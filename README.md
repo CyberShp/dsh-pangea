@@ -1,6 +1,9 @@
 # DSH 插件管理项目
 
-这个仓库用于集中存放和管理 DSH 插件。目前提供 `dsh-pangea-bridge`：让用户在 DSH Web 中直接用自然语言启动并完成一轮 PANGEA 分析。
+这个仓库用于集中存放和管理 DSH 插件。目前包含：
+
+- `dsh-pangea-bridge`：让用户在 DSH Web 中直接用自然语言启动并完成一轮 PANGEA 分析。
+- `dsh-mass-effect-theme`：为 DSH Web 提供原创的 `Normandy Command` 深色舰桥主题。
 
 ## 目录结构
 
@@ -17,6 +20,23 @@
 - `pangea_run`：低层入口。只创建或恢复 Run，并返回当前阶段和任务文件，不自动执行 Worker。
 
 正常聊天使用 `pangea_analyze` 即可，不需要手动调用工具名。
+
+## 安装 Normandy Command 主题
+
+先克隆仓库并进入项目目录：
+
+```bash
+git clone https://github.com/CyberShp/dsh-pangea.git
+cd dsh-pangea
+```
+
+从仓库根目录安装插件：
+
+```bash
+npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-mass-effect-theme"
+```
+
+重启 DSH Web 后主题会自动应用。它只改变界面外观，不修改 DSH 源码，也不影响 `dsh-pangea-bridge`。主题切换、更新和卸载说明见 [`plugins/dsh-mass-effect-theme/README.md`](plugins/dsh-mass-effect-theme/README.md)。
 
 ## 准备条件
 
