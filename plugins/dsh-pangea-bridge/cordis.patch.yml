@@ -1,0 +1,4 @@
+# Register the minimal PANGEA bridge when this local bundle is installed.
+- insert:
+    - id: pangea-bridge
+      name: dsh-pangea-bridge
