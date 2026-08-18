@@ -5,7 +5,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { apply, companionSnapshot } from '../src/index.js'
-import { discoverPangeaDataRoot } from '../src/reader.js'
+import { discoverPangeaDataRoot, summarizeRun } from '../src/reader.js'
 
 async function writeJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true })
@@ -123,6 +123,28 @@ async function legacyReportFixture() {
   return { root }
 }
 
+async function htmlFallbackFixture() {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-html-fallback-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runDirectory = path.join(dataRoot, 'runs', 'run-html')
+  await mkdir(runDirectory, { recursive: true })
+  await writeJson(path.join(runDirectory, 'progress.json'), {
+    run_id: 'run-html', phase: 'COMPLETE', analysis_units: ['u-html'], completed_analysis_units: [],
+    completed_rework_units: [], quality_status: 'PASS', errors: [], error_history: [],
+  })
+  const finalEvidence = evidence('e-html', 'html.c:1-5', 'HTML 报告证据')
+  await writeJson(path.join(runDirectory, 'final-state.json'), {
+    run_id: 'run-html', phase: 'COMPLETE', analysis_units: [{ unit_id: 'u-html' }],
+    risks: [{ risk_id: 'R-HTML', evidence: [finalEvidence] }],
+    test_cases: [{ test_case_id: 'TC-HTML', linked_risk_ids: ['R-HTML'] }],
+    business_flows: [{ title: 'HTML 流程', evidence: [finalEvidence] }],
+    quality_report: { status: 'PASS' }, errors: [],
+  })
+  await writeFile(path.join(runDirectory, 'report.md'), '# 报告\n\n摘要格式暂不可识别。\n', 'utf8')
+  await writeFile(path.join(runDirectory, 'report.html'), '<main>形成 <strong>1 条业务流程、1 个风险、1 个测试用例</strong>。</main>', 'utf8')
+  return { root, dataRoot }
+}
+
 test('discovers pangea-data from workspace root', async () => {
   const { root, dataRoot } = await fixture()
   try { assert.equal(await discoverPangeaDataRoot({ cwd: root }), dataRoot) }
@@ -201,13 +223,35 @@ test('legacy report can use worker-result fallback when report counts agree', as
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('falls back to report.html when report.md has no parseable counts', async () => {
+  const { root } = await htmlFallbackFixture()
+  try {
+    const run = (await companionSnapshot({ cwd: root, runId: 'run-html' })).current
+    assert.equal(run.reader_health.status, 'ok')
+    assert.equal(run.reader_health.trusted, true)
+    assert.match(run.reader_health.report_path, /report\.html$/)
+    assert.equal(run.reader_health.count_checks.risks.status, 'match')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('recent run summaries stay compact while current run carries details', async () => {
   const { root } = await fixture()
   try {
     const snapshot = await companionSnapshot({ cwd: root })
     assert.ok(snapshot.current.details)
     assert.equal(snapshot.runs[0].details, undefined)
+    assert.deepEqual(snapshot.runs[0].counts, { risks: null, test_cases: null, evidence: null, business_flows: null, review_issues: null })
     assert.equal(snapshot.runs[0].reader_health.report_checked, false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('summary mode does not materialize worker details', async () => {
+  const { root, dataRoot } = await fixture()
+  try {
+    const run = await summarizeRun(dataRoot, 'run-01')
+    assert.equal(run.details, undefined)
+    assert.equal(run.counts.risks, null)
+    assert.equal(run.review, null)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

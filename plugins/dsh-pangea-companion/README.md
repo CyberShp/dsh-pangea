@@ -25,11 +25,11 @@ Companion 不把 `progress.completed_* + agent-results/` 当成所有 Run 的唯
 2. **尚未形成 final state 的运行中 Run**，按 `progress.json` 的完成单元读取 `agent-results/analysis` / `agent-results/rework`，返工结果覆盖原 analysis 结果。
 3. **已生成报告但缺少可用 final-state 的旧 Run**，允许兼容回退读取 worker result，但会标记为 `warning`，不会伪装成标准路径。
 
-## v0.3.2 Reader 一致性层
+## v0.4.0 Reader 一致性层
 
 报告现在只承担“交叉核对”职责，不会被解析成新的风险/用例对象。
 
-对于当前 Run，Reader 会从 `report.md`（必要时 `report.html`）提取报告摘要中的：
+对于当前 Run，Reader 会先尝试从 `report.md` 提取报告摘要；Markdown 存在但格式无法识别时，会继续尝试 `report.html`。对账字段包括：
 
 - 业务流程数量；
 - 风险数量；
@@ -71,7 +71,7 @@ Better Sidebar 会显示“数据读取异常”，`pangea_status` 也会明确�
 
 如果报告存在但无法自动提取计数、终态 Run 缺少报告、final-state 读取失败，或报告 Run 只能退回 worker result，则返回 `warning` 和具体诊断原因。
 
-历史 Run 列表不会逐个解析整份报告；只有当前选中的 Run 才执行报告对账，避免历史任务很多时拖慢侧栏。
+历史 Run 列表不会读取 Worker 结果、构建风险/用例/证据关联，也不会逐个解析整份报告；只有当前选中的 Run 才执行完整读取和报告对账，避免历史任务很多时拖慢侧栏。
 
 ## Better Sidebar Explorer
 
@@ -86,7 +86,12 @@ PANGEA Tab 提供中文结果浏览器：
 - 测试用例列表支持搜索；详情展示前置条件、执行步骤、预期结果、观察点、清理动作，并可跳回关联风险。
 - 证据列表支持搜索；详情展示源码/资料位置、观察结论和关联风险。
 - 复核页展示 Reviewer、复核结论和每条 review issue 的原因/要求修改。
+- 风险、用例和证据详情页可把当前对象及其直接关联内容加入 DSH 会话输入框，支持综合判断、证据检查、改写测试语言和查找覆盖缺口。
+- 证据详情可在 Better Sidebar 中打开对应文件；总览可直接打开 `report.html` 或 `report.md`。证据行号会保留在讨论上下文中，当前 Better Sidebar 公开接口只保证打开文件，不伪装成已精确跳转到行。
 - 切换历史 Run 时自动回到该 Run 的总览，避免保留上一个 Run 的详情导航状态。
+- 当前 Run 使用顺序轮询：上一轮读取结束后才安排下一轮，不会堆叠请求；切换 Run 或工作区会取消旧请求，避免旧结果覆盖新页面。
+- 首次加载、后台同步失败和无工作区分别显示明确状态；短暂同步失败时保留上一次可信结果。
+- 界面直接使用 DSH 官方语义颜色变量，跟随浅色、深色与宿主主题，不注入独立皮肤。
 
 ## 边界
 
@@ -105,7 +110,20 @@ pangea-agent  <- read only -  dsh-pangea-companion  -> optional -> dsh-better-si
 
 因此卸载 DSH 或 Companion 后，PANGEA 仍可由 OpenCode、Claude Code 或其他兼容 Agent Runtime 按原流程完整运行。
 
+## 在 DSH 中讨论 PANGEA 对象
+
+在 PANGEA Tab 中打开一条风险、测试用例或证据，点击“加入当前会话”。Companion 会把当前对象、直接证据和关联项写入当前 DSH 输入框，但不会自动发送。你可以检查内容、继续补充问题，然后由 DSH 回答。
+
+这个动作只修改当前会话的草稿，不写入 PANGEA 目录，也不改变 Run 状态。
+
 ## 安装
+
+克隆仓库并进入项目目录：
+
+```bash
+git clone https://github.com/CyberShp/dsh-pangea.git
+cd dsh-pangea
+```
 
 如果还装着旧版 bridge，先卸载：
 
@@ -113,10 +131,16 @@ pangea-agent  <- read only -  dsh-pangea-companion  -> optional -> dsh-better-si
 npx @deepseek-ai/dsh plugin --profile web remove dsh-pangea-bridge
 ```
 
-从本仓库本地目录安装 Companion：
+需要 PANGEA 侧栏页面时，先安装 Better Sidebar：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web add /absolute/path/to/dsh-pangea/plugins/dsh-pangea-companion
+npx @deepseek-ai/dsh plugin --profile web add dsh-better-sidebar@latest
+```
+
+然后从仓库根目录安装 Companion：
+
+```bash
+npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-companion"
 ```
 
 如果已经安装 `dsh-better-sidebar`，硬刷新 DSH Web 后会在它的 `+` 菜单中看到 `PANGEA` 页面。没有安装 better-sidebar 时不影响 `pangea_status`。
@@ -136,4 +160,4 @@ cd plugins/dsh-pangea-companion
 npm test
 ```
 
-当前测试覆盖：运行中 worker result、返工替换、final-state 正常终态、报告/结构化计数不一致 fail-loud、旧 Run worker-result 兼容回退、历史 Run 轻量化、中文工具输出、Better Sidebar 单实例注册和健康状态交互入口。
+当前测试覆盖：运行中 worker result、返工替换、final-state 正常终态、Markdown → HTML 报告回退、报告/结构化计数不一致 fail-loud、旧 Run worker-result 兼容回退、历史 Run 摘要模式、中文工具输出、客户端请求编码/错误处理、局部讨论上下文、会话草稿插入、证据路径解析、Better Sidebar 单实例注册和健康状态交互入口。

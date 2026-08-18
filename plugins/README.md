@@ -4,5 +4,4 @@
 
 ## 当前插件
 
-- `dsh-pangea-companion/`：PANGEA 只读伴生工作台；提供 Run 状态读取、`pangea_status` 和可选的 `dsh-better-sidebar` PANGEA Tab。
-- `dsh-mass-effect-theme/`：原创诺曼底舰桥风格的 DSH Web 沉浸式主题。
+- `dsh-pangea-companion/`：PANGEA 只读伴生工作台；提供 Run 状态读取、`pangea_status`、可信结果导航、局部对象与 DSH 讨论、证据/报告打开。

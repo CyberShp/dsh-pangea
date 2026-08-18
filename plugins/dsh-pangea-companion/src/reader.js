@@ -223,17 +223,27 @@ async function readReportCounts(runDirectory, { checked = true } = {}) {
   }
 
   const warnings = []
+  let firstUnreadable = null
   for (const candidate of existing) {
     try {
       const raw = await readFile(candidate.path, 'utf8')
       const counts = parseReportCounts(raw, candidate.format)
       const parseable = Object.values(counts).some(Number.isInteger)
-      return { present: true, checked: true, path: candidate.path, format: candidate.format, counts, parseable, warnings }
+      if (parseable) return { present: true, checked: true, path: candidate.path, format: candidate.format, counts, parseable: true, warnings }
+      firstUnreadable ??= { path: candidate.path, format: candidate.format, counts }
     } catch (error) {
       warnings.push(`${path.basename(candidate.path)} 读取失败：${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  return { present: true, checked: true, path: existing[0].path, format: existing[0].format, counts: null, parseable: false, warnings }
+  return {
+    present: true,
+    checked: true,
+    path: firstUnreadable?.path ?? existing[0].path,
+    format: firstUnreadable?.format ?? existing[0].format,
+    counts: firstUnreadable?.counts ?? null,
+    parseable: false,
+    warnings,
+  }
 }
 
 async function readReview(runDirectory) {
@@ -288,12 +298,12 @@ function buildReaderHealth({ phase, dataSource, counts, finalStateRecord, report
   }
 
   for (const key of ['risks', 'test_cases', 'business_flows']) {
-    const structured = Number.isInteger(counts?.[key]) ? counts[key] : 0
+    const structured = Number.isInteger(counts?.[key]) ? counts[key] : null
     const reported = reportRecord.checked && Number.isInteger(reportRecord.counts?.[key]) ? reportRecord.counts[key] : null
     const check = {
       structured,
       report: reported,
-      status: reported === null ? 'unknown' : structured === reported ? 'match' : 'mismatch',
+      status: reported === null || structured === null ? 'unknown' : structured === reported ? 'match' : 'mismatch',
     }
     countChecks[key] = check
     if (check.status === 'mismatch') {
@@ -334,31 +344,31 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false, ch
   const analysisUnits = Array.isArray(progress?.analysis_units) ? progress.analysis_units : stateArray(finalState, 'analysis_units')
   const completedAnalysisUnits = Array.isArray(progress?.completed_analysis_units) ? progress.completed_analysis_units : []
   const completedReworkUnits = Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : []
-  const review = await readReview(runDirectory)
+  const review = includeDetails ? await readReview(runDirectory) : null
   const errors = Array.isArray(progress?.errors) ? progress.errors : stateArray(finalState, 'errors')
   const errorHistory = Array.isArray(progress?.error_history) ? progress.error_history : []
   const reportMd = path.join(runDirectory, 'report.md')
   const reportHtml = path.join(runDirectory, 'report.html')
   const reportRecord = await readReportCounts(runDirectory, { checked: checkReport })
 
+  const dataSource = finalStateHasResultCollections(finalState) ? 'final-state' : 'worker-results'
   let details
-  let dataSource
+  let counts = { risks: null, test_cases: null, evidence: null, business_flows: null, review_issues: null }
 
-  if (finalStateHasResultCollections(finalState)) {
-    details = buildDetailsFromFinalState(finalState, review)
-    dataSource = 'final-state'
-  } else {
-    const workerResults = await readWorkerResults(runDirectory, new Set(completedAnalysisUnits), new Set(completedReworkUnits))
-    details = buildDetails(workerResults, review)
-    dataSource = 'worker-results'
-  }
-
-  const counts = {
-    risks: details.risks.length,
-    test_cases: details.test_cases.length,
-    evidence: details.evidence.length,
-    business_flows: details.business_flows.length,
-    review_issues: details.review_issues.length,
+  if (includeDetails) {
+    if (dataSource === 'final-state') {
+      details = buildDetailsFromFinalState(finalState, review)
+    } else {
+      const workerResults = await readWorkerResults(runDirectory, new Set(completedAnalysisUnits), new Set(completedReworkUnits))
+      details = buildDetails(workerResults, review)
+    }
+    counts = {
+      risks: details.risks.length,
+      test_cases: details.test_cases.length,
+      evidence: details.evidence.length,
+      business_flows: details.business_flows.length,
+      review_issues: details.review_issues.length,
+    }
   }
   const readerHealth = buildReaderHealth({ phase, dataSource, counts, finalStateRecord, reportRecord })
   const qualityFromFinal = typeof finalState?.quality_report?.status === 'string' ? finalState.quality_report.status : null
