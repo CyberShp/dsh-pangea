@@ -1,0 +1,58 @@
+{
+  "name": "dsh-pangea-companion",
+  "version": "0.2.0",
+  "description": "Read-only PANGEA companion for DeepSeek Harness with optional dsh-better-sidebar cockpit",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "scripts",
+    "tests",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "UNLICENSED",
+  "private": true,
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "pangea-agent",
+    "companion",
+    "dsh-better-sidebar"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.6",
+    "dsh-better-sidebar": ">=0.12.0",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-runtime": { "optional": true },
+    "dsh-better-sidebar": { "optional": true },
+    "react": { "optional": true }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "npm run build && node --check src/index.js && node --check src/reader.js && node --check lib/client.js && node --test tests/*.test.mjs"
+  }
+}

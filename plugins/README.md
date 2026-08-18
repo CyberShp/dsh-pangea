@@ -1,8 +1,8 @@
 # Plugins
 
-每个 DSH 插件应放在本目录下的独立子目录中。
+每个 DSH 插件放在本目录下的独立子目录中。
 
 ## 当前插件
 
-- `dsh-pangea-bridge/`：通过 DSH 原生子 Agent 完整执行 PANGEA 分析、独立复核、一次返工与报告生成。
+- `dsh-pangea-companion/`：PANGEA 只读伴生工作台；提供 Run 状态读取、`pangea_status` 和可选的 `dsh-better-sidebar` PANGEA Tab。
 - `dsh-mass-effect-theme/`：原创诺曼底舰桥风格的 DSH Web 沉浸式主题。
