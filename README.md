@@ -27,7 +27,7 @@ Companion = 只读状态 / 产物适配层
 - `pangea_status` 读取当前/指定 Run 的 phase、quality、analysis 进度、风险、测试用例、证据和错误。
 - `GET /api/pangea-companion/state` 为 Web UI 提供同源只读状态。
 - 若安装 `dsh-better-sidebar`，自动注册一个单实例 `PANGEA` Tab；未安装时不影响 Core 和工具。
-- 风险、用例和证据详情可把局部上下文加入当前 DSH 会话；证据文件和最终报告可在 Better Sidebar 中直接打开。
+- 风险、用例和证据详情可把局部上下文加入当前 DSH 会话；风险和证据页会按真实行号预览源码片段，并可把片段一并加入会话；完整证据文件和最终报告可在 Better Sidebar 中直接打开。
 
 详细说明见 [`plugins/dsh-pangea-companion/README.md`](plugins/dsh-pangea-companion/README.md)。
 

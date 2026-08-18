@@ -11,11 +11,20 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const inject = ['betterSidebar']
     const API_PATH = '/api/pangea-companion/state'
+    const SOURCE_API_PATH = '/api/pangea-companion/source'
 
     async function requestSnapshot({ cwd, runId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
       if (runId) query.set('run_id', runId)
       const response = await fetcher(`${API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
+    async function requestSourceSnippet({ cwd, dataRoot, location, signal, fetcher = fetch }) {
+      const query = new URLSearchParams({ cwd, data_root: dataRoot, location })
+      const response = await fetcher(`${SOURCE_API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -95,6 +104,11 @@ window.__ModuleLoader__.load({
       runActive: { background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.1))' },
       actionCard: { borderColor: 'var(--dsw-alias-state-business-secondary, var(--dsw-alias-border-l2, #555))', background: 'var(--dsw-alias-state-business-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
       success: { color: 'var(--dsw-alias-state-success-primary, #38a892)', fontSize: 10, lineHeight: 1.5 },
+      source: { maxHeight: 200, margin: '9px 0 0', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, overflow: 'auto', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))', fontFamily: 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 10, lineHeight: 1.55 },
+      sourceLine: { display: 'flex', minWidth: 'max-content', whiteSpace: 'pre' },
+      sourceTarget: { background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
+      sourceNumber: { width: 42, flex: '0 0 42px', boxSizing: 'border-box', paddingRight: 9, textAlign: 'right', userSelect: 'none', color: 'var(--dsw-alias-label-tertiary, #888)', borderRight: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12))' },
+      sourceCode: { padding: '0 9px', color: 'var(--dsw-alias-label-primary, inherit)' },
     }
 
     function icon(size = 16) {
@@ -157,7 +171,7 @@ window.__ModuleLoader__.load({
       const location = text(item?.location, '未标注位置')
       return hasText(item?.observation) ? `${location} — ${item.observation.trim()}` : location
     }
-    function buildDiscussionDraft({ kind, item, runId, risks = [], testCases = [], intent = 'review' }) {
+    function buildDiscussionDraft({ kind, item, runId, risks = [], testCases = [], intent = 'review', sourceSnippet }) {
       const lines = [DISCUSSION_INTENTS[intent] ?? DISCUSSION_INTENTS.review, '', '[PANGEA 局部上下文]', `Run：${text(runId, '未知')}`]
       const riskById = new Map(risks.map(risk => [risk.risk_id, risk]))
       const caseById = new Map(testCases.map(testCase => [testCase.test_case_id, testCase]))
@@ -205,6 +219,11 @@ window.__ModuleLoader__.load({
           return linked ? `${id} ${text(linked.title, '')}`.trim() : id
         }))
       }
+      if (sourceSnippet?.lines?.length) {
+        lines.push('', `源码片段：${text(sourceSnippet.file_path, text(sourceSnippet.location, '未标注文件'))}:${sourceSnippet.visible_start}-${sourceSnippet.visible_end}`, '```')
+        for (const line of sourceSnippet.lines) lines.push(`${String(line.number).padStart(5, ' ')} | ${line.text}`)
+        lines.push('```')
+      }
       lines.push('', '请不要重新概括整个 Run，直接回答上面的问题。')
       return lines.join('\n')
     }
@@ -240,6 +259,7 @@ window.__ModuleLoader__.load({
       const [caseQuery, setCaseQuery] = React.useState('')
       const [evidenceQuery, setEvidenceQuery] = React.useState('')
       const [actionNotice, setActionNotice] = React.useState(undefined)
+      const [sourcePreview, setSourcePreview] = React.useState({ key: '', status: 'idle' })
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const noticeTimerRef = React.useRef(undefined)
 
@@ -299,6 +319,25 @@ window.__ModuleLoader__.load({
       const riskById = new Map(risks.map(item => [item.risk_id, item]))
       const caseById = new Map(testCases.map(item => [item.test_case_id, item]))
       const evidenceByKey = new Map(evidence.map(item => [[item.chunk_id, item.location, item.observation].join('\u0000'), item]))
+      const previewEvidence = screen.type === 'risk'
+        ? riskById.get(screen.id)?.evidence?.find(item => hasText(item?.location))
+        : screen.type === 'evidence-detail' ? evidenceByKey.get(screen.key) : undefined
+      const previewKey = previewEvidence ? `${current?.run_id ?? ''}\u0000${previewEvidence.location}` : ''
+
+      React.useEffect(() => {
+        if (!visible || !cwd || !snapshot?.data_root || !previewEvidence?.location) {
+          setSourcePreview({ key: '', status: 'idle' })
+          return undefined
+        }
+        const controller = new AbortController()
+        setSourcePreview({ key: previewKey, status: 'loading' })
+        requestSourceSnippet({ cwd, dataRoot: snapshot.data_root, location: previewEvidence.location, signal: controller.signal })
+          .then(value => setSourcePreview({ key: previewKey, status: 'ready', value }))
+          .catch(reason => {
+            if (reason?.name !== 'AbortError') setSourcePreview({ key: previewKey, status: 'error', error: reason instanceof Error ? reason.message : String(reason) })
+          })
+        return () => controller.abort()
+      }, [visible, cwd, snapshot?.data_root, previewKey])
 
       const navigate = React.useCallback((next) => { setHistory(previous => [...previous, screen]); setScreen(next) }, [screen])
       const jump = React.useCallback((type) => { setScreen({ type }); setHistory([]) }, [])
@@ -322,8 +361,8 @@ window.__ModuleLoader__.load({
         ctx.betterSidebar.openFile(scope, path, title)
         showActionNotice(`已在侧栏打开 ${title ?? text(value, '文件')}`)
       }
-      function addToConversation(kind, item, intent = 'review') {
-        const draft = buildDiscussionDraft({ kind, item, intent, runId: current?.run_id, risks, testCases })
+      function addToConversation(kind, item, intent = 'review', sourceSnippet) {
+        const draft = buildDiscussionDraft({ kind, item, intent, runId: current?.run_id, risks, testCases, sourceSnippet })
         const inserted = appendConversationDraft(ctx, scope, draft)
         showActionNotice(inserted ? '已加入当前 DSH 会话输入框。' : '无法访问当前 DSH 会话输入框。', !inserted)
       }
@@ -333,6 +372,26 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.itemMeta }, '只加入当前对象、直接证据和关联项，不会修改 PANGEA Run。'),
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => addToConversation(kind, item, 'review') }, '加入当前会话'),
           h('div', { style: styles.chips }, chip('检查证据', () => addToConversation(kind, item, 'evidence')), chip('转成测试语言', () => addToConversation(kind, item, 'executable')), chip('查找覆盖缺口', () => addToConversation(kind, item, 'coverage'))))
+      }
+      function renderSourcePreview(kind, item, evidenceItem) {
+        if (!evidenceItem?.location) return null
+        const sourcePath = evidenceFilePath(evidenceItem.location, cwd, snapshot?.data_root)
+        const preview = sourcePreview.key === previewKey ? sourcePreview : { status: 'loading' }
+        const snippet = preview.status === 'ready' ? preview.value : undefined
+        return h('div', { style: styles.card },
+          h('div', { style: styles.row },
+            h('div', { style: styles.itemTitle }, '源码片段'),
+            snippet ? h('span', { style: styles.badge }, `L${snippet.target_start}–${snippet.target_end}`) : null),
+          h('div', { style: styles.itemMeta }, evidenceItem.location),
+          preview.status === 'loading' ? h('div', { style: { ...styles.empty, marginTop: 8 } }, '正在读取证据源码…') : null,
+          preview.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 } }, `无法预览：${preview.error}`) : null,
+          snippet ? h('div', { style: styles.source, role: 'region', 'aria-label': `源码 ${snippet.visible_start} 到 ${snippet.visible_end} 行` },
+            snippet.lines.map(line => h('div', { key: line.number, style: { ...styles.sourceLine, ...(line.target ? styles.sourceTarget : {}) } },
+              h('span', { style: styles.sourceNumber }, line.number), h('span', { style: styles.sourceCode }, line.text || ' ')))) : null,
+          snippet?.truncated ? h('div', { style: styles.itemMeta }, '证据范围较长，当前只显示前 160 行。') : null,
+          h('div', { style: styles.chips },
+            sourcePath ? chip('打开完整文件', () => openSidebarFile(sourcePath)) : null,
+            snippet ? chip('连同源码加入会话', () => addToConversation(kind, item, 'evidence', snippet)) : null))
       }
 
       const total = current?.analysis?.total ?? 0
@@ -459,6 +518,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.chips }, h('span', { style: styles.badge }, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '—'}`), h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'), h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '未标注')),
             Array.isArray(risk.dfx) && risk.dfx.length ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `DFX：${risk.dfx.join('、')}`) : null),
           renderDiscussionCard('risk', risk),
+          renderSourcePreview('risk', risk, previewEvidence),
           section('触发条件', risk.trigger), section('系统结果', risk.system_result), section('外部可观察现象', risk.external_observation), section('排除条件', risk.exclusion_condition),
           semantics ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '上游语义核对'), h('hr', { style: styles.separator }),
             h('div', { style: styles.label }, '入口可达性'), h('div', { style: styles.text }, semantics.reachability),
@@ -501,10 +561,10 @@ window.__ModuleLoader__.load({
       function renderEvidenceDetail() {
         const item = evidenceByKey.get(screen.key)
         if (!item) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条证据，可能是 Run 已刷新或切换。'))
-        const sourcePath = evidenceFilePath(item.location, cwd, snapshot?.data_root)
         return h(React.Fragment, null,
-          h('div', { style: styles.card }, field('源码/资料位置', text(item.location, '未标注')), h('div', { style: { marginTop: 9 } }, field('Chunk ID', text(item.chunk_id, '未标注'))), sourcePath ? h('button', { type: 'button', style: { ...styles.button, marginTop: 9 }, onClick: () => openSidebarFile(sourcePath) }, '打开证据文件') : null),
+          h('div', { style: styles.card }, field('源码/资料位置', text(item.location, '未标注')), h('div', { style: { marginTop: 9 } }, field('Chunk ID', text(item.chunk_id, '未标注')))),
           renderDiscussionCard('evidence', item),
+          renderSourcePreview('evidence', item, item),
           section('观察结论', item.observation),
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.risk_ids?.length ?? 0}）`), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '这条证据没有直接绑定风险。')))
       }
@@ -549,6 +609,7 @@ window.__ModuleLoader__.load({
 
     exports.inject = inject
     exports.requestSnapshot = requestSnapshot
+    exports.requestSourceSnippet = requestSourceSnippet
     exports.filePathFromLocation = filePathFromLocation
     exports.absoluteWorkspacePath = absoluteWorkspacePath
     exports.evidenceFilePath = evidenceFilePath

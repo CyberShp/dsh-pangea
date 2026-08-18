@@ -36,7 +36,9 @@ test('better-sidebar client registers one PANGEA single tab and exposes Chinese 
   assert.match(source, /同步失败，继续显示上次结果/)
   assert.match(source, /和 DSH 讨论/)
   assert.match(source, /加入当前会话/)
-  assert.match(source, /打开证据文件/)
+  assert.match(source, /打开完整文件/)
+  assert.match(source, /源码片段/)
+  assert.match(source, /连同源码加入会话/)
   assert.match(source, /打开 HTML 报告/)
   assert.doesNotMatch(source, /Current Run|Recent Runs|Refreshing/)
 
@@ -95,12 +97,18 @@ test('client builds focused discussion drafts, appends them to the active DSH co
       evidence: [{ location: 'src/auth.c:88-91', observation: '失败路径未清理' }], linked_test_case_ids: ['TC-023'],
     },
     testCases: [{ test_case_id: 'TC-023', title: '认证中断后重连' }],
+    sourceSnippet: {
+      file_path: '/tmp/src/auth.c', location: 'src/auth.c:88-91', visible_start: 87, visible_end: 89,
+      lines: [{ number: 87, text: 'before' }, { number: 88, text: 'if (failed) return;' }, { number: 89, text: 'after' }],
+    },
   })
   assert.match(draft, /证据是否充分/)
   assert.match(draft, /Run：run-17/)
   assert.match(draft, /对象：风险 R-017/)
   assert.match(draft, /src\/auth\.c:88-91/)
   assert.match(draft, /TC-023 认证中断后重连/)
+  assert.match(draft, /源码片段：\/tmp\/src\/auth\.c:87-89/)
+  assert.match(draft, /88 \| if \(failed\) return;/)
   assert.doesNotMatch(draft, /final-state\.json|progress\.json/)
 
   let currentDraft = '我原来的问题'
@@ -122,6 +130,40 @@ test('client builds focused discussion drafts, appends them to the active DSH co
   assert.equal(exported.absoluteWorkspacePath('/Volumes/Media/pangea-agent', '/tmp/report.html'), '/tmp/report.html')
   assert.equal(exported.evidenceFilePath('spdk-full:lib/iscsi/conn.c:121-240', '/Volumes/Media/pangea-agent', '/Volumes/Media/pangea-agent/pangea-data'), '/Volumes/Media/pangea-agent/pangea-data/repositories/spdk-full/lib/iscsi/conn.c')
   assert.equal(exported.evidenceFilePath('src/auth.c:88-91', '/Volumes/Media/pangea-agent', '/Volumes/Media/pangea-agent/pangea-data'), '/Volumes/Media/pangea-agent/src/auth.c')
+})
+
+test('client source request encodes the evidence location and returns a line-aware snippet', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console, fetch: async () => { throw new Error('default fetch must not run') }, setTimeout, clearTimeout }
+  sandbox.window = {
+    setTimeout,
+    clearTimeout,
+    __ModuleLoader__: {
+      load(spec) {
+        exported = spec.factory(name => {
+          if (name === 'react') return fakeReact()
+          throw new Error(`unexpected client require: ${name}`)
+        })
+      },
+    },
+  }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+
+  const calls = []
+  const result = await exported.requestSourceSnippet({
+    cwd: '/Volumes/Media/pangea-agent',
+    dataRoot: '/Volumes/Media/pangea-agent/pangea-data',
+    location: 'spdk-full:lib/iscsi/conn.c:121-124',
+    async fetcher(url, options) {
+      calls.push({ url, options })
+      return { ok: true, status: 200, async json() { return { status: 'ok', target_start: 121, target_end: 124, lines: [] } } }
+    },
+  })
+  assert.equal(result.target_start, 121)
+  assert.match(calls[0].url, /^\/api\/pangea-companion\/source\?/)
+  assert.match(calls[0].url, /location=spdk-full%3Alib%2Fiscsi%2Fconn\.c%3A121-124/)
+  assert.equal(calls[0].options.cache, 'no-store')
 })
 
 test('client state request encodes workspace and run, passes cancellation, and returns only ok snapshots', async () => {

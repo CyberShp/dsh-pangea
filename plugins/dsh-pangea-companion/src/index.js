@@ -1,9 +1,11 @@
 import { companionSnapshot } from './reader.js'
+import { readEvidenceSnippet } from './source.js'
 
 export const name = 'dsh-pangea-companion'
 export const inject = ['tools', 'webServer']
 
 const API_PATH = '/api/pangea-companion/state'
+const SOURCE_API_PATH = '/api/pangea-companion/source'
 
 const STATUS_PARAMETERS = {
   type: 'object',
@@ -75,7 +77,7 @@ function sameOriginBrowserRequest(req) {
   try { return new URL(origin).host === host } catch { return false }
 }
 
-function routeHandler(req, res) {
+function stateRouteHandler(req, res) {
   if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? API_PATH, 'http://localhost')
@@ -84,6 +86,18 @@ function routeHandler(req, res) {
   const runId = url.searchParams.get('run_id') ?? undefined
   companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
     .then(snapshot => json(res, 200, snapshot))
+    .catch(error => json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) }))
+}
+
+function sourceRouteHandler(req, res) {
+  if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  const url = new URL(req.url ?? SOURCE_API_PATH, 'http://localhost')
+  const cwd = url.searchParams.get('cwd') ?? undefined
+  const dataRoot = url.searchParams.get('data_root') ?? undefined
+  const location = url.searchParams.get('location') ?? undefined
+  readEvidenceSnippet({ cwd, dataRoot, location })
+    .then(snippet => json(res, 200, snippet))
     .catch(error => json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) }))
 }
 
@@ -98,8 +112,10 @@ export function apply(ctx) {
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => renderStatus(value) },
   })
 
-  const disposeRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: routeHandler })
-  ctx.effect?.(() => disposeRoute, 'dsh-pangea-companion: read-only state route')
+  const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: stateRouteHandler })
+  const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
+  ctx.effect?.(() => () => { disposeSourceRoute(); disposeStateRoute() }, 'dsh-pangea-companion: read-only state and source routes')
 }
 
 export { companionSnapshot } from './reader.js'
+export { parseEvidenceLocation, readEvidenceSnippet, resolveEvidenceFile } from './source.js'

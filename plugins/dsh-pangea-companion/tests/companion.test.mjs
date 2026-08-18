@@ -6,6 +6,7 @@ import test from 'node:test'
 
 import { apply, companionSnapshot } from '../src/index.js'
 import { discoverPangeaDataRoot, summarizeRun } from '../src/reader.js'
+import { parseEvidenceLocation, readEvidenceSnippet, resolveEvidenceFile } from '../src/source.js'
 
 async function writeJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true })
@@ -151,6 +152,28 @@ test('discovers pangea-data from workspace root', async () => {
   finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('reads line-aware source snippets from workspace and repository evidence locations', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-source-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  try {
+    await mkdir(path.join(dataRoot, 'repositories', 'repo-one', 'src'), { recursive: true })
+    await writeFile(path.join(dataRoot, 'repositories', 'repo-one', 'src', 'auth.c'), Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join('\n'), 'utf8')
+    await writeFile(path.join(root, 'local.c'), 'alpha\nbeta\ngamma\n', 'utf8')
+
+    assert.deepEqual(parseEvidenceLocation('repo-one:src/auth.c:5-7'), { source: 'repo-one:src/auth.c', startLine: 5, endLine: 7 })
+    assert.deepEqual(parseEvidenceLocation('local.c#L2-L3'), { source: 'local.c', startLine: 2, endLine: 3 })
+    assert.equal(resolveEvidenceFile({ cwd: root, dataRoot, location: 'repo-one:src/auth.c:5-7' }).filePath, path.join(dataRoot, 'repositories', 'repo-one', 'src', 'auth.c'))
+
+    const snippet = await readEvidenceSnippet({ cwd: root, dataRoot, location: 'repo-one:src/auth.c:5-7' })
+    assert.equal(snippet.target_start, 5)
+    assert.equal(snippet.target_end, 7)
+    assert.equal(snippet.visible_start, 2)
+    assert.equal(snippet.visible_end, 10)
+    assert.deepEqual(snippet.lines.filter(line => line.target).map(line => line.number), [5, 6, 7])
+    assert.equal(snippet.lines.find(line => line.number === 6).text, 'line 6')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('returns current-run details and cross-links without double-counting replaced rework results', async () => {
   const { root } = await fixture()
   try {
@@ -255,14 +278,13 @@ test('summary mode does not materialize worker details', async () => {
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('registers one read-only status tool and one state route with Chinese tool copy', () => {
+test('registers one read-only status tool and read-only state/source routes with Chinese tool copy', () => {
   const tools = []
   const routes = []
   const effects = []
   apply({ tools: { register(tool) { tools.push(tool) } }, webServer: { register(route) { routes.push(route); return () => {} } }, effect(callback) { effects.push(callback) } })
   assert.deepEqual(tools.map(tool => tool.name), ['pangea_status'])
   assert.match(tools[0].description, /读取健康状态/)
-  assert.equal(routes.length, 1)
-  assert.equal(routes[0].path, '/api/pangea-companion/state')
+  assert.deepEqual(routes.map(route => route.path), ['/api/pangea-companion/state', '/api/pangea-companion/source'])
   assert.equal(effects.length, 1)
 })
