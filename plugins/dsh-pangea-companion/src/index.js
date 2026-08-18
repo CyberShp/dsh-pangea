@@ -9,16 +9,17 @@ const STATUS_PARAMETERS = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    data_root: {
-      type: 'string',
-      description: 'Optional absolute PANGEA data root. Omit to discover pangea-data from the current DSH workspace.',
-    },
-    run_id: {
-      type: 'string',
-      description: 'Optional PANGEA run id. Omit to inspect the latest active run, falling back to the latest run.',
-    },
+    data_root: { type: 'string', description: '可选：PANGEA 数据目录绝对路径。省略时从当前 DSH 工作区自动发现 pangea-data。' },
+    run_id: { type: 'string', description: '可选：指定 PANGEA Run ID。省略时优先读取最近的未结束 Run，否则读取最近 Run。' },
   },
 }
+
+const PHASE_LABELS = {
+  PREPARING: '准备中', WAITING_ANALYSIS: '等待分析', WAITING_REVIEW: '等待复核',
+  WAITING_REWORK: '等待返工', WAITING_REWORK_REVIEW: '等待返工复核', READY_TO_FINALIZE: '等待生成报告',
+  COMPLETE: '已完成', INCOMPLETE: '未完整结束', UNKNOWN: '未知',
+}
+const QUALITY_LABELS = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决' }
 
 function workspaceCwd(exec) {
   const cwd = exec?.agent?.session?.header?.cwd
@@ -27,28 +28,23 @@ function workspaceCwd(exec) {
 
 function renderStatus(value) {
   const run = value.current
-  if (run === null) {
-    return [{ type: 'text', text: `PANGEA data: ${value.data_root}\nNo runs found.` }]
-  }
+  if (run === null) return [{ type: 'text', text: `PANGEA 数据目录：${value.data_root}\n当前没有可读取的 Run。` }]
   const lines = [
-    `PANGEA run: ${run.run_id}`,
-    `Phase: ${run.phase}`,
-    `Quality: ${run.quality_status ?? 'pending'}`,
-    `Analysis: ${run.analysis.completed}/${run.analysis.total}`,
-    `Risks: ${run.counts.risks}`,
-    `Test cases: ${run.counts.test_cases}`,
-    `Evidence: ${run.counts.evidence}`,
+    `PANGEA Run：${run.run_id}`,
+    `阶段：${PHASE_LABELS[run.phase] ?? run.phase}`,
+    `质量状态：${QUALITY_LABELS[run.quality_status] ?? run.quality_status ?? '待定'}`,
+    `分析进度：${run.analysis.completed}/${run.analysis.total}`,
+    `风险：${run.counts.risks}`,
+    `测试用例：${run.counts.test_cases}`,
+    `证据：${run.counts.evidence}`,
   ]
-  if (run.errors.length > 0) lines.push(`Errors: ${run.errors.length}`)
-  if (run.artifacts.report_md !== null) lines.push(`Report: ${run.artifacts.report_md}`)
+  if (run.errors.length > 0) lines.push(`当前错误：${run.errors.length}`)
+  if (run.artifacts.report_md !== null) lines.push(`报告：${run.artifacts.report_md}`)
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
 function json(res, status, body) {
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store',
-  })
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(body))
 }
 
@@ -57,11 +53,7 @@ function sameOriginBrowserRequest(req) {
   const origin = req.headers.origin
   const host = req.headers.host
   if (typeof origin !== 'string' || typeof host !== 'string') return false
-  try {
-    return new URL(origin).host === host
-  } catch {
-    return false
-  }
+  try { return new URL(origin).host === host } catch { return false }
 }
 
 function routeHandler(req, res) {
@@ -73,35 +65,21 @@ function routeHandler(req, res) {
   const runId = url.searchParams.get('run_id') ?? undefined
   companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
     .then(snapshot => json(res, 200, snapshot))
-    .catch(error => json(res, 404, {
-      status: 'error',
-      error: error instanceof Error ? error.message : String(error),
-    }))
+    .catch(error => json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) }))
 }
 
 export function apply(ctx) {
   ctx.tools.register({
     name: 'pangea_status',
-    description: 'Read the current PANGEA run status and artifact counts. This tool is read-only and never advances or modifies a PANGEA run.',
+    description: '只读查看当前 PANGEA Run 的阶段、质量状态、分析进度和结构化结果数量；不会推进或修改 PANGEA 工作流。',
     parameters: STATUS_PARAMETERS,
     async execute(args, exec) {
-      return companionSnapshot({
-        cwd: workspaceCwd(exec),
-        dataRoot: args.data_root,
-        runId: args.run_id,
-      })
+      return companionSnapshot({ cwd: workspaceCwd(exec), dataRoot: args.data_root, runId: args.run_id })
     },
-    output: {
-      schema: { type: 'object', additionalProperties: true },
-      render: (_args, value) => renderStatus(value),
-    },
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => renderStatus(value) },
   })
 
-  const disposeRoute = ctx.webServer.register({
-    kind: 'exact',
-    path: API_PATH,
-    handler: routeHandler,
-  })
+  const disposeRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: routeHandler })
   ctx.effect?.(() => disposeRoute, 'dsh-pangea-companion: read-only state route')
 }
 
