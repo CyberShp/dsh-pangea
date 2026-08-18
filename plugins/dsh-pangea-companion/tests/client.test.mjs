@@ -39,6 +39,7 @@ test('better-sidebar client registers one PANGEA single tab and exposes Chinese 
   assert.match(source, /打开完整文件/)
   assert.match(source, /源码片段/)
   assert.match(source, /连同源码加入会话/)
+  assert.match(source, /选择风险证据源码/)
   assert.match(source, /打开 HTML 报告/)
   assert.doesNotMatch(source, /Current Run|Recent Runs|Refreshing/)
 
@@ -130,6 +131,9 @@ test('client builds focused discussion drafts, appends them to the active DSH co
   assert.equal(exported.absoluteWorkspacePath('/Volumes/Media/pangea-agent', '/tmp/report.html'), '/tmp/report.html')
   assert.equal(exported.evidenceFilePath('spdk-full:lib/iscsi/conn.c:121-240', '/Volumes/Media/pangea-agent', '/Volumes/Media/pangea-agent/pangea-data'), '/Volumes/Media/pangea-agent/pangea-data/repositories/spdk-full/lib/iscsi/conn.c')
   assert.equal(exported.evidenceFilePath('src/auth.c:88-91', '/Volumes/Media/pangea-agent', '/Volumes/Media/pangea-agent/pangea-data'), '/Volumes/Media/pangea-agent/src/auth.c')
+  assert.equal(exported.evidenceIdentity({ chunk_id: 'e-1', location: 'src/auth.c:88-91', observation: '状态未清理' }), 'e-1\u0000src/auth.c:88-91\u0000状态未清理')
+  assert.equal(exported.evidenceTabLabel({ location: 'spdk-full:lib/iscsi/conn.c:121-240' }, 0), '1 · conn.c:121–240')
+  assert.equal(exported.evidenceTabLabel({ location: 'docs/spec.md#L12-L16' }, 1), '2 · spec.md:12–16')
 })
 
 test('client source request encodes the evidence location and returns a line-aware snippet', async () => {

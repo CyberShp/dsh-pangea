@@ -109,6 +109,9 @@ window.__ModuleLoader__.load({
       sourceTarget: { background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
       sourceNumber: { width: 42, flex: '0 0 42px', boxSizing: 'border-box', paddingRight: 9, textAlign: 'right', userSelect: 'none', color: 'var(--dsw-alias-label-tertiary, #888)', borderRight: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12))' },
       sourceCode: { padding: '0 9px', color: 'var(--dsw-alias-label-primary, inherit)' },
+      evidenceTabs: { display: 'flex', gap: 5, overflowX: 'auto', marginTop: 8, paddingBottom: 3 },
+      evidenceTab: { flex: '0 0 auto', maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, padding: '4px 7px', background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', cursor: 'pointer', fontSize: 9 },
+      evidenceTabActive: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))', color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700 },
     }
 
     function icon(size = 16) {
@@ -125,6 +128,19 @@ window.__ModuleLoader__.load({
       const value = location.trim()
       if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return undefined
       return value.replace(/#L\d+(?:-L?\d+)?$/i, '').replace(/:\d+(?:-\d+)?$/, '').trim() || undefined
+    }
+    function evidenceIdentity(item) {
+      return [item?.chunk_id ?? '', item?.location ?? '', item?.observation ?? ''].join('\u0000')
+    }
+    function evidenceTabLabel(item, index) {
+      const location = text(item?.location, `证据 ${index + 1}`)
+      const filePath = filePathFromLocation(location) ?? location
+      const fileName = filePath.split(/[\\/]/).pop() || filePath
+      const hashRange = /#L(\d+)(?:-L?(\d+))?$/i.exec(location)
+      const colonRange = hashRange === null ? /:(\d+)(?:-(\d+))?$/.exec(location) : null
+      const range = hashRange ?? colonRange
+      const lineLabel = range ? `:${range[1]}${range[2] ? `–${range[2]}` : ''}` : ''
+      return `${index + 1} · ${fileName}${lineLabel}`
     }
     function absoluteWorkspacePath(cwd, value) {
       if (!hasText(value)) return undefined
@@ -260,6 +276,7 @@ window.__ModuleLoader__.load({
       const [evidenceQuery, setEvidenceQuery] = React.useState('')
       const [actionNotice, setActionNotice] = React.useState(undefined)
       const [sourcePreview, setSourcePreview] = React.useState({ key: '', status: 'idle' })
+      const [riskEvidenceSelection, setRiskEvidenceSelection] = React.useState({ riskKey: '', evidenceKey: '' })
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const noticeTimerRef = React.useRef(undefined)
 
@@ -318,11 +335,14 @@ window.__ModuleLoader__.load({
       const evidence = details.evidence ?? []
       const riskById = new Map(risks.map(item => [item.risk_id, item]))
       const caseById = new Map(testCases.map(item => [item.test_case_id, item]))
-      const evidenceByKey = new Map(evidence.map(item => [[item.chunk_id, item.location, item.observation].join('\u0000'), item]))
+      const evidenceByKey = new Map(evidence.map(item => [evidenceIdentity(item), item]))
+      const riskScreenKey = screen.type === 'risk' ? `${current?.run_id ?? ''}\u0000${screen.id}` : ''
+      const riskEvidenceOptions = screen.type === 'risk' ? (riskById.get(screen.id)?.evidence ?? []).filter(item => hasText(item?.location)) : []
+      const selectedRiskEvidenceKey = riskEvidenceSelection.riskKey === riskScreenKey ? riskEvidenceSelection.evidenceKey : ''
       const previewEvidence = screen.type === 'risk'
-        ? riskById.get(screen.id)?.evidence?.find(item => hasText(item?.location))
+        ? riskEvidenceOptions.find(item => evidenceIdentity(item) === selectedRiskEvidenceKey) ?? riskEvidenceOptions[0]
         : screen.type === 'evidence-detail' ? evidenceByKey.get(screen.key) : undefined
-      const previewKey = previewEvidence ? `${current?.run_id ?? ''}\u0000${previewEvidence.location}` : ''
+      const previewKey = previewEvidence ? `${current?.run_id ?? ''}\u0000${evidenceIdentity(previewEvidence)}` : ''
 
       React.useEffect(() => {
         if (!visible || !cwd || !snapshot?.data_root || !previewEvidence?.location) {
@@ -373,7 +393,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => addToConversation(kind, item, 'review') }, '加入当前会话'),
           h('div', { style: styles.chips }, chip('检查证据', () => addToConversation(kind, item, 'evidence')), chip('转成测试语言', () => addToConversation(kind, item, 'executable')), chip('查找覆盖缺口', () => addToConversation(kind, item, 'coverage'))))
       }
-      function renderSourcePreview(kind, item, evidenceItem) {
+      function renderSourcePreview(kind, item, evidenceItem, evidenceOptions = []) {
         if (!evidenceItem?.location) return null
         const sourcePath = evidenceFilePath(evidenceItem.location, cwd, snapshot?.data_root)
         const preview = sourcePreview.key === previewKey ? sourcePreview : { status: 'loading' }
@@ -382,6 +402,16 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.row },
             h('div', { style: styles.itemTitle }, '源码片段'),
             snippet ? h('span', { style: styles.badge }, `L${snippet.target_start}–${snippet.target_end}`) : null),
+          evidenceOptions.length > 1 ? h('div', { style: styles.evidenceTabs, role: 'group', 'aria-label': '选择风险证据源码' }, evidenceOptions.map((option, index) => {
+            const key = evidenceIdentity(option)
+            const active = key === evidenceIdentity(evidenceItem)
+            const label = evidenceTabLabel(option, index)
+            return h('button', {
+              key, type: 'button', title: option.location, 'aria-pressed': active,
+              style: { ...styles.evidenceTab, ...(active ? styles.evidenceTabActive : {}) },
+              onClick: () => setRiskEvidenceSelection({ riskKey: riskScreenKey, evidenceKey: key }),
+            }, label)
+          })) : null,
           h('div', { style: styles.itemMeta }, evidenceItem.location),
           preview.status === 'loading' ? h('div', { style: { ...styles.empty, marginTop: 8 } }, '正在读取证据源码…') : null,
           preview.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 } }, `无法预览：${preview.error}`) : null,
@@ -518,7 +548,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.chips }, h('span', { style: styles.badge }, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '—'}`), h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'), h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '未标注')),
             Array.isArray(risk.dfx) && risk.dfx.length ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `DFX：${risk.dfx.join('、')}`) : null),
           renderDiscussionCard('risk', risk),
-          renderSourcePreview('risk', risk, previewEvidence),
+          renderSourcePreview('risk', risk, previewEvidence, riskEvidenceOptions),
           section('触发条件', risk.trigger), section('系统结果', risk.system_result), section('外部可观察现象', risk.external_observation), section('排除条件', risk.exclusion_condition),
           semantics ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '上游语义核对'), h('hr', { style: styles.separator }),
             h('div', { style: styles.label }, '入口可达性'), h('div', { style: styles.text }, semantics.reachability),
@@ -611,6 +641,8 @@ window.__ModuleLoader__.load({
     exports.requestSnapshot = requestSnapshot
     exports.requestSourceSnippet = requestSourceSnippet
     exports.filePathFromLocation = filePathFromLocation
+    exports.evidenceIdentity = evidenceIdentity
+    exports.evidenceTabLabel = evidenceTabLabel
     exports.absoluteWorkspacePath = absoluteWorkspacePath
     exports.evidenceFilePath = evidenceFilePath
     exports.appendConversationDraft = appendConversationDraft

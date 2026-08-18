@@ -1,7 +1,7 @@
 {
   "name": "dsh-pangea-companion",
-  "version": "0.6.0",
-  "description": "Read-only PANGEA companion for DeepSeek Harness with focused discussion and line-aware evidence previews",
+  "version": "0.7.0",
+  "description": "Read-only PANGEA companion for DeepSeek Harness with focused discussion and switchable line-aware evidence previews",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
