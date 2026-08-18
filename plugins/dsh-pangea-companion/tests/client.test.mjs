@@ -18,7 +18,7 @@ function fakeReact() {
   }
 }
 
-test('better-sidebar client registers one PANGEA single tab and uses Chinese navigation', async () => {
+test('better-sidebar client registers one PANGEA single tab and exposes Chinese health/navigation affordances', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /总览/)
   assert.match(source, /风险/)
@@ -26,6 +26,10 @@ test('better-sidebar client registers one PANGEA single tab and uses Chinese nav
   assert.match(source, /证据/)
   assert.match(source, /复核/)
   assert.match(source, /← 返回/)
+  assert.match(source, /数据状态/)
+  assert.match(source, /数据读取异常/)
+  assert.match(source, /当前结构化结果不可信/)
+  assert.match(source, /不能把空列表解释为/)
   assert.doesNotMatch(source, /Current Run|Recent Runs|Refreshing/)
 
   let exported
