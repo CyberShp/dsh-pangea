@@ -2,19 +2,30 @@
 
 `dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的只读伴生工作台。
 
-它不创建 Contract、不推进 PANGEA phase、不派发 analysis/review/rework worker，也不改写 `progress.json`、`agent-tasks/`、`agent-results/` 或报告。PANGEA 仍是唯一工作流真相；Companion 只读取 Run 状态和结构化产物，让 DSH 更容易观察、查询和浏览分析过程。
+它不创建 Contract、不推进 PANGEA phase、不派发 analysis/review/rework worker，也不改写 `progress.json`、`agent-tasks/`、`agent-results/`、`final-state.json` 或报告。PANGEA 仍是唯一工作流真相；Companion 只读取 Run 状态和结构化产物，让 DSH 更容易观察、查询和浏览分析过程。
 
 ## 当前能力
 
 - 自动从当前 DSH workspace 向上发现 `pangea-data/runs/`。
 - `pangea_status`：读取当前或指定 Run 的阶段、质量状态、分析进度、风险/用例/证据数量和当前错误，模型侧输出中文。
 - 自动选择最新的非终态 Run；没有活动 Run 时回退到最新 Run。
-- 返工结果按 `unit_id` 覆盖原 analysis 结果，避免把旧结果和返工结果重复展示。
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
 - 建立 `风险 ↔ 测试用例 ↔ 证据` 关联，便于从风险追到测试和源码证据，再按访问路径返回。
 - 只读同源接口 `GET /api/pangea-companion/state`，供 Web UI 使用。
 - 检测到 `dsh-better-sidebar` 时，注册单实例 `PANGEA` Tab。
 - `dsh-better-sidebar` 是可选 peer dependency；未安装时 Host 工具与只读 Core 仍可工作。
+
+## 数据读取规则
+
+v0.3.1 起，Companion 不再把 `progress.completed_* + agent-results/` 当成所有 Run 的唯一数据来源。
+
+读取顺序固定为：
+
+1. **存在 `final-state.json` 且包含聚合结果时，优先读取 `final-state.json`。** PANGEA 在进入最终报告阶段前已经把最终有效的 `risks / test_cases / business_flows` 聚合进 final state，`report.md` / `report.html` 也是由这份 state 渲染，因此这是终态和已生成报告 Run 的权威数据源。
+2. **尚未形成 final state 的运行中 Run**，继续按 `progress.json` 的完成单元读取 `agent-results/analysis` / `agent-results/rework`，返工结果覆盖原 analysis 结果。
+3. 返回值增加 `data_source` 和 `reader_warnings`，用于确认本次读取走的是 `final-state` 还是 `worker-results`，以及是否发生兼容回退。
+
+这样可避免 `report.md` 已经有风险和测试用例，但 `progress.completed_*` 与历史中间状态不一致时，DSH Explorer 仍显示 0 条的问题。
 
 ## Better Sidebar Explorer
 
@@ -77,4 +88,4 @@ cd plugins/dsh-pangea-companion
 npm test
 ```
 
-当前测试覆盖：data-root 发现、返工结果替换、结构化明细与交叉关联、历史 Run 轻量化、中文工具输出、Better Sidebar 单实例注册和中文导航/返回入口。
+当前测试覆盖：data-root 发现、返工结果替换、结构化明细与交叉关联、终态 `final-state.json` 优先读取、历史 Run 轻量化、中文工具输出、Better Sidebar 单实例注册和中文导航/返回入口。
