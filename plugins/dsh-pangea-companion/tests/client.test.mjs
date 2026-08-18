@@ -40,6 +40,10 @@ test('better-sidebar client registers one PANGEA single tab and exposes Chinese 
   assert.match(source, /源码片段/)
   assert.match(source, /检查这段源码/)
   assert.match(source, /选择风险证据源码/)
+  assert.match(source, /选择待核对结论/)
+  assert.match(source, /选择核对证据/)
+  assert.match(source, /核对选中证据/)
+  assert.match(source, /转成定向测试/)
   assert.match(source, /打开 HTML 报告/)
   assert.doesNotMatch(source, /Current Run|Recent Runs|Refreshing/)
 
@@ -109,17 +113,54 @@ test('client builds focused discussion drafts, appends them to the active DSH co
       lines: [{ number: 87, text: 'before' }, { number: 88, text: 'if (failed) return;' }, { number: 89, text: 'after' }],
     },
   })
-  assert.match(draft, /只基于下方“当前源码片段”/)
+  assert.match(draft, /只基于下方“选中源码片段”/)
   assert.match(draft, /不要调用工具/)
   assert.match(draft, /Run：run-17/)
   assert.match(draft, /对象：风险 R-017/)
   assert.match(draft, /待核对结论：旧状态被复用/)
-  assert.match(draft, /源码片段：\/tmp\/src\/auth\.c:87-89/)
+  assert.match(draft, /选中源码片段：\/tmp\/src\/auth\.c:87-89/)
   assert.match(draft, /88 \| if \(failed\) return;/)
   assert.doesNotMatch(draft, /src\/session\.c:12-30|另一条证据/)
   assert.doesNotMatch(draft, /直接证据|关联测试用例|TC-023/)
   assert.doesNotMatch(draft, /重连|日志出现旧会话|正常退出不触发|risk_remains/)
   assert.doesNotMatch(draft, /final-state\.json|progress\.json/)
+
+  assert.deepEqual(Array.from(exported.splitRiskClaims('注销超时；连接保持活动。新连接失败')), ['注销超时；', '连接保持活动。', '新连接失败'])
+  assert.deepEqual(Array.from(exported.splitRiskClaims('NOP 因 !full_feature 直接返回；连接保持活动。')), ['NOP 因 !full_feature 直接返回；', '连接保持活动。'])
+
+  const multiEvidenceDraft = exported.buildDiscussionDraft({
+    kind: 'risk', runId: 'run-17', intent: 'evidence', selectedClaim: '连接保持活动。',
+    item: {
+      risk_id: 'R-017', title: '认证状态残留', system_result: '注销超时；连接保持活动。新连接失败',
+      trigger: '重连', external_observation: '日志出现旧会话',
+      evidence: [{ location: 'a.c:1-2' }, { location: 'b.c:3-4' }, { location: 'c.c:5-6' }],
+    },
+    sourceSnippets: [
+      { file_path: '/tmp/a.c', visible_start: 1, visible_end: 2, lines: [{ number: 1, text: 'a();' }] },
+      { file_path: '/tmp/b.c', visible_start: 3, visible_end: 4, lines: [{ number: 3, text: 'b();' }] },
+    ],
+  })
+  assert.match(multiEvidenceDraft, /待核对结论：连接保持活动。/)
+  assert.match(multiEvidenceDraft, /选中源码片段 1\/2：\/tmp\/a\.c:1-2/)
+  assert.match(multiEvidenceDraft, /选中源码片段 2\/2：\/tmp\/b\.c:3-4/)
+  assert.doesNotMatch(multiEvidenceDraft, /重连|日志出现旧会话|c\.c/)
+
+  const targetedTestDraft = exported.buildDiscussionDraft({
+    kind: 'risk', runId: 'run-17', intent: 'targeted-executable', selectedClaim: '连接保持活动。',
+    item: {
+      risk_id: 'R-017', title: '认证状态残留', system_result: '注销超时；连接保持活动。新连接失败',
+      trigger: '登录后中断', external_observation: '连接列表持续可见',
+      evidence: [{ location: 'a.c:1-2' }, { location: 'b.c:3-4' }],
+    },
+    sourceSnippets: [{ file_path: '/tmp/b.c', visible_start: 3, visible_end: 4, lines: [{ number: 3, text: 'b();' }] }],
+  })
+  assert.match(targetedTestDraft, /待测试结论：连接保持活动。/)
+  assert.match(targetedTestDraft, /触发条件：登录后中断/)
+  assert.match(targetedTestDraft, /外部观察：连接列表持续可见/)
+  assert.match(targetedTestDraft, /选中源码片段：\/tmp\/b\.c:3-4/)
+  assert.match(targetedTestDraft, /只生成这一个结论对应的单个测试/)
+  assert.match(targetedTestDraft, /不得增加可选扩展、其他风险后果或第二个测试/)
+  assert.doesNotMatch(targetedTestDraft, /注销超时|新连接失败|a\.c/)
 
   const reviewDraft = exported.buildDiscussionDraft({
     kind: 'risk', runId: 'run-17', intent: 'review',

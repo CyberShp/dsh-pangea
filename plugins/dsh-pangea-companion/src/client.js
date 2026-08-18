@@ -48,8 +48,9 @@ window.__ModuleLoader__.load({
     const SOURCE = { 'final-state': '最终聚合结果', 'worker-results': 'Worker 结果兼容读取' }
     const DISCUSSION_INTENTS = {
       review: '请结合证据和关联对象做独立判断：结论是否成立，还需要哪些信息。',
-      evidence: '只基于下方“当前源码片段”核对“待核对结论”：分别说明这段源码能直接支持什么、不能单独证明什么。不要调用工具，不要读取或使用其他文件、其他证据、PANGEA 其他字段或整个 Run 的信息。',
+      evidence: '只基于下方“选中源码片段”核对“待核对结论”：分别说明这些源码能直接支持什么、组合后仍不能证明什么。不要调用工具，不要读取或使用其他文件、其他证据、PANGEA 其他字段或整个 Run 的信息。',
       executable: '请把当前结论改写成可执行的测试语言，包含前置、操作、观察点和预期结果。',
+      'targeted-executable': '请只根据“待测试结论”和下方“选中源码片段”生成一个可执行测试，分别写出前置条件、操作步骤、观察点和预期结果。触发条件与外部观察只可提取和该结论直接相关的内容；忽略其余部分，不得增加可选扩展、其他风险后果或第二个测试。源码不能支持的预期必须标记为“待确认”，不要自行补充其他证据。',
       coverage: '请检查当前对象还缺少哪些测试覆盖，只列出有明确依据的缺口。',
     }
 
@@ -112,6 +113,12 @@ window.__ModuleLoader__.load({
       evidenceTabs: { display: 'flex', gap: 5, overflowX: 'auto', marginTop: 8, paddingBottom: 3 },
       evidenceTab: { flex: '0 0 auto', maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, padding: '4px 7px', background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', cursor: 'pointer', fontSize: 9 },
       evidenceTabActive: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))', color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700 },
+      choiceGrid: { display: 'grid', gap: 6, marginTop: 7 },
+      choiceButton: { width: '100%', textAlign: 'left', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '7px 8px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 10, lineHeight: 1.45 },
+      choiceButtonActive: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
+      evidenceChecks: { display: 'grid', gap: 5, marginTop: 7 },
+      evidenceCheck: { display: 'flex', alignItems: 'flex-start', gap: 7, border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '6px 7px', cursor: 'pointer', fontSize: 10, lineHeight: 1.4 },
+      evidenceCheckSelected: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
     }
 
     function icon(size = 16) {
@@ -187,16 +194,27 @@ window.__ModuleLoader__.load({
       const location = text(item?.location, '未标注位置')
       return hasText(item?.observation) ? `${location} — ${item.observation.trim()}` : location
     }
-    function buildDiscussionDraft({ kind, item, runId, risks = [], testCases = [], intent = 'review', sourceSnippet }) {
+    function splitRiskClaims(value) {
+      if (!hasText(value)) return []
+      return value.trim().split(/(?<=[。！？；;])\s*/).map(item => item.trim()).filter(hasText)
+    }
+    function buildDiscussionDraft({ kind, item, runId, risks = [], testCases = [], intent = 'review', selectedClaim, sourceSnippet, sourceSnippets = [] }) {
       const lines = [DISCUSSION_INTENTS[intent] ?? DISCUSSION_INTENTS.review, '', '[PANGEA 局部上下文]', `Run：${text(runId, '未知')}`]
       const riskById = new Map(risks.map(risk => [risk.risk_id, risk]))
       const caseById = new Map(testCases.map(testCase => [testCase.test_case_id, testCase]))
-      const isolatedSourceReview = intent === 'evidence' && sourceSnippet?.lines?.length
+      const snippets = [...(Array.isArray(sourceSnippets) ? sourceSnippets : []), ...(sourceSnippet ? [sourceSnippet] : [])].filter(snippet => snippet?.lines?.length)
+      const isolatedSourceReview = intent === 'evidence' && snippets.length > 0
+      const targetedExecutable = intent === 'targeted-executable' && snippets.length > 0
+      const scopedRiskDraft = isolatedSourceReview || targetedExecutable
       if (kind === 'risk') {
         lines.push(`对象：风险 ${text(item?.risk_id, '未编号')}`)
         discussionLine(lines, '标题', item?.title)
-        if (isolatedSourceReview) {
-          discussionLine(lines, '待核对结论', item?.system_result ?? item?.title)
+        if (scopedRiskDraft) {
+          discussionLine(lines, targetedExecutable ? '待测试结论' : '待核对结论', selectedClaim ?? item?.system_result ?? item?.title)
+          if (targetedExecutable) {
+            discussionLine(lines, '触发条件', item?.trigger)
+            discussionLine(lines, '外部观察', item?.external_observation)
+          }
         } else {
           discussionLine(lines, '严重度', SEVERITY[item?.severity] ?? item?.severity)
           discussionLine(lines, '触发条件', item?.trigger)
@@ -244,14 +262,17 @@ window.__ModuleLoader__.load({
           }))
         }
       }
-      if (sourceSnippet?.lines?.length) {
-        lines.push('', `源码片段：${text(sourceSnippet.file_path, text(sourceSnippet.location, '未标注文件'))}:${sourceSnippet.visible_start}-${sourceSnippet.visible_end}`, '```')
-        for (const line of sourceSnippet.lines) lines.push(`${String(line.number).padStart(5, ' ')} | ${line.text}`)
+      for (const [index, snippet] of snippets.entries()) {
+        const label = snippets.length > 1 ? `选中源码片段 ${index + 1}/${snippets.length}` : '选中源码片段'
+        lines.push('', `${label}：${text(snippet.file_path, text(snippet.location, '未标注文件'))}:${snippet.visible_start}-${snippet.visible_end}`, '```')
+        for (const line of snippet.lines) lines.push(`${String(line.number).padStart(5, ' ')} | ${line.text}`)
         lines.push('```')
       }
       lines.push('', isolatedSourceReview
-        ? '回答限制：只讨论当前源码片段，不要补充其他证据，也不要重新概括整个 Run。'
-        : '请不要重新概括整个 Run，直接回答上面的问题。')
+        ? '回答限制：只讨论选中源码片段，不要补充其他证据，也不要重新概括整个 Run。'
+        : targetedExecutable
+          ? '回答限制：只生成这一个结论对应的单个测试，不要扩展到整条风险、可选场景或其他证据。'
+          : '请不要重新概括整个 Run，直接回答上面的问题。')
       return lines.join('\n')
     }
     function field(label, value) {
@@ -288,6 +309,8 @@ window.__ModuleLoader__.load({
       const [actionNotice, setActionNotice] = React.useState(undefined)
       const [sourcePreview, setSourcePreview] = React.useState({ key: '', status: 'idle' })
       const [riskEvidenceSelection, setRiskEvidenceSelection] = React.useState({ riskKey: '', evidenceKey: '' })
+      const [riskClaimSelection, setRiskClaimSelection] = React.useState({ riskKey: '', claim: '' })
+      const [riskEvidenceSetSelection, setRiskEvidenceSetSelection] = React.useState({ riskKey: '', evidenceKeys: [] })
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const noticeTimerRef = React.useRef(undefined)
 
@@ -354,6 +377,12 @@ window.__ModuleLoader__.load({
         ? riskEvidenceOptions.find(item => evidenceIdentity(item) === selectedRiskEvidenceKey) ?? riskEvidenceOptions[0]
         : screen.type === 'evidence-detail' ? evidenceByKey.get(screen.key) : undefined
       const previewKey = previewEvidence ? `${current?.run_id ?? ''}\u0000${evidenceIdentity(previewEvidence)}` : ''
+      const riskClaims = screen.type === 'risk' ? splitRiskClaims(riskById.get(screen.id)?.system_result) : []
+      const selectedRiskClaim = riskClaimSelection.riskKey === riskScreenKey && riskClaims.includes(riskClaimSelection.claim)
+        ? riskClaimSelection.claim : riskClaims[0]
+      const defaultRiskEvidenceKey = previewEvidence && screen.type === 'risk' ? evidenceIdentity(previewEvidence) : ''
+      const selectedRiskEvidenceKeys = riskEvidenceSetSelection.riskKey === riskScreenKey
+        ? riskEvidenceSetSelection.evidenceKeys : defaultRiskEvidenceKey ? [defaultRiskEvidenceKey] : []
 
       React.useEffect(() => {
         if (!visible || !cwd || !snapshot?.data_root || !previewEvidence?.location) {
@@ -397,12 +426,66 @@ window.__ModuleLoader__.load({
         const inserted = appendConversationDraft(ctx, scope, draft)
         showActionNotice(inserted ? '已加入当前 DSH 会话输入框。' : '无法访问当前 DSH 会话输入框。', !inserted)
       }
+      function toggleRiskEvidence(key) {
+        const evidenceKeys = selectedRiskEvidenceKeys.includes(key)
+          ? selectedRiskEvidenceKeys.filter(item => item !== key)
+          : [...selectedRiskEvidenceKeys, key]
+        setRiskEvidenceSetSelection({ riskKey: riskScreenKey, evidenceKeys })
+        setRiskEvidenceSelection({ riskKey: riskScreenKey, evidenceKey: key })
+      }
+      async function addRiskSelectionToConversation(risk, intent) {
+        const selectedEvidence = riskEvidenceOptions.filter(item => selectedRiskEvidenceKeys.includes(evidenceIdentity(item)))
+        if (!selectedRiskClaim || selectedEvidence.length === 0) {
+          showActionNotice('请先选择一条结论和至少一条证据。', true)
+          return
+        }
+        showActionNotice(`正在读取 ${selectedEvidence.length} 条证据源码…`)
+        try {
+          const sourceSnippets = await Promise.all(selectedEvidence.map(item => requestSourceSnippet({
+            cwd, dataRoot: snapshot?.data_root, location: item.location,
+          })))
+          const draft = buildDiscussionDraft({
+            kind: 'risk', item: risk, intent, runId: current?.run_id, risks, testCases,
+            selectedClaim: selectedRiskClaim, sourceSnippets,
+          })
+          const inserted = appendConversationDraft(ctx, scope, draft)
+          showActionNotice(inserted ? `已加入当前 DSH 会话输入框（${selectedEvidence.length} 条证据）。` : '无法访问当前 DSH 会话输入框。', !inserted)
+        } catch (reason) {
+          showActionNotice(`无法读取选中证据：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
+      }
       function renderDiscussionCard(kind, item, evidenceSnippet) {
+        const secondaryActions = kind === 'risk'
+          ? [chip('查找覆盖缺口', () => addToConversation(kind, item, 'coverage'))]
+          : [evidenceSnippet ? chip('检查证据', () => addToConversation(kind, item, 'evidence', evidenceSnippet)) : null, chip('转成测试语言', () => addToConversation(kind, item, 'executable')), chip('查找覆盖缺口', () => addToConversation(kind, item, 'coverage'))]
         return h('div', { style: { ...styles.card, ...styles.actionCard } },
           h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '和 DSH 讨论'), h('span', { style: styles.badge }, '局部上下文')),
           h('div', { style: styles.itemMeta }, '只加入当前对象、直接证据和关联项，不会修改 PANGEA Run。'),
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => addToConversation(kind, item, 'review') }, '加入当前会话'),
-          h('div', { style: styles.chips }, evidenceSnippet ? chip('检查证据', () => addToConversation(kind, item, 'evidence', evidenceSnippet)) : null, chip('转成测试语言', () => addToConversation(kind, item, 'executable')), chip('查找覆盖缺口', () => addToConversation(kind, item, 'coverage'))))
+          h('div', { style: styles.chips }, secondaryActions))
+      }
+      function renderRiskSelectionWorkbench(risk) {
+        if (riskClaims.length === 0 || riskEvidenceOptions.length === 0) return null
+        const ready = Boolean(selectedRiskClaim && selectedRiskEvidenceKeys.length)
+        return h('div', { style: { ...styles.card, ...styles.actionCard } },
+          h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '定向核对与测试'), h('span', { style: styles.badge }, `已选 ${selectedRiskEvidenceKeys.length} 条证据`)),
+          h('div', { style: { ...styles.label, marginTop: 9 } }, '选择待核对结论'),
+          h('div', { style: styles.choiceGrid, role: 'group', 'aria-label': '选择风险结论' }, riskClaims.map((claim, index) => h('button', {
+            key: `${index}:${claim}`, type: 'button', 'aria-pressed': claim === selectedRiskClaim,
+            style: { ...styles.choiceButton, ...(claim === selectedRiskClaim ? styles.choiceButtonActive : {}) },
+            onClick: () => setRiskClaimSelection({ riskKey: riskScreenKey, claim }),
+          }, `${index + 1}. ${claim}`))),
+          h('div', { style: { ...styles.label, marginTop: 10 } }, '选择证据'),
+          h('div', { style: styles.evidenceChecks, role: 'group', 'aria-label': '选择核对证据' }, riskEvidenceOptions.map((option, index) => {
+            const key = evidenceIdentity(option)
+            const checked = selectedRiskEvidenceKeys.includes(key)
+            return h('label', { key, style: { ...styles.evidenceCheck, ...(checked ? styles.evidenceCheckSelected : {}) } },
+              h('input', { type: 'checkbox', checked, 'aria-label': `选择证据 ${evidenceTabLabel(option, index)}`, onChange: () => toggleRiskEvidence(key) }),
+              h('span', null, evidenceTabLabel(option, index)))
+          })),
+          h('div', { style: styles.chips },
+            h('button', { type: 'button', disabled: !ready, style: { ...styles.button, ...(!ready ? styles.buttonDisabled : {}) }, onClick: () => { void addRiskSelectionToConversation(risk, 'evidence') } }, '核对选中证据'),
+            h('button', { type: 'button', disabled: !ready, style: { ...styles.button, ...(!ready ? styles.buttonDisabled : {}) }, onClick: () => { void addRiskSelectionToConversation(risk, 'targeted-executable') } }, '转成定向测试')))
       }
       function renderSourcePreview(kind, item, evidenceItem, evidenceOptions = []) {
         if (!evidenceItem?.location) return null
@@ -432,7 +515,7 @@ window.__ModuleLoader__.load({
           snippet?.truncated ? h('div', { style: styles.itemMeta }, '证据范围较长，当前只显示前 160 行。') : null,
           h('div', { style: styles.chips },
             sourcePath ? chip('打开完整文件', () => openSidebarFile(sourcePath)) : null,
-            snippet ? chip('检查这段源码', () => addToConversation(kind, item, 'evidence', snippet)) : null))
+            snippet && kind !== 'risk' ? chip('检查这段源码', () => addToConversation(kind, item, 'evidence', snippet)) : null))
       }
 
       const total = current?.analysis?.total ?? 0
@@ -559,6 +642,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.chips }, h('span', { style: styles.badge }, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '—'}`), h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'), h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '未标注')),
             Array.isArray(risk.dfx) && risk.dfx.length ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `DFX：${risk.dfx.join('、')}`) : null),
           renderDiscussionCard('risk', risk, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
+          renderRiskSelectionWorkbench(risk),
           renderSourcePreview('risk', risk, previewEvidence, riskEvidenceOptions),
           section('触发条件', risk.trigger), section('系统结果', risk.system_result), section('外部可观察现象', risk.external_observation), section('排除条件', risk.exclusion_condition),
           semantics ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '上游语义核对'), h('hr', { style: styles.separator }),
@@ -657,6 +741,7 @@ window.__ModuleLoader__.load({
     exports.absoluteWorkspacePath = absoluteWorkspacePath
     exports.evidenceFilePath = evidenceFilePath
     exports.appendConversationDraft = appendConversationDraft
+    exports.splitRiskClaims = splitRiskClaims
     exports.buildDiscussionDraft = buildDiscussionDraft
     exports.apply = apply
     return module.exports
