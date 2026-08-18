@@ -95,9 +95,9 @@ function buildDetails(workerResults, review) {
   const addEvidence = (raw, { unitId, riskId } = {}) => {
     if (!raw || typeof raw !== 'object') return
     const normalized = {
-      chunk_id: typeof raw.chunk_id === 'string' ? raw.chunk_id : '',
-      location: typeof raw.location === 'string' ? raw.location : '',
-      observation: typeof raw.observation === 'string' ? raw.observation : '',
+      chunk_id: typeof raw.chunk_id === 'string' ? raw.chunk_id : typeof raw.evidence_id === 'string' ? raw.evidence_id : '',
+      location: typeof raw.location === 'string' ? raw.location : typeof raw.source === 'string' ? raw.source : typeof raw.path === 'string' ? raw.path : '',
+      observation: typeof raw.observation === 'string' ? raw.observation : typeof raw.summary === 'string' ? raw.summary : typeof raw.reason === 'string' ? raw.reason : '',
       unit_ids: [],
       risk_ids: [],
     }
@@ -150,6 +150,41 @@ function buildDetails(workerResults, review) {
   return { risks, test_cases: testCases, evidence, business_flows: businessFlows, review_issues: Array.isArray(review?.issues) ? review.issues : [] }
 }
 
+function stateArray(state, ...names) {
+  for (const name of names) {
+    if (Array.isArray(state?.[name])) return state[name]
+  }
+  return []
+}
+
+function finalStateHasResultCollections(state) {
+  if (!state || typeof state !== 'object') return false
+  return ['risks', 'risk_cards', 'test_cases', 'testcases', 'cases', 'business_flows', 'flows', 'flow_diagrams']
+    .some(name => Object.prototype.hasOwnProperty.call(state, name))
+}
+
+function buildDetailsFromFinalState(state, review) {
+  const synthetic = {
+    unit_id: 'final-state',
+    attempt: 2,
+    risks: stateArray(state, 'risks', 'risk_cards'),
+    test_cases: stateArray(state, 'test_cases', 'testcases', 'cases'),
+    evidence: stateArray(state, 'evidence'),
+    business_flows: stateArray(state, 'business_flows', 'flows', 'flow_diagrams'),
+  }
+  return buildDetails([synthetic], review)
+}
+
+async function readFinalState(runDirectory) {
+  const finalStatePath = path.join(runDirectory, 'final-state.json')
+  if (await pathKind(finalStatePath) !== 'file') return { path: null, value: null, error: null }
+  try {
+    return { path: finalStatePath, value: await readJson(finalStatePath), error: null }
+  } catch (error) {
+    return { path: finalStatePath, value: null, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 async function readReview(runDirectory) {
   const candidates = [path.join(runDirectory, 'agent-results', 'rework-review.json'), path.join(runDirectory, 'agent-results', 'review.json')]
   for (const candidate of candidates) {
@@ -170,8 +205,8 @@ async function readReview(runDirectory) {
   return null
 }
 
-async function runModifiedAt(runDirectory, progressPath) {
-  const target = await pathKind(progressPath) === 'file' ? progressPath : runDirectory
+async function runModifiedAt(runDirectory, progressPath, finalStatePath) {
+  const target = await pathKind(progressPath) === 'file' ? progressPath : finalStatePath && await pathKind(finalStatePath) === 'file' ? finalStatePath : runDirectory
   return (await stat(target)).mtimeMs
 }
 
@@ -180,41 +215,74 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   if (await pathKind(runDirectory) !== 'directory') throw new Error(`PANGEA run does not exist: ${runId}`)
   const progressPath = path.join(runDirectory, 'progress.json')
   const progress = await pathKind(progressPath) === 'file' ? await readJson(progressPath) : {}
-  const phase = typeof progress?.phase === 'string' ? progress.phase : 'UNKNOWN'
-  const analysisUnits = Array.isArray(progress?.analysis_units) ? progress.analysis_units : []
+  const finalStateRecord = await readFinalState(runDirectory)
+  const finalState = finalStateRecord.value
+  const phase = typeof progress?.phase === 'string' ? progress.phase : typeof finalState?.phase === 'string' ? finalState.phase : typeof finalState?.run_status === 'string' ? finalState.run_status : 'UNKNOWN'
+  const analysisUnits = Array.isArray(progress?.analysis_units) ? progress.analysis_units : stateArray(finalState, 'analysis_units')
   const completedAnalysisUnits = Array.isArray(progress?.completed_analysis_units) ? progress.completed_analysis_units : []
   const completedReworkUnits = Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : []
-  const workerResults = await readWorkerResults(runDirectory, new Set(completedAnalysisUnits), new Set(completedReworkUnits))
   const review = await readReview(runDirectory)
-  const errors = Array.isArray(progress?.errors) ? progress.errors : []
+  const errors = Array.isArray(progress?.errors) ? progress.errors : stateArray(finalState, 'errors')
   const errorHistory = Array.isArray(progress?.error_history) ? progress.error_history : []
   const reportMd = path.join(runDirectory, 'report.md')
   const reportHtml = path.join(runDirectory, 'report.html')
+  const hasReport = await pathKind(reportMd) === 'file' || await pathKind(reportHtml) === 'file'
+
+  let details
+  let counts
+  let dataSource
+  const readerWarnings = []
+
+  if (finalStateHasResultCollections(finalState)) {
+    details = buildDetailsFromFinalState(finalState, review)
+    counts = {
+      risks: details.risks.length,
+      test_cases: details.test_cases.length,
+      evidence: details.evidence.length,
+      business_flows: details.business_flows.length,
+      review_issues: details.review_issues.length,
+    }
+    dataSource = 'final-state'
+  } else {
+    const workerResults = await readWorkerResults(runDirectory, new Set(completedAnalysisUnits), new Set(completedReworkUnits))
+    details = buildDetails(workerResults, review)
+    counts = {
+      risks: countList(workerResults, 'risks'),
+      test_cases: countList(workerResults, 'test_cases'),
+      evidence: details.evidence.length,
+      business_flows: countList(workerResults, 'business_flows'),
+      review_issues: details.review_issues.length,
+    }
+    dataSource = 'worker-results'
+    if (hasReport) readerWarnings.push('检测到报告但 final-state.json 不包含结构化结果，已回退读取 worker result。')
+  }
+
+  if (finalStateRecord.error) readerWarnings.push(`final-state.json 读取失败：${finalStateRecord.error}`)
+
+  const qualityFromFinal = typeof finalState?.quality_report?.status === 'string' ? finalState.quality_report.status : null
+  const completedFallback = TERMINAL_PHASES.has(phase) && analysisUnits.length > 0 ? analysisUnits.length : completedAnalysisUnits.length
   const summary = {
     run_id: runId,
     phase,
     terminal: TERMINAL_PHASES.has(phase),
-    quality_status: typeof progress?.quality_status === 'string' ? progress.quality_status : null,
-    analysis: { total: analysisUnits.length, completed: completedAnalysisUnits.length, reworked: completedReworkUnits.length },
-    counts: {
-      risks: countList(workerResults, 'risks'),
-      test_cases: countList(workerResults, 'test_cases'),
-      evidence: countList(workerResults, 'evidence'),
-      business_flows: countList(workerResults, 'business_flows'),
-      review_issues: review?.issues?.length ?? 0,
-    },
+    quality_status: typeof progress?.quality_status === 'string' ? progress.quality_status : qualityFromFinal,
+    analysis: { total: analysisUnits.length, completed: completedAnalysisUnits.length || completedFallback, reworked: completedReworkUnits.length },
+    counts,
     errors,
     error_history: errorHistory,
     review,
+    data_source: dataSource,
+    reader_warnings: readerWarnings,
     artifacts: {
       run_directory: runDirectory,
       progress: await pathKind(progressPath) === 'file' ? progressPath : null,
+      final_state: finalStateRecord.path,
       report_md: await pathKind(reportMd) === 'file' ? reportMd : null,
       report_html: await pathKind(reportHtml) === 'file' ? reportHtml : null,
     },
-    modified_at: await runModifiedAt(runDirectory, progressPath),
+    modified_at: await runModifiedAt(runDirectory, progressPath, finalStateRecord.path),
   }
-  if (includeDetails) summary.details = buildDetails(workerResults, review)
+  if (includeDetails) summary.details = details
   return summary
 }
 

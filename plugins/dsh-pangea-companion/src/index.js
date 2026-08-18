@@ -20,6 +20,7 @@ const PHASE_LABELS = {
   COMPLETE: '已完成', INCOMPLETE: '未完整结束', UNKNOWN: '未知',
 }
 const QUALITY_LABELS = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决' }
+const SOURCE_LABELS = { 'final-state': '最终聚合结果', 'worker-results': '运行中 Worker 结果' }
 
 function workspaceCwd(exec) {
   const cwd = exec?.agent?.session?.header?.cwd
@@ -37,8 +38,12 @@ function renderStatus(value) {
     `风险：${run.counts.risks}`,
     `测试用例：${run.counts.test_cases}`,
     `证据：${run.counts.evidence}`,
+    `数据源：${SOURCE_LABELS[run.data_source] ?? run.data_source ?? '未知'}`,
   ]
   if (run.errors.length > 0) lines.push(`当前错误：${run.errors.length}`)
+  if (Array.isArray(run.reader_warnings) && run.reader_warnings.length > 0) {
+    lines.push(`读取提示：${run.reader_warnings.join('；')}`)
+  }
   if (run.artifacts.report_md !== null) lines.push(`报告：${run.artifacts.report_md}`)
   return [{ type: 'text', text: lines.join('\n') }]
 }
