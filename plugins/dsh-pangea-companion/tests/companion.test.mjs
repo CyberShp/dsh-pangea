@@ -80,8 +80,47 @@ async function finalizedFixture() {
     quality_report: { status: 'UNRESOLVED', checks: [], unresolved: [{ kind: 'example' }] },
     errors: [],
   })
-  await writeFile(path.join(runDirectory, 'report.md'), '# 已生成报告\n\n包含 1 个风险和 1 个测试用例。\n', 'utf8')
+  await writeFile(path.join(runDirectory, 'report.md'), '# 已生成报告\n\n形成 1 条业务流程、1 个风险、1 个测试用例。\n', 'utf8')
   return { root, dataRoot, runDirectory }
+}
+
+async function inconsistentFinalizedFixture() {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-inconsistent-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runDirectory = path.join(dataRoot, 'runs', 'run-bad')
+  await mkdir(runDirectory, { recursive: true })
+  await writeJson(path.join(runDirectory, 'progress.json'), {
+    schema_version: '1.0', run_id: 'run-bad', contract_digest: 'c'.repeat(64), phase: 'INCOMPLETE',
+    analysis_units: ['u-bad'], completed_analysis_units: [], completed_rework_units: [],
+    quality_status: 'UNRESOLVED', errors: [], error_history: [],
+  })
+  await writeJson(path.join(runDirectory, 'final-state.json'), {
+    run_id: 'run-bad', phase: 'INCOMPLETE', run_status: 'INCOMPLETE', analysis_units: [{ unit_id: 'u-bad' }],
+    risks: [], test_cases: [], business_flows: [], quality_report: { status: 'UNRESOLVED', checks: [], unresolved: [] }, errors: [],
+  })
+  await writeFile(path.join(runDirectory, 'report.md'), '# 历史报告\n\n形成 1 条业务流程、2 个风险、3 个测试用例。\n', 'utf8')
+  return { root }
+}
+
+async function legacyReportFixture() {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-legacy-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runDirectory = path.join(dataRoot, 'runs', 'run-legacy')
+  await mkdir(runDirectory, { recursive: true })
+  await writeJson(path.join(runDirectory, 'progress.json'), {
+    schema_version: '1.0', run_id: 'run-legacy', contract_digest: 'd'.repeat(64), phase: 'INCOMPLETE',
+    analysis_units: ['u1'], completed_analysis_units: ['u1'], completed_rework_units: [],
+    quality_status: 'UNRESOLVED', errors: [], error_history: [],
+  })
+  const legacyEvidence = evidence('legacy-e', 'legacy.c:1-9', '旧 Run 证据')
+  await writeJson(path.join(runDirectory, 'agent-results', 'analysis', 'u1.json'), {
+    unit_id: 'u1', attempt: 0,
+    risks: [{ risk_id: 'R-LEGACY', title: '旧风险', evidence: [legacyEvidence] }],
+    test_cases: [{ test_case_id: 'TC-LEGACY', title: '旧用例', linked_risk_ids: ['R-LEGACY'] }],
+    evidence: [legacyEvidence], business_flows: [{ title: '旧流程', steps: ['step'], evidence: [legacyEvidence] }],
+  })
+  await writeFile(path.join(runDirectory, 'report.md'), '# 旧版报告\n\n形成 1 条业务流程、1 个风险、1 个测试用例。\n', 'utf8')
+  return { root }
 }
 
 test('discovers pangea-data from workspace root', async () => {
@@ -97,6 +136,8 @@ test('returns current-run details and cross-links without double-counting replac
     const run = snapshot.current
     assert.equal(run.run_id, 'run-01')
     assert.equal(run.data_source, 'worker-results')
+    assert.equal(run.reader_health.status, 'ok')
+    assert.equal(run.reader_health.trusted, true)
     assert.deepEqual(run.analysis, { total: 2, completed: 2, reworked: 1 })
     assert.deepEqual(run.details.risks.map(item => item.risk_id), ['R-001', 'R-002'])
     assert.deepEqual(run.details.test_cases.map(item => item.test_case_id), ['TC-001', 'TC-002'])
@@ -108,13 +149,18 @@ test('returns current-run details and cross-links without double-counting replac
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('finalized report reads risks and test cases from final-state even when progress completion lists are stale', async () => {
+test('finalized report reads final-state and verifies report counts', async () => {
   const { root, runDirectory } = await finalizedFixture()
   try {
     const snapshot = await companionSnapshot({ cwd: root, runId: 'run-final' })
     const run = snapshot.current
     assert.equal(run.phase, 'INCOMPLETE')
     assert.equal(run.data_source, 'final-state')
+    assert.equal(run.reader_health.status, 'ok')
+    assert.equal(run.reader_health.trusted, true)
+    assert.equal(run.reader_health.count_checks.risks.status, 'match')
+    assert.equal(run.reader_health.count_checks.test_cases.status, 'match')
+    assert.equal(run.reader_health.count_checks.business_flows.status, 'match')
     assert.deepEqual(run.analysis, { total: 1, completed: 1, reworked: 0 })
     assert.deepEqual(run.details.risks.map(item => item.risk_id), ['R-FINAL'])
     assert.deepEqual(run.details.test_cases.map(item => item.test_case_id), ['TC-FINAL'])
@@ -126,12 +172,42 @@ test('finalized report reads risks and test cases from final-state even when pro
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('report and structured count mismatch is fail-loud and marks zero as untrusted', async () => {
+  const { root } = await inconsistentFinalizedFixture()
+  try {
+    const run = (await companionSnapshot({ cwd: root, runId: 'run-bad' })).current
+    assert.equal(run.data_source, 'final-state')
+    assert.equal(run.counts.risks, 0)
+    assert.equal(run.counts.test_cases, 0)
+    assert.equal(run.reader_health.status, 'error')
+    assert.equal(run.reader_health.trusted, false)
+    assert.deepEqual(run.reader_health.count_checks.risks, { structured: 0, report: 2, status: 'mismatch' })
+    assert.deepEqual(run.reader_health.count_checks.test_cases, { structured: 0, report: 3, status: 'mismatch' })
+    assert.match(run.reader_health.issues.join('\n'), /风险计数不一致/)
+    assert.match(run.reader_health.issues.join('\n'), /测试用例计数不一致/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('legacy report can use worker-result fallback when report counts agree', async () => {
+  const { root } = await legacyReportFixture()
+  try {
+    const run = (await companionSnapshot({ cwd: root, runId: 'run-legacy' })).current
+    assert.equal(run.data_source, 'worker-results')
+    assert.equal(run.reader_health.status, 'warning')
+    assert.equal(run.reader_health.trusted, true)
+    assert.equal(run.reader_health.count_checks.risks.status, 'match')
+    assert.equal(run.reader_health.count_checks.test_cases.status, 'match')
+    assert.match(run.reader_health.issues.join('\n'), /兼容回退/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('recent run summaries stay compact while current run carries details', async () => {
   const { root } = await fixture()
   try {
     const snapshot = await companionSnapshot({ cwd: root })
     assert.ok(snapshot.current.details)
     assert.equal(snapshot.runs[0].details, undefined)
+    assert.equal(snapshot.runs[0].reader_health.report_checked, false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -141,7 +217,7 @@ test('registers one read-only status tool and one state route with Chinese tool 
   const effects = []
   apply({ tools: { register(tool) { tools.push(tool) } }, webServer: { register(route) { routes.push(route); return () => {} } }, effect(callback) { effects.push(callback) } })
   assert.deepEqual(tools.map(tool => tool.name), ['pangea_status'])
-  assert.match(tools[0].description, /只读/)
+  assert.match(tools[0].description, /读取健康状态/)
   assert.equal(routes.length, 1)
   assert.equal(routes[0].path, '/api/pangea-companion/state')
   assert.equal(effects.length, 1)

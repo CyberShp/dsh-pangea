@@ -78,10 +78,6 @@ async function readWorkerResults(runDirectory, acceptedAnalysis, acceptedRework)
   return [...byUnit.values()]
 }
 
-function countList(results, field) {
-  return results.reduce((sum, item) => sum + (Array.isArray(item?.[field]) ? item[field].length : 0), 0)
-}
-
 function evidenceKey(value) {
   return [value?.chunk_id ?? '', value?.location ?? '', value?.observation ?? ''].join('\u0000')
 }
@@ -185,6 +181,61 @@ async function readFinalState(runDirectory) {
   }
 }
 
+function plainReportText(raw, format) {
+  if (format !== 'html') return raw
+  return raw
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+}
+
+function parseReportCounts(raw, format) {
+  const text = plainReportText(raw, format)
+  const pick = pattern => {
+    const match = pattern.exec(text)
+    if (match === null) return null
+    const value = Number(match[1])
+    return Number.isSafeInteger(value) && value >= 0 ? value : null
+  }
+  return {
+    business_flows: pick(/(\d+)\s*条业务流程/),
+    risks: pick(/(\d+)\s*个风险/),
+    test_cases: pick(/(\d+)\s*个测试用例/),
+  }
+}
+
+async function readReportCounts(runDirectory, { checked = true } = {}) {
+  const candidates = [
+    { path: path.join(runDirectory, 'report.md'), format: 'markdown' },
+    { path: path.join(runDirectory, 'report.html'), format: 'html' },
+  ]
+  const existing = []
+  for (const candidate of candidates) {
+    if (await pathKind(candidate.path) === 'file') existing.push(candidate)
+  }
+  if (existing.length === 0) {
+    return { present: false, checked, path: null, format: null, counts: null, parseable: false, warnings: [] }
+  }
+  if (!checked) {
+    return { present: true, checked: false, path: existing[0].path, format: existing[0].format, counts: null, parseable: false, warnings: [] }
+  }
+
+  const warnings = []
+  for (const candidate of existing) {
+    try {
+      const raw = await readFile(candidate.path, 'utf8')
+      const counts = parseReportCounts(raw, candidate.format)
+      const parseable = Object.values(counts).some(Number.isInteger)
+      return { present: true, checked: true, path: candidate.path, format: candidate.format, counts, parseable, warnings }
+    } catch (error) {
+      warnings.push(`${path.basename(candidate.path)} 读取失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return { present: true, checked: true, path: existing[0].path, format: existing[0].format, counts: null, parseable: false, warnings }
+}
+
 async function readReview(runDirectory) {
   const candidates = [path.join(runDirectory, 'agent-results', 'rework-review.json'), path.join(runDirectory, 'agent-results', 'review.json')]
   for (const candidate of candidates) {
@@ -205,12 +256,74 @@ async function readReview(runDirectory) {
   return null
 }
 
-async function runModifiedAt(runDirectory, progressPath, finalStatePath) {
-  const target = await pathKind(progressPath) === 'file' ? progressPath : finalStatePath && await pathKind(finalStatePath) === 'file' ? finalStatePath : runDirectory
-  return (await stat(target)).mtimeMs
+function buildReaderHealth({ phase, dataSource, counts, finalStateRecord, reportRecord }) {
+  const issues = []
+  const countChecks = {}
+  const labels = { risks: '风险', test_cases: '测试用例', business_flows: '业务流程' }
+  let status = 'ok'
+  let trusted = true
+
+  if (finalStateRecord.error) {
+    status = 'warning'
+    issues.push(`final-state.json 读取失败：${finalStateRecord.error}`)
+  }
+  for (const warning of reportRecord.warnings ?? []) {
+    if (status === 'ok') status = 'warning'
+    issues.push(warning)
+  }
+
+  if (reportRecord.present && reportRecord.checked && !reportRecord.parseable) {
+    if (status === 'ok') status = 'warning'
+    issues.push('检测到报告，但无法从报告摘要提取风险/测试用例计数，无法自动对账。')
+  }
+
+  if (reportRecord.present && dataSource === 'worker-results') {
+    if (status === 'ok') status = 'warning'
+    issues.push('检测到已生成报告，但缺少可用的 final-state 聚合结果，当前使用 worker result 兼容回退。')
+  }
+
+  if (TERMINAL_PHASES.has(phase) && !reportRecord.present) {
+    if (status === 'ok') status = 'warning'
+    issues.push('Run 已进入终态，但未检测到 report.md/report.html。')
+  }
+
+  for (const key of ['risks', 'test_cases', 'business_flows']) {
+    const structured = Number.isInteger(counts?.[key]) ? counts[key] : 0
+    const reported = reportRecord.checked && Number.isInteger(reportRecord.counts?.[key]) ? reportRecord.counts[key] : null
+    const check = {
+      structured,
+      report: reported,
+      status: reported === null ? 'unknown' : structured === reported ? 'match' : 'mismatch',
+    }
+    countChecks[key] = check
+    if (check.status === 'mismatch') {
+      status = 'error'
+      trusted = false
+      issues.push(`${labels[key]}计数不一致：结构化数据 ${structured}，报告 ${reported}。`)
+    }
+  }
+
+  return {
+    status,
+    trusted,
+    data_source: dataSource,
+    report_checked: reportRecord.checked,
+    report_path: reportRecord.path,
+    count_checks: countChecks,
+    issues,
+  }
 }
 
-export async function summarizeRun(dataRoot, runId, { includeDetails = false } = {}) {
+async function runModifiedAt(runDirectory, candidates) {
+  let latest = (await stat(runDirectory)).mtimeMs
+  for (const candidate of candidates) {
+    if (!candidate || await pathKind(candidate) !== 'file') continue
+    latest = Math.max(latest, (await stat(candidate)).mtimeMs)
+  }
+  return latest
+}
+
+export async function summarizeRun(dataRoot, runId, { includeDetails = false, checkReport = includeDetails } = {}) {
   const runDirectory = path.join(dataRoot, 'runs', runId)
   if (await pathKind(runDirectory) !== 'directory') throw new Error(`PANGEA run does not exist: ${runId}`)
   const progressPath = path.join(runDirectory, 'progress.json')
@@ -226,41 +339,31 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const errorHistory = Array.isArray(progress?.error_history) ? progress.error_history : []
   const reportMd = path.join(runDirectory, 'report.md')
   const reportHtml = path.join(runDirectory, 'report.html')
-  const hasReport = await pathKind(reportMd) === 'file' || await pathKind(reportHtml) === 'file'
+  const reportRecord = await readReportCounts(runDirectory, { checked: checkReport })
 
   let details
-  let counts
   let dataSource
-  const readerWarnings = []
 
   if (finalStateHasResultCollections(finalState)) {
     details = buildDetailsFromFinalState(finalState, review)
-    counts = {
-      risks: details.risks.length,
-      test_cases: details.test_cases.length,
-      evidence: details.evidence.length,
-      business_flows: details.business_flows.length,
-      review_issues: details.review_issues.length,
-    }
     dataSource = 'final-state'
   } else {
     const workerResults = await readWorkerResults(runDirectory, new Set(completedAnalysisUnits), new Set(completedReworkUnits))
     details = buildDetails(workerResults, review)
-    counts = {
-      risks: countList(workerResults, 'risks'),
-      test_cases: countList(workerResults, 'test_cases'),
-      evidence: details.evidence.length,
-      business_flows: countList(workerResults, 'business_flows'),
-      review_issues: details.review_issues.length,
-    }
     dataSource = 'worker-results'
-    if (hasReport) readerWarnings.push('检测到报告但 final-state.json 不包含结构化结果，已回退读取 worker result。')
   }
 
-  if (finalStateRecord.error) readerWarnings.push(`final-state.json 读取失败：${finalStateRecord.error}`)
-
+  const counts = {
+    risks: details.risks.length,
+    test_cases: details.test_cases.length,
+    evidence: details.evidence.length,
+    business_flows: details.business_flows.length,
+    review_issues: details.review_issues.length,
+  }
+  const readerHealth = buildReaderHealth({ phase, dataSource, counts, finalStateRecord, reportRecord })
   const qualityFromFinal = typeof finalState?.quality_report?.status === 'string' ? finalState.quality_report.status : null
   const completedFallback = TERMINAL_PHASES.has(phase) && analysisUnits.length > 0 ? analysisUnits.length : completedAnalysisUnits.length
+
   const summary = {
     run_id: runId,
     phase,
@@ -272,7 +375,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     error_history: errorHistory,
     review,
     data_source: dataSource,
-    reader_warnings: readerWarnings,
+    reader_health: readerHealth,
+    reader_warnings: readerHealth.issues,
     artifacts: {
       run_directory: runDirectory,
       progress: await pathKind(progressPath) === 'file' ? progressPath : null,
@@ -280,7 +384,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       report_md: await pathKind(reportMd) === 'file' ? reportMd : null,
       report_html: await pathKind(reportHtml) === 'file' ? reportHtml : null,
     },
-    modified_at: await runModifiedAt(runDirectory, progressPath, finalStateRecord.path),
+    modified_at: await runModifiedAt(runDirectory, [progressPath, finalStateRecord.path, reportMd, reportHtml]),
   }
   if (includeDetails) summary.details = details
   return summary
@@ -292,7 +396,7 @@ export async function listRuns(dataRoot, { limit = 20 } = {}) {
   const summaries = []
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    try { summaries.push(await summarizeRun(dataRoot, entry.name)) } catch { /* corrupt run must not hide healthy runs */ }
+    try { summaries.push(await summarizeRun(dataRoot, entry.name, { checkReport: false })) } catch { /* corrupt run must not hide healthy runs */ }
   }
   summaries.sort((a, b) => b.modified_at - a.modified_at)
   return summaries.slice(0, limit)
@@ -306,6 +410,6 @@ export async function companionSnapshot({ cwd, dataRoot, runId, limit = 20 } = {
   const resolvedDataRoot = await discoverPangeaDataRoot({ cwd, dataRoot })
   const runs = await listRuns(resolvedDataRoot, { limit })
   const selected = runId !== undefined ? (runs.find(run => run.run_id === runId) ?? { run_id: runId }) : chooseCurrentRun(runs)
-  const current = selected === null ? null : await summarizeRun(resolvedDataRoot, selected.run_id, { includeDetails: true })
+  const current = selected === null ? null : await summarizeRun(resolvedDataRoot, selected.run_id, { includeDetails: true, checkReport: true })
   return { status: 'ok', data_root: resolvedDataRoot, current, runs }
 }
