@@ -1,7 +1,7 @@
 {
   "name": "dsh-pangea-companion",
-  "version": "0.2.0",
-  "description": "Read-only PANGEA companion for DeepSeek Harness with optional dsh-better-sidebar cockpit",
+  "version": "0.3.0",
+  "description": "Read-only PANGEA companion for DeepSeek Harness with Chinese risk/testcase/evidence explorer",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
