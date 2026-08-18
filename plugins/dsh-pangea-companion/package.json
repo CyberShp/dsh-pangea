@@ -1,7 +1,7 @@
 {
   "name": "dsh-pangea-companion",
-  "version": "0.3.1",
-  "description": "Read-only PANGEA companion for DeepSeek Harness with Chinese risk/testcase/evidence explorer",
+  "version": "0.3.2",
+  "description": "Read-only PANGEA companion for DeepSeek Harness with Reader consistency health checks",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
