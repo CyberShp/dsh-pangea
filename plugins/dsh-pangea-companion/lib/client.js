@@ -48,7 +48,7 @@ window.__ModuleLoader__.load({
     const SOURCE = { 'final-state': '最终聚合结果', 'worker-results': 'Worker 结果兼容读取' }
     const DISCUSSION_INTENTS = {
       review: '请结合证据和关联对象做独立判断：结论是否成立，还需要哪些信息。',
-      evidence: '请检查这个结论的证据是否充分，指出证据能支持什么、不能支持什么。',
+      evidence: '只基于下方“当前源码片段”核对“待核对结论”：分别说明这段源码能直接支持什么、不能单独证明什么。不要调用工具，不要读取或使用其他文件、其他证据、PANGEA 其他字段或整个 Run 的信息。',
       executable: '请把当前结论改写成可执行的测试语言，包含前置、操作、观察点和预期结果。',
       coverage: '请检查当前对象还缺少哪些测试覆盖，只列出有明确依据的缺口。',
     }
@@ -191,20 +191,25 @@ window.__ModuleLoader__.load({
       const lines = [DISCUSSION_INTENTS[intent] ?? DISCUSSION_INTENTS.review, '', '[PANGEA 局部上下文]', `Run：${text(runId, '未知')}`]
       const riskById = new Map(risks.map(risk => [risk.risk_id, risk]))
       const caseById = new Map(testCases.map(testCase => [testCase.test_case_id, testCase]))
+      const isolatedSourceReview = intent === 'evidence' && sourceSnippet?.lines?.length
       if (kind === 'risk') {
         lines.push(`对象：风险 ${text(item?.risk_id, '未编号')}`)
         discussionLine(lines, '标题', item?.title)
-        discussionLine(lines, '严重度', SEVERITY[item?.severity] ?? item?.severity)
-        discussionLine(lines, '触发条件', item?.trigger)
-        discussionLine(lines, '系统结果', item?.system_result)
-        discussionLine(lines, '外部观察', item?.external_observation)
-        discussionLine(lines, '排除条件', item?.exclusion_condition)
-        discussionLine(lines, '上游语义结论', item?.upstream_semantics?.conclusion)
-        discussionList(lines, '直接证据', (item?.evidence ?? []).map(evidenceLine))
-        discussionList(lines, '关联测试用例', (item?.linked_test_case_ids ?? []).map(id => {
-          const linked = caseById.get(id)
-          return linked ? `${id} ${text(linked.title, '')}`.trim() : id
-        }))
+        if (isolatedSourceReview) {
+          discussionLine(lines, '待核对结论', item?.system_result ?? item?.title)
+        } else {
+          discussionLine(lines, '严重度', SEVERITY[item?.severity] ?? item?.severity)
+          discussionLine(lines, '触发条件', item?.trigger)
+          discussionLine(lines, '系统结果', item?.system_result)
+          discussionLine(lines, '外部观察', item?.external_observation)
+          discussionLine(lines, '排除条件', item?.exclusion_condition)
+          discussionLine(lines, '上游语义结论', item?.upstream_semantics?.conclusion)
+          discussionList(lines, '直接证据', (item?.evidence ?? []).map(evidenceLine))
+          discussionList(lines, '关联测试用例', (item?.linked_test_case_ids ?? []).map(id => {
+            const linked = caseById.get(id)
+            return linked ? `${id} ${text(linked.title, '')}`.trim() : id
+          }))
+        }
       } else if (kind === 'case') {
         lines.push(`对象：测试用例 ${text(item?.test_case_id, '未编号')}`)
         discussionLine(lines, '标题', item?.title)
@@ -223,24 +228,30 @@ window.__ModuleLoader__.load({
       } else {
         lines.push('对象：证据')
         discussionLine(lines, '位置', item?.location)
-        discussionLine(lines, 'Chunk ID', item?.chunk_id)
-        discussionLine(lines, '观察结论', item?.observation)
-        discussionList(lines, '关联风险', (item?.risk_ids ?? []).map(id => {
-          const linked = riskById.get(id)
-          return linked ? `${id} ${text(linked.title, '')}`.trim() : id
-        }))
-        const linkedCases = new Set((item?.risk_ids ?? []).flatMap(id => riskById.get(id)?.linked_test_case_ids ?? []))
-        discussionList(lines, '关联测试用例', [...linkedCases].map(id => {
-          const linked = caseById.get(id)
-          return linked ? `${id} ${text(linked.title, '')}`.trim() : id
-        }))
+        if (isolatedSourceReview) {
+          discussionLine(lines, '待核对结论', item?.observation)
+        } else {
+          discussionLine(lines, 'Chunk ID', item?.chunk_id)
+          discussionLine(lines, '观察结论', item?.observation)
+          discussionList(lines, '关联风险', (item?.risk_ids ?? []).map(id => {
+            const linked = riskById.get(id)
+            return linked ? `${id} ${text(linked.title, '')}`.trim() : id
+          }))
+          const linkedCases = new Set((item?.risk_ids ?? []).flatMap(id => riskById.get(id)?.linked_test_case_ids ?? []))
+          discussionList(lines, '关联测试用例', [...linkedCases].map(id => {
+            const linked = caseById.get(id)
+            return linked ? `${id} ${text(linked.title, '')}`.trim() : id
+          }))
+        }
       }
       if (sourceSnippet?.lines?.length) {
         lines.push('', `源码片段：${text(sourceSnippet.file_path, text(sourceSnippet.location, '未标注文件'))}:${sourceSnippet.visible_start}-${sourceSnippet.visible_end}`, '```')
         for (const line of sourceSnippet.lines) lines.push(`${String(line.number).padStart(5, ' ')} | ${line.text}`)
         lines.push('```')
       }
-      lines.push('', '请不要重新概括整个 Run，直接回答上面的问题。')
+      lines.push('', isolatedSourceReview
+        ? '回答限制：只讨论当前源码片段，不要补充其他证据，也不要重新概括整个 Run。'
+        : '请不要重新概括整个 Run，直接回答上面的问题。')
       return lines.join('\n')
     }
     function field(label, value) {
@@ -386,12 +397,12 @@ window.__ModuleLoader__.load({
         const inserted = appendConversationDraft(ctx, scope, draft)
         showActionNotice(inserted ? '已加入当前 DSH 会话输入框。' : '无法访问当前 DSH 会话输入框。', !inserted)
       }
-      function renderDiscussionCard(kind, item) {
+      function renderDiscussionCard(kind, item, evidenceSnippet) {
         return h('div', { style: { ...styles.card, ...styles.actionCard } },
           h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '和 DSH 讨论'), h('span', { style: styles.badge }, '局部上下文')),
           h('div', { style: styles.itemMeta }, '只加入当前对象、直接证据和关联项，不会修改 PANGEA Run。'),
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => addToConversation(kind, item, 'review') }, '加入当前会话'),
-          h('div', { style: styles.chips }, chip('检查证据', () => addToConversation(kind, item, 'evidence')), chip('转成测试语言', () => addToConversation(kind, item, 'executable')), chip('查找覆盖缺口', () => addToConversation(kind, item, 'coverage'))))
+          h('div', { style: styles.chips }, evidenceSnippet ? chip('检查证据', () => addToConversation(kind, item, 'evidence', evidenceSnippet)) : null, chip('转成测试语言', () => addToConversation(kind, item, 'executable')), chip('查找覆盖缺口', () => addToConversation(kind, item, 'coverage'))))
       }
       function renderSourcePreview(kind, item, evidenceItem, evidenceOptions = []) {
         if (!evidenceItem?.location) return null
@@ -421,7 +432,7 @@ window.__ModuleLoader__.load({
           snippet?.truncated ? h('div', { style: styles.itemMeta }, '证据范围较长，当前只显示前 160 行。') : null,
           h('div', { style: styles.chips },
             sourcePath ? chip('打开完整文件', () => openSidebarFile(sourcePath)) : null,
-            snippet ? chip('连同源码加入会话', () => addToConversation(kind, item, 'evidence', snippet)) : null))
+            snippet ? chip('检查这段源码', () => addToConversation(kind, item, 'evidence', snippet)) : null))
       }
 
       const total = current?.analysis?.total ?? 0
@@ -547,7 +558,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, text(risk.title, '未命名风险')), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
             h('div', { style: styles.chips }, h('span', { style: styles.badge }, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '—'}`), h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'), h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '未标注')),
             Array.isArray(risk.dfx) && risk.dfx.length ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `DFX：${risk.dfx.join('、')}`) : null),
-          renderDiscussionCard('risk', risk),
+          renderDiscussionCard('risk', risk, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
           renderSourcePreview('risk', risk, previewEvidence, riskEvidenceOptions),
           section('触发条件', risk.trigger), section('系统结果', risk.system_result), section('外部可观察现象', risk.external_observation), section('排除条件', risk.exclusion_condition),
           semantics ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '上游语义核对'), h('hr', { style: styles.separator }),
@@ -593,7 +604,7 @@ window.__ModuleLoader__.load({
         if (!item) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条证据，可能是 Run 已刷新或切换。'))
         return h(React.Fragment, null,
           h('div', { style: styles.card }, field('源码/资料位置', text(item.location, '未标注')), h('div', { style: { marginTop: 9 } }, field('Chunk ID', text(item.chunk_id, '未标注')))),
-          renderDiscussionCard('evidence', item),
+          renderDiscussionCard('evidence', item, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
           renderSourcePreview('evidence', item, item),
           section('观察结论', item.observation),
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.risk_ids?.length ?? 0}）`), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '这条证据没有直接绑定风险。')))

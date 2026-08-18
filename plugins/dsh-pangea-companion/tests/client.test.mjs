@@ -38,7 +38,7 @@ test('better-sidebar client registers one PANGEA single tab and exposes Chinese 
   assert.match(source, /加入当前会话/)
   assert.match(source, /打开完整文件/)
   assert.match(source, /源码片段/)
-  assert.match(source, /连同源码加入会话/)
+  assert.match(source, /检查这段源码/)
   assert.match(source, /选择风险证据源码/)
   assert.match(source, /打开 HTML 报告/)
   assert.doesNotMatch(source, /Current Run|Recent Runs|Refreshing/)
@@ -95,7 +95,13 @@ test('client builds focused discussion drafts, appends them to the active DSH co
     intent: 'evidence',
     item: {
       risk_id: 'R-017', title: '认证状态残留', severity: 'High', trigger: '重连', system_result: '旧状态被复用',
-      evidence: [{ location: 'src/auth.c:88-91', observation: '失败路径未清理' }], linked_test_case_ids: ['TC-023'],
+      external_observation: '日志出现旧会话', exclusion_condition: '正常退出不触发',
+      upstream_semantics: { conclusion: 'risk_remains' },
+      evidence: [
+        { location: 'src/auth.c:88-91', observation: '失败路径未清理' },
+        { location: 'src/session.c:12-30', observation: '另一条证据' },
+      ],
+      linked_test_case_ids: ['TC-023'],
     },
     testCases: [{ test_case_id: 'TC-023', title: '认证中断后重连' }],
     sourceSnippet: {
@@ -103,14 +109,30 @@ test('client builds focused discussion drafts, appends them to the active DSH co
       lines: [{ number: 87, text: 'before' }, { number: 88, text: 'if (failed) return;' }, { number: 89, text: 'after' }],
     },
   })
-  assert.match(draft, /证据是否充分/)
+  assert.match(draft, /只基于下方“当前源码片段”/)
+  assert.match(draft, /不要调用工具/)
   assert.match(draft, /Run：run-17/)
   assert.match(draft, /对象：风险 R-017/)
-  assert.match(draft, /src\/auth\.c:88-91/)
-  assert.match(draft, /TC-023 认证中断后重连/)
+  assert.match(draft, /待核对结论：旧状态被复用/)
   assert.match(draft, /源码片段：\/tmp\/src\/auth\.c:87-89/)
   assert.match(draft, /88 \| if \(failed\) return;/)
+  assert.doesNotMatch(draft, /src\/session\.c:12-30|另一条证据/)
+  assert.doesNotMatch(draft, /直接证据|关联测试用例|TC-023/)
+  assert.doesNotMatch(draft, /重连|日志出现旧会话|正常退出不触发|risk_remains/)
   assert.doesNotMatch(draft, /final-state\.json|progress\.json/)
+
+  const reviewDraft = exported.buildDiscussionDraft({
+    kind: 'risk', runId: 'run-17', intent: 'review',
+    item: {
+      risk_id: 'R-017', title: '认证状态残留', system_result: '旧状态被复用',
+      evidence: [{ location: 'src/auth.c:88-91', observation: '失败路径未清理' }],
+      linked_test_case_ids: ['TC-023'],
+    },
+    testCases: [{ test_case_id: 'TC-023', title: '认证中断后重连' }],
+  })
+  assert.match(reviewDraft, /直接证据：/)
+  assert.match(reviewDraft, /src\/auth\.c:88-91 — 失败路径未清理/)
+  assert.match(reviewDraft, /TC-023 认证中断后重连/)
 
   let currentDraft = '我原来的问题'
   const input = { state: { getSnapshot: () => ({ draft: currentDraft }) }, setDraft(value) { currentDraft = value } }
