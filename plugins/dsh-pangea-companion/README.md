@@ -7,7 +7,7 @@
 ## 当前能力
 
 - 自动从当前 DSH workspace 向上发现 `pangea-data/runs/`。
-- `pangea_status`：读取当前或指定 Run 的阶段、质量状态、分析进度、风险/用例/证据数量和当前错误，模型侧输出中文。
+- `pangea_status`：读取当前或指定 Run 的阶段、质量状态、分析进度、风险/用例/证据数量和读取健康状态，模型侧输出中文。
 - 自动选择最新的非终态 Run；没有活动 Run 时回退到最新 Run。
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
 - 建立 `风险 ↔ 测试用例 ↔ 证据` 关联，便于从风险追到测试和源码证据，再按访问路径返回。
@@ -17,22 +17,70 @@
 
 ## 数据读取规则
 
-v0.3.1 起，Companion 不再把 `progress.completed_* + agent-results/` 当成所有 Run 的唯一数据来源。
+Companion 不把 `progress.completed_* + agent-results/` 当成所有 Run 的唯一数据来源。
 
 读取顺序固定为：
 
-1. **存在 `final-state.json` 且包含聚合结果时，优先读取 `final-state.json`。** PANGEA 在进入最终报告阶段前已经把最终有效的 `risks / test_cases / business_flows` 聚合进 final state，`report.md` / `report.html` 也是由这份 state 渲染，因此这是终态和已生成报告 Run 的权威数据源。
-2. **尚未形成 final state 的运行中 Run**，继续按 `progress.json` 的完成单元读取 `agent-results/analysis` / `agent-results/rework`，返工结果覆盖原 analysis 结果。
-3. 返回值增加 `data_source` 和 `reader_warnings`，用于确认本次读取走的是 `final-state` 还是 `worker-results`，以及是否发生兼容回退。
+1. **存在 `final-state.json` 且包含聚合结果时，优先读取 `final-state.json`。** PANGEA 在进入最终报告阶段前已经把最终有效的 `risks / test_cases / business_flows` 聚合进 final state，`report.md` / `report.html` 也是由这份 state 渲染，因此这是终态和已生成报告 Run 的权威结构化数据源。
+2. **尚未形成 final state 的运行中 Run**，按 `progress.json` 的完成单元读取 `agent-results/analysis` / `agent-results/rework`，返工结果覆盖原 analysis 结果。
+3. **已生成报告但缺少可用 final-state 的旧 Run**，允许兼容回退读取 worker result，但会标记为 `warning`，不会伪装成标准路径。
 
-这样可避免 `report.md` 已经有风险和测试用例，但 `progress.completed_*` 与历史中间状态不一致时，DSH Explorer 仍显示 0 条的问题。
+## v0.3.2 Reader 一致性层
+
+报告现在只承担“交叉核对”职责，不会被解析成新的风险/用例对象。
+
+对于当前 Run，Reader 会从 `report.md`（必要时 `report.html`）提取报告摘要中的：
+
+- 业务流程数量；
+- 风险数量；
+- 测试用例数量。
+
+然后与当前结构化数据源的计数对账，并返回：
+
+```text
+reader_health.status      ok / warning / error
+reader_health.trusted     true / false
+reader_health.count_checks
+reader_health.issues
+```
+
+典型状态：
+
+```text
+正常
+数据源：final-state
+风险 17 = 报告 17
+测试用例 31 = 报告 31
+```
+
+如果出现：
+
+```text
+报告：17 个风险
+结构化读取：0 个风险
+```
+
+则直接返回：
+
+```text
+status = error
+trusted = false
+```
+
+Better Sidebar 会显示“数据读取异常”，`pangea_status` 也会明确说明当前结构化结果不可信。此时 **0 不允许被解释为“没有风险/用例”**。
+
+如果报告存在但无法自动提取计数、终态 Run 缺少报告、final-state 读取失败，或报告 Run 只能退回 worker result，则返回 `warning` 和具体诊断原因。
+
+历史 Run 列表不会逐个解析整份报告；只有当前选中的 Run 才执行报告对账，避免历史任务很多时拖慢侧栏。
 
 ## Better Sidebar Explorer
 
-v0.3.0 起不再只是 Run 摘要，PANGEA Tab 提供中文结果浏览器：
+PANGEA Tab 提供中文结果浏览器：
 
 - 固定顶部导航：`总览 / 风险 / 用例 / 证据 / 复核`，任何页面都能直接跳转。
 - 详情页固定提供 `← 返回`，使用页面栈按真实访问路径退回；例如 `风险 → 用例 → 风险` 可以逐级返回，不会钻进死胡同。
+- 总览顶部显示 Reader 数据状态、数据源和报告对账结果。
+- Reader 判定 `trusted=false` 时，详情页也持续显示告警；风险/用例空列表会明确提示“当前列表不可信”，不会显示普通的“没有数据”。
 - 总览里的风险、用例、证据、复核问题卡片可直接进入对应列表。
 - 风险列表支持关键词搜索和严重度筛选；风险详情展示触发条件、系统结果、外部观察、排除条件、上游语义核对、证据和关联用例。
 - 测试用例列表支持搜索；详情展示前置条件、执行步骤、预期结果、观察点、清理动作，并可跳回关联风险。
@@ -88,4 +136,4 @@ cd plugins/dsh-pangea-companion
 npm test
 ```
 
-当前测试覆盖：data-root 发现、返工结果替换、结构化明细与交叉关联、终态 `final-state.json` 优先读取、历史 Run 轻量化、中文工具输出、Better Sidebar 单实例注册和中文导航/返回入口。
+当前测试覆盖：运行中 worker result、返工替换、final-state 正常终态、报告/结构化计数不一致 fail-loud、旧 Run worker-result 兼容回退、历史 Run 轻量化、中文工具输出、Better Sidebar 单实例注册和健康状态交互入口。
