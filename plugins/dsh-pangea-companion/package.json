@@ -1,7 +1,7 @@
 {
   "name": "dsh-pangea-companion",
-  "version": "0.8.0",
-  "description": "Read-only PANGEA companion for DeepSeek Harness with claim-scoped multi-evidence review and targeted test drafting",
+  "version": "0.9.0",
+  "description": "Read-only PANGEA companion for DeepSeek Harness with current-session runtime monitoring and durable run summaries",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -53,6 +53,6 @@
   },
   "scripts": {
     "build": "node scripts/build-client.mjs",
-    "test": "npm run build && node --check src/index.js && node --check src/reader.js && node --check src/source.js && node --check lib/client.js && node --test tests/*.test.mjs"
+    "test": "npm run build && node --check src/index.js && node --check src/reader.js && node --check src/source.js && node --check src/monitor.js && node --check lib/client.js && node --test tests/*.test.mjs"
   }
 }

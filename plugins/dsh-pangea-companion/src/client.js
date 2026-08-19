@@ -13,9 +13,10 @@ window.__ModuleLoader__.load({
     const API_PATH = '/api/pangea-companion/state'
     const SOURCE_API_PATH = '/api/pangea-companion/source'
 
-    async function requestSnapshot({ cwd, runId, signal, fetcher = fetch }) {
+    async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
       if (runId) query.set('run_id', runId)
+      if (sessionId) query.set('session_id', sessionId)
       const response = await fetcher(`${API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
@@ -56,26 +57,26 @@ window.__ModuleLoader__.load({
 
     const styles = {
       root: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: 'var(--dsw-alias-label-primary, inherit)', background: 'var(--dsw-alias-bg-base, transparent)' },
-      sticky: { position: 'sticky', top: 0, zIndex: 5, padding: '13px 12px 0', background: 'var(--dsw-alias-bg-layer-1, #111)', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.18))' },
+      sticky: { position: 'sticky', top: 0, zIndex: 5, padding: '15px 14px 0', background: 'var(--dsw-alias-bg-layer-1, #111)', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))' },
       header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
       headerLeft: { minWidth: 0, display: 'flex', alignItems: 'center', gap: 7 },
-      title: { fontSize: 14, fontWeight: 720, lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-      subline: { marginTop: 3, color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      title: { fontSize: 16, fontWeight: 760, letterSpacing: '-0.01em', lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      subline: { marginTop: 4, color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       backButton: { border: 0, background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', padding: '4px 2px', cursor: 'pointer', fontSize: 11, whiteSpace: 'nowrap' },
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 10 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '7px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 700 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
-      nav: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 0, marginTop: 10 },
-      navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '8px 3px 7px', cursor: 'pointer', fontSize: 10 },
+      nav: { display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 0, marginTop: 12 },
+      navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '9px 2px 8px', cursor: 'pointer', fontSize: 10 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
-      content: { padding: '11px 12px 18px' },
-      card: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 8, padding: 11, marginBottom: 9 },
+      content: { padding: '14px 14px 22px' },
+      card: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 9, padding: 12, marginBottom: 11 },
       healthOk: { borderColor: 'var(--dsw-alias-state-success-secondary, #4fb8a8)', background: 'var(--dsw-alias-state-success-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
       healthError: { borderColor: 'var(--dsw-alias-state-error-secondary, #e66767)', background: 'var(--dsw-alias-interactive-bg-hover-danger, var(--dsw-alias-bg-layer-1, transparent))' },
       healthWarning: { borderColor: 'var(--dsw-alias-state-warn-secondary, #c9974f)', background: 'var(--dsw-alias-state-warn-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
       clickableCard: { width: '100%', textAlign: 'left', color: 'inherit', cursor: 'pointer' },
-      label: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, letterSpacing: '0.02em' },
-      value: { fontSize: 13, fontWeight: 650, marginTop: 3, overflowWrap: 'anywhere' },
+      label: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, fontWeight: 650, letterSpacing: '0.055em' },
+      value: { fontSize: 13, fontWeight: 680, lineHeight: 1.45, marginTop: 4, overflowWrap: 'anywhere' },
       grid: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 7, marginTop: 8 },
       metric: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14))', borderRadius: 7, padding: 9, background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))', color: 'inherit' },
       metricClickable: { cursor: 'pointer', width: '100%', textAlign: 'left' },
@@ -83,9 +84,9 @@ window.__ModuleLoader__.load({
       metricName: { color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, marginTop: 3 },
       progressTrack: { height: 5, borderRadius: 999, overflow: 'hidden', background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.16))', marginTop: 7 },
       progressFill: { height: '100%', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
-      sectionTitle: { fontSize: 12, fontWeight: 750, margin: '15px 0 7px' },
-      itemTitle: { fontSize: 12, fontWeight: 720, lineHeight: 1.4 },
-      itemMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, marginTop: 5, lineHeight: 1.5 },
+      sectionTitle: { fontSize: 13, fontWeight: 760, letterSpacing: '-0.005em', margin: '18px 0 8px' },
+      itemTitle: { fontSize: 12, fontWeight: 720, lineHeight: 1.45 },
+      itemMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, marginTop: 5, lineHeight: 1.55 },
       row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 7 },
       badge: { display: 'inline-flex', alignItems: 'center', borderRadius: 999, padding: '2px 6px', color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 9, background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', whiteSpace: 'nowrap' },
       statusRow: { display: 'flex', alignItems: 'center', gap: 6 },
@@ -119,6 +120,16 @@ window.__ModuleLoader__.load({
       evidenceChecks: { display: 'grid', gap: 5, marginTop: 7 },
       evidenceCheck: { display: 'flex', alignItems: 'flex-start', gap: 7, border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '6px 7px', cursor: 'pointer', fontSize: 10, lineHeight: 1.4 },
       evidenceCheckSelected: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
+      monitorHero: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', borderRadius: 10, padding: 14, marginBottom: 12, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
+      monitorState: { fontSize: 20, lineHeight: 1.2, fontWeight: 780, letterSpacing: '-0.02em' },
+      monitorHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, lineHeight: 1.55 },
+      boundary: { borderTop: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', paddingTop: 11, marginTop: 11 },
+      timeline: { position: 'relative', marginTop: 2 },
+      timelineItem: { position: 'relative', padding: '0 0 13px 18px', borderLeft: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', marginLeft: 4 },
+      timelineDot: { position: 'absolute', left: -4, top: 4, width: 7, height: 7, borderRadius: '50%', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', boxShadow: '0 0 0 3px var(--dsw-alias-bg-base, #111)' },
+      timelineTime: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, fontVariantNumeric: 'tabular-nums' },
+      timelineTitle: { marginTop: 2, fontSize: 11, fontWeight: 690, lineHeight: 1.45 },
+      timelineDetail: { marginTop: 3, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, lineHeight: 1.5, overflowWrap: 'anywhere' },
     }
 
     function icon(size = 16) {
@@ -130,6 +141,18 @@ window.__ModuleLoader__.load({
 
     function text(value, fallback = '—') { return typeof value === 'string' && value.trim() !== '' ? value : fallback }
     function hasText(value) { return typeof value === 'string' && value.trim() !== '' }
+    function shortId(value) { return hasText(value) ? value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value : '—' }
+    function formatTime(value) {
+      if (!Number.isFinite(value)) return '时间未知'
+      return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+    }
+    function durationLabel(start, end = Date.now()) {
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return ''
+      const seconds = Math.max(0, Math.round((end - start) / 1000))
+      if (seconds < 60) return `${seconds} 秒`
+      const minutes = Math.floor(seconds / 60)
+      return minutes < 60 ? `${minutes} 分 ${seconds % 60} 秒` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
+    }
     function filePathFromLocation(location) {
       if (!hasText(location)) return undefined
       const value = location.trim()
@@ -300,7 +323,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState(undefined)
       const [selectedRun, setSelectedRun] = React.useState(undefined)
       const [loading, setLoading] = React.useState(false)
-      const [screen, setScreen] = React.useState({ type: 'overview' })
+      const [screen, setScreen] = React.useState({ type: 'monitor' })
       const [history, setHistory] = React.useState([])
       const [riskQuery, setRiskQuery] = React.useState('')
       const [riskSeverity, setRiskSeverity] = React.useState('全部')
@@ -327,7 +350,7 @@ window.__ModuleLoader__.load({
         requestRef.current.controller = controller
         setLoading(true)
         try {
-          const body = await requestSnapshot({ cwd, runId: selectedRun, signal: controller.signal })
+          const body = await requestSnapshot({ cwd, runId: selectedRun, sessionId: scope?.sessionId, signal: controller.signal })
           if (sequence !== requestRef.current.sequence) return
           setSnapshot(body)
           setError(undefined)
@@ -338,9 +361,9 @@ window.__ModuleLoader__.load({
         } finally {
           if (sequence === requestRef.current.sequence) setLoading(false)
         }
-      }, [cwd, selectedRun])
+      }, [cwd, selectedRun, scope?.sessionId])
 
-      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: 'overview' }); setHistory([]) }, [cwd])
+      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: 'monitor' }); setHistory([]) }, [cwd])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
         if (!visible) {
@@ -362,6 +385,9 @@ window.__ModuleLoader__.load({
       }, [load, visible])
 
       const current = snapshot?.current
+      const monitor = snapshot?.monitor
+      const monitoredSession = monitor?.session
+      const monitoredRun = monitor?.run
       const health = current?.reader_health
       const details = current?.details ?? { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
       const risks = details.risks ?? []
@@ -522,8 +548,9 @@ window.__ModuleLoader__.load({
       const completed = current?.analysis?.completed ?? 0
       const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
       const activeNav = navType(screen)
-      const screenTitle = screen.type === 'overview' ? 'PANGEA 总览'
-        : screen.type === 'risks' ? '风险'
+      const screenTitle = screen.type === 'monitor' ? '运行监控'
+        : screen.type === 'overview' ? 'PANGEA 总览'
+          : screen.type === 'risks' ? '风险'
           : screen.type === 'risk' ? (riskById.get(screen.id)?.risk_id || '风险详情')
             : screen.type === 'cases' ? '测试用例'
               : screen.type === 'case' ? (caseById.get(screen.id)?.test_case_id || '用例详情')
@@ -531,7 +558,7 @@ window.__ModuleLoader__.load({
                   : screen.type === 'evidence-detail' ? '证据详情' : '复核'
 
       const navigation = h('nav', { style: styles.nav, 'aria-label': 'PANGEA 页面' }, [
-        ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],
+        ['monitor', '监控'], ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],
       ].map(([type, label]) => h('button', {
         key: type,
         type: 'button',
@@ -543,7 +570,7 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
-            screen.type !== 'overview' ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
+            !['monitor', 'overview', 'risks', 'cases', 'evidence', 'review'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
               h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : '只读伴生工作台'))),
@@ -587,6 +614,83 @@ window.__ModuleLoader__.load({
           checks.length ? h('div', { style: { ...styles.itemMeta, marginTop: 5 } }, checks.map(([key, check]) => `${names[key]} ${check.structured}${check.status === 'match' ? ' = ' : ' ≠ '}报告 ${check.report}`).join(' · ')) : null,
           health.trusted === false ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前结构化结果不可信。尤其当风险/用例显示 0 时，不能解释为“没有风险/用例”。') : null,
           !compact && health.issues?.length ? h('ul', { style: styles.list }, health.issues.map((item, index) => h('li', { key: `${index}:${item}` }, item))) : null)
+      }
+
+      function renderMonitor() {
+        if (!current) return h('div', { style: styles.monitorHero },
+          h('div', { style: styles.monitorState }, '等待 PANGEA Run'),
+          h('div', { style: styles.monitorHint }, '当前工作区还没有可关联的 Run。Agent 运行状态会在 Run 出现后自动合并到这里。'))
+
+        const historicalView = Boolean(selectedRun) || Boolean(monitoredRun?.run_id && monitoredSession?.bound_run_id && monitoredRun.run_id !== monitoredSession.bound_run_id)
+        const liveForRun = monitoredRun?.session_live === true && !historicalView
+        const historicalRun = historicalView || Boolean(monitoredRun && !liveForRun)
+        const stateTitle = liveForRun
+          ? monitoredSession?.status === 'running' ? 'Agent 运行中' : 'Agent 当前空闲'
+          : historicalRun ? '历史运行摘要' : monitoredSession?.status === 'running' ? 'Agent 运行中，等待关联' : '等待运行'
+        const stateHint = liveForRun
+          ? `当前 DSH 会话已关联 ${current.run_id}，页面每 4 秒同步 PANGEA 产物。`
+          : historicalRun
+            ? monitoredRun ? '原 DSH 会话可以被删除；这份最小运行摘要与 PANGEA Run 独立保留。' : '这个 Run 早于监控功能或未在当前设备记录；PANGEA 产物仍可完整浏览。'
+            : '当前还没有捕获到可显示的运行事件。'
+        const activeTools = liveForRun ? monitoredSession?.active_tools ?? [] : []
+        const activeSubagents = liveForRun ? monitoredSession?.active_subagents ?? [] : []
+        const timeline = monitoredRun?.timeline ?? []
+
+        const stateColor = liveForRun && monitoredSession?.status === 'running'
+          ? 'var(--dsw-alias-state-success-primary, #38a892)'
+          : 'var(--dsw-alias-label-primary, inherit)'
+
+        return h(React.Fragment, null,
+          h('div', { style: styles.monitorHero },
+            h('div', { style: styles.row },
+              h('div', { style: { ...styles.monitorState, color: stateColor } }, stateTitle),
+              h('span', { style: styles.badge }, liveForRun ? '当前会话' : historicalRun ? '历史 Run' : '未关联')),
+            h('div', { style: styles.monitorHint }, stateHint),
+            h('div', { style: styles.boundary },
+              h('div', { style: styles.grid },
+                field('DSH 会话', shortId(monitoredRun?.session_id ?? (historicalRun ? null : monitoredSession?.session_id))),
+                field('PANGEA Run', current.run_id),
+                field('Agent 状态', liveForRun ? monitoredSession.status === 'running' ? '运行中' : '空闲' : monitoredRun ? '会话已结束或已删除' : '原会话未记录'),
+                field('PANGEA 阶段', PHASE[current.phase] ?? current.phase)),
+              h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `最近活动：${formatTime(liveForRun ? monitoredSession?.last_activity : monitoredRun?.last_seen ?? current.modified_at)}`))),
+
+          h('div', { style: styles.sectionTitle }, '当前执行'),
+          h('div', { style: styles.card },
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '工具调用'), h('span', { style: styles.badge }, `${activeTools.length} 个进行中`)),
+            activeTools.length ? h('div', { style: styles.boundary }, activeTools.map(item => h('div', { key: item.key, style: { marginBottom: 8 } },
+              h('div', { style: styles.value }, item.title),
+              h('div', { style: styles.itemMeta }, `已运行 ${durationLabel(item.time)} · ${formatTime(item.time)}`))))
+              : h('div', { style: { ...styles.empty, marginTop: 8 } }, liveForRun ? '当前没有正在执行的工具。' : '历史摘要不保留实时工具状态。'),
+            h('div', { style: styles.boundary },
+              h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '子 Agent / 工作流成员'), h('span', { style: styles.badge }, `${activeSubagents.length} 个活动`)),
+              activeSubagents.length ? activeSubagents.map(item => h('div', { key: item.key, style: { marginTop: 8 } },
+                h('div', { style: styles.value }, item.title), h('div', { style: styles.itemMeta }, item.detail)))
+                : h('div', { style: { ...styles.empty, marginTop: 8 } }, '当前没有活动的子 Agent。'))),
+
+          h('div', { style: styles.sectionTitle }, 'PANGEA 进度'),
+          h('div', { style: styles.card },
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, PHASE[current.phase] ?? current.phase), h('span', { style: styles.badge }, `${completed}/${total}`)),
+            h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } })),
+            h('div', { style: styles.grid },
+              field('已完成分析', `${completed} / ${total}`),
+              field('返工单元', current.analysis?.reworked ?? 0),
+              field('质量状态', QUALITY[current.quality_status] ?? current.quality_status ?? '待定'),
+              field('读取状态', HEALTH[health?.status] ?? health?.status ?? '未知'))),
+
+          h('div', { style: styles.sectionTitle }, `运行时间线（${timeline.length}）`),
+          timeline.length ? h('div', { style: { ...styles.card, ...styles.timeline } }, timeline.map((item, index) => {
+            const dotColor = item.state === 'error' || item.state === 'failed'
+              ? 'var(--dsw-alias-state-error-primary, #e66767)'
+              : item.state === 'success' || item.state === 'ended'
+                ? 'var(--dsw-alias-state-success-primary, #38a892)'
+                : 'var(--dsw-alias-state-business-primary, #4d9ad6)'
+            const kind = { agent: 'Agent', tool: '工具', subagent: '子 Agent', worker: '工作流成员', workflow: '工作流', pangea: 'PANGEA', binding: '关联' }[item.kind] ?? '事件'
+            return h('div', { key: item.key ?? `${item.kind}:${item.time}:${index}`, style: { ...styles.timelineItem, ...(index === timeline.length - 1 ? { paddingBottom: 0 } : {}) } },
+              h('span', { style: { ...styles.timelineDot, background: dotColor }, 'aria-hidden': true }),
+              h('div', { style: styles.timelineTime }, `${kind} · ${formatTime(item.time)}${item.ended_at ? ` · ${durationLabel(item.time, item.ended_at)}` : ''}`),
+              h('div', { style: styles.timelineTitle }, text(item.title, '未命名事件')),
+              item.detail ? h('div', { style: styles.timelineDetail }, item.detail) : null)
+          })) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '暂无运行事件。Companion 只记录状态、工具名称和结果，不保存提示词或工具内容。')))
       }
 
       function renderOverview() {
@@ -704,7 +808,8 @@ window.__ModuleLoader__.load({
       }
 
       let body
-      if (screen.type === 'overview') body = renderOverview()
+      if (screen.type === 'monitor') body = renderMonitor()
+      else if (screen.type === 'overview') body = renderOverview()
       else if (screen.type === 'risks') body = renderRisks()
       else if (screen.type === 'risk') body = renderRiskDetail()
       else if (screen.type === 'cases') body = renderCases()
@@ -713,7 +818,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()
 
-      const healthAlert = screen.type !== 'overview' && health?.trusted === false ? renderHealthCard(true) : null
+      const healthAlert = !['monitor', 'overview'].includes(screen.type) && health?.trusted === false ? renderHealthCard(true) : null
       const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),

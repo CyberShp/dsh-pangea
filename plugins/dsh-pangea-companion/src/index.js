@@ -1,8 +1,9 @@
 import { companionSnapshot } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
+import { createRuntimeMonitor } from './monitor.js'
 
 export const name = 'dsh-pangea-companion'
-export const inject = ['tools', 'webServer']
+export const inject = ['tools', 'webServer', 'agents']
 
 const API_PATH = '/api/pangea-companion/state'
 const SOURCE_API_PATH = '/api/pangea-companion/source'
@@ -77,16 +78,22 @@ function sameOriginBrowserRequest(req) {
   try { return new URL(origin).host === host } catch { return false }
 }
 
-function stateRouteHandler(req, res) {
+async function stateRouteHandler(req, res, monitor) {
   if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
   const dataRoot = url.searchParams.get('data_root') ?? undefined
   const runId = url.searchParams.get('run_id') ?? undefined
-  companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
-    .then(snapshot => json(res, 200, snapshot))
-    .catch(error => json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) }))
+  const sessionId = url.searchParams.get('session_id') ?? undefined
+  try {
+    const snapshot = await companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
+    if (runId === undefined && sessionId && snapshot.current) await monitor.bindRun(sessionId, snapshot.current)
+    snapshot.monitor = await monitor.snapshot({ sessionId, runId: snapshot.current?.run_id })
+    json(res, 200, snapshot)
+  } catch (error) {
+    json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 function sourceRouteHandler(req, res) {
@@ -102,6 +109,9 @@ function sourceRouteHandler(req, res) {
 }
 
 export function apply(ctx) {
+  const monitor = createRuntimeMonitor()
+  const disposeMonitor = monitor.start(ctx)
+
   ctx.tools.register({
     name: 'pangea_status',
     description: '只读查看当前 PANGEA Run 的阶段、质量状态、分析进度、结构化结果数量和读取健康状态；不会推进或修改 PANGEA 工作流。',
@@ -112,10 +122,15 @@ export function apply(ctx) {
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => renderStatus(value) },
   })
 
-  const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: stateRouteHandler })
+  const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
-  ctx.effect?.(() => () => { disposeSourceRoute(); disposeStateRoute() }, 'dsh-pangea-companion: read-only state and source routes')
+  ctx.effect?.(() => async () => {
+    disposeSourceRoute()
+    disposeStateRoute()
+    await disposeMonitor()
+  }, 'dsh-pangea-companion: read-only state, runtime monitor, and source routes')
 }
 
 export { companionSnapshot } from './reader.js'
 export { parseEvidenceLocation, readEvidenceSnippet, resolveEvidenceFile } from './source.js'
+export { createRuntimeMonitor, RuntimeMonitor } from './monitor.js'

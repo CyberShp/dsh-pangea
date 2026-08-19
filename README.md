@@ -1,6 +1,6 @@
 # DSH 插件管理项目
 
-这个仓库用于集中存放和管理 DSH 插件。目前提供 `dsh-pangea-companion`：PANGEA 在 DSH 中的只读伴生工作台，负责 Run 状态感知、`pangea_status` 和 Better Sidebar 中文结果浏览，不执行或改写 PANGEA 工作流。
+这个仓库用于集中存放和管理 DSH 插件。目前提供 `dsh-pangea-companion`：PANGEA 在 DSH 中的只读伴生工作台，负责当前会话运行监控、Run 状态感知、`pangea_status` 和 Better Sidebar 中文结果浏览，不执行或改写 PANGEA 工作流。
 
 ## 目录结构
 
@@ -25,6 +25,7 @@ Companion = 只读状态 / 产物适配层
 
 - 自动从 DSH workspace 发现 `pangea-data/runs/`。
 - `pangea_status` 读取当前/指定 Run 的 phase、quality、analysis 进度、风险、测试用例、证据和错误。
+- `监控` 页面合并当前 DSH Agent 状态、工具/子 Agent 活动与 PANGEA 阶段；删除原会话后，历史 Run 仍保留最小运行摘要。
 - `GET /api/pangea-companion/state` 为 Web UI 提供同源只读状态。
 - 若安装 `dsh-better-sidebar`，自动注册一个单实例 `PANGEA` Tab；未安装时不影响 Core 和工具。
 - 风险、用例和证据详情可把局部上下文加入当前 DSH 会话；风险页可拆分系统结论、勾选多条证据并执行定向核对或生成定向测试，源码按真实行号预览；完整证据文件和最终报告可在 Better Sidebar 中直接打开。

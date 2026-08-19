@@ -22,6 +22,10 @@ function fakeReact() {
 test('better-sidebar client registers one PANGEA single tab and exposes Chinese health/navigation affordances', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /总览/)
+  assert.match(source, /运行监控/)
+  assert.match(source, /当前执行/)
+  assert.match(source, /运行时间线/)
+  assert.match(source, /历史运行摘要/)
   assert.match(source, /风险/)
   assert.match(source, /用例/)
   assert.match(source, /证据/)
@@ -256,6 +260,7 @@ test('client state request encodes workspace and run, passes cancellation, and r
   const result = await exported.requestSnapshot({
     cwd: '/Volumes/Media/pangea agent',
     runId: 'run 01',
+    sessionId: 'session 17',
     signal,
     async fetcher(url, options) {
       calls.push({ url, options })
@@ -267,6 +272,7 @@ test('client state request encodes workspace and run, passes cancellation, and r
   assert.match(calls[0].url, /^\/api\/pangea-companion\/state\?/)
   assert.match(calls[0].url, /cwd=%2FVolumes%2FMedia%2Fpangea\+agent/)
   assert.match(calls[0].url, /run_id=run\+01/)
+  assert.match(calls[0].url, /session_id=session\+17/)
   assert.equal(calls[0].options.cache, 'no-store')
   assert.equal(calls[0].options.signal, signal)
 
