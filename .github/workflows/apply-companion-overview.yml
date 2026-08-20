@@ -1,0 +1,464 @@
+name: Apply companion overview simplification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-companion-overview.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply focused patch
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          root = Path('.')
+          plugin = root / 'plugins' / 'dsh-pangea-companion'
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, got {count}')
+              return text.replace(old, new, 1)
+
+          # UI: overview is the entry point; the DSH-native trajectory is no longer a PANGEA page.
+          client_path = plugin / 'src' / 'client.js'
+          client = client_path.read_text(encoding='utf-8')
+          client = replace_once(
+              client,
+              "nav: { display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))'",
+              "nav: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))'",
+              'five-column navigation',
+          )
+          client = replace_once(client, "React.useState({ type: 'monitor' })", "React.useState({ type: 'overview' })", 'default overview')
+          client = replace_once(client, "setScreen({ type: 'monitor' }); setHistory([]) }, [cwd])", "setScreen({ type: 'overview' }); setHistory([]) }, [cwd])", 'workspace reset overview')
+          client = replace_once(
+              client,
+              "const screenTitle = screen.type === 'monitor' ? '运行监控'\n        : screen.type === 'overview' ? 'PANGEA 总览'",
+              "const screenTitle = screen.type === 'overview' ? 'PANGEA 总览'",
+              'screen title',
+          )
+          client = replace_once(
+              client,
+              "['monitor', '监控'], ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],",
+              "['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],",
+              'navigation items',
+          )
+          client = replace_once(
+              client,
+              "!['monitor', 'overview', 'risks', 'cases', 'evidence', 'review'].includes(screen.type)",
+              "!['overview', 'risks', 'cases', 'evidence', 'review'].includes(screen.type)",
+              'top-level back button set',
+          )
+          client = replace_once(
+              client,
+              "if (screen.type === 'monitor') body = renderMonitor()\n      else if (screen.type === 'overview') body = renderOverview()",
+              "if (screen.type === 'overview') body = renderOverview()",
+              'remove monitor route',
+          )
+          client = replace_once(
+              client,
+              "const healthAlert = !['monitor', 'overview'].includes(screen.type)",
+              "const healthAlert = !['overview'].includes(screen.type)",
+              'health alert routes',
+          )
+          client_path.write_text(client, encoding='utf-8')
+          (plugin / 'lib' / 'client.js').write_text(client, encoding='utf-8')
+
+          # Runtime association: keep only session/run binding and PANGEA phase/progress.
+          monitor = r'''import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+          import { homedir } from 'node:os'
+          import path from 'node:path'
+
+          const STORE_VERSION = 1
+
+          function defaultStorePath() {
+            const configured = process.env.DSH_HOME
+            const root = typeof configured === 'string' && configured.trim() !== ''
+              ? path.resolve(configured)
+              : path.join(homedir(), '.dsh')
+            return path.join(root, 'dsh-pangea-companion', 'monitor-v1.json')
+          }
+
+          function emptyStore() {
+            return { version: STORE_VERSION, runs: {} }
+          }
+
+          function plainText(value, fallback = '') {
+            return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback
+          }
+
+          function normalizeStoredRun(runId, value) {
+            return {
+              run_id: runId,
+              session_id: plainText(value?.session_id) || null,
+              session_created_at: Number.isFinite(value?.session_created_at) ? value.session_created_at : null,
+              workspace: plainText(value?.workspace) || null,
+              first_seen: Number.isFinite(value?.first_seen) ? value.first_seen : null,
+              last_seen: Number.isFinite(value?.last_seen) ? value.last_seen : null,
+              pangea_phase: plainText(value?.pangea_phase) || null,
+              pangea_progress: value?.pangea_progress && typeof value.pangea_progress === 'object'
+                ? value.pangea_progress
+                : null,
+            }
+          }
+
+          export class RuntimeMonitor {
+            constructor({ storePath = defaultStorePath(), now = () => Date.now() } = {}) {
+              this.storePath = storePath
+              this.now = now
+              this.store = emptyStore()
+              this.sessions = new Map()
+              this.agents = new WeakMap()
+              this.saveTimer = undefined
+              this.saveQueue = Promise.resolve()
+              this.ready = this.load()
+            }
+
+            async load() {
+              try {
+                const parsed = JSON.parse(await readFile(this.storePath, 'utf8'))
+                if (parsed?.version !== STORE_VERSION || !parsed.runs || typeof parsed.runs !== 'object') return
+                const runs = {}
+                for (const [runId, value] of Object.entries(parsed.runs)) runs[runId] = normalizeStoredRun(runId, value)
+                this.store = { version: STORE_VERSION, runs }
+              } catch (error) {
+                if (error?.code !== 'ENOENT') console.warn('[dsh-pangea-companion] run association history could not be loaded:', error)
+              }
+            }
+
+            start(ctx) {
+              const disposers = []
+              const attach = agent => {
+                if (!agent || agent.session?.header?.origin === 'subagent' || this.agents.has(agent)) return
+                const sessionId = String(agent.id)
+                const session = {
+                  session_id: sessionId,
+                  workspace: plainText(agent.session?.header?.cwd) || null,
+                  created_at: agent.session?.header?.createdAt ?? null,
+                  live: true,
+                  last_activity: this.now(),
+                  bound_run_id: null,
+                }
+                this.sessions.set(sessionId, session)
+                this.agents.set(agent, session)
+              }
+
+              for (const agent of ctx.agents?.roots?.() ?? []) attach(agent)
+              disposers.push(ctx.on('agent/created', ({ agent }) => attach(agent)))
+              disposers.push(ctx.on('agent/disposed', ({ agent }) => {
+                void this.ready.then(() => this.disposeAgent(agent))
+              }))
+              return async () => {
+                for (const dispose of disposers.reverse()) dispose()
+                for (const session of this.sessions.values()) session.live = false
+                await this.flush()
+              }
+            }
+
+            disposeAgent(agent) {
+              const session = this.agents.get(agent)
+              if (!session) return
+              session.live = false
+              session.last_activity = this.now()
+              if (session.bound_run_id) {
+                const run = this.store.runs[session.bound_run_id]
+                if (run) run.last_seen = Math.max(run.last_seen ?? 0, session.last_activity)
+              }
+              this.agents.delete(agent)
+              this.scheduleSave()
+            }
+
+            ensureRun(runId, session) {
+              let run = this.store.runs[runId]
+              if (!run) {
+                const time = this.now()
+                run = normalizeStoredRun(runId, {
+                  session_id: session?.session_id,
+                  session_created_at: session?.created_at,
+                  workspace: session?.workspace,
+                  first_seen: time,
+                  last_seen: time,
+                })
+                this.store.runs[runId] = run
+              }
+              if (session) {
+                run.session_id = session.session_id
+                run.session_created_at = session.created_at
+                run.workspace = session.workspace
+                run.first_seen ??= this.now()
+                run.last_seen ??= this.now()
+              }
+              return run
+            }
+
+            async bindRun(sessionId, summary) {
+              await this.ready
+              const session = this.sessions.get(sessionId)
+              const runId = plainText(summary?.run_id)
+              if (!session || !runId) return
+              const changedBinding = session.bound_run_id !== runId
+              session.bound_run_id = runId
+              if (changedBinding) session.last_activity = this.now()
+              const run = this.ensureRun(runId, session)
+              this.observePangeaSnapshot(run, summary)
+              this.scheduleSave()
+            }
+
+            observePangeaSnapshot(run, summary) {
+              const completed = summary?.analysis?.completed ?? 0
+              const total = summary?.analysis?.total ?? 0
+              const phase = plainText(summary?.phase, 'UNKNOWN')
+              const next = { completed, total, reworked: summary?.analysis?.reworked ?? 0 }
+              const changed = run.pangea_phase !== phase
+                || run.pangea_progress?.completed !== completed
+                || run.pangea_progress?.total !== total
+                || run.pangea_progress?.reworked !== next.reworked
+              run.pangea_phase = phase
+              run.pangea_progress = next
+              if (changed) run.last_seen = this.now()
+            }
+
+            async snapshot({ sessionId, runId } = {}) {
+              await this.ready
+              const session = plainText(sessionId) ? this.sessions.get(sessionId) : undefined
+              const selectedRunId = plainText(runId) || session?.bound_run_id || null
+              const run = selectedRunId ? this.store.runs[selectedRunId] : undefined
+              const currentBinding = Boolean(session && run && session.bound_run_id === run.run_id)
+              return {
+                session: session ? {
+                  session_id: session.session_id,
+                  workspace: session.workspace,
+                  created_at: session.created_at,
+                  live: session.live,
+                  last_activity: session.last_activity,
+                  bound_run_id: session.bound_run_id,
+                } : null,
+                run: run ? {
+                  ...run,
+                  session_id: currentBinding ? session.session_id : run.session_id,
+                  session_live: currentBinding ? session.live : false,
+                } : null,
+              }
+            }
+
+            scheduleSave() {
+              if (this.saveTimer !== undefined) return
+              this.saveTimer = setTimeout(() => {
+                this.saveTimer = undefined
+                this.saveQueue = this.saveQueue.then(() => this.persist(), () => this.persist())
+              }, 250)
+            }
+
+            async persist() {
+              await mkdir(path.dirname(this.storePath), { recursive: true })
+              const temporary = `${this.storePath}.tmp`
+              await writeFile(temporary, `${JSON.stringify(this.store, null, 2)}\n`, 'utf8')
+              await rename(temporary, this.storePath)
+            }
+
+            async flush() {
+              await this.ready
+              if (this.saveTimer !== undefined) {
+                clearTimeout(this.saveTimer)
+                this.saveTimer = undefined
+                this.saveQueue = this.saveQueue.then(() => this.persist(), () => this.persist())
+              }
+              await this.saveQueue
+            }
+          }
+
+          export function createRuntimeMonitor(options) {
+            return new RuntimeMonitor(options)
+          }
+          '''
+          # Remove workflow indentation introduced by the YAML block.
+          monitor = re.sub(r'^          ', '', monitor, flags=re.M)
+          (plugin / 'src' / 'monitor.js').write_text(monitor, encoding='utf-8')
+
+          index_path = plugin / 'src' / 'index.js'
+          index = index_path.read_text(encoding='utf-8')
+          index = replace_once(
+              index,
+              "'dsh-pangea-companion: read-only state, runtime monitor, and source routes'",
+              "'dsh-pangea-companion: read-only state, run association, and source routes'",
+              'index effect label',
+          )
+          index_path.write_text(index, encoding='utf-8')
+
+          # Client regression checks now verify that the monitor page is unreachable rather than
+          # requiring its old copy to remain in the bundle.
+          client_test_path = plugin / 'tests' / 'client.test.mjs'
+          client_test = client_test_path.read_text(encoding='utf-8')
+          old_asserts = """  assert.match(source, /运行监控/)\n  assert.match(source, /当前执行/)\n  assert.match(source, /运行时间线/)\n  assert.match(source, /历史运行摘要/)\n"""
+          new_asserts = """  assert.match(source, /React\\.useState\\(\\{ type: 'overview' \\}\\)/)\n  assert.match(source, /repeat\\(5, minmax\\(0, 1fr\\)\\)/)\n  assert.doesNotMatch(source, /\\['monitor', '监控'\\]/)\n  assert.doesNotMatch(source, /if \\(screen\\.type === 'monitor'\\) body = renderMonitor/)\n"""
+          client_test = replace_once(client_test, old_asserts, new_asserts, 'client monitor assertions')
+          client_test_path.write_text(client_test, encoding='utf-8')
+
+          companion_test_path = plugin / 'tests' / 'companion.test.mjs'
+          companion_test = companion_test_path.read_text(encoding='utf-8')
+          marker = "test('runtime monitor keeps a minimal run timeline after its DSH session is removed'"
+          pos = companion_test.find(marker)
+          if pos < 0:
+              raise SystemExit('runtime monitor test marker not found')
+          companion_test = companion_test[:pos] + r'''test('runtime monitor keeps only minimal DSH-to-PANGEA run association', async () => {
+            const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-monitor-'))
+            const storePath = path.join(root, 'monitor.json')
+            let clock = 1_700_000_000_000
+            const listeners = new Map()
+            const channel = map => ({
+              on(name, callback) {
+                const values = map.get(name) ?? []
+                values.push(callback)
+                map.set(name, values)
+                return () => map.set(name, (map.get(name) ?? []).filter(value => value !== callback))
+              },
+            })
+            const agent = {
+              id: 'session-monitor-1', status: 'idle',
+              session: {
+                header: { id: 'session-monitor-1', cwd: '/tmp/pangea', createdAt: clock },
+                events: [{ type: 'tool/call', time: clock - 100, data: { callId: 'secret-call', name: 'must_not_persist' } }],
+              },
+              ctx: channel(new Map()),
+            }
+            const ctx = { ...channel(listeners), agents: { roots: () => [agent] } }
+            const emit = (map, name, ...args) => { for (const callback of map.get(name) ?? []) callback(...args) }
+            const monitor = createRuntimeMonitor({ storePath, now: () => clock })
+            const dispose = monitor.start(ctx)
+
+            try {
+              await monitor.bindRun(agent.id, { run_id: 'run-monitor-1', phase: 'WAITING_ANALYSIS', analysis: { completed: 0, total: 2, reworked: 0 } })
+              const first = await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })
+              assert.equal(first.session.bound_run_id, 'run-monitor-1')
+              assert.equal(first.run.pangea_phase, 'WAITING_ANALYSIS')
+              assert.deepEqual(first.run.pangea_progress, { completed: 0, total: 2, reworked: 0 })
+              assert.equal('active_tools' in first.session, false)
+              assert.equal('active_subagents' in first.session, false)
+              assert.equal('timeline' in first.run, false)
+
+              const firstSeen = first.run.last_seen
+              clock += 500
+              await monitor.bindRun(agent.id, { run_id: 'run-monitor-1', phase: 'WAITING_ANALYSIS', analysis: { completed: 0, total: 2, reworked: 0 } })
+              assert.equal((await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })).run.last_seen, firstSeen)
+
+              clock += 500
+              await monitor.bindRun(agent.id, { run_id: 'run-monitor-1', phase: 'WAITING_REVIEW', analysis: { completed: 2, total: 2, reworked: 0 } })
+              const progressed = await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })
+              assert.equal(progressed.run.pangea_phase, 'WAITING_REVIEW')
+              assert.deepEqual(progressed.run.pangea_progress, { completed: 2, total: 2, reworked: 0 })
+              assert.ok(progressed.run.last_seen > firstSeen)
+
+              clock += 1_000
+              emit(listeners, 'agent/disposed', { agent })
+              await new Promise(resolve => setImmediate(resolve))
+              await monitor.flush()
+
+              const raw = await readFile(storePath, 'utf8')
+              assert.doesNotMatch(raw, /must_not_persist|secret-call|timeline|active_tools|active_subagents/)
+
+              const restored = createRuntimeMonitor({ storePath, now: () => clock })
+              const historical = await restored.snapshot({ runId: 'run-monitor-1' })
+              assert.equal(historical.session, null)
+              assert.equal(historical.run.run_id, 'run-monitor-1')
+              assert.equal(historical.run.session_live, false)
+              assert.equal(historical.run.pangea_phase, 'WAITING_REVIEW')
+            } finally {
+              await dispose()
+              await rm(root, { recursive: true, force: true })
+            }
+          })
+          '''
+          companion_test = re.sub(r'^          ', '', companion_test, flags=re.M)
+          companion_test_path.write_text(companion_test, encoding='utf-8')
+
+          readme_path = plugin / 'README.md'
+          readme = readme_path.read_text(encoding='utf-8')
+          readme = replace_once(
+              readme,
+              '- 监控当前 DSH 会话的 Agent 运行/空闲状态、工具调用、子 Agent 和工作流成员变化，并与当前 PANGEA Run 的阶段及分析进度合并显示。',
+              '- 将当前 DSH 会话与 PANGEA Run 做最小只读关联，只记录 Run、工作区、关联会话和 PANGEA 阶段/分析进度；DSH 自己负责展示 Agent、工具、子 Agent 和工作流轨迹。',
+              'README capability monitor',
+          )
+          readme = replace_once(
+              readme,
+              '- 会话删除后仍按 Run 保留最小运行摘要；历史 Run 不依赖原 DSH 会话继续存在。',
+              '- 会话删除后仍按 Run 保留最小关联摘要；历史 Run 不依赖原 DSH 会话继续存在。',
+              'README association history',
+          )
+          readme = replace_once(
+              readme,
+              '- 固定顶部导航：`监控 / 总览 / 风险 / 用例 / 证据 / 复核`，任何页面都能直接跳转。',
+              '- 固定顶部导航：`总览 / 风险 / 用例 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。',
+              'README navigation',
+          )
+          readme = replace_once(
+              readme,
+              '- `监控` 默认关联当前 DSH 会话与最新活动 Run，分开显示 Agent 状态、正在执行的工具、活动子 Agent、PANGEA 进度和合并时间线。',
+              '- Companion 不重复展示 DSH 已有的 Agent / Tool / Subagent / Workflow 轨迹；总览只聚焦 PANGEA 阶段、进度、质量、风险、用例、证据和复核。',
+              'README monitor page',
+          )
+          readme = replace_once(
+              readme,
+              '- 历史 Run 的监控页显示最小运行摘要；即使原 DSH 会话已删除，Run 的风险、用例、证据、复核、报告和已记录时间线仍可查看。',
+              '- 即使原 DSH 会话已删除，历史 Run 的风险、用例、证据、复核和报告仍可查看；Companion 不保存 DSH 执行时间线。',
+              'README historical monitor',
+          )
+          readme = replace_once(readme, '## 运行摘要保存范围', '## Run 关联摘要保存范围', 'README summary heading')
+          readme = replace_once(
+              readme,
+              '- Agent 运行/空闲变化；\n- 工具名称及开始、成功或失败状态；\n- 子 Agent、工作流成员和 PANGEA 阶段/进度摘要。',
+              '- PANGEA 阶段与分析进度摘要。\n\n不会保存 Agent 运行/空闲变化、工具调用、子 Agent 或工作流成员轨迹；这些信息由 DSH 原生轨迹负责。',
+              'README stored fields',
+          )
+          readme_path.write_text(readme, encoding='utf-8')
+
+          package_path = plugin / 'package.json'
+          package_data = json.loads(package_path.read_text(encoding='utf-8'))
+          package_data['version'] = '0.10.0'
+          package_data['description'] = 'Read-only PANGEA companion for DeepSeek Harness with structured run browsing and minimal DSH run association'
+          package_path.write_text(json.dumps(package_data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+          # This workflow is intentionally one-shot; remove it from the resulting tree.
+          workflow = root / '.github' / 'workflows' / 'apply-companion-overview.yml'
+          workflow.unlink()
+          PY
+
+      - name: Verify companion
+        working-directory: plugins/dsh-pangea-companion
+        run: npm test
+
+      - name: Commit to main
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            plugins/dsh-pangea-companion/src/client.js \
+            plugins/dsh-pangea-companion/lib/client.js \
+            plugins/dsh-pangea-companion/src/monitor.js \
+            plugins/dsh-pangea-companion/src/index.js \
+            plugins/dsh-pangea-companion/tests/client.test.mjs \
+            plugins/dsh-pangea-companion/tests/companion.test.mjs \
+            plugins/dsh-pangea-companion/README.md \
+            plugins/dsh-pangea-companion/package.json
+          git rm -- .github/workflows/apply-companion-overview.yml
+          git commit -m "refactor(companion): focus sidebar on PANGEA results"
+          git push origin HEAD:main
