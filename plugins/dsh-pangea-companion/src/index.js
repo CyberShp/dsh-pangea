@@ -128,7 +128,7 @@ export function apply(ctx) {
     disposeSourceRoute()
     disposeStateRoute()
     await disposeMonitor()
-  }, 'dsh-pangea-companion: read-only state, runtime monitor, and source routes')
+  }, 'dsh-pangea-companion: read-only state, run association, and source routes')
 }
 
 export { companionSnapshot } from './reader.js'

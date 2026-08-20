@@ -295,12 +295,11 @@ test('registers one read-only status tool and read-only state/source routes with
   assert.equal(effects.length, 1)
 })
 
-test('runtime monitor keeps a minimal run timeline after its DSH session is removed', async () => {
+test('runtime monitor keeps only minimal DSH-to-PANGEA run association', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-monitor-'))
   const storePath = path.join(root, 'monitor.json')
   let clock = 1_700_000_000_000
   const listeners = new Map()
-  const scopedListeners = new Map()
   const channel = map => ({
     on(name, callback) {
       const values = map.get(name) ?? []
@@ -309,11 +308,13 @@ test('runtime monitor keeps a minimal run timeline after its DSH session is remo
       return () => map.set(name, (map.get(name) ?? []).filter(value => value !== callback))
     },
   })
-  const sessionEvents = []
   const agent = {
     id: 'session-monitor-1', status: 'idle',
-    session: { header: { id: 'session-monitor-1', cwd: '/tmp/pangea', createdAt: clock }, events: sessionEvents },
-    ctx: channel(scopedListeners),
+    session: {
+      header: { id: 'session-monitor-1', cwd: '/tmp/pangea', createdAt: clock },
+      events: [{ type: 'tool/call', time: clock - 100, data: { callId: 'secret-call', name: 'must_not_persist' } }],
+    },
+    ctx: channel(new Map()),
   }
   const ctx = { ...channel(listeners), agents: { roots: () => [agent] } }
   const emit = (map, name, ...args) => { for (const callback of map.get(name) ?? []) callback(...args) }
@@ -321,61 +322,41 @@ test('runtime monitor keeps a minimal run timeline after its DSH session is remo
   const dispose = monitor.start(ctx)
 
   try {
-    sessionEvents.push(
-      { type: 'tool/call', seq: 0, time: clock - 5_000, data: { turn: 1, step: 1, callId: 'old-call', name: 'old_read', arguments: '{}' } },
-      { type: 'tool/result', seq: 1, time: clock - 4_000, data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'old-call' }, content: [{ type: 'tool-result', toolCallId: 'old-call', content: [] }] } } },
-      { type: 'tool/call', seq: 2, time: clock - 1_000, data: { turn: 1, step: 2, callId: 'open-call', name: 'active_before_binding', arguments: '{}' } },
-    )
     await monitor.bindRun(agent.id, { run_id: 'run-monitor-1', phase: 'WAITING_ANALYSIS', analysis: { completed: 0, total: 2, reworked: 0 } })
-    const afterBinding = await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })
-    assert.ok(afterBinding.session.active_tools.some(item => item.title === 'active_before_binding'))
-    assert.ok(!afterBinding.run.timeline.some(item => item.title === 'old_read'))
-    const firstSeen = (await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })).run.last_seen
+    const first = await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })
+    assert.equal(first.session.bound_run_id, 'run-monitor-1')
+    assert.equal(first.run.pangea_phase, 'WAITING_ANALYSIS')
+    assert.deepEqual(first.run.pangea_progress, { completed: 0, total: 2, reworked: 0 })
+    assert.equal('active_tools' in first.session, false)
+    assert.equal('active_subagents' in first.session, false)
+    assert.equal('timeline' in first.run, false)
+
+    const firstSeen = first.run.last_seen
     clock += 500
     await monitor.bindRun(agent.id, { run_id: 'run-monitor-1', phase: 'WAITING_ANALYSIS', analysis: { completed: 0, total: 2, reworked: 0 } })
     assert.equal((await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })).run.last_seen, firstSeen)
-    const preBindResult = {
-      type: 'tool/result', seq: 3, time: clock + 100,
-      data: { turn: 1, step: 2, message: { source: { kind: 'tool', callId: 'open-call' }, content: [{ type: 'tool-result', toolCallId: 'open-call', content: [] }] } },
-    }
-    sessionEvents.push(preBindResult)
-    emit(scopedListeners, 'session/event', agent.session, preBindResult)
+
+    clock += 500
+    await monitor.bindRun(agent.id, { run_id: 'run-monitor-1', phase: 'WAITING_REVIEW', analysis: { completed: 2, total: 2, reworked: 0 } })
+    const progressed = await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })
+    assert.equal(progressed.run.pangea_phase, 'WAITING_REVIEW')
+    assert.deepEqual(progressed.run.pangea_progress, { completed: 2, total: 2, reworked: 0 })
+    assert.ok(progressed.run.last_seen > firstSeen)
+
     clock += 1_000
-    emit(scopedListeners, 'agent/status', { agent, status: 'running' })
-
-    const call = {
-      type: 'tool/call', seq: 4, time: clock + 1_000,
-      data: { turn: 1, step: 1, callId: 'call-1', name: 'pangea_status', arguments: '{"private":"must-not-persist"}' },
-    }
-    sessionEvents.push(call)
-    emit(scopedListeners, 'session/event', agent.session, call)
-    const result = {
-      type: 'tool/result', seq: 5, time: clock + 3_000,
-      data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1', content: [{ type: 'text', text: 'secret-result' }] }] } },
-    }
-    sessionEvents.push(result)
-    emit(scopedListeners, 'session/event', agent.session, result)
-    await new Promise(resolve => setImmediate(resolve))
-
-    clock += 5_000
     emit(listeners, 'agent/disposed', { agent })
     await new Promise(resolve => setImmediate(resolve))
     await monitor.flush()
 
-    const live = await monitor.snapshot({ sessionId: agent.id, runId: 'run-monitor-1' })
-    assert.equal(live.session.live, false)
-    assert.equal(live.run.run_id, 'run-monitor-1')
-    assert.ok(live.run.timeline.some(item => item.kind === 'tool' && item.title === 'pangea_status' && item.state === 'success'))
-    assert.ok(live.run.timeline.some(item => item.title === 'DSH 会话已结束'))
-
     const raw = await readFile(storePath, 'utf8')
-    assert.doesNotMatch(raw, /must-not-persist|secret-result/)
+    assert.doesNotMatch(raw, /must_not_persist|secret-call|timeline|active_tools|active_subagents/)
 
     const restored = createRuntimeMonitor({ storePath, now: () => clock })
     const historical = await restored.snapshot({ runId: 'run-monitor-1' })
     assert.equal(historical.session, null)
     assert.equal(historical.run.run_id, 'run-monitor-1')
     assert.equal(historical.run.session_live, false)
+    assert.equal(historical.run.pangea_phase, 'WAITING_REVIEW')
   } finally {
     await dispose()
     await rm(root, { recursive: true, force: true })

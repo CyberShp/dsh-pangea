@@ -66,7 +66,7 @@ window.__ModuleLoader__.load({
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 10 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '7px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 700 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
-      nav: { display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 0, marginTop: 12 },
+      nav: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 0, marginTop: 12 },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '9px 2px 8px', cursor: 'pointer', fontSize: 10 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '14px 14px 22px' },
@@ -323,7 +323,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState(undefined)
       const [selectedRun, setSelectedRun] = React.useState(undefined)
       const [loading, setLoading] = React.useState(false)
-      const [screen, setScreen] = React.useState({ type: 'monitor' })
+      const [screen, setScreen] = React.useState({ type: 'overview' })
       const [history, setHistory] = React.useState([])
       const [riskQuery, setRiskQuery] = React.useState('')
       const [riskSeverity, setRiskSeverity] = React.useState('全部')
@@ -363,7 +363,7 @@ window.__ModuleLoader__.load({
         }
       }, [cwd, selectedRun, scope?.sessionId])
 
-      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: 'monitor' }); setHistory([]) }, [cwd])
+      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: 'overview' }); setHistory([]) }, [cwd])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
         if (!visible) {
@@ -548,8 +548,7 @@ window.__ModuleLoader__.load({
       const completed = current?.analysis?.completed ?? 0
       const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
       const activeNav = navType(screen)
-      const screenTitle = screen.type === 'monitor' ? '运行监控'
-        : screen.type === 'overview' ? 'PANGEA 总览'
+      const screenTitle = screen.type === 'overview' ? 'PANGEA 总览'
           : screen.type === 'risks' ? '风险'
           : screen.type === 'risk' ? (riskById.get(screen.id)?.risk_id || '风险详情')
             : screen.type === 'cases' ? '测试用例'
@@ -558,7 +557,7 @@ window.__ModuleLoader__.load({
                   : screen.type === 'evidence-detail' ? '证据详情' : '复核'
 
       const navigation = h('nav', { style: styles.nav, 'aria-label': 'PANGEA 页面' }, [
-        ['monitor', '监控'], ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],
+        ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],
       ].map(([type, label]) => h('button', {
         key: type,
         type: 'button',
@@ -570,7 +569,7 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
-            !['monitor', 'overview', 'risks', 'cases', 'evidence', 'review'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
+            !['overview', 'risks', 'cases', 'evidence', 'review'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
               h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : '只读伴生工作台'))),
@@ -808,8 +807,7 @@ window.__ModuleLoader__.load({
       }
 
       let body
-      if (screen.type === 'monitor') body = renderMonitor()
-      else if (screen.type === 'overview') body = renderOverview()
+      if (screen.type === 'overview') body = renderOverview()
       else if (screen.type === 'risks') body = renderRisks()
       else if (screen.type === 'risk') body = renderRiskDetail()
       else if (screen.type === 'cases') body = renderCases()
@@ -818,7 +816,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()
 
-      const healthAlert = !['monitor', 'overview'].includes(screen.type) && health?.trusted === false ? renderHealthCard(true) : null
+      const healthAlert = !['overview'].includes(screen.type) && health?.trusted === false ? renderHealthCard(true) : null
       const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
