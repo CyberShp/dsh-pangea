@@ -88,7 +88,6 @@ async function stateRouteHandler(req, res, monitor) {
   const sessionId = url.searchParams.get('session_id') ?? undefined
   try {
     const snapshot = await companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
-    if (runId === undefined && sessionId && snapshot.current) await monitor.bindRun(sessionId, snapshot.current)
     snapshot.monitor = await monitor.snapshot({ sessionId, runId: snapshot.current?.run_id })
     json(res, 200, snapshot)
   } catch (error) {
@@ -128,7 +127,7 @@ export function apply(ctx) {
     disposeSourceRoute()
     disposeStateRoute()
     await disposeMonitor()
-  }, 'dsh-pangea-companion: read-only state, run association, and source routes')
+  }, 'dsh-pangea-companion: read-only state and source routes')
 }
 
 export { companionSnapshot } from './reader.js'
