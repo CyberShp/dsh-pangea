@@ -134,9 +134,9 @@ window.__ModuleLoader__.load({
       const pangea = ctx.pangea
       if (!pangea) return
       ctx.effect(() => pangea.registerPage({
-        id: 'asset-catalog', title: () => '资产', icon, order: 30,
+        id: 'assets', title: () => '资产', icon, order: 30,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(CatalogPanel, props),
+        component: props => h(CatalogPanel, { ...props, ctx }),
       }), 'dsh-pangea-asset-catalog: asset page')
     }
 

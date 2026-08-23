@@ -46,7 +46,7 @@ test('registers one asset catalog page and keeps the boundary visible', async ()
     effect(factory) { return factory() },
   })
   assert.equal(pages.length, 1)
-  assert.equal(pages[0].id, 'asset-catalog')
+  assert.equal(pages[0].id, 'assets')
   assert.equal(pages[0].title(), '资产')
   assert.equal(pages[0].order, 30)
 })

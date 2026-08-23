@@ -20,25 +20,26 @@ dsh-pangea/
 浏览器侧的关系固定为：
 
 ```text
-dsh-better-sidebar
-        ↓
-dsh-pangea 基座（唯一 PANGEA Tab、ctx.pangea）
-        ↓
-Companion「分析 / 执行」页、Asset Catalog「资产」页
+dsh-pangea（用户唯一需要安装的包）
+        ├── dsh-better-sidebar 0.13.1
+        ├── Companion「分析 / 执行」
+        └── Asset Catalog「资产」
 ```
 
-`dsh-better-sidebar` 继续负责通用的侧栏、编辑器、终端、文件浏览等能力。`dsh-pangea`
-只负责 PANGEA 顶层入口和功能页注册，不重复实现通用侧栏。
+`dsh-pangea` 会自动带上固定版本的 Better Sidebar、Companion 和 Asset Catalog。
+Better Sidebar 继续负责通用侧栏、编辑器、终端、文件浏览等能力；`dsh-pangea` 通过
+适配层调整入口，不复制 Better Sidebar 源码。
 
 ## 插件职责
 
 ### dsh-pangea
 
-- 向 Better Sidebar 注册一个单实例 `PANGEA` Tab。
+- 向 Better Sidebar 原生注册“分析”“执行”“资产”三个单实例页签，不再提供外层
+  `PANGEA` 包装页。
 - 提供 `ctx.pangea.registerPage()`、`openPage()`、`openFile()`、`getPages()` 和
   `subscribe()`。
-- 按会话记住当前功能页；插件卸载或热重载时自动移除对应页面。
-- 隔离单个功能页的渲染错误。
+- 功能插件卸载或热重载时自动移除对应页签。
+- 固定 `+` 菜单顺序，并隐藏源码管理和终端菜单项。
 - 不读取 Run、不扫描资产、不执行用例，也不改变 PANGEA 决策。
 
 ### dsh-pangea-companion
@@ -63,15 +64,15 @@ Companion「分析 / 执行」页、Asset Catalog「资产」页
 
 ## 安装
 
-以下命令从仓库根目录执行。当前环境使用 Better Sidebar 0.13.1，因此这里固定版本，
-不使用 `@latest`：
+从仓库根目录只安装 `dsh-pangea`。本地目录必须带 `file:` 前缀，确保它作为一个包安装，
+并自动安装 Better Sidebar、Companion 与 Asset Catalog：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web add dsh-better-sidebar@0.13.1
-npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea"
-npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-companion"
-npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-asset-catalog"
+npx @deepseek-ai/dsh plugin --profile web add "file:$PWD/plugins/dsh-pangea"
 ```
+
+发布到包仓库后，对应命令是 `npx @deepseek-ai/dsh plugin --profile web add dsh-pangea`；
+用户仍然只安装这一个包。
 
 确认安装：
 
@@ -79,13 +80,10 @@ npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-asset-cat
 npx @deepseek-ai/dsh plugin --profile web list --depth 0
 ```
 
-应至少看到：
+顶层依赖应只看到：
 
 ```text
-dsh-better-sidebar
 dsh-pangea
-dsh-pangea-companion
-dsh-pangea-asset-catalog
 ```
 
 启动或重启 DSH Web 后硬刷新页面：
@@ -94,8 +92,8 @@ dsh-pangea-asset-catalog
 npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080
 ```
 
-Better Sidebar 的 `+` 菜单只会出现一个 `PANGEA` 入口。打开后，顶部会按已安装插件
-显示“分析”“执行”“资产”。缺少某个功能插件时只隐藏对应页面，不影响其他页面。
+Better Sidebar 的 `+` 菜单固定显示：`分析 / 执行 / 资产 / 文件 / 任务管理 / 浏览器`。
+源码管理被移除；终端不出现在 `+` 菜单中，但仍可从右上角按钮展开到底部面板。
 
 ## 开发验证
 

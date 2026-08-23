@@ -1000,14 +1000,14 @@ window.__ModuleLoader__.load({
       const pangea = ctx.pangea
       if (!pangea) return
       ctx.effect(() => pangea.registerPage({
-        id: 'companion-analysis', title: () => '分析', icon, order: 10,
+        id: 'analysis', title: () => '分析', icon, order: 10,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, initialScreen: 'overview', pageMode: 'analysis' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
       ctx.effect(() => pangea.registerPage({
-        id: 'companion-execution', title: () => '执行', icon, order: 20,
+        id: 'execution', title: () => '执行', icon, order: 20,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, initialScreen: 'execution', pageMode: 'execution' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'execution', pageMode: 'execution' }),
       }), 'dsh-pangea-companion: execution page')
     }
 

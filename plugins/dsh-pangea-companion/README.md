@@ -80,9 +80,9 @@ PANGEA 工作台会显示“数据读取异常”，`pangea_status` 也会明确
 
 历史 Run 列表不会读取 Worker 结果、构建风险/用例/证据关联，也不会逐个解析整份报告；只有当前选中的 Run 才执行完整读取和报告对账，避免历史任务很多时拖慢侧栏。
 
-## PANGEA 工作台页面
+## PANGEA 侧边栏页面
 
-Companion 在 PANGEA Tab 中提供“分析”和“执行”两个顶层页面：
+Companion 在 Better Sidebar 中提供“分析”和“执行”两个原生顶层页签：
 
 - “分析”页内部固定导航：`总览 / 风险 / 用例 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。
 - “执行”页集中显示执行记录与执行环境，不再混入分析页的内部导航。
@@ -155,7 +155,7 @@ Companion 的交互 SSH 当前支持直接连接；若 dsh-ssh alias 配置了 P
 
 ## 在 DSH 中讨论 PANGEA 对象
 
-在 PANGEA Tab 中打开一条风险、测试用例或证据，点击“加入当前会话”。Companion 会把当前对象、直接证据和关联项写入当前 DSH 输入框，但不会自动发送。你可以检查内容、继续补充问题，然后由 DSH 回答。
+在“分析”页签中打开一条风险、测试用例或证据，点击“加入当前会话”。Companion 会把当前对象、直接证据和关联项写入当前 DSH 输入框，但不会自动发送。你可以检查内容、继续补充问题，然后由 DSH 回答。
 
 风险或证据存在可读取的本地源码时，页面还会出现“源码片段”卡片。一条风险有多条证据时，可在卡片顶部原地切换文件和行号。
 
@@ -185,20 +185,15 @@ cd dsh-pangea
 npx @deepseek-ai/dsh plugin --profile web remove dsh-pangea-bridge
 ```
 
-按顺序安装当前兼容的 Better Sidebar 与 PANGEA 基座：
+只安装 PANGEA 基座。它会自动安装固定版本的 Better Sidebar、Companion 和 Asset
+Catalog；本地路径要使用 `file:` 前缀：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web add dsh-better-sidebar@0.13.1
-npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea"
+npx @deepseek-ai/dsh plugin --profile web add "file:$PWD/plugins/dsh-pangea"
 ```
 
-然后从仓库根目录安装 Companion：
-
-```bash
-npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-companion"
-```
-
-硬刷新 DSH Web 后，Better Sidebar 的 `+` 菜单只会看到一个 `PANGEA` 入口；打开后顶部显示“分析”和“执行”。
+硬刷新 DSH Web 后，Better Sidebar 的 `+` 菜单会直接显示“分析”和“执行”；不再有
+外层 `PANGEA` 包装入口。
 
 推荐把 DSH workspace 直接设置为 `pangea-agent` 根目录，这样 Companion 能自动发现：
 

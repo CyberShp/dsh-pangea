@@ -1,7 +1,12 @@
 # dsh-pangea
 
-PANGEA 在 DSH 中的工作台基座。它依赖 `dsh-better-sidebar`，只向侧边栏注册一个
-单实例 `PANGEA` Tab，然后通过浏览器侧的 `ctx.pangea` 服务接收功能页面。
+PANGEA 在 DSH 中的侧边栏基座。用户只安装这个包；它自动带上固定版本的
+`dsh-better-sidebar`、Companion 和 Asset Catalog，并通过浏览器侧的 `ctx.pangea`
+服务把“分析”“执行”“资产”注册成原生单实例页签。
+
+基座使用 Better Sidebar 的公开注册接口做适配，不复制其源代码。`+` 菜单固定为
+`分析 / 执行 / 资产 / 文件 / 任务管理 / 浏览器`。源码管理被移除；终端只从右上角
+按钮展开到底部面板，不出现在 `+` 菜单中。
 
 基座不读取 PANGEA Run，不扫描资产，不执行测试，也不改变 `pangea-agent` 的代码、
 Graph 或决策。
@@ -20,14 +25,14 @@ const dispose = ctx.pangea.registerPage({
 ```
 
 `registerPage()` 返回注销函数；重复页面 ID 会直接报错。页面会按 `order` 和注册顺序
-稳定排列。每个 DSH 会话分别记住当前页面，一个页面渲染失败不会影响其他页面。
+稳定排列，并分别作为 Better Sidebar 原生页签打开。
 
 服务还提供：
 
-- `openPage(scope, pageId)`：打开 PANGEA Tab 并切到指定功能页。
+- `openPage(scope, pageId)`：打开指定原生功能页签。
 - `openFile(scope, path, title)`：通过 Better Sidebar 的编辑器打开文件。
 - `getPages()`：读取当前已注册页面。
-- `subscribe(listener)`：监听页面注册、注销与当前页变化。
+- `subscribe(listener)`：监听页面注册与注销。
 
 ## 验证
 

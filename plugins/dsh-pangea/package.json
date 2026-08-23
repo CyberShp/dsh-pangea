@@ -1,7 +1,7 @@
 {
   "name": "dsh-pangea",
   "version": "0.1.0",
-  "description": "PANGEA workbench shell and feature-page registry for DeepSeek Harness",
+  "description": "Single-install PANGEA sidebar adapter and feature registry for DeepSeek Harness",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -37,9 +37,13 @@
       "platform": "web"
     }
   },
+  "dependencies": {
+    "dsh-better-sidebar": "0.13.1",
+    "dsh-pangea-asset-catalog": "file:../dsh-pangea-asset-catalog",
+    "dsh-pangea-companion": "file:../dsh-pangea-companion"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.6",
-    "dsh-better-sidebar": ">=0.13.1",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {

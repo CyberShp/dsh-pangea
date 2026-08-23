@@ -1,26 +1,82 @@
-// Browser half of the PANGEA workbench. Feature plugins register pages on
-// ctx.pangea; this shell is the only PANGEA tab registered with Better Sidebar.
+// Browser half of the PANGEA sidebar adapter. Feature plugins register native
+// Better Sidebar tabs through ctx.pangea; there is no wrapper PANGEA tab.
 window.__ModuleLoader__.load({
   id: 'dsh-pangea',
-  factory: (require) => {
+  factory: () => {
     const module = { exports: {} }
     const exports = module.exports
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
-    const React = require('react')
-    const h = React.createElement
     const inject = ['betterSidebar']
-    const TAB_ID = 'dsh-pangea:workbench'
-    const STORAGE_PREFIX = 'dsh-pangea:active-page:'
-
-    function pageTitle(page) {
-      return typeof page.title === 'function' ? page.title() : page.title
+    const PAGE_PREFIX = 'dsh-pangea:'
+    const LEGACY_TAB_TYPES = new Set([
+      'dsh-pangea:workbench',
+      'dsh-pangea-companion:pangea',
+      'dsh-pangea-asset-catalog:assets',
+    ])
+    const BUILTIN_POLICY = {
+      git: { hidden: true },
+      terminal: { hidden: true },
+      editor: { order: 40 },
+      subagent: { order: 50 },
+      browser: { order: 60 },
     }
 
-    function createPangeaService(betterSidebar, storage = globalThis.localStorage) {
+    function allTabs(tree) {
+      if (!tree) return []
+      if (Array.isArray(tree.tabs)) return tree.tabs
+      return Array.isArray(tree.children) ? tree.children.flatMap(allTabs) : []
+    }
+
+    function nativePageId(pageId) {
+      return `${PAGE_PREFIX}${pageId}`
+    }
+
+    function applyBuiltinPolicy(betterSidebar) {
+      for (const [id, patch] of Object.entries(BUILTIN_POLICY)) {
+        const descriptor = betterSidebar.getTab(id)
+        if (descriptor) Object.assign(descriptor, patch)
+      }
+    }
+
+    function closeDisallowedTabs(betterSidebar, registeredNativeIds = new Set()) {
+      const snapshot = betterSidebar.getSnapshot?.()
+      const state = snapshot?.state
+      const sessionId = snapshot?.sessionId
+      if (!state || !sessionId) return
+      const tabs = [...allTabs(state.splits), ...allTabs(state.bottomSplits)]
+      for (const tab of tabs) {
+        if (typeof tab?.type !== 'string') continue
+        const isSourceControl = tab.type === 'git' || tab.type === 'diff'
+        const isLegacy = LEGACY_TAB_TYPES.has(tab.type)
+        const isRemovedPangeaPage = tab.type.startsWith(PAGE_PREFIX)
+          && tab.type !== 'dsh-pangea:workbench'
+          && !registeredNativeIds.has(tab.type)
+        if (isSourceControl || isLegacy || isRemovedPangeaPage) {
+          betterSidebar.closeTab(tab.id, { sessionId })
+        }
+      }
+    }
+
+    function installSidebarPolicy(betterSidebar, registeredNativeIds) {
+      const reconcile = () => {
+        applyBuiltinPolicy(betterSidebar)
+        closeDisallowedTabs(betterSidebar, registeredNativeIds)
+      }
+      reconcile()
+      const disposeRegistry = betterSidebar.subscribe(reconcile)
+      const disposeState = betterSidebar.subscribeState?.(reconcile) ?? (() => {})
+      return () => {
+        disposeState()
+        disposeRegistry()
+      }
+    }
+
+    function createPangeaService(betterSidebar) {
       const pages = new Map()
+      const nativeDisposers = new Map()
       const listeners = new Set()
-      const activeBySession = new Map()
+      const registeredNativeIds = new Set()
       let sequence = 0
       let revision = 0
       let snapshot = Object.freeze({ revision, pages: Object.freeze([]) })
@@ -35,6 +91,16 @@ window.__ModuleLoader__.load({
         for (const listener of [...listeners]) listener()
       }
 
+      function closePageInCurrentSession(nativeId) {
+        const current = betterSidebar.getSnapshot?.()
+        const state = current?.state
+        const sessionId = current?.sessionId
+        if (!state || !sessionId) return
+        for (const tab of [...allTabs(state.splits), ...allTabs(state.bottomSplits)]) {
+          if (tab.type === nativeId) betterSidebar.closeTab(tab.id, { sessionId })
+        }
+      }
+
       function registerPage(descriptor) {
         if (!descriptor || typeof descriptor.id !== 'string' || descriptor.id.trim() === '') {
           throw new TypeError('PANGEA page id must be a non-empty string')
@@ -42,21 +108,36 @@ window.__ModuleLoader__.load({
         if ((typeof descriptor.title !== 'string' && typeof descriptor.title !== 'function') || typeof descriptor.component !== 'function') {
           throw new TypeError(`PANGEA page "${descriptor.id}" requires title and component`)
         }
-        if (pages.has(descriptor.id)) throw new Error(`PANGEA page id already registered: ${descriptor.id}`)
-        const page = Object.freeze({ ...descriptor, id: descriptor.id.trim(), sequence: sequence++ })
-        pages.set(page.id, page)
+        const id = descriptor.id.trim()
+        if (pages.has(id)) throw new Error(`PANGEA page id already registered: ${id}`)
+        const nativeId = nativePageId(id)
+        const page = Object.freeze({ ...descriptor, id, nativeId, sequence: sequence++ })
+        pages.set(id, page)
+        registeredNativeIds.add(nativeId)
+        const disposeNative = betterSidebar.registerTab({
+          id: nativeId,
+          title: descriptor.title,
+          icon: descriptor.icon,
+          order: descriptor.order,
+          single: true,
+          available: descriptor.available,
+          badge: descriptor.badge,
+          component: descriptor.component,
+        })
+        nativeDisposers.set(id, disposeNative)
+        applyBuiltinPolicy(betterSidebar)
         rebuild()
         let disposed = false
         return () => {
           if (disposed) return
           disposed = true
-          if (pages.get(page.id) === page) {
-            pages.delete(page.id)
-            for (const [sessionId, pageId] of activeBySession) {
-              if (pageId === page.id) activeBySession.delete(sessionId)
-            }
-            rebuild()
-          }
+          if (pages.get(id) !== page) return
+          closePageInCurrentSession(nativeId)
+          nativeDisposers.get(id)?.()
+          nativeDisposers.delete(id)
+          registeredNativeIds.delete(nativeId)
+          pages.delete(id)
+          rebuild()
         }
       }
 
@@ -65,50 +146,13 @@ window.__ModuleLoader__.load({
         return () => listeners.delete(listener)
       }
 
-      function getSnapshot() {
-        return snapshot
-      }
-
-      function getPages() {
-        return snapshot.pages
-      }
-
-      function isAvailable(page, ctx, scope) {
-        try { return page.available ? page.available(ctx, scope) !== false : true }
-        catch (error) {
-          console.error(`[dsh-pangea] page availability failed: ${page.id}`, error)
-          return false
-        }
-      }
-
-      function storedPage(sessionId) {
-        if (!sessionId || !storage?.getItem) return undefined
-        try { return storage.getItem(`${STORAGE_PREFIX}${sessionId}`) ?? undefined }
-        catch { return undefined }
-      }
-
-      function rememberPage(sessionId, pageId) {
-        if (!sessionId) return
-        activeBySession.set(sessionId, pageId)
-        if (!storage?.setItem) return
-        try { storage.setItem(`${STORAGE_PREFIX}${sessionId}`, pageId) } catch {}
-      }
-
-      function getActivePage(ctx, scope, candidates = getPages().filter(page => isAvailable(page, ctx, scope))) {
-        if (!candidates.length) return undefined
-        const sessionId = scope?.sessionId
-        const preferred = activeBySession.get(sessionId) ?? storedPage(sessionId)
-        const active = candidates.find(page => page.id === preferred) ?? candidates[0]
-        if (sessionId && active.id !== preferred) rememberPage(sessionId, active.id)
-        return active
-      }
+      function getSnapshot() { return snapshot }
+      function getPages() { return snapshot.pages }
 
       function openPage(scope, pageId) {
         const page = pages.get(pageId)
         if (!page) return false
-        rememberPage(scope?.sessionId, pageId)
-        rebuild()
-        betterSidebar.openTab({ type: TAB_ID }, scope)
+        betterSidebar.openTab({ type: page.nativeId }, scope)
         return true
       }
 
@@ -118,6 +162,8 @@ window.__ModuleLoader__.load({
         return true
       }
 
+      const disposePolicy = installSidebarPolicy(betterSidebar, registeredNativeIds)
+
       return Object.freeze({
         registerPage,
         openPage,
@@ -125,80 +171,22 @@ window.__ModuleLoader__.load({
         getPages,
         subscribe,
         getSnapshot,
-        getActivePage,
-        isAvailable,
+        disposePolicy,
       })
     }
-
-    const styles = {
-      root: { height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', color: 'var(--dsw-alias-label-primary, inherit)', background: 'var(--dsw-alias-bg-base, transparent)' },
-      nav: { flex: '0 0 auto', display: 'flex', alignItems: 'stretch', gap: 2, padding: '8px 9px 0', overflowX: 'auto', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', background: 'var(--dsw-alias-bg-layer-1, #111)' },
-      navButton: { flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 5, border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, #888)', padding: '8px 9px 7px', cursor: 'pointer', fontSize: 11 },
-      navActive: { color: 'var(--dsw-alias-label-primary, inherit)', borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', fontWeight: 720 },
-      badge: { minWidth: 15, borderRadius: 999, padding: '1px 5px', background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.18))', fontSize: 9, textAlign: 'center' },
-      body: { flex: '1 1 auto', minHeight: 0, overflow: 'hidden' },
-      empty: { margin: 14, padding: 14, border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', borderRadius: 9, color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 11, lineHeight: 1.6 },
-      error: { margin: 14, padding: 14, border: '1px solid var(--dsw-alias-state-error-primary, #e66767)', borderRadius: 9, color: 'var(--dsw-alias-state-error-primary, #e66767)', fontSize: 11, lineHeight: 1.6 },
-    }
-
-    class PageBoundary extends React.Component {
-      constructor(props) {
-        super(props)
-        this.state = { error: undefined }
-      }
-      static getDerivedStateFromError(error) { return { error } }
-      componentDidCatch(error, info) { console.error(`[dsh-pangea] page crashed: ${this.props.pageId}`, error, info) }
-      render() {
-        if (this.state.error) return h('div', { style: styles.error, role: 'alert' }, `页面“${this.props.title}”加载失败。其他 PANGEA 页面仍可继续使用。`)
-        return this.props.children
-      }
-    }
-
-    function PangeaWorkbench(props) {
-      const { ctx, scope, pangea: service } = props
-      const snapshot = React.useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
-      const available = snapshot.pages.filter(page => service.isAvailable(page, ctx, scope))
-      const active = service.getActivePage(ctx, scope, available)
-      if (!available.length) {
-        return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 工作台' },
-          h('div', { style: styles.empty }, '尚未安装可用的 PANGEA 功能插件。请安装 Companion 或 Asset Catalog 后刷新 DSH。'))
-      }
-      const nav = h('nav', { style: styles.nav, 'aria-label': 'PANGEA 功能' }, available.map(page => {
-        let badge
-        try { badge = page.badge?.(ctx, scope) } catch (error) { console.error(`[dsh-pangea] page badge failed: ${page.id}`, error) }
-        return h('button', {
-          key: page.id,
-          type: 'button',
-          style: { ...styles.navButton, ...(active?.id === page.id ? styles.navActive : {}) },
-          'aria-current': active?.id === page.id ? 'page' : undefined,
-          onClick: () => service.openPage(scope, page.id),
-        }, page.icon ?? null, h('span', null, pageTitle(page)), badge !== undefined && badge !== null ? h('span', { style: styles.badge }, badge) : null)
-      }))
-      const content = active
-        ? h(PageBoundary, { key: active.id, pageId: active.id, title: pageTitle(active) }, h(active.component, props))
-        : h('div', { style: styles.empty }, '当前没有可显示的 PANGEA 页面。')
-      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 工作台' }, nav, h('div', { style: styles.body }, content))
-    }
-
-    const icon = h('svg', { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 },
-      h('circle', { cx: 12, cy: 12, r: 8 }), h('path', { d: 'm14.8 9.2-1.6 4-4 1.6 1.6-4z' }))
 
     function apply(ctx) {
       const betterSidebar = ctx.betterSidebar
       if (!betterSidebar) return
       const service = createPangeaService(betterSidebar)
       ctx.provide('pangea', service)
-      ctx.effect(() => betterSidebar.registerTab({
-        id: TAB_ID,
-        title: () => 'PANGEA',
-        icon,
-        order: 55,
-        single: true,
-        component: props => h(PangeaWorkbench, { ...props, pangea: service }),
-      }), 'dsh-pangea: workbench tab')
+      ctx.effect(() => service.disposePolicy, 'dsh-pangea: sidebar policy')
     }
 
     exports.inject = inject
+    exports.nativePageId = nativePageId
+    exports.applyBuiltinPolicy = applyBuiltinPolicy
+    exports.closeDisallowedTabs = closeDisallowedTabs
     exports.createPangeaService = createPangeaService
     exports.apply = apply
     return module.exports

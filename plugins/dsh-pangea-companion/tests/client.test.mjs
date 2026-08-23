@@ -76,7 +76,7 @@ test('PANGEA client registers separate analysis and execution pages and exposes 
     effect(factory) { return factory() },
   })
   assert.equal(pages.length, 2)
-  assert.deepEqual(pages.map(page => page.id), ['companion-analysis', 'companion-execution'])
+  assert.deepEqual(pages.map(page => page.id), ['analysis', 'execution'])
   assert.deepEqual(pages.map(page => page.title()), ['分析', '执行'])
   assert.deepEqual(pages.map(page => page.order), [10, 20])
 })
