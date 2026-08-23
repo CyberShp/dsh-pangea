@@ -1,6 +1,9 @@
 # DSH 插件管理项目
 
-这个仓库用于集中存放和管理 DSH 插件。目前提供 `dsh-pangea-companion`：一个安装包同时包含 PANGEA 只读工作台和仅对 PANGEA 工作区生效的消息唤醒策略，不执行或改写 PANGEA 工作流。
+这个仓库用于集中存放和管理 DSH 插件。目前提供：
+
+- `dsh-pangea-companion`：PANGEA 在 DSH 中的伴生工作台，负责只读 Run 浏览、执行环境与 Executor 会话，以及仅对 PANGEA 工作区生效的消息唤醒策略，不执行或改写 PANGEA 分析工作流。
+- `dsh-pangea-asset-catalog`：只读扫描资料与测试自动化文件，生成非约束性目录，供外部适配层选择性读取。
 
 ## 目录结构
 
@@ -32,6 +35,15 @@ Companion = 只读状态 / 产物适配层 + DSH 唤醒策略
 - PANGEA 工作区的 `subagent-report` 只投递信息、不提前唤醒根 Agent；子 Agent 真正 `settled` 后再由 DSH 原生通知唤醒。其他工作区行为不变。
 
 详细说明见 [`plugins/dsh-pangea-companion/README.md`](plugins/dsh-pangea-companion/README.md)。
+
+## dsh-pangea-asset-catalog
+
+资产目录插件只读扫描 `pangea-data/inbox/` 和 `pangea-data/test-automation/`，在
+`pangea-data/asset-catalog/` 生成资料目录、方法论候选、自动化能力描述和解析诊断。
+
+这些文件全部是非约束性的引用材料。插件不修改 `pangea-agent`、Run、Graph、schema、
+rubric、原始资料或自动化代码，也不参与风险、测试或 PASS/FAIL 决策。详细说明见
+[`plugins/dsh-pangea-asset-catalog/README.md`](plugins/dsh-pangea-asset-catalog/README.md)。
 
 ## 安装 Companion
 
