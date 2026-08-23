@@ -17,6 +17,8 @@
 - 检测到 `dsh-better-sidebar` 时，注册单实例 `PANGEA` Tab。
 - `dsh-better-sidebar` 是可选 peer dependency；未安装时 Host 工具与只读 Core 仍可工作。
 - 当前 Agent 工作目录或其上级目录存在 `.agents/pangea/dsh.md` 时，`subagent-report` 静默投递，由原生 `subagent-settled` 在子 Agent 真正结束后唤醒根 Agent；其他工作区保持 DSH 默认行为。
+- 同一 PANGEA 工作区内，Companion 会直接约束根 Agent 的工具调用：Graph 返回 action 后只能按原样派发/续接；新派发后只能绑定真实 `subagent_id`；子 Agent 运行期间不能轮询、催促、读取产物或提前 `resume-run`；收到对应 `subagent-settled` 后只能恢复一次当前 Run。普通 DSH 工作区不启用此约束。
+- 若根 Agent 在恢复阶段调用了错误命令，拦截消息会直接给出当前 `run_id` 与 `data_root` 绑定的完整 `resume-run` 命令，避免严格控制把会话锁死在无法自查的状态。
 - 在“执行”页维护主机 alias、阵列 alias、自动化仓库 ID 和设备绑定；SSH 用户名/密码继续使用 `dsh-ssh` 的 `~/.dsh/dsh-ssh.json`。
 - 在用例列表中多选测试用例和执行环境，一键创建真实 DSH 执行会话；执行会话按独立 Executor Graph 生成计划并运行。
 - 提供 `pangea_environment_get`、`pangea_ssh_exec/start/read/stop/interactive` 工具，支持普通命令、持续 IO 后台任务和同一阵列 PTY 内的 `diagnose_usr → attach → dtoe` 交互。
@@ -136,7 +138,7 @@ dsh-ssh host configuration       <- aliases/passwords - Companion SSH tools
 
 禁止 Companion：
 
-- 调用 PANGEA CLI 推进原分析 Run。
+- 自行调用 PANGEA CLI 推进原分析 Run；生命周期策略只允许根 Agent 执行 Graph 已声明的 action 和 `resume-run`，不代替根 Agent发起调用。
 - 修改 `progress.json`、`final-state.json`、task/result 文件。
 - 替 PANGEA 实现 analysis/review/rework 状态机。
 - 把 DSH 或 Companion 依赖反向引入 `pangea-agent`。
@@ -213,4 +215,4 @@ cd plugins/dsh-pangea-companion
 npm test
 ```
 
-当前测试覆盖：原分析结果读取、报告/结构化计数核对、历史 Run 摘要、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册、客户端执行入口和原有证据交互。
+当前测试覆盖：原分析结果读取、报告/结构化计数核对、历史 Run 摘要、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册、客户端执行入口、原有证据交互，以及 PANGEA Graph action 的派发、会话绑定、等待、settled 恢复和多单元并行约束。
