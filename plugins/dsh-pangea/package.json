@@ -1,13 +1,12 @@
 {
-  "name": "dsh-pangea-companion",
-  "version": "0.10.0",
-  "description": "PANGEA companion for DeepSeek Harness with analysis browsing, executor environments, host-plus-array SSH execution, and workspace-scoped report wake control",
+  "name": "dsh-pangea",
+  "version": "0.1.0",
+  "description": "PANGEA workbench shell and feature-page registry for DeepSeek Harness",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
     "./client": "./lib/client.js",
-    "./report-policy": "./src/report-policy.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -23,10 +22,9 @@
   "keywords": [
     "deepseek-harness",
     "dsh",
-    "dsh-plugin",
     "pangea-agent",
-    "companion",
-    "dsh-pangea"
+    "workbench",
+    "plugin-registry"
   ],
   "dsh": {
     "bundle": {
@@ -41,25 +39,18 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.6",
-    "dsh-pangea": ">=0.1.0",
+    "dsh-better-sidebar": ">=0.13.1",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-client-runtime": {
-      "optional": true
-    },
-    "react": {
-      "optional": true
-    }
+    "@deepseek-ai/dsh-client-runtime": { "optional": true },
+    "react": { "optional": true }
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
-  "dependencies": {
-    "ssh2": "^1.17.0"
-  },
   "scripts": {
     "build": "node scripts/build-client.mjs",
-    "test": "npm run build && node --check src/index.js && node --check src/reader.js && node --check src/source.js && node --check src/monitor.js && node --check src/report-policy.js && node --check lib/client.js && node --test tests/*.test.mjs"
+    "test": "npm run build && node --check src/index.js && node --check lib/client.js && node --test tests/*.test.mjs"
   }
 }

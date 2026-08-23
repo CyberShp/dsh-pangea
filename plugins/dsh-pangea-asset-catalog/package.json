@@ -39,12 +39,11 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.6",
-    "dsh-better-sidebar": ">=0.12.0",
+    "dsh-pangea": ">=0.1.0",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-client-runtime": { "optional": true },
-    "dsh-better-sidebar": { "optional": true },
     "react": { "optional": true }
   },
   "engines": {

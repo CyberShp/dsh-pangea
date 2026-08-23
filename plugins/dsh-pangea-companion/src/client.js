@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
-    const inject = ['betterSidebar']
+    const inject = ['pangea']
     const API_PATH = '/api/pangea-companion/state'
     const SOURCE_API_PATH = '/api/pangea-companion/source'
     const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
@@ -100,7 +100,7 @@ window.__ModuleLoader__.load({
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 10 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '7px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 700 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
-      nav: { display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 0, marginTop: 12 },
+      nav: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 0, marginTop: 12 },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '9px 2px 8px', cursor: 'pointer', fontSize: 10 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '14px 14px 22px' },
@@ -358,13 +358,13 @@ window.__ModuleLoader__.load({
       return screen.type
     }
 
-    function PangeaPanel({ ctx, scope, visible }) {
+    function PangeaPanel({ ctx, scope, visible, initialScreen = 'overview', pageMode = 'analysis' }) {
       const cwd = scope?.cwd
       const [snapshot, setSnapshot] = React.useState(undefined)
       const [error, setError] = React.useState(undefined)
       const [selectedRun, setSelectedRun] = React.useState(undefined)
       const [loading, setLoading] = React.useState(false)
-      const [screen, setScreen] = React.useState({ type: 'overview' })
+      const [screen, setScreen] = React.useState({ type: initialScreen })
       const [history, setHistory] = React.useState([])
       const [riskQuery, setRiskQuery] = React.useState('')
       const [riskSeverity, setRiskSeverity] = React.useState('全部')
@@ -419,7 +419,7 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: 'overview' }); setHistory([]); setSelectedCaseIds([]) }, [cwd])
+      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: initialScreen }); setHistory([]); setSelectedCaseIds([]) }, [cwd, initialScreen])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
         if (!visible) {
@@ -485,10 +485,10 @@ window.__ModuleLoader__.load({
       const navigate = React.useCallback((next) => { setHistory(previous => [...previous, screen]); setScreen(next) }, [screen])
       const jump = React.useCallback((type) => { setScreen({ type }); setHistory([]) }, [])
       const goBack = React.useCallback(() => {
-        if (history.length === 0) { setScreen({ type: 'overview' }); return }
+        if (history.length === 0) { setScreen({ type: initialScreen }); return }
         setScreen(history[history.length - 1]); setHistory(history.slice(0, -1))
-      }, [history])
-      const chooseRun = React.useCallback((runId) => { setSelectedRun(runId); setScreen({ type: 'overview' }); setHistory([]) }, [])
+      }, [history, initialScreen])
+      const chooseRun = React.useCallback((runId) => { setSelectedRun(runId); setScreen({ type: initialScreen }); setHistory([]) }, [initialScreen])
 
       function showActionNotice(message, isError = false) {
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
@@ -553,11 +553,11 @@ window.__ModuleLoader__.load({
       }
       function openSidebarFile(value, title) {
         const path = absoluteWorkspacePath(cwd, value)
-        if (!path || !ctx?.betterSidebar?.openFile || !scope?.sessionId) {
+        if (!path || !ctx?.pangea?.openFile || !scope?.sessionId) {
           showActionNotice('当前会话无法打开这个文件。', true)
           return
         }
-        ctx.betterSidebar.openFile(scope, path, title)
+        ctx.pangea.openFile(scope, path, title)
         showActionNotice(`已在侧栏打开 ${title ?? text(value, '文件')}`)
       }
       function addToConversation(kind, item, intent = 'review', sourceSnippet) {
@@ -670,15 +670,16 @@ window.__ModuleLoader__.load({
                   : screen.type === 'evidence-detail' ? '证据详情'
                     : screen.type === 'execution' ? '执行环境' : '复核'
 
-      const navigation = h('nav', { style: styles.nav, 'aria-label': 'PANGEA 页面' }, [
-        ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['execution', '执行'], ['evidence', '证据'], ['review', '复核'],
-      ].map(([type, label]) => h('button', {
+      const navigationItems = pageMode === 'execution' ? [] : [
+        ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],
+      ]
+      const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
         type: 'button',
         'aria-current': activeNav === type ? 'page' : undefined,
         style: { ...styles.navButton, ...(activeNav === type ? styles.navActive : {}) },
         onClick: () => jump(type),
-      }, label)))
+      }, label))) : null
 
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
@@ -996,9 +997,18 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
-      const betterSidebar = ctx.betterSidebar
-      if (!betterSidebar) return
-      ctx.effect(() => betterSidebar.registerTab({ id: 'dsh-pangea-companion:pangea', title: () => 'PANGEA', icon, order: 55, single: true, component: (props) => h(PangeaPanel, props) }), 'dsh-pangea-companion: better-sidebar PANGEA tab')
+      const pangea = ctx.pangea
+      if (!pangea) return
+      ctx.effect(() => pangea.registerPage({
+        id: 'companion-analysis', title: () => '分析', icon, order: 10,
+        available: (_ctx, scope) => Boolean(scope?.cwd),
+        component: props => h(PangeaPanel, { ...props, initialScreen: 'overview', pageMode: 'analysis' }),
+      }), 'dsh-pangea-companion: analysis page')
+      ctx.effect(() => pangea.registerPage({
+        id: 'companion-execution', title: () => '执行', icon, order: 20,
+        available: (_ctx, scope) => Boolean(scope?.cwd),
+        component: props => h(PangeaPanel, { ...props, initialScreen: 'execution', pageMode: 'execution' }),
+      }), 'dsh-pangea-companion: execution page')
     }
 
     exports.inject = inject

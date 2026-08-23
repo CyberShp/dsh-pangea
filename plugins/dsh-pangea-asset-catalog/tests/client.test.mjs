@@ -18,7 +18,7 @@ function fakeReact() {
   }
 }
 
-test('registers one asset catalog tab and keeps the boundary visible', async () => {
+test('registers one asset catalog page and keeps the boundary visible', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /资产目录/)
   assert.match(source, /生成目录文件/)
@@ -39,16 +39,16 @@ test('registers one asset catalog tab and keeps the boundary visible', async () 
     },
   }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
-  assert.deepEqual(Array.from(exported.inject), ['betterSidebar'])
-  const tabs = []
+  assert.deepEqual(Array.from(exported.inject), ['pangea'])
+  const pages = []
   exported.apply({
-    betterSidebar: { registerTab(tab) { tabs.push(tab); return () => {} } },
+    pangea: { registerPage(page) { pages.push(page); return () => {} } },
     effect(factory) { return factory() },
   })
-  assert.equal(tabs.length, 1)
-  assert.equal(tabs[0].id, 'dsh-pangea-asset-catalog:assets')
-  assert.equal(tabs[0].title(), '资产目录')
-  assert.equal(tabs[0].single, true)
+  assert.equal(pages.length, 1)
+  assert.equal(pages[0].id, 'asset-catalog')
+  assert.equal(pages[0].title(), '资产')
+  assert.equal(pages[0].order, 30)
 })
 
 test('client requests preview and explicit generation separately', async () => {

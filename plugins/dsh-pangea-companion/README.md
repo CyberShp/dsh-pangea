@@ -14,8 +14,8 @@
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
 - 建立 `风险 ↔ 测试用例 ↔ 证据` 关联，便于从风险追到测试和源码证据，再按访问路径返回。
 - 只读同源接口 `GET /api/pangea-companion/state`，供 Web UI 使用。
-- 检测到 `dsh-better-sidebar` 时，注册单实例 `PANGEA` Tab。
-- `dsh-better-sidebar` 是可选 peer dependency；未安装时 Host 工具与只读 Core 仍可工作。
+- 通过 `ctx.pangea` 向统一工作台注册“分析”和“执行”两页，不再直接注册 Better Sidebar Tab。
+- `dsh-pangea` 是客户端页面的必需 peer dependency；通用侧栏只由基座接入。
 - 当前 Agent 工作目录或其上级目录存在 `.agents/pangea/dsh.md` 时，`subagent-report` 静默投递，由原生 `subagent-settled` 在子 Agent 真正结束后唤醒根 Agent；其他工作区保持 DSH 默认行为。
 - 在“执行”页维护主机 alias、阵列 alias、自动化仓库 ID 和设备绑定；SSH 用户名/密码继续使用 `dsh-ssh` 的 `~/.dsh/dsh-ssh.json`。
 - 在用例列表中多选测试用例和执行环境，一键创建真实 DSH 执行会话；执行会话按独立 Executor Graph 生成计划并运行。
@@ -74,17 +74,18 @@ status = error
 trusted = false
 ```
 
-Better Sidebar 会显示“数据读取异常”，`pangea_status` 也会明确说明当前结构化结果不可信。此时 **0 不允许被解释为“没有风险/用例”**。
+PANGEA 工作台会显示“数据读取异常”，`pangea_status` 也会明确说明当前结构化结果不可信。此时 **0 不允许被解释为“没有风险/用例”**。
 
 如果报告存在但无法自动提取计数、终态 Run 缺少报告、final-state 读取失败，或报告 Run 只能退回 worker result，则返回 `warning` 和具体诊断原因。
 
 历史 Run 列表不会读取 Worker 结果、构建风险/用例/证据关联，也不会逐个解析整份报告；只有当前选中的 Run 才执行完整读取和报告对账，避免历史任务很多时拖慢侧栏。
 
-## Better Sidebar Explorer
+## PANGEA 工作台页面
 
-PANGEA Tab 提供中文运行监控与结果浏览器：
+Companion 在 PANGEA Tab 中提供“分析”和“执行”两个顶层页面：
 
-- 固定顶部导航：`总览 / 风险 / 用例 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。
+- “分析”页内部固定导航：`总览 / 风险 / 用例 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。
+- “执行”页集中显示执行记录与执行环境，不再混入分析页的内部导航。
 - Companion 不重复展示 DSH 已有的 Agent / Tool / Subagent / Workflow 轨迹；总览只聚焦 PANGEA 阶段、进度、质量、风险、用例、证据和复核。
 - 即使原 DSH 会话已删除，历史 Run 的风险、用例、证据、复核和报告仍可查看；Companion 不保存 DSH 执行时间线。
 - 详情页固定提供 `← 返回`，使用页面栈按真实访问路径退回；例如 `风险 → 用例 → 风险` 可以逐级返回，不会钻进死胡同。
@@ -99,7 +100,7 @@ PANGEA Tab 提供中文运行监控与结果浏览器：
 - 风险详情会把“系统结果”拆成可选结论；可以勾选任意数量的源码证据，只核对当前结论与选中证据，或把这组局部上下文转成定向测试。
 - 风险详情在同一张源码卡片中提供多证据选择器，默认预览首条可读取证据；切换时不离开当前风险。证据详情预览当前证据，源码片段显示真实行号，并轻量标出 PANGEA 指向的行范围。
 - “连同源码加入会话”会把当前对象、关联项和可见源码片段一起写入 DSH 草稿，不会自动发送。
-- 证据详情可在 Better Sidebar 中打开完整文件；总览可直接打开 `report.html` 或 `report.md`。Better Sidebar 当前公开接口不支持指定光标行号，因此 Companion 在自己的预览卡片中完成准确行号定位，不伪装成编辑器已跳转。
+- 证据详情可经 `ctx.pangea.openFile()` 在 Better Sidebar 中打开完整文件；总览可直接打开 `report.html` 或 `report.md`。当前文件接口不支持指定光标行号，因此 Companion 在自己的预览卡片中完成准确行号定位，不伪装成编辑器已跳转。
 - 切换历史 Run 时自动回到该 Run 的总览，避免保留上一个 Run 的详情导航状态。
 - 当前 Run 使用顺序轮询：上一轮读取结束后才安排下一轮，不会堆叠请求；切换 Run 或工作区会取消旧请求，避免旧结果覆盖新页面。
 - 首次加载、后台同步失败和无工作区分别显示明确状态；短暂同步失败时保留上一次可信结果。
@@ -184,10 +185,11 @@ cd dsh-pangea
 npx @deepseek-ai/dsh plugin --profile web remove dsh-pangea-bridge
 ```
 
-需要 PANGEA 侧栏页面时，先安装 Better Sidebar：
+按顺序安装当前兼容的 Better Sidebar 与 PANGEA 基座：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web add dsh-better-sidebar@latest
+npx @deepseek-ai/dsh plugin --profile web add dsh-better-sidebar@0.13.1
+npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea"
 ```
 
 然后从仓库根目录安装 Companion：
@@ -196,7 +198,7 @@ npx @deepseek-ai/dsh plugin --profile web add dsh-better-sidebar@latest
 npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-companion"
 ```
 
-如果已经安装 `dsh-better-sidebar`，硬刷新 DSH Web 后会在它的 `+` 菜单中看到 `PANGEA` 页面。没有安装 better-sidebar 时不影响 `pangea_status`。
+硬刷新 DSH Web 后，Better Sidebar 的 `+` 菜单只会看到一个 `PANGEA` 入口；打开后顶部显示“分析”和“执行”。
 
 推荐把 DSH workspace 直接设置为 `pangea-agent` 根目录，这样 Companion 能自动发现：
 

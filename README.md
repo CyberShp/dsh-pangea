@@ -1,112 +1,106 @@
-# DSH 插件管理项目
+# dsh-pangea
 
-这个仓库用于集中存放和管理 DSH 插件。目前提供：
+这个仓库提供 PANGEA 在 DSH 中的统一工作台。远端仓库名是 `dsh-pangea`；本地克隆目录
+不需要改名，继续使用现有路径即可。
 
-- `dsh-pangea-companion`：PANGEA 在 DSH 中的伴生工作台，负责只读 Run 浏览、执行环境与 Executor 会话，以及仅对 PANGEA 工作区生效的消息唤醒策略，不执行或改写 PANGEA 分析工作流。
-- `dsh-pangea-asset-catalog`：只读扫描资料与测试自动化文件，生成非约束性目录，供外部适配层选择性读取。
-
-## 目录结构
-
-- `plugins/`：各个 DSH 插件，每个插件使用独立子目录。
-- `scripts/`：插件管理、检查和发布脚本。
-- `docs/`：项目说明和插件开发规范。
-- `templates/`：新插件可复用的基础模板。
-
-## dsh-pangea-companion
-
-`pangea-agent` 本身已经定义完整的 Contract、Graph、Worker、Review、Rework、Validation 和 Report 流程。DSH workspace 直接指向 `pangea-agent` 后，DSH 可以依据项目指令运行原生 PANGEA 流程，因此 Companion 不再维护第二套调度器。
-
-Companion 的职责固定为：
+## 结构
 
 ```text
-PANGEA = 工作流与结构化产物的唯一真相
-DSH = Agent Runtime 与交互工作台
-Companion = 只读状态 / 产物适配层 + DSH 唤醒策略
+dsh-pangea/
+├── plugins/
+│   ├── dsh-pangea/                    # 工作台基座与页面注册 API
+│   ├── dsh-pangea-companion/          # 分析与执行功能
+│   └── dsh-pangea-asset-catalog/      # 资产分析与目录生成
+├── docs/
+├── scripts/
+├── templates/
+└── README.md
 ```
 
-当前能力：
+浏览器侧的关系固定为：
 
-- 自动从 DSH workspace 发现 `pangea-data/runs/`。
-- `pangea_status` 读取当前/指定 Run 的 phase、quality、analysis 进度、风险、测试用例、证据和错误。
-- `监控` 页面合并当前 DSH Agent 状态、工具/子 Agent 活动与 PANGEA 阶段；删除原会话后，历史 Run 仍保留最小运行摘要。
-- `GET /api/pangea-companion/state` 为 Web UI 提供同源只读状态。
-- 若安装 `dsh-better-sidebar`，自动注册一个单实例 `PANGEA` Tab；未安装时不影响 Core 和工具。
-- 风险、用例和证据详情可把局部上下文加入当前 DSH 会话；风险页可拆分系统结论、勾选多条证据并执行定向核对或生成定向测试，源码按真实行号预览；完整证据文件和最终报告可在 Better Sidebar 中直接打开。
-- PANGEA 工作区的 `subagent-report` 只投递信息、不提前唤醒根 Agent；子 Agent 真正 `settled` 后再由 DSH 原生通知唤醒。其他工作区行为不变。
+```text
+dsh-better-sidebar
+        ↓
+dsh-pangea 基座（唯一 PANGEA Tab、ctx.pangea）
+        ↓
+Companion「分析 / 执行」页、Asset Catalog「资产」页
+```
+
+`dsh-better-sidebar` 继续负责通用的侧栏、编辑器、终端、文件浏览等能力。`dsh-pangea`
+只负责 PANGEA 顶层入口和功能页注册，不重复实现通用侧栏。
+
+## 插件职责
+
+### dsh-pangea
+
+- 向 Better Sidebar 注册一个单实例 `PANGEA` Tab。
+- 提供 `ctx.pangea.registerPage()`、`openPage()`、`openFile()`、`getPages()` 和
+  `subscribe()`。
+- 按会话记住当前功能页；插件卸载或热重载时自动移除对应页面。
+- 隔离单个功能页的渲染错误。
+- 不读取 Run、不扫描资产、不执行用例，也不改变 PANGEA 决策。
+
+### dsh-pangea-companion
+
+- “分析”页读取并展示 PANGEA Run、风险、用例、证据与复核结果。
+- “执行”页维护执行环境和独立 Executor 会话。
+- 提供 `pangea_status`、环境、执行和 SSH 工具。
+- 只读消费 PANGEA 分析产物，不修改分析 Run、Graph 或状态机。
+- 仅在 PANGEA 工作区调整 `subagent-report` 的唤醒时机。
 
 详细说明见 [`plugins/dsh-pangea-companion/README.md`](plugins/dsh-pangea-companion/README.md)。
 
-## dsh-pangea-asset-catalog
+### dsh-pangea-asset-catalog
 
-资产目录插件只读扫描 `pangea-data/inbox/` 和 `pangea-data/test-automation/`，在
-`pangea-data/asset-catalog/` 生成资料目录、方法论候选、自动化能力描述和解析诊断。
+- 只读扫描 `pangea-data/inbox/` 与 `pangea-data/test-automation/`。
+- 区分输入候选、语义参考、示例参考、方法论候选与自动化能力。
+- 只在用户明确生成时写入 `pangea-data/asset-catalog/`。
+- 生成结果全部是非约束性引用材料，不修改 `pangea-agent`、原始资产、Run、Graph、
+  schema、rubric 或 PASS/FAIL 决策。
 
-这些文件全部是非约束性的引用材料。插件不修改 `pangea-agent`、Run、Graph、schema、
-rubric、原始资料或自动化代码，也不参与风险、测试或 PASS/FAIL 决策。详细说明见
-[`plugins/dsh-pangea-asset-catalog/README.md`](plugins/dsh-pangea-asset-catalog/README.md)。
+详细说明见 [`plugins/dsh-pangea-asset-catalog/README.md`](plugins/dsh-pangea-asset-catalog/README.md)。
 
-## 安装 Companion
+## 安装
 
-克隆仓库并进入项目目录：
-
-```bash
-git clone https://github.com/CyberShp/dsh-pangea.git
-cd dsh-pangea
-```
-
-如果之前安装过旧版 `dsh-pangea-bridge`，先卸载：
+以下命令从仓库根目录执行。当前环境使用 Better Sidebar 0.13.1，因此这里固定版本，
+不使用 `@latest`：
 
 ```bash
-npx @deepseek-ai/dsh plugin --profile web remove dsh-pangea-bridge
-```
-
-需要侧栏结果浏览器时，安装 Better Sidebar：
-
-```bash
-npx @deepseek-ai/dsh plugin --profile web add dsh-better-sidebar@latest
-```
-
-从仓库根目录安装 Companion：
-
-```bash
+npx @deepseek-ai/dsh plugin --profile web add dsh-better-sidebar@0.13.1
+npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea"
 npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-companion"
+npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-asset-catalog"
 ```
 
-确认：
+确认安装：
 
 ```bash
 npx @deepseek-ai/dsh plugin --profile web list --depth 0
 ```
 
-应看到：
+应至少看到：
 
 ```text
+dsh-better-sidebar
+dsh-pangea
 dsh-pangea-companion
+dsh-pangea-asset-catalog
 ```
 
-推荐把 DSH workspace 直接设置到 `pangea-agent` 根目录。Companion 会自动发现：
-
-```text
-pangea-agent/
-└── pangea-data/
-    └── runs/
-```
-
-## dsh-better-sidebar
-
-Companion 不强依赖 `dsh-better-sidebar`。如果已安装该插件，PANGEA Cockpit 会通过它公开的 `ctx.betterSidebar.registerTab()` 服务注册为原生侧边栏 Tab。
-
-没有安装 better-sidebar 时，Companion 仍然保留 Host Reader 和 `pangea_status` 能力。
-
-## 启动 DSH Web
+启动或重启 DSH Web 后硬刷新页面：
 
 ```bash
 npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080
 ```
 
-## 开发与验证
+Better Sidebar 的 `+` 菜单只会出现一个 `PANGEA` 入口。打开后，顶部会按已安装插件
+显示“分析”“执行”“资产”。缺少某个功能插件时只隐藏对应页面，不影响其他页面。
+
+## 开发验证
 
 ```bash
-cd plugins/dsh-pangea-companion
-npm test
+cd plugins/dsh-pangea && npm test
+cd ../dsh-pangea-companion && npm test
+cd ../dsh-pangea-asset-catalog && npm test
 ```

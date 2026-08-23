@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
-    const inject = ['betterSidebar']
+    const inject = ['pangea']
     const API_PATH = '/api/pangea-asset-catalog/state'
     const ROLES = [
       ['input_candidate', '输入候选'],
@@ -131,9 +131,13 @@ window.__ModuleLoader__.load({
       h('path', { d: 'M4 5.5h6l2 2H20v11H4z' }), h('path', { d: 'M8 12h8M8 15h6' }))
 
     function apply(ctx) {
-      const betterSidebar = ctx.betterSidebar
-      if (!betterSidebar) return
-      ctx.effect(() => betterSidebar.registerTab({ id: 'dsh-pangea-asset-catalog:assets', title: () => '资产目录', icon, order: 58, single: true, component: props => h(CatalogPanel, props) }), 'dsh-pangea-asset-catalog: better-sidebar tab')
+      const pangea = ctx.pangea
+      if (!pangea) return
+      ctx.effect(() => pangea.registerPage({
+        id: 'asset-catalog', title: () => '资产', icon, order: 30,
+        available: (_ctx, scope) => Boolean(scope?.cwd),
+        component: props => h(CatalogPanel, props),
+      }), 'dsh-pangea-asset-catalog: asset page')
     }
 
     exports.inject = inject

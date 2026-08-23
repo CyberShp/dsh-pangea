@@ -19,11 +19,11 @@ function fakeReact() {
   }
 }
 
-test('better-sidebar client registers one PANGEA single tab and exposes Chinese health/navigation affordances', async () => {
+test('PANGEA client registers separate analysis and execution pages and exposes Chinese health/navigation affordances', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /总览/)
-  assert.match(source, /React\.useState\(\{ type: 'overview' \}\)/)
-  assert.match(source, /repeat\(6, minmax\(0, 1fr\)\)/)
+  assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
+  assert.match(source, /repeat\(5, minmax\(0, 1fr\)\)/)
   assert.doesNotMatch(source, /\['monitor', '监控'\]/)
   assert.doesNotMatch(source, /if \(screen\.type === 'monitor'\) body = renderMonitor/)
   assert.match(source, /风险/)
@@ -69,16 +69,16 @@ test('better-sidebar client registers one PANGEA single tab and exposes Chinese 
   }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
 
-  assert.deepEqual(Array.from(exported.inject), ['betterSidebar'])
-  const tabs = []
+  assert.deepEqual(Array.from(exported.inject), ['pangea'])
+  const pages = []
   exported.apply({
-    betterSidebar: { registerTab(tab) { tabs.push(tab); return () => {} } },
+    pangea: { registerPage(page) { pages.push(page); return () => {} } },
     effect(factory) { return factory() },
   })
-  assert.equal(tabs.length, 1)
-  assert.equal(tabs[0].id, 'dsh-pangea-companion:pangea')
-  assert.equal(tabs[0].single, true)
-  assert.equal(tabs[0].title(), 'PANGEA')
+  assert.equal(pages.length, 2)
+  assert.deepEqual(pages.map(page => page.id), ['companion-analysis', 'companion-execution'])
+  assert.deepEqual(pages.map(page => page.title()), ['分析', '执行'])
+  assert.deepEqual(pages.map(page => page.order), [10, 20])
 })
 
 test('client builds focused discussion drafts, appends them to the active DSH composer, and resolves evidence paths', async () => {

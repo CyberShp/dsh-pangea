@@ -38,7 +38,7 @@ pangea-data/asset-catalog/
 
 ## DSH 使用
 
-安装 Better Sidebar 后，插件注册一个单实例“资产目录”页面。页面可以：
+安装 `dsh-pangea` 基座后，插件会在统一 PANGEA 工作台中注册“资产”页面。页面可以：
 
 - 查看实时扫描预览；
 - 明确生成目录文件；
@@ -52,6 +52,7 @@ pangea-data/asset-catalog/
 从仓库根目录执行：
 
 ```bash
+npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea"
 npx @deepseek-ai/dsh plugin --profile web add "$PWD/plugins/dsh-pangea-asset-catalog"
 ```
 
