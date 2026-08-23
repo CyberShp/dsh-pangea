@@ -1,6 +1,8 @@
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
+import { NORMALIZABLE_SUFFIXES, normalizeDocument } from './normalize.js'
+
 const OUTPUT_DIR = 'asset-catalog'
 const MAX_TEXT_BYTES = 1024 * 1024
 const MAX_FILES = 5000
@@ -8,7 +10,7 @@ const TEXT_SUFFIXES = new Set([
   '.md', '.txt', '.json', '.yaml', '.yml', '.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx',
   '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd', '.lua', '.toml', '.ini', '.cfg', '.conf',
 ])
-const DISCOVERABLE_SUFFIXES = new Set([...TEXT_SUFFIXES, '.pdf', '.docx', '.xlsx'])
+const DISCOVERABLE_SUFFIXES = new Set([...TEXT_SUFFIXES, ...NORMALIZABLE_SUFFIXES])
 const IGNORED_PARTS = new Set(['.git', 'node_modules', '__pycache__', 'build', 'dist', '.pangea', OUTPUT_DIR])
 const ALLOWED_ROLES = new Set([
   'input_candidate', 'semantic_reference', 'example_reference', 'methodology_candidate',
@@ -43,7 +45,7 @@ function lineRecords(text) {
 function firstSummary(lines) {
   for (const line of lines) {
     const value = line.text.trim()
-    if (!value || value.startsWith('#')) continue
+    if (!value || value.startsWith('#') || value.startsWith('<!--')) continue
     return value.replace(/^[-*]\s+/, '').slice(0, 240)
   }
   return ''
@@ -178,6 +180,14 @@ async function readAssetText(absolute) {
   return { status: 'parsed', size_bytes: info.size, text: buffer.toString('utf8') }
 }
 
+async function readAssetContent({ absolute, relative, assetId, group }) {
+  const suffix = path.extname(absolute).toLowerCase()
+  if (group === 'inbox' && NORMALIZABLE_SUFFIXES.has(suffix)) {
+    return normalizeDocument({ absolute, relative, assetId })
+  }
+  return readAssetText(absolute)
+}
+
 async function pathKind(value) {
   try { return (await stat(value)).isDirectory() ? 'directory' : 'other' } catch { return 'missing' }
 }
@@ -208,7 +218,7 @@ async function loadOverrides(outputRoot) {
   } catch { return {} }
 }
 
-async function scanGroup({ root, dataRoot, group, overrides, diagnostics }) {
+async function scanGroup({ root, dataRoot, group, overrides, diagnostics, includeNormalizedContent }) {
   if (await pathKind(root) !== 'directory') {
     diagnostics.push({ severity: 'info', kind: 'missing_input_directory', path: path.relative(dataRoot, root).split(path.sep).join('/') })
     return []
@@ -225,13 +235,24 @@ async function scanGroup({ root, dataRoot, group, overrides, diagnostics }) {
     while (usedIds.has(id)) id = `${baseId}-${suffix++}`
     usedIds.add(id)
     let record
-    try { record = await readAssetText(absolute) } catch (error) {
+    try { record = await readAssetContent({ absolute, relative, assetId: id, group }) } catch (error) {
       diagnostics.push({ severity: 'warning', kind: 'read_failed', path: relative, error: error instanceof Error ? error.message : String(error) })
       continue
     }
-    if (record.status !== 'parsed') diagnostics.push({ severity: 'warning', kind: 'content_not_parsed', path: relative, parse_status: record.status })
+    if (record.status !== 'parsed') {
+      diagnostics.push({
+        severity: record.status === 'parsed_with_warnings' ? 'info' : 'warning',
+        kind: record.status === 'parsed_with_warnings' ? 'content_parsed_with_warnings' : 'content_not_parsed',
+        path: relative,
+        parse_status: record.status,
+        ...(record.normalization?.error_code ? { error_code: record.normalization.error_code } : {}),
+        ...(record.normalization?.error ? { error: record.normalization.error } : {}),
+        ...(record.normalization?.warnings?.length ? { warnings: record.normalization.warnings } : {}),
+      })
+    }
+    const analysisPath = record.normalization?.markdown_path ?? relative
     const analysis = group === 'inbox'
-      ? materialAnalysis(relative, record.text, overrides[id])
+      ? materialAnalysis(analysisPath, record.text, overrides[id])
       : automationAnalysis(relative, record.text, overrides[id])
     assets.push({
       asset_id: id,
@@ -240,6 +261,8 @@ async function scanGroup({ root, dataRoot, group, overrides, diagnostics }) {
       file_type: path.extname(relative).replace(/^\./, '').toLowerCase(),
       parse_status: record.status,
       size_bytes: record.size_bytes,
+      ...(record.normalization ? { normalization: record.normalization } : {}),
+      ...(includeNormalizedContent && record.normalization && record.text ? { _normalized_markdown: record.text } : {}),
       non_binding: true,
       ...analysis,
     })
@@ -247,13 +270,13 @@ async function scanGroup({ root, dataRoot, group, overrides, diagnostics }) {
   return assets
 }
 
-export async function scanAssets({ cwd, dataRoot } = {}) {
+export async function scanAssets({ cwd, dataRoot, includeNormalizedContent = false } = {}) {
   const resolvedDataRoot = await discoverDataRoot(cwd, dataRoot)
   const outputRoot = path.join(resolvedDataRoot, OUTPUT_DIR)
   const overrides = await loadOverrides(outputRoot)
   const diagnostics = []
-  const materials = await scanGroup({ root: path.join(resolvedDataRoot, 'inbox'), dataRoot: resolvedDataRoot, group: 'inbox', overrides, diagnostics })
-  const automations = await scanGroup({ root: path.join(resolvedDataRoot, 'test-automation'), dataRoot: resolvedDataRoot, group: 'test-automation', overrides, diagnostics })
+  const materials = await scanGroup({ root: path.join(resolvedDataRoot, 'inbox'), dataRoot: resolvedDataRoot, group: 'inbox', overrides, diagnostics, includeNormalizedContent })
+  const automations = await scanGroup({ root: path.join(resolvedDataRoot, 'test-automation'), dataRoot: resolvedDataRoot, group: 'test-automation', overrides, diagnostics, includeNormalizedContent })
   const assets = [...materials, ...automations]
   const methodologyCandidates = materials
     .filter(asset => asset.suggested_roles.includes('methodology_candidate'))
@@ -290,6 +313,9 @@ export async function scanAssets({ cwd, dataRoot } = {}) {
     materials: materials.length,
     automations: automations.length,
     methodology_candidates: methodologyCandidates.length,
+    normalizable_documents: materials.filter(asset => asset.normalization).length,
+    normalized_documents: materials.filter(asset => asset.normalization?.status === 'converted' || asset.normalization?.status === 'converted_with_warnings').length,
+    normalization_failures: materials.filter(asset => asset.normalization?.status === 'failed' || asset.normalization?.status === 'too_large').length,
     diagnostics: diagnostics.length,
     unclassified: assets.filter(asset => asset.suggested_roles.includes('unclassified')).length,
   }
@@ -316,6 +342,13 @@ async function writeJsonAtomic(destination, value) {
   await rename(temporary, destination)
 }
 
+async function writeTextAtomic(destination, value) {
+  await mkdir(path.dirname(destination), { recursive: true })
+  const temporary = `${destination}.tmp-${process.pid}`
+  await writeFile(temporary, `${value.trim()}\n`, 'utf8')
+  await rename(temporary, destination)
+}
+
 async function removeStaleMaterialFiles(directory, expectedNames) {
   let entries
   try { entries = await readdir(directory, { withFileTypes: true }) } catch { return }
@@ -325,11 +358,29 @@ async function removeStaleMaterialFiles(directory, expectedNames) {
   }
 }
 
+
+async function removeStaleNormalizedFiles(directory, expectedNames) {
+  let entries
+  try { entries = await readdir(directory, { withFileTypes: true }) } catch { return }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.md') || expectedNames.has(entry.name)) continue
+    await unlink(path.join(directory, entry.name))
+  }
+}
+
+function publicAsset(asset) {
+  const { _normalized_markdown: _ignored, ...value } = asset
+  return value
+}
+
 export async function generateCatalog(options = {}) {
-  const snapshot = await scanAssets(options)
+  const snapshot = await scanAssets({ ...options, includeNormalizedContent: true })
   const outputRoot = snapshot.output_root
   const materialRoot = path.join(outputRoot, 'materials')
+  const normalizedRoot = path.join(outputRoot, 'normalized')
   await mkdir(materialRoot, { recursive: true })
+  await mkdir(normalizedRoot, { recursive: true })
+  const assets = snapshot.assets.map(publicAsset)
   const catalog = {
     schema_version: snapshot.schema_version,
     generator: snapshot.generator,
@@ -337,19 +388,36 @@ export async function generateCatalog(options = {}) {
     generated_files_are_non_binding: true,
     data_root: snapshot.data_root,
     counts: snapshot.counts,
-    assets: snapshot.assets.map(asset => ({
+    assets: assets.map(asset => ({
       asset_id: asset.asset_id,
       source_path: asset.source_path,
       source_group: asset.source_group,
       file_type: asset.file_type,
       parse_status: asset.parse_status,
       size_bytes: asset.size_bytes,
+      ...(asset.normalization ? { normalization: asset.normalization } : {}),
       kind: asset.kind,
       suggested_roles: asset.suggested_roles,
       suggestion_source: asset.suggestion_source,
       non_binding: true,
     })),
   }
+  const expectedNames = new Set()
+  const expectedNormalizedNames = new Set()
+  for (const asset of snapshot.assets.filter(item => item.source_group === 'inbox')) {
+    const name = `${asset.asset_id}.json`
+    expectedNames.add(name)
+    await writeJsonAtomic(path.join(materialRoot, name), {
+      schema_version: '1.0', generated_at: snapshot.generated_at, non_binding: true, ...publicAsset(asset),
+    })
+    if (asset._normalized_markdown && asset.normalization?.markdown_path) {
+      const markdownName = path.basename(asset.normalization.markdown_path)
+      expectedNormalizedNames.add(markdownName)
+      await writeTextAtomic(path.join(normalizedRoot, markdownName), asset._normalized_markdown)
+    }
+  }
+  await removeStaleMaterialFiles(materialRoot, expectedNames)
+  await removeStaleNormalizedFiles(normalizedRoot, expectedNormalizedNames)
   await writeJsonAtomic(path.join(outputRoot, 'catalog.json'), catalog)
   await writeJsonAtomic(path.join(outputRoot, 'methodology-candidates.json'), {
     schema_version: '1.0', generated_at: snapshot.generated_at, non_binding: true, candidates: snapshot.methodology_candidates,
@@ -360,16 +428,7 @@ export async function generateCatalog(options = {}) {
   await writeJsonAtomic(path.join(outputRoot, 'diagnostics.json'), {
     schema_version: '1.0', generated_at: snapshot.generated_at, diagnostics: snapshot.diagnostics,
   })
-  const expectedNames = new Set()
-  for (const asset of snapshot.assets.filter(item => item.source_group === 'inbox')) {
-    const name = `${asset.asset_id}.json`
-    expectedNames.add(name)
-    await writeJsonAtomic(path.join(materialRoot, name), {
-      schema_version: '1.0', generated_at: snapshot.generated_at, non_binding: true, ...asset,
-    })
-  }
-  await removeStaleMaterialFiles(materialRoot, expectedNames)
-  return snapshot
+  return { ...snapshot, assets }
 }
 
 export async function saveOverride({ cwd, dataRoot, assetId, suggestedRoles, kind } = {}) {
@@ -395,7 +454,17 @@ export async function readGeneratedState({ cwd, dataRoot } = {}) {
     const info = await stat(path.join(snapshot.output_root, 'catalog.json'))
     generated = { catalog_path: path.join(snapshot.output_root, 'catalog.json'), modified_at: info.mtime.toISOString() }
   } catch {}
-  return { ...snapshot, generated }
+  const assets = await Promise.all(snapshot.assets.map(async asset => {
+    if (!asset.normalization?.markdown_path) return asset
+    const openPath = path.join(snapshot.data_root, asset.normalization.markdown_path)
+    try {
+      const info = await stat(openPath)
+      return { ...asset, normalization: { ...asset.normalization, persisted: true, open_path: openPath, modified_at: info.mtime.toISOString() } }
+    } catch {
+      return { ...asset, normalization: { ...asset.normalization, persisted: false } }
+    }
+  }))
+  return { ...snapshot, assets, generated }
 }
 
 export { ALLOWED_ROLES }

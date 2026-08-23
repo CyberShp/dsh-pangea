@@ -59,6 +59,7 @@ function renderGenerated(value) {
     `资产目录：${value.output_root}`,
     `资料：${value.counts.materials}`,
     `自动化资产：${value.counts.automations}`,
+    `已标准化文档：${value.counts.normalized_documents}`,
     `方法论候选：${value.counts.methodology_candidates}`,
     `诊断：${value.counts.diagnostics}`,
     '说明：生成结果仅供引用，不修改或约束 PANGEA 决策。',
@@ -69,7 +70,7 @@ function renderGenerated(value) {
 export function apply(ctx) {
   ctx.tools.register({
     name: 'pangea_asset_catalog_generate',
-    description: '只读扫描当前工作区的 pangea-data/inbox 与 pangea-data/test-automation，生成非约束性的资产目录、方法论候选和自动化能力文件；不修改 PANGEA、Run 或原始资产。',
+    description: '只读扫描当前工作区的 pangea-data/inbox 与 pangea-data/test-automation，把 inbox 中的 DOCX、PDF、XLSX 转成可引用的 Markdown，并生成非约束性的资产目录；不修改 PANGEA、Run 或原始资产。',
     parameters: {
       type: 'object',
       additionalProperties: false,

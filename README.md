@@ -55,6 +55,8 @@ Better Sidebar 继续负责通用侧栏、编辑器、终端、文件浏览等�
 ### dsh-pangea-asset-catalog
 
 - 只读扫描 `pangea-data/inbox/` 与 `pangea-data/test-automation/`。
+- 把 `inbox/` 中的 DOCX、PDF、XLSX 转成带来源位置的 Markdown，写入
+  `pangea-data/asset-catalog/normalized/`，不覆盖原文件。
 - 区分输入候选、语义参考、示例参考、方法论候选与自动化能力。
 - 只在用户明确生成时写入 `pangea-data/asset-catalog/`。
 - 生成结果全部是非约束性引用材料，不修改 `pangea-agent`、原始资产、Run、Graph、

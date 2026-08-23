@@ -50,7 +50,7 @@ window.__ModuleLoader__.load({
       success: { borderColor: 'var(--dsw-alias-state-success-secondary, #4fb8a8)' },
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '6px 9px', cursor: 'pointer', fontSize: 10 },
       primary: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', fontWeight: 700 },
-      metrics: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 7, marginBottom: 11 },
+      metrics: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 7, marginBottom: 11 },
       metric: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 8, padding: 9, background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))' },
       number: { fontSize: 18, fontWeight: 760 },
       label: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, marginTop: 3 },
@@ -66,7 +66,16 @@ window.__ModuleLoader__.load({
       empty: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 11, lineHeight: 1.6 },
     }
 
-    function CatalogPanel({ scope, visible }) {
+    function normalizationText(asset) {
+      const value = asset.normalization
+      if (!value) return ''
+      if (value.status === 'failed' || value.status === 'too_large') return `转换失败：${value.error ?? value.error_code ?? '无法读取文档'}`
+      if (value.persisted) return `已生成 Markdown：${value.markdown_path}`
+      if (value.status === 'converted_with_warnings') return `可转换为 Markdown，但有诊断：${value.warnings?.join('；') ?? '部分内容可能缺失'}`
+      return `可转换为 Markdown：${value.markdown_path}`
+    }
+
+    function CatalogPanel({ scope, visible, ctx }) {
       const cwd = scope?.cwd
       const [state, setState] = React.useState(undefined)
       const [error, setError] = React.useState('')
@@ -112,11 +121,12 @@ window.__ModuleLoader__.load({
           error ? h('div', { style: { ...styles.card, ...styles.error }, role: 'alert' }, h('div', { style: styles.summary }, error), h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load() } }, '重试')) : null,
           state ? h(React.Fragment, null,
             h('div', { style: styles.metrics },
-              [['资料', state.counts.materials], ['自动化', state.counts.automations], ['待处理', state.counts.diagnostics]].map(([label, value]) => h('div', { key: label, style: styles.metric }, h('div', { style: styles.number }, value), h('div', { style: styles.label }, label)))),
+              [['资料', state.counts.materials], ['自动化', state.counts.automations], ['已标准化', state.counts.normalized_documents], ['待处理', state.counts.diagnostics]].map(([label, value]) => h('div', { key: label, style: styles.metric }, h('div', { style: styles.number }, value), h('div', { style: styles.label }, label)))),
             h('div', { style: styles.filters }, [['all', '全部'], ...ROLES].map(([role, label]) => h('button', { key: role, type: 'button', style: { ...styles.filter, ...(filter === role ? styles.filterActive : {}) }, onClick: () => setFilter(role) }, label))),
             filtered.length ? filtered.map(asset => h('div', { key: asset.asset_id, style: styles.card },
               h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, asset.source_path), h('span', { style: styles.chip }, asset.kind)),
               h('div', { style: styles.meta }, `${asset.parse_status} · ${asset.suggestion_source === 'user_override' ? '人工修正' : '插件建议'} · 非约束性`),
+              asset.normalization ? h('div', { style: styles.meta }, normalizationText(asset), asset.normalization.persisted && asset.normalization.open_path ? h('button', { type: 'button', style: { ...styles.button, marginLeft: 7, padding: '3px 6px' }, onClick: () => ctx.pangea.openFile(scope, asset.normalization.open_path, `${asset.source_path} · Markdown`) }, '打开 Markdown') : null) : null,
               asset.summary ? h('div', { style: styles.summary }, asset.summary) : null,
               h('div', { style: styles.chips }, asset.suggested_roles.map(role => h('span', { key: role, style: styles.chip }, ROLE_LABELS[role] ?? role))),
               h('div', { style: { ...styles.row, marginTop: 9 } },
