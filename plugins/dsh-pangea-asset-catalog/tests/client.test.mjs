@@ -25,6 +25,7 @@ test('registers one asset catalog page and keeps the boundary visible', async ()
   assert.match(source, /提取历史问题/)
   assert.match(source, /修正后确认/)
   assert.match(source, /生成方法论候选/)
+  assert.match(source, /打开分析会话/)
   assert.match(source, /不修改 PANGEA、Run、原始资产或任何分析决策/)
   assert.match(source, /方法论候选/)
   assert.match(source, /自动化能力/)
@@ -42,7 +43,7 @@ test('registers one asset catalog page and keeps the boundary visible', async ()
     },
   }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
-  assert.deepEqual(Array.from(exported.inject), ['pangea'])
+  assert.deepEqual(Array.from(exported.inject), ['pangea', 'sessions'])
   const pages = []
   exported.apply({
     pangea: { registerPage(page) { pages.push(page); return () => {} } },
@@ -52,6 +53,26 @@ test('registers one asset catalog page and keeps the boundary visible', async ()
   assert.equal(pages[0].id, 'assets')
   assert.equal(pages[0].title(), '资产')
   assert.equal(pages[0].order, 30)
+})
+
+test('opens a created analysis session after it is visible in the DSH session list', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, AbortController, console, setTimeout, clearTimeout, fetch: async () => { throw new Error('default fetch must not run') } }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(() => fakeReact()) } } }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+
+  const opened = []
+  const sessions = {
+    list: {
+      getSnapshot() { return { byId: { 'session-1': { id: 'session-1' } } } },
+      subscribe() { throw new Error('already visible sessions should open immediately') },
+    },
+    open(id) { opened.push(id) },
+  }
+  await exported.openAnalysisSession(sessions, 'session-1')
+  assert.deepEqual(opened, ['session-1'])
+  assert.equal(exported.analysisSessionId({ result: { model_session_id: 'session-2' } }), 'session-2')
 })
 
 test('client requests preview and explicit generation separately', async () => {

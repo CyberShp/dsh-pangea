@@ -26,15 +26,30 @@ async function fixture() {
   return { root, dataRoot, sourcePath, asset: snapshot.assets[0] }
 }
 
-function fakeApi() {
+function fakeApi(workspacePath) {
   const prompts = []
   const titles = []
+  const created = []
   let next = 1
   return {
     prompts,
     titles,
+    created,
+    workspace: {
+      async list() {
+        return {
+          result: {
+            ok: true,
+            value: {
+              items: [{ workspaceId: 'workspace-1', path: workspacePath, title: 'fixture', sessionIds: [], createdAt: '', updatedAt: '' }],
+              archivedSessionIds: [],
+            },
+          },
+        }
+      },
+    },
     sessions: {
-      async create() { return { result: { ok: true, value: { sessionId: `session-${next++}` } } } },
+      async create(value) { created.push(value.payload); return { result: { ok: true, value: { sessionId: `session-${next++}` } } } },
       async rename(value) { titles.push(value.payload); return { result: { ok: true, value: {} } } },
       async prompt(value) { prompts.push(value.payload); return { result: { ok: true, value: { accepted: true } } } },
     },
@@ -71,10 +86,11 @@ test('bundled extraction skills are explicit-only and carry their submission con
 test('runs one-asset extraction, rejects ungrounded evidence, and preserves source files', async () => {
   const value = await fixture()
   const before = await readFile(value.sourcePath, 'utf8')
-  const api = fakeApi()
+  const api = fakeApi(value.root)
   const runtime = new AssetExtractionRuntime(api)
-  const launched = await runtime.startHistoricalIssues({ dataRoot: value.dataRoot, assetId: value.asset.asset_id })
+  const launched = await runtime.startHistoricalIssues({ cwd: value.root, dataRoot: value.dataRoot, assetId: value.asset.asset_id })
   assert.equal(launched.session_id, 'session-1')
+  assert.deepEqual(api.created[0], { workspaceId: 'workspace-1' })
   assert.match(api.prompts[0].content[0].text, /^\/pangea-extract-historical-issues\n/)
   assert.match(api.prompts[0].content[0].text, new RegExp(value.asset.asset_id))
   const exec = { agent: { session: { id: launched.session_id } } }
@@ -103,9 +119,9 @@ test('runs one-asset extraction, rejects ungrounded evidence, and preserves sour
 
 test('stores reviews separately and derives methodology only from confirmed issues', async () => {
   const value = await fixture()
-  const api = fakeApi()
+  const api = fakeApi(value.root)
   const runtime = new AssetExtractionRuntime(api)
-  const launched = await runtime.startHistoricalIssues({ dataRoot: value.dataRoot, assetId: value.asset.asset_id })
+  const launched = await runtime.startHistoricalIssues({ cwd: value.root, dataRoot: value.dataRoot, assetId: value.asset.asset_id })
   const extraction = await runtime.submitHistoricalIssues({
     asset_id: value.asset.asset_id,
     issues: [issue('During reconnect, cleanup timed out and state leaked to a peer instance.')],
@@ -120,8 +136,9 @@ test('stores reviews separately and derives methodology only from confirmed issu
   assert.equal(confirmed.length, 1)
   assert.equal(confirmed[0].title, 'Confirmed reconnect cleanup leak')
 
-  const methodJob = await runtime.startMethodology({ dataRoot: value.dataRoot })
+  const methodJob = await runtime.startMethodology({ cwd: value.root, dataRoot: value.dataRoot })
   assert.equal(methodJob.session_id, 'session-2')
+  assert.deepEqual(api.created[1], { workspaceId: 'workspace-1' })
   assert.match(api.prompts[1].content[0].text, /^\/pangea-derive-methodology-candidates\n/)
   assert.match(api.prompts[1].content[0].text, /confirmed_issue_count: 1/)
   const candidate = {
@@ -144,8 +161,8 @@ test('stores reviews separately and derives methodology only from confirmed issu
 
 test('marks a model job failed when its DSH turn ends without a validated submission', async () => {
   const value = await fixture()
-  const runtime = new AssetExtractionRuntime(fakeApi())
-  const launched = await runtime.startHistoricalIssues({ dataRoot: value.dataRoot, assetId: value.asset.asset_id })
+  const runtime = new AssetExtractionRuntime(fakeApi(value.root))
+  const launched = await runtime.startHistoricalIssues({ cwd: value.root, dataRoot: value.dataRoot, assetId: value.asset.asset_id })
   const agent = { session: { id: launched.session_id } }
   runtime.handleAgentStatus(agent, 'running')
   runtime.handleAgentStatus(agent, 'idle')

@@ -245,7 +245,16 @@ export class AssetExtractionRuntime {
   }
 
   async createSession(cwd, title) {
-    const created = await this.api.sessions.create(request({ cwd }))
+    const resolvedCwd = path.resolve(cwd)
+    let createPayload = { cwd: resolvedCwd }
+    if (this.api.workspace?.list) {
+      const listed = await this.api.workspace.list(request({}))
+      if (!listed.result.ok) throw apiFailure(listed.result.error)
+      const workspace = listed.result.value.items.find(item => path.resolve(item.path) === resolvedCwd)
+      if (!workspace) throw new Error(`current DSH workspace is not registered: ${resolvedCwd}`)
+      createPayload = { workspaceId: workspace.workspaceId }
+    }
+    const created = await this.api.sessions.create(request(createPayload))
     if (!created.result.ok) throw apiFailure(created.result.error)
     const sessionId = created.result.value.sessionId
     const renamed = await this.api.sessions.rename(request({ sessionId, title }))
@@ -270,7 +279,8 @@ export class AssetExtractionRuntime {
 
   async startHistoricalIssues({ cwd, dataRoot, assetId }) {
     const prepared = await prepareAsset({ cwd, dataRoot, assetId })
-    const sessionId = await this.createSession(prepared.snapshot.data_root, `资产提取 · ${prepared.asset.source_path}`)
+    const sessionCwd = cwd ? path.resolve(cwd) : prepared.snapshot.data_root
+    const sessionId = await this.createSession(sessionCwd, `资产提取 · ${prepared.asset.source_path}`)
     const job = {
       kind: 'historical_issues', status: 'queued', started: false, sessionId,
       startedAt: new Date().toISOString(), dataRoot: prepared.snapshot.data_root,
@@ -293,7 +303,8 @@ export class AssetExtractionRuntime {
     const resolvedDataRoot = await discoverDataRoot(cwd, dataRoot)
     const confirmed = await loadConfirmedIssues(resolvedDataRoot)
     if (confirmed.length === 0) throw new Error('no confirmed historical issues are available')
-    const sessionId = await this.createSession(resolvedDataRoot, `方法论候选 · ${confirmed.length} 条已确认问题`)
+    const sessionCwd = cwd ? path.resolve(cwd) : resolvedDataRoot
+    const sessionId = await this.createSession(sessionCwd, `方法论候选 · ${confirmed.length} 条已确认问题`)
     const inputPath = path.join(resolvedDataRoot, OUTPUT_DIR, '.model-input', `${sessionId}.json`)
     await writeJsonAtomic(inputPath, { schema_version: '1.0', confirmed_issues: confirmed })
     const job = {

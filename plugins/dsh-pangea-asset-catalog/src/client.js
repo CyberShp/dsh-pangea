@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
-    const inject = ['pangea']
+    const inject = ['pangea', 'sessions']
     const API_PATH = '/api/pangea-asset-catalog/state'
     const ROLES = [
       ['input_candidate', '输入候选'],
@@ -35,6 +35,33 @@ window.__ModuleLoader__.load({
       const value = await response.json()
       if (!response.ok || value.status !== 'ok') throw new Error(value.error ?? `HTTP ${response.status}`)
       return value
+    }
+
+    function analysisSessionId(value) {
+      return value?.job?.session_id ?? value?.result?.model_session_id ?? ''
+    }
+
+    async function openAnalysisSession(sessions, sessionId, timeoutMs = 5000) {
+      if (!sessionId) throw new Error('没有可打开的分析会话。')
+      const available = () => Boolean(sessions.list.getSnapshot().byId?.[sessionId])
+      if (!available()) {
+        await new Promise((resolve, reject) => {
+          let unsubscribe = () => {}
+          const timer = setTimeout(() => {
+            unsubscribe()
+            reject(new Error('分析会话尚未同步到侧边栏，请稍后重试。'))
+          }, timeoutMs)
+          const check = () => {
+            if (!available()) return
+            clearTimeout(timer)
+            unsubscribe()
+            resolve()
+          }
+          unsubscribe = sessions.list.subscribe(check)
+          check()
+        })
+      }
+      sessions.open(sessionId)
     }
 
     const styles = {
@@ -185,6 +212,12 @@ window.__ModuleLoader__.load({
         })
       }
 
+      async function openSession(sessionId) {
+        setError('')
+        try { await openAnalysisSession(ctx.sessions, sessionId) }
+        catch (value) { setError(value instanceof Error ? value.message : String(value)) }
+      }
+
       if (!cwd) return h('div', { style: styles.root }, h('div', { style: styles.content }, h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 DSH 页面没有可用工作区。'))))
       const assets = state?.assets ?? []
       const filtered = filter === 'all' ? assets : assets.filter(asset => asset.suggested_roles?.includes(filter))
@@ -202,7 +235,9 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.card },
               h('div', { style: styles.row },
                 h('div', null, h('div', { style: styles.itemTitle }, '已确认历史问题 → 方法论候选'), h('div', { style: styles.meta }, `已确认 ${state.historical_issue_reviews?.confirmed ?? 0} 条 · 已排除 ${state.historical_issue_reviews?.excluded ?? 0} 条`)),
-                h('button', { type: 'button', disabled: busy || modelBusy || !state.methodology_generation?.available, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('derive_methodology') } }, state.methodology_generation?.job && ['queued', 'running'].includes(state.methodology_generation.job.status) ? '生成中…' : '生成方法论候选')),
+                h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
+                  analysisSessionId(state.methodology_generation) ? h('button', { type: 'button', style: styles.button, onClick: () => { void openSession(analysisSessionId(state.methodology_generation)) } }, '打开分析会话') : null,
+                  h('button', { type: 'button', disabled: busy || modelBusy || !state.methodology_generation?.available, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('derive_methodology') } }, state.methodology_generation?.job && ['queued', 'running'].includes(state.methodology_generation.job.status) ? '生成中…' : '生成方法论候选'))),
               state.methodology_generation?.job?.status === 'failed' ? h('div', { style: { ...styles.meta, color: 'var(--dsw-alias-state-error-primary, #e66767)' } }, `生成失败：${state.methodology_generation.job.error}`) : null,
               state.methodology_generation?.result ? h('div', { style: styles.meta }, `当前 ${state.methodology_generation.result.candidates?.length ?? 0} 条候选${state.methodology_generation.stale ? ' · 已确认问题发生变化，需要重新生成' : ''} · ${state.methodology_generation.output_path}`) : null),
             h('div', { style: styles.filters }, [['all', '全部'], ...ROLES].map(([role, label]) => h('button', { key: role, type: 'button', style: { ...styles.filter, ...(filter === role ? styles.filterActive : {}) }, onClick: () => setFilter(role) }, label))),
@@ -215,6 +250,7 @@ window.__ModuleLoader__.load({
                   h('div', { style: styles.meta }, extractionText(asset.historical_extraction)),
                   h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
                     asset.historical_extraction.normalized_open_path ? h('button', { type: 'button', style: styles.button, onClick: () => ctx.pangea.openFile(scope, asset.historical_extraction.normalized_open_path, `${asset.source_path} · Markdown`) }, '打开 Markdown') : null,
+                    analysisSessionId(asset.historical_extraction) ? h('button', { type: 'button', style: styles.button, onClick: () => { void openSession(analysisSessionId(asset.historical_extraction)) } }, '打开分析会话') : null,
                     h('button', { type: 'button', disabled: busy || ['queued', 'running'].includes(asset.historical_extraction.job?.status), style: styles.button, onClick: () => { void act('extract_historical_issues', { asset_id: asset.asset_id }) } }, asset.historical_extraction.result ? '重新提取' : '提取历史问题'))),
                 asset.historical_extraction.result?.issues?.map(issue => h(IssueReview, { key: issue.issue_id, asset, issue, busy, onAction: reviewIssue }))) : null,
               asset.summary ? h('div', { style: styles.summary }, asset.summary) : null,
@@ -243,6 +279,8 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     exports.requestState = requestState
     exports.requestAction = requestAction
+    exports.analysisSessionId = analysisSessionId
+    exports.openAnalysisSession = openAnalysisSession
     exports.apply = apply
     return module.exports
   },
