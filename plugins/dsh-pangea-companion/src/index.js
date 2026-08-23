@@ -1,12 +1,17 @@
 import { companionSnapshot } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
 import { createRuntimeMonitor } from './monitor.js'
+import { EnvironmentStore } from './execution/environment.js'
+import { launchExecution } from './execution/launch.js'
+import { PangeaSshRuntime } from './execution/ssh.js'
 
 export const name = 'dsh-pangea-companion'
-export const inject = ['tools', 'webServer', 'agents']
+export const inject = ['tools', 'webServer', 'agents', 'apiProxy']
 
 const API_PATH = '/api/pangea-companion/state'
 const SOURCE_API_PATH = '/api/pangea-companion/source'
+const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
+const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 
 const STATUS_PARAMETERS = {
   type: 'object',
@@ -78,6 +83,17 @@ function sameOriginBrowserRequest(req) {
   try { return new URL(origin).host === host } catch { return false }
 }
 
+async function requestJson(req) {
+  let body = ''
+  for await (const chunk of req) {
+    body += chunk.toString('utf8')
+    if (body.length > 1024 * 1024) throw new Error('request body is too large')
+  }
+  const value = JSON.parse(body || '{}')
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('request body must be an object')
+  return value
+}
+
 async function stateRouteHandler(req, res, monitor) {
   if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
@@ -108,11 +124,54 @@ function sourceRouteHandler(req, res) {
     .catch(error => json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) }))
 }
 
+async function environmentRouteHandler(req, res, store) {
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  try {
+    if (req.method === 'GET') return json(res, 200, { status: 'ok', environments: await store.list() })
+    if (req.method === 'POST') return json(res, 200, { status: 'ok', environment: await store.save(await requestJson(req)) })
+    if (req.method === 'DELETE') {
+      const url = new URL(req.url ?? ENVIRONMENT_API_PATH, 'http://localhost')
+      const id = url.searchParams.get('id')
+      if (!id) return json(res, 400, { status: 'error', error: 'id-is-required' })
+      return json(res, 200, { status: 'ok', removed: await store.remove(id) })
+    }
+    return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  } catch (error) {
+    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+async function executionRouteHandler(req, res, store, api) {
+  if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  try {
+    const input = await requestJson(req)
+    if (typeof input.analysis_run_id !== 'string' || input.analysis_run_id === '') throw new Error('analysis_run_id is required')
+    if (!Array.isArray(input.test_case_ids) || input.test_case_ids.length === 0 || input.test_case_ids.some(value => typeof value !== 'string' || value === '')) {
+      throw new Error('test_case_ids must be a non-empty string array')
+    }
+    if (typeof input.environment_id !== 'string' || input.environment_id === '') throw new Error('environment_id is required')
+    if (typeof input.data_root !== 'string' || input.data_root === '') throw new Error('data_root is required')
+    const environment = await store.get(input.environment_id)
+    if (!environment) throw new Error(`environment not found: ${input.environment_id}`)
+    const launched = await launchExecution(api, input, environment)
+    return json(res, 200, { status: 'ok', ...launched })
+  } catch (error) {
+    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+function toolOutput() {
+  return { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
+}
+
 export function apply(ctx) {
   const monitor = createRuntimeMonitor()
   const disposeMonitor = monitor.start(ctx)
+  const environments = new EnvironmentStore()
+  const ssh = new PangeaSshRuntime()
 
-  ctx.tools.register({
+  const toolDisposers = [ctx.tools.register({
     name: 'pangea_status',
     description: '只读查看当前 PANGEA Run 的阶段、质量状态、分析进度、结构化结果数量和读取健康状态；不会推进或修改 PANGEA 工作流。',
     parameters: STATUS_PARAMETERS,
@@ -120,17 +179,71 @@ export function apply(ctx) {
       return companionSnapshot({ cwd: workspaceCwd(exec), dataRoot: args.data_root, runId: args.run_id })
     },
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => renderStatus(value) },
-  })
+  }), ctx.tools.register({
+    name: 'pangea_environment_get',
+    description: '读取 PANGEA 用例执行环境，返回主机/阵列 SSH alias、自动化仓库 ID 和非秘密设备绑定。',
+    parameters: { type: 'object', additionalProperties: false, required: ['environment_id'], properties: { environment_id: { type: 'string' } } },
+    async execute(args) {
+      const environment = await environments.get(args.environment_id)
+      if (!environment) throw new Error(`environment not found: ${args.environment_id}`)
+      return environment
+    },
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_ssh_exec',
+    description: '在 DSH SSH 配置中的主机或阵列 alias 上执行一条非交互命令。',
+    parameters: { type: 'object', additionalProperties: false, required: ['alias', 'command'], properties: { alias: { type: 'string' }, command: { type: 'string' }, timeout_ms: { type: 'integer' } } },
+    execute: args => ssh.exec(args.alias, args.command, args.timeout_ms),
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_ssh_start',
+    description: '在远程 SSH alias 上启动持续运行的后台命令，返回供 read/stop 使用的 job_id。',
+    parameters: { type: 'object', additionalProperties: false, required: ['alias', 'command'], properties: { alias: { type: 'string' }, command: { type: 'string' } } },
+    execute: args => ssh.start(args.alias, args.command),
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_ssh_read',
+    description: '读取 PANGEA 后台 SSH 任务的当前输出和完成状态，可短暂等待任务结束。',
+    parameters: { type: 'object', additionalProperties: false, required: ['job_id'], properties: { job_id: { type: 'string' }, wait_ms: { type: 'integer' } } },
+    execute: args => ssh.read(args.job_id, args.wait_ms),
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_ssh_stop',
+    description: '停止 PANGEA 后台 SSH 任务并返回最后输出；用于用例清理。',
+    parameters: { type: 'object', additionalProperties: false, required: ['job_id'], properties: { job_id: { type: 'string' } } },
+    execute: args => ssh.stop(args.job_id),
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_ssh_interactive',
+    description: '在阵列 SSH PTY 中保持同一交互会话，按 send 后 expect 正则的顺序执行 diagnose/attach/dtoe 等命令。',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['alias', 'exchanges'],
+      properties: {
+        alias: { type: 'string' },
+        exchanges: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['send', 'expect'], properties: { send: { type: 'string' }, expect: { type: 'string' }, timeout_seconds: { type: 'integer' } } } },
+      },
+    },
+    execute: args => ssh.interactive(args.alias, args.exchanges),
+    output: toolOutput(),
+  })]
 
   const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
+  const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments) })
+  const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
   ctx.effect?.(() => async () => {
+    disposeExecutionRoute()
+    disposeEnvironmentRoute()
     disposeSourceRoute()
     disposeStateRoute()
+    for (const dispose of toolDisposers) dispose()
+    await ssh.dispose()
     await disposeMonitor()
-  }, 'dsh-pangea-companion: read-only state, run association, and source routes')
+  }, 'dsh-pangea-companion: state, executor environments, SSH tools, and execution launch')
 }
 
 export { companionSnapshot } from './reader.js'
 export { parseEvidenceLocation, readEvidenceSnippet, resolveEvidenceFile } from './source.js'
 export { createRuntimeMonitor, RuntimeMonitor } from './monitor.js'
+export { EnvironmentStore } from './execution/environment.js'
+export { PangeaSshRuntime } from './execution/ssh.js'

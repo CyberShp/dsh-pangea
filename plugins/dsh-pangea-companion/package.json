@@ -1,12 +1,13 @@
 {
   "name": "dsh-pangea-companion",
   "version": "0.10.0",
-  "description": "Read-only PANGEA companion for DeepSeek Harness with structured run browsing and minimal DSH run association",
+  "description": "PANGEA companion for DeepSeek Harness with analysis browsing, executor environments, host-plus-array SSH execution, and workspace-scoped report wake control",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
     "./client": "./lib/client.js",
+    "./report-policy": "./src/report-policy.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -57,8 +58,11 @@
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  },
   "scripts": {
     "build": "node scripts/build-client.mjs",
-    "test": "npm run build && node --check src/index.js && node --check src/reader.js && node --check src/source.js && node --check src/monitor.js && node --check lib/client.js && node --test tests/*.test.mjs"
+    "test": "npm run build && node --check src/index.js && node --check src/reader.js && node --check src/source.js && node --check src/monitor.js && node --check src/report-policy.js && node --check lib/client.js && node --test tests/*.test.mjs"
   }
 }

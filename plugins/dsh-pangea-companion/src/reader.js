@@ -416,10 +416,50 @@ export function chooseCurrentRun(runs) {
   return runs.find(run => !run.terminal) ?? runs[0] ?? null
 }
 
+export async function listExecutorRuns(dataRoot, { analysisRunId, limit = 20 } = {}) {
+  const root = path.join(dataRoot, 'executor-runs')
+  let entries
+  try { entries = await readdir(root, { withFileTypes: true }) } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
+  const values = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const runDirectory = path.join(root, entry.name)
+    const progressPath = path.join(runDirectory, 'progress.json')
+    try {
+      const progress = await readJson(progressPath)
+      if (analysisRunId && progress.analysis_run_id !== analysisRunId) continue
+      const planPath = path.join(runDirectory, 'agent-results', 'plan.json')
+      const resultPath = path.join(runDirectory, 'agent-results', 'execution.json')
+      const plan = await pathKind(planPath) === 'file' ? await readJson(planPath).catch(() => null) : null
+      const result = await pathKind(resultPath) === 'file' ? await readJson(resultPath).catch(() => null) : null
+      values.push({
+        executor_run_id: entry.name,
+        analysis_run_id: progress.analysis_run_id,
+        phase: progress.phase,
+        result_status: progress.result_status ?? result?.status ?? null,
+        environment_id: progress.environment_id,
+        automation_id: progress.automation_id,
+        selected_test_case_ids: progress.selected_test_case_ids ?? [],
+        unresolved: plan?.unresolved ?? [],
+        case_results: result?.cases ?? [],
+        terminal: progress.phase === 'COMPLETE' || progress.phase === 'INCOMPLETE',
+        artifacts: { run_directory: runDirectory, plan: await pathKind(planPath) === 'file' ? planPath : null, result: await pathKind(resultPath) === 'file' ? resultPath : null },
+        modified_at: await runModifiedAt(runDirectory, [progressPath, planPath, resultPath]),
+      })
+    } catch { /* corrupt executor run must not hide healthy runs */ }
+  }
+  values.sort((a, b) => b.modified_at - a.modified_at)
+  return values.slice(0, limit)
+}
+
 export async function companionSnapshot({ cwd, dataRoot, runId, limit = 20 } = {}) {
   const resolvedDataRoot = await discoverPangeaDataRoot({ cwd, dataRoot })
   const runs = await listRuns(resolvedDataRoot, { limit })
   const selected = runId !== undefined ? (runs.find(run => run.run_id === runId) ?? { run_id: runId }) : chooseCurrentRun(runs)
   const current = selected === null ? null : await summarizeRun(resolvedDataRoot, selected.run_id, { includeDetails: true, checkReport: true })
-  return { status: 'ok', data_root: resolvedDataRoot, current, runs }
+  const executorRuns = await listExecutorRuns(resolvedDataRoot, { analysisRunId: current?.run_id, limit })
+  return { status: 'ok', data_root: resolvedDataRoot, current, runs, executor_runs: executorRuns }
 }

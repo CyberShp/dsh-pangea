@@ -1,8 +1,8 @@
 # dsh-pangea-companion
 
-`dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的只读伴生工作台。
+`dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的伴生插件：查看分析结果、维护执行环境、启动独立的用例执行任务，并内置 PANGEA 工作区的子 Agent 唤醒策略。
 
-它不创建 Contract、不推进 PANGEA phase、不派发 analysis/review/rework worker，也不改写 `progress.json`、`agent-tasks/`、`agent-results/`、`final-state.json` 或报告。PANGEA 仍是唯一工作流真相；Companion 只读取 Run 状态和结构化产物，让 DSH 更容易观察、查询和浏览分析过程。
+它不推进或改写原来的 analysis/review/rework Graph。用例执行使用 `pangea-data/executor-runs/` 中的独立 Executor Run；原 `progress.json`、`final-state.json` 和报告保持不变。
 
 ## 当前能力
 
@@ -16,6 +16,11 @@
 - 只读同源接口 `GET /api/pangea-companion/state`，供 Web UI 使用。
 - 检测到 `dsh-better-sidebar` 时，注册单实例 `PANGEA` Tab。
 - `dsh-better-sidebar` 是可选 peer dependency；未安装时 Host 工具与只读 Core 仍可工作。
+- 当前 Agent 工作目录或其上级目录存在 `.agents/pangea/dsh.md` 时，`subagent-report` 静默投递，由原生 `subagent-settled` 在子 Agent 真正结束后唤醒根 Agent；其他工作区保持 DSH 默认行为。
+- 在“执行”页维护主机 alias、阵列 alias、自动化仓库 ID 和设备绑定；SSH 用户名/密码继续使用 `dsh-ssh` 的 `~/.dsh/dsh-ssh.json`。
+- 在用例列表中多选测试用例和执行环境，一键创建真实 DSH 执行会话；执行会话按独立 Executor Graph 生成计划并运行。
+- 提供 `pangea_environment_get`、`pangea_ssh_exec/start/read/stop/interactive` 工具，支持普通命令、持续 IO 后台任务和同一阵列 PTY 内的 `diagnose_usr → attach → dtoe` 交互。
+- 在当前分析 Run 下展示对应的 Executor Run、计划、结果和 `UNRESOLVED` 原因。
 
 ## 数据读取规则
 
@@ -124,17 +129,28 @@ $DSH_HOME/dsh-pangea-companion/monitor-v1.json
 依赖方向固定为：
 
 ```text
-pangea-agent  <- read only -  dsh-pangea-companion  -> optional -> dsh-better-sidebar
+pangea-agent analysis artifacts  <- read only -  dsh-pangea-companion
+pangea-agent executor Graph      <- DSH execution session follows actions
+dsh-ssh host configuration       <- aliases/passwords - Companion SSH tools
 ```
 
 禁止 Companion：
 
-- 调用 PANGEA CLI 推进 Run。
+- 调用 PANGEA CLI 推进原分析 Run。
 - 修改 `progress.json`、`final-state.json`、task/result 文件。
 - 替 PANGEA 实现 analysis/review/rework 状态机。
 - 把 DSH 或 Companion 依赖反向引入 `pangea-agent`。
 
-因此卸载 DSH 或 Companion 后，PANGEA 仍可由 OpenCode、Claude Code 或其他兼容 Agent Runtime 按原流程完整运行。
+因此卸载 DSH 或 Companion 后，PANGEA 原分析流程仍可由 OpenCode、Claude Code 或其他兼容 Agent Runtime 按原流程完整运行；仅主机加阵列的环境执行能力不可用。
+
+## 用例执行准备
+
+1. 使用 dsh-ssh 配置主机和阵列 alias，可使用密码登录。
+2. 将内部 Python 自动化仓库放到 `pangea-data/test-automation/<automation_id>/`。
+3. 在 Companion“执行”页创建环境，填写两个 alias、`automation_id` 和当前环境需要的设备绑定。
+4. 回到“用例”页勾选用例和环境，点击“一键执行”。
+
+Companion 的交互 SSH 当前支持直接连接；若 dsh-ssh alias 配置了 ProxyJump，执行前会明确报 `UNRESOLVED/EXECUTION_FAILED`，不会改用另一条连接路径。
 
 ## 在 DSH 中讨论 PANGEA 对象
 
@@ -197,4 +213,4 @@ cd plugins/dsh-pangea-companion
 npm test
 ```
 
-当前测试覆盖：运行中 worker result、返工替换、final-state 正常终态、Markdown → HTML 报告回退、报告/结构化计数不一致 fail-loud、旧 Run worker-result 兼容回退、历史 Run 摘要模式、当前会话事件采集、会话删除后的最小摘要恢复、敏感内容不落入摘要、中文工具输出、客户端请求编码/错误处理、局部讨论上下文、会话草稿插入、证据路径与行范围解析、源码片段读取、多证据选择标签、Better Sidebar 单实例注册和健康状态交互入口。
+当前测试覆盖：原分析结果读取、报告/结构化计数核对、历史 Run 摘要、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册、客户端执行入口和原有证据交互。

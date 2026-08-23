@@ -4,4 +4,4 @@
 
 ## 当前插件
 
-- `dsh-pangea-companion/`：PANGEA 只读伴生工作台；提供 Run 状态读取、`pangea_status`、可信结果导航、结论拆分、多证据定向核对与测试、带行号源码预览、局部对象与 DSH 讨论、证据/报告打开。
+- `dsh-pangea-companion/`：PANGEA 伴生插件；提供只读 Run 状态、`pangea_status`、可信结果导航、证据/报告浏览，并内置仅对 PANGEA 工作区生效的 `subagent-report` 静默投递策略。

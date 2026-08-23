@@ -1,5 +1,5 @@
-// Browser half of dsh-pangea-companion. It registers one optional tab in
-// dsh-better-sidebar and never writes PANGEA state.
+// Browser half of dsh-pangea-companion. It browses PANGEA results and starts
+// separately stored executor runs without modifying analysis state.
 window.__ModuleLoader__.load({
   id: 'dsh-pangea-companion',
   factory: (require) => {
@@ -12,6 +12,8 @@ window.__ModuleLoader__.load({
     const inject = ['betterSidebar']
     const API_PATH = '/api/pangea-companion/state'
     const SOURCE_API_PATH = '/api/pangea-companion/source'
+    const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
+    const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 
     async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
@@ -26,6 +28,38 @@ window.__ModuleLoader__.load({
     async function requestSourceSnippet({ cwd, dataRoot, location, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd, data_root: dataRoot, location })
       const response = await fetcher(`${SOURCE_API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
+    async function requestEnvironments(fetcher = fetch) {
+      const response = await fetcher(ENVIRONMENT_API_PATH, { cache: 'no-store' })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body.environments ?? []
+    }
+
+    async function saveEnvironment(environment, fetcher = fetch) {
+      const response = await fetcher(ENVIRONMENT_API_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(environment),
+      })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body.environment
+    }
+
+    async function removeEnvironment(id, fetcher = fetch) {
+      const response = await fetcher(`${ENVIRONMENT_API_PATH}?${new URLSearchParams({ id })}`, { method: 'DELETE' })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body.removed === true
+    }
+
+    async function launchExecution(input, fetcher = fetch) {
+      const response = await fetcher(EXECUTION_API_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+      })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -66,7 +100,7 @@ window.__ModuleLoader__.load({
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 10 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '7px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 700 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
-      nav: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 0, marginTop: 12 },
+      nav: { display: 'grid', gridTemplateColumns: 'repeat(6, minmax(0, 1fr))', gap: 0, marginTop: 12 },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '9px 2px 8px', cursor: 'pointer', fontSize: 10 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '14px 14px 22px' },
@@ -118,6 +152,10 @@ window.__ModuleLoader__.load({
       choiceButton: { width: '100%', textAlign: 'left', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '7px 8px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 10, lineHeight: 1.45 },
       choiceButtonActive: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
       evidenceChecks: { display: 'grid', gap: 5, marginTop: 7 },
+      formGrid: { display: 'grid', gap: 7, marginTop: 8 },
+      textarea: { width: '100%', minHeight: 86, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '7px 8px', outline: 'none', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 10 },
+      caseSelect: { display: 'flex', alignItems: 'flex-start', gap: 8 },
+      caseDetailButton: { flex: 1, minWidth: 0, border: 0, background: 'transparent', color: 'inherit', padding: 0, textAlign: 'left', cursor: 'pointer' },
       evidenceCheck: { display: 'flex', alignItems: 'flex-start', gap: 7, border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '6px 7px', cursor: 'pointer', fontSize: 10, lineHeight: 1.4 },
       evidenceCheckSelected: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
       monitorHero: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', borderRadius: 10, padding: 14, marginBottom: 12, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
@@ -307,7 +345,10 @@ window.__ModuleLoader__.load({
     }
     function stringList(title, items, ordered = false) {
       if (!Array.isArray(items) || items.length === 0) return null
-      return h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, title), h(ordered ? 'ol' : 'ul', { style: styles.list }, items.map((item, index) => h('li', { key: `${index}:${item}` }, String(item)))))
+      const display = item => item && typeof item === 'object'
+        ? `${item.action ?? JSON.stringify(item)}${item.expected_result ? ` → ${item.expected_result}` : ''}`
+        : String(item)
+      return h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, title), h(ordered ? 'ol' : 'ul', { style: styles.list }, items.map((item, index) => h('li', { key: `${index}:${display(item)}` }, display(item)))))
     }
     function chip(label, onClick) { return h('button', { type: 'button', style: styles.chip, onClick }, label) }
     function navType(screen) {
@@ -334,6 +375,11 @@ window.__ModuleLoader__.load({
       const [riskEvidenceSelection, setRiskEvidenceSelection] = React.useState({ riskKey: '', evidenceKey: '' })
       const [riskClaimSelection, setRiskClaimSelection] = React.useState({ riskKey: '', claim: '' })
       const [riskEvidenceSetSelection, setRiskEvidenceSetSelection] = React.useState({ riskKey: '', evidenceKeys: [] })
+      const [environments, setEnvironments] = React.useState([])
+      const [selectedEnvironment, setSelectedEnvironment] = React.useState('')
+      const [selectedCaseIds, setSelectedCaseIds] = React.useState([])
+      const [launching, setLaunching] = React.useState(false)
+      const [environmentForm, setEnvironmentForm] = React.useState({ id: '', name: '', host_alias: '', array_alias: '', automation_id: '', bindings: '{}' })
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const noticeTimerRef = React.useRef(undefined)
 
@@ -363,7 +409,17 @@ window.__ModuleLoader__.load({
         }
       }, [cwd, selectedRun, scope?.sessionId])
 
-      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: 'overview' }); setHistory([]) }, [cwd])
+      const loadEnvironments = React.useCallback(async () => {
+        try {
+          const values = await requestEnvironments()
+          setEnvironments(values)
+          setSelectedEnvironment(current => values.some(item => item.id === current) ? current : (values[0]?.id ?? ''))
+        } catch (reason) {
+          setActionNotice({ message: `无法读取执行环境：${reason instanceof Error ? reason.message : String(reason)}`, isError: true })
+        }
+      }, [])
+
+      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: 'overview' }); setHistory([]); setSelectedCaseIds([]) }, [cwd])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
         if (!visible) {
@@ -383,6 +439,7 @@ window.__ModuleLoader__.load({
           requestRef.current.controller?.abort()
         }
       }, [load, visible])
+      React.useEffect(() => { if (visible) void loadEnvironments() }, [visible, loadEnvironments])
 
       const current = snapshot?.current
       const monitor = snapshot?.monitor
@@ -437,6 +494,62 @@ window.__ModuleLoader__.load({
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
         setActionNotice({ message, isError })
         noticeTimerRef.current = window.setTimeout(() => setActionNotice(undefined), 2600)
+      }
+      function toggleCase(testCaseId) {
+        setSelectedCaseIds(values => values.includes(testCaseId)
+          ? values.filter(value => value !== testCaseId)
+          : [...values, testCaseId])
+      }
+      function editEnvironment(environment) {
+        setEnvironmentForm({
+          id: environment.id,
+          name: environment.name,
+          host_alias: environment.host_alias,
+          array_alias: environment.array_alias,
+          automation_id: environment.automation_id,
+          bindings: JSON.stringify(environment.bindings ?? {}, null, 2),
+        })
+        jump('execution')
+      }
+      async function submitEnvironment() {
+        try {
+          const bindings = JSON.parse(environmentForm.bindings || '{}')
+          const saved = await saveEnvironment({ ...environmentForm, bindings })
+          await loadEnvironments()
+          setSelectedEnvironment(saved.id)
+          setEnvironmentForm({ id: '', name: '', host_alias: '', array_alias: '', automation_id: '', bindings: '{}' })
+          showActionNotice(`执行环境 ${saved.name} 已保存。`)
+        } catch (reason) {
+          showActionNotice(`保存失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
+      }
+      async function deleteEnvironment(id) {
+        try {
+          await removeEnvironment(id)
+          await loadEnvironments()
+          showActionNotice('执行环境已删除。')
+        } catch (reason) {
+          showActionNotice(`删除失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
+      }
+      async function startSelectedCases() {
+        if (!current || !snapshot?.data_root || selectedCaseIds.length === 0 || !selectedEnvironment) return
+        setLaunching(true)
+        try {
+          const launched = await launchExecution({
+            workspace_id: scope?.workspaceId ?? scope?.workspace?.workspaceId,
+            analysis_run_id: current.run_id,
+            test_case_ids: selectedCaseIds,
+            environment_id: selectedEnvironment,
+            data_root: snapshot.data_root,
+          })
+          showActionNotice(`已启动执行会话：${launched.session_id}`)
+          ctx?.sessions?.open?.(launched.session_id)
+        } catch (reason) {
+          showActionNotice(`启动失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        } finally {
+          setLaunching(false)
+        }
       }
       function openSidebarFile(value, title) {
         const path = absoluteWorkspacePath(cwd, value)
@@ -554,10 +667,11 @@ window.__ModuleLoader__.load({
             : screen.type === 'cases' ? '测试用例'
               : screen.type === 'case' ? (caseById.get(screen.id)?.test_case_id || '用例详情')
                 : screen.type === 'evidence' ? '证据'
-                  : screen.type === 'evidence-detail' ? '证据详情' : '复核'
+                  : screen.type === 'evidence-detail' ? '证据详情'
+                    : screen.type === 'execution' ? '执行环境' : '复核'
 
       const navigation = h('nav', { style: styles.nav, 'aria-label': 'PANGEA 页面' }, [
-        ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],
+        ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['execution', '执行'], ['evidence', '证据'], ['review', '复核'],
       ].map(([type, label]) => h('button', {
         key: type,
         type: 'button',
@@ -569,10 +683,10 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
-            !['overview', 'risks', 'cases', 'evidence', 'review'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
+            !['overview', 'risks', 'cases', 'execution', 'evidence', 'review'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
-              h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : '只读伴生工作台'))),
+              h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : 'PANGEA 伴生工作台'))),
           h('button', {
             type: 'button',
             disabled: loading,
@@ -761,10 +875,61 @@ window.__ModuleLoader__.load({
       function renderCases() {
         const query = caseQuery.trim().toLowerCase()
         const filtered = testCases.filter(item => !query || [item.test_case_id, item.title, item.case_type, ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
+        const canLaunch = selectedCaseIds.length > 0 && selectedEnvironment && !launching && health?.trusted !== false
         return h(React.Fragment, null,
+          h('div', { style: { ...styles.card, ...styles.actionCard } },
+            h('div', { style: styles.itemTitle }, '执行选中的黑盒用例'),
+            h('div', { style: styles.itemMeta }, '点击一次后创建独立 Executor Run；计划完整时自动进入主机与阵列执行。'),
+            h('select', { style: { ...styles.search, marginTop: 8 }, value: selectedEnvironment, onChange: event => setSelectedEnvironment(event.target.value) },
+              h('option', { value: '' }, environments.length ? '选择执行环境' : '请先在“执行”页配置环境'),
+              environments.map(environment => h('option', { key: environment.id, value: environment.id }, `${environment.name} · ${environment.host_alias} + ${environment.array_alias}`))),
+            h('div', { style: styles.row },
+              h('div', { style: styles.itemMeta }, `已选 ${selectedCaseIds.length} 条`),
+              h('div', { style: styles.chips },
+                chip('选择当前列表', () => setSelectedCaseIds([...new Set([...selectedCaseIds, ...filtered.map(item => item.test_case_id)])])),
+                chip('清空', () => setSelectedCaseIds([])))),
+            h('button', { type: 'button', disabled: !canLaunch, style: { ...styles.primaryButton, marginTop: 9, ...(!canLaunch ? styles.buttonDisabled : {}) }, onClick: () => { void startSelectedCases() } }, launching ? '正在创建执行会话…' : '一键执行')),
           h('input', { style: styles.search, value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例编号、标题、类型、关联风险…', onChange: event => setCaseQuery(event.target.value) }),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${testCases.length} 条`),
-          h('div', { style: { marginTop: 7 } }, filtered.length ? filtered.map(item => h('button', { key: `${item.unit_id}:${item.test_case_id}`, type: 'button', style: { ...styles.card, ...styles.clickableCard }, onClick: () => navigate({ type: 'case', id: item.test_case_id }) }, h('div', { style: styles.itemTitle }, `${item.test_case_id || '未编号'} · ${text(item.title, '未命名用例')}`), h('div', { style: styles.itemMeta }, `${text(item.case_type, '未标注类型')} · ${item.linked_risk_ids?.length ?? 0} 条关联风险 · ${text(item.status, 'draft')}`))) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
+          h('div', { style: { marginTop: 7 } }, filtered.length ? filtered.map(item => h('div', { key: `${item.unit_id}:${item.test_case_id}`, style: styles.card },
+            h('div', { style: styles.caseSelect },
+              h('input', { type: 'checkbox', checked: selectedCaseIds.includes(item.test_case_id), 'aria-label': `选择 ${item.test_case_id}`, onChange: () => toggleCase(item.test_case_id) }),
+              h('button', { type: 'button', style: styles.caseDetailButton, onClick: () => navigate({ type: 'case', id: item.test_case_id }) },
+                h('div', { style: styles.itemTitle }, `${item.test_case_id || '未编号'} · ${text(item.title, '未命名用例')}`),
+                h('div', { style: styles.itemMeta }, `${text(item.case_type, '未标注类型')} · ${item.linked_risk_ids?.length ?? 0} 条关联风险 · ${text(item.status, 'draft')}`))))) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
+      }
+
+      function renderExecution() {
+        const executorRuns = snapshot?.executor_runs ?? []
+        const formInput = (fieldName, placeholder) => h('input', {
+          style: { ...styles.search, marginBottom: 0 }, value: environmentForm[fieldName], placeholder,
+          onChange: event => setEnvironmentForm(value => ({ ...value, [fieldName]: event.target.value })),
+        })
+        return h(React.Fragment, null,
+          h('div', { style: styles.card },
+            h('div', { style: styles.itemTitle }, `当前分析的执行记录（${executorRuns.length}）`),
+            executorRuns.length ? h('div', { style: { marginTop: 8 } }, executorRuns.map(run => h('div', { key: run.executor_run_id, style: { ...styles.card, marginBottom: 7 } },
+              h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, run.executor_run_id), h('span', { style: styles.badge }, run.result_status ?? run.phase)),
+              h('div', { style: styles.itemMeta }, `${run.selected_test_case_ids.length} 条用例 · ${run.environment_id} · ${run.automation_id}`),
+              run.unresolved?.length ? h('div', { style: { ...styles.error, marginTop: 6 } }, run.unresolved.join('；')) : null,
+              h('div', { style: styles.chips }, run.artifacts?.plan ? chip('查看执行计划', () => openSidebarFile(run.artifacts.plan, 'PANGEA executable plan')) : null, run.artifacts?.result ? chip('查看执行结果', () => openSidebarFile(run.artifacts.result, 'PANGEA execution result')) : null)))) : h('div', { style: { ...styles.empty, marginTop: 8 } }, '当前分析还没有执行记录。')),
+          h('div', { style: styles.card },
+            h('div', { style: styles.itemTitle }, '执行环境'),
+            h('div', { style: styles.itemMeta }, 'SSH 密码和主机连接仍在 dsh-ssh 中维护；这里仅保存主机/阵列 alias、自动化仓库和设备绑定。'),
+            environments.length ? h('div', { style: { marginTop: 8 } }, environments.map(environment => h('div', { key: environment.id, style: { ...styles.card, marginBottom: 7 } },
+              h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, environment.name), h('span', { style: styles.badge }, environment.id)),
+              h('div', { style: styles.itemMeta }, `主机 ${environment.host_alias} · 阵列 ${environment.array_alias} · 自动化 ${environment.automation_id}`),
+              h('div', { style: styles.chips }, chip('编辑', () => editEnvironment(environment)), chip('删除', () => { void deleteEnvironment(environment.id) }))))) : h('div', { style: { ...styles.empty, marginTop: 8 } }, '还没有执行环境。')),
+          h('div', { style: styles.card },
+            h('div', { style: styles.itemTitle }, environmentForm.id ? '编辑环境' : '新增环境'),
+            h('div', { style: styles.formGrid },
+              formInput('id', '环境 ID，例如 lab-a'),
+              formInput('name', '环境名称'),
+              formInput('host_alias', 'dsh-ssh 主机 alias'),
+              formInput('array_alias', 'dsh-ssh 阵列 alias'),
+              formInput('automation_id', 'pangea-data/test-automation 下的目录名'),
+              h('textarea', { style: styles.textarea, value: environmentForm.bindings, 'aria-label': '设备绑定 JSON', placeholder: '{"portal":"10.0.0.2","iqn":"...","attach_target":"xx"}', onChange: event => setEnvironmentForm(value => ({ ...value, bindings: event.target.value })) }),
+              h('button', { type: 'button', style: styles.primaryButton, onClick: () => { void submitEnvironment() } }, '保存执行环境'))))
       }
 
       function renderCaseDetail() {
@@ -812,6 +977,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'risk') body = renderRiskDetail()
       else if (screen.type === 'cases') body = renderCases()
       else if (screen.type === 'case') body = renderCaseDetail()
+      else if (screen.type === 'execution') body = renderExecution()
       else if (screen.type === 'evidence') body = renderEvidence()
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()
@@ -826,7 +992,7 @@ window.__ModuleLoader__.load({
         ? h('div', { style: styles.card, role: 'status' }, h('div', { style: styles.empty }, '正在读取当前 Run…'))
         : snapshot === undefined && error ? null : h(React.Fragment, null, healthAlert, body)
       const actionFeedback = actionNotice ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
-      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 只读伴生工作台' }, header, h('div', { style: styles.content }, actionFeedback, errorNotice, contentBody))
+      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 伴生工作台' }, header, h('div', { style: styles.content }, actionFeedback, errorNotice, contentBody))
     }
 
     function apply(ctx) {
@@ -838,6 +1004,10 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     exports.requestSnapshot = requestSnapshot
     exports.requestSourceSnippet = requestSourceSnippet
+    exports.requestEnvironments = requestEnvironments
+    exports.saveEnvironment = saveEnvironment
+    exports.removeEnvironment = removeEnvironment
+    exports.launchExecution = launchExecution
     exports.filePathFromLocation = filePathFromLocation
     exports.evidenceIdentity = evidenceIdentity
     exports.evidenceTabLabel = evidenceTabLabel

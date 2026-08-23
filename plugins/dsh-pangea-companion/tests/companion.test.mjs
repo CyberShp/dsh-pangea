@@ -268,6 +268,27 @@ test('recent run summaries stay compact while current run carries details', asyn
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('lists executor runs separately from the analysis run', async () => {
+  const { root, dataRoot } = await fixture()
+  try {
+    const runDirectory = path.join(dataRoot, 'executor-runs', 'executor-01')
+    await writeJson(path.join(runDirectory, 'progress.json'), {
+      schema_version: '1.0', workflow_version: 1, executor_run_id: 'executor-01',
+      analysis_run_id: 'run-01', phase: 'COMPLETE', selected_test_case_ids: ['TC-1'],
+      automation_id: 'storage-tests', environment_id: 'lab-a', result_status: 'PASS',
+      errors: [], agent_session: { stage: 'execution', status: 'completed', task_id: 'agent-1' },
+    })
+    await writeJson(path.join(runDirectory, 'agent-results', 'execution.json'), {
+      status: 'PASS', cases: [{ test_case_id: 'TC-1', status: 'PASS' }],
+    })
+    const snapshot = await companionSnapshot({ cwd: root })
+    assert.equal(snapshot.executor_runs.length, 1)
+    assert.equal(snapshot.executor_runs[0].executor_run_id, 'executor-01')
+    assert.equal(snapshot.executor_runs[0].result_status, 'PASS')
+    assert.equal(snapshot.current.run_id, 'run-01')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('summary mode does not materialize worker details', async () => {
   const { root, dataRoot } = await fixture()
   try {
@@ -278,20 +299,27 @@ test('summary mode does not materialize worker details', async () => {
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('registers one read-only status tool and read-only state/source routes with Chinese tool copy', () => {
+test('registers read status plus executor environment and SSH tools', () => {
   const tools = []
   const routes = []
   const effects = []
   apply({
     agents: { roots() { return [] } },
     on() { return () => {} },
-    tools: { register(tool) { tools.push(tool) } },
+    apiProxy: {},
+    tools: { register(tool) { tools.push(tool); return () => {} } },
     webServer: { register(route) { routes.push(route); return () => {} } },
     effect(callback) { effects.push(callback) },
   })
-  assert.deepEqual(tools.map(tool => tool.name), ['pangea_status'])
+  assert.deepEqual(tools.map(tool => tool.name), [
+    'pangea_status', 'pangea_environment_get', 'pangea_ssh_exec',
+    'pangea_ssh_start', 'pangea_ssh_read', 'pangea_ssh_stop', 'pangea_ssh_interactive',
+  ])
   assert.match(tools[0].description, /读取健康状态/)
-  assert.deepEqual(routes.map(route => route.path), ['/api/pangea-companion/state', '/api/pangea-companion/source'])
+  assert.deepEqual(routes.map(route => route.path), [
+    '/api/pangea-companion/state', '/api/pangea-companion/source',
+    '/api/pangea-companion/environments', '/api/pangea-companion/executions',
+  ])
   assert.equal(effects.length, 1)
 })
 

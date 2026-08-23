@@ -1,6 +1,6 @@
 # DSH 插件管理项目
 
-这个仓库用于集中存放和管理 DSH 插件。目前提供 `dsh-pangea-companion`：PANGEA 在 DSH 中的只读伴生工作台，负责当前会话运行监控、Run 状态感知、`pangea_status` 和 Better Sidebar 中文结果浏览，不执行或改写 PANGEA 工作流。
+这个仓库用于集中存放和管理 DSH 插件。目前提供 `dsh-pangea-companion`：一个安装包同时包含 PANGEA 只读工作台和仅对 PANGEA 工作区生效的消息唤醒策略，不执行或改写 PANGEA 工作流。
 
 ## 目录结构
 
@@ -18,7 +18,7 @@ Companion 的职责固定为：
 ```text
 PANGEA = 工作流与结构化产物的唯一真相
 DSH = Agent Runtime 与交互工作台
-Companion = 只读状态 / 产物适配层
+Companion = 只读状态 / 产物适配层 + DSH 唤醒策略
 ```
 
 当前能力：
@@ -29,6 +29,7 @@ Companion = 只读状态 / 产物适配层
 - `GET /api/pangea-companion/state` 为 Web UI 提供同源只读状态。
 - 若安装 `dsh-better-sidebar`，自动注册一个单实例 `PANGEA` Tab；未安装时不影响 Core 和工具。
 - 风险、用例和证据详情可把局部上下文加入当前 DSH 会话；风险页可拆分系统结论、勾选多条证据并执行定向核对或生成定向测试，源码按真实行号预览；完整证据文件和最终报告可在 Better Sidebar 中直接打开。
+- PANGEA 工作区的 `subagent-report` 只投递信息、不提前唤醒根 Agent；子 Agent 真正 `settled` 后再由 DSH 原生通知唤醒。其他工作区行为不变。
 
 详细说明见 [`plugins/dsh-pangea-companion/README.md`](plugins/dsh-pangea-companion/README.md)。
 
