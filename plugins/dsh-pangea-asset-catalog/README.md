@@ -16,6 +16,9 @@ pangea-data/asset-catalog/
 ├── catalog.json
 ├── normalized/
 │   └── <asset_id>.md
+├── historical-issues/
+│   └── <asset_id>.json
+├── historical-issue-reviews.json
 ├── materials/
 │   └── <asset_id>.json
 ├── methodology-candidates.json
@@ -27,8 +30,13 @@ pangea-data/asset-catalog/
 - `catalog.json`：所有已发现资产及插件建议角色。
 - `normalized/`：从 `inbox/` 中的 DOCX、PDF、XLSX 提取出的 Markdown，带原文件、页码、
   工作表或内容块位置，供 PANGEA 后续适配层读取和引用。
+- `historical-issues/`：用户对单份资产明确点击“提取历史问题”后，由 DSH 模型生成的
+  问题草稿；模型只读取该资产对应的 Markdown。
+- `historical-issue-reviews.json`：用户对问题草稿的确认、修正后确认或排除结果；与模型
+  输出分开保存。
 - `materials/`：资料标题、需求 ID、符号、声明限制和原文位置。
-- `methodology-candidates.json`：只保存 `draft` 候选，不会自动成为 PANGEA 方法论。
+- `methodology-candidates.json`：只允许从已确认历史问题生成 `draft` 候选，不会自动成为
+  PANGEA 方法论。
 - `automation-capabilities.json`：脚本入口候选、参数名、环境变量名，以及
   precheck/setup/action/assertion/cleanup 的源码位置；不保存密码或参数值，不执行脚本。
 - `diagnostics.json`：缺失目录、无法读取、超限和未解析文件。
@@ -48,8 +56,9 @@ pangea-data/asset-catalog/
 `pangea-data/asset-catalog/normalized/`。旧版 `.doc`、`.xls`、受密码保护、损坏或超过
 25 MiB 的文件不会伪装成转换成功，原因会进入 `diagnostics.json`。
 
-本阶段只完成“文档转 Markdown”和原有建议分类，不会从用户上传的历史问题中提取问题，
-也不会生成新的方法论；这些属于下一阶段。
+历史问题提取和方法论候选生成都必须由用户在“资产”页明确触发，因此可能产生模型调用。
+“生成目录文件”仍是确定性的文件分析，不调用模型。提取任务会创建单独的 DSH 会话，且
+不会读取 PANGEA 历史 Run、其他 inbox 文件、源码仓库或已有方法论。
 
 ## DSH 使用
 
@@ -58,10 +67,18 @@ pangea-data/asset-catalog/
 - 查看实时扫描预览；
 - 查看文档是否可转换，并在生成后打开对应 Markdown；
 - 明确生成目录文件；
+- 对单份可解析资产明确触发“提取历史问题”；
+- 确认、修正后确认或排除问题草稿；
+- 只基于已确认问题明确触发“生成方法论候选”；
 - 按建议角色筛选；
 - 人工修正主要建议角色。
 
-也可以在 DSH 会话调用 `pangea_asset_catalog_generate`。该工具只生成上述目录文件。
+插件自带 `pangea-extract-historical-issues` 和
+`pangea-derive-methodology-candidates` 两个 Skill，不需要单独安装。它们只由插件创建的
+提取会话显式调用，并通过受校验的提交工具写入结果。
+
+也可以在普通 DSH 会话调用 `pangea_asset_catalog_generate`。该工具只生成目录文件，
+不会调用模型。
 
 ## 安装
 

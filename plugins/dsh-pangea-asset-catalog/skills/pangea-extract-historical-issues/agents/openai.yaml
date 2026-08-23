@@ -1,0 +1,4 @@
+interface:
+  display_name: "提取历史问题"
+  short_description: "从单份标准化资产中提取带有原文位置和置信度的历史问题草稿记录"
+  default_prompt: "Use $pangea-extract-historical-issues to extract grounded historical issues from this normalized asset."

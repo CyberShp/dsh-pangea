@@ -1,7 +1,12 @@
 import { generateCatalog, readGeneratedState, saveOverride } from './catalog.js'
+import { loadBundledSkills } from './bundled-skills.js'
+import {
+  AssetExtractionRuntime, ISSUE_SUBMISSION_PARAMETERS, METHODOLOGY_SUBMISSION_PARAMETERS,
+  saveHistoricalIssueReview,
+} from './extraction.js'
 
 export const name = 'dsh-pangea-asset-catalog'
-export const inject = ['tools', 'webServer']
+export const inject = ['tools', 'webServer', 'skills', 'apiProxy', 'agents']
 
 const API_PATH = '/api/pangea-asset-catalog/state'
 
@@ -32,21 +37,40 @@ async function readBody(req) {
   return body ? JSON.parse(body) : {}
 }
 
-async function routeHandler(req, res) {
+async function currentState(runtime, cwd) {
+  return runtime.decorateState(await readGeneratedState({ cwd }))
+}
+
+async function routeHandler(req, res, runtime) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
   try {
-    if (req.method === 'GET') return json(res, 200, await readGeneratedState({ cwd }))
+    if (req.method === 'GET') return json(res, 200, await currentState(runtime, cwd))
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await readBody(req)
     if (body.action === 'generate') {
       await generateCatalog({ cwd })
-      return json(res, 200, await readGeneratedState({ cwd }))
+      return json(res, 200, await currentState(runtime, cwd))
     }
     if (body.action === 'override') {
       await saveOverride({ cwd, assetId: body.asset_id, suggestedRoles: body.suggested_roles, kind: body.kind })
-      return json(res, 200, await readGeneratedState({ cwd }))
+      return json(res, 200, await currentState(runtime, cwd))
+    }
+    if (body.action === 'extract_historical_issues') {
+      const launched = await runtime.startHistoricalIssues({ cwd, assetId: body.asset_id })
+      return json(res, 200, { ...await currentState(runtime, cwd), launched })
+    }
+    if (body.action === 'review_historical_issue') {
+      await saveHistoricalIssueReview({
+        cwd, assetId: body.asset_id, issueId: body.issue_id, decision: body.decision,
+        correctedIssue: body.corrected_issue,
+      })
+      return json(res, 200, await currentState(runtime, cwd))
+    }
+    if (body.action === 'derive_methodology') {
+      const launched = await runtime.startMethodology({ cwd })
+      return json(res, 200, { ...await currentState(runtime, cwd), launched })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
   } catch (error) {
@@ -67,8 +91,14 @@ function renderGenerated(value) {
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
-export function apply(ctx) {
-  ctx.tools.register({
+function toolOutput() {
+  return { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
+}
+
+export async function apply(ctx) {
+  const runtime = new AssetExtractionRuntime(ctx.apiProxy)
+  const skillDisposers = (await loadBundledSkills()).map(skill => ctx.skills.register(skill))
+  const toolDisposers = [ctx.tools.register({
     name: 'pangea_asset_catalog_generate',
     description: '只读扫描当前工作区的 pangea-data/inbox 与 pangea-data/test-automation，把 inbox 中的 DOCX、PDF、XLSX 转成可引用的 Markdown，并生成非约束性的资产目录；不修改 PANGEA、Run 或原始资产。',
     parameters: {
@@ -89,9 +119,30 @@ export function apply(ctx) {
       }
     },
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => renderGenerated(value) },
-  })
-  const disposeRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: routeHandler })
-  ctx.effect?.(() => () => disposeRoute(), 'dsh-pangea-asset-catalog: catalog API')
+  }), ctx.tools.register({
+    name: 'pangea_asset_issue_submit',
+    description: '仅供资产目录创建的历史问题提取会话提交结构化草稿；会校验会话、资产、原文位置和摘录，不接受普通会话调用。',
+    parameters: ISSUE_SUBMISSION_PARAMETERS,
+    execute: (args, exec) => runtime.submitHistoricalIssues(args, exec),
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_asset_methodology_submit',
+    description: '仅供资产目录创建的方法论会话提交候选；只接受已确认问题编号及其原有证据，不接受普通会话调用。',
+    parameters: METHODOLOGY_SUBMISSION_PARAMETERS,
+    execute: (args, exec) => runtime.submitMethodology(args, exec),
+    output: toolOutput(),
+  })]
+  const disposeStatus = ctx.on?.('agent/status', ({ agent, status }) => runtime.handleAgentStatus(agent, status)) ?? (() => {})
+  const disposeError = ctx.on?.('agent/error', ({ agent, error }) => runtime.handleAgentError(agent, error)) ?? (() => {})
+  const disposeRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => routeHandler(req, res, runtime) })
+  ctx.effect?.(() => () => {
+    disposeRoute()
+    disposeError()
+    disposeStatus()
+    for (const dispose of toolDisposers) dispose()
+    for (const dispose of skillDisposers) dispose()
+  }, 'dsh-pangea-asset-catalog: skills, model extraction, reviews, and catalog API')
 }
 
 export { discoverDataRoot, generateCatalog, readGeneratedState, saveOverride, scanAssets } from './catalog.js'
+export { AssetExtractionRuntime, saveHistoricalIssueReview } from './extraction.js'

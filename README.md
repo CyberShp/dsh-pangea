@@ -59,6 +59,7 @@ Better Sidebar 继续负责通用侧栏、编辑器、终端、文件浏览等�
   `pangea-data/asset-catalog/normalized/`，不覆盖原文件。
 - 区分输入候选、语义参考、示例参考、方法论候选与自动化能力。
 - 只在用户明确生成时写入 `pangea-data/asset-catalog/`。
+- 用户可对单份资产调用 DSH 模型提取历史问题，人工确认后再生成非约束性方法论候选。
 - 生成结果全部是非约束性引用材料，不修改 `pangea-agent`、原始资产、Run、Graph、
   schema、rubric 或 PASS/FAIL 决策。
 

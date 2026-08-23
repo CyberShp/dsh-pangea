@@ -368,6 +368,32 @@ async function removeStaleNormalizedFiles(directory, expectedNames) {
   }
 }
 
+async function normalizedFilesReferencedByIssues(outputRoot) {
+  const names = new Set()
+  let entries
+  try { entries = await readdir(path.join(outputRoot, 'historical-issues'), { withFileTypes: true }) } catch { return names }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+    try {
+      const value = JSON.parse(await readFile(path.join(outputRoot, 'historical-issues', entry.name), 'utf8'))
+      if (typeof value.normalized_path === 'string') names.add(path.basename(value.normalized_path))
+    } catch {}
+  }
+  return names
+}
+
+async function preserveConfirmedMethodology(outputRoot, generatedAt) {
+  const destination = path.join(outputRoot, 'methodology-candidates.json')
+  try {
+    const value = JSON.parse(await readFile(destination, 'utf8'))
+    if (value?.source === 'confirmed_historical_issues') return
+  } catch {}
+  await writeJsonAtomic(destination, {
+    schema_version: '1.0', generated_at: generatedAt, source: 'confirmed_historical_issues',
+    non_binding: true, confirmed_issue_ids: [], candidates: [],
+  })
+}
+
 function publicAsset(asset) {
   const { _normalized_markdown: _ignored, ...value } = asset
   return value
@@ -416,12 +442,11 @@ export async function generateCatalog(options = {}) {
       await writeTextAtomic(path.join(normalizedRoot, markdownName), asset._normalized_markdown)
     }
   }
+  for (const name of await normalizedFilesReferencedByIssues(outputRoot)) expectedNormalizedNames.add(name)
   await removeStaleMaterialFiles(materialRoot, expectedNames)
   await removeStaleNormalizedFiles(normalizedRoot, expectedNormalizedNames)
   await writeJsonAtomic(path.join(outputRoot, 'catalog.json'), catalog)
-  await writeJsonAtomic(path.join(outputRoot, 'methodology-candidates.json'), {
-    schema_version: '1.0', generated_at: snapshot.generated_at, non_binding: true, candidates: snapshot.methodology_candidates,
-  })
+  await preserveConfirmedMethodology(outputRoot, snapshot.generated_at)
   await writeJsonAtomic(path.join(outputRoot, 'automation-capabilities.json'), {
     schema_version: '1.0', generated_at: snapshot.generated_at, non_binding: true, capabilities: snapshot.automation_capabilities,
   })

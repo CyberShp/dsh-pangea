@@ -1,0 +1,4 @@
+interface:
+  display_name: "生成方法论候选"
+  short_description: "从人工确认的历史问题中生成带来源证据且不约束决策的方法论候选"
+  default_prompt: "Use $pangea-derive-methodology-candidates to derive methodology candidates from confirmed historical issues."
