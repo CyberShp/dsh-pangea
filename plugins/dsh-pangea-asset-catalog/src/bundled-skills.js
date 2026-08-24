@@ -8,7 +8,8 @@ const SKILL_NAMES = [
 ]
 
 function parseSkill(markdown, skillPath) {
-  const match = markdown.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/)
+  const normalized = markdown.replace(/\r\n?/g, '\n')
+  const match = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/)
   if (!match) throw new Error(`invalid bundled skill frontmatter: ${skillPath}`)
   const fields = Object.fromEntries(match[1].split('\n').map(line => {
     const separator = line.indexOf(':')
@@ -38,4 +39,4 @@ export async function loadBundledSkills() {
   }))
 }
 
-export { SKILL_NAMES }
+export { SKILL_NAMES, parseSkill }
