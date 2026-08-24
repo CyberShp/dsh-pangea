@@ -38,12 +38,12 @@
     }
   },
   "dependencies": {
-    "dsh-better-sidebar": "0.13.1",
+    "dsh-better-sidebar": "0.15.2",
     "dsh-pangea-asset-catalog": "file:../dsh-pangea-asset-catalog",
     "dsh-pangea-companion": "file:../dsh-pangea-companion"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.8",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
