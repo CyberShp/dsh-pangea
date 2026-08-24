@@ -21,7 +21,7 @@ dsh-pangea/
 
 ```text
 dsh-pangea（用户唯一需要安装的包）
-        ├── dsh-better-sidebar 0.13.1
+        ├── dsh-better-sidebar 0.15.2
         ├── Companion「分析 / 执行」
         └── Asset Catalog「资产」
 ```
@@ -29,6 +29,9 @@ dsh-pangea（用户唯一需要安装的包）
 `dsh-pangea` 会自动带上固定版本的 Better Sidebar、Companion 和 Asset Catalog。
 Better Sidebar 继续负责通用侧栏、编辑器、终端、文件浏览等能力；`dsh-pangea` 通过
 适配层调整入口，不复制 Better Sidebar 源码。
+
+当前工作台基线要求 DSH `0.1.0-rc.8` 或更新版本。Better Sidebar `0.15.2` 已切到
+rc.8+ 的客户端模块加载方式，并在 `0.1.1-rc.1` 依赖线上开发验证。
 
 ## 插件职责
 
