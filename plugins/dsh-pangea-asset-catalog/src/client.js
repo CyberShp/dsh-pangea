@@ -21,15 +21,32 @@ window.__ModuleLoader__.load({
     ]
     const ROLE_LABELS = Object.fromEntries(ROLES)
 
-    async function requestState({ cwd, signal, fetcher = fetch }) {
-      const response = await fetcher(`${API_PATH}?${new URLSearchParams({ cwd }).toString()}`, { cache: 'no-store', signal })
+    function listSearch({ cwd, page = 1, pageSize = 20, role = 'all', assetId }) {
+      return new URLSearchParams({
+        cwd,
+        page: String(page),
+        page_size: String(pageSize),
+        role,
+        ...(assetId ? { asset_id: assetId } : {}),
+      }).toString()
+    }
+
+    async function requestState({ cwd, page = 1, pageSize = 20, role = 'all', signal, fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, role })}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
     }
 
-    async function requestAction({ cwd, action, payload = {}, fetcher = fetch }) {
-      const response = await fetcher(`${API_PATH}?${new URLSearchParams({ cwd }).toString()}`, {
+    async function requestAssetDetail({ cwd, assetId, signal, fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, assetId })}`, { cache: 'no-store', signal })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body.asset
+    }
+
+    async function requestAction({ cwd, action, payload = {}, page = 1, pageSize = 20, role = 'all', fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, role })}`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...payload }),
       })
       const value = await response.json()
@@ -119,11 +136,12 @@ window.__ModuleLoader__.load({
       if (value.job?.status === 'failed') return `提取失败：${value.job.error}`
       if (value.result) return value.result.extraction_status === 'no_issues'
         ? '模型没有发现有原文依据的历史问题。'
-        : `已提取 ${value.result.issues?.length ?? 0} 条历史问题草稿 · 第 ${value.result.extraction_revision} 次提取`
+        : `已提取 ${value.result.issues?.length ?? value.result.issue_count ?? 0} 条历史问题草稿 · 第 ${value.result.extraction_revision} 次提取`
       return '尚未调用 DSH 模型提取历史问题。'
     }
 
     function IssueReview({ asset, issue, busy, onAction }) {
+      const [expanded, setExpanded] = React.useState(false)
       const [editing, setEditing] = React.useState(false)
       const [draft, setDraft] = React.useState(() => ({ ...issue }))
       const review = issue.review
@@ -141,10 +159,17 @@ window.__ModuleLoader__.load({
         missing_fields: draft.missing_fields ?? [], confidence: draft.confidence,
       }
       return h('div', { style: styles.issue },
-        h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, issue.title), h('span', { style: styles.chip }, decision === 'confirmed' ? '已确认' : decision === 'excluded' ? '已排除' : `草稿 · ${issue.confidence}`)),
-        issue.symptom ? h('div', { style: styles.summary }, issue.symptom) : null,
-        h('div', { style: styles.meta }, `来源：${issue.evidence.map(item => item.location).join('；')}`),
-        editing ? h('div', { style: { marginTop: 9 } },
+        h('div', { style: styles.row },
+          h('div', { style: styles.itemTitle }, issue.title),
+          h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
+            h('span', { style: styles.chip }, decision === 'confirmed' ? '已确认' : decision === 'excluded' ? '已排除' : `草稿 · ${issue.confidence}`),
+            h('button', { type: 'button', style: styles.button, onClick: () => setExpanded(value => !value) }, expanded ? '收起问题' : '展开问题'))),
+        expanded && issue.symptom ? h('div', { style: styles.summary }, issue.symptom) : null,
+        expanded ? h('div', { style: styles.meta }, `来源：${issue.evidence.map(item => item.location).join('；')}`) : null,
+        expanded ? issue.evidence.map((item, index) => h('div', { key: `${item.location}:${index}`, style: { ...styles.meta, marginTop: 7 } },
+          h('div', { style: { fontWeight: 700 } }, item.location),
+          h('div', { style: { marginTop: 3, whiteSpace: 'pre-wrap' } }, item.excerpt))) : null,
+        expanded ? (editing ? h('div', { style: { marginTop: 9 } },
           h('label', { style: styles.label }, '问题名称', h('input', { style: styles.input, value: draft.title, onChange: event => update('title', event.target.value) })),
           h('label', { style: { ...styles.label, display: 'block', marginTop: 7 } }, '问题现象', h('textarea', { style: styles.textarea, value: draft.symptom, onChange: event => update('symptom', event.target.value) })),
           ...arrayFields.map(([field, label]) => h('label', { key: field, style: { ...styles.label, display: 'block', marginTop: 7 } }, `${label}（每行一项）`, h('textarea', { style: styles.textarea, value: lines(draft[field]), onChange: event => update(field, lineValues(event.target.value)) }))),
@@ -154,8 +179,9 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => setEditing(false) }, '取消')))
           : h('div', { style: { ...styles.row, justifyContent: 'flex-start', marginTop: 9 } },
             h('button', { type: 'button', disabled: busy || decision === 'confirmed', style: { ...styles.button, ...styles.primary }, onClick: () => { void onAction(asset, issue, 'confirmed') } }, decision === 'confirmed' ? '已确认' : '确认'),
-            h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => setEditing(true) }, '修正后确认'),
+            h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { setExpanded(true); setEditing(true) } }, '修正后确认'),
             h('button', { type: 'button', disabled: busy || decision === 'excluded', style: styles.button, onClick: () => { void onAction(asset, issue, 'excluded') } }, decision === 'excluded' ? '已排除' : '排除')))
+          : null)
     }
 
     function CatalogPanel({ scope, visible, ctx }) {
@@ -165,20 +191,33 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [notice, setNotice] = React.useState('')
       const [filter, setFilter] = React.useState('all')
+      const [page, setPage] = React.useState(1)
+      const [pageSize, setPageSize] = React.useState(20)
+      const [expandedAssets, setExpandedAssets] = React.useState({})
+      const [assetDetails, setAssetDetails] = React.useState({})
+      const [detailLoading, setDetailLoading] = React.useState({})
 
-      const load = React.useCallback(async () => {
+      const load = React.useCallback(async signal => {
         if (!cwd) return
-        const controller = new AbortController()
-        try { setError(''); setState(await requestState({ cwd, signal: controller.signal })) }
+        try {
+          setError('')
+          setState(await requestState({ cwd, page, pageSize, role: filter, signal }))
+          const assetIds = Object.keys(expandedAssets)
+          if (assetIds.length) {
+            setDetailLoading(current => ({ ...current, ...Object.fromEntries(assetIds.map(id => [id, true])) }))
+            const details = await Promise.all(assetIds.map(async assetId => [assetId, await requestAssetDetail({ cwd, assetId, signal })]))
+            setAssetDetails(current => ({ ...current, ...Object.fromEntries(details) }))
+            setDetailLoading(current => ({ ...current, ...Object.fromEntries(assetIds.map(id => [id, false])) }))
+          }
+        }
         catch (value) { if (value?.name !== 'AbortError') setError(value instanceof Error ? value.message : String(value)) }
-        return () => controller.abort()
-      }, [cwd])
+      }, [cwd, page, pageSize, filter, expandedAssets])
 
       React.useEffect(() => {
         if (visible === false || !cwd) return undefined
-        let dispose
-        void load().then(value => { dispose = value })
-        return () => dispose?.()
+        const controller = new AbortController()
+        void load(controller.signal)
+        return () => controller.abort()
       }, [cwd, visible, load])
 
       const modelBusy = Boolean(state?.assets?.some(asset => ['queued', 'running'].includes(asset.historical_extraction?.job?.status)) || ['queued', 'running'].includes(state?.methodology_generation?.job?.status))
@@ -191,8 +230,12 @@ window.__ModuleLoader__.load({
       async function act(action, payload = {}) {
         setBusy(true); setError(''); setNotice('')
         try {
-          const value = await requestAction({ cwd, action, payload })
+          const value = await requestAction({ cwd, action, payload, page, pageSize, role: filter })
           setState(value)
+          if (payload.asset_id && expandedAssets[payload.asset_id]) {
+            const detail = await requestAssetDetail({ cwd, assetId: payload.asset_id })
+            setAssetDetails(current => ({ ...current, [payload.asset_id]: detail }))
+          }
           const messages = {
             generate: `目录文件已生成：${value.output_root}`,
             override: '建议分类已保存，并重新生成目录文件。',
@@ -203,6 +246,19 @@ window.__ModuleLoader__.load({
           setNotice(messages[action] ?? '操作已完成。')
         } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
         finally { setBusy(false) }
+      }
+
+      function changeList(next) {
+        setExpandedAssets({})
+        setAssetDetails({})
+        setDetailLoading({})
+        next()
+      }
+
+      function toggleAsset(assetId) {
+        setExpandedAssets(current => current[assetId]
+          ? Object.fromEntries(Object.entries(current).filter(([id]) => id !== assetId))
+          : { ...current, [assetId]: true })
       }
 
       async function reviewIssue(asset, issue, decision, correctedIssue = undefined) {
@@ -220,7 +276,7 @@ window.__ModuleLoader__.load({
 
       if (!cwd) return h('div', { style: styles.root }, h('div', { style: styles.content }, h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 DSH 页面没有可用工作区。'))))
       const assets = state?.assets ?? []
-      const filtered = filter === 'all' ? assets : assets.filter(asset => asset.suggested_roles?.includes(filter))
+      const pagination = state?.pagination ?? { page, page_size: pageSize, total: assets.length, total_pages: 1, role: filter }
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 资产目录' },
         h('div', { style: styles.header },
           h('div', { style: styles.row }, h('div', { style: styles.title }, '资产目录'), h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('generate') } }, busy ? '处理中…' : '生成目录文件')),
@@ -240,25 +296,43 @@ window.__ModuleLoader__.load({
                   h('button', { type: 'button', disabled: busy || modelBusy || !state.methodology_generation?.available, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('derive_methodology') } }, state.methodology_generation?.job && ['queued', 'running'].includes(state.methodology_generation.job.status) ? '生成中…' : '生成方法论候选'))),
               state.methodology_generation?.job?.status === 'failed' ? h('div', { style: { ...styles.meta, color: 'var(--dsw-alias-state-error-primary, #e66767)' } }, `生成失败：${state.methodology_generation.job.error}`) : null,
               state.methodology_generation?.result ? h('div', { style: styles.meta }, `当前 ${state.methodology_generation.result.candidates?.length ?? 0} 条候选${state.methodology_generation.stale ? ' · 已确认问题发生变化，需要重新生成' : ''} · ${state.methodology_generation.output_path}`) : null),
-            h('div', { style: styles.filters }, [['all', '全部'], ...ROLES].map(([role, label]) => h('button', { key: role, type: 'button', style: { ...styles.filter, ...(filter === role ? styles.filterActive : {}) }, onClick: () => setFilter(role) }, label))),
-            filtered.length ? filtered.map(asset => h('div', { key: asset.asset_id, style: styles.card },
-              h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, asset.source_path), h('span', { style: styles.chip }, asset.kind)),
-              h('div', { style: styles.meta }, `${asset.parse_status} · ${asset.suggestion_source === 'user_override' ? '人工修正' : '插件建议'} · 非约束性`),
-              asset.normalization ? h('div', { style: styles.meta }, normalizationText(asset), asset.normalization.persisted && asset.normalization.open_path ? h('button', { type: 'button', style: { ...styles.button, marginLeft: 7, padding: '3px 6px' }, onClick: () => ctx.pangea.openFile(scope, asset.normalization.open_path, `${asset.source_path} · Markdown`) }, '打开 Markdown') : null) : null,
-              asset.historical_extraction?.available ? h('div', { style: { marginTop: 8 } },
+            h('div', { style: styles.filters }, [['all', '全部'], ...ROLES].map(([role, label]) => h('button', { key: role, type: 'button', style: { ...styles.filter, ...(filter === role ? styles.filterActive : {}) }, onClick: () => changeList(() => { setPage(1); setFilter(role) }) }, label))),
+            assets.length ? assets.map(asset => {
+              const expanded = Boolean(expandedAssets[asset.asset_id])
+              const detail = assetDetails[asset.asset_id] ?? asset
+              const extraction = detail.historical_extraction ?? asset.historical_extraction
+              return h('div', { key: asset.asset_id, style: styles.card },
                 h('div', { style: styles.row },
-                  h('div', { style: styles.meta }, extractionText(asset.historical_extraction)),
+                  h('div', { style: styles.itemTitle }, asset.source_path),
                   h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
-                    asset.historical_extraction.normalized_open_path ? h('button', { type: 'button', style: styles.button, onClick: () => ctx.pangea.openFile(scope, asset.historical_extraction.normalized_open_path, `${asset.source_path} · Markdown`) }, '打开 Markdown') : null,
-                    analysisSessionId(asset.historical_extraction) ? h('button', { type: 'button', style: styles.button, onClick: () => { void openSession(analysisSessionId(asset.historical_extraction)) } }, '打开分析会话') : null,
-                    h('button', { type: 'button', disabled: busy || ['queued', 'running'].includes(asset.historical_extraction.job?.status), style: styles.button, onClick: () => { void act('extract_historical_issues', { asset_id: asset.asset_id }) } }, asset.historical_extraction.result ? '重新提取' : '提取历史问题'))),
-                asset.historical_extraction.result?.issues?.map(issue => h(IssueReview, { key: issue.issue_id, asset, issue, busy, onAction: reviewIssue }))) : null,
-              asset.summary ? h('div', { style: styles.summary }, asset.summary) : null,
-              h('div', { style: styles.chips }, asset.suggested_roles.map(role => h('span', { key: role, style: styles.chip }, ROLE_LABELS[role] ?? role))),
-              h('div', { style: { ...styles.row, marginTop: 9 } },
-                h('span', { style: styles.label }, '修正主要建议角色'),
-                h('select', { style: styles.select, value: asset.suggested_roles[0] ?? 'unclassified', disabled: busy, onChange: event => { void act('override', { asset_id: asset.asset_id, suggested_roles: [event.target.value], kind: asset.kind }) } }, ROLES.map(([role, label]) => h('option', { key: role, value: role }, label))))))
-              : h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前筛选没有资产。')),
+                    h('span', { style: styles.chip }, asset.kind),
+                    h('button', { type: 'button', style: styles.button, onClick: () => toggleAsset(asset.asset_id) }, expanded ? '收起详情' : '展开详情'))),
+                h('div', { style: styles.meta }, `${asset.parse_status} · ${asset.suggestion_source === 'user_override' ? '人工修正' : '插件建议'} · 非约束性`),
+                h('div', { style: styles.chips }, asset.suggested_roles.map(role => h('span', { key: role, style: styles.chip }, ROLE_LABELS[role] ?? role))),
+                asset.historical_extraction?.available ? h('div', { style: { marginTop: 8 } },
+                  h('div', { style: styles.row },
+                    h('div', { style: styles.meta }, extractionText(asset.historical_extraction)),
+                    h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
+                      asset.historical_extraction.normalized_open_path ? h('button', { type: 'button', style: styles.button, onClick: () => ctx.pangea.openFile(scope, asset.historical_extraction.normalized_open_path, `${asset.source_path} · Markdown`) }, '打开 Markdown') : null,
+                      analysisSessionId(asset.historical_extraction) ? h('button', { type: 'button', style: styles.button, onClick: () => { void openSession(analysisSessionId(asset.historical_extraction)) } }, '打开分析会话') : null,
+                      h('button', { type: 'button', disabled: busy || ['queued', 'running'].includes(asset.historical_extraction.job?.status), style: styles.button, onClick: () => { void act('extract_historical_issues', { asset_id: asset.asset_id }) } }, asset.historical_extraction.result ? '重新提取' : '提取历史问题')))) : null,
+                expanded ? (detailLoading[asset.asset_id] && !assetDetails[asset.asset_id]
+                  ? h('div', { style: styles.meta }, '正在加载完整内容与证据…')
+                  : h('div', { style: { marginTop: 9, paddingTop: 9, borderTop: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))' } },
+                    detail.normalization ? h('div', { style: styles.meta }, normalizationText(detail), detail.normalization.persisted && detail.normalization.open_path ? h('button', { type: 'button', style: { ...styles.button, marginLeft: 7, padding: '3px 6px' }, onClick: () => ctx.pangea.openFile(scope, detail.normalization.open_path, `${detail.source_path} · Markdown`) }, '打开 Markdown') : null) : null,
+                    detail.summary ? h('div', { style: styles.summary }, detail.summary) : null,
+                    h('div', { style: { ...styles.row, marginTop: 9 } },
+                      h('span', { style: styles.label }, '修正主要建议角色'),
+                      h('select', { style: styles.select, value: detail.suggested_roles[0] ?? 'unclassified', disabled: busy, onChange: event => { void act('override', { asset_id: detail.asset_id, suggested_roles: [event.target.value], kind: detail.kind }) } }, ROLES.map(([role, label]) => h('option', { key: role, value: role }, label)))),
+                    extraction?.result?.issues?.length ? h('div', { style: { marginTop: 9 } }, extraction.result.issues.map(issue => h(IssueReview, { key: issue.issue_id, asset: detail, issue, busy, onAction: reviewIssue }))) : extraction?.result ? h('div', { style: styles.meta }, '没有需要展开的历史问题。') : null))
+                  : null)
+            }) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前筛选没有资产。')),
+            h('div', { style: { ...styles.card, ...styles.row } },
+              h('div', { style: styles.meta }, `第 ${pagination.page} / ${pagination.total_pages} 页 · 共 ${pagination.total} 个资产`),
+              h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
+                h('label', { style: styles.label }, '每页 ', h('select', { style: styles.select, value: pagination.page_size, onChange: event => changeList(() => { setPage(1); setPageSize(Number(event.target.value)) }) }, [20, 50, 100].map(value => h('option', { key: value, value }, value)))),
+                h('button', { type: 'button', disabled: pagination.page <= 1, style: styles.button, onClick: () => changeList(() => setPage(pagination.page - 1)) }, '上一页'),
+                h('button', { type: 'button', disabled: pagination.page >= pagination.total_pages, style: styles.button, onClick: () => changeList(() => setPage(pagination.page + 1)) }, '下一页'))),
             state.diagnostics.length ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `诊断（${state.diagnostics.length}）`), state.diagnostics.map((item, index) => h('div', { key: `${item.kind}:${item.path}:${index}`, style: styles.meta }, `${item.path} · ${item.kind}${item.parse_status ? ` · ${item.parse_status}` : ''}`))) : null)
             : !error ? h('div', { style: styles.card }, h('div', { style: styles.empty }, '正在扫描资产…')) : null))
     }
@@ -278,6 +352,7 @@ window.__ModuleLoader__.load({
 
     exports.inject = inject
     exports.requestState = requestState
+    exports.requestAssetDetail = requestAssetDetail
     exports.requestAction = requestAction
     exports.analysisSessionId = analysisSessionId
     exports.openAnalysisSession = openAnalysisSession

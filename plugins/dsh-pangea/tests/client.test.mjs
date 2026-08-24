@@ -11,9 +11,11 @@ const clientPath = path.resolve(here, '..', 'lib', 'client.js')
 async function loadClient() {
   const source = await readFile(clientPath, 'utf8')
   let exported
-  const sandbox = { console, window: { __ModuleLoader__: { load(spec) { exported = spec.factory() } } } }
+  const modules = new Map([['react', { name: 'react' }]])
+  const requireModule = specifier => modules.get(specifier) ?? { name: specifier }
+  const sandbox = { console, window: { __ModuleLoader__: { load(spec) { exported = spec.factory(requireModule) } } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
-  return { exported, source }
+  return { exported, source, sandbox, requireModule }
 }
 
 function fakeSidebar() {
@@ -69,6 +71,13 @@ test('publishes ctx.pangea without registering a wrapper tab', async () => {
   assert.equal(sidebar.tabs.has('dsh-pangea:workbench'), false)
 })
 
+test('bridges the DSH module loader for Better Sidebar lazy terminal chunks', async () => {
+  const { exported, sandbox, requireModule } = await loadClient()
+  const bridge = exported.installModuleSystemBridge(requireModule)
+  assert.equal(await bridge.import('react'), requireModule('react'))
+  assert.equal(sandbox.__DSH_MODULES__, bridge)
+})
+
 test('registers each feature page as one native sidebar tab', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()
@@ -85,7 +94,7 @@ test('registers each feature page as one native sidebar tab', async () => {
   assert.equal(sidebar.tabs.has('dsh-pangea:execution'), false)
 })
 
-test('shows PANGEA pages first, removes source control, and keeps terminal enabled but hidden', async () => {
+test('shows PANGEA pages first, removes source control, and keeps terminal visible', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()
   const service = exported.createPangeaService(sidebar)
@@ -94,7 +103,8 @@ test('shows PANGEA pages first, removes source control, and keeps terminal enabl
   service.registerPage({ id: 'execution', title: '执行', order: 20, component })
   service.registerPage({ id: 'assets', title: '资产', order: 30, component })
   assert.equal(sidebar.tabs.get('git').hidden, true)
-  assert.equal(sidebar.tabs.get('terminal').hidden, true)
+  assert.equal(sidebar.tabs.get('terminal').hidden, false)
+  assert.equal(sidebar.tabs.get('terminal').order, 40)
   assert.equal(sidebar.tabs.get('terminal').available, undefined)
   assert.equal(sidebar.tabs.get('editor').order, 40)
   assert.equal(sidebar.tabs.get('subagent').order, 50)

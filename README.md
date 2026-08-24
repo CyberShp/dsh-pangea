@@ -22,7 +22,7 @@ dsh-pangea/
 ```text
 dsh-pangea（用户唯一需要安装的包）
         ├── dsh-better-sidebar 0.15.2
-        ├── Companion「分析 / 执行」
+        ├── Companion「分析」（执行实现保留，页面暂不注册）
         └── Asset Catalog「资产」
 ```
 
@@ -98,8 +98,9 @@ dsh-pangea
 npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080
 ```
 
-Better Sidebar 的 `+` 菜单固定显示：`分析 / 执行 / 资产 / 文件 / 任务管理 / 浏览器`。
-源码管理被移除；终端不出现在 `+` 菜单中，但仍可从右上角按钮展开到底部面板。
+PANGEA 适配后的 `+` 菜单提供：`分析 / 资产 / 文件 / 终端 / 任务管理 / 浏览器`；
+Better Sidebar 0.15.2 还会显示其自带的 `侧边对话(beta)`。源码管理和 PANGEA“执行”
+入口被移除，终端可直接从 `+` 菜单打开到底部面板。
 
 ## 开发验证
 

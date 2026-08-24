@@ -2,7 +2,7 @@
 // Better Sidebar tabs through ctx.pangea; there is no wrapper PANGEA tab.
 window.__ModuleLoader__.load({
   id: 'dsh-pangea',
-  factory: () => {
+  factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
@@ -16,11 +16,24 @@ window.__ModuleLoader__.load({
     ])
     const BUILTIN_POLICY = {
       git: { hidden: true },
-      terminal: { hidden: true },
+      terminal: { hidden: false, order: 40 },
       editor: { order: 40 },
       subagent: { order: 50 },
       browser: { order: 60 },
     }
+
+    function installModuleSystemBridge(requireModule) {
+      const current = globalThis.__DSH_MODULES__
+      if (!current || current.__dshPangeaBridge === true) {
+        globalThis.__DSH_MODULES__ = {
+          __dshPangeaBridge: true,
+          import: async specifier => requireModule(specifier),
+        }
+      }
+      return globalThis.__DSH_MODULES__
+    }
+
+    installModuleSystemBridge(require)
 
     function allTabs(tree) {
       if (!tree) return []
@@ -185,6 +198,7 @@ window.__ModuleLoader__.load({
 
     exports.inject = inject
     exports.nativePageId = nativePageId
+    exports.installModuleSystemBridge = installModuleSystemBridge
     exports.applyBuiltinPolicy = applyBuiltinPolicy
     exports.closeDisallowedTabs = closeDisallowedTabs
     exports.createPangeaService = createPangeaService

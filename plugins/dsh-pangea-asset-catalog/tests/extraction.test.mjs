@@ -170,3 +170,20 @@ test('marks a model job failed when its DSH turn ends without a validated submis
   assert.equal(state.assets[0].historical_extraction.job.status, 'failed')
   assert.match(state.assets[0].historical_extraction.job.error, /without submitting/)
 })
+
+test('omits historical issue evidence from list state and includes it in asset detail state', async () => {
+  const value = await fixture()
+  const runtime = new AssetExtractionRuntime(fakeApi(value.root))
+  const launched = await runtime.startHistoricalIssues({ cwd: value.root, dataRoot: value.dataRoot, assetId: value.asset.asset_id })
+  await runtime.submitHistoricalIssues({
+    asset_id: value.asset.asset_id,
+    issues: [issue('During reconnect, cleanup timed out and state leaked to a peer instance.')],
+  }, { agent: { session: { id: launched.session_id } } })
+  const snapshot = await scanAssets({ dataRoot: value.dataRoot })
+  const listState = await runtime.decorateState(snapshot, { includeIssues: false })
+  assert.equal(listState.assets[0].historical_extraction.result.issue_count, 1)
+  assert.equal('issues' in listState.assets[0].historical_extraction.result, false)
+  const detailState = await runtime.decorateState(snapshot)
+  assert.equal(detailState.assets[0].historical_extraction.result.issues.length, 1)
+  assert.match(detailState.assets[0].historical_extraction.result.issues[0].evidence[0].excerpt, /cleanup timed out/)
+})

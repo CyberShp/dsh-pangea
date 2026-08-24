@@ -1004,11 +1004,6 @@ window.__ModuleLoader__.load({
         available: (_ctx, scope) => Boolean(scope?.cwd),
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
-      ctx.effect(() => pangea.registerPage({
-        id: 'execution', title: () => '执行', icon, order: 20,
-        available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'execution', pageMode: 'execution' }),
-      }), 'dsh-pangea-companion: execution page')
     }
 
     exports.inject = inject

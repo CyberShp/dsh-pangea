@@ -1,4 +1,4 @@
-import { generateCatalog, readGeneratedState, saveOverride } from './catalog.js'
+import { ALLOWED_ROLES, generateCatalog, readGeneratedState, saveOverride } from './catalog.js'
 import { loadBundledSkills } from './bundled-skills.js'
 import {
   AssetExtractionRuntime, ISSUE_SUBMISSION_PARAMETERS, METHODOLOGY_SUBMISSION_PARAMETERS,
@@ -9,6 +9,8 @@ export const name = 'dsh-pangea-asset-catalog'
 export const inject = ['tools', 'webServer', 'skills', 'apiProxy', 'agents']
 
 const API_PATH = '/api/pangea-asset-catalog/state'
+const DEFAULT_PAGE_SIZE = 20
+const PAGE_SIZES = new Set([20, 50, 100])
 
 function workspaceCwd(exec) {
   const cwd = exec?.agent?.session?.header?.cwd
@@ -37,40 +39,99 @@ async function readBody(req) {
   return body ? JSON.parse(body) : {}
 }
 
-async function currentState(runtime, cwd) {
-  return runtime.decorateState(await readGeneratedState({ cwd }))
+function positiveInteger(value, fallback) {
+  const parsed = Number.parseInt(value, 10)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+export function paginationOptions(searchParams) {
+  const requestedSize = positiveInteger(searchParams.get('page_size'), DEFAULT_PAGE_SIZE)
+  const requestedRole = searchParams.get('role') ?? 'all'
+  return {
+    page: positiveInteger(searchParams.get('page'), 1),
+    pageSize: PAGE_SIZES.has(requestedSize) ? requestedSize : DEFAULT_PAGE_SIZE,
+    role: requestedRole === 'all' || ALLOWED_ROLES.has(requestedRole) ? requestedRole : 'all',
+  }
+}
+
+export function paginateSnapshot(snapshot, { page = 1, pageSize = DEFAULT_PAGE_SIZE, role = 'all' } = {}) {
+  const matching = [...snapshot.assets]
+    .filter(asset => role === 'all' || asset.suggested_roles?.includes(role))
+    .sort((left, right) => left.source_path < right.source_path ? -1 : left.source_path > right.source_path ? 1 : 0)
+  const total = matching.length
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const currentPage = Math.min(Math.max(1, page), totalPages)
+  const offset = (currentPage - 1) * pageSize
+  const assets = matching.slice(offset, offset + pageSize).map(asset => ({
+    asset_id: asset.asset_id,
+    source_path: asset.source_path,
+    source_group: asset.source_group,
+    file_type: asset.file_type,
+    parse_status: asset.parse_status,
+    size_bytes: asset.size_bytes,
+    ...(asset.normalization ? { normalization: asset.normalization } : {}),
+    kind: asset.kind,
+    suggested_roles: asset.suggested_roles,
+    suggestion_source: asset.suggestion_source,
+    summary: asset.summary ?? '',
+    non_binding: true,
+  }))
+  return {
+    ...snapshot,
+    assets,
+    methodology_candidates: [],
+    automation_capabilities: [],
+    pagination: { page: currentPage, page_size: pageSize, total, total_pages: totalPages, role },
+  }
+}
+
+async function currentState(runtime, cwd, options) {
+  const snapshot = paginateSnapshot(await readGeneratedState({ cwd }), options)
+  return runtime.decorateState(snapshot, { includeIssues: false })
+}
+
+async function assetDetail(runtime, cwd, assetId) {
+  const snapshot = await readGeneratedState({ cwd })
+  const asset = snapshot.assets.find(item => item.asset_id === assetId)
+  if (!asset) throw new Error(`asset not found: ${assetId}`)
+  const decorated = await runtime.decorateState({ ...snapshot, assets: [asset] })
+  return { status: 'ok', asset: decorated.assets[0] }
 }
 
 async function routeHandler(req, res, runtime) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
+  const options = paginationOptions(url.searchParams)
   try {
-    if (req.method === 'GET') return json(res, 200, await currentState(runtime, cwd))
+    if (req.method === 'GET') {
+      const assetId = url.searchParams.get('asset_id')
+      return json(res, 200, assetId ? await assetDetail(runtime, cwd, assetId) : await currentState(runtime, cwd, options))
+    }
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await readBody(req)
     if (body.action === 'generate') {
       await generateCatalog({ cwd })
-      return json(res, 200, await currentState(runtime, cwd))
+      return json(res, 200, await currentState(runtime, cwd, options))
     }
     if (body.action === 'override') {
       await saveOverride({ cwd, assetId: body.asset_id, suggestedRoles: body.suggested_roles, kind: body.kind })
-      return json(res, 200, await currentState(runtime, cwd))
+      return json(res, 200, await currentState(runtime, cwd, options))
     }
     if (body.action === 'extract_historical_issues') {
       const launched = await runtime.startHistoricalIssues({ cwd, assetId: body.asset_id })
-      return json(res, 200, { ...await currentState(runtime, cwd), launched })
+      return json(res, 200, { ...await currentState(runtime, cwd, options), launched })
     }
     if (body.action === 'review_historical_issue') {
       await saveHistoricalIssueReview({
         cwd, assetId: body.asset_id, issueId: body.issue_id, decision: body.decision,
         correctedIssue: body.corrected_issue,
       })
-      return json(res, 200, await currentState(runtime, cwd))
+      return json(res, 200, await currentState(runtime, cwd, options))
     }
     if (body.action === 'derive_methodology') {
       const launched = await runtime.startMethodology({ cwd })
-      return json(res, 200, { ...await currentState(runtime, cwd), launched })
+      return json(res, 200, { ...await currentState(runtime, cwd, options), launched })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
   } catch (error) {

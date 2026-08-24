@@ -26,6 +26,11 @@ test('registers one asset catalog page and keeps the boundary visible', async ()
   assert.match(source, /修正后确认/)
   assert.match(source, /生成方法论候选/)
   assert.match(source, /打开分析会话/)
+  assert.match(source, /展开详情/)
+  assert.match(source, /收起详情/)
+  assert.match(source, /展开问题/)
+  assert.match(source, /上一页/)
+  assert.match(source, /下一页/)
   assert.match(source, /不修改 PANGEA、Run、原始资产或任何分析决策/)
   assert.match(source, /方法论候选/)
   assert.match(source, /自动化能力/)
@@ -75,7 +80,7 @@ test('opens a created analysis session after it is visible in the DSH session li
   assert.equal(exported.analysisSessionId({ result: { model_session_id: 'session-2' } }), 'session-2')
 })
 
-test('client requests preview and explicit generation separately', async () => {
+test('client requests paged previews, lazy asset detail, and explicit generation separately', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported
   const sandbox = { URLSearchParams, AbortController, console, fetch: async () => { throw new Error('default fetch must not run') } }
@@ -87,9 +92,16 @@ test('client requests preview and explicit generation separately', async () => {
     calls.push({ url, options })
     return { ok: true, status: 200, async json() { return { status: 'ok', assets: [], counts: {} } } }
   }
-  await exported.requestState({ cwd: '/tmp/workspace', fetcher })
-  await exported.requestAction({ cwd: '/tmp/workspace', action: 'generate', fetcher })
+  await exported.requestState({ cwd: '/tmp/workspace', page: 2, pageSize: 50, role: 'semantic_reference', fetcher })
+  await exported.requestAssetDetail({ cwd: '/tmp/workspace', assetId: 'material-1', fetcher })
+  await exported.requestAction({ cwd: '/tmp/workspace', action: 'generate', page: 2, pageSize: 50, role: 'semantic_reference', fetcher })
   assert.equal(calls[0].options.method, undefined)
-  assert.equal(calls[1].options.method, 'POST')
-  assert.deepEqual(JSON.parse(calls[1].options.body), { action: 'generate' })
+  const listUrl = new URL(calls[0].url, 'http://localhost')
+  assert.equal(listUrl.searchParams.get('page'), '2')
+  assert.equal(listUrl.searchParams.get('page_size'), '50')
+  assert.equal(listUrl.searchParams.get('role'), 'semantic_reference')
+  const detailUrl = new URL(calls[1].url, 'http://localhost')
+  assert.equal(detailUrl.searchParams.get('asset_id'), 'material-1')
+  assert.equal(calls[2].options.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[2].options.body), { action: 'generate' })
 })

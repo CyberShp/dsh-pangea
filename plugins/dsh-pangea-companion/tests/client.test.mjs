@@ -19,7 +19,7 @@ function fakeReact() {
   }
 }
 
-test('PANGEA client registers separate analysis and execution pages and exposes Chinese health/navigation affordances', async () => {
+test('PANGEA client registers only the analysis page and keeps execution UI unregistered', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /总览/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
@@ -75,10 +75,10 @@ test('PANGEA client registers separate analysis and execution pages and exposes 
     pangea: { registerPage(page) { pages.push(page); return () => {} } },
     effect(factory) { return factory() },
   })
-  assert.equal(pages.length, 2)
-  assert.deepEqual(pages.map(page => page.id), ['analysis', 'execution'])
-  assert.deepEqual(pages.map(page => page.title()), ['分析', '执行'])
-  assert.deepEqual(pages.map(page => page.order), [10, 20])
+  assert.equal(pages.length, 1)
+  assert.deepEqual(pages.map(page => page.id), ['analysis'])
+  assert.deepEqual(pages.map(page => page.title()), ['分析'])
+  assert.deepEqual(pages.map(page => page.order), [10])
 })
 
 test('client builds focused discussion drafts, appends them to the active DSH composer, and resolves evidence paths', async () => {

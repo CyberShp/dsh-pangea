@@ -407,7 +407,7 @@ export class AssetExtractionRuntime {
     void this.cleanupJobInput(job)
   }
 
-  async decorateState(snapshot) {
+  async decorateState(snapshot, { includeIssues = true } = {}) {
     const reviews = await loadReviews(snapshot.data_root)
     const assets = await Promise.all(snapshot.assets.map(async asset => {
       if (asset.source_group !== 'inbox' || !['parsed', 'parsed_with_warnings'].includes(asset.parse_status)) {
@@ -416,17 +416,21 @@ export class AssetExtractionRuntime {
       const destination = issueFile(snapshot.data_root, asset.asset_id)
       const result = await readJson(destination, null)
       const output = await fileInfo(destination)
-      const issues = Array.isArray(result?.issues) ? result.issues.map(issue => ({
+      const rawIssues = Array.isArray(result?.issues) ? result.issues : []
+      const issues = rawIssues.map(issue => ({
         ...issue,
         review: reviews.reviews[issue.issue_id] ?? null,
-      })) : []
+      }))
+      const resultSummary = result ? { ...result } : null
+      if (resultSummary) delete resultSummary.issues
       return {
         ...asset,
         historical_extraction: {
           available: true,
           job: this.latestJob(snapshot.data_root, asset.asset_id),
           ...(result ? {
-            result: { ...result, issues }, output_path: output?.path, modified_at: output?.modified_at,
+            result: includeIssues ? { ...resultSummary, issues } : { ...resultSummary, issue_count: rawIssues.length },
+            output_path: output?.path, modified_at: output?.modified_at,
             normalized_open_path: path.join(snapshot.data_root, result.normalized_path),
           } : {}),
         },

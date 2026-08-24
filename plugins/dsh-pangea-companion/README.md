@@ -82,10 +82,10 @@ PANGEA 工作台会显示“数据读取异常”，`pangea_status` 也会明确
 
 ## PANGEA 侧边栏页面
 
-Companion 在 Better Sidebar 中提供“分析”和“执行”两个原生顶层页签：
+Companion 当前只在 Better Sidebar 中注册“分析”顶层页签：
 
 - “分析”页内部固定导航：`总览 / 风险 / 用例 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。
-- “执行”页集中显示执行记录与执行环境，不再混入分析页的内部导航。
+- “执行”页的内部实现仍保留，但页面入口暂不注册，不作为当前可用功能交付。
 - Companion 不重复展示 DSH 已有的 Agent / Tool / Subagent / Workflow 轨迹；总览只聚焦 PANGEA 阶段、进度、质量、风险、用例、证据和复核。
 - 即使原 DSH 会话已删除，历史 Run 的风险、用例、证据、复核和报告仍可查看；Companion 不保存 DSH 执行时间线。
 - 详情页固定提供 `← 返回`，使用页面栈按真实访问路径退回；例如 `风险 → 用例 → 风险` 可以逐级返回，不会钻进死胡同。
@@ -148,7 +148,7 @@ dsh-ssh host configuration       <- aliases/passwords - Companion SSH tools
 
 1. 使用 dsh-ssh 配置主机和阵列 alias，可使用密码登录。
 2. 将内部 Python 自动化仓库放到 `pangea-data/test-automation/<automation_id>/`。
-3. 在 Companion“执行”页创建环境，填写两个 alias、`automation_id` 和当前环境需要的设备绑定。
+3. 当前 Companion“执行”入口已隐藏；重新开放前，不能从界面创建环境。
 4. 回到“用例”页勾选用例和环境，点击“一键执行”。
 
 Companion 的交互 SSH 当前支持直接连接；若 dsh-ssh alias 配置了 ProxyJump，执行前会明确报 `UNRESOLVED/EXECUTION_FAILED`，不会改用另一条连接路径。
@@ -210,4 +210,4 @@ cd plugins/dsh-pangea-companion
 npm test
 ```
 
-当前测试覆盖：原分析结果读取、报告/结构化计数核对、历史 Run 摘要、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册、客户端执行入口和原有证据交互。
+当前测试覆盖：原分析结果读取、报告/结构化计数核对、历史 Run 摘要、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册、执行实现保留但页面不注册，以及原有证据交互。
