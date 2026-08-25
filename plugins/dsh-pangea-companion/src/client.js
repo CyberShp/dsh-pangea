@@ -66,9 +66,9 @@ window.__ModuleLoader__.load({
     }
 
     const PHASE = {
-      PREPARING: '准备中', WAITING_ANALYSIS: '等待分析', WAITING_REVIEW: '等待复核',
-      WAITING_REWORK: '等待返工', WAITING_REWORK_REVIEW: '等待返工复核',
-      READY_TO_FINALIZE: '等待生成报告', COMPLETE: '已完成', INCOMPLETE: '未完整结束', UNKNOWN: '未知',
+      PREPARING: '准备中', PLANNING: '规划分析单元', ANALYZING: '并行分析中', REVIEWING: '独立复核中',
+      CLOSING: '定向补齐中', REPORTING: '生成报告中', COMPLETE: '已完成', INCOMPLETE: '未完整结束',
+      STOPPED: '已停止', FAILED: '已失败', UNKNOWN: '未知',
     }
     const QUALITY = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决' }
     const REVIEW = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决', UNREADABLE: '结果不可读' }
@@ -787,7 +787,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } })),
             h('div', { style: styles.grid },
               field('已完成分析', `${completed} / ${total}`),
-              field('返工单元', current.analysis?.reworked ?? 0),
+              field('定向补齐单元', current.analysis?.reworked ?? 0),
               field('质量状态', QUALITY[current.quality_status] ?? current.quality_status ?? '待定'),
               field('读取状态', HEALTH[health?.status] ?? health?.status ?? '未知'))),
 
@@ -825,7 +825,7 @@ window.__ModuleLoader__.load({
               current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html')) : null,
               current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md')) : null)) : null,
           h('div', { style: styles.grid }, metric(risks.length, '风险', 'risks', 'risks'), metric(testCases.length, '测试用例', 'cases', 'test_cases'), metric(evidence.length, '证据', 'evidence'), metric(details.review_issues?.length ?? 0, '复核问题', 'review')),
-          h('div', { style: styles.grid }, metric(details.business_flows?.length ?? current.counts?.business_flows ?? 0, '业务流程', undefined, 'business_flows'), metric(current.analysis?.reworked ?? 0, '返工单元')),
+          h('div', { style: styles.grid }, metric(details.business_flows?.length ?? current.counts?.business_flows ?? 0, '业务流程', undefined, 'business_flows'), metric(current.analysis?.reworked ?? 0, '定向补齐单元')),
           current.errors?.length ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), h('div', { style: { ...styles.card, ...styles.error } }, JSON.stringify(current.errors, null, 2))) : null,
           snapshot?.runs?.length ? h(React.Fragment, null,
             h('div', { style: styles.sectionTitle }, '历史任务'),

@@ -1,5 +1,3 @@
-// Browser half of dsh-pangea-asset-catalog. It only edits generated catalog
-// metadata and never changes source assets or PANGEA state.
 window.__ModuleLoader__.load({
   id: 'dsh-pangea-asset-catalog',
   factory: (require) => {
@@ -11,28 +9,26 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const inject = ['pangea', 'sessions']
     const API_PATH = '/api/pangea-asset-catalog/state'
-    const ROLES = [
-      ['input_candidate', '输入候选'],
-      ['semantic_reference', '语义参考'],
-      ['example_reference', '示例参考'],
-      ['methodology_candidate', '方法论候选'],
-      ['automation_capability', '自动化能力'],
-      ['unclassified', '未分类'],
+    const TYPES = [
+      ['', '全部'], ['requirement', '需求'], ['design', '设计'],
+      ['historical_defect', '历史缺陷'], ['reference', '参考资料'], ['coverage', 'Coverage'],
     ]
-    const ROLE_LABELS = Object.fromEntries(ROLES)
+    const STATUS = {
+      imported: '待提取', extracting: '提取中', awaiting_review: '待人工审核',
+      available: '可用于分析', no_items: '已分析，无结构化条目', rejected: '已拒绝',
+      failed: '失败', archived: '已归档',
+    }
 
-    function listSearch({ cwd, page = 1, pageSize = 20, role = 'all', assetId }) {
+    function listSearch({ cwd, page = 1, pageSize = 20, type = '', status = '', query = '', assetId }) {
       return new URLSearchParams({
-        cwd,
-        page: String(page),
-        page_size: String(pageSize),
-        role,
-        ...(assetId ? { asset_id: assetId } : {}),
+        cwd, page: String(page), page_size: String(pageSize),
+        ...(type ? { type } : {}), ...(status ? { status } : {}),
+        ...(query ? { q: query } : {}), ...(assetId ? { asset_id: assetId } : {}),
       }).toString()
     }
 
-    async function requestState({ cwd, page = 1, pageSize = 20, role = 'all', signal, fetcher = fetch }) {
-      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, role })}`, { cache: 'no-store', signal })
+    async function requestState({ cwd, page = 1, pageSize = 20, type = '', status = '', query = '', signal, fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, type, status, query })}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -42,37 +38,28 @@ window.__ModuleLoader__.load({
       const response = await fetcher(`${API_PATH}?${listSearch({ cwd, assetId })}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
-      return body.asset
+      return body
     }
 
-    async function requestAction({ cwd, action, payload = {}, page = 1, pageSize = 20, role = 'all', fetcher = fetch }) {
-      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, role })}`, {
+    async function requestAction({ cwd, action, payload = {}, page = 1, pageSize = 20, type = '', status = '', query = '', fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, type, status, query })}`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...payload }),
       })
-      const value = await response.json()
-      if (!response.ok || value.status !== 'ok') throw new Error(value.error ?? `HTTP ${response.status}`)
-      return value
-    }
-
-    function analysisSessionId(value) {
-      return value?.job?.session_id ?? value?.result?.model_session_id ?? ''
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
     }
 
     async function openAnalysisSession(sessions, sessionId, timeoutMs = 5000) {
-      if (!sessionId) throw new Error('没有可打开的分析会话。')
+      if (!sessionId) throw new Error('没有可打开的提取会话。')
       const available = () => Boolean(sessions.list.getSnapshot().byId?.[sessionId])
       if (!available()) {
         await new Promise((resolve, reject) => {
           let unsubscribe = () => {}
-          const timer = setTimeout(() => {
-            unsubscribe()
-            reject(new Error('分析会话尚未同步到侧边栏，请稍后重试。'))
-          }, timeoutMs)
+          const timer = setTimeout(() => { unsubscribe(); reject(new Error('提取会话尚未同步，请稍后重试。')) }, timeoutMs)
           const check = () => {
             if (!available()) return
-            clearTimeout(timer)
-            unsubscribe()
-            resolve()
+            clearTimeout(timer); unsubscribe(); resolve()
           }
           unsubscribe = sessions.list.subscribe(check)
           check()
@@ -82,271 +69,149 @@ window.__ModuleLoader__.load({
     }
 
     const styles = {
-      root: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: 'var(--dsw-alias-label-primary, inherit)', background: 'var(--dsw-alias-bg-base, transparent)' },
-      header: { position: 'sticky', top: 0, zIndex: 4, padding: '14px', background: 'var(--dsw-alias-bg-layer-1, #111)', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))' },
-      row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-      title: { fontSize: 16, fontWeight: 760 },
-      subline: { marginTop: 4, color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, lineHeight: 1.45, overflowWrap: 'anywhere' },
+      root: { height: '100%', overflow: 'auto', color: 'var(--dsw-alias-label-primary, inherit)' },
+      header: { position: 'sticky', top: 0, zIndex: 3, padding: 14, background: 'var(--dsw-alias-bg-layer-1, #111)', borderBottom: '1px solid var(--dsw-alias-border-l2, #444)' },
       content: { padding: '14px 14px 24px' },
-      card: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 9, padding: 11, marginBottom: 9 },
-      notice: { borderColor: 'var(--dsw-alias-state-business-secondary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.1))' },
-      error: { borderColor: 'var(--dsw-alias-state-error-secondary, #e66767)', color: 'var(--dsw-alias-state-error-primary, #e66767)' },
-      success: { borderColor: 'var(--dsw-alias-state-success-secondary, #4fb8a8)' },
-      button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '6px 9px', cursor: 'pointer', fontSize: 10 },
-      primary: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', fontWeight: 700 },
-      metrics: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 7, marginBottom: 11 },
-      metric: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 8, padding: 9, background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))' },
-      number: { fontSize: 18, fontWeight: 760 },
-      label: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, marginTop: 3 },
-      filters: { display: 'flex', gap: 5, overflowX: 'auto', marginBottom: 10, paddingBottom: 3 },
-      filter: { flex: '0 0 auto', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, background: 'transparent', color: 'inherit', padding: '4px 8px', fontSize: 10, cursor: 'pointer' },
-      filterActive: { background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.16))', fontWeight: 700 },
-      itemTitle: { fontSize: 12, fontWeight: 720, overflowWrap: 'anywhere' },
+      row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+      wrap: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
+      title: { fontSize: 16, fontWeight: 760 }, itemTitle: { fontSize: 12, fontWeight: 720 },
       meta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, lineHeight: 1.5, marginTop: 5, overflowWrap: 'anywhere' },
-      summary: { fontSize: 11, lineHeight: 1.55, marginTop: 7 },
-      chips: { display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 7 },
-      chip: { borderRadius: 999, padding: '2px 6px', background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 9 },
-      select: { border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, background: 'var(--dsw-alias-bg-layer-2, #222)', color: 'inherit', padding: '4px 6px', fontSize: 10, maxWidth: 150 },
-      input: { width: '100%', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, background: 'var(--dsw-alias-bg-layer-2, #222)', color: 'inherit', padding: '6px 7px', fontSize: 10, marginTop: 4 },
-      textarea: { width: '100%', minHeight: 54, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, background: 'var(--dsw-alias-bg-layer-2, #222)', color: 'inherit', padding: '6px 7px', fontSize: 10, marginTop: 4 },
-      issue: { marginTop: 8, padding: 9, borderRadius: 7, border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.06))' },
-      empty: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 11, lineHeight: 1.6 },
+      card: { border: '1px solid var(--dsw-alias-border-l2, #444)', borderRadius: 9, padding: 11, marginBottom: 9, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
+      notice: { borderColor: 'var(--dsw-alias-state-business-secondary, #4d9ad6)' },
+      error: { borderColor: 'var(--dsw-alias-state-error-secondary, #e66767)', color: 'var(--dsw-alias-state-error-primary, #e66767)' },
+      button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '6px 9px', cursor: 'pointer', fontSize: 10 },
+      primary: { background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: '#fff', fontWeight: 700 },
+      active: { background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.18))', fontWeight: 700 },
+      input: { boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, background: 'var(--dsw-alias-bg-layer-2, #222)', color: 'inherit', padding: '6px 7px', fontSize: 10 },
+      grow: { flex: '1 1 180px', minWidth: 0 },
+      chip: { borderRadius: 999, padding: '2px 6px', background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', fontSize: 9 },
+      pre: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflow: 'auto', fontSize: 10, lineHeight: 1.5 },
     }
 
-    function normalizationText(asset) {
-      const value = asset.normalization
-      if (!value) return ''
-      if (value.status === 'failed' || value.status === 'too_large') return `转换失败：${value.error ?? value.error_code ?? '无法读取文档'}`
-      if (value.persisted) return `已生成 Markdown：${value.markdown_path}`
-      if (value.status === 'converted_with_warnings') return `可转换为 Markdown，但有诊断：${value.warnings?.join('；') ?? '部分内容可能缺失'}`
-      return `可转换为 Markdown：${value.markdown_path}`
-    }
-
-    function lines(value) {
-      return Array.isArray(value) ? value.join('\n') : ''
-    }
-
-    function lineValues(value) {
-      return value.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
-    }
-
-    function extractionText(value) {
-      if (!value?.available) return ''
-      if (value.job?.status === 'queued' || value.job?.status === 'running') return `DSH 模型分析中 · 会话 ${value.job.session_id}`
-      if (value.job?.status === 'failed') return `提取失败：${value.job.error}`
-      if (value.result) return value.result.extraction_status === 'no_issues'
-        ? '模型没有发现有原文依据的历史问题。'
-        : `已提取 ${value.result.issues?.length ?? value.result.issue_count ?? 0} 条历史问题草稿 · 第 ${value.result.extraction_revision} 次提取`
-      return '尚未调用 DSH 模型提取历史问题。'
-    }
-
-    function IssueReview({ asset, issue, busy, onAction }) {
-      const [expanded, setExpanded] = React.useState(false)
-      const [editing, setEditing] = React.useState(false)
-      const [draft, setDraft] = React.useState(() => ({ ...issue }))
-      const review = issue.review
-      const decision = review?.decision
-      const update = (field, value) => setDraft(current => ({ ...current, [field]: value }))
-      const arrayFields = [
-        ['trigger_conditions', '触发条件'], ['impact', '影响'], ['root_causes', '根因'],
-        ['resolutions', '解决办法'], ['verification', '验证方式'], ['limitations', '限制与例外'],
-      ]
-      const corrected = {
-        title: draft.title, symptom: draft.symptom,
-        trigger_conditions: draft.trigger_conditions, impact: draft.impact,
-        root_causes: draft.root_causes, resolutions: draft.resolutions,
-        verification: draft.verification, limitations: draft.limitations,
-        missing_fields: draft.missing_fields ?? [], confidence: draft.confidence,
-      }
-      return h('div', { style: styles.issue },
-        h('div', { style: styles.row },
-          h('div', { style: styles.itemTitle }, issue.title),
-          h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
-            h('span', { style: styles.chip }, decision === 'confirmed' ? '已确认' : decision === 'excluded' ? '已排除' : `草稿 · ${issue.confidence}`),
-            h('button', { type: 'button', style: styles.button, onClick: () => setExpanded(value => !value) }, expanded ? '收起问题' : '展开问题'))),
-        expanded && issue.symptom ? h('div', { style: styles.summary }, issue.symptom) : null,
-        expanded ? h('div', { style: styles.meta }, `来源：${issue.evidence.map(item => item.location).join('；')}`) : null,
-        expanded ? issue.evidence.map((item, index) => h('div', { key: `${item.location}:${index}`, style: { ...styles.meta, marginTop: 7 } },
-          h('div', { style: { fontWeight: 700 } }, item.location),
-          h('div', { style: { marginTop: 3, whiteSpace: 'pre-wrap' } }, item.excerpt))) : null,
-        expanded ? (editing ? h('div', { style: { marginTop: 9 } },
-          h('label', { style: styles.label }, '问题名称', h('input', { style: styles.input, value: draft.title, onChange: event => update('title', event.target.value) })),
-          h('label', { style: { ...styles.label, display: 'block', marginTop: 7 } }, '问题现象', h('textarea', { style: styles.textarea, value: draft.symptom, onChange: event => update('symptom', event.target.value) })),
-          ...arrayFields.map(([field, label]) => h('label', { key: field, style: { ...styles.label, display: 'block', marginTop: 7 } }, `${label}（每行一项）`, h('textarea', { style: styles.textarea, value: lines(draft[field]), onChange: event => update(field, lineValues(event.target.value)) }))),
-          h('label', { style: { ...styles.label, display: 'block', marginTop: 7 } }, '置信度', h('select', { style: { ...styles.select, display: 'block', marginTop: 4 }, value: draft.confidence, onChange: event => update('confidence', event.target.value) }, ['high', 'medium', 'low'].map(value => h('option', { key: value, value }, value)))),
-          h('div', { style: { ...styles.row, justifyContent: 'flex-start', marginTop: 9 } },
-            h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void onAction(asset, issue, 'confirmed', corrected); setEditing(false) } }, '保存并确认'),
-            h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => setEditing(false) }, '取消')))
-          : h('div', { style: { ...styles.row, justifyContent: 'flex-start', marginTop: 9 } },
-            h('button', { type: 'button', disabled: busy || decision === 'confirmed', style: { ...styles.button, ...styles.primary }, onClick: () => { void onAction(asset, issue, 'confirmed') } }, decision === 'confirmed' ? '已确认' : '确认'),
-            h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { setExpanded(true); setEditing(true) } }, '修正后确认'),
-            h('button', { type: 'button', disabled: busy || decision === 'excluded', style: styles.button, onClick: () => { void onAction(asset, issue, 'excluded') } }, decision === 'excluded' ? '已排除' : '排除')))
-          : null)
-    }
-
-    function CatalogPanel({ scope, visible, ctx }) {
-      const cwd = scope?.cwd
-      const [state, setState] = React.useState(undefined)
+    function AssetPanel({ ctx, scope, visible }) {
+      const cwd = scope?.cwd ?? ''
+      const [state, setState] = React.useState(null)
       const [error, setError] = React.useState('')
-      const [busy, setBusy] = React.useState(false)
       const [notice, setNotice] = React.useState('')
-      const [filter, setFilter] = React.useState('all')
+      const [busy, setBusy] = React.useState(false)
       const [page, setPage] = React.useState(1)
       const [pageSize, setPageSize] = React.useState(20)
-      const [expandedAssets, setExpandedAssets] = React.useState({})
-      const [assetDetails, setAssetDetails] = React.useState({})
-      const [detailLoading, setDetailLoading] = React.useState({})
+      const [type, setType] = React.useState('')
+      const [query, setQuery] = React.useState('')
+      const [queryDraft, setQueryDraft] = React.useState('')
+      const [expanded, setExpanded] = React.useState({})
+      const [details, setDetails] = React.useState({})
+      const [importPath, setImportPath] = React.useState('')
+      const [importType, setImportType] = React.useState('requirement')
+      const [importTitle, setImportTitle] = React.useState('')
 
       const load = React.useCallback(async signal => {
         if (!cwd) return
         try {
           setError('')
-          setState(await requestState({ cwd, page, pageSize, role: filter, signal }))
-          const assetIds = Object.keys(expandedAssets)
-          if (assetIds.length) {
-            setDetailLoading(current => ({ ...current, ...Object.fromEntries(assetIds.map(id => [id, true])) }))
-            const details = await Promise.all(assetIds.map(async assetId => [assetId, await requestAssetDetail({ cwd, assetId, signal })]))
-            setAssetDetails(current => ({ ...current, ...Object.fromEntries(details) }))
-            setDetailLoading(current => ({ ...current, ...Object.fromEntries(assetIds.map(id => [id, false])) }))
-          }
+          setState(await requestState({ cwd, page, pageSize, type, query, signal }))
+        } catch (value) {
+          if (value?.name !== 'AbortError') setError(value instanceof Error ? value.message : String(value))
         }
-        catch (value) { if (value?.name !== 'AbortError') setError(value instanceof Error ? value.message : String(value)) }
-      }, [cwd, page, pageSize, filter, expandedAssets])
+      }, [cwd, page, pageSize, type, query])
 
       React.useEffect(() => {
         if (visible === false || !cwd) return undefined
         const controller = new AbortController()
         void load(controller.signal)
         return () => controller.abort()
-      }, [cwd, visible, load])
+      }, [visible, cwd, load])
 
-      const modelBusy = Boolean(state?.assets?.some(asset => ['queued', 'running'].includes(asset.historical_extraction?.job?.status)) || ['queued', 'running'].includes(state?.methodology_generation?.job?.status))
+      const active = Boolean(state?.assets?.some(asset => asset.status === 'extracting' || ['queued', 'running', 'finalizing'].includes(asset.extraction_job?.status)))
       React.useEffect(() => {
-        if (!modelBusy || visible === false) return undefined
+        if (!active || visible === false) return undefined
         const timer = setInterval(() => { void load() }, 1500)
         return () => clearInterval(timer)
-      }, [modelBusy, visible, load])
+      }, [active, visible, load])
 
       async function act(action, payload = {}) {
         setBusy(true); setError(''); setNotice('')
         try {
-          const value = await requestAction({ cwd, action, payload, page, pageSize, role: filter })
+          const value = await requestAction({ cwd, action, payload, page, pageSize, type, query })
           setState(value)
-          if (payload.asset_id && expandedAssets[payload.asset_id]) {
-            const detail = await requestAssetDetail({ cwd, assetId: payload.asset_id })
-            setAssetDetails(current => ({ ...current, [payload.asset_id]: detail }))
-          }
-          const messages = {
-            generate: `目录文件已生成：${value.output_root}`,
-            override: '建议分类已保存，并重新生成目录文件。',
-            extract_historical_issues: `历史问题提取任务已创建：${value.launched?.session_id ?? ''}`,
-            review_historical_issue: '人工复核结果已保存。',
-            derive_methodology: `方法论候选任务已创建：${value.launched?.session_id ?? ''}`,
-          }
-          setNotice(messages[action] ?? '操作已完成。')
+          setNotice(action === 'import' ? '资产已导入。' : action === 'extract' ? '结构化提取已启动。' : action === 'review' ? '审核结果已保存。' : '资产已归档。')
         } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
         finally { setBusy(false) }
       }
 
-      function changeList(next) {
-        setExpandedAssets({})
-        setAssetDetails({})
-        setDetailLoading({})
-        next()
+      async function toggle(assetId) {
+        if (expanded[assetId]) { setExpanded(current => ({ ...current, [assetId]: false })); return }
+        setExpanded(current => ({ ...current, [assetId]: true }))
+        if (details[assetId]) return
+        try {
+          const value = await requestAssetDetail({ cwd, assetId })
+          setDetails(current => ({ ...current, [assetId]: value }))
+        } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
       }
 
-      function toggleAsset(assetId) {
-        setExpandedAssets(current => current[assetId]
-          ? Object.fromEntries(Object.entries(current).filter(([id]) => id !== assetId))
-          : { ...current, [assetId]: true })
-      }
-
-      async function reviewIssue(asset, issue, decision, correctedIssue = undefined) {
-        await act('review_historical_issue', {
-          asset_id: asset.asset_id, issue_id: issue.issue_id, decision,
-          ...(correctedIssue ? { corrected_issue: correctedIssue } : {}),
-        })
-      }
-
-      async function openSession(sessionId) {
-        setError('')
-        try { await openAnalysisSession(ctx.sessions, sessionId) }
-        catch (value) { setError(value instanceof Error ? value.message : String(value)) }
-      }
-
-      if (!cwd) return h('div', { style: styles.root }, h('div', { style: styles.content }, h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 DSH 页面没有可用工作区。'))))
+      const pagination = state?.pagination ?? { page, page_size: pageSize, total: 0, total_pages: 1 }
       const assets = state?.assets ?? []
-      const pagination = state?.pagination ?? { page, page_size: pageSize, total: assets.length, total_pages: 1, role: filter }
-      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 资产目录' },
-        h('div', { style: styles.header },
-          h('div', { style: styles.row }, h('div', { style: styles.title }, '资产目录'), h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('generate') } }, busy ? '处理中…' : '生成目录文件')),
-          h('div', { style: styles.subline }, cwd)),
+      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 资产管理' },
+        h('div', { style: styles.header }, h('div', { style: styles.title }, '资产管理'), h('div', { style: styles.meta }, cwd)),
         h('div', { style: styles.content },
-          h('div', { style: { ...styles.card, ...styles.notice } }, h('div', { style: styles.summary }, '本插件只分析文件并生成非约束性目录。它不修改 PANGEA、Run、原始资产或任何分析决策。'), state?.generated ? h('div', { style: styles.meta }, `已有目录：${state.generated.catalog_path} · ${state.generated.modified_at}`) : h('div', { style: styles.meta }, '尚未生成 catalog.json；当前页面显示的是实时扫描预览。')),
-          notice ? h('div', { style: { ...styles.card, ...styles.success } }, h('div', { style: styles.summary }, notice)) : null,
-          error ? h('div', { style: { ...styles.card, ...styles.error }, role: 'alert' }, h('div', { style: styles.summary }, error), h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load() } }, '重试')) : null,
-          state ? h(React.Fragment, null,
-            h('div', { style: styles.metrics },
-              [['资料', state.counts.materials], ['自动化', state.counts.automations], ['已标准化', state.counts.normalized_documents], ['待处理', state.counts.diagnostics]].map(([label, value]) => h('div', { key: label, style: styles.metric }, h('div', { style: styles.number }, value), h('div', { style: styles.label }, label)))),
-            h('div', { style: styles.card },
+          h('div', { style: { ...styles.card, ...styles.notice } },
+            h('div', { style: styles.itemTitle }, '导入资产'),
+            h('div', { style: styles.meta }, '需求、设计、历史缺陷和参考资料会先结构化；Coverage 由 Python 直接解析。少量已有用例只在创建 Run 时作为示例提供，不进入资产库。'),
+            h('div', { style: { ...styles.wrap, marginTop: 8 } },
+              h('input', { 'aria-label': '资产文件路径', placeholder: '文件绝对路径', style: { ...styles.input, ...styles.grow }, value: importPath, onChange: event => setImportPath(event.target.value) }),
+              h('select', { style: styles.input, value: importType, onChange: event => setImportType(event.target.value) }, TYPES.filter(([value]) => value).map(([value, label]) => h('option', { key: value, value }, label))),
+              h('input', { 'aria-label': '资产标题', placeholder: '标题（可选）', style: { ...styles.input, ...styles.grow }, value: importTitle, onChange: event => setImportTitle(event.target.value) }),
+              h('button', { type: 'button', disabled: busy || !importPath.trim(), style: { ...styles.button, ...styles.primary }, onClick: () => { void act('import', { path: importPath.trim(), asset_type: importType, title: importTitle.trim() }) } }, '导入'))),
+          notice ? h('div', { style: styles.card }, notice) : null,
+          error ? h('div', { style: { ...styles.card, ...styles.error }, role: 'alert' }, error) : null,
+          h('div', { style: { ...styles.wrap, marginBottom: 10 } },
+            TYPES.map(([value, label]) => h('button', { key: value || 'all', type: 'button', style: { ...styles.button, ...(type === value ? styles.active : {}) }, onClick: () => { setPage(1); setType(value) } }, label)),
+            h('form', { style: { ...styles.wrap, ...styles.grow }, onSubmit: event => { event.preventDefault(); setPage(1); setQuery(queryDraft.trim()) } },
+              h('input', { 'aria-label': '搜索资产', placeholder: '搜索标题、ID 或路径', style: { ...styles.input, ...styles.grow }, value: queryDraft, onChange: event => setQueryDraft(event.target.value) }),
+              h('button', { type: 'submit', style: styles.button }, '搜索'))),
+          assets.length ? assets.map(asset => {
+            const detail = details[asset.asset_id]
+            const isExpanded = Boolean(expanded[asset.asset_id])
+            const job = asset.extraction_job
+            return h('div', { key: asset.asset_id, style: styles.card },
               h('div', { style: styles.row },
-                h('div', null, h('div', { style: styles.itemTitle }, '已确认历史问题 → 方法论候选'), h('div', { style: styles.meta }, `已确认 ${state.historical_issue_reviews?.confirmed ?? 0} 条 · 已排除 ${state.historical_issue_reviews?.excluded ?? 0} 条`)),
-                h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
-                  analysisSessionId(state.methodology_generation) ? h('button', { type: 'button', style: styles.button, onClick: () => { void openSession(analysisSessionId(state.methodology_generation)) } }, '打开分析会话') : null,
-                  h('button', { type: 'button', disabled: busy || modelBusy || !state.methodology_generation?.available, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('derive_methodology') } }, state.methodology_generation?.job && ['queued', 'running'].includes(state.methodology_generation.job.status) ? '生成中…' : '生成方法论候选'))),
-              state.methodology_generation?.job?.status === 'failed' ? h('div', { style: { ...styles.meta, color: 'var(--dsw-alias-state-error-primary, #e66767)' } }, `生成失败：${state.methodology_generation.job.error}`) : null,
-              state.methodology_generation?.result ? h('div', { style: styles.meta }, `当前 ${state.methodology_generation.result.candidates?.length ?? 0} 条候选${state.methodology_generation.stale ? ' · 已确认问题发生变化，需要重新生成' : ''} · ${state.methodology_generation.output_path}`) : null),
-            h('div', { style: styles.filters }, [['all', '全部'], ...ROLES].map(([role, label]) => h('button', { key: role, type: 'button', style: { ...styles.filter, ...(filter === role ? styles.filterActive : {}) }, onClick: () => changeList(() => { setPage(1); setFilter(role) }) }, label))),
-            assets.length ? assets.map(asset => {
-              const expanded = Boolean(expandedAssets[asset.asset_id])
-              const detail = assetDetails[asset.asset_id] ?? asset
-              const extraction = detail.historical_extraction ?? asset.historical_extraction
-              return h('div', { key: asset.asset_id, style: styles.card },
-                h('div', { style: styles.row },
-                  h('div', { style: styles.itemTitle }, asset.source_path),
-                  h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
-                    h('span', { style: styles.chip }, asset.kind),
-                    h('button', { type: 'button', style: styles.button, onClick: () => toggleAsset(asset.asset_id) }, expanded ? '收起详情' : '展开详情'))),
-                h('div', { style: styles.meta }, `${asset.parse_status} · ${asset.suggestion_source === 'user_override' ? '人工修正' : '插件建议'} · 非约束性`),
-                h('div', { style: styles.chips }, asset.suggested_roles.map(role => h('span', { key: role, style: styles.chip }, ROLE_LABELS[role] ?? role))),
-                asset.historical_extraction?.available ? h('div', { style: { marginTop: 8 } },
-                  h('div', { style: styles.row },
-                    h('div', { style: styles.meta }, extractionText(asset.historical_extraction)),
-                    h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
-                      asset.historical_extraction.normalized_open_path ? h('button', { type: 'button', style: styles.button, onClick: () => ctx.pangea.openFile(scope, asset.historical_extraction.normalized_open_path, `${asset.source_path} · Markdown`) }, '打开 Markdown') : null,
-                      analysisSessionId(asset.historical_extraction) ? h('button', { type: 'button', style: styles.button, onClick: () => { void openSession(analysisSessionId(asset.historical_extraction)) } }, '打开分析会话') : null,
-                      h('button', { type: 'button', disabled: busy || ['queued', 'running'].includes(asset.historical_extraction.job?.status), style: styles.button, onClick: () => { void act('extract_historical_issues', { asset_id: asset.asset_id }) } }, asset.historical_extraction.result ? '重新提取' : '提取历史问题')))) : null,
-                expanded ? (detailLoading[asset.asset_id] && !assetDetails[asset.asset_id]
-                  ? h('div', { style: styles.meta }, '正在加载完整内容与证据…')
-                  : h('div', { style: { marginTop: 9, paddingTop: 9, borderTop: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))' } },
-                    detail.normalization ? h('div', { style: styles.meta }, normalizationText(detail), detail.normalization.persisted && detail.normalization.open_path ? h('button', { type: 'button', style: { ...styles.button, marginLeft: 7, padding: '3px 6px' }, onClick: () => ctx.pangea.openFile(scope, detail.normalization.open_path, `${detail.source_path} · Markdown`) }, '打开 Markdown') : null) : null,
-                    detail.summary ? h('div', { style: styles.summary }, detail.summary) : null,
-                    h('div', { style: { ...styles.row, marginTop: 9 } },
-                      h('span', { style: styles.label }, '修正主要建议角色'),
-                      h('select', { style: styles.select, value: detail.suggested_roles[0] ?? 'unclassified', disabled: busy, onChange: event => { void act('override', { asset_id: detail.asset_id, suggested_roles: [event.target.value], kind: detail.kind }) } }, ROLES.map(([role, label]) => h('option', { key: role, value: role }, label)))),
-                    extraction?.result?.issues?.length ? h('div', { style: { marginTop: 9 } }, extraction.result.issues.map(issue => h(IssueReview, { key: issue.issue_id, asset: detail, issue, busy, onAction: reviewIssue }))) : extraction?.result ? h('div', { style: styles.meta }, '没有需要展开的历史问题。') : null))
-                  : null)
-            }) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前筛选没有资产。')),
-            h('div', { style: { ...styles.card, ...styles.row } },
-              h('div', { style: styles.meta }, `第 ${pagination.page} / ${pagination.total_pages} 页 · 共 ${pagination.total} 个资产`),
-              h('div', { style: { ...styles.row, justifyContent: 'flex-end' } },
-                h('label', { style: styles.label }, '每页 ', h('select', { style: styles.select, value: pagination.page_size, onChange: event => changeList(() => { setPage(1); setPageSize(Number(event.target.value)) }) }, [20, 50, 100].map(value => h('option', { key: value, value }, value)))),
-                h('button', { type: 'button', disabled: pagination.page <= 1, style: styles.button, onClick: () => changeList(() => setPage(pagination.page - 1)) }, '上一页'),
-                h('button', { type: 'button', disabled: pagination.page >= pagination.total_pages, style: styles.button, onClick: () => changeList(() => setPage(pagination.page + 1)) }, '下一页'))),
-            state.diagnostics.length ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `诊断（${state.diagnostics.length}）`), state.diagnostics.map((item, index) => h('div', { key: `${item.kind}:${item.path}:${index}`, style: styles.meta }, `${item.path} · ${item.kind}${item.parse_status ? ` · ${item.parse_status}` : ''}`))) : null)
-            : !error ? h('div', { style: styles.card }, h('div', { style: styles.empty }, '正在扫描资产…')) : null))
+                h('div', null, h('div', { style: styles.itemTitle }, asset.title), h('div', { style: styles.meta }, `${asset.asset_id} · ${asset.source_path}`)),
+                h('div', { style: { ...styles.wrap, justifyContent: 'flex-end' } },
+                  h('span', { style: styles.chip }, TYPES.find(([value]) => value === asset.asset_type)?.[1] ?? asset.asset_type),
+                  h('span', { style: styles.chip }, STATUS[asset.status] ?? asset.status),
+                  h('button', { type: 'button', style: styles.button, onClick: () => { void toggle(asset.asset_id) } }, isExpanded ? '收起详情' : '展开详情'))),
+              h('div', { style: styles.meta }, `结构化条目 ${asset.structured_item_count} · 更新于 ${asset.updated_at}`),
+              h('div', { style: { ...styles.wrap, marginTop: 8 } },
+                ['imported', 'available', 'no_items', 'rejected'].includes(asset.status) && asset.asset_type !== 'coverage'
+                  ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('extract', { asset_id: asset.asset_id }) } }, asset.status === 'imported' ? '开始提取' : '重新提取') : null,
+                asset.status === 'imported' && asset.asset_type === 'coverage'
+                  ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('extract', { asset_id: asset.asset_id }) } }, '解析 Coverage') : null,
+                job?.session_id ? h('button', { type: 'button', style: styles.button, onClick: () => { void openAnalysisSession(ctx.sessions, job.session_id) } }, '打开提取会话') : null,
+                asset.status === 'awaiting_review' ? h(React.Fragment, null,
+                  h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'approve' }) } }, '审核通过'),
+                  h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'reject' }) } }, '拒绝')) : null,
+                asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('archive', { asset_id: asset.asset_id }) } }, '归档') : null),
+              isExpanded ? h('div', { style: { marginTop: 9, borderTop: '1px solid var(--dsw-alias-border-l2, #444)', paddingTop: 9 } },
+                asset.status === 'no_items' ? h('div', { style: styles.meta }, '已完成分析，没有可结构化条目。') : null,
+                asset.warnings?.length ? h('div', { style: styles.meta }, `提示：${asset.warnings.join('；')}`) : null,
+                detail?.result ? h('pre', { style: styles.pre }, JSON.stringify(detail.result, null, 2)) : h('div', { style: styles.meta }, '正在加载结构化结果…')) : null)
+          }) : h('div', { style: styles.card }, '当前筛选没有资产。'),
+          h('div', { style: { ...styles.card, ...styles.row } },
+            h('div', { style: styles.meta }, `第 ${pagination.page} / ${pagination.total_pages} 页 · 共 ${pagination.total} 个资产`),
+            h('div', { style: styles.wrap },
+              h('select', { style: styles.input, value: pagination.page_size, onChange: event => { setPage(1); setPageSize(Number(event.target.value)) } }, [20, 50, 100].map(value => h('option', { key: value, value }, value))),
+              h('button', { type: 'button', disabled: pagination.page <= 1, style: styles.button, onClick: () => setPage(pagination.page - 1) }, '上一页'),
+              h('button', { type: 'button', disabled: pagination.page >= pagination.total_pages, style: styles.button, onClick: () => setPage(pagination.page + 1) }, '下一页')))))
     }
 
-    const icon = h('svg', { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 },
-      h('path', { d: 'M4 5.5h6l2 2H20v11H4z' }), h('path', { d: 'M8 12h8M8 15h6' }))
+    const icon = h('svg', { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 }, h('path', { d: 'M4 5.5h6l2 2H20v11H4z' }), h('path', { d: 'M8 12h8M8 15h6' }))
 
     function apply(ctx) {
-      const pangea = ctx.pangea
-      if (!pangea) return
-      ctx.effect(() => pangea.registerPage({
+      if (!ctx.pangea) return
+      ctx.effect(() => ctx.pangea.registerPage({
         id: 'assets', title: () => '资产', icon, order: 30,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(CatalogPanel, { ...props, ctx }),
+        component: props => h(AssetPanel, { ...props, ctx }),
       }), 'dsh-pangea-asset-catalog: asset page')
     }
 
@@ -354,7 +219,6 @@ window.__ModuleLoader__.load({
     exports.requestState = requestState
     exports.requestAssetDetail = requestAssetDetail
     exports.requestAction = requestAction
-    exports.analysisSessionId = analysisSessionId
     exports.openAnalysisSession = openAnalysisSession
     exports.apply = apply
     return module.exports

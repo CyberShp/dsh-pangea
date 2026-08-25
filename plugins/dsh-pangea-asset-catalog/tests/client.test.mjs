@@ -18,90 +18,68 @@ function fakeReact() {
   }
 }
 
-test('registers one asset catalog page and keeps the boundary visible', async () => {
+async function loadClient() {
   const source = await readFile(clientPath, 'utf8')
-  assert.match(source, /资产目录/)
-  assert.match(source, /生成目录文件/)
-  assert.match(source, /提取历史问题/)
-  assert.match(source, /修正后确认/)
-  assert.match(source, /生成方法论候选/)
-  assert.match(source, /打开分析会话/)
-  assert.match(source, /展开详情/)
-  assert.match(source, /收起详情/)
-  assert.match(source, /展开问题/)
-  assert.match(source, /上一页/)
-  assert.match(source, /下一页/)
-  assert.match(source, /不修改 PANGEA、Run、原始资产或任何分析决策/)
-  assert.match(source, /方法论候选/)
-  assert.match(source, /自动化能力/)
-
   let exported
-  const sandbox = { URLSearchParams, AbortController, console, fetch: async () => { throw new Error('fetch must not run') } }
-  sandbox.window = {
-    __ModuleLoader__: {
-      load(spec) {
-        exported = spec.factory(name => {
-          if (name === 'react') return fakeReact()
-          throw new Error(`unexpected require: ${name}`)
-        })
-      },
-    },
+  const sandbox = {
+    URLSearchParams, AbortController, console, setTimeout, clearTimeout, setInterval, clearInterval,
+    fetch: async () => { throw new Error('default fetch must not run') },
   }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(() => fakeReact()) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
-  assert.deepEqual(Array.from(exported.inject), ['pangea', 'sessions'])
+  return { source, exported }
+}
+
+test('registers a PANGEA-owned asset management page', async () => {
+  const { source, exported } = await loadClient()
+  for (const text of [
+    '资产管理', '导入资产', '需求', '设计', '历史缺陷', '参考资料', 'Coverage',
+    '待人工审核', '审核通过', '拒绝', '已分析，无结构化条目', '打开提取会话',
+    '上一页', '下一页', '已有用例只在创建 Run 时作为示例提供',
+  ]) assert.match(source, new RegExp(text))
+  assert.doesNotMatch(source, /生成目录文件|方法论候选|自动化文件|修正后确认/)
+
   const pages = []
   exported.apply({
     pangea: { registerPage(page) { pages.push(page); return () => {} } },
     effect(factory) { return factory() },
   })
+  assert.deepEqual(Array.from(exported.inject), ['pangea', 'sessions'])
   assert.equal(pages.length, 1)
   assert.equal(pages[0].id, 'assets')
   assert.equal(pages[0].title(), '资产')
-  assert.equal(pages[0].order, 30)
 })
 
-test('opens a created analysis session after it is visible in the DSH session list', async () => {
-  const source = await readFile(clientPath, 'utf8')
-  let exported
-  const sandbox = { URLSearchParams, AbortController, console, setTimeout, clearTimeout, fetch: async () => { throw new Error('default fetch must not run') } }
-  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(() => fakeReact()) } } }
-  vm.runInNewContext(source, sandbox, { filename: clientPath })
+test('client uses server pagination type filters detail loading and explicit actions', async () => {
+  const { exported } = await loadClient()
+  const calls = []
+  const fetcher = async (url, options = {}) => {
+    calls.push({ url, options })
+    return { ok: true, status: 200, async json() { return { status: 'ok', assets: [], pagination: {} } } }
+  }
+  await exported.requestState({ cwd: '/tmp/workspace', page: 2, pageSize: 50, type: 'design', query: 'tcp', fetcher })
+  await exported.requestAssetDetail({ cwd: '/tmp/workspace', assetId: 'asset-1', fetcher })
+  await exported.requestAction({ cwd: '/tmp/workspace', action: 'extract', payload: { asset_id: 'asset-1' }, fetcher })
+  const listUrl = new URL(calls[0].url, 'http://localhost')
+  assert.equal(listUrl.searchParams.get('page'), '2')
+  assert.equal(listUrl.searchParams.get('page_size'), '50')
+  assert.equal(listUrl.searchParams.get('type'), 'design')
+  assert.equal(listUrl.searchParams.get('q'), 'tcp')
+  assert.equal(new URL(calls[1].url, 'http://localhost').searchParams.get('asset_id'), 'asset-1')
+  assert.equal(calls[2].options.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[2].options.body), { action: 'extract', asset_id: 'asset-1' })
+})
 
+test('opens a real extraction session once DSH lists it', async () => {
+  const { exported } = await loadClient()
   const opened = []
   const sessions = {
     list: {
-      getSnapshot() { return { byId: { 'session-1': { id: 'session-1' } } } },
-      subscribe() { throw new Error('already visible sessions should open immediately') },
+      getSnapshot() { return { byId: { 'session-1': {} } } },
+      subscribe() { throw new Error('session is already visible') },
     },
     open(id) { opened.push(id) },
   }
   await exported.openAnalysisSession(sessions, 'session-1')
   assert.deepEqual(opened, ['session-1'])
-  assert.equal(exported.analysisSessionId({ result: { model_session_id: 'session-2' } }), 'session-2')
-})
-
-test('client requests paged previews, lazy asset detail, and explicit generation separately', async () => {
-  const source = await readFile(clientPath, 'utf8')
-  let exported
-  const sandbox = { URLSearchParams, AbortController, console, fetch: async () => { throw new Error('default fetch must not run') } }
-  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(() => fakeReact()) } } }
-  vm.runInNewContext(source, sandbox, { filename: clientPath })
-
-  const calls = []
-  const fetcher = async (url, options = {}) => {
-    calls.push({ url, options })
-    return { ok: true, status: 200, async json() { return { status: 'ok', assets: [], counts: {} } } }
-  }
-  await exported.requestState({ cwd: '/tmp/workspace', page: 2, pageSize: 50, role: 'semantic_reference', fetcher })
-  await exported.requestAssetDetail({ cwd: '/tmp/workspace', assetId: 'material-1', fetcher })
-  await exported.requestAction({ cwd: '/tmp/workspace', action: 'generate', page: 2, pageSize: 50, role: 'semantic_reference', fetcher })
-  assert.equal(calls[0].options.method, undefined)
-  const listUrl = new URL(calls[0].url, 'http://localhost')
-  assert.equal(listUrl.searchParams.get('page'), '2')
-  assert.equal(listUrl.searchParams.get('page_size'), '50')
-  assert.equal(listUrl.searchParams.get('role'), 'semantic_reference')
-  const detailUrl = new URL(calls[1].url, 'http://localhost')
-  assert.equal(detailUrl.searchParams.get('asset_id'), 'material-1')
-  assert.equal(calls[2].options.method, 'POST')
-  assert.deepEqual(JSON.parse(calls[2].options.body), { action: 'generate' })
 })

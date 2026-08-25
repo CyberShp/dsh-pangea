@@ -1,16 +1,12 @@
-import { ALLOWED_ROLES, generateCatalog, readGeneratedState, saveOverride } from './catalog.js'
-import { loadBundledSkills } from './bundled-skills.js'
-import {
-  AssetExtractionRuntime, ISSUE_SUBMISSION_PARAMETERS, METHODOLOGY_SUBMISSION_PARAMETERS,
-  saveHistoricalIssueReview,
-} from './extraction.js'
+import { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
 
 export const name = 'dsh-pangea-asset-catalog'
-export const inject = ['tools', 'webServer', 'skills', 'apiProxy', 'agents']
+export const inject = ['tools', 'webServer', 'apiProxy']
 
 const API_PATH = '/api/pangea-asset-catalog/state'
-const DEFAULT_PAGE_SIZE = 20
 const PAGE_SIZES = new Set([20, 50, 100])
+const ASSET_TYPES = new Set(['requirement', 'design', 'historical_defect', 'reference', 'coverage'])
+const ASSET_STATUSES = new Set(['imported', 'extracting', 'awaiting_review', 'available', 'no_items', 'rejected', 'failed', 'archived'])
 
 function workspaceCwd(exec) {
   const cwd = exec?.agent?.session?.header?.cwd
@@ -33,10 +29,12 @@ function sameOriginBrowserRequest(req) {
 async function readBody(req) {
   let body = ''
   for await (const chunk of req) {
-    body += chunk
+    body += chunk.toString('utf8')
     if (body.length > 64 * 1024) throw new Error('request body is too large')
   }
-  return body ? JSON.parse(body) : {}
+  const value = JSON.parse(body || '{}')
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('request body must be an object')
+  return value
 }
 
 function positiveInteger(value, fallback) {
@@ -44,166 +42,136 @@ function positiveInteger(value, fallback) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
-export function paginationOptions(searchParams) {
-  const requestedSize = positiveInteger(searchParams.get('page_size'), DEFAULT_PAGE_SIZE)
-  const requestedRole = searchParams.get('role') ?? 'all'
+export function listOptions(searchParams) {
+  const pageSizeValue = positiveInteger(searchParams.get('page_size'), 20)
+  const typeValue = searchParams.get('type') ?? ''
+  const statusValue = searchParams.get('status') ?? ''
   return {
     page: positiveInteger(searchParams.get('page'), 1),
-    pageSize: PAGE_SIZES.has(requestedSize) ? requestedSize : DEFAULT_PAGE_SIZE,
-    role: requestedRole === 'all' || ALLOWED_ROLES.has(requestedRole) ? requestedRole : 'all',
+    pageSize: PAGE_SIZES.has(pageSizeValue) ? pageSizeValue : 20,
+    type: ASSET_TYPES.has(typeValue) ? typeValue : '',
+    status: ASSET_STATUSES.has(statusValue) ? statusValue : '',
+    query: (searchParams.get('q') ?? '').trim().slice(0, 200),
   }
 }
 
-export function paginateSnapshot(snapshot, { page = 1, pageSize = DEFAULT_PAGE_SIZE, role = 'all' } = {}) {
-  const matching = [...snapshot.assets]
-    .filter(asset => role === 'all' || asset.suggested_roles?.includes(role))
-    .sort((left, right) => left.source_path < right.source_path ? -1 : left.source_path > right.source_path ? 1 : 0)
-  const total = matching.length
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
-  const currentPage = Math.min(Math.max(1, page), totalPages)
-  const offset = (currentPage - 1) * pageSize
-  const assets = matching.slice(offset, offset + pageSize).map(asset => ({
-    asset_id: asset.asset_id,
-    source_path: asset.source_path,
-    source_group: asset.source_group,
-    file_type: asset.file_type,
-    parse_status: asset.parse_status,
-    size_bytes: asset.size_bytes,
-    ...(asset.normalization ? { normalization: asset.normalization } : {}),
-    kind: asset.kind,
-    suggested_roles: asset.suggested_roles,
-    suggestion_source: asset.suggestion_source,
-    summary: asset.summary ?? '',
-    non_binding: true,
-  }))
+async function listState({ cwd, dataRoot, runtime, options }) {
+  const resolvedDataRoot = dataRootFor(cwd, dataRoot)
+  const cursor = (options.page - 1) * options.pageSize
+  const args = [
+    'assets', 'list', '--data-root', resolvedDataRoot,
+    '--cursor', String(cursor), '--limit', String(options.pageSize),
+  ]
+  if (options.type) args.push('--type', options.type)
+  if (options.status) args.push('--status', options.status)
+  if (options.query) args.push('--query', options.query)
+  const result = await runPangea({ cwd, args })
+  const totalPages = Math.max(1, Math.ceil(result.total / options.pageSize))
   return {
-    ...snapshot,
-    assets,
-    methodology_candidates: [],
-    automation_capabilities: [],
-    pagination: { page: currentPage, page_size: pageSize, total, total_pages: totalPages, role },
+    status: 'ok',
+    data_root: resolvedDataRoot,
+    assets: result.items.map(asset => ({
+      ...asset,
+      extraction_job: runtime.job(resolvedDataRoot, asset.asset_id),
+    })),
+    pagination: {
+      page: Math.min(options.page, totalPages), page_size: options.pageSize,
+      total: result.total, total_pages: totalPages,
+      type: options.type, status: options.status, query: options.query,
+    },
   }
 }
 
-async function currentState(runtime, cwd, options) {
-  const snapshot = paginateSnapshot(await readGeneratedState({ cwd }), options)
-  return runtime.decorateState(snapshot, { includeIssues: false })
-}
-
-async function assetDetail(runtime, cwd, assetId) {
-  const snapshot = await readGeneratedState({ cwd })
-  const asset = snapshot.assets.find(item => item.asset_id === assetId)
-  if (!asset) throw new Error(`asset not found: ${assetId}`)
-  const decorated = await runtime.decorateState({ ...snapshot, assets: [asset] })
-  return { status: 'ok', asset: decorated.assets[0] }
+async function assetDetail({ cwd, dataRoot, runtime, assetId }) {
+  const resolvedDataRoot = dataRootFor(cwd, dataRoot)
+  const detail = await runPangea({
+    cwd,
+    args: ['assets', 'get', '--data-root', resolvedDataRoot, '--asset-id', assetId],
+  })
+  return {
+    status: 'ok', data_root: resolvedDataRoot,
+    asset: { ...detail.asset, extraction_job: runtime.job(resolvedDataRoot, assetId) },
+    result: detail.result,
+  }
 }
 
 async function routeHandler(req, res, runtime) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
-  const options = paginationOptions(url.searchParams)
+  const dataRoot = url.searchParams.get('data_root') ?? undefined
+  const options = listOptions(url.searchParams)
   try {
     if (req.method === 'GET') {
       const assetId = url.searchParams.get('asset_id')
-      return json(res, 200, assetId ? await assetDetail(runtime, cwd, assetId) : await currentState(runtime, cwd, options))
+      const value = assetId
+        ? await assetDetail({ cwd, dataRoot, runtime, assetId })
+        : await listState({ cwd, dataRoot, runtime, options })
+      return json(res, 200, value)
     }
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await readBody(req)
-    if (body.action === 'generate') {
-      await generateCatalog({ cwd })
-      return json(res, 200, await currentState(runtime, cwd, options))
-    }
-    if (body.action === 'override') {
-      await saveOverride({ cwd, assetId: body.asset_id, suggestedRoles: body.suggested_roles, kind: body.kind })
-      return json(res, 200, await currentState(runtime, cwd, options))
-    }
-    if (body.action === 'extract_historical_issues') {
-      const launched = await runtime.startHistoricalIssues({ cwd, assetId: body.asset_id })
-      return json(res, 200, { ...await currentState(runtime, cwd, options), launched })
-    }
-    if (body.action === 'review_historical_issue') {
-      await saveHistoricalIssueReview({
-        cwd, assetId: body.asset_id, issueId: body.issue_id, decision: body.decision,
-        correctedIssue: body.corrected_issue,
+    const resolvedDataRoot = dataRootFor(cwd, dataRoot)
+    if (body.action === 'import') {
+      const args = [
+        'assets', 'import', '--data-root', resolvedDataRoot,
+        '--path', body.path, '--type', body.asset_type,
+      ]
+      if (body.title) args.push('--title', body.title)
+      await runPangea({ cwd, args })
+    } else if (body.action === 'extract') {
+      await runtime.start({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id })
+    } else if (body.action === 'review') {
+      await runPangea({
+        cwd,
+        args: [
+          'assets', 'review', '--data-root', resolvedDataRoot,
+          '--asset-id', body.asset_id, '--decision', body.decision,
+        ],
       })
-      return json(res, 200, await currentState(runtime, cwd, options))
+    } else if (body.action === 'archive') {
+      await runPangea({
+        cwd,
+        args: ['assets', 'archive', '--data-root', resolvedDataRoot, '--asset-id', body.asset_id],
+      })
+    } else {
+      return json(res, 400, { status: 'error', error: 'unsupported-action' })
     }
-    if (body.action === 'derive_methodology') {
-      const launched = await runtime.startMethodology({ cwd })
-      return json(res, 200, { ...await currentState(runtime, cwd, options), launched })
-    }
-    return json(res, 400, { status: 'error', error: 'unsupported-action' })
+    return json(res, 200, await listState({ cwd, dataRoot: resolvedDataRoot, runtime, options }))
   } catch (error) {
     return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
 }
 
-function renderGenerated(value) {
-  const lines = [
-    `资产目录：${value.output_root}`,
-    `资料：${value.counts.materials}`,
-    `自动化资产：${value.counts.automations}`,
-    `已标准化文档：${value.counts.normalized_documents}`,
-    `方法论候选：${value.counts.methodology_candidates}`,
-    `诊断：${value.counts.diagnostics}`,
-    '说明：生成结果仅供引用，不修改或约束 PANGEA 决策。',
-  ]
-  return [{ type: 'text', text: lines.join('\n') }]
-}
-
-function toolOutput() {
-  return { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
-}
-
 export async function apply(ctx) {
-  const runtime = new AssetExtractionRuntime(ctx.apiProxy)
-  const skillDisposers = (await loadBundledSkills()).map(skill => ctx.skills.register(skill))
-  const toolDisposers = [ctx.tools.register({
-    name: 'pangea_asset_catalog_generate',
-    description: '只读扫描当前工作区的 pangea-data/inbox 与 pangea-data/test-automation，把 inbox 中的 DOCX、PDF、XLSX 转成可引用的 Markdown，并生成非约束性的资产目录；不修改 PANGEA、Run 或原始资产。',
+  const runtime = new AssetActionRuntime(ctx.apiProxy)
+  const disposeTool = ctx.tools.register({
+    name: 'pangea_assets_list',
+    description: '只读列出 PANGEA 已导入资产及其结构化/审核状态。',
     parameters: {
-      type: 'object',
-      additionalProperties: false,
+      type: 'object', additionalProperties: false,
       properties: {
-        data_root: { type: 'string', description: '可选：pangea-data 绝对路径；省略时从当前 DSH 工作区向上发现。' },
+        data_root: { type: 'string' }, type: { type: 'string' },
+        status: { type: 'string' }, query: { type: 'string' },
       },
     },
     async execute(args, exec) {
-      const value = await generateCatalog({ cwd: workspaceCwd(exec), dataRoot: args.data_root })
-      return {
-        status: value.status,
-        output_root: value.output_root,
-        generated_at: value.generated_at,
-        counts: value.counts,
-        generated_files_are_non_binding: true,
-      }
+      return listState({
+        cwd: workspaceCwd(exec), dataRoot: args.data_root, runtime,
+        options: { page: 1, pageSize: 50, type: args.type ?? '', status: args.status ?? '', query: args.query ?? '' },
+      })
     },
-    output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => renderGenerated(value) },
-  }), ctx.tools.register({
-    name: 'pangea_asset_issue_submit',
-    description: '仅供资产目录创建的历史问题提取会话提交结构化草稿；会校验会话、资产、原文位置和摘录，不接受普通会话调用。',
-    parameters: ISSUE_SUBMISSION_PARAMETERS,
-    execute: (args, exec) => runtime.submitHistoricalIssues(args, exec),
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_asset_methodology_submit',
-    description: '仅供资产目录创建的方法论会话提交候选；只接受已确认问题编号及其原有证据，不接受普通会话调用。',
-    parameters: METHODOLOGY_SUBMISSION_PARAMETERS,
-    execute: (args, exec) => runtime.submitMethodology(args, exec),
-    output: toolOutput(),
-  })]
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    },
+  })
   const disposeStatus = ctx.on?.('agent/status', ({ agent, status }) => runtime.handleAgentStatus(agent, status)) ?? (() => {})
   const disposeError = ctx.on?.('agent/error', ({ agent, error }) => runtime.handleAgentError(agent, error)) ?? (() => {})
   const disposeRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => routeHandler(req, res, runtime) })
   ctx.effect?.(() => () => {
-    disposeRoute()
-    disposeError()
-    disposeStatus()
-    for (const dispose of toolDisposers) dispose()
-    for (const dispose of skillDisposers) dispose()
-  }, 'dsh-pangea-asset-catalog: skills, model extraction, reviews, and catalog API')
+    disposeRoute(); disposeError(); disposeStatus(); disposeTool()
+  }, 'dsh-pangea-asset-catalog: PANGEA asset API and extraction sessions')
 }
 
-export { discoverDataRoot, generateCatalog, readGeneratedState, saveOverride, scanAssets } from './catalog.js'
-export { AssetExtractionRuntime, saveHistoricalIssueReview } from './extraction.js'
+export { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'

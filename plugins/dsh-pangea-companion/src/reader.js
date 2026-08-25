@@ -1,7 +1,11 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 
-const TERMINAL_PHASES = new Set(['COMPLETE', 'INCOMPLETE'])
+const TERMINAL_PHASES = new Set(['COMPLETE', 'INCOMPLETE', 'STOPPED', 'FAILED'])
+const STAGE_PHASES = {
+  preparing: 'PREPARING', planning: 'PLANNING', analyzing: 'ANALYZING',
+  reviewing: 'REVIEWING', closing: 'CLOSING', reporting: 'REPORTING', complete: 'COMPLETE',
+}
 
 async function pathKind(filePath) {
   try {
@@ -247,16 +251,16 @@ async function readReportCounts(runDirectory, { checked = true } = {}) {
 }
 
 async function readReview(runDirectory) {
-  const candidates = [path.join(runDirectory, 'agent-results', 'rework-review.json'), path.join(runDirectory, 'agent-results', 'review.json')]
+  const candidates = [path.join(runDirectory, 'agent-results', 'review.json')]
   for (const candidate of candidates) {
     if (await pathKind(candidate) !== 'file') continue
     try {
       const value = await readJson(candidate)
       return {
-        status: typeof value?.status === 'string' ? value.status : null,
+        status: typeof value?.status === 'string' ? value.status : 'COMPLETE',
         reviewer_id: typeof value?.reviewer_id === 'string' ? value.reviewer_id : null,
         summary: typeof value?.summary === 'string' ? value.summary : null,
-        issues: Array.isArray(value?.issues) ? value.issues : [],
+        issues: Array.isArray(value?.findings) ? value.findings : Array.isArray(value?.issues) ? value.issues : [],
         path: candidate,
       }
     } catch {
@@ -340,10 +344,24 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false, ch
   const progress = await pathKind(progressPath) === 'file' ? await readJson(progressPath) : {}
   const finalStateRecord = await readFinalState(runDirectory)
   const finalState = finalStateRecord.value
-  const phase = typeof progress?.phase === 'string' ? progress.phase : typeof finalState?.phase === 'string' ? finalState.phase : typeof finalState?.run_status === 'string' ? finalState.run_status : 'UNKNOWN'
+  const lifecycle = typeof progress?.lifecycle_status === 'string' ? progress.lifecycle_status : null
+  const phase = lifecycle === 'stopped' ? 'STOPPED'
+    : lifecycle === 'failed' ? 'FAILED'
+      : typeof progress?.stage === 'string' ? (STAGE_PHASES[progress.stage] ?? progress.stage.toUpperCase())
+        : typeof progress?.phase === 'string' ? progress.phase
+          : typeof finalState?.phase === 'string' ? finalState.phase
+            : typeof finalState?.run_status === 'string' ? finalState.run_status : 'UNKNOWN'
   const analysisUnits = Array.isArray(progress?.analysis_units) ? progress.analysis_units : stateArray(finalState, 'analysis_units')
   const completedAnalysisUnits = Array.isArray(progress?.completed_analysis_units) ? progress.completed_analysis_units : []
-  const completedReworkUnits = Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : []
+  const completedReworkUnits = Array.isArray(progress?.completed_closure_units)
+    ? progress.completed_closure_units
+    : Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : []
+  const analysisActions = Object.values(progress?.actions ?? {}).filter(
+    action => action?.role === 'analysis',
+  )
+  const legacySessions = Object.values(progress?.agent_sessions ?? {}).filter(
+    session => session?.role === 'analysis',
+  )
   const review = includeDetails ? await readReview(runDirectory) : null
   const errors = Array.isArray(progress?.errors) ? progress.errors : stateArray(finalState, 'errors')
   const errorHistory = Array.isArray(progress?.error_history) ? progress.error_history : []
@@ -379,7 +397,21 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false, ch
     phase,
     terminal: TERMINAL_PHASES.has(phase),
     quality_status: typeof progress?.quality_status === 'string' ? progress.quality_status : qualityFromFinal,
-    analysis: { total: analysisUnits.length, completed: completedAnalysisUnits.length || completedFallback, reworked: completedReworkUnits.length },
+    analysis: {
+      total: analysisUnits.length,
+      completed: completedAnalysisUnits.length || completedFallback,
+      reworked: completedReworkUnits.length,
+      running: analysisActions.length
+        ? analysisActions.filter(action => action.status === 'dispatched').length
+        : legacySessions.filter(session => session.status === 'dispatched').length,
+      pending: analysisActions.length
+        ? analysisActions.filter(action => action.status === 'pending').length
+        : legacySessions.filter(session => session.status === 'pending').length,
+      submitted: analysisActions.length
+        ? analysisActions.filter(action => ['settled', 'accepted'].includes(action.status)).length
+        : legacySessions.filter(session => session.status === 'completed').length,
+      max_parallel: 8,
+    },
     counts,
     errors,
     error_history: errorHistory,

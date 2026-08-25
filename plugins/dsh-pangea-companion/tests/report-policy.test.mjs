@@ -4,113 +4,135 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
 
-import {
-  apply,
-  isPangeaWorkspace,
-  reportDeliveryForWorkspace,
-} from '../src/report-policy.js'
+import { apply, isPangeaWorkspace, reportDeliveryForWorkspace, workspaceInstructions } from '../src/report-policy.js'
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'dsh-pangea-companion-policy-'))
   const markerDir = join(root, '.agents', 'pangea')
-  const nested = join(root, 'pangea-data', 'repositories', 'demo')
   mkdirSync(markerDir, { recursive: true })
-  mkdirSync(nested, { recursive: true })
   writeFileSync(join(markerDir, 'dsh.md'), 'PANGEA DSH adapter\n')
-  return { root, nested }
+  writeFileSync(join(markerDir, 'planning-worker.md'), '# Planning worker\n')
+  writeFileSync(join(markerDir, 'analysis-worker.md'), '# Analysis worker\n')
+  writeFileSync(join(markerDir, 'review-worker.md'), '# Review worker\n')
+  writeFileSync(join(markerDir, 'closure-worker.md'), '# Closure worker\n')
+  return root
 }
 
-function policyHarness() {
+function policyHarness({ failFirstBind = false } = {}) {
   const listeners = new Map()
+  const registeredTools = new Map()
+  const starts = []
+  const adapterCalls = []
+  const followups = []
+  let bindFailuresRemaining = failFirstBind ? 1 : 0
   let guard
-  let setup
+  const fakeAdapter = async (cwd, operation, input) => {
+    adapterCalls.push({ cwd, operation, input })
+    if (operation === 'bind' && bindFailuresRemaining > 0) {
+      bindFailuresRemaining -= 1
+      throw new Error('simulated bind failure')
+    }
+    return { action_id: input.action_id, status: 'dispatched' }
+  }
   const ctx = {
     subagents: {
-      registerContinuableSetup(value) { setup = value },
-    },
-    tools: {
-      guard(value) {
-        guard = value
-        return () => {}
+      registerContinuableSetup() {},
+      async startContinuable(spec) {
+        starts.push(spec)
+        return { childId: `child-${starts.length}`, messageId: `message-${starts.length}` }
+      },
+      async followup(parent, childId, content, options) {
+        followups.push({ parent, childId, content, options })
+        return `repair-${followups.length}`
       },
     },
-    on(name, value) {
-      listeners.set(name, value)
-      return () => {}
+    tools: {
+      guard(value) { guard = value; return () => {} },
+      register(tool) { registeredTools.set(tool.name, tool); return () => registeredTools.delete(tool.name) },
     },
+    on(name, value) { listeners.set(name, value); return () => {} },
   }
-  apply(ctx)
+  apply(ctx, fakeAdapter)
   return {
-    guard(exec) { return guard(exec) },
-    inserted(payload) { listeners.get('agent/inbox/inserted')(payload) },
-    claimed(payload) { listeners.get('agent/inbox/claimed')(payload) },
-    async post(exec, value, { isError = false } = {}) {
+    guard: exec => guard(exec),
+    tool(name) { return registeredTools.get(name) },
+    starts,
+    adapterCalls,
+    followups,
+    settled(agent, childId) {
+      listeners.get('agent/inbox/inserted')({
+        agent,
+        message: { source: { kind: 'subagent-settled', senderSessionId: childId } },
+      })
+    },
+    post(exec, value, isError = false) {
       return listeners.get('tools/post-execute')(
         exec,
         { isError, value },
         async () => ({ kind: 'accept' }),
       )
     },
-    setup() { return setup },
   }
 }
 
-function fakeAgent(cwd) {
-  return { id: `agent-${cwd}`, session: { header: { cwd } } }
+function fakeAgent(cwd, id = `agent-${cwd}`) {
+  return {
+    id,
+    options: { provider: 'test-provider', model: 'test-model', reasoningEffort: 'high' },
+    session: { header: { cwd } },
+  }
 }
 
 function fakeExec(agent, name, args) {
   let concluded = false
   return {
-    agent,
-    name,
-    arguments: args,
+    agent, name, arguments: args,
     concludeTurn() { concluded = true },
     get concluded() { return concluded },
   }
 }
 
-function graphOutput({ runId = 'lua-run-01', dataRoot = 'pangea-data/acceptance', phase = 'WAITING_SOURCE_CHECKPOINT', actions = [] } = {}) {
-  return [
-    `run_id=${runId}`,
-    `data_root=${dataRoot}`,
-    `phase=${phase}`,
-    ...actions.map(action => `action=${JSON.stringify(action)}`),
-  ].join('\n')
+function envelope(result) {
+  return JSON.stringify({ api_version: '1.0', ok: true, result })
 }
 
-function dispatchAction(taskPath, overrides = {}) {
+function action(taskPath, actionId = 'run-01:analysis:U00') {
   return {
-    action: 'dispatch_agent',
-    role: 'analysis',
-    stage: 'source_checkpoint',
-    session_key: 'analysis:U00',
-    unit_id: 'U00',
-    task_path: taskPath,
-    task_id: null,
-    replacement_allowed: false,
-    after_completion: 'resume_run',
-    ...overrides,
+    schema_version: '1.0', action_id: actionId, action: 'dispatch_agent',
+    role: 'analysis', stage: 'unit_analysis', task_path: taskPath, task_id: null,
   }
 }
 
 test('uses quiet delivery only inside a PANGEA workspace', () => {
-  const { root, nested } = fixture()
+  const root = fixture()
   const unrelated = mkdtempSync(join(tmpdir(), 'dsh-unrelated-'))
   try {
     assert.equal(isPangeaWorkspace(root), true)
-    assert.equal(isPangeaWorkspace(nested), true)
-    assert.equal(reportDeliveryForWorkspace(nested), 'quiet')
+    assert.equal(reportDeliveryForWorkspace(root), 'quiet')
     assert.equal(reportDeliveryForWorkspace(unrelated), 'next-step')
-    assert.equal(reportDeliveryForWorkspace(undefined), 'next-step')
   } finally {
     rmSync(root, { recursive: true, force: true })
     rmSync(unrelated, { recursive: true, force: true })
   }
 })
 
-test('report tool resolves delivery from the reporting agent workspace', async () => {
-  const { root } = fixture()
+test('injects DSH rules only for a PANGEA root agent', () => {
+  const root = fixture()
+  const unrelated = mkdtempSync(join(tmpdir(), 'dsh-unrelated-'))
+  try {
+    assert.match(workspaceInstructions({ agent: fakeAgent(root) }), /PANGEA DSH adapter/)
+    assert.equal(workspaceInstructions({ agent: fakeAgent(unrelated) }), '')
+    assert.equal(workspaceInstructions({
+      agent: { session: { header: { cwd: root, origin: 'subagent' } } },
+    }), '')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(unrelated, { recursive: true, force: true })
+  }
+})
+
+test('report tool resolves delivery from the reporting workspace', async () => {
+  const root = fixture()
   const unrelated = mkdtempSync(join(tmpdir(), 'dsh-unrelated-'))
   const deliveries = []
   let setup
@@ -118,35 +140,20 @@ test('report tool resolves delivery from the reporting agent workspace', async (
   const ctx = {
     subagents: {
       registerContinuableSetup(value) { setup = value },
-      async reportFrom(_agent, _content, options) {
-        deliveries.push(options.delivery)
-        return `message-${deliveries.length}`
-      },
+      async reportFrom(_agent, _content, options) { deliveries.push(options.delivery); return 'message' },
     },
-    tools: { guard() { return () => {} } },
+    tools: { guard() { return () => {} }, register() { return () => {} } },
     on() { return () => {} },
   }
   const childCtx = {
     systemPrompt: { section() { return () => {} } },
-    tools: {
-      register(value) {
-        reportTool = value
-        return () => {}
-      },
-    },
+    tools: { register(value) { reportTool = value; return () => {} } },
   }
   try {
     apply(ctx)
     setup(childCtx)
-    const signal = new AbortController().signal
-    await reportTool.execute({ output: 'pangea result' }, {
-      agent: { session: { header: { cwd: root } } },
-      signal,
-    })
-    await reportTool.execute({ output: 'ordinary result' }, {
-      agent: { session: { header: { cwd: unrelated } } },
-      signal,
-    })
+    await reportTool.execute({ output: 'result' }, { agent: fakeAgent(root), signal: undefined })
+    await reportTool.execute({ output: 'result' }, { agent: fakeAgent(unrelated), signal: undefined })
     assert.deepEqual(deliveries, ['quiet', 'next-step'])
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -154,262 +161,241 @@ test('report tool resolves delivery from the reporting agent workspace', async (
   }
 })
 
-test('PANGEA lifecycle permits only Graph action, binding, settlement, and resume', async () => {
-  const { root } = fixture()
+test('lifecycle enforces dispatch bind validate and settle', async () => {
+  const root = fixture()
   try {
     const harness = policyHarness()
-    const agent = fakeAgent(root)
-    const taskPath = 'pangea-data/acceptance/runs/lua-run-01/agent-tasks/analysis/U00-source_checkpoint.json'
-    const action = dispatchAction(taskPath)
-    const moduleExec = fakeExec(agent, 'bash', {
-      command: 'python -m pangea_agent.cli.main module-analysis --contract pending.json',
-    })
-    await harness.post(moduleExec, graphOutput({ actions: [action] }))
-
-    const listExec = fakeExec(agent, 'list_agents', {})
-    assert.match(harness.guard(listExec), /Graph 已返回待执行 action/)
-    const cleanupExec = fakeExec(agent, 'bash', {
-      command: `rm -f ${root}/pangea-data/.pangea/pending-task-contract.json`,
-    })
-    assert.equal(harness.guard(cleanupExec), undefined)
-    const powershellCleanup = fakeExec(agent, 'bash', {
-      command: `Remove-Item -LiteralPath '${root}\\pangea-data\\.pangea\\pending-task-contract.json' -Force`,
-    })
-    assert.equal(harness.guard(powershellCleanup), undefined)
-    const unrelatedDelete = fakeExec(agent, 'bash', { command: `rm -f ${root}/other.json` })
-    assert.match(harness.guard(unrelatedDelete), /Graph 已返回待执行 action/)
-    const dispatchExec = fakeExec(agent, 'subagent', {
-      prompt: taskPath,
-      description: '分析 Lua 模块',
-      run_in_background: true,
-    })
-    assert.equal(harness.guard(dispatchExec), undefined)
-    await harness.post(dispatchExec, { kind: 'continuable', subagentId: 'child-01' })
-
-    const earlyResume = fakeExec(agent, 'bash', {
-      command: 'python -m pangea_agent.cli.main resume-run --run-id lua-run-01 --data-root pangea-data/acceptance',
-    })
-    assert.match(harness.guard(earlyResume), /record-agent-session/)
-    const recordExec = fakeExec(agent, 'bash', {
-      command: `python -m pangea_agent.cli.main record-agent-session --task '${taskPath}' --role analysis --unit-id U00 --task-id child-01`,
-    })
-    assert.equal(harness.guard(recordExec), undefined)
-    const recordDecision = await harness.post(recordExec, 'session recorded')
-    assert.equal(recordExec.concluded, true)
-    assert.equal(recordDecision.kind, 'accept')
-    assert.match(harness.guard(listExec), /仍在运行/)
-    assert.match(harness.guard(earlyResume), /仍在运行/)
-
-    harness.claimed({
-      agent,
-      message: { source: { kind: 'subagent-settled', senderSessionId: 'other-child' } },
-    })
-    assert.match(harness.guard(earlyResume), /仍在运行/)
-    harness.inserted({
-      agent: { ...agent },
-      message: { source: { kind: 'subagent-settled', senderSessionId: 'child-01' } },
-    })
-    assert.equal(harness.guard(earlyResume), undefined)
-    assert.match(harness.guard(listExec), /下一步只能执行当前 Run/)
-    assert.match(harness.guard(listExec), /--run-id lua-run-01 --data-root pangea-data\/acceptance/)
-
-    const nextTask = 'pangea-data/acceptance/runs/lua-run-01/agent-tasks/analysis/U00-risk_analysis.json'
-    const continueAction = dispatchAction(nextTask, {
-      action: 'continue_agent',
-      stage: 'risk_analysis',
-      task_id: 'child-01',
-    })
-    await harness.post(earlyResume, graphOutput({ actions: [continueAction] }))
-    const wrongMessage = fakeExec(agent, 'send_message', {
-      subagent_id: 'child-01',
-      message: 'check status',
-    })
-    assert.match(harness.guard(wrongMessage), /Graph 已返回待执行 action/)
-    const continueExec = fakeExec(agent, 'send_message', {
-      subagent_id: 'child-01',
-      message: nextTask,
-    })
-    assert.equal(harness.guard(continueExec), undefined)
-    await harness.post(continueExec, { messageId: 'message-01' })
-    assert.equal(continueExec.concluded, true)
-    assert.match(harness.guard(listExec), /仍在运行/)
-
-    harness.claimed({
-      agent,
-      message: { source: { kind: 'subagent-settled', senderSessionId: 'child-01' } },
-    })
-    const finalResume = fakeExec(agent, 'bash', {
-      command: 'python -m pangea_agent.cli.main resume-run --run-id lua-run-01 --data-root pangea-data/acceptance',
-    })
-    assert.equal(harness.guard(finalResume), undefined)
-    await harness.post(finalResume, graphOutput({ phase: 'COMPLETE', actions: [] }))
-    assert.equal(harness.guard(listExec), undefined)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('PANGEA child can write only its current Graph result', async () => {
-  const { root } = fixture()
-  try {
-    const harness = policyHarness()
-    const rootAgent = fakeAgent(root)
-    const run = join(root, 'pangea-data', 'acceptance', 'runs', 'lua-run-01')
-    const taskPath = join(run, 'agent-tasks', 'rework', 'U00.json')
-    const currentResult = join(run, 'agent-results', 'rework', 'U00.json')
-    const priorResult = join(run, 'agent-results', 'analysis', 'U00.json')
+    const parent = fakeAgent(root)
+    const taskPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-tasks', 'analysis', 'U00.json')
+    const resultPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-results', 'analysis', 'U00.json')
     mkdirSync(dirname(taskPath), { recursive: true })
-    mkdirSync(dirname(currentResult), { recursive: true })
-    mkdirSync(dirname(priorResult), { recursive: true })
-    writeFileSync(taskPath, JSON.stringify({
-      result_path: currentResult,
-      prior_result_path: priorResult,
-    }))
-    writeFileSync(currentResult, '{}\n')
-    writeFileSync(priorResult, '{}\n')
-
-    const action = dispatchAction(taskPath, { role: 'rework', stage: 'rework' })
+    writeFileSync(taskPath, JSON.stringify({ result_path: resultPath }))
+    const currentAction = action(taskPath)
     await harness.post(
-      fakeExec(rootAgent, 'bash', {
-        command: 'python -m pangea_agent.cli.main module-analysis --contract pending.json',
-      }),
-      graphOutput({ actions: [action] }),
+      fakeExec(parent, 'bash', { command: 'python -m pangea_agent.cli.main runs create --contract pending.json' }),
+      envelope({ run_id: 'run-01', data_root: 'pangea-data', agent_actions: [currentAction] }),
     )
-    const dispatchExec = fakeExec(rootAgent, 'subagent', {
-      prompt: taskPath,
-      description: '返工 Lua 单元',
-      run_in_background: true,
-    })
-    await harness.post(dispatchExec, { kind: 'continuable', subagentId: 'child-01' })
 
-    const child = { id: 'child-01', session: { header: { cwd: root } } }
-    assert.equal(harness.guard(fakeExec(child, 'edit', { file_path: currentResult })), undefined)
-    assert.match(
-      harness.guard(fakeExec(child, 'write', { file_path: currentResult })),
-      /禁止整文件 Write/,
-    )
-    assert.match(
-      harness.guard(fakeExec(child, 'edit', { file_path: priorResult })),
-      /只能编辑当前 Graph task 的 result_path/,
-    )
-    assert.match(
-      harness.guard(fakeExec(child, 'write', { file_path: join(root, 'src', 'core.py') })),
-      /禁止整文件 Write/,
-    )
-    assert.match(
-      harness.guard(fakeExec(child, 'bash', {
-        command: `python3 - <<'PY'\nrewrite('${currentResult}')\nPY`,
-      })),
-      /当前 result_path 只能用 Edit/,
-    )
-    assert.match(
-      harness.guard(fakeExec(child, 'bash', {
-        command: `python -c "rewrite('${priorResult}')"`,
-      })),
-      /不得通过 Bash 修改正式 JSON/,
-    )
-    assert.equal(
-      harness.guard(fakeExec(child, 'bash', {
-        command: `python -m pangea_agent.cli.main validate-worker-result --task '${taskPath}'`,
-      })),
-      undefined,
-    )
-    assert.equal(harness.guard(fakeExec(child, 'read', { file_path: priorResult })), undefined)
+    assert.match(harness.guard(fakeExec(parent, 'list_agents', {})), /待执行 action/)
+    const dispatch = fakeExec(parent, 'subagent', { prompt: taskPath, run_in_background: true })
+    assert.equal(harness.guard(dispatch), undefined)
+    await harness.post(dispatch, { kind: 'continuable', subagentId: 'child-01' })
+
+    const bind = fakeExec(parent, 'bash', {
+      command: `python -m pangea_agent.cli.main adapter bind --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id} --task-id child-01`,
+    })
+    assert.equal(harness.guard(bind), undefined)
+    await harness.post(bind, envelope({ action_id: currentAction.action_id, status: 'dispatched' }))
+    assert.equal(bind.concluded, true)
+    assert.match(harness.guard(fakeExec(parent, 'list_agents', {})), /仍在运行/)
+
+    harness.settled(parent, 'child-01')
+    const validate = fakeExec(parent, 'bash', {
+      command: `python -m pangea_agent.cli.main adapter validate --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id}`,
+    })
+    assert.equal(harness.guard(validate), undefined)
+    await harness.post(validate, envelope({ action_id: currentAction.action_id, status: 'valid' }))
+
+    const settle = fakeExec(parent, 'bash', {
+      command: `python -m pangea_agent.cli.main adapter settle --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id}`,
+    })
+    assert.equal(harness.guard(settle), undefined)
+    await harness.post(settle, envelope({ run_id: 'run-01', data_root: 'pangea-data', lifecycle_status: 'complete', agent_actions: [] }))
+    assert.equal(harness.guard(fakeExec(parent, 'list_agents', {})), undefined)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('PANGEA lifecycle fails closed when a waiting phase has no parseable action', async () => {
-  const { root } = fixture()
+test('lifecycle accepts direct PANGEA run and action tools', async () => {
+  const root = fixture()
+  try {
+    const harness = policyHarness()
+    const parent = fakeAgent(root)
+    const dataRoot = join(root, 'pangea-data')
+    const taskPath = join(dataRoot, 'runs', 'run-tools', 'agent-tasks', 'planning.json')
+    const resultPath = join(dataRoot, 'runs', 'run-tools', 'agent-results', 'planning.json')
+    mkdirSync(dirname(taskPath), { recursive: true })
+    writeFileSync(taskPath, JSON.stringify({ result_path: resultPath }))
+    const currentAction = { ...action(taskPath, 'run-tools:planning'), role: 'planning' }
+    await harness.post(
+      fakeExec(parent, 'pangea_run_create', { repository: 'repo', target: 'target', source_scope: ['src/a.c'] }),
+      { run_id: 'run-tools', data_root: dataRoot, agent_actions: [currentAction] },
+    )
+
+    const dispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: currentAction.action_id })
+    assert.equal(harness.guard(dispatch), undefined)
+    assert.equal(harness.tool('pangea_action_dispatch').isConcurrencySafe(), false)
+    const dispatched = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+    assert.equal(dispatched.subagent_id, 'child-1')
+    assert.equal(dispatched.bound, true)
+    assert.equal(harness.starts[0].request.prompt[0].text, taskPath)
+    assert.match(harness.starts[0].request.persona, /Planning worker/)
+    assert.deepEqual(harness.starts[0].request.agentOptions, parent.options)
+    assert.notEqual(harness.starts[0].request.agentOptions, parent.options)
+    assert.equal(harness.adapterCalls[0].operation, 'bind')
+    assert.equal(harness.adapterCalls[0].input.task_id, 'child-1')
+    await harness.post(dispatch, dispatched)
+    assert.equal(dispatch.concluded, true)
+    harness.settled(parent, 'child-1')
+
+    const validate = fakeExec(parent, 'pangea_action_validate', {
+      data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
+    })
+    assert.equal(harness.guard(validate), undefined)
+    await harness.post(validate, { action_id: currentAction.action_id, status: 'invalid', error: 'input_decisions extra=[x]' })
+    assert.equal(validate.concluded, true)
+    assert.equal(harness.followups.length, 1)
+    assert.equal(harness.followups[0].childId, 'child-1')
+    assert.match(harness.followups[0].content[0].text, /input_decisions extra=\[x\]/)
+    assert.match(harness.guard(fakeExec(parent, 'list_agents', {})), /仍在运行/)
+    harness.settled(parent, 'child-1')
+    const revalidate = fakeExec(parent, 'pangea_action_validate', {
+      data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
+    })
+    assert.equal(harness.guard(revalidate), undefined)
+    await harness.post(revalidate, { action_id: currentAction.action_id, status: 'valid' })
+    const settle = fakeExec(parent, 'pangea_action_settle', {
+      data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
+    })
+    assert.equal(harness.guard(settle), undefined)
+    await harness.post(settle, { run_id: 'run-tools', data_root: dataRoot, lifecycle_status: 'complete', actions: [] })
+    assert.equal(harness.guard(fakeExec(parent, 'list_agents', {})), undefined)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('dispatch retries bind with the original child instead of spawning a duplicate', async () => {
+  const root = fixture()
+  try {
+    const harness = policyHarness({ failFirstBind: true })
+    const parent = fakeAgent(root)
+    const dataRoot = join(root, 'pangea-data')
+    const taskPath = join(dataRoot, 'runs', 'run-retry', 'agent-tasks', 'analysis', 'U00.json')
+    mkdirSync(dirname(taskPath), { recursive: true })
+    writeFileSync(taskPath, JSON.stringify({ result_path: join(dataRoot, 'result.json') }))
+    const currentAction = action(taskPath, 'run-retry:analysis:U00')
+    await harness.post(
+      fakeExec(parent, 'pangea_run_create', {}),
+      { run_id: 'run-retry', data_root: dataRoot, actions: [currentAction] },
+    )
+
+    const dispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: currentAction.action_id })
+    await assert.rejects(
+      harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch),
+      /simulated bind failure/,
+    )
+    assert.equal(harness.starts.length, 1)
+
+    const retried = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+    assert.equal(retried.subagent_id, 'child-1')
+    assert.equal(harness.starts.length, 1)
+    assert.equal(harness.adapterCalls.length, 2)
+    assert.equal(harness.adapterCalls[1].input.task_id, 'child-1')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('validation failure can return to the same child and result writes stay scoped', async () => {
+  const root = fixture()
+  try {
+    const harness = policyHarness()
+    const parent = fakeAgent(root)
+    const taskPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-tasks', 'closure', 'U00.json')
+    const resultPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-results', 'closure', 'U00.json')
+    const originalPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-results', 'analysis', 'U00.json')
+    mkdirSync(dirname(taskPath), { recursive: true })
+    writeFileSync(taskPath, JSON.stringify({ result_path: resultPath, original_result_path: originalPath }))
+    const currentAction = action(taskPath, 'run-01:closure:U00')
+    await harness.post(
+      fakeExec(parent, 'bash', { command: 'python -m pangea_agent.cli.main runs create --contract pending.json' }),
+      envelope({ run_id: 'run-01', data_root: 'pangea-data', agent_actions: [currentAction] }),
+    )
+    const dispatch = fakeExec(parent, 'subagent', { prompt: taskPath, run_in_background: true })
+    await harness.post(dispatch, { kind: 'continuable', subagent_id: 'child-01', job_id: 'not-the-task-id' })
+    const child = fakeAgent(root, 'child-01')
+    assert.equal(harness.guard(fakeExec(child, 'write', { file_path: resultPath })), undefined)
+    assert.match(harness.guard(fakeExec(child, 'write', { file_path: originalPath })), /只能写当前 task/)
+    assert.equal(harness.guard(fakeExec(child, 'bash', {
+      command: `python3 -c "from pathlib import Path; Path('${resultPath}').write_text('{}')"`,
+    })), undefined)
+    assert.match(harness.guard(fakeExec(child, 'bash', {
+      command: `python3 -c "from pathlib import Path; Path('${originalPath}').write_text('{}')"`,
+    })), /只能修改当前 task/)
+
+    const bind = fakeExec(parent, 'bash', {
+      command: `python -m pangea_agent.cli.main adapter bind --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id} --task-id child-01`,
+    })
+    await harness.post(bind, envelope({ status: 'dispatched' }))
+    harness.settled(parent, 'child-01')
+    const repair = fakeExec(parent, 'send_message', { subagent_id: 'child-01', message: '修正当前 result_path' })
+    assert.equal(harness.guard(repair), undefined)
+    await harness.post(repair, { messageId: 'message-01' })
+    assert.equal(repair.concluded, true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('continue action resumes the original reviewer instead of spawning another agent', async () => {
+  const root = fixture()
+  try {
+    const harness = policyHarness()
+    const parent = fakeAgent(root)
+    const dataRoot = join(root, 'pangea-data')
+    const firstTask = join(dataRoot, 'runs', 'run-review', 'agent-tasks', 'review.json')
+    const secondTask = join(dataRoot, 'runs', 'run-review', 'agent-tasks', 'comparison-review.json')
+    mkdirSync(dirname(firstTask), { recursive: true })
+    writeFileSync(firstTask, JSON.stringify({ result_path: join(dataRoot, 'review.json') }))
+    writeFileSync(secondTask, JSON.stringify({ result_path: join(dataRoot, 'comparison.json') }))
+    const first = { ...action(firstTask, 'run-review:review'), role: 'review', stage: 'independent_review' }
+    await harness.post(
+      fakeExec(parent, 'pangea_run_create', {}),
+      { run_id: 'run-review', data_root: dataRoot, actions: [first] },
+    )
+    const dispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: first.action_id })
+    const started = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+    await harness.post(dispatch, started)
+    harness.settled(parent, 'child-1')
+    const validate = fakeExec(parent, 'pangea_action_validate', {
+      data_root: dataRoot, run_id: 'run-review', action_id: first.action_id,
+    })
+    await harness.post(validate, { status: 'valid' })
+    const continuation = {
+      ...action(secondTask, 'run-review:comparison-review'),
+      action: 'continue_agent', role: 'review', stage: 'comparison_review', task_id: 'child-1',
+    }
+    const settle = fakeExec(parent, 'pangea_action_settle', {
+      data_root: dataRoot, run_id: 'run-review', action_id: first.action_id,
+    })
+    await harness.post(settle, {
+      run_id: 'run-review', data_root: dataRoot, actions: [continuation],
+    })
+    const resume = fakeExec(parent, 'pangea_action_dispatch', { action_id: continuation.action_id })
+    const resumed = await harness.tool('pangea_action_dispatch').execute(resume.arguments, resume)
+    assert.equal(resumed.subagent_id, 'child-1')
+    assert.equal(harness.starts.length, 1)
+    assert.equal(harness.followups.at(-1).childId, 'child-1')
+    assert.equal(harness.followups.at(-1).content[0].text, secondTask)
+    await harness.post(resume, resumed)
+    assert.equal(resume.concluded, true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('policy does not affect ordinary workspaces', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-unrelated-'))
   try {
     const harness = policyHarness()
     const agent = fakeAgent(root)
-    const resume = fakeExec(agent, 'bash', {
-      command: 'python -m pangea_agent.cli.main resume-run --run-id lua-run-01 --data-root pangea-data/acceptance',
-    })
     await harness.post(
-      fakeExec(agent, 'bash', {
-        command: 'python -m pangea_agent.cli.main module-analysis --contract pending.json',
-      }),
-      graphOutput({ actions: [] }),
-    )
-    assert.match(
-      harness.guard(fakeExec(agent, 'read', { file_path: 'pangea-data/runs/anything.json' })),
-      /没有解析到合法 action/,
-    )
-    assert.equal(harness.guard(resume), undefined)
-    await harness.post(resume, graphOutput({ actions: [] }))
-    assert.match(
-      harness.guard(fakeExec(agent, 'subagent', { prompt: 'guessed-task', run_in_background: true })),
-      /不得读取产物、猜阶段或自行派发/,
-    )
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('PANGEA lifecycle policy does not affect ordinary DSH workspaces', async () => {
-  const unrelated = mkdtempSync(join(tmpdir(), 'dsh-unrelated-'))
-  try {
-    const harness = policyHarness()
-    const agent = fakeAgent(unrelated)
-    const taskPath = 'pangea-data/runs/demo/agent-tasks/analysis/U00-source_checkpoint.json'
-    await harness.post(
-      fakeExec(agent, 'bash', { command: 'python -m pangea_agent.cli.main module-analysis --contract pending.json' }),
-      graphOutput({ actions: [dispatchAction(taskPath)] }),
+      fakeExec(agent, 'bash', { command: 'python -m pangea_agent.cli.main runs create --contract pending.json' }),
+      envelope({ run_id: 'run-01', agent_actions: [action('task.json')] }),
     )
     assert.equal(harness.guard(fakeExec(agent, 'list_agents', {})), undefined)
-    assert.equal(harness.guard(fakeExec(agent, 'send_message', { subagent_id: 'x', message: 'status' })), undefined)
-  } finally {
-    rmSync(unrelated, { recursive: true, force: true })
-  }
-})
-
-test('PANGEA lifecycle binds every parallel Graph dispatch before waiting', async () => {
-  const { root } = fixture()
-  try {
-    const harness = policyHarness()
-    const agent = fakeAgent(root)
-    const firstPath = 'pangea-data/runs/multi/agent-tasks/analysis/U00-source_checkpoint.json'
-    const secondPath = 'pangea-data/runs/multi/agent-tasks/analysis/U01-source_checkpoint.json'
-    await harness.post(
-      fakeExec(agent, 'bash', { command: 'python -m pangea_agent.cli.main module-analysis --contract pending.json' }),
-      graphOutput({
-        runId: 'multi',
-        dataRoot: 'pangea-data',
-        actions: [
-          dispatchAction(firstPath),
-          dispatchAction(secondPath, { session_key: 'analysis:U01', unit_id: 'U01' }),
-        ],
-      }),
-    )
-
-    const firstDispatch = fakeExec(agent, 'subagent', {
-      prompt: firstPath,
-      description: '分析单元零',
-      run_in_background: true,
-    })
-    await harness.post(firstDispatch, { kind: 'continuable', subagentId: 'child-00' })
-    const secondDispatch = fakeExec(agent, 'subagent', {
-      prompt: secondPath,
-      description: '分析单元一',
-      run_in_background: true,
-    })
-    assert.equal(harness.guard(secondDispatch), undefined)
-    await harness.post(secondDispatch, { kind: 'continuable', subagentId: 'child-01' })
-
-    const firstRecord = fakeExec(agent, 'bash', {
-      command: `python -m pangea_agent.cli.main record-agent-session --task '${firstPath}' --role analysis --unit-id U00 --task-id child-00`,
-    })
-    await harness.post(firstRecord, 'recorded')
-    assert.equal(firstRecord.concluded, false)
-    const secondRecord = fakeExec(agent, 'bash', {
-      command: `python -m pangea_agent.cli.main record-agent-session --task '${secondPath}' --role analysis --unit-id U01 --task-id child-01`,
-    })
-    await harness.post(secondRecord, 'recorded')
-    assert.equal(secondRecord.concluded, true)
-    assert.match(harness.guard(fakeExec(agent, 'list_agents', {})), /仍在运行/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -4,6 +4,7 @@ import { createRuntimeMonitor } from './monitor.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
+import { createRun, runAdapter } from './pangea-api.js'
 
 export const name = 'dsh-pangea-companion'
 export const inject = ['tools', 'webServer', 'agents', 'apiProxy']
@@ -16,18 +17,50 @@ const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 const STATUS_PARAMETERS = {
   type: 'object',
   additionalProperties: false,
+  required: ['run_id'],
   properties: {
     data_root: { type: 'string', description: '可选：PANGEA 数据目录绝对路径。省略时从当前 DSH 工作区自动发现 pangea-data。' },
-    run_id: { type: 'string', description: '可选：指定 PANGEA Run ID。省略时优先读取最近的未结束 Run，否则读取最近 Run。' },
+    run_id: { type: 'string', minLength: 1, description: '必填：当前会话已明确持有或用户指定的 PANGEA Run ID。不允许用无参数查询猜测历史 Run。' },
   },
 }
 
-const PHASE_LABELS = {
-  PREPARING: '准备中', WAITING_ANALYSIS: '等待分析', WAITING_REVIEW: '等待复核',
-  WAITING_REWORK: '等待返工', WAITING_REWORK_REVIEW: '等待返工复核', READY_TO_FINALIZE: '等待生成报告',
-  COMPLETE: '已完成', INCOMPLETE: '未完整结束', UNKNOWN: '未知',
+const RUN_CREATE_PARAMETERS = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['repository', 'target', 'source_scope'],
+  properties: {
+    repository: { type: 'string', minLength: 1, description: 'pangea-data/repositories 下的仓库 ID。' },
+    target: { type: 'string', minLength: 1, description: '本次分析目标的简短名称。' },
+    source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '相对仓库根目录的最小源码路径集合。' },
+    focus: { type: 'array', items: { type: 'string', minLength: 1 } },
+    asset_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
+    test_case_examples: { type: 'array', items: { type: 'string', minLength: 1 }, description: '可选：当前工作区中少量已有用例文件的路径；不是自然语言用例描述。没有文件就省略。' },
+    data_root: { type: 'string', description: '可选。默认使用当前 PANGEA 工作区的 pangea-data。' },
+  },
 }
-const QUALITY_LABELS = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决' }
+
+const ACTION_PARAMETERS = {
+  type: 'object', additionalProperties: false,
+  required: ['data_root', 'run_id', 'action_id'],
+  properties: {
+    data_root: { type: 'string', minLength: 1 },
+    run_id: { type: 'string', minLength: 1 },
+    action_id: { type: 'string', minLength: 1 },
+  },
+}
+
+const ACTION_BIND_PARAMETERS = {
+  ...ACTION_PARAMETERS,
+  required: [...ACTION_PARAMETERS.required, 'task_id'],
+  properties: { ...ACTION_PARAMETERS.properties, task_id: { type: 'string', minLength: 1 } },
+}
+
+const PHASE_LABELS = {
+  PREPARING: '准备输入', PLANNING: '规划分析单元', ANALYZING: '并行分析',
+  REVIEWING: '独立复核', CLOSING: '定向补齐', REPORTING: '生成报告',
+  COMPLETE: '已完成', INCOMPLETE: '未完整结束', STOPPED: '已停止', FAILED: '运行失败', UNKNOWN: '未知',
+}
+const QUALITY_LABELS = { PASS: '通过', UNRESOLVED: '未解决' }
 const SOURCE_LABELS = { 'final-state': '最终聚合结果', 'worker-results': '运行中 Worker 结果' }
 const HEALTH_LABELS = { ok: '正常', warning: '需关注', error: '异常' }
 
@@ -53,6 +86,7 @@ function renderStatus(value) {
     `阶段：${PHASE_LABELS[run.phase] ?? run.phase}`,
     `质量状态：${QUALITY_LABELS[run.quality_status] ?? run.quality_status ?? '待定'}`,
     `分析进度：${run.analysis.completed}/${run.analysis.total}`,
+    `Worker：运行 ${run.analysis.running ?? 0} / 等待 ${run.analysis.pending ?? 0} / 已提交 ${run.analysis.submitted ?? 0}（最大并发 ${run.analysis.max_parallel ?? 8}）`,
     renderCount(run, 'risks', '风险'),
     renderCount(run, 'test_cases', '测试用例'),
     `证据：${run.counts.evidence}`,
@@ -172,8 +206,42 @@ export function apply(ctx) {
   const ssh = new PangeaSshRuntime()
 
   const toolDisposers = [ctx.tools.register({
+    name: 'pangea_run_create',
+    description: '创建新的 PANGEA 模块分析 Run。对业务源码发起分析时直接调用本工具；不要读取 PANGEA CLI 源码、schema 或手写 pending contract。返回的 actions 必须逐条派发。',
+    parameters: RUN_CREATE_PARAMETERS,
+    execute: (args, exec) => createRun(workspaceCwd(exec), args),
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_action_bind',
+    description: '兼容接口：手动把 action 与真实 DSH subagent_id 绑定。pangea_action_dispatch 已自动完成绑定，正常流程无需调用。',
+    parameters: ACTION_BIND_PARAMETERS,
+    execute: (args, exec) => runAdapter(workspaceCwd(exec), 'bind', args),
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_action_validate',
+    description: '子 Agent 结束后校验其 action 结果契约；失败时工具会把完整错误自动送回同一子 Agent 修正。',
+    parameters: ACTION_PARAMETERS,
+    async execute(args, exec) {
+      try {
+        return await runAdapter(workspaceCwd(exec), 'validate', args)
+      } catch (error) {
+        return {
+          action_id: args.action_id,
+          status: 'invalid',
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+    },
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_action_settle',
+    description: '结果契约校验通过后接收 action，并返回下一批 actions 或最终 Run 状态。',
+    parameters: ACTION_PARAMETERS,
+    execute: (args, exec) => runAdapter(workspaceCwd(exec), 'settle', args),
+    output: toolOutput(),
+  }), ctx.tools.register({
     name: 'pangea_status',
-    description: '只读查看当前 PANGEA Run 的阶段、质量状态、分析进度、结构化结果数量和读取健康状态；不会推进或修改 PANGEA 工作流。',
+    description: '只读查看一个明确 run_id 的 PANGEA 阶段、质量状态、分析进度、结果数量和读取健康状态；不得用它扫描或猜测历史 Run。',
     parameters: STATUS_PARAMETERS,
     async execute(args, exec) {
       return companionSnapshot({ cwd: workspaceCwd(exec), dataRoot: args.data_root, runId: args.run_id })
@@ -247,3 +315,4 @@ export { parseEvidenceLocation, readEvidenceSnippet, resolveEvidenceFile } from 
 export { createRuntimeMonitor, RuntimeMonitor } from './monitor.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
+export { createRun, runAdapter, runPangea, workspaceRoot } from './pangea-api.js'

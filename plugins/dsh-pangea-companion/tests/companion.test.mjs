@@ -152,6 +152,30 @@ test('discovers pangea-data from workspace root', async () => {
   finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('reads the current lifecycle stage and action concurrency from v3 progress', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-v3-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runDirectory = path.join(dataRoot, 'runs', 'run-v3')
+  try {
+    await writeJson(path.join(runDirectory, 'progress.json'), {
+      schema_version: '3.0', run_id: 'run-v3', lifecycle_status: 'running', stage: 'analyzing',
+      analysis_units: [{ unit_id: 'U00' }, { unit_id: 'U01' }, { unit_id: 'U02' }],
+      completed_analysis_units: ['U00'], completed_closure_units: [], quality_status: null,
+      actions: {
+        a0: { role: 'analysis', status: 'accepted' },
+        a1: { role: 'analysis', status: 'dispatched' },
+        a2: { role: 'analysis', status: 'pending' },
+      },
+      errors: [],
+    })
+    const summary = await summarizeRun(dataRoot, 'run-v3')
+    assert.equal(summary.phase, 'ANALYZING')
+    assert.deepEqual(summary.analysis, {
+      total: 3, completed: 1, reworked: 0, running: 1, pending: 1, submitted: 1, max_parallel: 8,
+    })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('reads line-aware source snippets from workspace and repository evidence locations', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-source-'))
   const dataRoot = path.join(root, 'pangea-data')
@@ -183,7 +207,10 @@ test('returns current-run details and cross-links without double-counting replac
     assert.equal(run.data_source, 'worker-results')
     assert.equal(run.reader_health.status, 'ok')
     assert.equal(run.reader_health.trusted, true)
-    assert.deepEqual(run.analysis, { total: 2, completed: 2, reworked: 1 })
+    assert.deepEqual(run.analysis, {
+      total: 2, completed: 2, reworked: 1,
+      running: 0, pending: 0, submitted: 0, max_parallel: 8,
+    })
     assert.deepEqual(run.details.risks.map(item => item.risk_id), ['R-001', 'R-002'])
     assert.deepEqual(run.details.test_cases.map(item => item.test_case_id), ['TC-001', 'TC-002'])
     assert.deepEqual(run.details.risks[0].linked_test_case_ids, ['TC-001'])
@@ -206,7 +233,10 @@ test('finalized report reads final-state and verifies report counts', async () =
     assert.equal(run.reader_health.count_checks.risks.status, 'match')
     assert.equal(run.reader_health.count_checks.test_cases.status, 'match')
     assert.equal(run.reader_health.count_checks.business_flows.status, 'match')
-    assert.deepEqual(run.analysis, { total: 1, completed: 1, reworked: 0 })
+    assert.deepEqual(run.analysis, {
+      total: 1, completed: 1, reworked: 0,
+      running: 0, pending: 0, submitted: 0, max_parallel: 8,
+    })
     assert.deepEqual(run.details.risks.map(item => item.risk_id), ['R-FINAL'])
     assert.deepEqual(run.details.test_cases.map(item => item.test_case_id), ['TC-FINAL'])
     assert.deepEqual(run.details.risks[0].linked_test_case_ids, ['TC-FINAL'])
@@ -312,10 +342,13 @@ test('registers read status plus executor environment and SSH tools', () => {
     effect(callback) { effects.push(callback) },
   })
   assert.deepEqual(tools.map(tool => tool.name), [
+    'pangea_run_create', 'pangea_action_bind', 'pangea_action_validate', 'pangea_action_settle',
     'pangea_status', 'pangea_environment_get', 'pangea_ssh_exec',
     'pangea_ssh_start', 'pangea_ssh_read', 'pangea_ssh_stop', 'pangea_ssh_interactive',
   ])
-  assert.match(tools[0].description, /读取健康状态/)
+  assert.match(tools[0].description, /不要读取 PANGEA CLI 源码/)
+  assert.deepEqual(tools[4].parameters.required, ['run_id'])
+  assert.equal(tools[4].parameters.properties.run_id.minLength, 1)
   assert.deepEqual(routes.map(route => route.path), [
     '/api/pangea-companion/state', '/api/pangea-companion/source',
     '/api/pangea-companion/environments', '/api/pangea-companion/executions',

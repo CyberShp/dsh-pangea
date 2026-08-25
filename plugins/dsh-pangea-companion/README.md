@@ -1,8 +1,8 @@
 # dsh-pangea-companion
 
-`dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的伴生插件：查看分析结果、维护执行环境、启动独立的用例执行任务，并内置 PANGEA 工作区的子 Agent 唤醒策略。
+`dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的伴生插件：按 PANGEA 返回的 action 派发专用子 Agent，展示 Run 进度与结果，并保留独立的用例执行能力。
 
-它不推进或改写原来的 analysis/review/rework Graph。用例执行使用 `pangea-data/executor-runs/` 中的独立 Executor Run；原 `progress.json`、`final-state.json` 和报告保持不变。
+插件不自行判断下一阶段：它只会绑定真实 DSH 会话、校验该 Agent 的结果，然后通过 adapter 交回 PANGEA Graph 决定后续 action。用例执行仍使用 `pangea-data/executor-runs/` 中的独立 Executor Run。
 
 ## 当前能力
 
@@ -17,6 +17,8 @@
 - 通过 `ctx.pangea` 向统一工作台注册“分析”和“执行”两页，不再直接注册 Better Sidebar Tab。
 - `dsh-pangea` 是客户端页面的必需 peer dependency；通用侧栏只由基座接入。
 - 当前 Agent 工作目录或其上级目录存在 `.agents/pangea/dsh.md` 时，`subagent-report` 静默投递，由原生 `subagent-settled` 在子 Agent 真正结束后唤醒根 Agent；其他工作区保持 DSH 默认行为。
+- 当 PANGEA CLI 返回 planning / analysis / review / closure action 时，最多同时派发 8 个待办 action，且严格使用 action 指定的角色规则和 task 文件。
+- 结果先通过 adapter 契约校验。若字段或引用不合法，原子 Agent 在同一会话内修正；根 Agent 不代填语义结果。
 - 在“执行”页维护主机 alias、阵列 alias、自动化仓库 ID 和设备绑定；SSH 用户名/密码继续使用 `dsh-ssh` 的 `~/.dsh/dsh-ssh.json`。
 - 在用例列表中多选测试用例和执行环境，一键创建真实 DSH 执行会话；执行会话按独立 Executor Graph 生成计划并运行。
 - 提供 `pangea_environment_get`、`pangea_ssh_exec/start/read/stop/interactive` 工具，支持普通命令、持续 IO 后台任务和同一阵列 PTY 内的 `diagnose_usr → attach → dtoe` 交互。
@@ -29,7 +31,7 @@ Companion 不把 `progress.completed_* + agent-results/` 当成所有 Run 的唯
 读取顺序固定为：
 
 1. **存在 `final-state.json` 且包含聚合结果时，优先读取 `final-state.json`。** PANGEA 在进入最终报告阶段前已经把最终有效的 `risks / test_cases / business_flows` 聚合进 final state，`report.md` / `report.html` 也是由这份 state 渲染，因此这是终态和已生成报告 Run 的权威结构化数据源。
-2. **尚未形成 final state 的运行中 Run**，按 `progress.json` 的完成单元读取 `agent-results/analysis` / `agent-results/rework`，返工结果覆盖原 analysis 结果。
+2. **尚未形成 final state 的运行中 Run**，按 `progress.json` 的完成单元读取 `agent-results/analysis` 和定向补齐结果；若某单元被补齐，最终结果覆盖该单元的首次分析。
 3. **已生成报告但缺少可用 final-state 的旧 Run**，允许兼容回退读取 worker result，但会标记为 `warning`，不会伪装成标准路径。
 
 ## v0.4.0 Reader 一致性层
@@ -130,19 +132,19 @@ $DSH_HOME/dsh-pangea-companion/monitor-v1.json
 依赖方向固定为：
 
 ```text
-pangea-agent analysis artifacts  <- read only -  dsh-pangea-companion
+pangea-agent JSON API / adapter  <- actions and results - dsh-pangea-companion
 pangea-agent executor Graph      <- DSH execution session follows actions
 dsh-ssh host configuration       <- aliases/passwords - Companion SSH tools
 ```
 
 禁止 Companion：
 
-- 调用 PANGEA CLI 推进原分析 Run。
-- 修改 `progress.json`、`final-state.json`、task/result 文件。
-- 替 PANGEA 实现 analysis/review/rework 状态机。
+- 绕过 action 自行选择阶段、角色或 task。
+- 直接修改 `progress.json`、`final-state.json` 或代写 Agent 的语义结果。
+- 在 DSH 内另建一套 planning / analysis / review / closure 状态机。
 - 把 DSH 或 Companion 依赖反向引入 `pangea-agent`。
 
-因此卸载 DSH 或 Companion 后，PANGEA 原分析流程仍可由 OpenCode、Claude Code 或其他兼容 Agent Runtime 按原流程完整运行；仅主机加阵列的环境执行能力不可用。
+因此卸载 DSH 或 Companion 后，PANGEA Graph 与语义契约仍是独立的；其他客户端只需实现同一 action/adapter 协议即可运行。
 
 ## 用例执行准备
 

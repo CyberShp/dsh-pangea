@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
+import { runAdapter } from './pangea-api.js'
 
 export const name = 'dsh-pangea-companion-report-policy'
 export const inject = ['subagents', 'tools', 'systemPrompt']
@@ -9,14 +10,30 @@ const REPORT_SECTION_ORDER = 117
 const PANGEA_CLI = '-m pangea_agent.cli.main '
 const PENDING_CONTRACT_SUFFIX = 'pangea-data/.pangea/pending-task-contract.json'
 
-export function isPangeaWorkspace(cwd) {
-  if (typeof cwd !== 'string' || cwd.trim() === '') return false
+function pangeaWorkspaceRoot(cwd) {
+  if (typeof cwd !== 'string' || cwd.trim() === '') return undefined
   let current = resolve(cwd)
   while (true) {
-    if (existsSync(join(current, PANGEA_WORKSPACE_MARKER))) return true
+    if (existsSync(join(current, PANGEA_WORKSPACE_MARKER))) return current
     const parent = dirname(current)
-    if (parent === current) return false
+    if (parent === current) return undefined
     current = parent
+  }
+}
+
+export function isPangeaWorkspace(cwd) {
+  return pangeaWorkspaceRoot(cwd) !== undefined
+}
+
+export function workspaceInstructions(context) {
+  const header = context?.agent?.session?.header
+  if (header?.origin === 'subagent') return ''
+  const root = pangeaWorkspaceRoot(header?.cwd)
+  if (!root) return ''
+  try {
+    return readFileSync(join(root, PANGEA_WORKSPACE_MARKER), 'utf8')
+  } catch {
+    return ''
   }
 }
 
@@ -35,8 +52,8 @@ function commandOf(exec) {
     : undefined
 }
 
-function isPangeaCliCommand(command, subcommand) {
-  return typeof command === 'string' && command.includes(`${PANGEA_CLI}${subcommand}`)
+function isPangeaCliCommand(command, fragment) {
+  return typeof command === 'string' && command.includes(`${PANGEA_CLI}${fragment}`)
 }
 
 function escapedPattern(value) {
@@ -56,46 +73,64 @@ function commandText(value) {
 }
 
 function bashSucceeded(value) {
-  if (typeof value === 'string') {
-    return !/\[(?:exit code|shell exited: code):?\s*[1-9]\d*\]/i.test(value)
-  }
+  if (typeof value === 'string') return !/\[(?:exit code|shell exited: code):?\s*[1-9]\d*\]/i.test(value)
   return value?.kind === 'foreground'
     && value.exitCode === 0
     && value.timedOut !== true
     && value.aborted !== true
 }
 
-function parseGraphOutput(value) {
-  const actions = []
-  let runId
-  let dataRoot
-  let phase
-  for (const line of commandText(value).split(/\r?\n/)) {
-    if (line.startsWith('run_id=')) runId = line.slice('run_id='.length).trim()
-    else if (line.startsWith('data_root=')) dataRoot = line.slice('data_root='.length).trim()
-    else if (line.startsWith('phase=')) phase = line.slice('phase='.length).trim()
-    else if (line.startsWith('action=')) {
-      try {
-        const action = JSON.parse(line.slice('action='.length))
-        if (
-          (action.action === 'dispatch_agent' || action.action === 'continue_agent')
-          && typeof action.task_path === 'string'
-          && action.task_path !== ''
-        ) actions.push(action)
-      } catch {
-        // The CLI owns the action contract. A malformed line is not guessed here.
-      }
+function parseWorkflowResult(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return workflowResult(value)
+  }
+  const lines = commandText(value).split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const envelope = JSON.parse(lines[index])
+      if (envelope?.ok !== true || !envelope.result || typeof envelope.result !== 'object') continue
+      return workflowResult(envelope.result)
+    } catch {
+      // stdout must contain one valid JSON envelope; unrelated lines are ignored here.
     }
   }
-  return { actions, runId, dataRoot, phase }
+  return null
+}
+
+function workflowResult(result) {
+  const actions = [
+    ...(Array.isArray(result.agent_actions) ? result.agent_actions : []),
+    ...(Array.isArray(result.actions) ? result.actions : []),
+    ...(result.action && typeof result.action === 'object' ? [result.action] : []),
+  ].filter(action => (
+    typeof action?.action_id === 'string'
+    && typeof action?.task_path === 'string'
+    && (action.action === 'dispatch_agent' || action.action === 'continue_agent')
+  ))
+  return {
+    actions,
+    runId: typeof result.run_id === 'string' ? result.run_id : undefined,
+    dataRoot: typeof result.data_root === 'string' ? result.data_root : undefined,
+    assetId: typeof result.asset?.asset_id === 'string' ? result.asset.asset_id : undefined,
+    lifecycleStatus: result.lifecycle_status,
+  }
 }
 
 function actionKey(action) {
-  return `${action.action}\u0000${action.task_path}\u0000${action.task_id ?? ''}`
+  return action.action_id
+}
+
+function continuableSubagentId(value) {
+  const candidate = value?.subagentId ?? value?.subagent_id
+  return typeof candidate === 'string' && candidate.trim() !== '' ? candidate : undefined
 }
 
 function pendingActionFor(state, exec) {
   for (const [key, action] of state.pendingActions) {
+    if (
+      exec.name === 'pangea_action_dispatch'
+      && exec.arguments?.action_id === action.action_id
+    ) return { key, action }
     if (
       action.action === 'dispatch_agent'
       && exec.name === 'subagent'
@@ -112,48 +147,70 @@ function pendingActionFor(state, exec) {
   return undefined
 }
 
-function recordTargetFor(state, exec) {
+function roleInstructions(exec, action) {
+  const root = pangeaWorkspaceRoot(workspaceCwd(exec))
+  if (!root) throw new Error('PANGEA workspace not found')
+  const ruleNames = {
+    planning: 'planning-worker.md',
+    analysis: 'analysis-worker.md',
+    review: 'review-worker.md',
+    closure: 'closure-worker.md',
+  }
+  const ruleName = ruleNames[action.role]
+  if (!ruleName) throw new Error(`unsupported PANGEA action role: ${action.role}`)
+  return readFileSync(join(root, '.agents', 'pangea', ruleName), 'utf8')
+}
+
+function targetFlag(state) {
+  return state.assetId ? ['--asset-id', state.assetId] : ['--run-id', state.runId]
+}
+
+function adapterTarget(state, exec, subcommand) {
+  if (exec.name === `pangea_action_${subcommand}`) {
+    if (exec.arguments?.run_id !== state.runId || exec.arguments?.data_root !== state.dataRoot) return undefined
+    const child = [...state.activeChildren.entries()]
+      .find(([, item]) => item.action.action_id === exec.arguments?.action_id)
+    if (!child) return undefined
+    const [childId, childState] = child
+    if (subcommand === 'bind' && exec.arguments?.task_id === childId) return { childId, child: childState }
+    if (subcommand === 'validate' && childState.status === 'settled' && childState.bound) return { childId, child: childState }
+    if (subcommand === 'settle' && childState.status === 'settled' && childState.validated) return { childId, child: childState }
+    return undefined
+  }
   const command = commandOf(exec)
-  if (!isPangeaCliCommand(command, 'record-agent-session')) return undefined
+  if (!isPangeaCliCommand(command, `adapter ${subcommand}`)) return undefined
+  const [flag, value] = targetFlag(state)
+  if (!value || !commandHasFlagValue(command, flag, value)) return undefined
   for (const [childId, child] of state.activeChildren) {
-    if (!child.recorded && commandHasFlagValue(command, '--task-id', childId)) {
+    if (!commandHasFlagValue(command, '--action-id', child.action.action_id)) continue
+    if (subcommand === 'bind' && commandHasFlagValue(command, '--task-id', childId)) {
+      return { childId, child }
+    }
+    if (subcommand === 'validate' && child.status === 'settled' && child.bound) {
+      return { childId, child }
+    }
+    if (subcommand === 'settle' && child.status === 'settled' && child.validated) {
       return { childId, child }
     }
   }
   return undefined
 }
 
-function isBoundResume(state, exec) {
-  const command = commandOf(exec)
-  if (!isPangeaCliCommand(command, 'resume-run')) return false
-  if (state.runId && !commandHasFlagValue(command, '--run-id', state.runId)) return false
-  if (state.dataRoot && !commandHasFlagValue(command, '--data-root', state.dataRoot)) return false
-  return true
-}
-
-function requiredResumeMessage(state) {
-  const runFlag = state.runId ? ` --run-id ${state.runId}` : ''
-  const dataRootFlag = state.dataRoot ? ` --data-root ${state.dataRoot}` : ''
-  return (
-    'PANGEA 子 Agent 已结束；下一步只能执行当前 Run 的一次 resume-run，由 Graph 决定后续 action。'
-    + ` 请原样执行：python -m pangea_agent.cli.main resume-run${runFlag}${dataRootFlag}`
-  )
+function repairTarget(state, exec) {
+  if (exec.name !== 'send_message') return undefined
+  const child = state.activeChildren.get(exec.arguments?.subagent_id)
+  if (!child || child.status !== 'settled' || child.validated) return undefined
+  return { childId: exec.arguments.subagent_id, child }
 }
 
 function isPendingContractCleanup(exec) {
   const command = commandOf(exec)?.trim()
   if (!command) return false
   const posix = command.match(/^rm\s+-f\s+(?:--\s+)?(?:"([^"]+)"|'([^']+)'|(\S+))$/)
-  const powershell = command.match(
-    /^Remove-Item\s+(?:-Force\s+)?-LiteralPath\s+(?:"([^"]+)"|'([^']+)')(?:\s+-Force)?$/i,
-  )
-  const path = posix?.slice(1).find(Boolean) ?? powershell?.slice(1).find(Boolean)
-  return typeof path === 'string'
-    && path.replaceAll('\\', '/').endsWith(PENDING_CONTRACT_SUFFIX)
-}
-
-function normalizedPath(value) {
-  return value.replaceAll('\\', '/')
+  const powershell = command.match(/^Remove-Item\s+(?:-Force\s+)?-LiteralPath\s+(?:"([^"]+)"|'([^']+)')(?:\s+-Force)?$/i)
+  const candidate = posix?.slice(1).find(Boolean) ?? powershell?.slice(1).find(Boolean)
+  return typeof candidate === 'string'
+    && candidate.replaceAll('\\', '/').endsWith(PENDING_CONTRACT_SUFFIX)
 }
 
 function childTaskWritePolicy(taskPath, cwd) {
@@ -164,13 +221,9 @@ function childTaskWritePolicy(taskPath, cwd) {
     const allowedResult = resolve(cwd, task.result_path)
     const protectedPaths = [
       absoluteTaskPath,
-      task.prior_result_path,
-      task.independent_result_path,
-      ...(Array.isArray(task.analysis_results)
-        ? task.analysis_results.map(item => item?.result_path)
-        : []),
-    ]
-      .filter(value => typeof value === 'string' && value !== '')
+      task.original_result_path,
+      task.original_task_path,
+    ].filter(value => typeof value === 'string' && value !== '')
       .map(value => resolve(cwd, value))
       .filter(value => value !== allowedResult)
     return { allowedResult, protectedPaths }
@@ -180,9 +233,9 @@ function childTaskWritePolicy(taskPath, cwd) {
 }
 
 function commandReferencesPath(command, cwd, target) {
-  const normalized = normalizedPath(command)
-  const absolute = normalizedPath(target)
-  const local = normalizedPath(relative(cwd, target))
+  const normalized = command.replaceAll('\\', '/')
+  const absolute = target.replaceAll('\\', '/')
+  const local = relative(cwd, target).replaceAll('\\', '/')
   return normalized.includes(absolute) || (local !== '' && normalized.includes(local))
 }
 
@@ -191,51 +244,35 @@ function childArtifactMutationBlock(taskPath, exec) {
   if (!cwd) return undefined
   const policy = childTaskWritePolicy(taskPath, cwd)
   if (!policy) return undefined
-
-  if (exec.name === 'write') {
-    return 'PANGEA 正式结果必须由 CLI 先生成骨架，再用 Edit 局部修改；禁止整文件 Write。'
-  }
-
-  if (exec.name === 'edit') {
+  if (exec.name === 'write' || exec.name === 'edit') {
     const target = exec.arguments?.file_path ?? exec.arguments?.path
     if (typeof target !== 'string' || resolve(cwd, target) !== policy.allowedResult) {
-      return `PANGEA 子 Agent 只能编辑当前 Graph task 的 result_path：${policy.allowedResult}`
+      return `PANGEA 子 Agent 只能写当前 task 的 result_path：${policy.allowedResult}`
     }
     return undefined
   }
-
   const command = commandOf(exec)
-  if (!command || isPangeaCliCommand(command, 'prepare-worker-result')
-    || isPangeaCliCommand(command, 'prepare-review-result')
-    || isPangeaCliCommand(command, 'validate-worker-result')
-    || isPangeaCliCommand(command, 'check-review-artifact')
-    || isPangeaCliCommand(command, 'read-material')) return undefined
+  if (!command) return undefined
   const canMutate = /(?:^|\s)(?:python(?:3)?|perl|ruby|node|tee|cp|mv|rm)(?:\s|$)|sed\s+-i|(?:^|[^>])>{1,2}(?:[^>]|$)|Set-Content|Out-File/i.test(command)
-  const formalArtifacts = [policy.allowedResult, ...policy.protectedPaths]
-  if (canMutate && formalArtifacts.some(target => commandReferencesPath(command, cwd, target))) {
-    return 'PANGEA 子 Agent 不得通过 Bash 修改正式 JSON；当前 result_path 只能用 Edit 局部修改。'
+  if (canMutate && policy.protectedPaths
+    .some(target => commandReferencesPath(command, cwd, target))) {
+    return `PANGEA 子 Agent 只能修改当前 task 的 result_path：${policy.allowedResult}`
   }
   return undefined
-}
-
-function hasUnrecordedChild(state) {
-  return [...state.activeChildren.values()].some(child => !child.recorded)
 }
 
 function hasRunningChild(state) {
   return [...state.activeChildren.values()].some(child => child.status === 'running')
 }
 
-function shouldEndDispatchTurn(state) {
-  return state.pendingActions.size === 0
-    && !hasUnrecordedChild(state)
-    && !state.resumeRequired
-    && hasRunningChild(state)
+function hasUnboundChild(state) {
+  return [...state.activeChildren.values()].some(child => !child.bound)
 }
 
 function acceptedValue(result, downstream) {
-  if (downstream.kind === 'accept' && Object.hasOwn(downstream, 'value')) return downstream.value
-  return result.value
+  return downstream.kind === 'accept' && Object.hasOwn(downstream, 'value')
+    ? downstream.value
+    : result.value
 }
 
 function acceptAndConclude(exec, value, downstream) {
@@ -247,13 +284,104 @@ function acceptAndConclude(exec, value, downstream) {
   }
 }
 
-export function installPangeaLifecyclePolicy(ctx) {
+function workflowStart(exec) {
+  if (exec.name === 'pangea_run_create') return true
+  const command = commandOf(exec)
+  return isPangeaCliCommand(command, 'runs create')
+    || isPangeaCliCommand(command, 'module-analysis')
+    || isPangeaCliCommand(command, 'assets extract')
+    || isPangeaCliCommand(command, 'adapter next')
+}
+
+export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
   const states = new Map()
   const childTasks = new Map()
-
   const stateFor = agent => agent ? states.get(agent.id) : undefined
-  const saveState = (agent, state) => states.set(agent.id, state)
-  const deleteState = agent => states.delete(agent.id)
+
+  ctx.tools.register({
+    name: 'pangea_action_dispatch',
+    description: '派发一个由 pangea_run_create 或 pangea_action_settle 返回的待执行 action。只传 action_id；工具会使用原始 task_path 和对应角色规则创建后台子 Agent。',
+    parameters: {
+      type: 'object', additionalProperties: false, required: ['action_id'],
+      properties: { action_id: { type: 'string', minLength: 1 } },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          kind: { type: 'string' }, subagent_id: { type: 'string' }, action_id: { type: 'string' }, bound: { type: 'boolean' },
+        },
+        required: ['kind', 'subagent_id', 'action_id', 'bound'],
+      },
+      render: (_args, value) => [{ type: 'text', text: `已派发并绑定 ${value.action_id}，subagent_id=${value.subagent_id}` }],
+    },
+    // Agent 仍会并发运行；只把“创建子任务 + 绑定 action”串行化，
+    // 避免多个 CLI 进程同时改写同一份 progress.json。
+    isConcurrencySafe: () => false,
+    async execute(args, exec) {
+      const state = stateFor(exec.agent)
+      const action = state?.pendingActions.get(args.action_id)
+      if (!action) throw new Error(`PANGEA action 当前不可派发：${args.action_id}`)
+      const previous = state.dispatchAttempts.get(action.action_id)
+      if (previous) {
+        await adapter(workspaceCwd(exec), 'bind', {
+          data_root: state.dataRoot,
+          run_id: state.runId,
+          action_id: action.action_id,
+          task_id: previous.childId,
+        })
+        return {
+          kind: 'continuable', subagent_id: previous.childId,
+          action_id: action.action_id, bound: true,
+        }
+      }
+      if (action.action === 'continue_agent') {
+        if (typeof action.task_id !== 'string' || action.task_id === '') {
+          throw new Error(`PANGEA continue action 缺少原 subagent_id：${action.action_id}`)
+        }
+        await ctx.subagents.followup(
+          exec.agent,
+          action.task_id,
+          [{ type: 'text', text: action.task_path }],
+          {
+            source: { kind: 'coordinator', form: 'relay', senderSessionId: exec.agent.id },
+            signal: exec.signal,
+          },
+        )
+        state.dispatchAttempts.set(action.action_id, { childId: action.task_id })
+        await adapter(workspaceCwd(exec), 'bind', {
+          data_root: state.dataRoot,
+          run_id: state.runId,
+          action_id: action.action_id,
+          task_id: action.task_id,
+        })
+        return {
+          kind: 'continuable', subagent_id: action.task_id,
+          action_id: action.action_id, bound: true,
+        }
+      }
+      const started = await ctx.subagents.startContinuable({
+        provider: 'spawn',
+        label: `PANGEA ${action.role}`,
+        request: {
+          label: `PANGEA ${action.role}`,
+          prompt: [{ type: 'text', text: action.task_path }],
+          parent: exec.agent,
+          persona: roleInstructions(exec, action),
+          agentOptions: { ...exec.agent.options },
+        },
+        signal: exec.signal,
+      })
+      state.dispatchAttempts.set(action.action_id, { childId: started.childId })
+      await adapter(workspaceCwd(exec), 'bind', {
+        data_root: state.dataRoot,
+        run_id: state.runId,
+        action_id: action.action_id,
+        task_id: started.childId,
+      })
+      return { kind: 'continuable', subagent_id: started.childId, action_id: action.action_id, bound: true }
+    },
+  })
 
   ctx.tools.guard(exec => {
     const childTask = exec?.agent ? childTasks.get(exec.agent.id) : undefined
@@ -264,39 +392,32 @@ export function installPangeaLifecyclePolicy(ctx) {
     const state = stateFor(exec.agent)
     if (!state || !isPangeaWorkspace(workspaceCwd(exec))) return undefined
 
-    if (state.protocolError) {
-      if (isBoundResume(state, exec)) return undefined
-      return 'PANGEA Graph 仍在等待阶段，但客户端没有解析到合法 action；只能对当前 Run 重试一次 resume-run，不得读取产物、猜阶段或自行派发。'
+    if (hasUnboundChild(state)) {
+      if (adapterTarget(state, exec, 'bind') || pendingActionFor(state, exec)) return undefined
+      return 'PANGEA 子 Agent 已派发；下一步必须调用 pangea_action_bind 绑定真实 subagent_id。'
     }
-
-    if (hasUnrecordedChild(state)) {
-      if (recordTargetFor(state, exec)) return undefined
-      if (pendingActionFor(state, exec)) return undefined
-      return 'PANGEA 已派发子 Agent；下一步只能用 record-agent-session 绑定真实 subagent_id。'
-    }
-    if (state.resumeRequired) {
-      if (isBoundResume(state, exec)) return undefined
-      return requiredResumeMessage(state)
+    const settled = [...state.activeChildren.values()].find(child => child.status === 'settled')
+    if (settled) {
+      if (repairTarget(state, exec)) return undefined
+      if (!settled.validated && adapterTarget(state, exec, 'validate')) return undefined
+      if (settled.validated && adapterTarget(state, exec, 'settle')) return undefined
+      return settled.validated
+        ? 'PANGEA 结果已校验；下一步必须调用 pangea_action_settle。'
+        : 'PANGEA 子 Agent 已结束；下一步必须调用 pangea_action_validate。'
     }
     if (state.pendingActions.size > 0) {
-      if (isPendingContractCleanup(exec)) return undefined
-      if (pendingActionFor(state, exec)) return undefined
-      return 'PANGEA Graph 已返回待执行 action；只能按其 task_path 派发或续接对应子 Agent。'
+      if (isPendingContractCleanup(exec) || pendingActionFor(state, exec)) return undefined
+      return 'PANGEA 已返回待执行 action；下一步必须调用 pangea_action_dispatch，并传入返回的 action_id。'
     }
-    if (hasRunningChild(state)) {
-      return 'PANGEA 子 Agent 仍在运行；禁止轮询、催促、读取产物或提前 resume-run，请等待 subagent-settled。'
-    }
+    if (hasRunningChild(state)) return 'PANGEA 子 Agent 仍在运行；请等待完成，不读取或修改其结果。'
     return undefined
   })
 
   const noticeSettled = ({ agent, message }) => {
     if (message?.source?.kind !== 'subagent-settled') return
     const state = stateFor(agent)
-    const childId = message.source.senderSessionId
-    const child = state?.activeChildren.get(childId)
-    if (!state || !child || child.status !== 'running') return
-    child.status = 'settled'
-    state.resumeRequired = true
+    const child = state?.activeChildren.get(message.source.senderSessionId)
+    if (child?.status === 'running') child.status = 'settled'
   }
   ctx.on('agent/inbox/inserted', noticeSettled)
   ctx.on('agent/inbox/claimed', noticeSettled)
@@ -309,74 +430,91 @@ export function installPangeaLifecyclePolicy(ctx) {
     const command = commandOf(exec)
     let state = stateFor(exec.agent)
 
-    if (
-      exec.name === 'bash'
-      && bashSucceeded(value)
-      && (isPangeaCliCommand(command, 'module-analysis') || isPangeaCliCommand(command, 'resume-run'))
-    ) {
-      const parsed = parseGraphOutput(value)
-      if (isPangeaCliCommand(command, 'module-analysis')) {
-        state = {
-          runId: parsed.runId,
-          dataRoot: parsed.dataRoot,
-          pendingActions: new Map(parsed.actions.map(action => [actionKey(action), action])),
-          activeChildren: new Map(),
-          resumeRequired: false,
-          protocolError: parsed.actions.length === 0 && parsed.phase?.startsWith('WAITING_'),
-        }
-        if (state.pendingActions.size > 0 || state.protocolError) saveState(exec.agent, state)
-        return downstream
+    if ((exec.name !== 'bash' || bashSucceeded(value)) && workflowStart(exec)) {
+      const parsed = parseWorkflowResult(value)
+      if (!parsed || parsed.actions.length === 0) return downstream
+      state = {
+        runId: parsed.runId,
+        dataRoot: parsed.dataRoot,
+        assetId: parsed.assetId,
+        pendingActions: new Map(parsed.actions.map(action => [actionKey(action), action])),
+        activeChildren: new Map(),
+        dispatchAttempts: new Map(),
       }
-      if ((state?.resumeRequired || state?.protocolError) && isBoundResume(state, exec)) {
-        for (const [childId, child] of state.activeChildren) {
-          if (child.status === 'settled') state.activeChildren.delete(childId)
-        }
-        state.resumeRequired = false
-        state.runId = parsed.runId || state.runId
-        state.dataRoot = parsed.dataRoot || state.dataRoot
-        state.pendingActions = new Map(parsed.actions.map(action => [actionKey(action), action]))
-        state.protocolError = parsed.actions.length === 0 && parsed.phase?.startsWith('WAITING_')
-        if (state.protocolError) return downstream
-        if (state.pendingActions.size === 0 && state.activeChildren.size === 0) {
-          deleteState(exec.agent)
-          return downstream
-        }
-        if (state.pendingActions.size === 0 && hasRunningChild(state)) {
-          return acceptAndConclude(exec, value, downstream)
-        }
-        return downstream
-      }
+      states.set(exec.agent.id, state)
+      return downstream
     }
 
     if (!state) return downstream
     const pending = pendingActionFor(state, exec)
     if (pending && !result.isError) {
-      if (pending.action.action === 'dispatch_agent') {
-        if (value?.kind !== 'continuable' || typeof value.subagentId !== 'string') return downstream
-        state.pendingActions.delete(pending.key)
-        state.activeChildren.set(value.subagentId, {
-          taskPath: pending.action.task_path,
-          recorded: false,
-          status: 'running',
-        })
-        childTasks.set(value.subagentId, pending.action.task_path)
-        return downstream
-      }
+      const childId = pending.action.action === 'dispatch_agent'
+        ? continuableSubagentId(value)
+        : pending.action.task_id
+      if (!childId) return downstream
       state.pendingActions.delete(pending.key)
-      state.activeChildren.set(pending.action.task_id, {
-        taskPath: pending.action.task_path,
-        recorded: true,
+      state.dispatchAttempts.delete(pending.action.action_id)
+      state.activeChildren.set(childId, {
+        action: pending.action,
+        bound: pending.action.action === 'continue_agent' || value?.bound === true,
+        validated: false,
         status: 'running',
       })
-      childTasks.set(pending.action.task_id, pending.action.task_path)
-      if (shouldEndDispatchTurn(state)) return acceptAndConclude(exec, value, downstream)
+      childTasks.set(childId, pending.action.task_path)
+      if (state.pendingActions.size === 0 && !hasUnboundChild(state) && hasRunningChild(state)) {
+        return acceptAndConclude(exec, value, downstream)
+      }
       return downstream
     }
 
-    const recordTarget = recordTargetFor(state, exec)
-    if (recordTarget && bashSucceeded(value)) {
-      recordTarget.child.recorded = true
-      if (shouldEndDispatchTurn(state)) return acceptAndConclude(exec, value, downstream)
+    const repair = repairTarget(state, exec)
+    if (repair && !result.isError) {
+      repair.child.status = 'running'
+      return acceptAndConclude(exec, value, downstream)
+    }
+
+    const bind = adapterTarget(state, exec, 'bind')
+    if (bind && (exec.name !== 'bash' || bashSucceeded(value))) {
+      bind.child.bound = true
+      if (state.pendingActions.size === 0 && hasRunningChild(state)) {
+        return acceptAndConclude(exec, value, downstream)
+      }
+      return downstream
+    }
+    const validate = adapterTarget(state, exec, 'validate')
+    if (validate && (exec.name !== 'bash' || bashSucceeded(value))) {
+      if (value?.status === 'invalid') {
+        const messageId = await ctx.subagents.followup(
+          exec.agent,
+          validate.childId,
+          [{ type: 'text', text: [
+            '结果契约校验未通过。只修正当前 task 的 result_path，不重新分析、不扩大范围。',
+            `完整错误：${value.error}`,
+            '重新读取 task 的 result_schema_path 与 selected_inputs_path，一次修正错误中列出的全部字段后结束本回合。',
+          ].join('\n') }],
+          {
+            source: { kind: 'coordinator', form: 'relay', senderSessionId: exec.agent.id },
+            signal: exec.signal,
+          },
+        )
+        validate.child.status = 'running'
+        return acceptAndConclude(exec, { ...value, repair_message_id: messageId }, downstream)
+      }
+      validate.child.validated = true
+      return downstream
+    }
+    const settle = adapterTarget(state, exec, 'settle')
+    if (settle && (exec.name !== 'bash' || bashSucceeded(value))) {
+      const parsed = parseWorkflowResult(value)
+      state.activeChildren.delete(settle.childId)
+      childTasks.delete(settle.childId)
+      if (parsed) {
+        state.runId = parsed.runId ?? state.runId
+        state.dataRoot = parsed.dataRoot ?? state.dataRoot
+        for (const action of parsed.actions) state.pendingActions.set(actionKey(action), action)
+      }
+      if (state.pendingActions.size === 0 && state.activeChildren.size === 0) states.delete(exec.agent.id)
+      else if (state.pendingActions.size === 0 && hasRunningChild(state)) return acceptAndConclude(exec, value, downstream)
     }
     return downstream
   })
@@ -386,52 +524,40 @@ export function installReportTool(childCtx, ctx) {
   const disposeSection = childCtx.systemPrompt.section({
     name: 'tool:report',
     order: REPORT_SECTION_ORDER,
-    text: 'Deliver your result with the report tool before you finish: call it once with a self-contained answer. The agent that started you shares your workspace but does not automatically receive your transcript, tool output, or reasoning, so a closing remark such as "done" leaves it nothing it can use. Report earlier as well whenever a partial finding changes what that agent should do next; reporting never ends your turn.',
+    text: 'Deliver your result with the report tool before you finish: call it once with a self-contained answer. The agent that started you shares your workspace but does not automatically receive your transcript, tool output, or reasoning. Reporting does not end your turn.',
   })
   const disposeTool = childCtx.tools.register({
     name: 'report',
-    description: 'Report selected content to the agent that started you. Reporting does not end your turn or finish your work.',
+    description: 'Report selected content to the agent that started you. Reporting does not end your turn.',
     parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        output: {
-          type: 'string',
-          description: 'Actionable content for your parent; summarize conclusions and reference relevant shared paths.',
-        },
-      },
-      required: ['output'],
+      type: 'object', additionalProperties: false,
+      properties: { output: { type: 'string' } }, required: ['output'],
     },
     output: {
       schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: { messageId: { type: 'string' } },
-        required: ['messageId'],
+        type: 'object', additionalProperties: false,
+        properties: { messageId: { type: 'string' } }, required: ['messageId'],
       },
-      render: (_args, value) => [{
-        type: 'text',
-        text: `report accepted by the agent that started you as message ${value.messageId}`,
-      }],
+      render: (_args, value) => [{ type: 'text', text: `report accepted as message ${value.messageId}` }],
     },
     async execute(args, exec) {
-      const delivery = reportDeliveryForWorkspace(workspaceCwd(exec))
       const messageId = await ctx.subagents.reportFrom(
         exec.agent,
         [{ type: 'text', text: args.output }],
-        { delivery, signal: exec.signal },
+        { delivery: reportDeliveryForWorkspace(workspaceCwd(exec)), signal: exec.signal },
       )
       return { messageId }
     },
   })
-
-  return () => {
-    disposeTool()
-    disposeSection()
-  }
+  return () => { disposeTool(); disposeSection() }
 }
 
-export function apply(ctx) {
+export function apply(ctx, adapter = runAdapter) {
+  ctx.systemPrompt?.section({
+    name: 'pangea:dsh-workspace',
+    order: 116,
+    text: workspaceInstructions,
+  })
   ctx.subagents.registerContinuableSetup(childCtx => installReportTool(childCtx, ctx))
-  installPangeaLifecyclePolicy(ctx)
+  installPangeaLifecyclePolicy(ctx, adapter)
 }

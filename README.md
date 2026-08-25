@@ -10,7 +10,7 @@ dsh-pangea/
 ├── plugins/
 │   ├── dsh-pangea/                    # 工作台基座与页面注册 API
 │   ├── dsh-pangea-companion/          # 分析与执行功能
-│   └── dsh-pangea-asset-catalog/      # 资产分析与目录生成
+│   └── dsh-pangea-asset-catalog/      # PANGEA 资产管理与提取
 ├── docs/
 ├── scripts/
 ├── templates/
@@ -57,14 +57,11 @@ rc.8+ 的客户端模块加载方式，并在 `0.1.1-rc.1` 依赖线上开发验
 
 ### dsh-pangea-asset-catalog
 
-- 只读扫描 `pangea-data/inbox/` 与 `pangea-data/test-automation/`。
-- 把 `inbox/` 中的 DOCX、PDF、XLSX 转成带来源位置的 Markdown，写入
-  `pangea-data/asset-catalog/normalized/`，不覆盖原文件。
-- 区分输入候选、语义参考、示例参考、方法论候选与自动化能力。
-- 只在用户明确生成时写入 `pangea-data/asset-catalog/`。
-- 用户可对单份资产调用 DSH 模型提取历史问题，人工确认后再生成非约束性方法论候选。
-- 生成结果全部是非约束性引用材料，不修改 `pangea-agent`、原始资产、Run、Graph、
-  schema、rubric 或 PASS/FAIL 决策。
+- 直接调用 `pangea-agent` 稳定 JSON API，展示需求、设计、历史缺陷、参考资料和覆盖率资产。
+- 提供服务端搜索与分页，并按需加载单份资产的结构化结果。
+- 需求、设计、历史缺陷和参考资料由专用 DSH Agent 提取；覆盖率由 PANGEA 确定性解析。
+- 历史缺陷提取结果必须经人工通过后，才可作为新 Run 的缺陷机理输入。
+- 既有用例不作为长期资产；少量用例只能作为单次 Run 的表达示例。
 
 详细说明见 [`plugins/dsh-pangea-asset-catalog/README.md`](plugins/dsh-pangea-asset-catalog/README.md)。
 
