@@ -156,6 +156,7 @@ function roleInstructions(exec, action) {
   const ruleNames = {
     planning: 'planning-worker.md',
     analysis: 'analysis-worker.md',
+    rework: 'analysis-worker.md',
     review: 'review-worker.md',
     closure: 'closure-worker.md',
   }

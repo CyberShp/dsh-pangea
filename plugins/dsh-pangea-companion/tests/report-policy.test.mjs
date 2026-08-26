@@ -256,6 +256,32 @@ test('lifecycle accepts direct PANGEA run and action tools', async () => {
   }
 })
 
+test('dispatches rework actions with analysis worker rules', async () => {
+  const root = fixture()
+  try {
+    const harness = policyHarness()
+    const parent = fakeAgent(root)
+    const dataRoot = join(root, 'pangea-data')
+    const taskPath = join(dataRoot, 'runs', 'run-rework', 'agent-tasks', 'rework-u1.json')
+    const resultPath = join(dataRoot, 'runs', 'run-rework', 'agent-results', 'rework', 'u1.json')
+    mkdirSync(dirname(taskPath), { recursive: true })
+    writeFileSync(taskPath, JSON.stringify({ result_path: resultPath }))
+    const currentAction = { ...action(taskPath, 'run-rework:rework:u1'), role: 'rework' }
+    await harness.post(
+      fakeExec(parent, 'pangea_run_create', { repository: 'repo', target: 'target', source_scope: ['src/a.c'] }),
+      { run_id: 'run-rework', data_root: dataRoot, agent_actions: [currentAction] },
+    )
+
+    const dispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: currentAction.action_id })
+    const dispatched = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+
+    assert.equal(dispatched.bound, true)
+    assert.match(harness.starts[0].request.persona, /Analysis worker/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('completed actions can be validated and settled without cross-action blocking', async () => {
   const root = fixture()
   try {
