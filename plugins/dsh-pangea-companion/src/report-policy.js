@@ -153,16 +153,27 @@ function pendingActionFor(state, exec) {
 function roleInstructions(exec, action) {
   const root = pangeaWorkspaceRoot(workspaceCwd(exec))
   if (!root) throw new Error('PANGEA workspace not found')
-  const ruleNames = {
-    planning: 'planning-worker.md',
-    analysis: 'analysis-worker.md',
-    rework: 'analysis-worker.md',
-    review: 'review-worker.md',
-    closure: 'closure-worker.md',
+  const rulePaths = {
+    planning: [join('.agents', 'pangea', 'planning-worker.md')],
+    analysis: [
+      join('.agents', 'pangea', 'analysis-worker.md'),
+      join('.opencode', 'agents', 'analysis-worker.md'),
+    ],
+    rework: [
+      join('.agents', 'pangea', 'analysis-worker.md'),
+      join('.opencode', 'agents', 'analysis-worker.md'),
+    ],
+    review: [
+      join('.agents', 'pangea', 'review-worker.md'),
+      join('.opencode', 'agents', 'review-worker.md'),
+    ],
+    closure: [join('.agents', 'pangea', 'closure-worker.md')],
   }
-  const ruleName = ruleNames[action.role]
-  if (!ruleName) throw new Error(`unsupported PANGEA action role: ${action.role}`)
-  return readFileSync(join(root, '.agents', 'pangea', ruleName), 'utf8')
+  const candidates = rulePaths[action.role]
+  if (!candidates) throw new Error(`unsupported PANGEA action role: ${action.role}`)
+  const rulePath = candidates.map(candidate => join(root, candidate)).find(existsSync)
+  if (!rulePath) throw new Error(`PANGEA worker rules not found for role: ${action.role}`)
+  return readFileSync(rulePath, 'utf8')
 }
 
 function targetFlag(state) {

@@ -259,6 +259,10 @@ test('lifecycle accepts direct PANGEA run and action tools', async () => {
 test('dispatches rework actions with analysis worker rules', async () => {
   const root = fixture()
   try {
+    rmSync(join(root, '.agents', 'pangea', 'analysis-worker.md'))
+    const openCodeAgents = join(root, '.opencode', 'agents')
+    mkdirSync(openCodeAgents, { recursive: true })
+    writeFileSync(join(openCodeAgents, 'analysis-worker.md'), '# OpenCode analysis worker\n')
     const harness = policyHarness()
     const parent = fakeAgent(root)
     const dataRoot = join(root, 'pangea-data')
@@ -276,7 +280,7 @@ test('dispatches rework actions with analysis worker rules', async () => {
     const dispatched = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
 
     assert.equal(dispatched.bound, true)
-    assert.match(harness.starts[0].request.persona, /Analysis worker/)
+    assert.match(harness.starts[0].request.persona, /OpenCode analysis worker/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
