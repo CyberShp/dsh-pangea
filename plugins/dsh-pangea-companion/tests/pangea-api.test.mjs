@@ -19,6 +19,7 @@ test('creates one managed pending contract and removes it after Run creation', a
     let observed
     const result = await createRun(nested, {
       repository: 'repo-one', target: 'session and retry', source_scope: ['src/session.c'], focus: ['failure'],
+      asset_ids: ['asset-not-in-current-contract'], test_case_examples: ['TC-not-in-current-contract'],
     }, async call => {
       observed = { call, contract: JSON.parse(await readFile(pending, 'utf8')) }
       return { run_id: 'run-01', data_root: path.join(root, 'pangea-data'), actions: [] }
@@ -29,6 +30,8 @@ test('creates one managed pending contract and removes it after Run creation', a
     assert.equal(observed.contract.repository, 'repo-one')
     assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
     assert.equal(observed.contract.run_id, undefined)
+    assert.equal(observed.contract.asset_ids, undefined)
+    assert.equal(observed.contract.test_case_examples, undefined)
     assert.equal(existsSync(pending), false)
   } finally {
     await rm(root, { recursive: true, force: true })

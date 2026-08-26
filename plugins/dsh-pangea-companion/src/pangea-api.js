@@ -89,8 +89,6 @@ export async function createRun(cwd, input, runner = runPangea) {
     target: input.target,
     source_scope: input.source_scope,
     focus: input.focus ?? [],
-    asset_ids: input.asset_ids ?? [],
-    test_case_examples: input.test_case_examples ?? [],
   }
   await mkdir(path.dirname(pendingPath), { recursive: true })
   await rm(pendingPath, { force: true })
