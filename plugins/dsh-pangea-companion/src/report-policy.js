@@ -146,18 +146,6 @@ function pendingActionFor(state, exec) {
       exec.name === 'pangea_action_dispatch'
       && exec.arguments?.action_id === action.action_id
     ) return { key, action }
-    if (
-      action.action === 'dispatch_agent'
-      && exec.name === 'subagent'
-      && exec.arguments?.run_in_background === true
-      && exec.arguments?.prompt === action.task_path
-    ) return { key, action }
-    if (
-      action.action === 'continue_agent'
-      && exec.name === 'send_message'
-      && exec.arguments?.subagent_id === action.task_id
-      && exec.arguments?.message === action.task_path
-    ) return { key, action }
   }
   return undefined
 }
@@ -220,14 +208,40 @@ function repairTarget(state, exec) {
   return { childId: exec.arguments.subagent_id, child }
 }
 
-function isPendingContractCleanup(exec) {
-  const command = commandOf(exec)?.trim()
-  if (!command) return false
-  const posix = command.match(/^rm\s+-f\s+(?:--\s+)?(?:"([^"]+)"|'([^']+)'|(\S+))$/)
-  const powershell = command.match(/^Remove-Item\s+(?:-Force\s+)?-LiteralPath\s+(?:"([^"]+)"|'([^']+)')(?:\s+-Force)?$/i)
-  const candidate = posix?.slice(1).find(Boolean) ?? powershell?.slice(1).find(Boolean)
-  return typeof candidate === 'string'
-    && candidate.replaceAll('\\', '/').endsWith(PENDING_CONTRACT_SUFFIX)
+function referencesPendingContract(exec) {
+  let serialized
+  try {
+    serialized = JSON.stringify(exec.arguments ?? {})
+  } catch {
+    return false
+  }
+  return serialized.replaceAll('\\\\', '/').replaceAll('\\', '/').includes(PENDING_CONTRACT_SUFFIX)
+}
+
+function rootLifecycleMutationBlock(exec) {
+  if (referencesPendingContract(exec)) {
+    return 'PANGEA pending contract 由 pangea_run_create 独占管理；根 Agent 不得读取、创建、编辑或删除。'
+  }
+  if (exec.name === 'pangea_action_bind') {
+    return 'PANGEA action 必须用 pangea_action_dispatch 派发；该工具会自动绑定真实 subagent_id。'
+  }
+  const command = commandOf(exec)
+  if (
+    isPangeaCliCommand(command, 'runs create')
+    || isPangeaCliCommand(command, 'module-analysis')
+  ) {
+    return 'PANGEA 新 Run 必须调用 pangea_run_create；不得手写 contract 或直接调用创建 Run 的 CLI。'
+  }
+  if (
+    isPangeaCliCommand(command, 'record-agent-session')
+    || isPangeaCliCommand(command, 'resume-run')
+    || isPangeaCliCommand(command, 'adapter bind')
+    || isPangeaCliCommand(command, 'adapter validate')
+    || isPangeaCliCommand(command, 'adapter settle')
+  ) {
+    return 'PANGEA action 生命周期必须使用 pangea_action_dispatch、pangea_action_validate 和 pangea_action_settle。'
+  }
+  return undefined
 }
 
 function childTaskWritePolicy(taskPath, cwd) {
@@ -238,6 +252,7 @@ function childTaskWritePolicy(taskPath, cwd) {
     const allowedResult = resolve(cwd, task.result_path)
     const protectedPaths = [
       absoluteTaskPath,
+      task.prior_result_path,
       task.original_result_path,
       task.original_task_path,
     ].filter(value => typeof value === 'string' && value !== '')
@@ -343,12 +358,7 @@ function acceptAndConclude(exec, value, downstream) {
 }
 
 function workflowStart(exec) {
-  if (exec.name === 'pangea_run_create') return true
-  const command = commandOf(exec)
-  return isPangeaCliCommand(command, 'runs create')
-    || isPangeaCliCommand(command, 'module-analysis')
-    || isPangeaCliCommand(command, 'assets extract')
-    || isPangeaCliCommand(command, 'adapter next')
+  return exec.name === 'pangea_run_create'
 }
 
 export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
@@ -450,11 +460,14 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
       if (blocked) return blocked
     }
     const state = stateFor(exec.agent)
-    if (!state || !isPangeaWorkspace(workspaceCwd(exec))) return undefined
+    if (!isPangeaWorkspace(workspaceCwd(exec))) return undefined
+    const lifecycleBlocked = rootLifecycleMutationBlock(exec)
+    if (lifecycleBlocked) return lifecycleBlocked
+    if (!state) return undefined
 
     if (hasUnboundChild(state)) {
-      if (adapterTarget(state, exec, 'bind') || pendingActionFor(state, exec)) return undefined
-      return 'PANGEA 子 Agent 已派发；下一步必须调用 pangea_action_bind 绑定真实 subagent_id。'
+      if (pendingActionFor(state, exec)) return undefined
+      return 'PANGEA 子 Agent 的自动绑定尚未完成；请用同一 action_id 重试 pangea_action_dispatch。'
     }
     const hasSettled = [...state.activeChildren.values()].some(child => child.status === 'settled')
     if (hasSettled) {
@@ -464,7 +477,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
       return settledActionGuidance(state)
     }
     if (state.pendingActions.size > 0) {
-      if (isPendingContractCleanup(exec) || pendingActionFor(state, exec)) return undefined
+      if (pendingActionFor(state, exec)) return undefined
       return 'PANGEA 已返回待执行 action；下一步必须调用 pangea_action_dispatch，并传入返回的 action_id。'
     }
     if (hasRunningChild(state)) return 'PANGEA 子 Agent 仍在运行；请等待完成，不读取或修改其结果。'

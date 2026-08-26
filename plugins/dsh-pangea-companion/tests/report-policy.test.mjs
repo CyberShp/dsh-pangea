@@ -161,47 +161,24 @@ test('report tool resolves delivery from the reporting workspace', async () => {
   }
 })
 
-test('lifecycle enforces dispatch bind validate and settle', async () => {
+test('root lifecycle rejects pending-contract and legacy CLI mutations', async () => {
   const root = fixture()
   try {
     const harness = policyHarness()
     const parent = fakeAgent(root)
-    const taskPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-tasks', 'analysis', 'U00.json')
-    const resultPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-results', 'analysis', 'U00.json')
-    mkdirSync(dirname(taskPath), { recursive: true })
-    writeFileSync(taskPath, JSON.stringify({ result_path: resultPath }))
-    const currentAction = action(taskPath)
-    await harness.post(
-      fakeExec(parent, 'bash', { command: 'python -m pangea_agent.cli.main runs create --contract pending.json' }),
-      envelope({ run_id: 'run-01', data_root: 'pangea-data', agent_actions: [currentAction] }),
-    )
-
-    assert.match(harness.guard(fakeExec(parent, 'list_agents', {})), /待执行 action/)
-    const dispatch = fakeExec(parent, 'subagent', { prompt: taskPath, run_in_background: true })
-    assert.equal(harness.guard(dispatch), undefined)
-    await harness.post(dispatch, { kind: 'continuable', subagentId: 'child-01' })
-
-    const bind = fakeExec(parent, 'bash', {
-      command: `python -m pangea_agent.cli.main adapter bind --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id} --task-id child-01`,
-    })
-    assert.equal(harness.guard(bind), undefined)
-    await harness.post(bind, envelope({ action_id: currentAction.action_id, status: 'dispatched' }))
-    assert.equal(bind.concluded, true)
-    assert.match(harness.guard(fakeExec(parent, 'list_agents', {})), /仍在运行/)
-
-    harness.settled(parent, 'child-01')
-    const validate = fakeExec(parent, 'bash', {
-      command: `python -m pangea_agent.cli.main adapter validate --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id}`,
-    })
-    assert.equal(harness.guard(validate), undefined)
-    await harness.post(validate, envelope({ action_id: currentAction.action_id, status: 'valid' }))
-
-    const settle = fakeExec(parent, 'bash', {
-      command: `python -m pangea_agent.cli.main adapter settle --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id}`,
-    })
-    assert.equal(harness.guard(settle), undefined)
-    await harness.post(settle, envelope({ run_id: 'run-01', data_root: 'pangea-data', lifecycle_status: 'complete', agent_actions: [] }))
-    assert.equal(harness.guard(fakeExec(parent, 'list_agents', {})), undefined)
+    assert.match(harness.guard(fakeExec(parent, 'read', {
+      path: join(root, 'pangea-data', '.pangea', 'pending-task-contract.json'),
+    })), /pangea_run_create/)
+    assert.match(harness.guard(fakeExec(parent, 'write', {
+      file_path: 'pangea-data/.pangea/pending-task-contract.json', content: '{}',
+    })), /pangea_run_create/)
+    assert.match(harness.guard(fakeExec(parent, 'bash', {
+      command: 'python -m pangea_agent.cli.main module-analysis --contract pending.json',
+    })), /pangea_run_create/)
+    assert.match(harness.guard(fakeExec(parent, 'bash', {
+      command: 'python -m pangea_agent.cli.main resume-run --data-root pangea-data --run-id run-01',
+    })), /pangea_action_dispatch/)
+    assert.match(harness.guard(fakeExec(parent, 'pangea_action_bind', {})), /自动绑定/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -367,18 +344,23 @@ test('validation failure can return to the same child and result writes stay sco
     const taskPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-tasks', 'closure', 'U00.json')
     const resultPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-results', 'closure', 'U00.json')
     const originalPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-results', 'analysis', 'U00.json')
+    const priorPath = join(root, 'pangea-data', 'runs', 'run-01', 'agent-results', 'prior', 'U00.json')
     mkdirSync(dirname(taskPath), { recursive: true })
-    writeFileSync(taskPath, JSON.stringify({ result_path: resultPath, original_result_path: originalPath }))
+    writeFileSync(taskPath, JSON.stringify({
+      result_path: resultPath, prior_result_path: priorPath, original_result_path: originalPath,
+    }))
     const currentAction = action(taskPath, 'run-01:closure:U00')
     await harness.post(
-      fakeExec(parent, 'bash', { command: 'python -m pangea_agent.cli.main runs create --contract pending.json' }),
-      envelope({ run_id: 'run-01', data_root: 'pangea-data', agent_actions: [currentAction] }),
+      fakeExec(parent, 'pangea_run_create', {}),
+      { run_id: 'run-01', data_root: 'pangea-data', agent_actions: [currentAction] },
     )
-    const dispatch = fakeExec(parent, 'subagent', { prompt: taskPath, run_in_background: true })
-    await harness.post(dispatch, { kind: 'continuable', subagent_id: 'child-01', job_id: 'not-the-task-id' })
-    const child = fakeAgent(root, 'child-01')
+    const dispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: currentAction.action_id })
+    const dispatched = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+    await harness.post(dispatch, dispatched)
+    const child = fakeAgent(root, 'child-1')
     assert.equal(harness.guard(fakeExec(child, 'write', { file_path: resultPath })), undefined)
     assert.match(harness.guard(fakeExec(child, 'write', { file_path: originalPath })), /只能写当前 task/)
+    assert.match(harness.guard(fakeExec(child, 'write', { file_path: priorPath })), /只能写当前 task/)
     assert.equal(harness.guard(fakeExec(child, 'bash', {
       command: `python3 -c "from pathlib import Path; Path('${resultPath}').write_text('{}')"`,
     })), undefined)
@@ -392,12 +374,8 @@ test('validation failure can return to the same child and result writes stay sco
       command: `python -m pangea_agent.cli.main adapter settle --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id}`,
     })), /只能由根 Agent 推进/)
 
-    const bind = fakeExec(parent, 'bash', {
-      command: `python -m pangea_agent.cli.main adapter bind --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id} --task-id child-01`,
-    })
-    await harness.post(bind, envelope({ status: 'dispatched' }))
-    harness.settled(parent, 'child-01')
-    const repair = fakeExec(parent, 'send_message', { subagent_id: 'child-01', message: '修正当前 result_path' })
+    harness.settled(parent, 'child-1')
+    const repair = fakeExec(parent, 'send_message', { subagent_id: 'child-1', message: '修正当前 result_path' })
     assert.equal(harness.guard(repair), undefined)
     await harness.post(repair, { messageId: 'message-01' })
     assert.equal(repair.concluded, true)
