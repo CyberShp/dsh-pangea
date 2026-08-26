@@ -5,6 +5,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runAdapter } from './pangea-api.js'
+import { launchAnalysisSession, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 
 export const name = 'dsh-pangea-companion'
 export const inject = ['tools', 'webServer', 'agents', 'apiProxy']
@@ -13,6 +14,7 @@ const API_PATH = '/api/pangea-companion/state'
 const SOURCE_API_PATH = '/api/pangea-companion/source'
 const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
 const EXECUTION_API_PATH = '/api/pangea-companion/executions'
+const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
 
 const STATUS_PARAMETERS = {
   type: 'object',
@@ -195,6 +197,35 @@ async function executionRouteHandler(req, res, store, api) {
   }
 }
 
+async function workbenchRouteHandler(req, res, api) {
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
+  const cwd = url.searchParams.get('cwd') ?? undefined
+  const dataRoot = url.searchParams.get('data_root') ?? undefined
+  try {
+    if (req.method === 'GET') {
+      return json(res, 200, await workbenchSnapshot({
+        cwd,
+        dataRoot,
+        cursor: url.searchParams.get('cursor') ?? 0,
+        limit: url.searchParams.get('limit') ?? 20,
+      }))
+    }
+    if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+    const body = await requestJson(req)
+    const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
+    if (body.action === 'create') {
+      return json(res, 200, await launchAnalysisSession(api, { cwd, dataRoot: actionDataRoot, input: body.input }))
+    }
+    if (body.action === 'stop') {
+      return json(res, 200, await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id }))
+    }
+    return json(res, 400, { status: 'error', error: 'unsupported-action' })
+  } catch (error) {
+    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 function toolOutput() {
   return { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
 }
@@ -221,6 +252,7 @@ export function apply(ctx) {
     name: 'pangea_action_validate',
     description: '子 Agent 结束后校验其 action 结果契约；失败时工具会把完整错误自动送回同一子 Agent 修正。',
     parameters: ACTION_PARAMETERS,
+    isConcurrencySafe: () => false,
     async execute(args, exec) {
       try {
         return await runAdapter(workspaceCwd(exec), 'validate', args)
@@ -237,6 +269,7 @@ export function apply(ctx) {
     name: 'pangea_action_settle',
     description: '结果契约校验通过后接收 action，并返回下一批 actions 或最终 Run 状态。',
     parameters: ACTION_PARAMETERS,
+    isConcurrencySafe: () => false,
     execute: (args, exec) => runAdapter(workspaceCwd(exec), 'settle', args),
     output: toolOutput(),
   }), ctx.tools.register({
@@ -299,7 +332,9 @@ export function apply(ctx) {
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
+  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy) })
   ctx.effect?.(() => async () => {
+    disposeWorkbenchRoute()
     disposeExecutionRoute()
     disposeEnvironmentRoute()
     disposeSourceRoute()
@@ -316,3 +351,4 @@ export { createRuntimeMonitor, RuntimeMonitor } from './monitor.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
 export { createRun, runAdapter, runPangea, workspaceRoot } from './pangea-api.js'
+export { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'

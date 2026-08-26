@@ -80,6 +80,21 @@ function bashSucceeded(value) {
     && value.aborted !== true
 }
 
+function validationFeedback(value) {
+  const errors = Array.isArray(value?.errors) && value.errors.length > 0
+    ? value.errors
+    : [{
+        loc: [],
+        type: 'validation_error',
+        message: typeof value?.error === 'string' ? value.error : '结果契约校验未通过',
+      }]
+  return JSON.stringify({
+    result_path: value?.result_path ?? null,
+    expected_contract: value?.expected_contract ?? null,
+    errors,
+  }, null, 2)
+}
+
 function parseWorkflowResult(value) {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return workflowResult(value)
@@ -173,7 +188,9 @@ function adapterTarget(state, exec, subcommand) {
     if (!child) return undefined
     const [childId, childState] = child
     if (subcommand === 'bind' && exec.arguments?.task_id === childId) return { childId, child: childState }
-    if (subcommand === 'validate' && childState.status === 'settled' && childState.bound) return { childId, child: childState }
+    if (subcommand === 'validate' && childState.status === 'settled' && childState.bound && !childState.validated) {
+      return { childId, child: childState }
+    }
     if (subcommand === 'settle' && childState.status === 'settled' && childState.validated) return { childId, child: childState }
     return undefined
   }
@@ -186,7 +203,7 @@ function adapterTarget(state, exec, subcommand) {
     if (subcommand === 'bind' && commandHasFlagValue(command, '--task-id', childId)) {
       return { childId, child }
     }
-    if (subcommand === 'validate' && child.status === 'settled' && child.bound) {
+    if (subcommand === 'validate' && child.status === 'settled' && child.bound && !child.validated) {
       return { childId, child }
     }
     if (subcommand === 'settle' && child.status === 'settled' && child.validated) {
@@ -261,12 +278,53 @@ function childArtifactMutationBlock(taskPath, exec) {
   return undefined
 }
 
+function childLifecycleMutationBlock(exec) {
+  if (
+    exec.name === 'pangea_action_dispatch'
+    || exec.name === 'pangea_action_bind'
+    || exec.name === 'pangea_action_validate'
+    || exec.name === 'pangea_action_settle'
+  ) {
+    return 'PANGEA action 生命周期只能由根 Agent 推进；子 Agent 只提交当前 task 的结果。'
+  }
+  const command = commandOf(exec)
+  if (
+    isPangeaCliCommand(command, 'adapter bind')
+    || isPangeaCliCommand(command, 'adapter validate')
+    || isPangeaCliCommand(command, 'adapter settle')
+  ) {
+    return 'PANGEA action 生命周期只能由根 Agent 推进；子 Agent 只提交当前 task 的结果。'
+  }
+  return undefined
+}
+
 function hasRunningChild(state) {
   return [...state.activeChildren.values()].some(child => child.status === 'running')
 }
 
 function hasUnboundChild(state) {
   return [...state.activeChildren.values()].some(child => !child.bound)
+}
+
+function settledActionGuidance(state) {
+  const actions = [...state.activeChildren.entries()]
+    .filter(([, child]) => child.status === 'settled')
+    .map(([childId, child]) => ({
+      childId,
+      actionId: child.action.action_id,
+      tool: child.validated ? 'pangea_action_settle' : 'pangea_action_validate',
+    }))
+  const calls = actions.map(item => (
+    `- ${item.tool}(${JSON.stringify({
+      data_root: state.dataRoot,
+      run_id: state.runId,
+      action_id: item.actionId,
+    })})，subagent_id=${item.childId}`
+  ))
+  return [
+    'PANGEA 有已结束 action 待处理。一次只处理一个 action；validate 通过后立即 settle 同一 action，再处理其他 action。',
+    ...calls,
+  ].join('\n')
 }
 
 function acceptedValue(result, downstream) {
@@ -386,6 +444,8 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
   ctx.tools.guard(exec => {
     const childTask = exec?.agent ? childTasks.get(exec.agent.id) : undefined
     if (childTask) {
+      const lifecycleBlocked = childLifecycleMutationBlock(exec)
+      if (lifecycleBlocked) return lifecycleBlocked
       const blocked = childArtifactMutationBlock(childTask, exec)
       if (blocked) return blocked
     }
@@ -396,14 +456,12 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
       if (adapterTarget(state, exec, 'bind') || pendingActionFor(state, exec)) return undefined
       return 'PANGEA 子 Agent 已派发；下一步必须调用 pangea_action_bind 绑定真实 subagent_id。'
     }
-    const settled = [...state.activeChildren.values()].find(child => child.status === 'settled')
-    if (settled) {
+    const hasSettled = [...state.activeChildren.values()].some(child => child.status === 'settled')
+    if (hasSettled) {
       if (repairTarget(state, exec)) return undefined
-      if (!settled.validated && adapterTarget(state, exec, 'validate')) return undefined
-      if (settled.validated && adapterTarget(state, exec, 'settle')) return undefined
-      return settled.validated
-        ? 'PANGEA 结果已校验；下一步必须调用 pangea_action_settle。'
-        : 'PANGEA 子 Agent 已结束；下一步必须调用 pangea_action_validate。'
+      if (adapterTarget(state, exec, 'validate')) return undefined
+      if (adapterTarget(state, exec, 'settle')) return undefined
+      return settledActionGuidance(state)
     }
     if (state.pendingActions.size > 0) {
       if (isPendingContractCleanup(exec) || pendingActionFor(state, exec)) return undefined
@@ -489,8 +547,8 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
           validate.childId,
           [{ type: 'text', text: [
             '结果契约校验未通过。只修正当前 task 的 result_path，不重新分析、不扩大范围。',
-            `完整错误：${value.error}`,
-            '重新读取 task 的 result_schema_path 与 selected_inputs_path，一次修正错误中列出的全部字段后结束本回合。',
+            `结构化错误：${validationFeedback(value)}`,
+            '重新读取 expected_contract 和 task 的 selected_inputs_path，在同一 result_path 一次修正 errors 列出的全部字段后结束本回合。',
           ].join('\n') }],
           {
             source: { kind: 'coordinator', form: 'relay', senderSessionId: exec.agent.id },

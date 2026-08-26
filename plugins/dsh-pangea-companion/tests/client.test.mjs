@@ -19,17 +19,22 @@ function fakeReact() {
   }
 }
 
-test('PANGEA client registers only the analysis page and keeps execution UI unregistered', async () => {
+test('PANGEA client registers the analysis and execution pages with the full workbench', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /总览/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
-  assert.match(source, /repeat\(5, minmax\(0, 1fr\)\)/)
+  assert.match(source, /repeat\(7, minmax\(58px, 1fr\)\)/)
   assert.doesNotMatch(source, /\['monitor', '监控'\]/)
   assert.doesNotMatch(source, /if \(screen\.type === 'monitor'\) body = renderMonitor/)
   assert.match(source, /风险/)
   assert.match(source, /用例/)
   assert.match(source, /证据/)
   assert.match(source, /复核/)
+  assert.match(source, /业务流/)
+  assert.match(source, /新建分析/)
+  assert.match(source, /Action 生命周期/)
+  assert.match(source, /后端与工作台不兼容/)
+  assert.match(source, /停止 Run/)
   assert.match(source, /执行环境/)
   assert.match(source, /一键执行/)
   assert.match(source, /← 返回/)
@@ -75,10 +80,32 @@ test('PANGEA client registers only the analysis page and keeps execution UI unre
     pangea: { registerPage(page) { pages.push(page); return () => {} } },
     effect(factory) { return factory() },
   })
-  assert.equal(pages.length, 1)
-  assert.deepEqual(pages.map(page => page.id), ['analysis'])
-  assert.deepEqual(pages.map(page => page.title()), ['分析'])
-  assert.deepEqual(pages.map(page => page.order), [10])
+  assert.equal(pages.length, 2)
+  assert.deepEqual(pages.map(page => page.id), ['analysis', 'execution'])
+  assert.deepEqual(pages.map(page => page.title()), ['分析', '执行'])
+  assert.deepEqual(pages.map(page => page.order), [10, 20])
+})
+
+test('workbench API lists runs and starts or stops through explicit actions', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+  const calls = []
+  const fetcher = async (url, options = {}) => {
+    calls.push({ url, options })
+    return { ok: true, status: 200, async json() { return { status: 'ok' } } }
+  }
+
+  await exported.requestWorkbench({ cwd: '/tmp/workspace', cursor: 20, limit: 10, fetcher })
+  await exported.requestWorkbenchAction({ cwd: '/tmp/workspace', action: 'stop', payload: { run_id: 'run-1' }, fetcher })
+
+  const listUrl = new URL(calls[0].url, 'http://localhost')
+  assert.equal(listUrl.searchParams.get('cursor'), '20')
+  assert.equal(listUrl.searchParams.get('limit'), '10')
+  assert.equal(calls[1].options.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[1].options.body), { action: 'stop', run_id: 'run-1' })
 })
 
 test('client builds focused discussion drafts, appends them to the active DSH composer, and resolves evidence paths', async () => {

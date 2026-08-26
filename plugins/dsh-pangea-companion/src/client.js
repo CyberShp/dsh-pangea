@@ -14,6 +14,7 @@ window.__ModuleLoader__.load({
     const SOURCE_API_PATH = '/api/pangea-companion/source'
     const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
     const EXECUTION_API_PATH = '/api/pangea-companion/executions'
+    const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
 
     async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
@@ -65,6 +66,23 @@ window.__ModuleLoader__.load({
       return body
     }
 
+    async function requestWorkbench({ cwd, cursor = 0, limit = 20, signal, fetcher = fetch }) {
+      const query = new URLSearchParams({ cwd, cursor: String(cursor), limit: String(limit) })
+      const response = await fetcher(`${WORKBENCH_API_PATH}?${query}`, { cache: 'no-store', signal })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
+    async function requestWorkbenchAction({ cwd, action, payload = {}, fetcher = fetch }) {
+      const response = await fetcher(`${WORKBENCH_API_PATH}?${new URLSearchParams({ cwd })}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...payload }),
+      })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
     const PHASE = {
       PREPARING: '准备中', PLANNING: '规划分析单元', ANALYZING: '并行分析中', REVIEWING: '独立复核中',
       CLOSING: '定向补齐中', REPORTING: '生成报告中', COMPLETE: '已完成', INCOMPLETE: '未完整结束',
@@ -100,7 +118,7 @@ window.__ModuleLoader__.load({
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 10 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '7px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 700 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
-      nav: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 0, marginTop: 12 },
+      nav: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(58px, 1fr))', gap: 0, marginTop: 12, overflowX: 'auto' },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '9px 2px 8px', cursor: 'pointer', fontSize: 10 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '14px 14px 22px' },
@@ -138,6 +156,14 @@ window.__ModuleLoader__.load({
       error: { whiteSpace: 'pre-wrap', fontSize: 11, color: 'var(--dsw-alias-state-error-primary, #e66767)' },
       runButton: { width: '100%', textAlign: 'left', border: 0, borderRadius: 7, padding: '7px 8px', marginBottom: 3, cursor: 'pointer', color: 'inherit', background: 'transparent' },
       runActive: { background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.1))' },
+      toolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 7, flexWrap: 'wrap' },
+      formGrid: { display: 'grid', gap: 8, marginTop: 9 },
+      textarea: { width: '100%', minHeight: 74, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '8px 9px', outline: 'none', fontSize: 11, lineHeight: 1.5 },
+      compatibility: { borderLeft: '3px solid var(--dsw-alias-state-business-primary, #4d9ad6)' },
+      stageRail: { display: 'grid', gap: 7, marginTop: 8 },
+      stageItem: { display: 'grid', gridTemplateColumns: '9px minmax(0, 1fr) auto', gap: 8, alignItems: 'start', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.13))', paddingBottom: 8 },
+      stageDot: { width: 7, height: 7, marginTop: 5, borderRadius: 2, background: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
+      flowStep: { borderLeft: '2px solid var(--dsw-alias-border-l2, #555)', paddingLeft: 9, marginTop: 7 },
       actionCard: { borderColor: 'var(--dsw-alias-state-business-secondary, var(--dsw-alias-border-l2, #555))', background: 'var(--dsw-alias-state-business-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
       success: { color: 'var(--dsw-alias-state-success-primary, #38a892)', fontSize: 10, lineHeight: 1.5 },
       source: { maxHeight: 200, margin: '9px 0 0', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, overflow: 'auto', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))', fontFamily: 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 10, lineHeight: 1.55 },
@@ -361,9 +387,13 @@ window.__ModuleLoader__.load({
     function PangeaPanel({ ctx, scope, visible, initialScreen = 'overview', pageMode = 'analysis' }) {
       const cwd = scope?.cwd
       const [snapshot, setSnapshot] = React.useState(undefined)
+      const [workbench, setWorkbench] = React.useState(undefined)
       const [error, setError] = React.useState(undefined)
+      const [workbenchError, setWorkbenchError] = React.useState(undefined)
       const [selectedRun, setSelectedRun] = React.useState(undefined)
       const [loading, setLoading] = React.useState(false)
+      const [workbenchLoading, setWorkbenchLoading] = React.useState(false)
+      const [runCursor, setRunCursor] = React.useState(0)
       const [screen, setScreen] = React.useState({ type: initialScreen })
       const [history, setHistory] = React.useState([])
       const [riskQuery, setRiskQuery] = React.useState('')
@@ -380,7 +410,14 @@ window.__ModuleLoader__.load({
       const [selectedCaseIds, setSelectedCaseIds] = React.useState([])
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState({ id: '', name: '', host_alias: '', array_alias: '', automation_id: '', bindings: '{}' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', focus: '', asset_ids: '', test_case_examples: '' })
+      const [creatingRun, setCreatingRun] = React.useState(false)
+      const [pendingStopRun, setPendingStopRun] = React.useState('')
+      const [flowQuery, setFlowQuery] = React.useState('')
+      const [runDraft, setRunDraft] = React.useState(ctx?.pangea?.getRunDraft?.() ?? { requestId: 0, assetIds: [] })
       const requestRef = React.useRef({ sequence: 0, controller: null })
+      const workbenchRequestRef = React.useRef({ sequence: 0, controller: null })
+      const handledRunDraftRequest = React.useRef(0)
       const noticeTimerRef = React.useRef(undefined)
 
       const load = React.useCallback(async () => {
@@ -409,6 +446,27 @@ window.__ModuleLoader__.load({
         }
       }, [cwd, selectedRun, scope?.sessionId])
 
+      const loadWorkbench = React.useCallback(async () => {
+        if (!cwd || pageMode === 'execution') return
+        const sequence = ++workbenchRequestRef.current.sequence
+        workbenchRequestRef.current.controller?.abort()
+        const controller = new AbortController()
+        workbenchRequestRef.current.controller = controller
+        setWorkbenchLoading(true)
+        try {
+          const body = await requestWorkbench({ cwd, cursor: runCursor, limit: 20, signal: controller.signal })
+          if (sequence !== workbenchRequestRef.current.sequence) return
+          setWorkbench(body)
+          setWorkbenchError(undefined)
+        } catch (reason) {
+          if (reason?.name !== 'AbortError' && sequence === workbenchRequestRef.current.sequence) {
+            setWorkbenchError(reason instanceof Error ? reason.message : String(reason))
+          }
+        } finally {
+          if (sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
+        }
+      }, [cwd, pageMode, runCursor])
+
       const loadEnvironments = React.useCallback(async () => {
         try {
           const values = await requestEnvironments()
@@ -421,6 +479,22 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: initialScreen }); setHistory([]); setSelectedCaseIds([]) }, [cwd, initialScreen])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
+      React.useEffect(() => {
+        const sync = () => setRunDraft(ctx?.pangea?.getRunDraft?.() ?? { requestId: 0, assetIds: [] })
+        sync()
+        return ctx?.pangea?.subscribeRunDraft?.(sync)
+      }, [ctx?.pangea])
+      React.useEffect(() => {
+        if (!runDraft?.requestId || runDraft.requestId === handledRunDraftRequest.current) return
+        handledRunDraftRequest.current = runDraft.requestId
+        setCreateForm(value => ({ ...value, asset_ids: (runDraft.assetIds ?? []).join('\n') }))
+        setScreen({ type: 'create' })
+        setHistory([])
+      }, [runDraft?.requestId])
+      React.useEffect(() => {
+        const repositories = workbench?.capabilities?.repositories ?? []
+        if (repositories.length > 0) setCreateForm(value => value.repository ? value : { ...value, repository: repositories[0] })
+      }, [workbench?.capabilities])
       React.useEffect(() => {
         if (!visible) {
           requestRef.current.controller?.abort()
@@ -439,6 +513,11 @@ window.__ModuleLoader__.load({
           requestRef.current.controller?.abort()
         }
       }, [load, visible])
+      React.useEffect(() => {
+        if (!visible || pageMode === 'execution') return undefined
+        void loadWorkbench()
+        return () => workbenchRequestRef.current.controller?.abort()
+      }, [loadWorkbench, pageMode, visible])
       React.useEffect(() => { if (visible) void loadEnvironments() }, [visible, loadEnvironments])
 
       const current = snapshot?.current
@@ -450,6 +529,8 @@ window.__ModuleLoader__.load({
       const risks = details.risks ?? []
       const testCases = details.test_cases ?? []
       const evidence = details.evidence ?? []
+      const businessFlows = details.business_flows ?? []
+      const workflow = current?.workflow ?? { units: [], actions: [], error_history: [], quality_checks: [], unresolved: [] }
       const riskById = new Map(risks.map(item => [item.risk_id, item]))
       const caseById = new Map(testCases.map(item => [item.test_case_id, item]))
       const evidenceByKey = new Map(evidence.map(item => [evidenceIdentity(item), item]))
@@ -494,6 +575,50 @@ window.__ModuleLoader__.load({
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
         setActionNotice({ message, isError })
         noticeTimerRef.current = window.setTimeout(() => setActionNotice(undefined), 2600)
+      }
+      function multilineValues(value) {
+        return [...new Set(String(value ?? '').split(/\r?\n/).map(item => item.trim()).filter(Boolean))]
+      }
+      async function submitNewRun() {
+        if (!cwd || creatingRun || workbench?.compatibility?.compatible !== true) return
+        setCreatingRun(true)
+        try {
+          const launched = await requestWorkbenchAction({
+            cwd,
+            action: 'create',
+            payload: {
+              input: {
+                repository: createForm.repository,
+                target: createForm.target,
+                source_scope: multilineValues(createForm.source_scope),
+                focus: multilineValues(createForm.focus),
+                asset_ids: multilineValues(createForm.asset_ids),
+                test_case_examples: multilineValues(createForm.test_case_examples),
+              },
+            },
+          })
+          ctx?.pangea?.updateRunDraft?.({ assetIds: [] })
+          setScreen({ type: 'overview' })
+          setHistory([])
+          showActionNotice(`已创建分析会话：${launched.session_id}`)
+          ctx?.sessions?.open?.(launched.session_id)
+          await loadWorkbench()
+        } catch (reason) {
+          showActionNotice(`创建失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        } finally {
+          setCreatingRun(false)
+        }
+      }
+      async function stopCurrentRun() {
+        if (!cwd || !current || current.terminal) return
+        try {
+          await requestWorkbenchAction({ cwd, action: 'stop', payload: { run_id: current.run_id, data_root: snapshot?.data_root } })
+          setPendingStopRun('')
+          showActionNotice(`已停止 ${current.run_id}`)
+          await Promise.all([load(), loadWorkbench()])
+        } catch (reason) {
+          showActionNotice(`停止失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
       }
       function toggleCase(testCaseId) {
         setSelectedCaseIds(values => values.includes(testCaseId)
@@ -662,6 +787,9 @@ window.__ModuleLoader__.load({
       const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
       const activeNav = navType(screen)
       const screenTitle = screen.type === 'overview' ? 'PANGEA 总览'
+        : screen.type === 'create' ? '新建分析'
+          : screen.type === 'workflow' ? '运行流程'
+            : screen.type === 'flows' ? '业务流程'
           : screen.type === 'risks' ? '风险'
           : screen.type === 'risk' ? (riskById.get(screen.id)?.risk_id || '风险详情')
             : screen.type === 'cases' ? '测试用例'
@@ -671,7 +799,7 @@ window.__ModuleLoader__.load({
                     : screen.type === 'execution' ? '执行环境' : '复核'
 
       const navigationItems = pageMode === 'execution' ? [] : [
-        ['overview', '总览'], ['risks', '风险'], ['cases', '用例'], ['evidence', '证据'], ['review', '复核'],
+        ['overview', '总览'], ['workflow', '流程'], ['risks', '风险'], ['cases', '用例'], ['flows', '业务流'], ['evidence', '证据'], ['review', '复核'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -684,17 +812,19 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
-            !['overview', 'risks', 'cases', 'execution', 'evidence', 'review'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
+            !['overview', 'workflow', 'risks', 'cases', 'flows', 'execution', 'evidence', 'review'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
               h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : 'PANGEA 伴生工作台'))),
-          h('button', {
-            type: 'button',
-            disabled: loading,
-            'aria-busy': loading,
-            style: { ...styles.button, ...(loading ? styles.buttonDisabled : {}) },
-            onClick: () => { void load() },
-          }, loading ? '同步中…' : '刷新')),
+          h('div', { style: styles.chips },
+            pageMode !== 'execution' && screen.type !== 'create' ? h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => jump('create') }, '新建分析') : null,
+            h('button', {
+              type: 'button',
+              disabled: loading || workbenchLoading,
+              'aria-busy': loading || workbenchLoading,
+              style: { ...styles.button, ...(loading || workbenchLoading ? styles.buttonDisabled : {}) },
+              onClick: () => { void Promise.all([load(), loadWorkbench()]) },
+            }, loading || workbenchLoading ? '同步中…' : '刷新'))),
         navigation)
 
       function countCheck(key) { return health?.count_checks?.[key] }
@@ -807,9 +937,87 @@ window.__ModuleLoader__.load({
           })) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '暂无运行事件。Companion 只记录状态、工具名称和结果，不保存提示词或工具内容。')))
       }
 
-      function renderOverview() {
-        if (!current) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 pangea-data 中还没有可读取的 Run。'))
+      function renderCompatibility() {
+        if (workbenchError) return h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
+          h('div', { style: styles.itemTitle }, '工作台接口读取失败'), h('div', { style: styles.error }, workbenchError))
+        if (!workbench || workbench.compatibility?.compatible === true) return null
+        return h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
+          h('div', { style: styles.itemTitle }, '当前 PANGEA 后端与工作台不兼容'),
+          h('div', { style: styles.itemMeta }, '请切换到提供 assets / runs / system / adapter 稳定接口的 PANGEA 工作区。'),
+          h('div', { style: { ...styles.error, marginTop: 7 } }, workbench.compatibility?.error ?? '无法读取后端能力。'))
+      }
+
+      function renderCreate() {
+        const repositories = workbench?.capabilities?.repositories ?? []
+        const compatible = workbench?.compatibility?.compatible === true
+        const canSubmit = compatible && createForm.repository && createForm.target.trim() && multilineValues(createForm.source_scope).length > 0 && !creatingRun
+        const formField = (label, key, placeholder) => h('label', null,
+          h('div', { style: styles.label }, label),
+          h('input', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm[key], placeholder, onChange: event => setCreateForm(value => ({ ...value, [key]: event.target.value })) }))
+        const formArea = (label, key, placeholder) => h('label', null,
+          h('div', { style: styles.label }, label),
+          h('textarea', { style: styles.textarea, value: createForm[key], placeholder, onChange: event => setCreateForm(value => ({ ...value, [key]: event.target.value })) }))
         return h(React.Fragment, null,
+          renderCompatibility(),
+          h('div', { style: { ...styles.card, ...styles.compatibility } },
+            h('div', { style: styles.itemTitle }, '分析输入'),
+            h('div', { style: styles.itemMeta }, '每行一个源码路径。提交后会创建独立 DSH 会话，由 Agent 按 PANGEA action 契约完成分析。'),
+            h('div', { style: styles.formGrid },
+              h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
+                h('option', { value: '' }, repositories.length ? '选择仓库' : '没有可用仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository)))),
+              formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
+              formArea('源码范围（必填）', 'source_scope', 'lib/nvmf/auth.c\nlib/nvme/nvme_auth.c'),
+              formArea('分析重点', 'focus', '错误路径\n恢复行为\n外部可观测结果'),
+              formArea('结构化资产 ID', 'asset_ids', '可从“资产”页勾选后带入'),
+              formArea('少量用例示例文件', 'test_case_examples', 'tests/auth_cases.yaml')),
+            h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建分析会话…' : '创建并开始分析')))
+      }
+
+      function renderWorkflow() {
+        if (!current) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '选择一个 Run 后查看流程。'))
+        const roleLabel = { planning: '规划', analysis: '分析', review: '复核', closure: '定向补齐', reporting: '报告' }
+        const statusLabel = { pending: '等待', dispatched: '运行中', settled: '待校验', accepted: '已接收', failed: '失败' }
+        return h(React.Fragment, null,
+          h('div', { style: styles.card },
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Action 生命周期'), h('span', { style: styles.badge }, `${workflow.actions.length} 个 action`)),
+            h('div', { style: styles.stageRail }, workflow.actions.length ? workflow.actions.map(action => h('div', { key: action.action_id, style: styles.stageItem },
+              h('span', { style: { ...styles.stageDot, background: action.status === 'failed' ? 'var(--dsw-alias-state-error-primary, #e66767)' : action.status === 'accepted' ? 'var(--dsw-alias-state-success-primary, #38a892)' : undefined } }),
+              h('div', null, h('div', { style: styles.itemTitle }, `${roleLabel[action.role] ?? action.role} · ${action.stage}`), h('div', { style: styles.itemMeta }, `${action.action_id}${action.task_id ? ` · DSH ${action.task_id}` : ''}`), action.error ? h('div', { style: styles.error }, String(action.error)) : null),
+              h('span', { style: styles.badge }, statusLabel[action.status] ?? action.status))) : h('div', { style: styles.empty }, '尚未生成 action。'))),
+          h('div', { style: styles.sectionTitle }, `分析单元（${workflow.units.length}）`),
+          workflow.units.length ? workflow.units.map(unit => h('details', { key: unit.unit_id, style: styles.card },
+            h('summary', { style: { cursor: 'pointer' } }, `${unit.unit_id} · ${unit.title ?? '未命名单元'} · ${unit.status}`),
+            h('div', { style: styles.itemMeta }, `源码：${(unit.source_scope ?? []).join('、') || '—'}`),
+            h('div', { style: styles.itemMeta }, `上下文：${(unit.context_scope ?? []).join('、') || '—'}`),
+            unit.rationale ? h('div', { style: { ...styles.text, marginTop: 8 } }, unit.rationale) : null,
+            unit.summary ? h('div', { style: { ...styles.flowStep, ...styles.text } }, unit.summary) : null)) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '规划尚未产生分析单元。')),
+          workflow.quality_checks?.length ? stringList('质量门禁', workflow.quality_checks) : null,
+          workflow.unresolved?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '未解决事项'), h('pre', { style: styles.text }, JSON.stringify(workflow.unresolved, null, 2))) : null,
+          workflow.error_history?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '错误历史'), h('pre', { style: styles.text }, JSON.stringify(workflow.error_history, null, 2))) : null)
+      }
+
+      function renderFlows() {
+        const query = flowQuery.trim().toLowerCase()
+        const filtered = businessFlows.filter(flow => !query || [flow.flow_id, flow.title, flow.description, flow.entry, ...(flow.steps ?? [])].join(' ').toLowerCase().includes(query))
+        return h(React.Fragment, null,
+          h('input', { style: styles.search, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称、入口或步骤…', onChange: event => setFlowQuery(event.target.value) }),
+          h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${businessFlows.length} 条`),
+          filtered.length ? filtered.map(flow => h('details', { key: flow.flow_id ?? flow.title, style: styles.card },
+            h('summary', { style: { cursor: 'pointer' } }, `${flow.flow_id ?? 'FLOW'} · ${flow.title ?? '未命名流程'}`),
+            flow.description ? h('div', { style: { ...styles.text, marginTop: 8 } }, flow.description) : null,
+            flow.entry ? h('div', { style: styles.itemMeta }, `入口：${flow.entry}`) : null,
+            stringList('步骤', flow.steps, true),
+            Array.isArray(flow.evidence) && flow.evidence.length ? h('div', { style: styles.chips }, flow.evidence.map((item, index) => chip(text(item.location, `证据 ${index + 1}`), () => navigate({ type: 'evidence-detail', key: evidenceIdentity(item) })))) : null,
+            flow.mermaid ? h('pre', { style: { ...styles.source, marginTop: 9 } }, flow.mermaid) : null)) : h('div', { style: styles.card }, h('div', { style: styles.empty }, collectionEmpty('business_flows', '当前 Run 没有业务流程。'))))
+      }
+
+      function renderOverview() {
+        const runItems = workbench?.runs?.items ?? snapshot?.runs ?? []
+        if (!current) return h(React.Fragment, null, renderCompatibility(), h('div', { style: styles.card },
+          h('div', { style: styles.empty }, '当前还没有可读取的 Run。'),
+          workbench?.compatibility?.compatible === true ? h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => jump('create') }, '创建第一个分析') : null))
+        return h(React.Fragment, null,
+          renderCompatibility(),
           renderHealthCard(false),
           h('div', { style: styles.card },
             field('当前任务', current.run_id),
@@ -825,14 +1033,23 @@ window.__ModuleLoader__.load({
               current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html')) : null,
               current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md')) : null)) : null,
           h('div', { style: styles.grid }, metric(risks.length, '风险', 'risks', 'risks'), metric(testCases.length, '测试用例', 'cases', 'test_cases'), metric(evidence.length, '证据', 'evidence'), metric(details.review_issues?.length ?? 0, '复核问题', 'review')),
-          h('div', { style: styles.grid }, metric(details.business_flows?.length ?? current.counts?.business_flows ?? 0, '业务流程', undefined, 'business_flows'), metric(current.analysis?.reworked ?? 0, '定向补齐单元')),
+          h('div', { style: styles.grid }, metric(details.business_flows?.length ?? current.counts?.business_flows ?? 0, '业务流程', 'flows', 'business_flows'), metric(current.analysis?.reworked ?? 0, '定向补齐单元', 'workflow')),
+          !current.terminal ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
+            h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '运行控制'), h('div', { style: styles.itemMeta }, '停止后保留已有产物和运行记录。')),
+              pendingStopRun === current.run_id
+                ? h('div', { style: styles.chips }, chip('取消', () => setPendingStopRun('')), h('button', { type: 'button', style: { ...styles.button, color: 'var(--dsw-alias-state-error-primary, #e66767)' }, onClick: () => { void stopCurrentRun() } }, '确认停止'))
+                : h('button', { type: 'button', style: styles.button, onClick: () => setPendingStopRun(current.run_id) }, '停止 Run'))) : null,
           current.errors?.length ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), h('div', { style: { ...styles.card, ...styles.error } }, JSON.stringify(current.errors, null, 2))) : null,
-          snapshot?.runs?.length ? h(React.Fragment, null,
-            h('div', { style: styles.sectionTitle }, '历史任务'),
-            h('div', { style: styles.card }, snapshot.runs.slice(0, 8).map(run => {
+          runItems.length ? h(React.Fragment, null,
+            h('div', { style: styles.sectionTitle }, `任务记录（${workbench?.runs?.total ?? runItems.length}）`),
+            h('div', { style: styles.card }, runItems.map(run => {
               const active = current.run_id === run.run_id
               return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, run.run_id), h('span', { style: styles.badge }, QUALITY[run.quality_status] ?? PHASE[run.phase] ?? run.quality_status ?? run.phase)))
-            }))) : null)
+            })),
+            h('div', { style: styles.toolbar },
+              h('button', { type: 'button', disabled: runCursor <= 0, style: { ...styles.button, ...(runCursor <= 0 ? styles.buttonDisabled : {}) }, onClick: () => setRunCursor(Math.max(0, runCursor - 20)) }, '上一页'),
+              h('span', { style: styles.itemMeta }, `${runCursor + 1}–${runCursor + runItems.length}`),
+              h('button', { type: 'button', disabled: workbench?.runs?.next_cursor == null, style: { ...styles.button, ...(workbench?.runs?.next_cursor == null ? styles.buttonDisabled : {}) }, onClick: () => setRunCursor(workbench.runs.next_cursor) }, '下一页'))) : null)
       }
 
       function renderRisks() {
@@ -966,19 +1183,41 @@ window.__ModuleLoader__.load({
       function renderReview() {
         const review = current?.review
         if (!review) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 还没有复核结果。'))
+        const comparisonDecisions = review.comparison?.decisions ?? []
+        const comparisonDetails = review.comparison ? h('details', { style: styles.card, open: true },
+          h('summary', { style: { cursor: 'pointer', fontWeight: 700 } }, '对照复核'),
+          review.comparison.summary ? h('div', { style: { ...styles.text, marginTop: 8 } }, review.comparison.summary) : null,
+          comparisonDecisions.length ? h('div', { style: styles.stageRail }, comparisonDecisions.map(decision => h('div', { key: decision.finding_key, style: styles.stageItem },
+            h('span', { style: { ...styles.stageDot, background: decision.disposition === 'dismissed' ? 'var(--dsw-alias-label-tertiary, #888)' : 'var(--dsw-alias-state-warn-primary, #c9974f)' } }),
+            h('div', null,
+              h('div', { style: styles.itemTitle }, decision.finding_key),
+              decision.conclusion ? h('div', { style: styles.itemMeta }, decision.conclusion) : null),
+            h('span', { style: styles.badge }, decision.disposition === 'dismissed' ? '已驳回' : decision.disposition)))) : null) : null
         return h(React.Fragment, null,
-          h('div', { style: styles.card }, field('复核状态', REVIEW[review.status] ?? review.status ?? '待定'), h('div', { style: { marginTop: 9 } }, field('Reviewer', review.reviewer_id ?? '—')), review.summary ? h('div', { style: { ...styles.text, marginTop: 9 } }, review.summary) : null),
-          h('div', { style: styles.sectionTitle }, `复核问题（${details.review_issues?.length ?? 0}）`),
+          h('div', { style: styles.card },
+            field('最终复核状态', REVIEW[review.status] ?? QUALITY[review.status] ?? review.status ?? '待定'),
+            h('div', { style: styles.grid },
+              field('独立发现', review.counts?.independent ?? 0),
+              field('对照驳回', review.counts?.dismissed ?? 0),
+              field('对照确认', review.counts?.confirmed ?? 0),
+              field('最终有效', review.counts?.effective ?? details.review_issues?.length ?? 0)),
+            review.summary ? h('div', { style: { ...styles.text, marginTop: 9 } }, review.summary) : null),
+          review.independent ? h('details', { style: styles.card }, h('summary', { style: { cursor: 'pointer', fontWeight: 700 } }, '独立复核'), review.independent.summary ? h('div', { style: { ...styles.text, marginTop: 8 } }, review.independent.summary) : null, h('div', { style: styles.itemMeta }, `${review.independent.findings?.length ?? 0} 条原始发现`)) : null,
+          comparisonDetails,
+          h('div', { style: styles.sectionTitle }, `最终有效复核问题（${details.review_issues?.length ?? 0}）`),
           details.review_issues?.length ? details.review_issues.map(issue => h('div', { key: issue.issue_id ?? JSON.stringify(issue), style: styles.card }, h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, issue.issue_id ?? '未编号问题'), issue.unit_id ? h('span', { style: styles.badge }, issue.unit_id) : null), issue.reason ? h(React.Fragment, null, h('div', { style: { ...styles.label, marginTop: 8 } }, '原因'), h('div', { style: styles.text }, issue.reason)) : null, issue.required_change ? h(React.Fragment, null, h('div', { style: { ...styles.label, marginTop: 8 } }, '要求修改'), h('div', { style: styles.text }, issue.required_change)) : null)) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '没有待处理的复核问题。')))
       }
 
       let body
       if (screen.type === 'overview') body = renderOverview()
+      else if (screen.type === 'create') body = renderCreate()
+      else if (screen.type === 'workflow') body = renderWorkflow()
       else if (screen.type === 'risks') body = renderRisks()
       else if (screen.type === 'risk') body = renderRiskDetail()
       else if (screen.type === 'cases') body = renderCases()
       else if (screen.type === 'case') body = renderCaseDetail()
       else if (screen.type === 'execution') body = renderExecution()
+      else if (screen.type === 'flows') body = renderFlows()
       else if (screen.type === 'evidence') body = renderEvidence()
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()
@@ -988,10 +1227,11 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
         h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load() } }, '重试')) : null
-      const initialLoading = loading && snapshot === undefined
+      const requiresSnapshot = !['create', 'execution'].includes(screen.type)
+      const initialLoading = requiresSnapshot && loading && snapshot === undefined
       const contentBody = initialLoading
         ? h('div', { style: styles.card, role: 'status' }, h('div', { style: styles.empty }, '正在读取当前 Run…'))
-        : snapshot === undefined && error ? null : h(React.Fragment, null, healthAlert, body)
+        : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body)
       const actionFeedback = actionNotice ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 伴生工作台' }, header, h('div', { style: styles.content }, actionFeedback, errorNotice, contentBody))
     }
@@ -1004,6 +1244,11 @@ window.__ModuleLoader__.load({
         available: (_ctx, scope) => Boolean(scope?.cwd),
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
+      ctx.effect(() => pangea.registerPage({
+        id: 'execution', title: () => '执行', icon, order: 20,
+        available: (_ctx, scope) => Boolean(scope?.cwd),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'execution', pageMode: 'execution' }),
+      }), 'dsh-pangea-companion: execution page')
     }
 
     exports.inject = inject
@@ -1013,6 +1258,8 @@ window.__ModuleLoader__.load({
     exports.saveEnvironment = saveEnvironment
     exports.removeEnvironment = removeEnvironment
     exports.launchExecution = launchExecution
+    exports.requestWorkbench = requestWorkbench
+    exports.requestWorkbenchAction = requestWorkbenchAction
     exports.filePathFromLocation = filePathFromLocation
     exports.evidenceIdentity = evidenceIdentity
     exports.evidenceTabLabel = evidenceTabLabel

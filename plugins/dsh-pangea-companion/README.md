@@ -12,6 +12,8 @@
 - 将当前 DSH 会话与 PANGEA Run 做最小只读关联，只记录 Run、工作区、关联会话和 PANGEA 阶段/分析进度；DSH 自己负责展示 Agent、工具、子 Agent 和工作流轨迹。
 - 会话删除后仍按 Run 保留最小关联摘要；历史 Run 不依赖原 DSH 会话继续存在。
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
+- 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止。
+- 新建分析会创建独立 DSH 会话，由会话调用 `pangea_run_create` 并完整执行 PANGEA action 生命周期；页面不另建状态机。
 - 建立 `风险 ↔ 测试用例 ↔ 证据` 关联，便于从风险追到测试和源码证据，再按访问路径返回。
 - 只读同源接口 `GET /api/pangea-companion/state`，供 Web UI 使用。
 - 通过 `ctx.pangea` 向统一工作台注册“分析”和“执行”两页，不再直接注册 Better Sidebar Tab。
@@ -33,6 +35,10 @@ Companion 不把 `progress.completed_* + agent-results/` 当成所有 Run 的唯
 1. **存在 `final-state.json` 且包含聚合结果时，优先读取 `final-state.json`。** PANGEA 在进入最终报告阶段前已经把最终有效的 `risks / test_cases / business_flows` 聚合进 final state，`report.md` / `report.html` 也是由这份 state 渲染，因此这是终态和已生成报告 Run 的权威结构化数据源。
 2. **尚未形成 final state 的运行中 Run**，按 `progress.json` 的完成单元读取 `agent-results/analysis` 和定向补齐结果；若某单元被补齐，最终结果覆盖该单元的首次分析。
 3. **已生成报告但缺少可用 final-state 的旧 Run**，允许兼容回退读取 worker result，但会标记为 `warning`，不会伪装成标准路径。
+
+独立复核与对照复核分开展示。最终有效问题优先读取 `final-state.json` 的
+`review_findings`；没有 final state 时，再根据 `comparison-review.json` 排除已驳回的独立发现，
+避免把已消除的问题继续显示为待处理项。
 
 ## v0.4.0 Reader 一致性层
 
@@ -84,10 +90,13 @@ PANGEA 工作台会显示“数据读取异常”，`pangea_status` 也会明确
 
 ## PANGEA 侧边栏页面
 
-Companion 当前只在 Better Sidebar 中注册“分析”顶层页签：
+Companion 在 Better Sidebar 中注册“分析”和“执行”两个顶层页签：
 
-- “分析”页内部固定导航：`总览 / 风险 / 用例 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。
-- “执行”页的内部实现仍保留，但页面入口暂不注册，不作为当前可用功能交付。
+- “分析”页内部固定导航：`总览 / 流程 / 风险 / 用例 / 业务流 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。
+- “执行”页用于维护执行环境和查看独立 Executor Run。
+- 总览显示后端兼容性、完整 Run 分页、当前 Run 进度和停止入口；“新建分析”表单接受仓库、目标、源码范围、分析重点、资产 ID 和少量用例示例。
+- “流程”页显示 action 生命周期、分析单元状态、定向补齐、质量门禁和错误历史；adapter bind / validate / settle 保持自动处理。
+- “业务流”页展示结构化步骤、证据和 Mermaid 文本，支持搜索。
 - Companion 不重复展示 DSH 已有的 Agent / Tool / Subagent / Workflow 轨迹；总览只聚焦 PANGEA 阶段、进度、质量、风险、用例、证据和复核。
 - 即使原 DSH 会话已删除，历史 Run 的风险、用例、证据、复核和报告仍可查看；Companion 不保存 DSH 执行时间线。
 - 详情页固定提供 `← 返回`，使用页面栈按真实访问路径退回；例如 `风险 → 用例 → 风险` 可以逐级返回，不会钻进死胡同。
@@ -97,7 +106,7 @@ Companion 当前只在 Better Sidebar 中注册“分析”顶层页签：
 - 风险列表支持关键词搜索和严重度筛选；风险详情展示触发条件、系统结果、外部观察、排除条件、上游语义核对、证据和关联用例。
 - 测试用例列表支持搜索；详情展示前置条件、执行步骤、预期结果、观察点、清理动作，并可跳回关联风险。
 - 证据列表支持搜索；详情展示源码/资料位置、观察结论和关联风险。
-- 复核页展示 Reviewer、复核结论和每条 review issue 的原因/要求修改。
+- 复核页分别展示独立发现、对照复核的确认/驳回结论，以及最终仍有效的问题。
 - 风险、用例和证据详情页可把当前对象及其直接关联内容加入 DSH 会话输入框，支持综合判断、证据检查、改写测试语言和查找覆盖缺口。
 - 风险详情会把“系统结果”拆成可选结论；可以勾选任意数量的源码证据，只核对当前结论与选中证据，或把这组局部上下文转成定向测试。
 - 风险详情在同一张源码卡片中提供多证据选择器，默认预览首条可读取证据；切换时不离开当前风险。证据详情预览当前证据，源码片段显示真实行号，并轻量标出 PANGEA 指向的行范围。
@@ -150,7 +159,7 @@ dsh-ssh host configuration       <- aliases/passwords - Companion SSH tools
 
 1. 使用 dsh-ssh 配置主机和阵列 alias，可使用密码登录。
 2. 将内部 Python 自动化仓库放到 `pangea-data/test-automation/<automation_id>/`。
-3. 当前 Companion“执行”入口已隐藏；重新开放前，不能从界面创建环境。
+3. 在 Companion“执行”页创建或选择执行环境。
 4. 回到“用例”页勾选用例和环境，点击“一键执行”。
 
 Companion 的交互 SSH 当前支持直接连接；若 dsh-ssh alias 配置了 ProxyJump，执行前会明确报 `UNRESOLVED/EXECUTION_FAILED`，不会改用另一条连接路径。
@@ -212,4 +221,4 @@ cd plugins/dsh-pangea-companion
 npm test
 ```
 
-当前测试覆盖：原分析结果读取、报告/结构化计数核对、历史 Run 摘要、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册、执行实现保留但页面不注册，以及原有证据交互。
+当前测试覆盖：分析结果读取、报告/结构化计数核对、独立与对照复核合并、历史 Run 摘要、Run 分页/新建/停止、资产草稿传递、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册和证据交互。

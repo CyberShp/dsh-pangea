@@ -217,7 +217,33 @@ test('returns current-run details and cross-links without double-counting replac
     assert.equal(run.details.evidence.length, 2)
     assert.deepEqual(run.details.evidence[0].risk_ids, ['R-001'])
     assert.equal(run.details.review_issues[0].required_change, '补充调用方约束')
+    assert.equal(run.workflow.units[0].status, 'reworked')
+    assert.equal(run.workflow.units[1].status, 'completed')
     assert.ok(!run.details.risks.some(item => item.risk_id === 'R-old'))
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('uses comparison review and final state to hide dismissed independent findings', async () => {
+  const { root, dataRoot } = await fixture()
+  try {
+    const runDirectory = path.join(dataRoot, 'runs', 'run-01')
+    await writeJson(path.join(runDirectory, 'agent-results', 'review.json'), {
+      status: 'REWORK', summary: '独立复核发现一个问题',
+      findings: [{ finding_key: 'F-001', affected_unit_ids: ['u2'], summary: '看起来缺证据', required_change: '补证据' }],
+    })
+    await writeJson(path.join(runDirectory, 'agent-results', 'comparison-review.json'), {
+      summary: '对照后确认属于误报',
+      independent_finding_decisions: [{ finding_key: 'F-001', disposition: 'dismissed', conclusion: '现有证据已经覆盖' }],
+      findings: [],
+    })
+    await writeJson(path.join(runDirectory, 'final-state.json'), { review_findings: [] })
+
+    const run = (await companionSnapshot({ cwd: root, runId: 'run-01' })).current
+    assert.equal(run.review.counts.independent, 1)
+    assert.equal(run.review.counts.dismissed, 1)
+    assert.equal(run.review.counts.effective, 0)
+    assert.deepEqual(run.details.review_issues, [])
+    assert.equal(run.review.comparison.decisions[0].conclusion, '现有证据已经覆盖')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -347,11 +373,14 @@ test('registers read status plus executor environment and SSH tools', () => {
     'pangea_ssh_start', 'pangea_ssh_read', 'pangea_ssh_stop', 'pangea_ssh_interactive',
   ])
   assert.match(tools[0].description, /不要读取 PANGEA CLI 源码/)
+  assert.equal(tools[2].isConcurrencySafe(), false)
+  assert.equal(tools[3].isConcurrencySafe(), false)
   assert.deepEqual(tools[4].parameters.required, ['run_id'])
   assert.equal(tools[4].parameters.properties.run_id.minLength, 1)
   assert.deepEqual(routes.map(route => route.path), [
     '/api/pangea-companion/state', '/api/pangea-companion/source',
     '/api/pangea-companion/environments', '/api/pangea-companion/executions',
+    '/api/pangea-companion/workbench',
   ])
   assert.equal(effects.length, 1)
 })

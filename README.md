@@ -22,7 +22,7 @@ dsh-pangea/
 ```text
 dsh-pangea（用户唯一需要安装的包）
         ├── dsh-better-sidebar 0.15.2
-        ├── Companion「分析」（执行实现保留，页面暂不注册）
+        ├── Companion「分析」「执行」
         └── Asset Catalog「资产」
 ```
 
@@ -40,17 +40,17 @@ rc.8+ 的客户端模块加载方式，并在 `0.1.1-rc.1` 依赖线上开发验
 - 向 Better Sidebar 原生注册“分析”“执行”“资产”三个单实例页签，不再提供外层
   `PANGEA` 包装页。
 - 提供 `ctx.pangea.registerPage()`、`openPage()`、`openFile()`、`getPages()` 和
-  `subscribe()`。
+  `subscribe()`，并在“资产”和“分析”页之间传递单次 Run 草稿。
 - 功能插件卸载或热重载时自动移除对应页签。
-- 固定 `+` 菜单顺序，并隐藏源码管理和终端菜单项。
+- 固定 `+` 菜单顺序，隐藏源码管理入口并保留终端菜单项。
 - 不读取 Run、不扫描资产、不执行用例，也不改变 PANGEA 决策。
 
 ### dsh-pangea-companion
 
-- “分析”页读取并展示 PANGEA Run、风险、用例、证据与复核结果。
+- “分析”页可新建、分页查看和停止 Run，并展示 action 流程、分析单元、业务流程、风险、用例、证据与复核结果。
 - “执行”页维护执行环境和独立 Executor 会话。
 - 提供 `pangea_status`、环境、执行和 SSH 工具。
-- 只读消费 PANGEA 分析产物，不修改分析 Run、Graph 或状态机。
+- 新建与停止只调用 PANGEA 的稳定 `system / runs` 接口；action 生命周期仍由 PANGEA Graph 决定。
 - 仅在 PANGEA 工作区调整 `subagent-report` 的唤醒时机。
 
 详细说明见 [`plugins/dsh-pangea-companion/README.md`](plugins/dsh-pangea-companion/README.md)。
@@ -58,7 +58,8 @@ rc.8+ 的客户端模块加载方式，并在 `0.1.1-rc.1` 依赖线上开发验
 ### dsh-pangea-asset-catalog
 
 - 直接调用 `pangea-agent` 稳定 JSON API，展示需求、设计、历史缺陷、参考资料和覆盖率资产。
-- 提供服务端搜索与分页，并按需加载单份资产的结构化结果。
+- 提供服务端搜索、状态筛选与分页，并按需加载单份资产的结构化结果。
+- 可勾选已可用资产并带入“新建分析”，无需手工抄写资产 ID。
 - 需求、设计、历史缺陷和参考资料由专用 DSH Agent 提取；覆盖率由 PANGEA 确定性解析。
 - 历史缺陷提取结果必须经人工通过后，才可作为新 Run 的缺陷机理输入。
 - 既有用例不作为长期资产；少量用例只能作为单次 Run 的表达示例。
@@ -95,9 +96,9 @@ dsh-pangea
 npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080
 ```
 
-PANGEA 适配后的 `+` 菜单提供：`分析 / 资产 / 文件 / 终端 / 任务管理 / 浏览器`；
-Better Sidebar 0.15.2 还会显示其自带的 `侧边对话(beta)`。源码管理和 PANGEA“执行”
-入口被移除，终端可直接从 `+` 菜单打开到底部面板。
+PANGEA 适配后的 `+` 菜单提供：`分析 / 执行 / 资产 / 文件 / 终端 / 任务管理 / 浏览器`；
+Better Sidebar 0.15.2 还会显示其自带的 `侧边对话(beta)`。源码管理入口隐藏，终端仍可
+直接从 `+` 菜单打开到底部面板。
 
 ## 开发验证
 

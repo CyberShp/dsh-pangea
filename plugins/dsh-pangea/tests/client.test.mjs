@@ -141,3 +141,21 @@ test('forwards page and file opens through Better Sidebar', async () => {
   assert.equal(sidebar.opened[0].scope, scope)
   assert.equal(sidebar.opened[1].filePath, '/tmp/report.md')
 })
+
+test('shares a deduplicated asset selection with the analysis page', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  const changes = []
+  const dispose = service.subscribeRunDraft(() => changes.push(service.getRunDraft()))
+  const scope = { sessionId: 'session-1', cwd: '/tmp/project' }
+
+  assert.equal(service.requestRunCreation(scope, { assetIds: ['asset-2', 'asset-1', 'asset-2', ''] }), true)
+  assert.deepEqual(Array.from(service.getRunDraft().assetIds), ['asset-2', 'asset-1'])
+  assert.equal(service.getRunDraft().requestId, 1)
+  assert.equal(changes.length, 1)
+  assert.equal(sidebar.opened[0].seed.type, 'dsh-pangea:analysis')
+
+  dispose()
+})

@@ -243,11 +243,24 @@ test('lifecycle accepts direct PANGEA run and action tools', async () => {
       data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
     })
     assert.equal(harness.guard(validate), undefined)
-    await harness.post(validate, { action_id: currentAction.action_id, status: 'invalid', error: 'input_decisions extra=[x]' })
+    await harness.post(validate, {
+      action_id: currentAction.action_id,
+      status: 'invalid',
+      result_path: resultPath,
+      expected_contract: join(root, 'schemas', 'planning_result.schema.json'),
+      errors: [{
+        loc: ['input_decisions', 0, 'input_id'],
+        type: 'missing',
+        message: 'Field required',
+      }],
+    })
     assert.equal(validate.concluded, true)
     assert.equal(harness.followups.length, 1)
     assert.equal(harness.followups[0].childId, 'child-1')
-    assert.match(harness.followups[0].content[0].text, /input_decisions extra=\[x\]/)
+    assert.match(harness.followups[0].content[0].text, /"result_path"/)
+    assert.match(harness.followups[0].content[0].text, /planning_result\.schema\.json/)
+    assert.match(harness.followups[0].content[0].text, /"input_decisions"/)
+    assert.match(harness.followups[0].content[0].text, /Field required/)
     assert.match(harness.guard(fakeExec(parent, 'list_agents', {})), /仍在运行/)
     harness.settled(parent, 'child-1')
     const revalidate = fakeExec(parent, 'pangea_action_validate', {
@@ -261,6 +274,54 @@ test('lifecycle accepts direct PANGEA run and action tools', async () => {
     assert.equal(harness.guard(settle), undefined)
     await harness.post(settle, { run_id: 'run-tools', data_root: dataRoot, lifecycle_status: 'complete', actions: [] })
     assert.equal(harness.guard(fakeExec(parent, 'list_agents', {})), undefined)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('completed actions can be validated and settled without cross-action blocking', async () => {
+  const root = fixture()
+  try {
+    const harness = policyHarness()
+    const parent = fakeAgent(root)
+    const dataRoot = join(root, 'pangea-data')
+    const firstTask = join(dataRoot, 'runs', 'run-parallel', 'agent-tasks', 'analysis', 'U00.json')
+    const secondTask = join(dataRoot, 'runs', 'run-parallel', 'agent-tasks', 'analysis', 'U01.json')
+    mkdirSync(dirname(firstTask), { recursive: true })
+    writeFileSync(firstTask, JSON.stringify({ result_path: join(dataRoot, 'U00.json') }))
+    writeFileSync(secondTask, JSON.stringify({ result_path: join(dataRoot, 'U01.json') }))
+    const first = action(firstTask, 'run-parallel:analysis:U00')
+    const second = action(secondTask, 'run-parallel:analysis:U01')
+    await harness.post(
+      fakeExec(parent, 'pangea_run_create', {}),
+      { run_id: 'run-parallel', data_root: dataRoot, actions: [first, second] },
+    )
+
+    for (const current of [first, second]) {
+      const dispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: current.action_id })
+      const started = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+      await harness.post(dispatch, started)
+    }
+    harness.settled(parent, 'child-1')
+    harness.settled(parent, 'child-2')
+
+    const validateSecond = fakeExec(parent, 'pangea_action_validate', {
+      data_root: dataRoot, run_id: 'run-parallel', action_id: second.action_id,
+    })
+    assert.equal(harness.guard(validateSecond), undefined)
+    await harness.post(validateSecond, { action_id: second.action_id, status: 'valid' })
+
+    const settleSecond = fakeExec(parent, 'pangea_action_settle', {
+      data_root: dataRoot, run_id: 'run-parallel', action_id: second.action_id,
+    })
+    assert.equal(harness.guard(settleSecond), undefined)
+
+    const guidance = harness.guard(fakeExec(parent, 'list_agents', {}))
+    assert.match(guidance, /run-parallel:analysis:U00/)
+    assert.match(guidance, /pangea_action_validate/)
+    assert.match(guidance, /run-parallel:analysis:U01/)
+    assert.match(guidance, /pangea_action_settle/)
+    assert.match(guidance, /一次只处理一个 action/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -324,6 +385,12 @@ test('validation failure can return to the same child and result writes stay sco
     assert.match(harness.guard(fakeExec(child, 'bash', {
       command: `python3 -c "from pathlib import Path; Path('${originalPath}').write_text('{}')"`,
     })), /只能修改当前 task/)
+    assert.match(harness.guard(fakeExec(child, 'pangea_action_settle', {
+      data_root: 'pangea-data', run_id: 'run-01', action_id: currentAction.action_id,
+    })), /只能由根 Agent 推进/)
+    assert.match(harness.guard(fakeExec(child, 'bash', {
+      command: `python -m pangea_agent.cli.main adapter settle --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id}`,
+    })), /只能由根 Agent 推进/)
 
     const bind = fakeExec(parent, 'bash', {
       command: `python -m pangea_agent.cli.main adapter bind --data-root pangea-data --run-id run-01 --action-id ${currentAction.action_id} --task-id child-01`,

@@ -250,24 +250,81 @@ async function readReportCounts(runDirectory, { checked = true } = {}) {
   }
 }
 
-async function readReview(runDirectory) {
-  const candidates = [path.join(runDirectory, 'agent-results', 'review.json')]
-  for (const candidate of candidates) {
-    if (await pathKind(candidate) !== 'file') continue
-    try {
-      const value = await readJson(candidate)
-      return {
-        status: typeof value?.status === 'string' ? value.status : 'COMPLETE',
-        reviewer_id: typeof value?.reviewer_id === 'string' ? value.reviewer_id : null,
-        summary: typeof value?.summary === 'string' ? value.summary : null,
-        issues: Array.isArray(value?.findings) ? value.findings : Array.isArray(value?.issues) ? value.issues : [],
-        path: candidate,
-      }
-    } catch {
-      return { status: 'UNREADABLE', issues: [], path: candidate }
-    }
+async function readReviewArtifact(filePath) {
+  if (await pathKind(filePath) !== 'file') return null
+  try {
+    return { path: filePath, value: await readJson(filePath), error: null }
+  } catch (error) {
+    return { path: filePath, value: null, error: error instanceof Error ? error.message : String(error) }
   }
-  return null
+}
+
+function reviewIssue(value) {
+  if (!value || typeof value !== 'object') return null
+  const affectedUnits = Array.isArray(value.affected_unit_ids) ? value.affected_unit_ids : []
+  return {
+    ...value,
+    issue_id: value.issue_id ?? value.finding_key ?? null,
+    unit_id: value.unit_id ?? affectedUnits[0] ?? null,
+    reason: value.reason ?? value.summary ?? value.conclusion ?? null,
+    required_change: value.required_change ?? value.required_check ?? null,
+  }
+}
+
+function effectiveReviewIssues(independent, comparison, finalState) {
+  if (Array.isArray(finalState?.review_findings)) {
+    return finalState.review_findings.map(reviewIssue).filter(Boolean)
+  }
+  const independentFindings = Array.isArray(independent?.findings)
+    ? independent.findings
+    : Array.isArray(independent?.issues) ? independent.issues : []
+  if (!comparison) return independentFindings.map(reviewIssue).filter(Boolean)
+  const decisions = new Map((comparison.independent_finding_decisions ?? []).map(item => [item.finding_key, item.disposition]))
+  return [
+    ...independentFindings.filter(item => decisions.get(item.finding_key) !== 'dismissed'),
+    ...(Array.isArray(comparison.findings) ? comparison.findings : []),
+  ].map(reviewIssue).filter(Boolean)
+}
+
+async function readReview(runDirectory, finalState) {
+  const independentRecord = await readReviewArtifact(path.join(runDirectory, 'agent-results', 'review.json'))
+  const comparisonRecord = await readReviewArtifact(path.join(runDirectory, 'agent-results', 'comparison-review.json'))
+  if (!independentRecord && !comparisonRecord && !Array.isArray(finalState?.review_findings)) return null
+  const independent = independentRecord?.value
+  const comparison = comparisonRecord?.value
+  const decisions = Array.isArray(comparison?.independent_finding_decisions) ? comparison.independent_finding_decisions : []
+  const independentFindings = Array.isArray(independent?.findings)
+    ? independent.findings
+    : Array.isArray(independent?.issues) ? independent.issues : []
+  const issues = effectiveReviewIssues(independent, comparison, finalState)
+  return {
+    status: finalState?.quality_report?.status ?? (comparisonRecord ? 'COMPLETE' : independentRecord?.error ? 'UNREADABLE' : 'INDEPENDENT_COMPLETE'),
+    reviewer_id: independent?.reviewer_id ?? comparison?.reviewer_id ?? null,
+    summary: comparison?.summary ?? independent?.summary ?? null,
+    issues,
+    counts: {
+      independent: independentFindings.length,
+      dismissed: decisions.filter(item => item.disposition === 'dismissed').length,
+      confirmed: decisions.filter(item => item.disposition !== 'dismissed').length,
+      added: Array.isArray(comparison?.findings) ? comparison.findings.length : 0,
+      effective: issues.length,
+    },
+    independent: independentRecord ? {
+      summary: independent?.summary ?? null,
+      findings: independentFindings.map(reviewIssue).filter(Boolean),
+      unresolved: Array.isArray(independent?.unresolved) ? independent.unresolved : [],
+      path: independentRecord.path,
+      error: independentRecord.error,
+    } : null,
+    comparison: comparisonRecord ? {
+      summary: comparison?.summary ?? null,
+      decisions,
+      findings: Array.isArray(comparison?.findings) ? comparison.findings.map(reviewIssue).filter(Boolean) : [],
+      unresolved: Array.isArray(comparison?.unresolved) ? comparison.unresolved : [],
+      path: comparisonRecord.path,
+      error: comparisonRecord.error,
+    } : null,
+  }
 }
 
 function buildReaderHealth({ phase, dataSource, counts, finalStateRecord, reportRecord }) {
@@ -362,7 +419,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false, ch
   const legacySessions = Object.values(progress?.agent_sessions ?? {}).filter(
     session => session?.role === 'analysis',
   )
-  const review = includeDetails ? await readReview(runDirectory) : null
+  const review = includeDetails ? await readReview(runDirectory, finalState) : null
   const errors = Array.isArray(progress?.errors) ? progress.errors : stateArray(finalState, 'errors')
   const errorHistory = Array.isArray(progress?.error_history) ? progress.error_history : []
   const reportMd = path.join(runDirectory, 'report.md')
@@ -428,7 +485,33 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false, ch
     },
     modified_at: await runModifiedAt(runDirectory, [progressPath, finalStateRecord.path, reportMd, reportHtml]),
   }
-  if (includeDetails) summary.details = details
+  if (includeDetails) {
+    const completedSet = new Set(completedAnalysisUnits)
+    const closureSet = new Set(completedReworkUnits)
+    summary.details = details
+    summary.workflow = {
+      units: analysisUnits.map(value => {
+        const unit = typeof value === 'string' ? { unit_id: value } : value
+        return {
+          ...unit,
+          status: closureSet.has(unit.unit_id) ? 'reworked' : completedSet.has(unit.unit_id) ? 'completed' : 'pending',
+          summary: stateArray(finalState, 'analysis_summaries').find(item => item?.unit_id === unit.unit_id)?.summary ?? null,
+        }
+      }),
+      actions: Object.values(progress?.actions ?? {}).map(action => ({
+        action_id: action.action_id,
+        action: action.action,
+        role: action.role,
+        stage: action.stage,
+        status: action.status,
+        task_id: action.task_id ?? null,
+        error: action.error ?? null,
+      })),
+      error_history: errorHistory,
+      quality_checks: Array.isArray(finalState?.quality_report?.checks) ? finalState.quality_report.checks : [],
+      unresolved: Array.isArray(finalState?.quality_report?.unresolved) ? finalState.quality_report.unresolved : [],
+    }
+  }
   return summary
 }
 

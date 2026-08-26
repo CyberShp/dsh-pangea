@@ -89,10 +89,12 @@ window.__ModuleLoader__.load({
       const pages = new Map()
       const nativeDisposers = new Map()
       const listeners = new Set()
+      const runDraftListeners = new Set()
       const registeredNativeIds = new Set()
       let sequence = 0
       let revision = 0
       let snapshot = Object.freeze({ revision, pages: Object.freeze([]) })
+      let runDraft = Object.freeze({ revision: 0, requestId: 0, assetIds: Object.freeze([]) })
 
       function rebuild() {
         revision += 1
@@ -162,6 +164,27 @@ window.__ModuleLoader__.load({
       function getSnapshot() { return snapshot }
       function getPages() { return snapshot.pages }
 
+      function getRunDraft() { return runDraft }
+
+      function updateRunDraft(patch = {}) {
+        const assetIds = Array.isArray(patch.assetIds)
+          ? [...new Set(patch.assetIds.map(value => typeof value === 'string' ? value.trim() : '').filter(Boolean))]
+          : [...runDraft.assetIds]
+        runDraft = Object.freeze({
+          ...runDraft,
+          ...patch,
+          revision: runDraft.revision + 1,
+          assetIds: Object.freeze(assetIds),
+        })
+        for (const listener of [...runDraftListeners]) listener()
+        return runDraft
+      }
+
+      function subscribeRunDraft(listener) {
+        runDraftListeners.add(listener)
+        return () => runDraftListeners.delete(listener)
+      }
+
       function openPage(scope, pageId) {
         const page = pages.get(pageId)
         if (!page) return false
@@ -175,6 +198,11 @@ window.__ModuleLoader__.load({
         return true
       }
 
+      function requestRunCreation(scope, patch = {}) {
+        updateRunDraft({ ...patch, requestId: runDraft.requestId + 1 })
+        return openPage(scope, 'analysis')
+      }
+
       const disposePolicy = installSidebarPolicy(betterSidebar, registeredNativeIds)
 
       return Object.freeze({
@@ -183,6 +211,10 @@ window.__ModuleLoader__.load({
         openFile,
         getPages,
         subscribe,
+        getRunDraft,
+        updateRunDraft,
+        subscribeRunDraft,
+        requestRunCreation,
         getSnapshot,
         disposePolicy,
       })

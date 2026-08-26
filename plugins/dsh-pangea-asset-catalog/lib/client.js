@@ -18,6 +18,11 @@ window.__ModuleLoader__.load({
       available: '可用于分析', no_items: '已分析，无结构化条目', rejected: '已拒绝',
       failed: '失败', archived: '已归档',
     }
+    const STATUS_FILTERS = [
+      ['', '全部状态'], ['imported', '待提取'], ['awaiting_review', '待人工审核'],
+      ['available', '可用于分析'], ['no_items', '无结构化条目'], ['rejected', '已拒绝'],
+      ['failed', '失败'], ['archived', '已归档'],
+    ]
 
     function listSearch({ cwd, page = 1, pageSize = 20, type = '', status = '', query = '', assetId }) {
       return new URLSearchParams({
@@ -86,6 +91,32 @@ window.__ModuleLoader__.load({
       grow: { flex: '1 1 180px', minWidth: 0 },
       chip: { borderRadius: 999, padding: '2px 6px', background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', fontSize: 9 },
       pre: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflow: 'auto', fontSize: 10, lineHeight: 1.5 },
+      resultGrid: { display: 'grid', gap: 7 },
+      resultItem: { borderLeft: '2px solid var(--dsw-alias-state-business-primary, #4d9ad6)', paddingLeft: 8 },
+    }
+
+    function structuredItems(result) {
+      if (!result || typeof result !== 'object') return []
+      for (const key of ['items', 'records', 'requirements', 'designs', 'defects', 'references', 'coverage']) {
+        if (Array.isArray(result[key])) return result[key]
+      }
+      return []
+    }
+
+    function renderStructuredResult(result) {
+      const items = structuredItems(result)
+      if (items.length === 0) {
+        return h('pre', { style: styles.pre }, JSON.stringify(result, null, 2))
+      }
+      return h('div', { style: styles.resultGrid }, items.map((item, index) => {
+        const title = item?.title ?? item?.name ?? item?.item_id ?? item?.id ?? `结构化条目 ${index + 1}`
+        const summary = item?.summary ?? item?.description ?? item?.mechanism ?? item?.observation ?? ''
+        const source = item?.source_location ?? item?.location ?? item?.source ?? ''
+        return h('div', { key: `${title}:${index}`, style: styles.resultItem },
+          h('div', { style: styles.itemTitle }, String(title)),
+          summary ? h('div', { style: styles.meta }, String(summary)) : null,
+          source ? h('div', { style: styles.meta }, `来源：${String(source)}`) : null)
+      }))
     }
 
     function AssetPanel({ ctx, scope, visible }) {
@@ -97,6 +128,7 @@ window.__ModuleLoader__.load({
       const [page, setPage] = React.useState(1)
       const [pageSize, setPageSize] = React.useState(20)
       const [type, setType] = React.useState('')
+      const [status, setStatus] = React.useState('')
       const [query, setQuery] = React.useState('')
       const [queryDraft, setQueryDraft] = React.useState('')
       const [expanded, setExpanded] = React.useState({})
@@ -104,16 +136,17 @@ window.__ModuleLoader__.load({
       const [importPath, setImportPath] = React.useState('')
       const [importType, setImportType] = React.useState('requirement')
       const [importTitle, setImportTitle] = React.useState('')
+      const [selectedAssetIds, setSelectedAssetIds] = React.useState([])
 
       const load = React.useCallback(async signal => {
         if (!cwd) return
         try {
           setError('')
-          setState(await requestState({ cwd, page, pageSize, type, query, signal }))
+          setState(await requestState({ cwd, page, pageSize, type, status, query, signal }))
         } catch (value) {
           if (value?.name !== 'AbortError') setError(value instanceof Error ? value.message : String(value))
         }
-      }, [cwd, page, pageSize, type, query])
+      }, [cwd, page, pageSize, type, status, query])
 
       React.useEffect(() => {
         if (visible === false || !cwd) return undefined
@@ -132,11 +165,22 @@ window.__ModuleLoader__.load({
       async function act(action, payload = {}) {
         setBusy(true); setError(''); setNotice('')
         try {
-          const value = await requestAction({ cwd, action, payload, page, pageSize, type, query })
+          const value = await requestAction({ cwd, action, payload, page, pageSize, type, status, query })
           setState(value)
+          if (action === 'archive' && payload.asset_id) setSelectedAssetIds(values => values.filter(id => id !== payload.asset_id))
           setNotice(action === 'import' ? '资产已导入。' : action === 'extract' ? '结构化提取已启动。' : action === 'review' ? '审核结果已保存。' : '资产已归档。')
         } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
         finally { setBusy(false) }
+      }
+
+      function toggleSelectedAsset(assetId) {
+        setSelectedAssetIds(values => values.includes(assetId) ? values.filter(id => id !== assetId) : [...values, assetId])
+      }
+
+      function createRunFromSelection() {
+        if (!ctx.pangea?.requestRunCreation || selectedAssetIds.length === 0) return
+        ctx.pangea.requestRunCreation(scope, { assetIds: selectedAssetIds })
+        setNotice(`已把 ${selectedAssetIds.length} 个资产加入新分析。`)
       }
 
       async function toggle(assetId) {
@@ -164,8 +208,12 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', disabled: busy || !importPath.trim(), style: { ...styles.button, ...styles.primary }, onClick: () => { void act('import', { path: importPath.trim(), asset_type: importType, title: importTitle.trim() }) } }, '导入'))),
           notice ? h('div', { style: styles.card }, notice) : null,
           error ? h('div', { style: { ...styles.card, ...styles.error }, role: 'alert' }, error) : null,
+          selectedAssetIds.length ? h('div', { style: { ...styles.card, ...styles.notice, ...styles.row } },
+            h('div', null, h('div', { style: styles.itemTitle }, `已选择 ${selectedAssetIds.length} 个可用资产`), h('div', { style: styles.meta }, '新建分析时会作为结构化输入提交。')),
+            h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, onClick: createRunFromSelection }, '用于新分析')) : null,
           h('div', { style: { ...styles.wrap, marginBottom: 10 } },
             TYPES.map(([value, label]) => h('button', { key: value || 'all', type: 'button', style: { ...styles.button, ...(type === value ? styles.active : {}) }, onClick: () => { setPage(1); setType(value) } }, label)),
+            h('select', { 'aria-label': '资产状态', style: styles.input, value: status, onChange: event => { setPage(1); setStatus(event.target.value) } }, STATUS_FILTERS.map(([value, label]) => h('option', { key: value || 'all-status', value }, label))),
             h('form', { style: { ...styles.wrap, ...styles.grow }, onSubmit: event => { event.preventDefault(); setPage(1); setQuery(queryDraft.trim()) } },
               h('input', { 'aria-label': '搜索资产', placeholder: '搜索标题、ID 或路径', style: { ...styles.input, ...styles.grow }, value: queryDraft, onChange: event => setQueryDraft(event.target.value) }),
               h('button', { type: 'submit', style: styles.button }, '搜索'))),
@@ -175,7 +223,9 @@ window.__ModuleLoader__.load({
             const job = asset.extraction_job
             return h('div', { key: asset.asset_id, style: styles.card },
               h('div', { style: styles.row },
-                h('div', null, h('div', { style: styles.itemTitle }, asset.title), h('div', { style: styles.meta }, `${asset.asset_id} · ${asset.source_path}`)),
+                h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 8, minWidth: 0 } },
+                  asset.status === 'available' ? h('input', { type: 'checkbox', checked: selectedAssetIds.includes(asset.asset_id), 'aria-label': `选择资产 ${asset.title}`, onChange: () => toggleSelectedAsset(asset.asset_id) }) : null,
+                  h('div', null, h('div', { style: styles.itemTitle }, asset.title), h('div', { style: styles.meta }, `${asset.asset_id} · ${asset.source_path}`))),
                 h('div', { style: { ...styles.wrap, justifyContent: 'flex-end' } },
                   h('span', { style: styles.chip }, TYPES.find(([value]) => value === asset.asset_type)?.[1] ?? asset.asset_type),
                   h('span', { style: styles.chip }, STATUS[asset.status] ?? asset.status),
@@ -194,7 +244,7 @@ window.__ModuleLoader__.load({
               isExpanded ? h('div', { style: { marginTop: 9, borderTop: '1px solid var(--dsw-alias-border-l2, #444)', paddingTop: 9 } },
                 asset.status === 'no_items' ? h('div', { style: styles.meta }, '已完成分析，没有可结构化条目。') : null,
                 asset.warnings?.length ? h('div', { style: styles.meta }, `提示：${asset.warnings.join('；')}`) : null,
-                detail?.result ? h('pre', { style: styles.pre }, JSON.stringify(detail.result, null, 2)) : h('div', { style: styles.meta }, '正在加载结构化结果…')) : null)
+                detail?.result ? renderStructuredResult(detail.result) : h('div', { style: styles.meta }, '正在加载结构化结果…')) : null)
           }) : h('div', { style: styles.card }, '当前筛选没有资产。'),
           h('div', { style: { ...styles.card, ...styles.row } },
             h('div', { style: styles.meta }, `第 ${pagination.page} / ${pagination.total_pages} 页 · 共 ${pagination.total} 个资产`),
