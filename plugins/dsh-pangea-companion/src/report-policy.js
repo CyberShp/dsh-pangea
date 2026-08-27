@@ -191,7 +191,7 @@ function adapterTarget(state, exec, subcommand) {
     if (subcommand === 'validate' && childState.status === 'settled' && childState.bound && !childState.validated) {
       return { childId, child: childState }
     }
-    if (subcommand === 'settle' && childState.status === 'settled' && childState.validated) return { childId, child: childState }
+    if (subcommand === 'settle' && childState.status === 'settled' && childState.bound) return { childId, child: childState }
     return undefined
   }
   const command = commandOf(exec)
@@ -206,7 +206,7 @@ function adapterTarget(state, exec, subcommand) {
     if (subcommand === 'validate' && child.status === 'settled' && child.bound && !child.validated) {
       return { childId, child }
     }
-    if (subcommand === 'settle' && child.status === 'settled' && child.validated) {
+    if (subcommand === 'settle' && child.status === 'settled' && child.bound) {
       return { childId, child }
     }
   }
@@ -251,7 +251,7 @@ function rootLifecycleMutationBlock(exec) {
     || isPangeaCliCommand(command, 'adapter validate')
     || isPangeaCliCommand(command, 'adapter settle')
   ) {
-    return 'PANGEA action 生命周期必须使用 pangea_action_dispatch、pangea_action_validate 和 pangea_action_settle。'
+    return 'PANGEA action 生命周期必须使用 pangea_action_dispatch 和 pangea_action_settle。'
   }
   return undefined
 }
@@ -339,24 +339,30 @@ function settledActionGuidance(state) {
     .map(([childId, child]) => ({
       childId,
       actionId: child.action.action_id,
-      tool: child.validated ? 'pangea_action_settle' : 'pangea_action_validate',
     }))
   const calls = actions.map(item => (
-    `- ${item.tool}(${JSON.stringify({
+    `- pangea_action_settle(${JSON.stringify({
       data_root: state.dataRoot,
       run_id: state.runId,
       action_id: item.actionId,
     })})，subagent_id=${item.childId}`
   ))
-  const hasUnvalidated = actions.some(item => item.tool === 'pangea_action_validate')
   return [
-    'PANGEA 有已结束 action 待处理。一次只处理一个 action；validate 通过后立即 settle 同一 action，再处理其他 action。',
-    ...(hasUnvalidated ? [
-      '当前 result 修复回合已经结束；上一次 invalid 只对应修复前的旧产物，现已过期。',
-      '现在必须重新调用下面的 pangea_action_validate；不得复述旧 invalid，不得调用 settle、resume-run、status、Bash 或其他工具。',
-    ] : []),
+    'PANGEA 有已结束 action 待处理。一次只对一个 action 直接调用 settle；settle 会校验当前结果并推进 Workflow。',
+    '不得调用 validate、resume-run、status、Bash 或其他工具。',
     ...calls,
   ].join('\n')
+}
+
+function continuationContent(action) {
+  const feedback = action.validation_error ?? action.error
+  if (!feedback) return [{ type: 'text', text: action.task_path }]
+  return [{ type: 'text', text: [
+    action.task_path,
+    '',
+    '上一次提交未通过确定性契约校验。重新打开同一 task 的 result_path，保留有效语义并修正下面列出的全部错误后结束本回合。',
+    `validation_error=${JSON.stringify(feedback, null, 2)}`,
+  ].join('\n') }]
 }
 
 function acceptedValue(result, downstream) {
@@ -427,7 +433,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
         await ctx.subagents.followup(
           exec.agent,
           action.task_id,
-          [{ type: 'text', text: action.task_path }],
+          continuationContent(action),
           {
             source: { kind: 'coordinator', form: 'relay', senderSessionId: exec.agent.id },
             signal: exec.signal,
@@ -489,7 +495,6 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
     const hasSettled = [...state.activeChildren.values()].some(child => child.status === 'settled')
     if (hasSettled) {
       if (repairTarget(state, exec)) return undefined
-      if (adapterTarget(state, exec, 'validate')) return undefined
       if (adapterTarget(state, exec, 'settle')) return undefined
       return settledActionGuidance(state)
     }

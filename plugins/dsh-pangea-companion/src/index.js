@@ -253,7 +253,7 @@ export function apply(ctx) {
     output: toolOutput(),
   }), ctx.tools.register({
     name: 'pangea_action_validate',
-    description: '子 Agent 结束后校验其 action 结果契约；失败时工具会把完整错误自动送回同一子 Agent 修正。',
+    description: '兼容接口，当前流程已停用。子 Agent 结束后直接调用 pangea_action_settle；settle 会完成校验，并在失败时返回原 Agent 的返修 action。',
     parameters: ACTION_PARAMETERS,
     isConcurrencySafe: () => false,
     async execute(args, exec) {
@@ -270,7 +270,7 @@ export function apply(ctx) {
     output: toolOutput(),
   }), ctx.tools.register({
     name: 'pangea_action_settle',
-    description: '结果契约校验通过后接收 action，并返回下一批 actions 或最终 Run 状态。',
+    description: '子 Agent 结束后直接调用。工具会校验并接收当前 action；失败时返回携带结构化错误的原 Agent 返修 action，通过时返回下一批 actions 或最终 Run 状态。',
     parameters: ACTION_PARAMETERS,
     isConcurrencySafe: () => false,
     execute: (args, exec) => runAdapter(workspaceCwd(exec), 'settle', args),

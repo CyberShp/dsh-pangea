@@ -216,42 +216,51 @@ test('lifecycle accepts direct PANGEA run and action tools', async () => {
     assert.equal(dispatch.concluded, true)
     harness.settled(parent, 'child-1')
 
-    const validate = fakeExec(parent, 'pangea_action_validate', {
+    const disabledValidate = fakeExec(parent, 'pangea_action_validate', {
       data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
     })
-    assert.equal(harness.guard(validate), undefined)
-    await harness.post(validate, {
-      action_id: currentAction.action_id,
-      status: 'invalid',
-      result_path: resultPath,
-      expected_contract: join(root, 'schemas', 'planning_result.schema.json'),
-      errors: [{
-        loc: ['input_decisions', 0, 'input_id'],
-        type: 'missing',
-        message: 'Field required',
-      }],
+    assert.match(harness.guard(disabledValidate), /直接.*settle/)
+
+    const repairAction = {
+      ...currentAction,
+      action_id: 'run-tools:planning:repair-1',
+      action: 'continue_agent',
+      task_id: 'child-1',
+      validation_error: {
+        code: 'ValidationError',
+        message: 'planning result contract failed',
+        details: [{ loc: ['input_decisions', 0, 'input_id'], message: 'Field required' }],
+      },
+    }
+    const firstSettle = fakeExec(parent, 'pangea_action_settle', {
+      data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
     })
-    assert.equal(validate.concluded, true)
+    assert.equal(harness.guard(firstSettle), undefined)
+    await harness.post(firstSettle, {
+      run_id: 'run-tools', data_root: dataRoot, lifecycle_status: 'running',
+      validation: { status: 'invalid', error: repairAction.validation_error },
+      agent_actions: [repairAction],
+    })
+
+    const repairDispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: repairAction.action_id })
+    assert.equal(harness.guard(repairDispatch), undefined)
+    const repaired = await harness.tool('pangea_action_dispatch').execute(repairDispatch.arguments, repairDispatch)
+    assert.equal(repaired.subagent_id, 'child-1')
     assert.equal(harness.followups.length, 1)
     assert.equal(harness.followups[0].childId, 'child-1')
-    assert.match(harness.followups[0].content[0].text, /"result_path"/)
-    assert.match(harness.followups[0].content[0].text, /planning_result\.schema\.json/)
-    assert.match(harness.followups[0].content[0].text, /"input_decisions"/)
+    assert.match(harness.followups[0].content[0].text, new RegExp(taskPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.match(harness.followups[0].content[0].text, /validation_error=/)
+    assert.match(harness.followups[0].content[0].text, /planning result contract failed/)
     assert.match(harness.followups[0].content[0].text, /Field required/)
+    await harness.post(repairDispatch, repaired)
+    assert.equal(repairDispatch.concluded, true)
     assert.match(harness.guard(fakeExec(parent, 'list_agents', {})), /仍在运行/)
     harness.settled(parent, 'child-1')
     const repairGuidance = harness.guard(fakeExec(parent, 'list_agents', {}))
-    assert.match(repairGuidance, /上一次 invalid.*已过期/)
-    assert.match(repairGuidance, /必须重新调用下面的 pangea_action_validate/)
-    assert.match(repairGuidance, /不得调用 settle、resume-run、status、Bash/)
-    assert.match(repairGuidance, /run-tools:planning/)
-    const revalidate = fakeExec(parent, 'pangea_action_validate', {
-      data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
-    })
-    assert.equal(harness.guard(revalidate), undefined)
-    await harness.post(revalidate, { action_id: currentAction.action_id, status: 'valid' })
+    assert.match(repairGuidance, /直接.*settle/)
+    assert.match(repairGuidance, /run-tools:planning:repair-1/)
     const settle = fakeExec(parent, 'pangea_action_settle', {
-      data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
+      data_root: dataRoot, run_id: 'run-tools', action_id: repairAction.action_id,
     })
     assert.equal(harness.guard(settle), undefined)
     await harness.post(settle, { run_id: 'run-tools', data_root: dataRoot, lifecycle_status: 'complete', actions: [] })
@@ -291,7 +300,7 @@ test('dispatches rework actions with analysis worker rules', async () => {
   }
 })
 
-test('completed actions can be validated and settled without cross-action blocking', async () => {
+test('completed actions can be settled without cross-action blocking', async () => {
   const root = fixture()
   try {
     const harness = policyHarness()
@@ -317,23 +326,20 @@ test('completed actions can be validated and settled without cross-action blocki
     harness.settled(parent, 'child-1')
     harness.settled(parent, 'child-2')
 
-    const validateSecond = fakeExec(parent, 'pangea_action_validate', {
-      data_root: dataRoot, run_id: 'run-parallel', action_id: second.action_id,
-    })
-    assert.equal(harness.guard(validateSecond), undefined)
-    await harness.post(validateSecond, { action_id: second.action_id, status: 'valid' })
-
     const settleSecond = fakeExec(parent, 'pangea_action_settle', {
       data_root: dataRoot, run_id: 'run-parallel', action_id: second.action_id,
     })
     assert.equal(harness.guard(settleSecond), undefined)
+    await harness.post(settleSecond, {
+      run_id: 'run-parallel', data_root: dataRoot, lifecycle_status: 'running', actions: [],
+    })
 
     const guidance = harness.guard(fakeExec(parent, 'list_agents', {}))
     assert.match(guidance, /run-parallel:analysis:U00/)
-    assert.match(guidance, /pangea_action_validate/)
-    assert.match(guidance, /run-parallel:analysis:U01/)
     assert.match(guidance, /pangea_action_settle/)
-    assert.match(guidance, /一次只处理一个 action/)
+    assert.doesNotMatch(guidance, /run-parallel:analysis:U01/)
+    assert.doesNotMatch(guidance, /pangea_action_validate/)
+    assert.match(guidance, /一次只对一个 action/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -439,10 +445,6 @@ test('continue action resumes the original reviewer instead of spawning another 
     const started = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
     await harness.post(dispatch, started)
     harness.settled(parent, 'child-1')
-    const validate = fakeExec(parent, 'pangea_action_validate', {
-      data_root: dataRoot, run_id: 'run-review', action_id: first.action_id,
-    })
-    await harness.post(validate, { status: 'valid' })
     const continuation = {
       ...action(secondTask, 'run-review:comparison-review'),
       action: 'continue_agent', role: 'review', stage: 'comparison_review', task_id: 'child-1',
