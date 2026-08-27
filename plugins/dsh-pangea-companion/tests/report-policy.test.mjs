@@ -240,6 +240,11 @@ test('lifecycle accepts direct PANGEA run and action tools', async () => {
     assert.match(harness.followups[0].content[0].text, /Field required/)
     assert.match(harness.guard(fakeExec(parent, 'list_agents', {})), /仍在运行/)
     harness.settled(parent, 'child-1')
+    const repairGuidance = harness.guard(fakeExec(parent, 'list_agents', {}))
+    assert.match(repairGuidance, /上一次 invalid.*已过期/)
+    assert.match(repairGuidance, /必须重新调用下面的 pangea_action_validate/)
+    assert.match(repairGuidance, /不得调用 settle、resume-run、status、Bash/)
+    assert.match(repairGuidance, /run-tools:planning/)
     const revalidate = fakeExec(parent, 'pangea_action_validate', {
       data_root: dataRoot, run_id: 'run-tools', action_id: currentAction.action_id,
     })

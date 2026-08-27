@@ -348,8 +348,13 @@ function settledActionGuidance(state) {
       action_id: item.actionId,
     })})，subagent_id=${item.childId}`
   ))
+  const hasUnvalidated = actions.some(item => item.tool === 'pangea_action_validate')
   return [
     'PANGEA 有已结束 action 待处理。一次只处理一个 action；validate 通过后立即 settle 同一 action，再处理其他 action。',
+    ...(hasUnvalidated ? [
+      '当前 result 修复回合已经结束；上一次 invalid 只对应修复前的旧产物，现已过期。',
+      '现在必须重新调用下面的 pangea_action_validate；不得复述旧 invalid，不得调用 settle、resume-run、status、Bash 或其他工具。',
+    ] : []),
     ...calls,
   ].join('\n')
 }
