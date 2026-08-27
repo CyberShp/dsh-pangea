@@ -373,6 +373,8 @@ test('registers read status plus executor environment and SSH tools', () => {
     'pangea_ssh_start', 'pangea_ssh_read', 'pangea_ssh_stop', 'pangea_ssh_interactive',
   ])
   assert.match(tools[0].description, /不要读取 PANGEA CLI 源码/)
+  assert.match(tools[0].description, /target 必须逐字复制/)
+  assert.match(tools[0].parameters.properties.target.description, /不翻译、不重排、不自行缩写/)
   assert.equal(tools[2].isConcurrencySafe(), false)
   assert.equal(tools[3].isConcurrencySafe(), false)
   assert.deepEqual(tools[4].parameters.required, ['run_id'])

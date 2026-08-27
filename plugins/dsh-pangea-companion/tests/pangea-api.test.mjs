@@ -28,6 +28,7 @@ test('creates one managed pending contract and removes it after Run creation', a
     assert.equal(result.run_id, 'run-01')
     assert.deepEqual(observed.call.args, ['runs', 'create', '--contract', pending])
     assert.equal(observed.contract.repository, 'repo-one')
+    assert.equal(observed.contract.target, 'session and retry')
     assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
     assert.equal(observed.contract.run_id, undefined)
     assert.equal(observed.contract.asset_ids, undefined)

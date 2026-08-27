@@ -32,7 +32,10 @@ const RUN_CREATE_PARAMETERS = {
   required: ['repository', 'target', 'source_scope'],
   properties: {
     repository: { type: 'string', minLength: 1, description: 'pangea-data/repositories 下的仓库 ID。' },
-    target: { type: 'string', minLength: 1, description: '本次分析目标的简短名称。' },
+    target: {
+      type: 'string', minLength: 1,
+      description: '逐字复制用户确认的本次分析对象；不得添加仓库名、产品名或范围说明，不翻译、不重排、不自行缩写。',
+    },
     source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '相对仓库根目录的最小源码路径集合。' },
     focus: { type: 'array', items: { type: 'string', minLength: 1 } },
     asset_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
@@ -238,7 +241,7 @@ export function apply(ctx) {
 
   const toolDisposers = [ctx.tools.register({
     name: 'pangea_run_create',
-    description: '创建新的 PANGEA 模块分析 Run。对业务源码发起分析时直接调用本工具；不要读取 PANGEA CLI 源码、schema 或手写 pending contract。返回的 actions 必须逐条派发。',
+    description: '创建新的 PANGEA 模块分析 Run。对业务源码发起分析时直接调用本工具；target 必须逐字复制用户确认的分析对象，不得增删或改写。不要读取 PANGEA CLI 源码、schema 或手写 pending contract。返回的 actions 必须逐条派发。',
     parameters: RUN_CREATE_PARAMETERS,
     execute: (args, exec) => createRun(workspaceCwd(exec), args),
     output: toolOutput(),
