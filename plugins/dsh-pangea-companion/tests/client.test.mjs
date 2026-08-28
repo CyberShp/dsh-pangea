@@ -19,11 +19,13 @@ function fakeReact() {
   }
 }
 
-test('PANGEA client registers the analysis and execution pages with the full workbench', async () => {
+test('PANGEA client registers the decision and execution workbench', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /总览/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
-  assert.match(source, /repeat\(7, minmax\(58px, 1fr\)\)/)
+  assert.match(source, /repeat\(4, minmax\(72px, 1fr\)\)/)
+  assert.match(source, /\['overview', '总览'\], \['risks', '待处理'\], \['cases', '测试计划'\], \['execution', '执行结果'\]/)
+  assert.doesNotMatch(source, /\['workflow', '流程'\], \['risks', '风险'\]/)
   assert.doesNotMatch(source, /\['monitor', '监控'\]/)
   assert.doesNotMatch(source, /if \(screen\.type === 'monitor'\) body = renderMonitor/)
   assert.match(source, /风险/)
@@ -36,7 +38,12 @@ test('PANGEA client registers the analysis and execution pages with the full wor
   assert.match(source, /后端与工作台不兼容/)
   assert.match(source, /停止 Run/)
   assert.match(source, /执行环境/)
-  assert.match(source, /一键执行/)
+  assert.match(source, /开始执行计划/)
+  assert.match(source, /优先失败场景/)
+  assert.match(source, /技术详情/)
+  assert.match(source, /未归入分析单元/)
+  assert.match(source, /用例尚未编号，不能选择/)
+  assert.match(source, /filter\(hasText\)/)
   assert.match(source, /← 返回/)
   assert.match(source, /数据状态/)
   assert.match(source, /数据读取异常/)

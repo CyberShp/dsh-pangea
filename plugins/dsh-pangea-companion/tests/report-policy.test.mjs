@@ -345,6 +345,67 @@ test('completed actions can be settled without cross-action blocking', async () 
   }
 })
 
+test('pending repair dispatch takes priority while another completed action is waiting', async () => {
+  const root = fixture()
+  try {
+    const harness = policyHarness()
+    const parent = fakeAgent(root)
+    const dataRoot = join(root, 'pangea-data')
+    const firstTask = join(dataRoot, 'runs', 'run-repair-priority', 'agent-tasks', 'analysis', 'U00.json')
+    const secondTask = join(dataRoot, 'runs', 'run-repair-priority', 'agent-tasks', 'analysis', 'U01.json')
+    mkdirSync(dirname(firstTask), { recursive: true })
+    writeFileSync(firstTask, JSON.stringify({ result_path: join(dataRoot, 'U00.json') }))
+    writeFileSync(secondTask, JSON.stringify({ result_path: join(dataRoot, 'U01.json') }))
+    const first = action(firstTask, 'run-repair-priority:analysis:U00')
+    const second = action(secondTask, 'run-repair-priority:analysis:U01')
+    await harness.post(
+      fakeExec(parent, 'pangea_run_create', {}),
+      { run_id: 'run-repair-priority', data_root: dataRoot, actions: [first, second] },
+    )
+
+    for (const current of [first, second]) {
+      const dispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: current.action_id })
+      const started = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+      await harness.post(dispatch, started)
+    }
+    harness.settled(parent, 'child-1')
+    harness.settled(parent, 'child-2')
+
+    const repairAction = {
+      ...first,
+      action_id: 'run-repair-priority:analysis:U00:repair-1',
+      action: 'continue_agent',
+      task_id: 'child-1',
+      validation_error: { code: 'ValidationError', message: 'missing required field' },
+    }
+    const settleFirst = fakeExec(parent, 'pangea_action_settle', {
+      data_root: dataRoot, run_id: 'run-repair-priority', action_id: first.action_id,
+    })
+    assert.equal(harness.guard(settleFirst), undefined)
+    await harness.post(settleFirst, {
+      run_id: 'run-repair-priority', data_root: dataRoot, lifecycle_status: 'running',
+      validation: { status: 'invalid', error: repairAction.validation_error },
+      agent_actions: [repairAction],
+    })
+
+    const repairDispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: repairAction.action_id })
+    assert.equal(harness.guard(repairDispatch), undefined)
+    const repaired = await harness.tool('pangea_action_dispatch').execute(repairDispatch.arguments, repairDispatch)
+    assert.equal(repaired.subagent_id, 'child-1')
+    assert.equal(harness.starts.length, 2)
+    assert.equal(harness.followups.length, 1)
+    assert.equal(harness.followups[0].childId, 'child-1')
+    await harness.post(repairDispatch, repaired)
+
+    const settleSecond = fakeExec(parent, 'pangea_action_settle', {
+      data_root: dataRoot, run_id: 'run-repair-priority', action_id: second.action_id,
+    })
+    assert.equal(harness.guard(settleSecond), undefined)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('dispatch retries bind with the original child instead of spawning a duplicate', async () => {
   const root = fixture()
   try {

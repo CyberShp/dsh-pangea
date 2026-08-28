@@ -494,6 +494,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
     }
     const hasSettled = [...state.activeChildren.values()].some(child => child.status === 'settled')
     if (hasSettled) {
+      if (pendingActionFor(state, exec)) return undefined
       if (repairTarget(state, exec)) return undefined
       if (adapterTarget(state, exec, 'settle')) return undefined
       return settledActionGuidance(state)

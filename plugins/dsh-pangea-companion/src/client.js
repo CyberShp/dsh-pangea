@@ -118,7 +118,7 @@ window.__ModuleLoader__.load({
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 10 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '7px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 700 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
-      nav: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(58px, 1fr))', gap: 0, marginTop: 12, overflowX: 'auto' },
+      nav: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(72px, 1fr))', gap: 0, marginTop: 12, overflowX: 'auto' },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '9px 2px 8px', cursor: 'pointer', fontSize: 10 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '14px 14px 22px' },
@@ -194,6 +194,20 @@ window.__ModuleLoader__.load({
       timelineTime: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, fontVariantNumeric: 'tabular-nums' },
       timelineTitle: { marginTop: 2, fontSize: 11, fontWeight: 690, lineHeight: 1.45 },
       timelineDetail: { marginTop: 3, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, lineHeight: 1.5, overflowWrap: 'anywhere' },
+      eyebrow: { color: 'var(--dsw-alias-state-business-primary, #4d9ad6)', fontSize: 9, fontWeight: 760, letterSpacing: '0.09em', textTransform: 'uppercase' },
+      decisionHero: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', borderLeft: '3px solid var(--dsw-alias-state-business-primary, #4d9ad6)', borderRadius: 8, padding: 13, marginBottom: 11, background: 'linear-gradient(135deg, var(--dsw-alias-bg-layer-1, #171717), var(--dsw-alias-bg-layer-2, #202020))' },
+      decisionTitle: { marginTop: 5, fontSize: 18, fontWeight: 780, lineHeight: 1.3, letterSpacing: '-0.02em' },
+      decisionHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, lineHeight: 1.55 },
+      decisionBand: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 6, marginTop: 11 },
+      decisionItem: { minWidth: 0, borderTop: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', paddingTop: 7 },
+      decisionValue: { marginTop: 3, fontSize: 11, fontWeight: 700, lineHeight: 1.4, overflowWrap: 'anywhere' },
+      group: { marginBottom: 14 },
+      groupHeader: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, padding: '0 2px 7px', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))' },
+      groupTitle: { fontSize: 12, fontWeight: 760, lineHeight: 1.4 },
+      groupMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, lineHeight: 1.45, marginTop: 2 },
+      compactCard: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 7, padding: 10, marginTop: 7 },
+      scenarioIndex: { width: 24, flex: '0 0 24px', color: 'var(--dsw-alias-label-tertiary, #888)', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 9, paddingTop: 2 },
+      technical: { border: '1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.32))', borderRadius: 8, padding: 10, marginBottom: 11, background: 'transparent' },
     }
 
     function icon(size = 16) {
@@ -380,7 +394,8 @@ window.__ModuleLoader__.load({
     function navType(screen) {
       if (screen.type === 'risk') return 'risks'
       if (screen.type === 'case') return 'cases'
-      if (screen.type === 'evidence-detail') return 'evidence'
+      if (screen.type === 'evidence-detail') return 'risks'
+      if (['workflow', 'flows', 'evidence', 'review'].includes(screen.type)) return 'overview'
       return screen.type
     }
 
@@ -531,9 +546,20 @@ window.__ModuleLoader__.load({
       const evidence = details.evidence ?? []
       const businessFlows = details.business_flows ?? []
       const workflow = current?.workflow ?? { units: [], actions: [], error_history: [], quality_checks: [], unresolved: [] }
-      const riskById = new Map(risks.map(item => [item.risk_id, item]))
-      const caseById = new Map(testCases.map(item => [item.test_case_id, item]))
+      const riskEntries = risks.map((item, index) => [hasText(item.risk_id) ? item.risk_id : `__risk__:${index}`, item])
+      const caseEntries = testCases.map((item, index) => [hasText(item.test_case_id) ? item.test_case_id : `__case__:${index}`, item])
+      const riskById = new Map(riskEntries)
+      const caseById = new Map(caseEntries)
+      const riskKeyByItem = new Map(riskEntries.map(([key, item]) => [item, key]))
+      const caseKeyByItem = new Map(caseEntries.map(([key, item]) => [item, key]))
       const evidenceByKey = new Map(evidence.map(item => [evidenceIdentity(item), item]))
+      const unitById = new Map(workflow.units.map(unit => [unit.unit_id, unit]))
+      const flowsByUnit = new Map()
+      for (const flow of businessFlows) {
+        const key = hasText(flow.unit_id) ? flow.unit_id : '__unassigned__'
+        if (!flowsByUnit.has(key)) flowsByUnit.set(key, [])
+        flowsByUnit.get(key).push(flow)
+      }
       const riskScreenKey = screen.type === 'risk' ? `${current?.run_id ?? ''}\u0000${screen.id}` : ''
       const riskEvidenceOptions = screen.type === 'risk' ? (riskById.get(screen.id)?.evidence ?? []).filter(item => hasText(item?.location)) : []
       const selectedRiskEvidenceKey = riskEvidenceSelection.riskKey === riskScreenKey ? riskEvidenceSelection.evidenceKey : ''
@@ -621,6 +647,7 @@ window.__ModuleLoader__.load({
         }
       }
       function toggleCase(testCaseId) {
+        if (!hasText(testCaseId)) return
         setSelectedCaseIds(values => values.includes(testCaseId)
           ? values.filter(value => value !== testCaseId)
           : [...values, testCaseId])
@@ -790,16 +817,16 @@ window.__ModuleLoader__.load({
         : screen.type === 'create' ? '新建分析'
           : screen.type === 'workflow' ? '运行流程'
             : screen.type === 'flows' ? '业务流程'
-          : screen.type === 'risks' ? '风险'
+          : screen.type === 'risks' ? '待处理'
           : screen.type === 'risk' ? (riskById.get(screen.id)?.risk_id || '风险详情')
-            : screen.type === 'cases' ? '测试用例'
+            : screen.type === 'cases' ? '测试计划'
               : screen.type === 'case' ? (caseById.get(screen.id)?.test_case_id || '用例详情')
                 : screen.type === 'evidence' ? '证据'
                   : screen.type === 'evidence-detail' ? '证据详情'
-                    : screen.type === 'execution' ? '执行环境' : '复核'
+                    : screen.type === 'execution' ? '执行结果' : '复核'
 
       const navigationItems = pageMode === 'execution' ? [] : [
-        ['overview', '总览'], ['workflow', '流程'], ['risks', '风险'], ['cases', '用例'], ['flows', '业务流'], ['evidence', '证据'], ['review', '复核'],
+        ['overview', '总览'], ['risks', '待处理'], ['cases', '测试计划'], ['execution', '执行结果'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -812,7 +839,7 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
-            !['overview', 'workflow', 'risks', 'cases', 'flows', 'execution', 'evidence', 'review'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
+            !['overview', 'risks', 'cases', 'execution'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
               h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : 'PANGEA 伴生工作台'))),
@@ -1016,33 +1043,68 @@ window.__ModuleLoader__.load({
         if (!current) return h(React.Fragment, null, renderCompatibility(), h('div', { style: styles.card },
           h('div', { style: styles.empty }, '当前还没有可读取的 Run。'),
           workbench?.compatibility?.compatible === true ? h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => jump('create') }, '创建第一个分析') : null))
+        const uncoveredRisks = risks.filter(risk => (risk.linked_test_case_ids?.length ?? 0) === 0)
+        const executorRuns = snapshot?.executor_runs ?? []
+        const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
+        const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
+        const nextAction = health?.trusted === false
+          ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
+          : !current.terminal
+            ? { label: '等待分析完成', hint: `当前 ${completed}/${total} 个分析单元完成，可查看运行细节。`, target: 'workflow' }
+            : uncoveredRisks.length > 0
+              ? { label: `处理 ${uncoveredRisks.length} 条未覆盖风险`, hint: '这些风险还没有关联可执行测试用例。', target: 'risks' }
+              : testCases.length > 0
+                ? { label: '形成并执行测试计划', hint: `${testCases.length} 条用例已可选择，先确认环境再执行。`, target: 'cases' }
+                : { label: '查看分析结论', hint: '当前没有可进入执行阶段的测试用例。', target: 'risks' }
         return h(React.Fragment, null,
           renderCompatibility(),
+          h('div', { style: styles.decisionHero },
+            h('div', { style: styles.eyebrow }, '下一步'),
+            h('div', { style: styles.decisionTitle }, nextAction.label),
+            h('div', { style: styles.decisionHint }, nextAction.hint),
+            h('button', { type: 'button', style: { ...styles.button, marginTop: 9 }, onClick: () => jump(nextAction.target) }, nextAction.target === 'workflow' ? '查看运行细节' : '进入处理'),
+            h('div', { style: styles.decisionBand },
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析可信度'), h('div', { style: styles.decisionValue }, health?.trusted === false ? '不可用于决策' : HEALTH[health?.status] ?? health?.status ?? '未知')),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, `${testCases.length} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '执行进展'), h('div', { style: styles.decisionValue }, `${executorRuns.length} 个执行记录`)))),
           renderHealthCard(false),
           h('div', { style: styles.card },
-            field('当前任务', current.run_id),
-            h('div', { style: { marginTop: 9 } }, field('阶段', PHASE[current.phase] ?? current.phase)),
-            h('div', { style: { marginTop: 9 } },
+            h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前任务'), h('div', { style: styles.itemTitle }, current.run_id)), h('span', { style: styles.badge }, PHASE[current.phase] ?? current.phase)),
+            h('div', { style: { marginTop: 10 } },
               h('div', { style: styles.row }, h('span', { style: styles.label }, '分析进度'), h('span', { style: styles.label }, `${completed}/${total}`)),
               h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } }))),
-            h('div', { style: styles.grid }, field('质量状态', QUALITY[current.quality_status] ?? current.quality_status ?? '待定'), field('复核状态', REVIEW[current.review?.status] ?? current.review?.status ?? '待定'))),
+            h('div', { style: styles.grid }, field('质量结论', QUALITY[current.quality_status] ?? current.quality_status ?? '待定'), field('独立复核', REVIEW[current.review?.status] ?? current.review?.status ?? '待定'))),
+          h('div', { style: styles.sectionTitle }, '优先失败场景'),
+          priorityScenarios.length ? h('div', { style: styles.card }, priorityScenarios.map((risk, index) => h('button', {
+            key: riskKeyByItem.get(risk), type: 'button', style: { ...styles.runButton, display: 'flex', gap: 7, alignItems: 'flex-start' }, onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }),
+          },
+          h('span', { style: styles.scenarioIndex }, String(index + 1).padStart(2, '0')),
+          h('span', { style: { flex: 1, minWidth: 0 } },
+            h('span', { style: styles.row }, h('span', { style: styles.itemTitle }, text(risk.title, risk.risk_id)), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
+            h('span', { style: { ...styles.itemMeta, display: 'block' } }, text(risk.trigger, '未记录触发条件')))))) : h('div', { style: styles.card }, h('div', { style: styles.empty }, collectionEmpty('risks', '当前没有风险结论。'))),
           current.artifacts?.report_html || current.artifacts?.report_md ? h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, '最终报告'),
-            h('div', { style: styles.itemMeta }, '在 Better Sidebar 中直接预览，不会修改报告文件。'),
+            h('div', { style: styles.itemMeta }, '报告是完整交付物；日常处理优先使用上面的任务入口。'),
             h('div', { style: styles.chips },
               current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html')) : null,
               current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md')) : null)) : null,
-          h('div', { style: styles.grid }, metric(risks.length, '风险', 'risks', 'risks'), metric(testCases.length, '测试用例', 'cases', 'test_cases'), metric(evidence.length, '证据', 'evidence'), metric(details.review_issues?.length ?? 0, '复核问题', 'review')),
-          h('div', { style: styles.grid }, metric(details.business_flows?.length ?? current.counts?.business_flows ?? 0, '业务流程', 'flows', 'business_flows'), metric(current.analysis?.reworked ?? 0, '定向补齐单元', 'workflow')),
+          h('details', { style: styles.technical },
+            h('summary', { style: { cursor: 'pointer', fontSize: 11, fontWeight: 720 } }, '技术详情'),
+            h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '这里保留流程、证据和复核原始信息，不参与日常主导航。'),
+            h('div', { style: styles.chips },
+              chip(`运行流程 · ${workflow.actions.length}`, () => jump('workflow')),
+              chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')),
+              chip(`证据 · ${evidence.length}`, () => jump('evidence')),
+              chip(`复核问题 · ${details.review_issues?.length ?? 0}`, () => jump('review')))),
           !current.terminal ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '运行控制'), h('div', { style: styles.itemMeta }, '停止后保留已有产物和运行记录。')),
               pendingStopRun === current.run_id
                 ? h('div', { style: styles.chips }, chip('取消', () => setPendingStopRun('')), h('button', { type: 'button', style: { ...styles.button, color: 'var(--dsw-alias-state-error-primary, #e66767)' }, onClick: () => { void stopCurrentRun() } }, '确认停止'))
                 : h('button', { type: 'button', style: styles.button, onClick: () => setPendingStopRun(current.run_id) }, '停止 Run'))) : null,
           current.errors?.length ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), h('div', { style: { ...styles.card, ...styles.error } }, JSON.stringify(current.errors, null, 2))) : null,
-          runItems.length ? h(React.Fragment, null,
-            h('div', { style: styles.sectionTitle }, `任务记录（${workbench?.runs?.total ?? runItems.length}）`),
-            h('div', { style: styles.card }, runItems.map(run => {
+          runItems.length ? h('details', { style: styles.technical },
+            h('summary', { style: { cursor: 'pointer', fontSize: 11, fontWeight: 720 } }, `历史任务 · ${workbench?.runs?.total ?? runItems.length}`),
+            h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, runItems.map(run => {
               const active = current.run_id === run.run_id
               return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, run.run_id), h('span', { style: styles.badge }, QUALITY[run.quality_status] ?? PHASE[run.phase] ?? run.quality_status ?? run.phase)))
             })),
@@ -1058,13 +1120,43 @@ window.__ModuleLoader__.load({
           if (riskSeverity !== '全部' && risk.severity !== riskSeverity) return false
           return !query || [risk.risk_id, risk.title, risk.trigger, risk.system_result, ...(risk.dfx ?? [])].join(' ').toLowerCase().includes(query)
         })
+        const groups = new Map()
+        for (const risk of filtered) {
+          const key = hasText(risk.unit_id) ? risk.unit_id : '__unassigned__'
+          if (!groups.has(key)) groups.set(key, [])
+          groups.get(key).push(risk)
+        }
         return h(React.Fragment, null,
+          h('div', { style: styles.decisionHero },
+            h('div', { style: styles.eyebrow }, '行动清单'),
+            h('div', { style: styles.decisionTitle }, `${filtered.length} 条风险需要判断`),
+            h('div', { style: styles.decisionHint }, '按现有分析单元和业务流程组织。这里不自动改写结论，也不替测试工程师做语义取舍。'),
+            h('div', { style: styles.decisionBand },
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '高优先级'), h('div', { style: styles.decisionValue }, risks.filter(item => ['Critical', 'High'].includes(item.severity)).length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '未关联用例'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0).length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已有用例'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.linked_test_case_ids?.length ?? 0) > 0).length)))),
           h('input', { style: styles.search, value: riskQuery, 'aria-label': '搜索风险', placeholder: '搜索风险编号、标题、触发条件…', onChange: event => setRiskQuery(event.target.value) }),
           h('div', { style: styles.filters }, ['全部', 'Critical', 'High', 'Medium', 'Low'].map(level => h('button', { key: level, type: 'button', style: { ...styles.filter, ...(riskSeverity === level ? styles.filterActive : {}) }, onClick: () => setRiskSeverity(level) }, level === '全部' ? '全部' : SEVERITY[level] ?? level))),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${risks.length} 条`),
-          h('div', { style: { marginTop: 7 } }, filtered.length ? filtered.map(risk => h('button', { key: `${risk.unit_id}:${risk.risk_id}`, type: 'button', style: { ...styles.card, ...styles.clickableCard }, onClick: () => navigate({ type: 'risk', id: risk.risk_id }) },
-            h('div', { style: styles.row }, h('div', { style: { ...styles.itemTitle, minWidth: 0 } }, `${risk.risk_id || '未编号'} · ${text(risk.title, '未命名风险')}`), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
-            h('div', { style: styles.itemMeta }, `${TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'} · 置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '—'} · ${risk.linked_test_case_ids?.length ?? 0} 条关联用例`))) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('risks', '没有符合条件的风险。')))))
+          h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
+            const unit = unitById.get(unitId)
+            const unitFlows = flowsByUnit.get(unitId) ?? []
+            const uncovered = items.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0).length
+            return h('section', { key: unitId, style: styles.group },
+              h('div', { style: styles.groupHeader },
+                h('div', null,
+                  h('div', { style: styles.groupTitle }, unit ? `${unit.unit_id} · ${text(unit.title, '未命名单元')}` : '未归入分析单元'),
+                  h('div', { style: styles.groupMeta }, unitFlows.length ? `业务流程：${unitFlows.map(flow => text(flow.title, flow.flow_id)).join('、')}` : '当前没有可直接关联的业务流程')),
+                h('span', { style: styles.badge }, `${uncovered} 条未覆盖`)),
+              items.map(risk => h('button', { key: `${risk.unit_id}:${riskKeyByItem.get(risk)}`, type: 'button', style: { ...styles.compactCard, ...styles.clickableCard }, onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }) },
+                h('div', { style: styles.row }, h('div', { style: { ...styles.itemTitle, minWidth: 0 } }, `${risk.risk_id || '未编号'} · ${text(risk.title, '未命名风险')}`), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
+                h('div', { style: styles.itemMeta }, text(risk.trigger, '未记录触发条件')),
+                h('div', { style: styles.chips },
+                  h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '待确认'),
+                  h('span', { style: styles.badge }, `${risk.linked_test_case_ids?.length ?? 0} 条关联用例`),
+                  h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'))))
+            )
+          }) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('risks', '没有符合条件的风险。')))))
       }
 
       function renderRiskDetail() {
@@ -1094,46 +1186,87 @@ window.__ModuleLoader__.load({
         const query = caseQuery.trim().toLowerCase()
         const filtered = testCases.filter(item => !query || [item.test_case_id, item.title, item.case_type, ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
         const canLaunch = selectedCaseIds.length > 0 && selectedEnvironment && !launching && health?.trusted !== false
+        const selectableFilteredIds = filtered.map(item => item.test_case_id).filter(hasText)
+        const groups = new Map()
+        for (const item of filtered) {
+          const key = hasText(item.unit_id) ? item.unit_id : '__unassigned__'
+          if (!groups.has(key)) groups.set(key, [])
+          groups.get(key).push(item)
+        }
         return h(React.Fragment, null,
+          h('div', { style: styles.decisionHero },
+            h('div', { style: styles.eyebrow }, '测试计划'),
+            h('div', { style: styles.decisionTitle }, selectedCaseIds.length ? `已选择 ${selectedCaseIds.length} 条测试` : '从风险结论形成执行清单'),
+            h('div', { style: styles.decisionHint }, '用例按现有分析单元和业务流程分组；选择只影响本次执行，不修改分析产物。'),
+            h('div', { style: styles.decisionBand },
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '可选用例'), h('div', { style: styles.decisionValue }, testCases.length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已选择'), h('div', { style: styles.decisionValue }, selectedCaseIds.length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '执行环境'), h('div', { style: styles.decisionValue }, selectedEnvironment ? environments.find(item => item.id === selectedEnvironment)?.name ?? selectedEnvironment : '未选择')))),
           h('div', { style: { ...styles.card, ...styles.actionCard } },
-            h('div', { style: styles.itemTitle }, '执行选中的黑盒用例'),
-            h('div', { style: styles.itemMeta }, '点击一次后创建独立 Executor Run；计划完整时自动进入主机与阵列执行。'),
+            h('div', { style: styles.itemTitle }, '执行这份计划'),
+            h('div', { style: styles.itemMeta }, '系统会创建独立执行记录，并保留本次选择、环境和结果。'),
             h('select', { style: { ...styles.search, marginTop: 8 }, value: selectedEnvironment, onChange: event => setSelectedEnvironment(event.target.value) },
-              h('option', { value: '' }, environments.length ? '选择执行环境' : '请先在“执行”页配置环境'),
+              h('option', { value: '' }, environments.length ? '选择执行环境' : '请先在“执行结果”配置环境'),
               environments.map(environment => h('option', { key: environment.id, value: environment.id }, `${environment.name} · ${environment.host_alias} + ${environment.array_alias}`))),
             h('div', { style: styles.row },
               h('div', { style: styles.itemMeta }, `已选 ${selectedCaseIds.length} 条`),
               h('div', { style: styles.chips },
-                chip('选择当前列表', () => setSelectedCaseIds([...new Set([...selectedCaseIds, ...filtered.map(item => item.test_case_id)])])),
+                chip('选择当前列表', () => setSelectedCaseIds([...new Set([...selectedCaseIds, ...selectableFilteredIds])])),
                 chip('清空', () => setSelectedCaseIds([])))),
-            h('button', { type: 'button', disabled: !canLaunch, style: { ...styles.primaryButton, marginTop: 9, ...(!canLaunch ? styles.buttonDisabled : {}) }, onClick: () => { void startSelectedCases() } }, launching ? '正在创建执行会话…' : '一键执行')),
+            h('button', { type: 'button', disabled: !canLaunch, style: { ...styles.primaryButton, marginTop: 9, ...(!canLaunch ? styles.buttonDisabled : {}) }, onClick: () => { void startSelectedCases() } }, launching ? '正在创建执行会话…' : '开始执行计划')),
           h('input', { style: styles.search, value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例编号、标题、类型、关联风险…', onChange: event => setCaseQuery(event.target.value) }),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${testCases.length} 条`),
-          h('div', { style: { marginTop: 7 } }, filtered.length ? filtered.map(item => h('div', { key: `${item.unit_id}:${item.test_case_id}`, style: styles.card },
-            h('div', { style: styles.caseSelect },
-              h('input', { type: 'checkbox', checked: selectedCaseIds.includes(item.test_case_id), 'aria-label': `选择 ${item.test_case_id}`, onChange: () => toggleCase(item.test_case_id) }),
-              h('button', { type: 'button', style: styles.caseDetailButton, onClick: () => navigate({ type: 'case', id: item.test_case_id }) },
-                h('div', { style: styles.itemTitle }, `${item.test_case_id || '未编号'} · ${text(item.title, '未命名用例')}`),
-                h('div', { style: styles.itemMeta }, `${text(item.case_type, '未标注类型')} · ${item.linked_risk_ids?.length ?? 0} 条关联风险 · ${text(item.status, 'draft')}`))))) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
+          h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
+            const unit = unitById.get(unitId)
+            const unitFlows = flowsByUnit.get(unitId) ?? []
+            const coverageCount = Array.isArray(unit?.coverage_ids) ? unit.coverage_ids.length : 0
+            return h('section', { key: unitId, style: styles.group },
+              h('div', { style: styles.groupHeader },
+                h('div', null,
+                  h('div', { style: styles.groupTitle }, unit ? `${unit.unit_id} · ${text(unit.title, '未命名单元')}` : '未归入分析单元'),
+                  h('div', { style: styles.groupMeta }, unitFlows.length ? `业务流程：${unitFlows.map(flow => text(flow.title, flow.flow_id)).join('、')}` : '当前没有可直接关联的业务流程')),
+                h('span', { style: styles.badge }, coverageCount ? `${coverageCount} 个 Coverage 输入` : `${items.length} 条用例`)),
+              items.map(item => {
+                const selectable = hasText(item.test_case_id)
+                const itemKey = caseKeyByItem.get(item)
+                return h('div', { key: `${item.unit_id}:${itemKey}`, style: styles.compactCard },
+                  h('div', { style: styles.caseSelect },
+                  h('input', { type: 'checkbox', disabled: !selectable, checked: selectable && selectedCaseIds.includes(item.test_case_id), 'aria-label': selectable ? `选择 ${item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(item.test_case_id) }),
+                  h('button', { type: 'button', style: styles.caseDetailButton, onClick: () => navigate({ type: 'case', id: itemKey }) },
+                    h('div', { style: styles.itemTitle }, `${item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`),
+                    h('div', { style: styles.itemMeta }, `${text(item.case_type, '未标注类型')} · ${item.linked_risk_ids?.length ?? 0} 条关联风险 · ${text(item.status, 'draft')}${selectable ? '' : ' · 分析完成后可加入计划'}`))))
+              })
+            )
+          }) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
       }
 
       function renderExecution() {
         const executorRuns = snapshot?.executor_runs ?? []
+        const completedRuns = executorRuns.filter(run => ['PASS', 'passed', 'complete', 'completed', 'success'].includes(run.result_status ?? run.phase)).length
+        const unresolvedRuns = executorRuns.filter(run => (run.unresolved?.length ?? 0) > 0 || ['FAILED', 'failed', 'error', 'UNRESOLVED'].includes(run.result_status ?? run.phase)).length
         const formInput = (fieldName, placeholder) => h('input', {
           style: { ...styles.search, marginBottom: 0 }, value: environmentForm[fieldName], placeholder,
           onChange: event => setEnvironmentForm(value => ({ ...value, [fieldName]: event.target.value })),
         })
         return h(React.Fragment, null,
+          h('div', { style: styles.decisionHero },
+            h('div', { style: styles.eyebrow }, '执行结果'),
+            h('div', { style: styles.decisionTitle }, executorRuns.length ? `${executorRuns.length} 次执行留有记录` : '还没有执行测试计划'),
+            h('div', { style: styles.decisionHint }, '这里关联测试计划、实验环境和实际结果；环境配置是执行条件，不是产品主结果。'),
+            h('div', { style: styles.decisionBand },
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '执行记录'), h('div', { style: styles.decisionValue }, executorRuns.length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '完成'), h('div', { style: styles.decisionValue }, completedRuns)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '需处理'), h('div', { style: styles.decisionValue }, unresolvedRuns)))),
           h('div', { style: styles.card },
-            h('div', { style: styles.itemTitle }, `当前分析的执行记录（${executorRuns.length}）`),
+            h('div', { style: styles.itemTitle }, `测试执行记录（${executorRuns.length}）`),
             executorRuns.length ? h('div', { style: { marginTop: 8 } }, executorRuns.map(run => h('div', { key: run.executor_run_id, style: { ...styles.card, marginBottom: 7 } },
               h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, run.executor_run_id), h('span', { style: styles.badge }, run.result_status ?? run.phase)),
               h('div', { style: styles.itemMeta }, `${run.selected_test_case_ids.length} 条用例 · ${run.environment_id} · ${run.automation_id}`),
               run.unresolved?.length ? h('div', { style: { ...styles.error, marginTop: 6 } }, run.unresolved.join('；')) : null,
               h('div', { style: styles.chips }, run.artifacts?.plan ? chip('查看执行计划', () => openSidebarFile(run.artifacts.plan, 'PANGEA executable plan')) : null, run.artifacts?.result ? chip('查看执行结果', () => openSidebarFile(run.artifacts.result, 'PANGEA execution result')) : null)))) : h('div', { style: { ...styles.empty, marginTop: 8 } }, '当前分析还没有执行记录。')),
           h('div', { style: styles.card },
-            h('div', { style: styles.itemTitle }, '执行环境'),
-            h('div', { style: styles.itemMeta }, 'SSH 密码和主机连接仍在 dsh-ssh 中维护；这里仅保存主机/阵列 alias、自动化仓库和设备绑定。'),
+            h('div', { style: styles.itemTitle }, '可用测试环境'),
+            h('div', { style: styles.itemMeta }, '连接凭据仍由 dsh-ssh 管理；这里仅记录执行计划所需的环境引用。'),
             environments.length ? h('div', { style: { marginTop: 8 } }, environments.map(environment => h('div', { key: environment.id, style: { ...styles.card, marginBottom: 7 } },
               h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, environment.name), h('span', { style: styles.badge }, environment.id)),
               h('div', { style: styles.itemMeta }, `主机 ${environment.host_alias} · 阵列 ${environment.array_alias} · 自动化 ${environment.automation_id}`),
