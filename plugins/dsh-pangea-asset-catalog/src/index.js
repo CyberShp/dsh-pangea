@@ -1,4 +1,5 @@
 import { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
+import { METHODOLOGY_SUBMISSION_PARAMETERS, MethodologyCandidateRuntime } from './methodology-runtime.js'
 
 export const name = 'dsh-pangea-asset-catalog'
 export const inject = ['tools', 'webServer', 'apiProxy']
@@ -65,7 +66,11 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   if (options.type) args.push('--type', options.type)
   if (options.status) args.push('--status', options.status)
   if (options.query) args.push('--query', options.query)
-  const result = await runPangea({ cwd, args })
+  const [result, methodologies, capabilities] = await Promise.all([
+    runPangea({ cwd, args }),
+    runPangea({ cwd, args: ['methodologies', 'list', '--data-root', resolvedDataRoot, '--limit', '200'] }),
+    runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] }),
+  ])
   const totalPages = Math.max(1, Math.ceil(result.total / options.pageSize))
   return {
     status: 'ok',
@@ -74,6 +79,11 @@ async function listState({ cwd, dataRoot, runtime, options }) {
       ...asset,
       extraction_job: runtime.job(resolvedDataRoot, asset.asset_id),
     })),
+    methodologies: {
+      ...methodologies,
+      candidate_schema_path: capabilities.methodologies?.candidate_schema_path ?? capabilities.candidate_schema_path ?? null,
+      generation_job: runtime.methodologies.job(resolvedDataRoot),
+    },
     pagination: {
       page: Math.min(options.page, totalPages), page_size: options.pageSize,
       total: result.total, total_pages: totalPages,
@@ -95,6 +105,14 @@ async function assetDetail({ cwd, dataRoot, runtime, assetId }) {
   }
 }
 
+async function methodologyDetail({ cwd, dataRoot, methodologyId }) {
+  const resolvedDataRoot = dataRootFor(cwd, dataRoot)
+  return {
+    status: 'ok', data_root: resolvedDataRoot,
+    methodology: await runPangea({ cwd, args: ['methodologies', 'get', '--data-root', resolvedDataRoot, '--id', methodologyId] }),
+  }
+}
+
 async function routeHandler(req, res, runtime) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? API_PATH, 'http://localhost')
@@ -104,7 +122,10 @@ async function routeHandler(req, res, runtime) {
   try {
     if (req.method === 'GET') {
       const assetId = url.searchParams.get('asset_id')
-      const value = assetId
+      const methodologyId = url.searchParams.get('methodology_id')
+      const value = methodologyId
+        ? await methodologyDetail({ cwd, dataRoot, methodologyId })
+        : assetId
         ? await assetDetail({ cwd, dataRoot, runtime, assetId })
         : await listState({ cwd, dataRoot, runtime, options })
       return json(res, 200, value)
@@ -134,6 +155,16 @@ async function routeHandler(req, res, runtime) {
         cwd,
         args: ['assets', 'archive', '--data-root', resolvedDataRoot, '--asset-id', body.asset_id],
       })
+    } else if (body.action === 'generate_methodology') {
+      await runtime.methodologies.start({ cwd, dataRoot: resolvedDataRoot, assetIds: body.asset_ids })
+    } else if (body.action === 'enable_methodology' || body.action === 'disable_methodology') {
+      await runPangea({
+        cwd,
+        args: [
+          'methodologies', body.action === 'enable_methodology' ? 'enable' : 'disable',
+          '--data-root', resolvedDataRoot, '--id', body.methodology_id,
+        ],
+      })
     } else {
       return json(res, 400, { status: 'error', error: 'unsupported-action' })
     }
@@ -145,7 +176,8 @@ async function routeHandler(req, res, runtime) {
 
 export async function apply(ctx) {
   const runtime = new AssetActionRuntime(ctx.apiProxy)
-  const disposeTool = ctx.tools.register({
+  runtime.methodologies = new MethodologyCandidateRuntime(ctx.apiProxy)
+  const toolDisposers = [ctx.tools.register({
     name: 'pangea_assets_list',
     description: '只读列出 PANGEA 已导入资产及其结构化/审核状态。',
     parameters: {
@@ -165,13 +197,30 @@ export async function apply(ctx) {
       schema: { type: 'object', additionalProperties: true },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
-  })
-  const disposeStatus = ctx.on?.('agent/status', ({ agent, status }) => runtime.handleAgentStatus(agent, status)) ?? (() => {})
-  const disposeError = ctx.on?.('agent/error', ({ agent, error }) => runtime.handleAgentError(agent, error)) ?? (() => {})
+  }), ctx.tools.register({
+    name: 'pangea_methodology_candidate_submit',
+    description: '仅供 Desktop 启动的方法论候选会话提交非约束候选；PANGEA 会校验候选 schema 和已批准历史缺陷来源，并把结果写入正式方法论注册表。',
+    parameters: METHODOLOGY_SUBMISSION_PARAMETERS,
+    execute: (args, exec) => runtime.methodologies.submit(args, exec),
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    },
+  })]
+  const disposeStatus = ctx.on?.('agent/status', ({ agent, status }) => {
+    runtime.handleAgentStatus(agent, status)
+    runtime.methodologies.handleAgentStatus(agent, status)
+  }) ?? (() => {})
+  const disposeError = ctx.on?.('agent/error', ({ agent, error }) => {
+    runtime.handleAgentError(agent, error)
+    runtime.methodologies.handleAgentError(agent, error)
+  }) ?? (() => {})
   const disposeRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => routeHandler(req, res, runtime) })
   ctx.effect?.(() => () => {
-    disposeRoute(); disposeError(); disposeStatus(); disposeTool()
-  }, 'dsh-pangea-asset-catalog: PANGEA asset API and extraction sessions')
+    disposeRoute(); disposeError(); disposeStatus()
+    for (const dispose of toolDisposers) dispose()
+  }, 'dsh-pangea-asset-catalog: PANGEA asset and methodology API sessions')
 }
 
 export { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
+export { METHODOLOGY_SUBMISSION_PARAMETERS, MethodologyCandidateRuntime } from './methodology-runtime.js'

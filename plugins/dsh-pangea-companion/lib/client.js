@@ -66,8 +66,9 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestWorkbench({ cwd, cursor = 0, limit = 20, signal, fetcher = fetch }) {
+    async function requestWorkbench({ cwd, runId, cursor = 0, limit = 20, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd, cursor: String(cursor), limit: String(limit) })
+      if (runId) query.set('run_id', runId)
       const response = await fetcher(`${WORKBENCH_API_PATH}?${query}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
@@ -469,7 +470,7 @@ window.__ModuleLoader__.load({
         workbenchRequestRef.current.controller = controller
         setWorkbenchLoading(true)
         try {
-          const body = await requestWorkbench({ cwd, cursor: runCursor, limit: 20, signal: controller.signal })
+          const body = await requestWorkbench({ cwd, runId: selectedRun ?? snapshot?.current?.run_id, cursor: runCursor, limit: 20, signal: controller.signal })
           if (sequence !== workbenchRequestRef.current.sequence) return
           setWorkbench(body)
           setWorkbenchError(undefined)
@@ -480,7 +481,7 @@ window.__ModuleLoader__.load({
         } finally {
           if (sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
         }
-      }, [cwd, pageMode, runCursor])
+      }, [cwd, pageMode, runCursor, selectedRun, snapshot?.current?.run_id])
 
       const loadEnvironments = React.useCallback(async () => {
         try {
@@ -546,6 +547,11 @@ window.__ModuleLoader__.load({
       const evidence = details.evidence ?? []
       const businessFlows = details.business_flows ?? []
       const workflow = current?.workflow ?? { units: [], actions: [], error_history: [], quality_checks: [], unresolved: [] }
+      const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
+      const methodologyDetailError = workbench?.run_detail?.run_id === current?.run_id && workbench?.run_detail?.status === 'error'
+        ? workbench.run_detail.error : ''
+      const methodologyManifests = methodologyDetailAvailable ? workbench.run.methodologies : []
+      const methodologiesByUnit = new Map(methodologyManifests.map(manifest => [manifest.unit_id, Array.isArray(manifest.items) ? manifest.items : []]))
       const riskEntries = risks.map((item, index) => [hasText(item.risk_id) ? item.risk_id : `__risk__:${index}`, item])
       const caseEntries = testCases.map((item, index) => [hasText(item.test_case_id) ? item.test_case_id : `__case__:${index}`, item])
       const riskById = new Map(riskEntries)
@@ -1004,6 +1010,33 @@ window.__ModuleLoader__.load({
         if (!current) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '选择一个 Run 后查看流程。'))
         const roleLabel = { planning: '规划', analysis: '分析', review: '复核', closure: '定向补齐', reporting: '报告' }
         const statusLabel = { pending: '等待', dispatched: '运行中', settled: '待校验', accepted: '已接收', failed: '失败' }
+        const methodologyKind = { general: '通用', specialized: '专项', task: '任务', user: '用户方法论' }
+        const renderMethodologies = unitId => {
+          if (methodologyDetailError) {
+            return h('div', { style: { ...styles.error, marginTop: 8 } }, `无法读取 PANGEA 方法论清单：${methodologyDetailError}`)
+          }
+          if (!methodologyDetailAvailable) {
+            return h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, '正在读取 PANGEA 返回的方法论清单。')
+          }
+          const items = methodologiesByUnit.get(unitId) ?? []
+          if (items.length === 0) {
+            return h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, 'PANGEA 尚未返回该单元已冻结的方法论。')
+          }
+          return h('div', { style: { marginTop: 10 } },
+            h('div', { style: styles.label }, `实际加载方法论（${items.length}）`),
+            items.map(item => h('div', { key: `${unitId}:${item.methodology_id}:${item.content_sha256}`, style: styles.compactCard },
+              h('div', { style: styles.row },
+                h('div', { style: styles.itemTitle }, text(item.title, item.methodology_id)),
+                h('span', { style: styles.badge }, methodologyKind[item.selection_kind] ?? item.selection_kind ?? '—')),
+              h('div', { style: styles.itemMeta }, `ID：${text(item.methodology_id, '—')}`),
+              h('div', { style: { ...styles.itemMeta, overflowWrap: 'anywhere' } }, `SHA-256：${text(item.content_sha256, '—')}`),
+              h('div', { style: styles.itemMeta }, `来源基线：${text(item.source_baseline, '—')}`),
+              h('div', { style: styles.itemMeta }, `选择依据：${text(item.selection_reason, '—')}`),
+              Array.isArray(item.source_item_ids) && item.source_item_ids.length
+                ? h('div', { style: { ...styles.itemMeta, overflowWrap: 'anywhere' } }, `来源条目：${item.source_item_ids.join('、')}`) : null,
+              hasText(item.path) ? h('div', { style: { ...styles.itemMeta, overflowWrap: 'anywhere' } }, `加载路径：${item.path}`) : null,
+              hasText(item.source_catalog_path) ? h('div', { style: { ...styles.itemMeta, overflowWrap: 'anywhere' } }, `来源目录：${item.source_catalog_path}`) : null)))
+        }
         return h(React.Fragment, null,
           h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Action 生命周期'), h('span', { style: styles.badge }, `${workflow.actions.length} 个 action`)),
@@ -1017,7 +1050,8 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.itemMeta }, `源码：${(unit.source_scope ?? []).join('、') || '—'}`),
             h('div', { style: styles.itemMeta }, `上下文：${(unit.context_scope ?? []).join('、') || '—'}`),
             unit.rationale ? h('div', { style: { ...styles.text, marginTop: 8 } }, unit.rationale) : null,
-            unit.summary ? h('div', { style: { ...styles.flowStep, ...styles.text } }, unit.summary) : null)) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '规划尚未产生分析单元。')),
+            unit.summary ? h('div', { style: { ...styles.flowStep, ...styles.text } }, unit.summary) : null,
+            renderMethodologies(unit.unit_id))) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '规划尚未产生分析单元。')),
           workflow.quality_checks?.length ? stringList('质量门禁', workflow.quality_checks) : null,
           workflow.unresolved?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '未解决事项'), h('pre', { style: styles.text }, JSON.stringify(workflow.unresolved, null, 2))) : null,
           workflow.error_history?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '错误历史'), h('pre', { style: styles.text }, JSON.stringify(workflow.error_history, null, 2))) : null)

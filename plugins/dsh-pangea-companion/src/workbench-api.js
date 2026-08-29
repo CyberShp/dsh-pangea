@@ -53,7 +53,7 @@ export function normalizeRunInput(value, capabilities) {
   }
 }
 
-export async function workbenchSnapshot({ cwd, dataRoot, cursor = 0, limit = DEFAULT_PAGE_SIZE, runner = runPangea }) {
+export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limit = DEFAULT_PAGE_SIZE, runner = runPangea }) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
   const pageCursor = boundedInteger(cursor, 0, 0, Number.MAX_SAFE_INTEGER)
@@ -67,12 +67,28 @@ export async function workbenchSnapshot({ cwd, dataRoot, cursor = 0, limit = DEF
       cwd: root,
       args: ['runs', 'list', '--data-root', resolvedDataRoot, '--cursor', String(pageCursor), '--limit', String(pageLimit)],
     })
+    const requestedRunId = typeof runId === 'string' ? runId.trim() : ''
+    let run = null
+    let runDetail = null
+    if (requestedRunId) {
+      try {
+        run = await runner({
+          cwd: root,
+          args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', requestedRunId],
+        })
+        runDetail = { run_id: requestedRunId, status: 'ok', error: null }
+      } catch (error) {
+        runDetail = { run_id: requestedRunId, status: 'error', error: error instanceof Error ? error.message : String(error) }
+      }
+    }
     return {
       status: 'ok',
       data_root: resolvedDataRoot,
       compatibility: { compatible: true, api_version: '1.0' },
       capabilities,
       runs,
+      run,
+      run_detail: runDetail,
       pagination: { cursor: pageCursor, limit: pageLimit },
     }
   } catch (error) {
@@ -86,6 +102,8 @@ export async function workbenchSnapshot({ cwd, dataRoot, cursor = 0, limit = DEF
       },
       capabilities: null,
       runs: { items: [], next_cursor: null, total: 0 },
+      run: null,
+      run_detail: null,
       pagination: { cursor: pageCursor, limit: pageLimit },
     }
   }

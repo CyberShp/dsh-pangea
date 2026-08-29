@@ -205,11 +205,13 @@ async function workbenchRouteHandler(req, res, api) {
   const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
   const dataRoot = url.searchParams.get('data_root') ?? undefined
+  const runId = url.searchParams.get('run_id') ?? undefined
   try {
     if (req.method === 'GET') {
       return json(res, 200, await workbenchSnapshot({
         cwd,
         dataRoot,
+        runId,
         cursor: url.searchParams.get('cursor') ?? 0,
         limit: url.searchParams.get('limit') ?? 20,
       }))

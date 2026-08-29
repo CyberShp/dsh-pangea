@@ -23,6 +23,7 @@ window.__ModuleLoader__.load({
       ['available', '可用于分析'], ['no_items', '无结构化条目'], ['rejected', '已拒绝'],
       ['failed', '失败'], ['archived', '已归档'],
     ]
+    const METHODOLOGY_STATUS = { candidate: '待启用', enabled: '已启用', disabled: '已停用' }
 
     function listSearch({ cwd, page = 1, pageSize = 20, type = '', status = '', query = '', assetId }) {
       return new URLSearchParams({
@@ -41,6 +42,13 @@ window.__ModuleLoader__.load({
 
     async function requestAssetDetail({ cwd, assetId, signal, fetcher = fetch }) {
       const response = await fetcher(`${API_PATH}?${listSearch({ cwd, assetId })}`, { cache: 'no-store', signal })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
+    async function requestMethodologyDetail({ cwd, methodologyId, signal, fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd })}&methodology_id=${encodeURIComponent(methodologyId)}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -93,6 +101,9 @@ window.__ModuleLoader__.load({
       pre: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflow: 'auto', fontSize: 10, lineHeight: 1.5 },
       resultGrid: { display: 'grid', gap: 7 },
       resultItem: { borderLeft: '2px solid var(--dsw-alias-state-business-primary, #4d9ad6)', paddingLeft: 8 },
+      methodologyGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 9, marginTop: 10 },
+      methodologyCard: { border: '1px solid var(--dsw-alias-border-l2, #444)', borderRadius: 9, padding: 12, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
+      sourceList: { margin: '7px 0 0', paddingLeft: 17, fontSize: 10, lineHeight: 1.55 },
     }
 
     function structuredItems(result) {
@@ -137,6 +148,8 @@ window.__ModuleLoader__.load({
       const [importType, setImportType] = React.useState('requirement')
       const [importTitle, setImportTitle] = React.useState('')
       const [selectedAssetIds, setSelectedAssetIds] = React.useState([])
+      const [expandedMethodology, setExpandedMethodology] = React.useState('')
+      const [methodologyDetails, setMethodologyDetails] = React.useState({})
 
       const load = React.useCallback(async signal => {
         if (!cwd) return
@@ -155,7 +168,10 @@ window.__ModuleLoader__.load({
         return () => controller.abort()
       }, [visible, cwd, load])
 
-      const active = Boolean(state?.assets?.some(asset => asset.status === 'extracting' || ['queued', 'running', 'finalizing'].includes(asset.extraction_job?.status)))
+      const active = Boolean(
+        state?.assets?.some(asset => asset.status === 'extracting' || ['queued', 'running', 'finalizing'].includes(asset.extraction_job?.status))
+        || ['queued', 'running'].includes(state?.methodologies?.generation_job?.status)
+      )
       React.useEffect(() => {
         if (!active || visible === false) return undefined
         const timer = setInterval(() => { void load() }, 1500)
@@ -168,7 +184,17 @@ window.__ModuleLoader__.load({
           const value = await requestAction({ cwd, action, payload, page, pageSize, type, status, query })
           setState(value)
           if (action === 'archive' && payload.asset_id) setSelectedAssetIds(values => values.filter(id => id !== payload.asset_id))
-          setNotice(action === 'import' ? '资产已导入。' : action === 'extract' ? '结构化提取已启动。' : action === 'review' ? '审核结果已保存。' : '资产已归档。')
+          if (action === 'generate_methodology' && value.methodologies?.generation_job?.session_id) {
+            setNotice('方法论候选会话已启动。候选提交后会进入待启用状态。')
+            await openAnalysisSession(ctx.sessions, value.methodologies.generation_job.session_id)
+          } else {
+            setNotice(action === 'import' ? '资产已导入。'
+              : action === 'extract' ? '结构化提取已启动。'
+                : action === 'review' ? '审核结果已保存。'
+                  : action === 'enable_methodology' ? '方法论已启用，后续新 Run 可以冻结引用。'
+                    : action === 'disable_methodology' ? '方法论已停用，后续新 Run 不再引用。'
+                      : '资产已归档。')
+          }
         } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
         finally { setBusy(false) }
       }
@@ -193,8 +219,23 @@ window.__ModuleLoader__.load({
         } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
       }
 
+      async function toggleMethodology(methodologyId) {
+        if (expandedMethodology === methodologyId) { setExpandedMethodology(''); return }
+        setExpandedMethodology(methodologyId)
+        if (methodologyDetails[methodologyId]) return
+        try {
+          const value = await requestMethodologyDetail({ cwd, methodologyId })
+          setMethodologyDetails(current => ({ ...current, [methodologyId]: value.methodology }))
+        } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
+      }
+
       const pagination = state?.pagination ?? { page, page_size: pageSize, total: 0, total_pages: 1 }
       const assets = state?.assets ?? []
+      const methodologies = state?.methodologies?.items ?? []
+      const selectedHistoricalIds = selectedAssetIds.filter(assetId => {
+        const asset = assets.find(item => item.asset_id === assetId)
+        return asset?.asset_type === 'historical_defect' && asset?.status === 'available'
+      })
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 资产管理' },
         h('div', { style: styles.header }, h('div', { style: styles.title }, '资产管理'), h('div', { style: styles.meta }, cwd)),
         h('div', { style: styles.content },
@@ -209,8 +250,43 @@ window.__ModuleLoader__.load({
           notice ? h('div', { style: styles.card }, notice) : null,
           error ? h('div', { style: { ...styles.card, ...styles.error }, role: 'alert' }, error) : null,
           selectedAssetIds.length ? h('div', { style: { ...styles.card, ...styles.notice, ...styles.row } },
-            h('div', null, h('div', { style: styles.itemTitle }, `已选择 ${selectedAssetIds.length} 个可用资产`), h('div', { style: styles.meta }, '新建分析时会作为结构化输入提交。')),
-            h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, onClick: createRunFromSelection }, '用于新分析')) : null,
+            h('div', null,
+              h('div', { style: styles.itemTitle }, `已选择 ${selectedAssetIds.length} 个可用资产`),
+              h('div', { style: styles.meta }, selectedHistoricalIds.length
+                ? `其中 ${selectedHistoricalIds.length} 个已批准历史缺陷可交给语义 Agent 生成方法论候选。`
+                : '新建分析时会作为结构化输入提交。')),
+            h('div', { style: styles.wrap },
+              selectedHistoricalIds.length ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('generate_methodology', { asset_ids: selectedHistoricalIds }) } }, '生成方法论候选') : null,
+              h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, onClick: createRunFromSelection }, '用于新分析'))) : null,
+          h('section', { style: { ...styles.card, ...styles.notice } },
+            h('div', { style: styles.row },
+              h('div', null,
+                h('div', { style: styles.title }, '用户方法论'),
+                h('div', { style: styles.meta }, '候选由已批准历史缺陷生成。只有用户启用的方法论才会进入后续新 Run；内容更新后状态会自动回到待启用。')),
+              h('span', { style: styles.chip }, `${methodologies.length} 个`)),
+            state?.methodologies?.candidate_schema_path ? h('div', { style: styles.meta }, `候选契约：${state.methodologies.candidate_schema_path}`) : null,
+            state?.methodologies?.generation_job ? h('div', { style: { ...styles.meta, marginTop: 8 } },
+              `语义会话：${state.methodologies.generation_job.status}`,
+              state.methodologies.generation_job.session_id ? h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: () => { void openAnalysisSession(ctx.sessions, state.methodologies.generation_job.session_id) } }, '打开会话') : null) : null,
+            methodologies.length ? h('div', { style: styles.methodologyGrid }, methodologies.map(methodology => {
+              const detail = methodologyDetails[methodology.methodology_id] ?? methodology
+              const expanded = expandedMethodology === methodology.methodology_id
+              return h('article', { key: methodology.methodology_id, style: styles.methodologyCard },
+                h('div', { style: styles.row },
+                  h('div', { style: { minWidth: 0 } },
+                    h('div', { style: styles.itemTitle }, methodology.title),
+                    h('div', { style: styles.meta }, methodology.methodology_id)),
+                  h('span', { style: { ...styles.chip, color: methodology.status === 'candidate' ? '#cf0a2c' : undefined } }, METHODOLOGY_STATUS[methodology.status] ?? methodology.status)),
+                methodology.status === 'candidate' ? h('div', { style: styles.meta }, '需要用户确认启用；如果这是内容更新产生的状态，旧 Run 的冻结版本不受影响。') : null,
+                h('div', { style: { ...styles.wrap, marginTop: 9 } },
+                  methodology.status !== 'enabled' ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('enable_methodology', { methodology_id: methodology.methodology_id }) } }, '启用') : null,
+                  methodology.status !== 'disabled' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('disable_methodology', { methodology_id: methodology.methodology_id }) } }, '停用') : null,
+                  h('button', { type: 'button', style: styles.button, onClick: () => { void toggleMethodology(methodology.methodology_id) } }, expanded ? '收起详情' : '查看详情')),
+                expanded ? h('div', { style: { marginTop: 10, paddingTop: 9, borderTop: '1px solid var(--dsw-alias-border-l2, #444)' } },
+                  h('div', { style: styles.itemTitle }, '适用条件'), h('ul', { style: styles.sourceList }, (detail.applicable_when ?? []).map(item => h('li', { key: item }, item))),
+                  h('div', { style: styles.itemTitle }, '检查项'), h('ol', { style: styles.sourceList }, (detail.checks ?? []).map(item => h('li', { key: item }, item))),
+                  h('div', { style: styles.itemTitle }, '来源条目'), h('ul', { style: styles.sourceList }, (detail.source_item_ids ?? []).map(item => h('li', { key: item }, item)))) : null)
+            })) : h('div', { style: { ...styles.meta, marginTop: 10 } }, '暂无候选。请先选择已批准历史缺陷，再启动语义生成会话。')),
           h('div', { style: { ...styles.wrap, marginBottom: 10 } },
             TYPES.map(([value, label]) => h('button', { key: value || 'all', type: 'button', style: { ...styles.button, ...(type === value ? styles.active : {}) }, onClick: () => { setPage(1); setType(value) } }, label)),
             h('select', { 'aria-label': '资产状态', style: styles.input, value: status, onChange: event => { setPage(1); setStatus(event.target.value) } }, STATUS_FILTERS.map(([value, label]) => h('option', { key: value || 'all-status', value }, label))),
@@ -268,6 +344,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     exports.requestState = requestState
     exports.requestAssetDetail = requestAssetDetail
+    exports.requestMethodologyDetail = requestMethodologyDetail
     exports.requestAction = requestAction
     exports.openAnalysisSession = openAnalysisSession
     exports.apply = apply
