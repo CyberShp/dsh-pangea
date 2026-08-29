@@ -283,6 +283,30 @@ function commandReferencesPath(command, cwd, target) {
   return normalized.includes(absolute) || (local !== '' && normalized.includes(local))
 }
 
+function shellLiteralPattern(value) {
+  const escaped = escapedPattern(value)
+  const alternatives = [`"${escaped}"`, `'${escaped}'`]
+  if (!/\s/.test(value)) alternatives.push(escaped)
+  return `(?:${alternatives.join('|')})`
+}
+
+function isReadOnlyResultCheck(command, taskPath, cwd) {
+  const absoluteTaskPath = resolve(cwd, taskPath)
+  const taskPatterns = [absoluteTaskPath, relative(cwd, absoluteTaskPath)]
+    .filter((value, index, values) => value !== '' && values.indexOf(value) === index)
+    .map(shellLiteralPattern)
+    .join('|')
+  const cwdPattern = shellLiteralPattern(cwd)
+  const pattern = new RegExp([
+    '^\\s*',
+    `(?:cd\\s+${cwdPattern}\\s*&&\\s*)?`,
+    'python(?:3(?:\\.\\d+)?)?\\s+-m\\s+pangea_agent\\.cli\\.main\\s+',
+    `check-result-json\\s+--task(?:=|\\s+)(?:${taskPatterns})`,
+    '\\s*(?:2>&1\\s*)?(?:\\|\\|\\s*true\\s*)?$',
+  ].join(''))
+  return pattern.test(command)
+}
+
 function childArtifactMutationBlock(taskPath, exec) {
   const cwd = workspaceCwd(exec)
   if (!cwd) return undefined
@@ -297,6 +321,7 @@ function childArtifactMutationBlock(taskPath, exec) {
   }
   const command = commandOf(exec)
   if (!command) return undefined
+  if (isReadOnlyResultCheck(command, taskPath, cwd)) return undefined
   const canMutate = /(?:^|\s)(?:python(?:3)?|perl|ruby|node|tee|cp|mv|rm)(?:\s|$)|sed\s+-i|(?:^|[^>])>{1,2}(?:[^>]|$)|Set-Content|Out-File/i.test(command)
   if (canMutate && policy.protectedPaths
     .some(target => commandReferencesPath(command, cwd, target))) {
