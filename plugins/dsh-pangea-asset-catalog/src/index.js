@@ -66,10 +66,11 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   if (options.type) args.push('--type', options.type)
   if (options.status) args.push('--status', options.status)
   if (options.query) args.push('--query', options.query)
-  const [result, methodologies, capabilities] = await Promise.all([
+  const [result, methodologies, capabilities, methodologyJob] = await Promise.all([
     runPangea({ cwd, args }),
     runPangea({ cwd, args: ['methodologies', 'list', '--data-root', resolvedDataRoot, '--limit', '200'] }),
     runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] }),
+    runtime.methodologies.job(cwd, resolvedDataRoot),
   ])
   const totalPages = Math.max(1, Math.ceil(result.total / options.pageSize))
   return {
@@ -82,7 +83,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
     methodologies: {
       ...methodologies,
       candidate_schema_path: capabilities.methodologies?.candidate_schema_path ?? capabilities.candidate_schema_path ?? null,
-      generation_job: runtime.methodologies.job(resolvedDataRoot),
+      generation_job: methodologyJob,
     },
     pagination: {
       page: Math.min(options.page, totalPages), page_size: options.pageSize,

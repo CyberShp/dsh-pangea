@@ -24,6 +24,12 @@ function jobView(job) {
   }
 }
 
+function sameAssets(left, right) {
+  const a = [...(left ?? [])].sort()
+  const b = [...(right ?? [])].sort()
+  return a.length === b.length && a.every((value, index) => value === b[index])
+}
+
 export class MethodologyCandidateRuntime {
   constructor(api, runner = runPangea) {
     this.api = api
@@ -32,8 +38,25 @@ export class MethodologyCandidateRuntime {
     this.latest = new Map()
   }
 
-  job(dataRoot) {
-    return jobView(this.latest.get(path.resolve(dataRoot)))
+  async derivations(cwd, dataRoot) {
+    const result = await this.runner({
+      cwd,
+      args: ['methodologies', 'derivations', 'list', '--data-root', dataRoot, '--limit', '50'],
+    })
+    return result.items ?? []
+  }
+
+  async job(cwd, dataRoot) {
+    const active = this.latest.get(path.resolve(dataRoot))
+    if (active && !['completed', 'failed'].includes(active.status)) return jobView(active)
+    const latest = (await this.derivations(cwd, dataRoot))[0]
+    return latest ? {
+      status: latest.status,
+      started_at: latest.created_at,
+      completed_at: latest.completed_at,
+      source_asset_ids: latest.source_asset_ids,
+      task_path: latest.task_path,
+    } : null
   }
 
   async createSession(cwd, title) {
@@ -54,9 +77,36 @@ export class MethodologyCandidateRuntime {
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
     const uniqueAssetIds = [...new Set((assetIds ?? []).filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))]
     if (uniqueAssetIds.length === 0) throw new Error('至少选择一个已批准历史缺陷资产')
-    const deriveArgs = ['methodologies', 'derive', '--data-root', resolvedDataRoot]
-    for (const assetId of uniqueAssetIds) deriveArgs.push('--asset-id', assetId)
-    const prepared = await this.runner({ cwd, args: deriveArgs })
+    const active = this.latest.get(path.resolve(resolvedDataRoot))
+    if (active && !['completed', 'failed'].includes(active.status) && sameAssets(active.assetIds, uniqueAssetIds)) {
+      return { session_id: active.sessionId, action: active.action, reused: true }
+    }
+    const recoverable = (await this.derivations(cwd, resolvedDataRoot)).find(item =>
+      ['pending', 'ready'].includes(item.status) && sameAssets(item.source_asset_ids, uniqueAssetIds))
+    if (recoverable?.status === 'ready') {
+      await this.runner({
+        cwd,
+        args: ['methodologies', 'complete-derivation', '--task', recoverable.task_path],
+      })
+      return { completed: true, task_path: recoverable.task_path }
+    }
+    let prepared
+    if (recoverable) {
+      prepared = {
+        action: {
+          action_id: recoverable.action_id,
+          action: 'dispatch_agent',
+          role: 'methodology',
+          stage: 'candidate_derivation',
+          task_path: recoverable.task_path,
+          task_id: recoverable.task_id,
+        },
+      }
+    } else {
+      const deriveArgs = ['methodologies', 'derive', '--data-root', resolvedDataRoot]
+      for (const assetId of uniqueAssetIds) deriveArgs.push('--asset-id', assetId)
+      prepared = await this.runner({ cwd, args: deriveArgs })
+    }
     if (!prepared?.action?.task_path) throw new Error('PANGEA 未返回方法论提炼 task_path')
     const root = workspaceRoot(cwd)
     const workerPath = path.join(root, '.agents', 'pangea', 'methodology-worker.md')
