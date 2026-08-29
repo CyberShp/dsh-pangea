@@ -12,6 +12,11 @@ window.__ModuleLoader__.load({
     const inject = ['betterSidebar']
     const PAGE_PREFIX = 'dsh-pangea:'
     const PRODUCT_STYLE_ID = 'dsh-pangea-product-shell'
+    const DEFAULT_PRODUCT_STATE = Object.freeze({
+      systemState: Object.freeze({ state: 'checking', label: '系统检查中' }),
+      assistantContext: null,
+    })
+    const productStateByWorkspace = new Map()
     const LEGACY_TAB_TYPES = new Set([
       'dsh-pangea-companion:pangea',
       'dsh-pangea-asset-catalog:assets',
@@ -310,17 +315,30 @@ window.__ModuleLoader__.load({
           lineIcon([h('path', { key: 'a', d: 'm8 10 4 4 4-4' })], 18, 1.7)))
     }
 
-    function ProductShell({ service, betterSidebar, page, scope, children }) {
+    function ProductShell({ service, betterSidebar, page, scope, tab, visible, children }) {
       const snapshot = React.useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
-      const [systemState, setSystemState] = React.useState({ state: 'checking', label: '系统检查中' })
-      const [assistantContext, setAssistantContext] = React.useState(null)
+      const sidebarSnapshot = React.useSyncExternalStore(
+        betterSidebar.subscribeState,
+        betterSidebar.getSnapshot,
+        betterSidebar.getSnapshot,
+      )
+      const productStateKey = scope?.cwd ?? scope?.sessionId ?? '__default__'
+      const initialProductState = productStateByWorkspace.get(productStateKey) ?? DEFAULT_PRODUCT_STATE
+      const [systemState, setSystemState] = React.useState(initialProductState.systemState)
+      const [assistantContext, setAssistantContext] = React.useState(initialProductState.assistantContext)
+      const sidebarState = sidebarSnapshot?.state
+      const productVisible = visible
+        || tabIsActive(sidebarState?.splits, tab?.id)
+        || tabIsActive(sidebarState?.bottomSplits, tab?.id)
       React.useEffect(() => {
+        if (!productVisible) return undefined
         document.body.setAttribute('data-pangea-product-shell', page.id)
         return () => {
           if (document.body.getAttribute('data-pangea-product-shell') === page.id) document.body.removeAttribute('data-pangea-product-shell')
         }
-      }, [page.id])
+      }, [page.id, productVisible])
       React.useLayoutEffect(() => {
+        if (!productVisible) return undefined
         const body = document.body
         const forceLightTheme = () => {
           if (body.hasAttribute('data-ds-dark-theme')) body.removeAttribute('data-ds-dark-theme')
@@ -330,17 +348,36 @@ window.__ModuleLoader__.load({
         const observer = new MutationObserver(forceLightTheme)
         observer.observe(body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
         return () => observer.disconnect()
-      }, [])
+      }, [productVisible])
       React.useEffect(() => {
-        const onSystemState = event => setSystemState(event.detail ?? { state: 'checking', label: '系统检查中' })
-        const onRunContext = event => setAssistantContext(event.detail ?? null)
+        if (!productVisible) return undefined
+        const cached = productStateByWorkspace.get(productStateKey)
+        if (cached) {
+          setSystemState(cached.systemState)
+          setAssistantContext(cached.assistantContext)
+        }
+        const remember = patch => {
+          const next = { ...(productStateByWorkspace.get(productStateKey) ?? DEFAULT_PRODUCT_STATE), ...patch }
+          productStateByWorkspace.set(productStateKey, next)
+          return next
+        }
+        const onSystemState = event => {
+          const next = event.detail ?? DEFAULT_PRODUCT_STATE.systemState
+          remember({ systemState: next })
+          setSystemState(next)
+        }
+        const onRunContext = event => {
+          const next = event.detail ?? null
+          remember({ assistantContext: next })
+          setAssistantContext(next)
+        }
         window.addEventListener('pangea:system-state', onSystemState)
         window.addEventListener('pangea:run-context', onRunContext)
         return () => {
           window.removeEventListener('pangea:system-state', onSystemState)
           window.removeEventListener('pangea:run-context', onRunContext)
         }
-      }, [])
+      }, [productStateKey, productVisible])
       const openUtility = (type, title) => betterSidebar.openTab({ type, title }, scope)
       const pageMeta = {
         workbench: { label: '工作台', icon: 'workbench' },
@@ -362,13 +399,19 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', 'data-pangea-tool-button': true, onClick: () => openUtility('editor', '文件') }, utilityIcon('file'), h('span', { 'data-pangea-nav-label': true }, '文件')),
             h('button', { type: 'button', 'data-pangea-tool-button': true, onClick: () => openUtility('terminal', '终端') }, utilityIcon('terminal'), h('span', { 'data-pangea-nav-label': true }, '终端')),
             h('button', { type: 'button', 'data-pangea-tool-button': true, onClick: () => openUtility('browser', '浏览器') }, utilityIcon('browser'), h('span', { 'data-pangea-nav-label': true }, '浏览器')))),
-        h('main', { 'data-pangea-page': page.id }, children))
+        h('main', { 'data-pangea-page': page.id }, React.cloneElement(children, { visible: productVisible })))
     }
 
     function allTabs(tree) {
       if (!tree) return []
       if (Array.isArray(tree.tabs)) return tree.tabs
       return Array.isArray(tree.children) ? tree.children.flatMap(allTabs) : []
+    }
+
+    function tabIsActive(tree, tabId) {
+      if (!tree || !tabId) return false
+      if (Array.isArray(tree.tabs)) return tree.active === tabId
+      return Array.isArray(tree.children) && tree.children.some(child => tabIsActive(child, tabId))
     }
 
     function nativePageId(pageId) {
@@ -481,7 +524,7 @@ window.__ModuleLoader__.load({
           available: descriptor.available,
           badge: descriptor.badge,
           component: props => h(ProductShell, {
-            service: publicService, betterSidebar, page, scope: props.scope,
+            service: publicService, betterSidebar, page, scope: props.scope, tab: props.tab, visible: props.visible,
           }, h(descriptor.component, props)),
         })
         nativeDisposers.set(id, disposeNative)

@@ -1598,17 +1598,17 @@ window.__ModuleLoader__.load({
       ctx.effect(() => pangea.registerPage({
         id: 'workbench', title: () => '工作台', icon, order: 0, default: true,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, visible: true, ctx, initialScreen: 'home', pageMode: 'home' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'home', pageMode: 'home' }),
       }), 'dsh-pangea-companion: workbench page')
       ctx.effect(() => pangea.registerPage({
         id: 'analysis', title: () => 'PANGEA 分析', icon, order: 10,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, visible: true, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
       ctx.effect(() => pangea.registerPage({
         id: 'execution', title: () => '环境与执行', icon, order: 20,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, visible: true, ctx, initialScreen: 'execution', pageMode: 'execution' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'execution', pageMode: 'execution' }),
       }), 'dsh-pangea-companion: execution page')
     }
 
