@@ -109,12 +109,12 @@ window.__ModuleLoader__.load({
     }
 
     const styles = {
-      root: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: 'var(--dsw-alias-label-primary, inherit)', background: 'var(--dsw-alias-bg-base, transparent)' },
-      sticky: { position: 'sticky', top: 0, zIndex: 5, padding: '15px 14px 0', background: 'var(--dsw-alias-bg-layer-1, #111)', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))' },
+      root: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: 'var(--dsw-alias-label-primary, #17191d)', background: 'var(--dsw-alias-bg-base, #fff)', fontFamily: '"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif', WebkitFontSmoothing: 'antialiased' },
+      sticky: { position: 'sticky', top: 0, zIndex: 5, padding: '17px 22px 0', background: 'var(--dsw-alias-bg-layer-1, #fff)', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))' },
       header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
       headerLeft: { minWidth: 0, display: 'flex', alignItems: 'center', gap: 7 },
-      title: { fontSize: 16, fontWeight: 760, letterSpacing: '-0.01em', lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-      subline: { marginTop: 4, color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      title: { fontSize: 17, fontWeight: 720, letterSpacing: '-0.012em', lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      subline: { marginTop: 5, color: 'var(--dsw-alias-label-tertiary, #7a818b)', fontSize: 11, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       backButton: { border: 0, background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', padding: '4px 2px', cursor: 'pointer', fontSize: 11, whiteSpace: 'nowrap' },
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 10 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '7px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 700 },
@@ -122,7 +122,8 @@ window.__ModuleLoader__.load({
       nav: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(72px, 1fr))', gap: 0, marginTop: 12, overflowX: 'auto' },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '9px 2px 8px', cursor: 'pointer', fontSize: 10 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
-      content: { padding: '14px 14px 22px' },
+      content: { padding: '20px 22px 30px' },
+      homeContent: { padding: '32px 36px 42px' },
       card: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 9, padding: 12, marginBottom: 11 },
       healthOk: { borderColor: 'var(--dsw-alias-state-success-secondary, #4fb8a8)', background: 'var(--dsw-alias-state-success-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
       healthError: { borderColor: 'var(--dsw-alias-state-error-secondary, #e66767)', background: 'var(--dsw-alias-interactive-bg-hover-danger, var(--dsw-alias-bg-layer-1, transparent))' },
@@ -209,30 +210,31 @@ window.__ModuleLoader__.load({
       compactCard: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 7, padding: 10, marginTop: 7 },
       scenarioIndex: { width: 24, flex: '0 0 24px', color: 'var(--dsw-alias-label-tertiary, #888)', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 9, paddingTop: 2 },
       technical: { border: '1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.32))', borderRadius: 8, padding: 10, marginBottom: 11, background: 'transparent' },
-      homeHero: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20, padding: '8px 4px 18px', marginBottom: 0 },
-      homeTitle: { fontSize: 30, fontWeight: 760, lineHeight: 1.15, letterSpacing: '-0.035em' },
-      homeLead: { maxWidth: 620, marginTop: 8, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 12, lineHeight: 1.65 },
-      metricGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(128px, 1fr))', gap: 14, marginBottom: 18 },
-      metricCard: { minHeight: 92, display: 'grid', gridTemplateColumns: '44px minmax(0, 1fr)', alignItems: 'center', columnGap: 13, border: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))', borderRadius: 10, padding: '14px 16px', background: 'var(--dsw-alias-bg-layer-1, #fff)', boxSizing: 'border-box' },
-      metricIcon: { width: 42, height: 42, display: 'grid', placeItems: 'center', borderRadius: 10, background: 'color-mix(in srgb, currentColor 9%, transparent)' },
-      metricLabel: { color: 'var(--dsw-alias-label-secondary, #555)', fontSize: 12, lineHeight: 1.35 },
-      metricValue: { marginTop: 2, fontSize: 25, fontWeight: 760, lineHeight: 1, fontVariantNumeric: 'tabular-nums' },
-      metricCaption: { gridColumn: '1 / -1', marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.09))', color: 'var(--dsw-alias-label-tertiary, #8a8f99)', fontSize: 9.5 },
-      homeSection: { border: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))', borderRadius: 10, background: 'var(--dsw-alias-bg-layer-1, #fff)', overflow: 'hidden' },
-      homeSectionHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 48, gap: 12, padding: '0 16px', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.1))' },
-      homeSectionTitle: { fontSize: 14, fontWeight: 740, letterSpacing: '-0.01em' },
-      homeTableHeader: { display: 'grid', gridTemplateColumns: 'minmax(210px, 1.5fr) minmax(110px, .7fr) minmax(140px, .8fr) 92px', gap: 14, padding: '9px 16px', color: 'var(--dsw-alias-label-tertiary, #8a8f99)', fontSize: 10, borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.08))' },
-      homeTableRow: { width: '100%', display: 'grid', gridTemplateColumns: 'minmax(210px, 1.5fr) minmax(110px, .7fr) minmax(140px, .8fr) 92px', alignItems: 'center', gap: 14, padding: '12px 16px', color: 'inherit', textAlign: 'left', border: 0, borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.08))', background: 'transparent', cursor: 'pointer', boxSizing: 'border-box' },
-      progressLine: { height: 6, borderRadius: 999, overflow: 'hidden', background: 'var(--dsw-alias-bg-layer-3, rgba(31,35,41,.09))' },
-      appGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(220px, 1fr))', gap: 12 },
-      appCard: { minHeight: 102, display: 'grid', gridTemplateColumns: '48px minmax(0, 1fr) 18px', alignItems: 'center', columnGap: 14, textAlign: 'left', color: 'inherit', border: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))', borderRadius: 10, padding: '14px 16px', background: 'var(--dsw-alias-bg-layer-1, #fff)', cursor: 'pointer', boxSizing: 'border-box' },
-      appMark: { width: 46, height: 46, display: 'grid', placeItems: 'center', borderRadius: 11, color: '#cf0a2c', background: 'color-mix(in srgb, #cf0a2c 10%, transparent)', fontSize: 15, fontWeight: 800 },
-      appTitle: { fontSize: 13, fontWeight: 760, lineHeight: 1.35 },
-      appCopy: { marginTop: 5, color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, lineHeight: 1.5 },
-      appArrow: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 20, lineHeight: 1 },
-      homeColumns: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, .78fr)', gap: 14, marginTop: 14 },
-      reportRow: { width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 0', color: 'inherit', border: 0, borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.08))', background: 'transparent', cursor: 'pointer', textAlign: 'left' },
-      redButton: { borderColor: '#cf0a2c', background: '#cf0a2c', color: '#fff' },
+      homeHero: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, padding: '4px 4px 26px', marginBottom: 0 },
+      homeTitle: { fontSize: 32, fontWeight: 720, lineHeight: 1.15, letterSpacing: '-0.045em', color: '#14161a' },
+      homeLead: { maxWidth: 650, marginTop: 9, color: '#747b85', fontSize: 13, lineHeight: 1.55 },
+      metricGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(128px, 1fr))', gap: 16, marginBottom: 18 },
+      metricCard: { position: 'relative', minHeight: 110, display: 'grid', gridTemplateColumns: '52px minmax(0, 1fr)', alignItems: 'center', columnGap: 16, border: '1px solid #dce1e6', borderRadius: 8, padding: '18px 20px', background: '#fff', boxShadow: '0 2px 8px rgba(20,29,40,.025)', boxSizing: 'border-box' },
+      metricIcon: { width: 48, height: 48, display: 'grid', placeItems: 'center', borderRadius: 11, background: 'color-mix(in srgb, currentColor 10%, white)' },
+      metricLabel: { color: '#3e444c', fontSize: 14, lineHeight: 1.3, fontWeight: 520 },
+      metricValue: { marginTop: 4, fontSize: 25, fontWeight: 700, lineHeight: 1, fontVariantNumeric: 'tabular-nums' },
+      metricAccent: { position: 'absolute', left: '50%', bottom: 0, width: 52, height: 3, borderRadius: '3px 3px 0 0', transform: 'translateX(-50%)' },
+      homeSection: { border: '1px solid #dce1e6', borderRadius: 8, background: '#fff', overflow: 'hidden', boxShadow: '0 2px 8px rgba(20,29,40,.02)' },
+      homeSectionHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 50, gap: 12, padding: '0 18px', borderBottom: '1px solid #e7eaee' },
+      homeSectionTitle: { fontSize: 16, fontWeight: 680, letterSpacing: '-0.015em', color: '#25282d' },
+      homeTableHeader: { display: 'grid', gridTemplateColumns: 'minmax(230px, 1.5fr) minmax(100px, .62fr) minmax(150px, .8fr) minmax(90px, .55fr) 128px 22px', alignItems: 'center', gap: 14, minHeight: 42, padding: '0 18px', color: '#747b85', fontSize: 12, fontWeight: 520, borderBottom: '1px solid #e7eaee', boxSizing: 'border-box' },
+      homeTableRow: { width: '100%', minHeight: 56, display: 'grid', gridTemplateColumns: 'minmax(230px, 1.5fr) minmax(100px, .62fr) minmax(150px, .8fr) minmax(90px, .55fr) 128px 22px', alignItems: 'center', gap: 14, padding: '0 18px', color: '#25282d', textAlign: 'left', border: 0, borderBottom: '1px solid #edf0f2', background: 'transparent', cursor: 'pointer', boxSizing: 'border-box' },
+      homeStatus: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', justifySelf: 'start', minHeight: 26, padding: '0 8px', border: '1px solid currentColor', borderRadius: 5, background: '#fff', fontSize: 12, fontWeight: 580, whiteSpace: 'nowrap' },
+      progressLine: { height: 7, borderRadius: 999, overflow: 'hidden', background: '#edf0f2' },
+      appGrid: { display: 'grid', gridTemplateColumns: '1fr', gap: 12 },
+      appCard: { minHeight: 102, display: 'grid', gridTemplateColumns: '54px minmax(0, 1fr) 20px', alignItems: 'center', columnGap: 16, textAlign: 'left', color: '#24272c', border: '1px solid #dfe3e8', borderRadius: 8, padding: '15px 18px', background: '#fff', cursor: 'pointer', boxSizing: 'border-box', boxShadow: '0 1px 3px rgba(20,29,40,.02)' },
+      appMark: { width: 52, height: 52, display: 'grid', placeItems: 'center', borderRadius: 11, color: '#c7000b', background: '#fff0f1', border: '1px solid #ffe0e2' },
+      appTitle: { fontSize: 15, fontWeight: 680, lineHeight: 1.35 },
+      appCopy: { marginTop: 5, color: '#747b85', fontSize: 12, lineHeight: 1.45 },
+      appArrow: { color: '#68707c', fontSize: 22, lineHeight: 1 },
+      homeColumns: { display: 'grid', gridTemplateColumns: 'minmax(0, 1.02fr) minmax(300px, .98fr)', gap: 16, marginTop: 16, minHeight: 330 },
+      reportRow: { width: '100%', minHeight: 47, display: 'grid', gridTemplateColumns: '22px minmax(0,1fr) 96px 18px', alignItems: 'center', gap: 10, padding: '0 2px', color: '#24272c', border: 0, borderBottom: '1px solid #edf0f2', background: 'transparent', cursor: 'pointer', textAlign: 'left' },
+      redButton: { minWidth: 118, minHeight: 42, border: '1px solid #c7000b', borderRadius: 6, padding: '0 22px', background: 'linear-gradient(135deg, #c7000b, #d90012)', color: '#fff', fontSize: 14, fontWeight: 650, boxShadow: '0 6px 14px rgba(199,0,11,.13)' },
     }
 
     function icon(size = 16) {
@@ -250,7 +252,19 @@ window.__ModuleLoader__.load({
         report: [h('path', { key: 'p', d: 'M7 3.5h7l3 3V20H7Z' }), h('path', { key: 'l', d: 'M14 3.5V7h3M10 11h4m-4 3h4' })],
       }
       return h('span', { style: { ...styles.metricIcon, color }, 'aria-hidden': true },
-        h('svg', { width: 25, height: 25, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round' }, paths[kind] ?? paths.report))
+        h('svg', { width: 29, height: 29, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' }, paths[kind] ?? paths.report))
+    }
+
+    function appGlyph(kind) {
+      const paths = kind === 'analysis'
+        ? [h('path', { key: 'a', d: 'M4 17.5 8.4 13l3.4 3 7.2-8.5' }), h('path', { key: 'b', d: 'M5 4h14v16H5Z' }), h('circle', { key: 'c', cx: 8.4, cy: 13, r: 1.1 })]
+        : [h('rect', { key: 'a', x: 3.5, y: 4, width: 12, height: 6.5, rx: 1.5 }), h('rect', { key: 'b', x: 3.5, y: 13.5, width: 9, height: 6.5, rx: 1.5 }), h('circle', { key: 'c', cx: 17.5, cy: 16.5, r: 3 }), h('path', { key: 'd', d: 'M17.5 12.2v1.3m0 6v1.3m4.3-4.3h-1.3m-6 0h-1.3' })]
+      return h('svg', { width: 31, height: 31, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, paths)
+    }
+
+    function reportGlyph() {
+      return h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: '#737b86', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
+        h('path', { d: 'M6 3.5h8l4 4V20H6Z' }), h('path', { d: 'M14 3.5V8h4M9 12h6m-6 3h6' }))
     }
 
     function text(value, fallback = '—') { return typeof value === 'string' && value.trim() !== '' ? value : fallback }
@@ -259,6 +273,12 @@ window.__ModuleLoader__.load({
     function formatTime(value) {
       if (!Number.isFinite(value)) return '时间未知'
       return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+    }
+    function formatDate(value) {
+      if (value === null || value === undefined || value === '') return '—'
+      const date = new Date(value)
+      if (Number.isNaN(date.getTime())) return '—'
+      return date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replaceAll('/', '-')
     }
     function durationLabel(start, end = Date.now()) {
       if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return ''
@@ -593,6 +613,25 @@ window.__ModuleLoader__.load({
       const evidence = details.evidence ?? []
       const businessFlows = details.business_flows ?? []
       const workflow = current?.workflow ?? { units: [], actions: [], error_history: [], quality_checks: [], unresolved: [] }
+      React.useEffect(() => {
+        if (!visible) return
+        const systemState = workbenchError || error || workbench?.compatibility?.compatible === false
+          ? { state: 'error', label: '系统异常' }
+          : health?.status === 'warning'
+            ? { state: 'warning', label: '需要关注' }
+            : workbench?.compatibility?.compatible === true
+              ? { state: 'ok', label: '系统正常' }
+              : { state: 'checking', label: '系统检查中' }
+        window.dispatchEvent(new CustomEvent('pangea:system-state', { detail: systemState }))
+        const contextTotal = current?.analysis?.total ?? 0
+        const contextCompleted = current?.analysis?.completed ?? 0
+        window.dispatchEvent(new CustomEvent('pangea:run-context', { detail: current ? {
+          runId: current.run_id,
+          title: current.target ?? current.run_id,
+          phase: PHASE[String(current.phase ?? '').toUpperCase()] ?? PHASE[current.phase] ?? current.phase,
+          percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
+        } : null }))
+      }, [current, error, health?.status, visible, workbench?.compatibility?.compatible, workbenchError])
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
       const methodologyDetailError = workbench?.run_detail?.run_id === current?.run_id && workbench?.run_detail?.status === 'error'
         ? workbench.run_detail.error : ''
@@ -1159,24 +1198,27 @@ window.__ModuleLoader__.load({
           return { total, completed, percent: total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0 }
         }
         const runStatus = run => QUALITY[run.quality_status] ?? PHASE[String(run.phase ?? '').toUpperCase()] ?? PHASE[run.phase] ?? (run.lifecycle_status === 'running' ? '运行中' : run.lifecycle_status ?? '待定')
-        const metricCard = (kind, color, label, value, caption) => h('section', { style: styles.metricCard },
+        const metricCard = (kind, color, label, value, caption) => h('section', { style: styles.metricCard, title: caption },
           dashboardIcon(kind, color),
           h('div', null, h('div', { style: styles.metricLabel }, label), h('div', { style: { ...styles.metricValue, color } }, value)),
-          h('div', { style: styles.metricCaption }, caption))
-        const appCard = (mark, title, copy, onClick) => h('button', {
+          h('span', { style: { ...styles.metricAccent, background: color }, 'aria-hidden': true }))
+        const appCard = (kind, title, copy, onClick) => h('button', {
           type: 'button', style: styles.appCard, onClick,
-        }, h('span', { style: styles.appMark, 'aria-hidden': true }, mark),
+        }, h('span', { style: styles.appMark, 'aria-hidden': true }, appGlyph(kind)),
         h('span', null, h('span', { style: styles.appTitle }, title), h('span', { style: { ...styles.appCopy, display: 'block' } }, copy)),
         h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))
+        const runStatusColor = run => run.quality_status === 'UNRESOLVED' || run.quality_status === 'REWORK'
+          ? '#c7000b'
+          : ['reviewing', 'closing'].includes(String(run.phase ?? '').toLowerCase())
+            ? '#d97706'
+            : run.lifecycle_status === 'running' ? '#2da44e' : '#2f7acb'
+        const runUpdatedAt = run => run.updated_at ?? run.updated_at_ms ?? run.completed_at ?? run.created_at
 
         return h(React.Fragment, null,
           h('section', { style: styles.homeHero },
             h('div', null,
-              h('div', { style: styles.homeTitle }, '测试工作台'),
-              h('div', { style: styles.homeLead }, current
-                ? `当前 Run：${current.run_id} · ${runStatus(current)}`
-                : '选择工作区并创建分析后，这里将展示真实的运行、风险、覆盖和报告数据。')),
-            h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, minWidth: 118, padding: '8px 18px', fontSize: 12, fontWeight: 700, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => openProductPage('analysis', 'PANGEA 分析') }, '新建分析')),
+              h('div', { style: styles.homeTitle }, '测试工作台')),
+            h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => openProductPage('analysis', 'PANGEA 分析') }, '新建分析')),
           h('div', { style: styles.metricGrid, 'aria-label': '真实运行指标' },
             metricCard('running', '#2da44e', '运行中', runningRuns.length, `当前已载入 ${runItems.length}/${totalRuns} 个 Run`),
             metricCard('review', '#e07a00', '待复核', reviewRuns.length, '当前列表处于复核或补齐阶段'),
@@ -1187,30 +1229,32 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.homeSectionTitle }, '需要处理'),
               h('span', { style: styles.itemMeta }, current ? `${uncoveredRisks.length} 条风险尚未关联测试用例` : '暂无当前 Run')),
             h('div', { style: styles.homeTableHeader },
-              h('span', null, '名称'), h('span', null, '阶段'), h('span', null, '进度'), h('span', null, '状态')),
+              h('span', null, '名称'), h('span', null, '阶段'), h('span', null, '进度'), h('span', null, '状态'), h('span', null, '更新时间'), h('span', null)),
             workRows.length ? workRows.map(run => {
               const progress = runProgress(run)
               return h('button', { key: run.run_id, type: 'button', style: styles.homeTableRow, onClick: () => chooseRun(run.run_id) },
-                h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, run.run_id),
-                h('span', { style: styles.itemMeta }, PHASE[String(run.phase ?? '').toUpperCase()] ?? PHASE[run.phase] ?? run.phase ?? '待定'),
+                h('span', { style: { fontSize: 13, fontWeight: 620, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, run.run_id),
+                h('span', { style: { color: '#59616c', fontSize: 12 } }, PHASE[String(run.phase ?? '').toUpperCase()] ?? PHASE[run.phase] ?? run.phase ?? '待定'),
                 h('span', null,
                   h('span', { style: { display: 'flex', alignItems: 'center', gap: 9 } },
                     h('span', { style: { ...styles.progressLine, flex: 1 } }, h('span', { style: { display: 'block', width: `${progress.percent}%`, height: '100%', borderRadius: 999, background: '#2da44e' } })),
-                    h('span', { style: { ...styles.itemMeta, marginTop: 0, minWidth: 28 } }, `${progress.percent}%`))),
-                h('span', { style: { ...styles.badge, justifySelf: 'start', color: run.quality_status === 'UNRESOLVED' ? '#cf0a2c' : undefined } }, runStatus(run)))
+                    h('span', { style: { color: '#59616c', fontSize: 11, minWidth: 32, fontVariantNumeric: 'tabular-nums' } }, `${progress.percent}%`))),
+                h('span', { style: { ...styles.homeStatus, color: runStatusColor(run) } }, runStatus(run)),
+                h('span', { style: { color: '#59616c', fontSize: 12, fontVariantNumeric: 'tabular-nums' } }, formatDate(runUpdatedAt(run))),
+                h('span', { style: { color: '#7a818b', fontSize: 20, lineHeight: 1, letterSpacing: 1 }, 'aria-hidden': true }, '⋮'))
             }) : h('div', { style: { ...styles.empty, padding: 18 } }, '当前没有可显示的 Run。')),
           h('div', { style: styles.homeColumns },
-            h('section', { style: { ...styles.homeSection, padding: 14 } },
-              h('div', { style: { ...styles.homeSectionTitle, margin: '2px 2px 12px' } }, '测试应用'),
+            h('section', { style: { ...styles.homeSection, padding: 16 } },
+              h('div', { style: { ...styles.homeSectionTitle, margin: '2px 2px 14px' } }, '测试应用'),
               h('div', { style: styles.appGrid, 'aria-label': '测试应用' },
-                appCard('P', 'PANGEA 分析', '源码语义分析、风险、测试计划与独立复核', () => openProductPage('analysis', 'PANGEA 分析')),
-                appCard('E', '环境配置', 'AI 对话式环境管理与真实执行计划', () => openProductPage('execution', '环境与执行')))),
-            h('section', { style: { ...styles.homeSection, padding: '14px 16px' } },
-              h('div', { style: { ...styles.row, marginBottom: 2 } }, h('div', { style: styles.homeSectionTitle }, '最近报告'), h('span', { style: styles.itemMeta }, `${reportRows.length} 份已载入`)),
+                appCard('analysis', 'PANGEA 分析', '源码语义分析、风险与测试用例', () => openProductPage('analysis', 'PANGEA 分析')),
+                appCard('environment', '环境配置', 'AI 对话式测试环境操作', () => openProductPage('execution', '环境与执行')))),
+            h('section', { style: { ...styles.homeSection, padding: '16px 18px' } },
+              h('div', { style: { ...styles.row, minHeight: 32, marginBottom: 4 } }, h('div', { style: styles.homeSectionTitle }, '最近报告'), h('span', { style: { color: '#7a818b', fontSize: 11 } }, `${reportRows.length} 份已载入`)),
               reportRows.length ? reportRows.map(run => h('button', { key: run.run_id, type: 'button', style: styles.reportRow, onClick: () => { chooseRun(run.run_id); openProductPage('analysis', 'PANGEA 分析') } },
-                h('span', { style: { minWidth: 0 } },
-                  h('span', { style: { ...styles.itemTitle, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, run.run_id),
-                  h('span', { style: { ...styles.itemMeta, display: 'block' } }, QUALITY[run.quality_status] ?? '报告可读取')),
+                reportGlyph(),
+                h('span', { style: { minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, run.run_id),
+                h('span', { style: { color: '#737b86', fontSize: 11, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, formatDate(runUpdatedAt(run))),
                 h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))) : h('div', { style: { ...styles.empty, padding: '16px 0' } }, '当前已载入列表中没有报告。'))))
       }
 
@@ -1543,7 +1587,9 @@ window.__ModuleLoader__.load({
         ? h('div', { style: styles.card, role: 'status' }, h('div', { style: styles.empty }, '正在读取当前 Run…'))
         : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body)
       const actionFeedback = actionNotice ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
-      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 测试工作台' }, header, h('div', { style: styles.content }, actionFeedback, errorNotice, contentBody))
+      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 测试工作台' },
+        screen.type === 'home' ? null : header,
+        h('div', { style: screen.type === 'home' ? styles.homeContent : styles.content }, actionFeedback, errorNotice, contentBody))
     }
 
     function apply(ctx) {
@@ -1552,17 +1598,17 @@ window.__ModuleLoader__.load({
       ctx.effect(() => pangea.registerPage({
         id: 'workbench', title: () => '工作台', icon, order: 0, default: true,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'home', pageMode: 'home' }),
+        component: props => h(PangeaPanel, { ...props, visible: true, ctx, initialScreen: 'home', pageMode: 'home' }),
       }), 'dsh-pangea-companion: workbench page')
       ctx.effect(() => pangea.registerPage({
         id: 'analysis', title: () => 'PANGEA 分析', icon, order: 10,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
+        component: props => h(PangeaPanel, { ...props, visible: true, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
       ctx.effect(() => pangea.registerPage({
         id: 'execution', title: () => '环境与执行', icon, order: 20,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'execution', pageMode: 'execution' }),
+        component: props => h(PangeaPanel, { ...props, visible: true, ctx, initialScreen: 'execution', pageMode: 'execution' }),
       }), 'dsh-pangea-companion: execution page')
     }
 
