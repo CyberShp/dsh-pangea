@@ -151,6 +151,14 @@ window.__ModuleLoader__.load({
       const [expandedMethodology, setExpandedMethodology] = React.useState('')
       const [methodologyDetails, setMethodologyDetails] = React.useState({})
 
+      React.useEffect(() => {
+        if (visible === false) return undefined
+        document.body.setAttribute('data-pangea-product-mode', 'assets')
+        return () => {
+          if (document.body.getAttribute('data-pangea-product-mode') === 'assets') document.body.removeAttribute('data-pangea-product-mode')
+        }
+      }, [visible])
+
       const load = React.useCallback(async signal => {
         if (!cwd) return
         try {
@@ -335,7 +343,7 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       if (!ctx.pangea) return
       ctx.effect(() => ctx.pangea.registerPage({
-        id: 'assets', title: () => '资产', icon, order: 30,
+        id: 'assets', title: () => '测试资产', icon, order: 30,
         available: (_ctx, scope) => Boolean(scope?.cwd),
         component: props => h(AssetPanel, { ...props, ctx }),
       }), 'dsh-pangea-asset-catalog: asset page')

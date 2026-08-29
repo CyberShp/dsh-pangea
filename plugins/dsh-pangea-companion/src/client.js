@@ -209,6 +209,30 @@ window.__ModuleLoader__.load({
       compactCard: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 7, padding: 10, marginTop: 7 },
       scenarioIndex: { width: 24, flex: '0 0 24px', color: 'var(--dsw-alias-label-tertiary, #888)', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 9, paddingTop: 2 },
       technical: { border: '1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.32))', borderRadius: 8, padding: 10, marginBottom: 11, background: 'transparent' },
+      homeHero: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20, padding: '8px 4px 18px', marginBottom: 0 },
+      homeTitle: { fontSize: 30, fontWeight: 760, lineHeight: 1.15, letterSpacing: '-0.035em' },
+      homeLead: { maxWidth: 620, marginTop: 8, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 12, lineHeight: 1.65 },
+      metricGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(128px, 1fr))', gap: 14, marginBottom: 18 },
+      metricCard: { minHeight: 92, display: 'grid', gridTemplateColumns: '44px minmax(0, 1fr)', alignItems: 'center', columnGap: 13, border: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))', borderRadius: 10, padding: '14px 16px', background: 'var(--dsw-alias-bg-layer-1, #fff)', boxSizing: 'border-box' },
+      metricIcon: { width: 42, height: 42, display: 'grid', placeItems: 'center', borderRadius: 10, background: 'color-mix(in srgb, currentColor 9%, transparent)' },
+      metricLabel: { color: 'var(--dsw-alias-label-secondary, #555)', fontSize: 12, lineHeight: 1.35 },
+      metricValue: { marginTop: 2, fontSize: 25, fontWeight: 760, lineHeight: 1, fontVariantNumeric: 'tabular-nums' },
+      metricCaption: { gridColumn: '1 / -1', marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.09))', color: 'var(--dsw-alias-label-tertiary, #8a8f99)', fontSize: 9.5 },
+      homeSection: { border: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))', borderRadius: 10, background: 'var(--dsw-alias-bg-layer-1, #fff)', overflow: 'hidden' },
+      homeSectionHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 48, gap: 12, padding: '0 16px', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.1))' },
+      homeSectionTitle: { fontSize: 14, fontWeight: 740, letterSpacing: '-0.01em' },
+      homeTableHeader: { display: 'grid', gridTemplateColumns: 'minmax(210px, 1.5fr) minmax(110px, .7fr) minmax(140px, .8fr) 92px', gap: 14, padding: '9px 16px', color: 'var(--dsw-alias-label-tertiary, #8a8f99)', fontSize: 10, borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.08))' },
+      homeTableRow: { width: '100%', display: 'grid', gridTemplateColumns: 'minmax(210px, 1.5fr) minmax(110px, .7fr) minmax(140px, .8fr) 92px', alignItems: 'center', gap: 14, padding: '12px 16px', color: 'inherit', textAlign: 'left', border: 0, borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.08))', background: 'transparent', cursor: 'pointer', boxSizing: 'border-box' },
+      progressLine: { height: 6, borderRadius: 999, overflow: 'hidden', background: 'var(--dsw-alias-bg-layer-3, rgba(31,35,41,.09))' },
+      appGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(220px, 1fr))', gap: 12 },
+      appCard: { minHeight: 102, display: 'grid', gridTemplateColumns: '48px minmax(0, 1fr) 18px', alignItems: 'center', columnGap: 14, textAlign: 'left', color: 'inherit', border: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))', borderRadius: 10, padding: '14px 16px', background: 'var(--dsw-alias-bg-layer-1, #fff)', cursor: 'pointer', boxSizing: 'border-box' },
+      appMark: { width: 46, height: 46, display: 'grid', placeItems: 'center', borderRadius: 11, color: '#cf0a2c', background: 'color-mix(in srgb, #cf0a2c 10%, transparent)', fontSize: 15, fontWeight: 800 },
+      appTitle: { fontSize: 13, fontWeight: 760, lineHeight: 1.35 },
+      appCopy: { marginTop: 5, color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, lineHeight: 1.5 },
+      appArrow: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 20, lineHeight: 1 },
+      homeColumns: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, .78fr)', gap: 14, marginTop: 14 },
+      reportRow: { width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 0', color: 'inherit', border: 0, borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(31,35,41,.08))', background: 'transparent', cursor: 'pointer', textAlign: 'left' },
+      redButton: { borderColor: '#cf0a2c', background: '#cf0a2c', color: '#fff' },
     }
 
     function icon(size = 16) {
@@ -216,6 +240,17 @@ window.__ModuleLoader__.load({
         width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6,
         strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true,
       }, h('circle', { cx: 12, cy: 12, r: 8 }), h('path', { d: 'M7.5 12h9M12 7.5v9' }), h('circle', { cx: 12, cy: 12, r: 2.2 }))
+    }
+
+    function dashboardIcon(kind, color) {
+      const paths = {
+        running: [h('circle', { key: 'c', cx: 12, cy: 12, r: 8.5 }), h('path', { key: 'p', d: 'm10 8 6 4-6 4Z' })],
+        review: [h('circle', { key: 'c', cx: 12, cy: 12, r: 8.5 }), h('path', { key: 'p', d: 'M12 7v5l3 2' })],
+        risk: [h('path', { key: 'p', d: 'M12 3.5 20 7v5.5c0 4.1-3.1 6.9-8 8-4.9-1.1-8-3.9-8-8V7l8-3.5Z' }), h('path', { key: 'l', d: 'M12 8v5m0 3h.01' })],
+        report: [h('path', { key: 'p', d: 'M7 3.5h7l3 3V20H7Z' }), h('path', { key: 'l', d: 'M14 3.5V7h3M10 11h4m-4 3h4' })],
+      }
+      return h('span', { style: { ...styles.metricIcon, color }, 'aria-hidden': true },
+        h('svg', { width: 25, height: 25, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round' }, paths[kind] ?? paths.report))
     }
 
     function text(value, fallback = '—') { return typeof value === 'string' && value.trim() !== '' ? value : fallback }
@@ -393,6 +428,7 @@ window.__ModuleLoader__.load({
     }
     function chip(label, onClick) { return h('button', { type: 'button', style: styles.chip, onClick }, label) }
     function navType(screen) {
+      if (screen.type === 'home') return 'home'
       if (screen.type === 'risk') return 'risks'
       if (screen.type === 'case') return 'cases'
       if (screen.type === 'evidence-detail') return 'risks'
@@ -435,6 +471,16 @@ window.__ModuleLoader__.load({
       const workbenchRequestRef = React.useRef({ sequence: 0, controller: null })
       const handledRunDraftRequest = React.useRef(0)
       const noticeTimerRef = React.useRef(undefined)
+
+      React.useEffect(() => {
+        if (!visible) return undefined
+        document.body.setAttribute('data-pangea-product-mode', pageMode)
+        return () => {
+          if (document.body.getAttribute('data-pangea-product-mode') === pageMode) {
+            document.body.removeAttribute('data-pangea-product-mode')
+          }
+        }
+      }, [visible, pageMode])
 
       const load = React.useCallback(async () => {
         if (!cwd) {
@@ -607,6 +653,30 @@ window.__ModuleLoader__.load({
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
         setActionNotice({ message, isError })
         noticeTimerRef.current = window.setTimeout(() => setActionNotice(undefined), 2600)
+      }
+      function openProductPage(pageId, label) {
+        const opened = ctx?.pangea?.openPage?.(scope, pageId) === true
+        if (!opened) showActionNotice(`${label}当前不可用，请检查对应插件是否已加载。`, true)
+      }
+      function discussCurrentRun() {
+        if (!current) {
+          showActionNotice('当前没有可加入会话的 PANGEA Run。', true)
+          return
+        }
+        const draft = [
+          '我正在 PANGEA 测试工作台查看当前运行，请基于下面的工作台上下文协助我判断下一步。',
+          '',
+          `Run：${current.run_id}`,
+          `阶段：${PHASE[current.phase] ?? current.phase ?? '未知'}`,
+          `质量结论：${QUALITY[current.quality_status] ?? current.quality_status ?? '待定'}`,
+          `风险：${risks.length} 条（其中 ${risks.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0).length} 条未关联测试用例）`,
+          `测试用例：${testCases.length} 条`,
+          `执行记录：${snapshot?.executor_runs?.length ?? 0} 个`,
+          '',
+          '请先指出当前最需要处理的一件事，并说明依据；不要修改 PANGEA Run。',
+        ].join('\n')
+        const inserted = appendConversationDraft(ctx, scope, draft)
+        showActionNotice(inserted ? '当前运行上下文已加入 DSH 会话输入框。' : '无法访问当前 DSH 会话输入框。', !inserted)
       }
       function multilineValues(value) {
         return [...new Set(String(value ?? '').split(/\r?\n/).map(item => item.trim()).filter(Boolean))]
@@ -819,7 +889,8 @@ window.__ModuleLoader__.load({
       const completed = current?.analysis?.completed ?? 0
       const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
       const activeNav = navType(screen)
-      const screenTitle = screen.type === 'overview' ? 'PANGEA 总览'
+      const screenTitle = screen.type === 'home' ? '测试工作台'
+        : screen.type === 'overview' ? 'PANGEA 总览'
         : screen.type === 'create' ? '新建分析'
           : screen.type === 'workflow' ? '运行流程'
             : screen.type === 'flows' ? '业务流程'
@@ -831,7 +902,7 @@ window.__ModuleLoader__.load({
                   : screen.type === 'evidence-detail' ? '证据详情'
                     : screen.type === 'execution' ? '执行结果' : '复核'
 
-      const navigationItems = pageMode === 'execution' ? [] : [
+      const navigationItems = pageMode !== 'analysis' ? [] : [
         ['overview', '总览'], ['risks', '待处理'], ['cases', '测试计划'], ['execution', '执行结果'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
@@ -845,12 +916,12 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
-            !['overview', 'risks', 'cases', 'execution'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
+            !['home', 'overview', 'risks', 'cases', 'execution'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
-              h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : 'PANGEA 伴生工作台'))),
+              h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : 'PANGEA 测试平台'))),
           h('div', { style: styles.chips },
-            pageMode !== 'execution' && screen.type !== 'create' ? h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => jump('create') }, '新建分析') : null,
+            pageMode === 'analysis' && screen.type !== 'create' ? h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => jump('create') }, '新建分析') : null,
             h('button', {
               type: 'button',
               disabled: loading || workbenchLoading,
@@ -1070,6 +1141,77 @@ window.__ModuleLoader__.load({
             stringList('步骤', flow.steps, true),
             Array.isArray(flow.evidence) && flow.evidence.length ? h('div', { style: styles.chips }, flow.evidence.map((item, index) => chip(text(item.location, `证据 ${index + 1}`), () => navigate({ type: 'evidence-detail', key: evidenceIdentity(item) })))) : null,
             flow.mermaid ? h('pre', { style: { ...styles.source, marginTop: 9 } }, flow.mermaid) : null)) : h('div', { style: styles.card }, h('div', { style: styles.empty }, collectionEmpty('business_flows', '当前 Run 没有业务流程。'))))
+      }
+
+      function renderHome() {
+        const runItems = workbench?.runs?.items ?? snapshot?.runs ?? []
+        const uncoveredRisks = risks.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0)
+        const runningRuns = runItems.filter(run => run.lifecycle_status === 'running')
+        const reviewRuns = runItems.filter(run => ['reviewing', 'closing'].includes(String(run.phase ?? '').toLowerCase()))
+        const highRisks = risks.filter(item => ['Critical', 'High'].includes(item.severity))
+        const reportRuns = runItems.filter(run => run.report_available === true)
+        const totalRuns = workbench?.runs?.total ?? runItems.length
+        const workRows = [current, ...runItems.filter(run => run.run_id !== current?.run_id)].filter(Boolean).slice(0, 3)
+        const reportRows = reportRuns.slice(0, 5)
+        const runProgress = run => {
+          const total = run.run_id === current?.run_id ? current?.analysis?.total ?? run.unit_count ?? 0 : run.unit_count ?? 0
+          const completed = run.run_id === current?.run_id ? current?.analysis?.completed ?? run.completed_unit_count ?? 0 : run.completed_unit_count ?? 0
+          return { total, completed, percent: total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0 }
+        }
+        const runStatus = run => QUALITY[run.quality_status] ?? PHASE[String(run.phase ?? '').toUpperCase()] ?? PHASE[run.phase] ?? (run.lifecycle_status === 'running' ? '运行中' : run.lifecycle_status ?? '待定')
+        const metricCard = (kind, color, label, value, caption) => h('section', { style: styles.metricCard },
+          dashboardIcon(kind, color),
+          h('div', null, h('div', { style: styles.metricLabel }, label), h('div', { style: { ...styles.metricValue, color } }, value)),
+          h('div', { style: styles.metricCaption }, caption))
+        const appCard = (mark, title, copy, onClick) => h('button', {
+          type: 'button', style: styles.appCard, onClick,
+        }, h('span', { style: styles.appMark, 'aria-hidden': true }, mark),
+        h('span', null, h('span', { style: styles.appTitle }, title), h('span', { style: { ...styles.appCopy, display: 'block' } }, copy)),
+        h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))
+
+        return h(React.Fragment, null,
+          h('section', { style: styles.homeHero },
+            h('div', null,
+              h('div', { style: styles.homeTitle }, '测试工作台'),
+              h('div', { style: styles.homeLead }, current
+                ? `当前 Run：${current.run_id} · ${runStatus(current)}`
+                : '选择工作区并创建分析后，这里将展示真实的运行、风险、覆盖和报告数据。')),
+            h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, minWidth: 118, padding: '8px 18px', fontSize: 12, fontWeight: 700, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => openProductPage('analysis', 'PANGEA 分析') }, '新建分析')),
+          h('div', { style: styles.metricGrid, 'aria-label': '真实运行指标' },
+            metricCard('running', '#2da44e', '运行中', runningRuns.length, `当前已载入 ${runItems.length}/${totalRuns} 个 Run`),
+            metricCard('review', '#e07a00', '待复核', reviewRuns.length, '当前列表处于复核或补齐阶段'),
+            metricCard('risk', '#cf0a2c', '高风险', highRisks.length, current ? '当前 Run 的 Critical 与 High 风险' : '选择 Run 后显示'),
+            metricCard('report', '#2878d0', '已有报告', reportRuns.length, '当前已载入列表中可读取的报告')),
+          h('section', { style: styles.homeSection },
+            h('div', { style: styles.homeSectionHeader },
+              h('div', { style: styles.homeSectionTitle }, '需要处理'),
+              h('span', { style: styles.itemMeta }, current ? `${uncoveredRisks.length} 条风险尚未关联测试用例` : '暂无当前 Run')),
+            h('div', { style: styles.homeTableHeader },
+              h('span', null, '名称'), h('span', null, '阶段'), h('span', null, '进度'), h('span', null, '状态')),
+            workRows.length ? workRows.map(run => {
+              const progress = runProgress(run)
+              return h('button', { key: run.run_id, type: 'button', style: styles.homeTableRow, onClick: () => chooseRun(run.run_id) },
+                h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, run.run_id),
+                h('span', { style: styles.itemMeta }, PHASE[String(run.phase ?? '').toUpperCase()] ?? PHASE[run.phase] ?? run.phase ?? '待定'),
+                h('span', null,
+                  h('span', { style: { display: 'flex', alignItems: 'center', gap: 9 } },
+                    h('span', { style: { ...styles.progressLine, flex: 1 } }, h('span', { style: { display: 'block', width: `${progress.percent}%`, height: '100%', borderRadius: 999, background: '#2da44e' } })),
+                    h('span', { style: { ...styles.itemMeta, marginTop: 0, minWidth: 28 } }, `${progress.percent}%`))),
+                h('span', { style: { ...styles.badge, justifySelf: 'start', color: run.quality_status === 'UNRESOLVED' ? '#cf0a2c' : undefined } }, runStatus(run)))
+            }) : h('div', { style: { ...styles.empty, padding: 18 } }, '当前没有可显示的 Run。')),
+          h('div', { style: styles.homeColumns },
+            h('section', { style: { ...styles.homeSection, padding: 14 } },
+              h('div', { style: { ...styles.homeSectionTitle, margin: '2px 2px 12px' } }, '测试应用'),
+              h('div', { style: styles.appGrid, 'aria-label': '测试应用' },
+                appCard('P', 'PANGEA 分析', '源码语义分析、风险、测试计划与独立复核', () => openProductPage('analysis', 'PANGEA 分析')),
+                appCard('E', '环境配置', 'AI 对话式环境管理与真实执行计划', () => openProductPage('execution', '环境与执行')))),
+            h('section', { style: { ...styles.homeSection, padding: '14px 16px' } },
+              h('div', { style: { ...styles.row, marginBottom: 2 } }, h('div', { style: styles.homeSectionTitle }, '最近报告'), h('span', { style: styles.itemMeta }, `${reportRows.length} 份已载入`)),
+              reportRows.length ? reportRows.map(run => h('button', { key: run.run_id, type: 'button', style: styles.reportRow, onClick: () => { chooseRun(run.run_id); openProductPage('analysis', 'PANGEA 分析') } },
+                h('span', { style: { minWidth: 0 } },
+                  h('span', { style: { ...styles.itemTitle, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, run.run_id),
+                  h('span', { style: { ...styles.itemMeta, display: 'block' } }, QUALITY[run.quality_status] ?? '报告可读取')),
+                h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))) : h('div', { style: { ...styles.empty, padding: '16px 0' } }, '当前已载入列表中没有报告。'))))
       }
 
       function renderOverview() {
@@ -1376,7 +1518,8 @@ window.__ModuleLoader__.load({
       }
 
       let body
-      if (screen.type === 'overview') body = renderOverview()
+      if (screen.type === 'home') body = renderHome()
+      else if (screen.type === 'overview') body = renderOverview()
       else if (screen.type === 'create') body = renderCreate()
       else if (screen.type === 'workflow') body = renderWorkflow()
       else if (screen.type === 'risks') body = renderRisks()
@@ -1389,7 +1532,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()
 
-      const healthAlert = !['overview'].includes(screen.type) && health?.trusted === false ? renderHealthCard(true) : null
+      const healthAlert = !['home', 'overview'].includes(screen.type) && health?.trusted === false ? renderHealthCard(true) : null
       const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
@@ -1400,19 +1543,24 @@ window.__ModuleLoader__.load({
         ? h('div', { style: styles.card, role: 'status' }, h('div', { style: styles.empty }, '正在读取当前 Run…'))
         : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body)
       const actionFeedback = actionNotice ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
-      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 伴生工作台' }, header, h('div', { style: styles.content }, actionFeedback, errorNotice, contentBody))
+      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 测试工作台' }, header, h('div', { style: styles.content }, actionFeedback, errorNotice, contentBody))
     }
 
     function apply(ctx) {
       const pangea = ctx.pangea
       if (!pangea) return
       ctx.effect(() => pangea.registerPage({
-        id: 'analysis', title: () => '分析', icon, order: 10,
+        id: 'workbench', title: () => '工作台', icon, order: 0, default: true,
+        available: (_ctx, scope) => Boolean(scope?.cwd),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'home', pageMode: 'home' }),
+      }), 'dsh-pangea-companion: workbench page')
+      ctx.effect(() => pangea.registerPage({
+        id: 'analysis', title: () => 'PANGEA 分析', icon, order: 10,
         available: (_ctx, scope) => Boolean(scope?.cwd),
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
       ctx.effect(() => pangea.registerPage({
-        id: 'execution', title: () => '执行', icon, order: 20,
+        id: 'execution', title: () => '环境与执行', icon, order: 20,
         available: (_ctx, scope) => Boolean(scope?.cwd),
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'execution', pageMode: 'execution' }),
       }), 'dsh-pangea-companion: execution page')
