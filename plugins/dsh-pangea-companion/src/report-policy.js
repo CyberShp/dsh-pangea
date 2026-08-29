@@ -297,10 +297,22 @@ function isReadOnlyResultCheck(command, taskPath, cwd) {
     .map(shellLiteralPattern)
     .join('|')
   const cwdPattern = shellLiteralPattern(cwd)
+  const localPythonCandidates = [
+    join(cwd, '.venv', 'bin', 'python'),
+    join(cwd, '.venv', 'Scripts', 'python.exe'),
+  ]
+  const pythonPatterns = [
+    'python(?:3(?:\\.\\d+)?)?',
+    ...localPythonCandidates.flatMap(value => {
+      const local = relative(cwd, value)
+      return [value, local, `.${local.includes('\\') ? '\\' : '/'}${local}`]
+        .map(shellLiteralPattern)
+    }),
+  ].join('|')
   const pattern = new RegExp([
     '^\\s*',
     `(?:cd\\s+${cwdPattern}\\s*&&\\s*)?`,
-    'python(?:3(?:\\.\\d+)?)?\\s+-m\\s+pangea_agent\\.cli\\.main\\s+',
+    `(?:${pythonPatterns})\\s+-m\\s+pangea_agent\\.cli\\.main\\s+`,
     `check-result-json\\s+--task(?:=|\\s+)(?:${taskPatterns})`,
     '\\s*(?:2>&1\\s*)?(?:\\|\\|\\s*true\\s*)?$',
   ].join(''))
