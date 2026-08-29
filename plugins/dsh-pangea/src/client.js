@@ -53,6 +53,25 @@ window.__ModuleLoader__.load({
           --pangea-line: #dfe3e8;
         }
 
+        body[data-pangea-product-shell] {
+          color-scheme: light !important;
+          background: #f5f6f8 !important;
+          --dsw-alias-bg-base: #f5f6f8;
+          --dsw-alias-bg-layer-1: #ffffff;
+          --dsw-alias-bg-layer-2: #f8f9fa;
+          --dsw-alias-bg-layer-3: #eef1f4;
+          --dsw-alias-label-primary: #17191d;
+          --dsw-alias-label-secondary: #4d5560;
+          --dsw-alias-label-tertiary: #7a828d;
+          --dsw-alias-label-on-primary: #ffffff;
+          --dsw-alias-border-l1: rgba(23,25,29,.08);
+          --dsw-alias-border-l2: #dfe3e8;
+          --dsw-alias-interactive-bg-hover: #f0f2f4;
+          --dsw-alias-state-business-primary: #c7000b;
+          --dsw-alias-state-business-secondary: #e05b65;
+          --dsw-alias-state-business-tertiary: #fff0f1;
+        }
+
         [data-pangea-shell] {
           width: 100%; height: 100%; min-width: 0; min-height: 0;
           display: grid; grid-template-columns: 244px minmax(0, 1fr);
@@ -74,8 +93,8 @@ window.__ModuleLoader__.load({
         [data-pangea-topbar-brand] { width: 136px; height: 34px; display: flex; align-items: center; flex: none; }
         [data-pangea-logo] { width: 124px; height: auto; display: block; object-fit: contain; object-position: left center; }
         [data-pangea-logo-dark] { display: none; filter: brightness(0) invert(1); }
-        body[data-ds-dark-theme] [data-pangea-logo-light] { display: none; }
-        body[data-ds-dark-theme] [data-pangea-logo-dark] { display: block; }
+        body[data-pangea-product-shell] [data-pangea-logo-light] { display: block; }
+        body[data-pangea-product-shell] [data-pangea-logo-dark] { display: none; }
         [data-pangea-topbar-title] {
           height: 30px; display: flex; align-items: center; margin-left: 28px; padding-left: 28px;
           border-left: 1px solid #e0e3e7; font-size: 21px; line-height: 1; font-weight: 720;
@@ -126,7 +145,7 @@ window.__ModuleLoader__.load({
         [data-pangea-nav-icon] { width: 25px; height: 25px; display: grid; place-items: center; }
         [data-pangea-nav-divider] { height: 1px; margin: 18px 7px 12px; background: #e5e7eb; }
         [data-pangea-tool-list] { margin-top: auto; }
-        [data-pangea-page] { min-width: 0; min-height: 0; display: flex; overflow: hidden; background: #fff; }
+        [data-pangea-page] { min-width: 0; min-height: 0; display: flex; overflow: hidden; background: #f5f6f8; }
         [data-pangea-page] > * { flex: 1; min-width: 0; min-height: 0; }
 
         @media (min-width: 1180px) {
@@ -190,6 +209,16 @@ window.__ModuleLoader__.load({
           [data-pangea-assistant-progress] { margin-top: 5px; color: #68707c; font-size: 11px; }
         }
 
+        @media (min-width: 1180px) and (max-width: 1479px) {
+          :root { --pangea-ai-width: 360px; }
+          [data-pangea-shell] { grid-template-columns: 220px minmax(0, 1fr); }
+          [data-pangea-topbar] { padding-left: 28px; }
+          [data-pangea-topbar-title] { margin-left: 22px; padding-left: 22px; font-size: 20px; }
+          [data-pangea-project] { min-width: 168px; max-width: 220px; margin-left: 28px; }
+          [data-pangea-product-nav] { padding-inline: 12px; }
+          [data-pangea-assistant-head] { padding-inline: 20px; }
+        }
+
         @media (max-width: 1179px) {
           [data-pangea-shell] { grid-template-columns: 74px minmax(0, 1fr); }
           [data-pangea-product-nav] { padding-inline: 9px; }
@@ -202,11 +231,6 @@ window.__ModuleLoader__.load({
         body.dsh-desktop-windows-titlebar-layout [data-pangea-topbar] {
           padding-right: calc(var(--dsh-desktop-windows-caption-width, 140px) + 56px);
         }
-        body[data-ds-dark-theme] [data-pangea-topbar],
-        body[data-ds-dark-theme] [data-pangea-assistant-head],
-        body[data-ds-dark-theme] [data-pangea-assistant-card],
-        body[data-ds-dark-theme] [data-pangea-page] { background: #17181b; color: #f5f6f7; }
-        body[data-ds-dark-theme] [data-pangea-product-nav] { background: #1c1e22; border-color: #30343a; }
       `
       document.head.appendChild(style)
       return () => style.remove()
@@ -296,6 +320,17 @@ window.__ModuleLoader__.load({
           if (document.body.getAttribute('data-pangea-product-shell') === page.id) document.body.removeAttribute('data-pangea-product-shell')
         }
       }, [page.id])
+      React.useLayoutEffect(() => {
+        const body = document.body
+        const forceLightTheme = () => {
+          if (body.hasAttribute('data-ds-dark-theme')) body.removeAttribute('data-ds-dark-theme')
+          document.documentElement.style.colorScheme = 'light'
+        }
+        forceLightTheme()
+        const observer = new MutationObserver(forceLightTheme)
+        observer.observe(body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+        return () => observer.disconnect()
+      }, [])
       React.useEffect(() => {
         const onSystemState = event => setSystemState(event.detail ?? { state: 'checking', label: '系统检查中' })
         const onRunContext = event => setAssistantContext(event.detail ?? null)
