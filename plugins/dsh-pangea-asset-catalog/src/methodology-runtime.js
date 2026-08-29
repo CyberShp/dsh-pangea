@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 import { dataRootFor, runPangea, workspaceRoot } from './pangea-api.js'
@@ -13,21 +11,6 @@ function apiValue(response) {
   return response.result.value
 }
 
-function structuredItems(result) {
-  if (!result || typeof result !== 'object') return []
-  for (const key of ['items', 'defects', 'records']) {
-    if (Array.isArray(result[key])) return result[key]
-  }
-  return []
-}
-
-function itemId(item) {
-  for (const key of ['item_id', 'defect_id', 'id']) {
-    if (typeof item?.[key] === 'string' && item[key].trim()) return item[key].trim()
-  }
-  return ''
-}
-
 function jobView(job) {
   if (!job) return null
   return {
@@ -35,32 +18,10 @@ function jobView(job) {
     session_id: job.sessionId,
     started_at: job.startedAt,
     source_asset_ids: job.assetIds,
+    task_path: job.action.task_path,
     ...(job.completedAt ? { completed_at: job.completedAt } : {}),
     ...(job.error ? { error: job.error } : {}),
   }
-}
-
-export const METHODOLOGY_SUBMISSION_PARAMETERS = {
-  type: 'object', additionalProperties: false, required: ['candidates'],
-  properties: {
-    candidates: {
-      type: 'array', minItems: 1,
-      items: {
-        type: 'object', additionalProperties: false,
-        required: ['methodology_id', 'title', 'applicable_when', 'checks', 'expected_signals', 'failure_signals', 'source_item_ids'],
-        properties: {
-          methodology_id: { type: 'string', minLength: 1 },
-          title: { type: 'string', minLength: 1 },
-          applicable_when: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
-          checks: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
-          expected_signals: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
-          failure_signals: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
-          exceptions: { type: 'array', items: { type: 'string', minLength: 1 } },
-          source_item_ids: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
-        },
-      },
-    },
-  },
 }
 
 export class MethodologyCandidateRuntime {
@@ -89,37 +50,20 @@ export class MethodologyCandidateRuntime {
     return sessionId
   }
 
-  async approvedSources(cwd, dataRoot, assetIds) {
-    const sources = []
-    for (const assetId of assetIds) {
-      const detail = await this.runner({ cwd, args: ['assets', 'get', '--data-root', dataRoot, '--asset-id', assetId] })
-      const asset = detail.asset
-      if (asset?.asset_type !== 'historical_defect' || asset?.status !== 'available') {
-        throw new Error(`只有已批准的历史缺陷资产可以生成方法论：${assetId}`)
-      }
-      for (const item of structuredItems(detail.result)) {
-        const id = itemId(item)
-        if (!id) continue
-        sources.push({ source_item_id: `${assetId}:${id}`, asset_id: assetId, item })
-      }
-    }
-    if (sources.length === 0) throw new Error('所选历史缺陷资产没有可引用的已批准条目')
-    return sources
-  }
-
   async start({ cwd, dataRoot, assetIds }) {
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
     const uniqueAssetIds = [...new Set((assetIds ?? []).filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))]
     if (uniqueAssetIds.length === 0) throw new Error('至少选择一个已批准历史缺陷资产')
-    const [capabilities, sources, existing] = await Promise.all([
-      this.runner({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] }),
-      this.approvedSources(cwd, resolvedDataRoot, uniqueAssetIds),
-      this.runner({ cwd, args: ['methodologies', 'list', '--data-root', resolvedDataRoot, '--limit', '200'] }),
-    ])
+    const deriveArgs = ['methodologies', 'derive', '--data-root', resolvedDataRoot]
+    for (const assetId of uniqueAssetIds) deriveArgs.push('--asset-id', assetId)
+    const prepared = await this.runner({ cwd, args: deriveArgs })
+    if (!prepared?.action?.task_path) throw new Error('PANGEA 未返回方法论提炼 task_path')
+    const root = workspaceRoot(cwd)
+    const workerPath = path.join(root, '.agents', 'pangea', 'methodology-worker.md')
     const sessionId = await this.createSession(cwd, 'PANGEA 方法论候选')
     const job = {
-      cwd, dataRoot: resolvedDataRoot, assetIds: uniqueAssetIds, sources,
-      sessionId, status: 'queued', startedAt: new Date().toISOString(),
+      cwd, dataRoot: resolvedDataRoot, assetIds: uniqueAssetIds, action: prepared.action,
+      workerPath, sessionId, status: 'queued', retries: 0, startedAt: new Date().toISOString(),
     }
     this.jobs.set(sessionId, job)
     this.latest.set(path.resolve(resolvedDataRoot), job)
@@ -129,60 +73,59 @@ export class MethodologyCandidateRuntime {
       content: [{
         type: 'text',
         text: [
-          '根据下面已批准的历史缺陷条目，生成少量可复用、非约束性的方法论候选。',
-          '候选只描述适用条件、检查方向和信号，不得把历史结论直接当作当前项目事实。',
-          '完成后调用 pangea_methodology_candidate_submit；不要写入资产目录或自行修改 PANGEA 文件。',
-          `候选 schema：${capabilities.methodologies?.candidate_schema_path ?? capabilities.candidate_schema_path ?? '由提交工具参数约束'}`,
-          `现有方法论 ID：${(existing.items ?? []).map(item => item.methodology_id).join('、') || '无'}`,
-          '',
-          '[已批准历史缺陷条目]',
-          JSON.stringify(sources, null, 2),
+          `读取 ${workerPath} 并严格执行。`,
+          `task_path: ${prepared.action.task_path}`,
+          '只读取 task 指定的输入，只把完整 JSON 写入 task 的 result_path；不要修改其他文件。',
         ].join('\n'),
       }],
     })))
-    return { session_id: sessionId, source_item_count: sources.length }
+    return { session_id: sessionId, action: prepared.action }
   }
 
-  async submit(args, exec) {
-    const sessionId = exec?.agent?.session?.id
-    const job = this.jobs.get(sessionId)
-    if (!job) throw new Error('该会话不是 Desktop 启动的方法论候选会话')
-    if (job.status === 'completed') throw new Error('该会话已经提交过方法论候选')
-    const allowed = new Set(job.sources.map(item => item.source_item_id))
-    for (const candidate of args.candidates ?? []) {
-      for (const sourceId of candidate.source_item_ids ?? []) {
-        if (!allowed.has(sourceId)) throw new Error(`候选引用了本会话未提供的历史缺陷条目：${sourceId}`)
-      }
-    }
-    const directory = path.join(job.dataRoot, 'methodologies')
-    await mkdir(directory, { recursive: true })
-    const inputPath = path.join(directory, `.desktop-candidate-${randomUUID()}.json`)
-    await writeFile(inputPath, `${JSON.stringify({
-      schema_version: '1.0', generated_at: new Date().toISOString(),
-      source: 'confirmed_historical_defects', non_binding: true, candidates: args.candidates,
-    }, null, 2)}\n`, 'utf8')
+  async finish(job) {
+    if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
+    job.status = 'finalizing'
     try {
-      const imported = await this.runner({
+      await this.runner({
         cwd: job.cwd,
-        args: ['methodologies', 'import', '--data-root', job.dataRoot, '--input', inputPath],
+        args: ['methodologies', 'complete-derivation', '--task', job.action.task_path],
       })
       job.status = 'completed'
-      job.completedAt = new Date().toISOString()
-      return { status: 'ok', imported }
-    } finally {
-      await unlink(inputPath).catch(() => {})
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (job.retries === 0) {
+        job.retries = 1
+        job.status = 'queued'
+        try {
+          apiValue(await this.api.sessions.prompt(rpc({
+            sessionId: job.sessionId,
+            mode: 'queue',
+            content: [{
+              type: 'text',
+              text: [
+                `PANGEA 方法论结果校验失败：${message}`,
+                `重新读取 ${job.workerPath} 和 task_path: ${job.action.task_path}。`,
+                '只修正同一 result_path，完成后结束。',
+              ].join('\n'),
+            }],
+          })))
+          return
+        } catch (promptError) {
+          job.error = promptError instanceof Error ? promptError.message : String(promptError)
+        }
+      } else {
+        job.error = message
+      }
+      job.status = 'failed'
     }
+    job.completedAt = new Date().toISOString()
   }
 
   handleAgentStatus(agent, status) {
     const job = this.jobs.get(agent?.session?.id)
-    if (!job || ['completed', 'failed'].includes(job.status)) return
+    if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
     if (status === 'running') job.status = 'running'
-    if (status === 'idle' && job.status === 'running') {
-      job.status = 'failed'
-      job.error = '语义会话结束，但没有提交方法论候选'
-      job.completedAt = new Date().toISOString()
-    }
+    if (status === 'idle' && job.status === 'running') void this.finish(job)
   }
 
   handleAgentError(agent, error) {

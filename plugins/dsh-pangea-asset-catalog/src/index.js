@@ -1,5 +1,5 @@
 import { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
-import { METHODOLOGY_SUBMISSION_PARAMETERS, MethodologyCandidateRuntime } from './methodology-runtime.js'
+import { MethodologyCandidateRuntime } from './methodology-runtime.js'
 
 export const name = 'dsh-pangea-asset-catalog'
 export const inject = ['tools', 'webServer', 'apiProxy']
@@ -197,15 +197,6 @@ export async function apply(ctx) {
       schema: { type: 'object', additionalProperties: true },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
-  }), ctx.tools.register({
-    name: 'pangea_methodology_candidate_submit',
-    description: '仅供 Desktop 启动的方法论候选会话提交非约束候选；PANGEA 会校验候选 schema 和已批准历史缺陷来源，并把结果写入正式方法论注册表。',
-    parameters: METHODOLOGY_SUBMISSION_PARAMETERS,
-    execute: (args, exec) => runtime.methodologies.submit(args, exec),
-    output: {
-      schema: { type: 'object', additionalProperties: true },
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
-    },
   })]
   const disposeStatus = ctx.on?.('agent/status', ({ agent, status }) => {
     runtime.handleAgentStatus(agent, status)
@@ -223,4 +214,4 @@ export async function apply(ctx) {
 }
 
 export { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
-export { METHODOLOGY_SUBMISSION_PARAMETERS, MethodologyCandidateRuntime } from './methodology-runtime.js'
+export { MethodologyCandidateRuntime } from './methodology-runtime.js'
