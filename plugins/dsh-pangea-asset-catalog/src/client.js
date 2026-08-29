@@ -81,6 +81,20 @@ window.__ModuleLoader__.load({
       sessions.open(sessionId)
     }
 
+    function resolveWorkspaceCwd(scope, sessions) {
+      if (typeof scope?.cwd === 'string' && scope.cwd.trim() !== '') return scope.cwd
+      const snapshot = sessions?.list?.getSnapshot?.()
+      let sessionId = scope?.sessionId ?? snapshot?.current
+      const visited = new Set()
+      while (sessionId && !visited.has(sessionId)) {
+        visited.add(sessionId)
+        const session = snapshot?.byId?.[sessionId]
+        if (typeof session?.cwd === 'string' && session.cwd.trim() !== '') return session.cwd
+        sessionId = session?.parentId
+      }
+      return ''
+    }
+
     const styles = {
       root: { height: '100%', overflow: 'auto', color: 'var(--dsw-alias-label-primary, inherit)' },
       header: { position: 'sticky', top: 0, zIndex: 3, padding: 14, background: 'var(--dsw-alias-bg-layer-1, #111)', borderBottom: '1px solid var(--dsw-alias-border-l2, #444)' },
@@ -131,7 +145,7 @@ window.__ModuleLoader__.load({
     }
 
     function AssetPanel({ ctx, scope, visible }) {
-      const cwd = scope?.cwd ?? ''
+      const cwd = resolveWorkspaceCwd(scope, ctx.sessions)
       const [state, setState] = React.useState(null)
       const [error, setError] = React.useState('')
       const [notice, setNotice] = React.useState('')
@@ -355,6 +369,7 @@ window.__ModuleLoader__.load({
     exports.requestMethodologyDetail = requestMethodologyDetail
     exports.requestAction = requestAction
     exports.openAnalysisSession = openAnalysisSession
+    exports.resolveWorkspaceCwd = resolveWorkspaceCwd
     exports.apply = apply
     return module.exports
   },
