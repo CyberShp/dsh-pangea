@@ -94,6 +94,18 @@ test('registers each feature page as one native sidebar tab', async () => {
   assert.equal(sidebar.tabs.has('dsh-pangea:execution'), false)
 })
 
+test('opens the product workbench once when a session becomes active', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'workbench', title: '工作台', order: 0, default: true, component: () => null })
+  assert.equal(sidebar.opened.length, 1)
+  assert.equal(sidebar.opened[0].seed.type, 'dsh-pangea:workbench')
+  assert.equal(sidebar.opened[0].scope.sessionId, 'session-1')
+  service.registerPage({ id: 'analysis', title: '分析', order: 10, component: () => null })
+  assert.equal(sidebar.opened.length, 1)
+})
+
 test('shows PANGEA pages first, removes source control, and keeps terminal visible', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()
@@ -111,7 +123,7 @@ test('shows PANGEA pages first, removes source control, and keeps terminal visib
   assert.equal(sidebar.tabs.get('browser').order, 60)
 })
 
-test('cleans Git, diff, wrapper, and removed feature tabs from the active session', async () => {
+test('cleans Git, diff, and removed feature tabs while retaining the workbench', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()
   sidebar.setState({
@@ -125,7 +137,7 @@ test('cleans Git, diff, wrapper, and removed feature tabs from the active sessio
   })
   const service = exported.createPangeaService(sidebar)
   service.registerPage({ id: 'analysis', title: '分析', component: () => null })
-  assert.deepEqual(sidebar.closed.map(item => item.id), ['git', 'diff:1', 'old-shell', 'removed'])
+  assert.deepEqual(sidebar.closed.map(item => item.id), ['git', 'diff:1', 'removed'])
 })
 
 test('forwards page and file opens through Better Sidebar', async () => {

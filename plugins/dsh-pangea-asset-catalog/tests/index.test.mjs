@@ -14,7 +14,7 @@ test('normalizes asset pagination filters for the public API', () => {
   )
 })
 
-test('host registers one asset API tool and one same-origin page route', async () => {
+test('host registers asset and methodology tools with one same-origin page route', async () => {
   const tools = []
   const routes = []
   const listeners = []
@@ -31,5 +31,5 @@ test('host registers one asset API tool and one same-origin page route', async (
   assert.deepEqual(listeners, ['agent/status', 'agent/error'])
   assert.equal(routes.length, 1)
   assert.equal(routes[0].path, '/api/pangea-asset-catalog/state')
-  assert.match(effectDescription, /PANGEA asset API/)
+  assert.match(effectDescription, /PANGEA asset and methodology API/)
 })

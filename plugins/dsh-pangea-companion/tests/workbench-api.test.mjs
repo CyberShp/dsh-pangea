@@ -43,6 +43,45 @@ test('returns paginated Run metadata and reports incompatible backends explicitl
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('returns the selected Run methodologies from the public runs get API unchanged', async () => {
+  const root = await workspace()
+  try {
+    const methodologies = [{
+      unit_id: 'U00',
+      items: [{
+        methodology_id: 'storage_nvme', title: 'NVMe 核心专项分析', path: '/runtime/storage_nvme.md',
+        content_sha256: 'a'.repeat(64), selection_kind: 'specialized', selection_reason: '源码范围命中 NVMe 信号',
+        source_baseline: 'NVMe Base 2.4', source_catalog_path: '/runtime/SOURCES.md',
+      }],
+    }]
+    const calls = []
+    const snapshot = await workbenchSnapshot({ cwd: root, runId: 'run-nvme', runner: async input => {
+      calls.push(input.args)
+      if (input.args[0] === 'system') return { repositories: ['repo-one'] }
+      if (input.args[1] === 'list') return { items: [{ run_id: 'run-nvme' }], next_cursor: null, total: 1 }
+      return { run_id: 'run-nvme', methodologies }
+    } })
+    assert.deepEqual(calls[2].slice(0, 2), ['runs', 'get'])
+    assert.deepEqual(calls[2].slice(-2), ['--run-id', 'run-nvme'])
+    assert.deepEqual(snapshot.run.methodologies, methodologies)
+    assert.deepEqual(snapshot.run_detail, { run_id: 'run-nvme', status: 'ok', error: null })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('keeps the workbench available when one public runs get detail cannot be read', async () => {
+  const root = await workspace()
+  try {
+    const snapshot = await workbenchSnapshot({ cwd: root, runId: 'run-bad', runner: async input => {
+      if (input.args[0] === 'system') return { repositories: ['repo-one'] }
+      if (input.args[1] === 'list') return { items: [{ run_id: 'run-bad' }], next_cursor: null, total: 1 }
+      throw new Error('methodologies unavailable')
+    } })
+    assert.equal(snapshot.compatibility.compatible, true)
+    assert.equal(snapshot.run, null)
+    assert.deepEqual(snapshot.run_detail, { run_id: 'run-bad', status: 'error', error: 'methodologies unavailable' })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('launches a dedicated DSH session that owns the complete Run lifecycle', async () => {
   const root = await workspace()
   try {

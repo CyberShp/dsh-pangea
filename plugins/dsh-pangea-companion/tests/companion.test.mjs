@@ -383,6 +383,7 @@ test('registers read status plus executor environment and SSH tools', () => {
     '/api/pangea-companion/state', '/api/pangea-companion/source',
     '/api/pangea-companion/environments', '/api/pangea-companion/executions',
     '/api/pangea-companion/workbench',
+    '/api/pangea-companion/repositories',
   ])
   assert.equal(effects.length, 1)
 })

@@ -19,8 +19,21 @@ function fakeReact() {
   }
 }
 
-test('PANGEA client registers the decision and execution workbench', async () => {
+test('PANGEA client registers the test workbench, analysis, and execution pages', async () => {
   const source = await readFile(clientPath, 'utf8')
+  assert.match(source, /测试工作台/)
+  assert.match(source, /真实运行指标/)
+  assert.match(source, /需要处理/)
+  assert.match(source, /已有报告/)
+  assert.match(source, /data-pangea-product-mode/)
+  assert.match(source, /ctx\?\.pangea\?\.openPage\?\.\(scope, pageId\)/)
+  assert.match(source, /实际加载方法论/)
+  assert.match(source, /SHA-256/)
+  assert.match(source, /来源基线/)
+  assert.match(source, /选择依据/)
+  assert.match(source, /source_catalog_path/)
+  assert.match(source, /用户方法论/)
+  assert.match(source, /source_item_ids/)
   assert.match(source, /总览/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
   assert.match(source, /repeat\(4, minmax\(72px, 1fr\)\)/)
@@ -50,7 +63,9 @@ test('PANGEA client registers the decision and execution workbench', async () =>
   assert.match(source, /当前结构化结果不可信/)
   assert.match(source, /不能把空列表解释为/)
   assert.match(source, /AbortController/)
-  assert.match(source, /setTimeout\(\(\) => \{ void poll\(\) \}, 4000\)/)
+  assert.match(source, /const ACTIVE_POLL_INTERVAL_MS = 10_000/)
+  assert.match(source, /const IDLE_POLL_INTERVAL_MS = 45_000/)
+  assert.match(source, /snapshotPollInterval\(value\)/)
   assert.match(source, /同步失败，继续显示上次结果/)
   assert.match(source, /和 DSH 讨论/)
   assert.match(source, /加入当前会话/)
@@ -87,10 +102,10 @@ test('PANGEA client registers the decision and execution workbench', async () =>
     pangea: { registerPage(page) { pages.push(page); return () => {} } },
     effect(factory) { return factory() },
   })
-  assert.equal(pages.length, 2)
-  assert.deepEqual(pages.map(page => page.id), ['analysis', 'execution'])
-  assert.deepEqual(pages.map(page => page.title()), ['分析', '执行'])
-  assert.deepEqual(pages.map(page => page.order), [10, 20])
+  assert.equal(pages.length, 3)
+  assert.deepEqual(pages.map(page => page.id), ['workbench', 'analysis', 'execution'])
+  assert.deepEqual(pages.map(page => page.title()), ['工作台', 'PANGEA 分析', '环境配置'])
+  assert.deepEqual(pages.map(page => page.order), [0, 10, 20])
 })
 
 test('workbench API lists runs and starts or stops through explicit actions', async () => {
