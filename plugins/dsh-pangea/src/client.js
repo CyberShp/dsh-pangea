@@ -58,7 +58,10 @@ window.__ModuleLoader__.load({
       if (!workspace?.workspaceId) throw new Error('PANGEA product workspace registration returned no id')
       const sessionId = await ctx.workspaces.connectWorkspace(workspace.workspaceId)
       if (!sessionId) throw new Error('PANGEA product workspace returned no session')
-      if (isActive()) ctx.sessions.open(sessionId)
+      if (isActive()) {
+        ctx.sessions.open(sessionId)
+        await desktopBridge.productWorkspaceReady?.()
+      }
       return true
     }
 

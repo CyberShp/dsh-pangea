@@ -82,6 +82,7 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
   const { exported } = await loadClient()
   const calls = []
   const opened = []
+  let ready = false
   const result = await exported.bootstrapProductWorkspace({
     workspaces: {
       async create(input) {
@@ -96,6 +97,7 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
     sessions: { open(sessionId) { opened.push(sessionId) } },
   }, {
     async productWorkspace() { return 'C:\\Users\\tester\\AppData\\Roaming\\pangea-desktop\\launch-root' },
+    async productWorkspaceReady() { ready = true },
   })
 
   assert.equal(result, true)
@@ -104,6 +106,7 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
     ['connect', 'workspace-pangea'],
   ])
   assert.deepEqual(opened, ['session-pangea'])
+  assert.equal(ready, true)
 })
 
 test('registers each feature page as one native sidebar tab', async () => {
