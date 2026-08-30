@@ -40,6 +40,35 @@ window.__ModuleLoader__.load({
       return globalThis.__DSH_MODULES__
     }
 
+    async function bootstrapProductWorkspace(
+      ctx,
+      desktopBridge = globalThis.dshDesktop,
+      isActive = () => true,
+    ) {
+      if (
+        typeof desktopBridge?.productWorkspace !== 'function'
+        || typeof ctx.workspaces?.create !== 'function'
+        || typeof ctx.workspaces?.connectWorkspace !== 'function'
+        || typeof ctx.sessions?.open !== 'function'
+      ) return false
+
+      const path = await desktopBridge.productWorkspace()
+      if (typeof path !== 'string' || path.trim() === '') return false
+      const workspace = await ctx.workspaces.create({ path })
+      if (!workspace?.workspaceId) throw new Error('PANGEA product workspace registration returned no id')
+      const sessionId = await ctx.workspaces.connectWorkspace(workspace.workspaceId)
+      if (!sessionId) throw new Error('PANGEA product workspace returned no session')
+      if (isActive()) ctx.sessions.open(sessionId)
+      return true
+    }
+
+    function installProductWorkspaceBootstrap(ctx) {
+      let active = true
+      void bootstrapProductWorkspace(ctx, globalThis.dshDesktop, () => active)
+        .catch(error => console.error('[dsh-pangea] product workspace bootstrap failed', error))
+      return () => { active = false }
+    }
+
     installModuleSystemBridge(require)
 
     function installProductStyles() {
@@ -750,12 +779,14 @@ window.__ModuleLoader__.load({
       ctx.effect(installProductStyles, 'dsh-pangea: product shell styles')
       const service = createPangeaService(betterSidebar)
       ctx.provide('pangea', service)
+      ctx.effect(() => installProductWorkspaceBootstrap(ctx), 'dsh-pangea: product workspace bootstrap')
       ctx.effect(() => service.disposePolicy, 'dsh-pangea: sidebar policy')
     }
 
     exports.inject = inject
     exports.nativePageId = nativePageId
     exports.installModuleSystemBridge = installModuleSystemBridge
+    exports.bootstrapProductWorkspace = bootstrapProductWorkspace
     exports.applyBuiltinPolicy = applyBuiltinPolicy
     exports.closeDisallowedTabs = closeDisallowedTabs
     exports.createPangeaService = createPangeaService

@@ -78,6 +78,34 @@ test('bridges the DSH module loader for Better Sidebar lazy terminal chunks', as
   assert.equal(sandbox.__DSH_MODULES__, bridge)
 })
 
+test('registers and opens the Desktop-owned PANGEA workspace on first launch', async () => {
+  const { exported } = await loadClient()
+  const calls = []
+  const opened = []
+  const result = await exported.bootstrapProductWorkspace({
+    workspaces: {
+      async create(input) {
+        calls.push(['create', input])
+        return { workspaceId: 'workspace-pangea' }
+      },
+      async connectWorkspace(workspaceId) {
+        calls.push(['connect', workspaceId])
+        return 'session-pangea'
+      },
+    },
+    sessions: { open(sessionId) { opened.push(sessionId) } },
+  }, {
+    async productWorkspace() { return 'C:\\Users\\tester\\AppData\\Roaming\\pangea-desktop\\launch-root' },
+  })
+
+  assert.equal(result, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ['create', { path: 'C:\\Users\\tester\\AppData\\Roaming\\pangea-desktop\\launch-root' }],
+    ['connect', 'workspace-pangea'],
+  ])
+  assert.deepEqual(opened, ['session-pangea'])
+})
+
 test('registers each feature page as one native sidebar tab', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()
