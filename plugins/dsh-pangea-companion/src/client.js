@@ -15,6 +15,16 @@ window.__ModuleLoader__.load({
     const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
     const EXECUTION_API_PATH = '/api/pangea-companion/executions'
     const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
+    const ACTIVE_POLL_INTERVAL_MS = 10_000
+    const IDLE_POLL_INTERVAL_MS = 45_000
+
+    function snapshotFingerprint(value) {
+      try { return JSON.stringify(value) } catch { return null }
+    }
+
+    function snapshotPollInterval(value) {
+      return value?.current?.terminal === false ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
+    }
 
     async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
@@ -489,6 +499,8 @@ window.__ModuleLoader__.load({
       const [runDraft, setRunDraft] = React.useState(ctx?.pangea?.getRunDraft?.() ?? { requestId: 0, assetIds: [] })
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const workbenchRequestRef = React.useRef({ sequence: 0, controller: null })
+      const snapshotRef = React.useRef(undefined)
+      const snapshotFingerprintRef = React.useRef('')
       const handledRunDraftRequest = React.useRef(0)
       const noticeTimerRef = React.useRef(undefined)
 
@@ -502,29 +514,39 @@ window.__ModuleLoader__.load({
         }
       }, [visible, pageMode])
 
-      const load = React.useCallback(async () => {
+      const load = React.useCallback(async ({ foreground = false } = {}) => {
         if (!cwd) {
           requestRef.current.controller?.abort()
+          snapshotRef.current = undefined
+          snapshotFingerprintRef.current = ''
           setSnapshot(undefined)
           setError('当前会话没有工作区路径，无法定位 pangea-data。')
-          return
+          return undefined
         }
         const sequence = ++requestRef.current.sequence
         requestRef.current.controller?.abort()
         const controller = new AbortController()
         requestRef.current.controller = controller
-        setLoading(true)
+        const showLoading = foreground || snapshotRef.current === undefined
+        if (showLoading) setLoading(true)
         try {
           const body = await requestSnapshot({ cwd, runId: selectedRun, sessionId: scope?.sessionId, signal: controller.signal })
-          if (sequence !== requestRef.current.sequence) return
-          setSnapshot(body)
+          if (sequence !== requestRef.current.sequence) return undefined
+          const fingerprint = snapshotFingerprint(body)
+          if (fingerprint === null || fingerprint !== snapshotFingerprintRef.current) {
+            snapshotRef.current = body
+            snapshotFingerprintRef.current = fingerprint ?? ''
+            setSnapshot(body)
+          }
           setError(undefined)
+          return body
         } catch (reason) {
           if (reason?.name !== 'AbortError' && sequence === requestRef.current.sequence) {
             setError(reason instanceof Error ? reason.message : String(reason))
           }
+          return undefined
         } finally {
-          if (sequence === requestRef.current.sequence) setLoading(false)
+          if (showLoading && sequence === requestRef.current.sequence) setLoading(false)
         }
       }, [cwd, selectedRun, scope?.sessionId])
 
@@ -559,7 +581,15 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      React.useEffect(() => { setSelectedRun(undefined); setScreen({ type: initialScreen }); setHistory([]); setSelectedCaseIds([]) }, [cwd, initialScreen])
+      React.useEffect(() => {
+        snapshotRef.current = undefined
+        snapshotFingerprintRef.current = ''
+        setSnapshot(undefined)
+        setSelectedRun(undefined)
+        setScreen({ type: initialScreen })
+        setHistory([])
+        setSelectedCaseIds([])
+      }, [cwd, initialScreen])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
         const sync = () => setRunDraft(ctx?.pangea?.getRunDraft?.() ?? { requestId: 0, assetIds: [] })
@@ -584,15 +614,44 @@ window.__ModuleLoader__.load({
         }
         let stopped = false
         let timer
-        const poll = async () => {
-          await load()
-          if (!stopped) timer = window.setTimeout(() => { void poll() }, 4000)
+        const canPoll = () => document.visibilityState !== 'hidden' && document.hasFocus()
+        const clearTimer = () => {
+          if (timer !== undefined) window.clearTimeout(timer)
+          timer = undefined
         }
-        void poll()
+        const schedule = value => {
+          clearTimer()
+          if (!stopped && canPoll()) timer = window.setTimeout(() => { timer = undefined; void poll() }, snapshotPollInterval(value))
+        }
+        const poll = async () => {
+          if (stopped || !canPoll()) return
+          const value = await load()
+          if (!stopped) schedule(value ?? snapshotRef.current)
+        }
+        const pause = () => {
+          clearTimer()
+          requestRef.current.controller?.abort()
+        }
+        const resume = () => {
+          if (stopped || !canPoll()) return
+          clearTimer()
+          timer = window.setTimeout(() => { timer = undefined; void poll() }, 0)
+        }
+        const onVisibilityChange = () => {
+          if (canPoll()) resume()
+          else pause()
+        }
+        window.addEventListener('focus', resume)
+        window.addEventListener('blur', pause)
+        document.addEventListener('visibilitychange', onVisibilityChange)
+        resume()
         return () => {
           stopped = true
-          if (timer) window.clearTimeout(timer)
+          clearTimer()
           requestRef.current.controller?.abort()
+          window.removeEventListener('focus', resume)
+          window.removeEventListener('blur', pause)
+          document.removeEventListener('visibilitychange', onVisibilityChange)
         }
       }, [load, visible])
       React.useEffect(() => {
@@ -966,7 +1025,7 @@ window.__ModuleLoader__.load({
               disabled: loading || workbenchLoading,
               'aria-busy': loading || workbenchLoading,
               style: { ...styles.button, ...(loading || workbenchLoading ? styles.buttonDisabled : {}) },
-              onClick: () => { void Promise.all([load(), loadWorkbench()]) },
+              onClick: () => { void Promise.all([load({ foreground: true }), loadWorkbench()]) },
             }, loading || workbenchLoading ? '同步中…' : '刷新'))),
         navigation)
 
@@ -1580,7 +1639,7 @@ window.__ModuleLoader__.load({
       const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
-        h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load() } }, '重试')) : null
+        h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load({ foreground: true }) } }, '重试')) : null
       const requiresSnapshot = !['create', 'execution'].includes(screen.type)
       const initialLoading = requiresSnapshot && loading && snapshot === undefined
       const contentBody = initialLoading
