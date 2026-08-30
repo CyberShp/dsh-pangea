@@ -58,7 +58,7 @@ function fakeSidebar() {
 
 test('publishes ctx.pangea without registering a wrapper tab', async () => {
   const { exported, source } = await loadClient()
-  assert.deepEqual(Array.from(exported.inject), ['betterSidebar'])
+  assert.deepEqual(Array.from(exported.inject), ['betterSidebar', 'workspaces', 'sessions'])
   assert.doesNotMatch(source, /PangeaWorkbench/)
   const sidebar = fakeSidebar()
   let provided
