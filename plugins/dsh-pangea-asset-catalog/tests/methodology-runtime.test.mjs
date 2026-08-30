@@ -51,7 +51,7 @@ test('semantic candidate session imports through the PANGEA methodology API', as
     const launched = await runtime.start({ cwd: root, dataRoot, assetIds: ['asset-1'] })
     assert.equal(launched.session_id, 'session-1')
     assert.match(prompts[0].content[0].text, /methodology-worker\.md/)
-    assert.match(prompts[0].content[0].text, /methodology-1\/task\.json/)
+    assert.match(prompts[0].content[0].text, /methodology-1[\\/]task\.json/)
     const repeated = await runtime.start({ cwd: root, dataRoot, assetIds: ['asset-1'] })
     assert.equal(repeated.reused, true)
     assert.equal(prompts.length, 1)
