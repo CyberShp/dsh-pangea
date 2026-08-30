@@ -33,13 +33,15 @@ function stringList(value) {
     : []
 }
 
-export function normalizeRunInput(value, capabilities) {
+function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   const repository = typeof value?.repository === 'string' ? value.repository.trim() : ''
   const target = typeof value?.target === 'string' ? value.target.trim() : ''
   const sourceScope = stringList(value?.source_scope)
   if (!repository) throw new Error('repository is required')
   if (!target) throw new Error('target is required')
-  if (sourceScope.length === 0) throw new Error('source_scope must contain at least one path')
+  if (sourceScope.length === 0 && !allowEmptySourceScope) {
+    throw new Error('source_scope must contain at least one path')
+  }
   if (Array.isArray(capabilities?.repositories) && !capabilities.repositories.includes(repository)) {
     throw new Error(`repository is not registered: ${repository}`)
   }
@@ -51,6 +53,10 @@ export function normalizeRunInput(value, capabilities) {
     asset_ids: stringList(value?.asset_ids),
     test_case_examples: stringList(value?.test_case_examples),
   }
+}
+
+export function normalizeRunInput(value, capabilities) {
+  return normalizeAnalysisInput(value, capabilities, false)
 }
 
 export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limit = DEFAULT_PAGE_SIZE, runner = runPangea }) {
@@ -129,21 +135,32 @@ export async function launchAnalysisSession(api, { cwd, dataRoot, input }, runne
     cwd: root,
     args: ['system', 'capabilities', '--data-root', resolvedDataRoot],
   })
-  const contract = normalizeRunInput(input, capabilities)
-  const sessionId = await createDshSession(api, root, `PANGEA 分析 · ${contract.target}`)
+  const request = normalizeAnalysisInput(input, capabilities, true)
+  const sessionId = await createDshSession(api, root, `PANGEA 分析 · ${request.target}`)
+  const scopeInstructions = request.source_scope.length > 0
+    ? ['用户已经指定 source_scope，逐字使用下面输入中的路径，不得自行扩大范围。']
+    : [
+        '用户没有手工指定 source_scope。调用 pangea_run_create 前，仅可在已选仓库中列目录、按文件名搜索或 grep 符号，以确定与 target 直接相关的最小源码路径集合。',
+        '不得为确定范围而 Read、分段读取或通读业务源码，也不得读取历史 Run、PANGEA CLI、graph 或 schema。',
+        '能够确定唯一合理范围时，直接补全非空 source_scope 并调用 pangea_run_create，不要再次要求用户填写。若存在多个明显不同且无法安全选择的范围，先在当前会话列出候选并等待用户确认。',
+      ]
+  const agentInput = request.source_scope.length > 0
+    ? request
+    : Object.fromEntries(Object.entries(request).filter(([key]) => key !== 'source_scope'))
   const prompt = [
     '创建一个新的 PANGEA 模块分析并走完完整 action 流程，直到生成最终报告。',
     '必须读取 .agents/pangea/dsh.md，并直接调用 pangea_run_create；不得手写 pending contract 或自行推进 graph。',
+    ...scopeInstructions,
     '',
     '[PANGEA Run 输入]',
-    JSON.stringify({ ...contract, data_root: resolvedDataRoot }, null, 2),
+    JSON.stringify({ ...agentInput, data_root: resolvedDataRoot }, null, 2),
   ].join('\n')
   apiValue(await api.sessions.prompt(rpc({
     sessionId,
     mode: 'queue',
     content: [{ type: 'text', text: prompt }],
   })))
-  return { status: 'ok', session_id: sessionId, input: contract, data_root: resolvedDataRoot }
+  return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot }
 }
 
 export async function stopAnalysisRun({ cwd, dataRoot, runId, runner = runPangea }) {

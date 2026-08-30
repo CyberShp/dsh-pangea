@@ -34,8 +34,26 @@ async function hostByAlias(alias) {
   return host
 }
 
-async function connect(alias) {
-  const host = await hostByAlias(alias)
+function endpointHost(endpoint) {
+  return {
+    host: endpoint.ip,
+    port: endpoint.port ?? 22,
+    user: endpoint.username,
+    auth: { kind: 'password', password: endpoint.password },
+  }
+}
+
+async function resolvedHost(alias, environments) {
+  const match = /^pangea-environment\/([^/]+)\/(host|array)$/.exec(alias)
+  if (!match) return hostByAlias(alias)
+  const environment = await environments?.get(match[1])
+  if (!environment) throw new Error(`environment not found: ${match[1]}`)
+  const endpoint = environment[match[2]]
+  if (!endpoint?.ip) throw new Error(`${match[2]} connection is not configured: ${match[1]}`)
+  return endpointHost(endpoint)
+}
+
+async function connectHost(host) {
   const config = {
     host: host.host,
     port: host.port ?? 22,
@@ -48,7 +66,7 @@ async function connect(alias) {
     if (host.auth.passphrase) config.passphrase = host.auth.passphrase
   } else if (host.auth?.kind === 'agent') {
     config.agent = host.auth.agentPath || process.env.SSH_AUTH_SOCK
-  } else throw new Error(`SSH auth is not configured for alias: ${alias}`)
+  } else throw new Error('SSH authentication is not configured')
   return await new Promise((resolve, reject) => {
     const client = new Client()
     const fail = error => {
@@ -66,18 +84,37 @@ async function connect(alias) {
   })
 }
 
+async function connect(alias, environments) {
+  return connectHost(await resolvedHost(alias, environments))
+}
+
 function stripAnsi(value) {
   return value.replace(/[\u001b\u009b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g, '')
 }
 
 export class PangeaSshRuntime {
-  constructor() {
+  constructor(environments) {
+    this.environments = environments
     this.jobs = new Map()
+  }
+
+  async test(endpoint) {
+    const normalized = {
+      ip: typeof endpoint?.ip === 'string' ? endpoint.ip.trim() : '',
+      username: typeof endpoint?.username === 'string' ? endpoint.username.trim() : '',
+      password: typeof endpoint?.password === 'string' ? endpoint.password : '',
+      port: endpoint?.port === undefined || endpoint.port === '' ? 22 : Number(endpoint.port),
+    }
+    if (!normalized.ip || !normalized.username || !normalized.password) throw new Error('IP、用户名和密码不能为空')
+    if (!Number.isInteger(normalized.port) || normalized.port < 1 || normalized.port > 65535) throw new Error('SSH 端口必须在 1 到 65535 之间')
+    const client = await connectHost(endpointHost(normalized))
+    client.end()
+    return { connected: true, ip: normalized.ip, port: normalized.port }
   }
 
   async exec(alias, command, timeoutMs = 60_000) {
     const started = Date.now()
-    const client = await connect(alias)
+    const client = await connect(alias, this.environments)
     return await new Promise((resolve) => {
       let stdout = ''
       let stderr = ''
@@ -101,7 +138,7 @@ export class PangeaSshRuntime {
   }
 
   async start(alias, command) {
-    const client = await connect(alias)
+    const client = await connect(alias, this.environments)
     const jobId = crypto.randomUUID()
     return await new Promise((resolve, reject) => {
       client.exec(command, { pty: true }, (error, stream) => {
@@ -178,7 +215,7 @@ export class PangeaSshRuntime {
 
   async interactive(alias, exchanges) {
     const started = Date.now()
-    const client = await connect(alias)
+    const client = await connect(alias, this.environments)
     return await new Promise((resolve) => {
       let transcript = ''
       let settled = false

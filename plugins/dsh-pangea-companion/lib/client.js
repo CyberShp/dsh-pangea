@@ -15,6 +15,7 @@ window.__ModuleLoader__.load({
     const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
     const EXECUTION_API_PATH = '/api/pangea-companion/executions'
     const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
+    const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
     const ACTIVE_POLL_INTERVAL_MS = 10_000
     const IDLE_POLL_INTERVAL_MS = 45_000
 
@@ -60,6 +61,15 @@ window.__ModuleLoader__.load({
       return body.environment
     }
 
+    async function testEnvironmentConnection(endpoint, fetcher = fetch) {
+      const response = await fetcher(ENVIRONMENT_API_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'test', endpoint }),
+      })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body.result
+    }
+
     async function removeEnvironment(id, fetcher = fetch) {
       const response = await fetcher(`${ENVIRONMENT_API_PATH}?${new URLSearchParams({ id })}`, { method: 'DELETE' })
       const body = await response.json()
@@ -88,6 +98,24 @@ window.__ModuleLoader__.load({
     async function requestWorkbenchAction({ cwd, action, payload = {}, fetcher = fetch }) {
       const response = await fetcher(`${WORKBENCH_API_PATH}?${new URLSearchParams({ cwd })}`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...payload }),
+      })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
+    async function requestRepositoryStatus({ cwd, fetcher = fetch }) {
+      const response = await fetcher(`${REPOSITORY_API_PATH}?${new URLSearchParams({ cwd })}`, { cache: 'no-store' })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
+    async function requestRepositoryImport({ cwd, sourcePath, repositoryName, fetcher = fetch }) {
+      const response = await fetcher(`${REPOSITORY_API_PATH}?${new URLSearchParams({ cwd })}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ source_path: sourcePath, repository_name: repositoryName }),
       })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
@@ -245,6 +273,43 @@ window.__ModuleLoader__.load({
       homeColumns: { display: 'grid', gridTemplateColumns: 'minmax(0, 1.02fr) minmax(300px, .98fr)', gap: 16, marginTop: 16, minHeight: 330 },
       reportRow: { width: '100%', minHeight: 47, display: 'grid', gridTemplateColumns: '22px minmax(0,1fr) 96px 18px', alignItems: 'center', gap: 10, padding: '0 2px', color: '#24272c', border: 0, borderBottom: '1px solid #edf0f2', background: 'transparent', cursor: 'pointer', textAlign: 'left' },
       redButton: { minWidth: 118, minHeight: 42, border: '1px solid #c7000b', borderRadius: 6, padding: '0 22px', background: 'linear-gradient(135deg, #c7000b, #d90012)', color: '#fff', fontSize: 14, fontWeight: 650, boxShadow: '0 6px 14px rgba(199,0,11,.13)' },
+      environmentContent: { padding: '22px 28px 32px', maxWidth: 1120, margin: '0 auto', boxSizing: 'border-box' },
+      environmentSection: { border: '1px solid #dce1e6', borderRadius: 9, marginBottom: 18, background: '#fff', overflow: 'hidden', boxShadow: '0 1px 2px rgba(20,29,40,.03)' },
+      environmentSectionHead: { minHeight: 51, display: 'flex', alignItems: 'center', gap: 12, padding: '0 20px', borderBottom: '1px solid #e6e9ed' },
+      environmentSectionTitle: { fontSize: 16, fontWeight: 700, color: '#25282d' },
+      environmentSectionHint: { color: '#7a818c', fontSize: 12 },
+      environmentSectionBody: { padding: '18px 20px 20px' },
+      environmentConnections: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 18 },
+      environmentConnectionCard: { border: '1px solid #dfe3e8', borderRadius: 8, padding: 18, background: '#fbfcfd' },
+      environmentConnectionTitle: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, color: '#25282d', fontSize: 15, fontWeight: 700 },
+      environmentConnectionIcon: { width: 34, height: 34, display: 'grid', placeItems: 'center', borderRadius: 7, color: '#c7000b', background: '#fff0f1', border: '1px solid #ffe0e2' },
+      environmentFieldGrid: { display: 'grid', gridTemplateColumns: 'minmax(0, 1.25fr) minmax(0, .85fr)', gap: 13 },
+      environmentField: { minWidth: 0 },
+      environmentFieldWide: { gridColumn: '1 / -1' },
+      environmentLabel: { display: 'block', marginBottom: 7, color: '#343a43', fontSize: 13, fontWeight: 620 },
+      environmentInput: { width: '100%', height: 42, boxSizing: 'border-box', border: '1px solid #cfd5dc', borderRadius: 5, padding: '0 12px', outline: 'none', color: '#272b31', background: '#fff', fontSize: 14 },
+      environmentConnectionFoot: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 16 },
+      environmentTestState: { color: '#7a818c', fontSize: 12 },
+      environmentActions: { display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 2 },
+      environmentSecondaryButton: { minWidth: 74, height: 36, border: '1px solid #cfd4da', borderRadius: 5, padding: '0 16px', color: '#343a43', background: '#fff', cursor: 'pointer', fontSize: 13 },
+      environmentPrimaryButton: { minWidth: 102, height: 36, border: '1px solid #c7000b', borderRadius: 5, padding: '0 18px', color: '#fff', background: '#c7000b', cursor: 'pointer', fontSize: 13, fontWeight: 650 },
+      environmentAdvanced: { gridColumn: '1 / -1', marginTop: 1, color: '#59616c', fontSize: 12 },
+      environmentList: { display: 'grid', gap: 9 },
+      environmentListItem: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'center', gap: 14, padding: '13px 14px', border: '1px solid #e1e5e9', borderRadius: 7, background: '#fff' },
+      onboardingShell: { minHeight: 'calc(100vh - 128px)', display: 'grid', placeItems: 'center', padding: '34px 28px 54px', boxSizing: 'border-box', background: 'radial-gradient(circle at 50% 5%, #fff 0, #f7f8fa 44%, #f3f5f7 100%)' },
+      onboardingCard: { width: 'min(760px, 100%)', border: '1px solid #dce1e6', borderRadius: 12, padding: '38px 42px 40px', background: '#fff', boxShadow: '0 22px 60px rgba(22,31,43,.08), 0 2px 8px rgba(22,31,43,.04)', boxSizing: 'border-box' },
+      onboardingEyebrow: { color: '#c7000b', fontSize: 12, fontWeight: 720, letterSpacing: '.1em' },
+      onboardingTitle: { marginTop: 10, color: '#181a1f', fontSize: 30, fontWeight: 730, lineHeight: 1.2, letterSpacing: '-.035em' },
+      onboardingLead: { maxWidth: 610, marginTop: 11, color: '#68717c', fontSize: 14, lineHeight: 1.7 },
+      onboardingRail: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', marginTop: 30, borderTop: '1px solid #e0e4e8' },
+      onboardingStep: { position: 'relative', padding: '20px 14px 18px 0', color: '#7a828d', fontSize: 12, lineHeight: 1.45 },
+      onboardingStepDot: { position: 'absolute', top: -6, left: 0, width: 11, height: 11, borderRadius: '50%', background: '#c7000b', boxShadow: '0 0 0 4px #fff' },
+      onboardingStepTitle: { color: '#292d33', fontSize: 14, fontWeight: 680, marginBottom: 4 },
+      repositoryPicker: { marginTop: 6, border: '1px solid #dce1e6', borderRadius: 9, padding: 18, background: '#fafbfc' },
+      repositoryPickerRow: { display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto', alignItems: 'end', gap: 14 },
+      repositoryPath: { minHeight: 42, display: 'flex', alignItems: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid #cfd5dc', borderRadius: 5, padding: '0 12px', color: '#4e5661', background: '#fff', fontSize: 13, boxSizing: 'border-box' },
+      repositoryActions: { display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 12, marginTop: 22 },
+      repositoryHint: { marginTop: 12, color: '#7a828d', fontSize: 12, lineHeight: 1.6 },
     }
 
     function icon(size = 16) {
@@ -466,6 +531,14 @@ window.__ModuleLoader__.load({
       return screen.type
     }
 
+    function emptyEnvironmentForm() {
+      return {
+        id: '', name: '', advanced: false,
+        host_ip: '', host_username: '', host_password: '', host_port: '22',
+        array_ip: '', array_username: '', array_password: '', array_port: '22',
+      }
+    }
+
     function PangeaPanel({ ctx, scope, visible, initialScreen = 'overview', pageMode = 'analysis' }) {
       const cwd = scope?.cwd
       const [snapshot, setSnapshot] = React.useState(undefined)
@@ -475,6 +548,11 @@ window.__ModuleLoader__.load({
       const [selectedRun, setSelectedRun] = React.useState(undefined)
       const [loading, setLoading] = React.useState(false)
       const [workbenchLoading, setWorkbenchLoading] = React.useState(false)
+      const [repositoryState, setRepositoryState] = React.useState(undefined)
+      const [repositoryLoading, setRepositoryLoading] = React.useState(false)
+      const [repositoryForm, setRepositoryForm] = React.useState({ sourcePath: '', repositoryName: '' })
+      const [repositoryImporting, setRepositoryImporting] = React.useState(false)
+      const [repositoryError, setRepositoryError] = React.useState('')
       const [runCursor, setRunCursor] = React.useState(0)
       const [screen, setScreen] = React.useState({ type: initialScreen })
       const [history, setHistory] = React.useState([])
@@ -491,7 +569,8 @@ window.__ModuleLoader__.load({
       const [selectedEnvironment, setSelectedEnvironment] = React.useState('')
       const [selectedCaseIds, setSelectedCaseIds] = React.useState([])
       const [launching, setLaunching] = React.useState(false)
-      const [environmentForm, setEnvironmentForm] = React.useState({ id: '', name: '', host_alias: '', array_alias: '', automation_id: '', bindings: '{}' })
+      const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
+      const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
       const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', focus: '', asset_ids: '', test_case_examples: '' })
       const [creatingRun, setCreatingRun] = React.useState(false)
       const [pendingStopRun, setPendingStopRun] = React.useState('')
@@ -581,6 +660,23 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      const loadRepositories = React.useCallback(async () => {
+        if (!cwd || pageMode !== 'home') return undefined
+        setRepositoryLoading(true)
+        try {
+          const value = await requestRepositoryStatus({ cwd })
+          setRepositoryState(value)
+          setRepositoryError('')
+          return value
+        } catch (reason) {
+          const message = reason instanceof Error ? reason.message : String(reason)
+          setRepositoryError(message)
+          return undefined
+        } finally {
+          setRepositoryLoading(false)
+        }
+      }, [cwd, pageMode])
+
       React.useEffect(() => {
         snapshotRef.current = undefined
         snapshotFingerprintRef.current = ''
@@ -597,18 +693,18 @@ window.__ModuleLoader__.load({
         return ctx?.pangea?.subscribeRunDraft?.(sync)
       }, [ctx?.pangea])
       React.useEffect(() => {
-        if (!runDraft?.requestId || runDraft.requestId === handledRunDraftRequest.current) return
+        if (pageMode !== 'analysis' || !runDraft?.requestId || runDraft.requestId === handledRunDraftRequest.current) return
         handledRunDraftRequest.current = runDraft.requestId
         setCreateForm(value => ({ ...value, asset_ids: (runDraft.assetIds ?? []).join('\n') }))
         setScreen({ type: 'create' })
         setHistory([])
-      }, [runDraft?.requestId])
+      }, [pageMode, runDraft?.requestId])
       React.useEffect(() => {
         const repositories = workbench?.capabilities?.repositories ?? []
         if (repositories.length > 0) setCreateForm(value => value.repository ? value : { ...value, repository: repositories[0] })
       }, [workbench?.capabilities])
       React.useEffect(() => {
-        if (!visible) {
+        if (!visible || pageMode === 'execution') {
           requestRef.current.controller?.abort()
           return undefined
         }
@@ -653,13 +749,14 @@ window.__ModuleLoader__.load({
           window.removeEventListener('blur', pause)
           document.removeEventListener('visibilitychange', onVisibilityChange)
         }
-      }, [load, visible])
+      }, [load, pageMode, visible])
       React.useEffect(() => {
         if (!visible || pageMode === 'execution') return undefined
         void loadWorkbench()
         return () => workbenchRequestRef.current.controller?.abort()
       }, [loadWorkbench, pageMode, visible])
       React.useEffect(() => { if (visible) void loadEnvironments() }, [visible, loadEnvironments])
+      React.useEffect(() => { if (visible && pageMode === 'home') void loadRepositories() }, [visible, pageMode, loadRepositories])
 
       const current = snapshot?.current
       const monitor = snapshot?.monitor
@@ -779,6 +876,58 @@ window.__ModuleLoader__.load({
       function multilineValues(value) {
         return [...new Set(String(value ?? '').split(/\r?\n/).map(item => item.trim()).filter(Boolean))]
       }
+      function repositoryNameFromPath(value) {
+        return String(value ?? '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+      }
+      async function chooseRepositoryFolder() {
+        const picker = window.dshDesktopDirectoryPicker
+        if (!picker?.pick) {
+          setRepositoryError('当前不是 PANGEA Desktop 原生窗口，无法打开系统文件夹选择器。')
+          return
+        }
+        try {
+          const selected = await picker.pick({ purpose: 'repository' })
+          if (!selected) return
+          setRepositoryForm({ sourcePath: selected, repositoryName: repositoryNameFromPath(selected) })
+          setRepositoryError('')
+        } catch (reason) {
+          setRepositoryError(reason instanceof Error ? reason.message : String(reason))
+        }
+      }
+      async function submitRepositoryImport() {
+        if (!cwd || repositoryImporting || !repositoryForm.sourcePath || !repositoryForm.repositoryName.trim()) return
+        setRepositoryImporting(true)
+        setRepositoryError('')
+        try {
+          const result = await requestRepositoryImport({
+            cwd,
+            sourcePath: repositoryForm.sourcePath,
+            repositoryName: repositoryForm.repositoryName,
+          })
+          const nextState = await requestRepositoryStatus({ cwd })
+          setRepositoryState(nextState)
+          setRepositoryForm({ sourcePath: '', repositoryName: '' })
+          setScreen({ type: 'home' })
+          setHistory([])
+          showActionNotice(`源码仓库“${result.repository.name}”已加入 PANGEA。`)
+          await Promise.all([load(), loadWorkbench()])
+        } catch (reason) {
+          const raw = reason instanceof Error ? reason.message : String(reason)
+          const message = raw.includes('repository already exists')
+            ? '已存在同名仓库，请修改仓库名称后重试。'
+            : raw.includes('outside the PANGEA data directory')
+              ? '请选择 pangea-data 目录之外的源码仓库。'
+              : raw
+          setRepositoryError(message)
+        } finally {
+          setRepositoryImporting(false)
+        }
+      }
+      function openRepositoryImport() {
+        setRepositoryForm({ sourcePath: '', repositoryName: '' })
+        setRepositoryError('')
+        navigate({ type: 'repository-import' })
+      }
       async function submitNewRun() {
         if (!cwd || creatingRun || workbench?.compatibility?.compatible !== true) return
         setCreatingRun(true)
@@ -830,23 +979,58 @@ window.__ModuleLoader__.load({
         setEnvironmentForm({
           id: environment.id,
           name: environment.name,
-          host_alias: environment.host_alias,
-          array_alias: environment.array_alias,
-          automation_id: environment.automation_id,
-          bindings: JSON.stringify(environment.bindings ?? {}, null, 2),
+          advanced: (environment.host?.port ?? 22) !== 22 || (environment.array?.port ?? 22) !== 22,
+          host_ip: environment.host?.ip ?? '',
+          host_username: environment.host?.username ?? '',
+          host_password: environment.host?.password ?? '',
+          host_port: String(environment.host?.port ?? 22),
+          array_ip: environment.array?.ip ?? '',
+          array_username: environment.array?.username ?? '',
+          array_password: environment.array?.password ?? '',
+          array_port: String(environment.array?.port ?? 22),
         })
-        jump('execution')
+        setEnvironmentTests({ host: { state: 'idle' }, array: { state: 'idle' } })
+        jump('environment')
+      }
+      function environmentEndpoint(kind) {
+        const prefix = kind === 'host' ? 'host' : 'array'
+        const ip = environmentForm[`${prefix}_ip`].trim()
+        if (!ip) return null
+        return {
+          ip,
+          username: environmentForm[`${prefix}_username`].trim(),
+          password: environmentForm[`${prefix}_password`],
+          port: Number(environmentForm[`${prefix}_port`] || 22),
+        }
       }
       async function submitEnvironment() {
         try {
-          const bindings = JSON.parse(environmentForm.bindings || '{}')
-          const saved = await saveEnvironment({ ...environmentForm, bindings })
+          const host = environmentEndpoint('host')
+          const array = environmentEndpoint('array')
+          if (!environmentForm.name.trim()) throw new Error('请填写环境名称')
+          if (!host && !array) throw new Error('请至少配置测试主机或存储阵列')
+          const saved = await saveEnvironment({ id: environmentForm.id || undefined, name: environmentForm.name.trim(), host, array })
           await loadEnvironments()
           setSelectedEnvironment(saved.id)
-          setEnvironmentForm({ id: '', name: '', host_alias: '', array_alias: '', automation_id: '', bindings: '{}' })
-          showActionNotice(`执行环境 ${saved.name} 已保存。`)
+          setEnvironmentForm(emptyEnvironmentForm())
+          setEnvironmentTests({ host: { state: 'idle' }, array: { state: 'idle' } })
+          showActionNotice(`测试环境 ${saved.name} 已保存。`)
         } catch (reason) {
           showActionNotice(`保存失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
+      }
+      async function testEnvironment(kind) {
+        const endpoint = environmentEndpoint(kind)
+        if (!endpoint) {
+          setEnvironmentTests(value => ({ ...value, [kind]: { state: 'error', message: '请先填写 IP、用户名和密码' } }))
+          return
+        }
+        setEnvironmentTests(value => ({ ...value, [kind]: { state: 'testing' } }))
+        try {
+          await testEnvironmentConnection(endpoint)
+          setEnvironmentTests(value => ({ ...value, [kind]: { state: 'ok', message: '连接成功' } }))
+        } catch (reason) {
+          setEnvironmentTests(value => ({ ...value, [kind]: { state: 'error', message: reason instanceof Error ? reason.message : String(reason) } }))
         }
       }
       async function deleteEnvironment(id) {
@@ -998,7 +1182,9 @@ window.__ModuleLoader__.load({
               : screen.type === 'case' ? (caseById.get(screen.id)?.test_case_id || '用例详情')
                 : screen.type === 'evidence' ? '证据'
                   : screen.type === 'evidence-detail' ? '证据详情'
-                    : screen.type === 'execution' ? '执行结果' : '复核'
+                    : screen.type === 'execution' ? '执行结果'
+                      : screen.type === 'environment' ? (environmentForm.id ? '编辑测试环境' : '新增测试环境')
+                        : screen.type === 'repository-import' ? '添加源码仓库' : '复核'
 
       const navigationItems = pageMode !== 'analysis' ? [] : [
         ['overview', '总览'], ['risks', '待处理'], ['cases', '测试计划'], ['execution', '执行结果'],
@@ -1014,7 +1200,7 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
-            !['home', 'overview', 'risks', 'cases', 'execution'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
+            !['home', 'overview', 'risks', 'cases', 'execution', 'environment'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
               h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : 'PANGEA 测试平台'))),
@@ -1025,7 +1211,7 @@ window.__ModuleLoader__.load({
               disabled: loading || workbenchLoading,
               'aria-busy': loading || workbenchLoading,
               style: { ...styles.button, ...(loading || workbenchLoading ? styles.buttonDisabled : {}) },
-              onClick: () => { void Promise.all([load({ foreground: true }), loadWorkbench()]) },
+              onClick: () => { void (pageMode === 'execution' ? loadEnvironments() : Promise.all([load({ foreground: true }), loadWorkbench()])) },
             }, loading || workbenchLoading ? '同步中…' : '刷新'))),
         navigation)
 
@@ -1152,7 +1338,7 @@ window.__ModuleLoader__.load({
       function renderCreate() {
         const repositories = workbench?.capabilities?.repositories ?? []
         const compatible = workbench?.compatibility?.compatible === true
-        const canSubmit = compatible && createForm.repository && createForm.target.trim() && multilineValues(createForm.source_scope).length > 0 && !creatingRun
+        const canSubmit = compatible && createForm.repository && createForm.target.trim() && !creatingRun
         const formField = (label, key, placeholder) => h('label', null,
           h('div', { style: styles.label }, label),
           h('input', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm[key], placeholder, onChange: event => setCreateForm(value => ({ ...value, [key]: event.target.value })) }))
@@ -1163,12 +1349,12 @@ window.__ModuleLoader__.load({
           renderCompatibility(),
           h('div', { style: { ...styles.card, ...styles.compatibility } },
             h('div', { style: styles.itemTitle }, '分析输入'),
-            h('div', { style: styles.itemMeta }, '每行一个源码路径。提交后会创建独立 DSH 会话，由 Agent 按 PANGEA action 契约完成分析。'),
+            h('div', { style: styles.itemMeta }, '分析目标必填；源码范围可选。不填写时，Agent 会先在所选仓库中识别最小范围，再按 PANGEA action 契约完成分析。'),
             h('div', { style: styles.formGrid },
               h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
                 h('option', { value: '' }, repositories.length ? '选择仓库' : '没有可用仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository)))),
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
-              formArea('源码范围（必填）', 'source_scope', 'lib/nvmf/auth.c\nlib/nvme/nvme_auth.c'),
+              formArea('源码范围（可选）', 'source_scope', '可留空，由 Agent 自动识别；也可每行填写一个源码路径'),
               formArea('分析重点', 'focus', '错误路径\n恢复行为\n外部可观测结果'),
               formArea('结构化资产 ID', 'asset_ids', '可从“资产”页勾选后带入'),
               formArea('少量用例示例文件', 'test_case_examples', 'tests/auth_cases.yaml')),
@@ -1241,7 +1427,54 @@ window.__ModuleLoader__.load({
             flow.mermaid ? h('pre', { style: { ...styles.source, marginTop: 9 } }, flow.mermaid) : null)) : h('div', { style: styles.card }, h('div', { style: styles.empty }, collectionEmpty('business_flows', '当前 Run 没有业务流程。'))))
       }
 
+      function renderRepositoryImport(firstUse = false) {
+        const folderReady = Boolean(repositoryForm.sourcePath)
+        const copyReady = folderReady && Boolean(repositoryForm.repositoryName.trim())
+        const step = (number, title, copy, active) => h('div', { style: styles.onboardingStep },
+          h('span', { style: { ...styles.onboardingStepDot, background: active ? '#c7000b' : '#c7cdd4' }, 'aria-hidden': true }),
+          h('div', { style: styles.onboardingStepTitle }, `${number}. ${title}`),
+          h('div', null, copy))
+        return h('div', { style: styles.onboardingShell },
+          h('section', { style: styles.onboardingCard, 'aria-labelledby': 'pangea-repository-title' },
+            h('div', { style: styles.onboardingEyebrow }, firstUse ? '首次使用' : '源码仓库'),
+            h('div', { id: 'pangea-repository-title', style: styles.onboardingTitle }, firstUse ? '初始化 PANGEA 测试工作区' : '添加源码仓库'),
+            h('div', { style: styles.onboardingLead }, firstUse
+              ? 'PANGEA 已准备好本地数据目录。请选择一个源码仓库，Desktop 会完整复制到 pangea-data，之后的分析、资产和报告都在该工作区内完成。'
+              : '选择新的源码目录并复制到 PANGEA 数据区。原目录不会被修改，已有同名仓库也不会被覆盖。'),
+            h('div', { style: styles.onboardingRail, 'aria-label': '初始化进度' },
+              step('01', '数据目录', 'PANGEA 数据结构已就绪', true),
+              step('02', '选择仓库', folderReady ? '已选择源码目录' : '等待选择源码目录', folderReady),
+              step('03', '安全复制', repositoryImporting ? '正在复制，请保持窗口打开' : copyReady ? '可以开始复制' : '等待仓库信息', repositoryImporting)),
+            h('div', { style: styles.repositoryPicker },
+              h('div', { style: styles.repositoryPickerRow },
+                h('div', null,
+                  h('label', { style: styles.environmentLabel }, '源码仓库目录'),
+                  h('div', { style: styles.repositoryPath, title: repositoryForm.sourcePath || undefined }, repositoryForm.sourcePath || '尚未选择文件夹')),
+                h('button', { type: 'button', disabled: repositoryImporting, style: styles.environmentSecondaryButton, onClick: () => { void chooseRepositoryFolder() } }, '选择文件夹')),
+              h('div', { style: { marginTop: 16 } },
+                h('label', { style: styles.environmentLabel }, '仓库名称'),
+                h('input', {
+                  style: styles.environmentInput,
+                  value: repositoryForm.repositoryName,
+                  disabled: repositoryImporting,
+                  placeholder: '选择文件夹后自动填写，也可以修改',
+                  onChange: event => setRepositoryForm(value => ({ ...value, repositoryName: event.target.value })),
+                })),
+              h('div', { style: styles.repositoryHint }, '将保留完整源码与 .git 历史。复制过程先写入临时目录，成功后一次性加入仓库列表。')),
+            repositoryError ? h('div', { style: { ...styles.error, marginTop: 15 }, role: 'alert' }, repositoryError) : null,
+            h('div', { style: styles.repositoryActions },
+              !firstUse ? h('button', { type: 'button', disabled: repositoryImporting, style: styles.environmentSecondaryButton, onClick: goBack }, '取消') : null,
+              h('button', {
+                type: 'button',
+                disabled: !copyReady || repositoryImporting,
+                'aria-busy': repositoryImporting,
+                style: { ...styles.redButton, ...(!copyReady || repositoryImporting ? styles.buttonDisabled : {}) },
+                onClick: () => { void submitRepositoryImport() },
+              }, repositoryImporting ? '正在复制源码仓库…' : firstUse ? '完成初始化' : '添加仓库'))))
+      }
+
       function renderHome() {
+        if (repositoryState?.onboarding_required) return renderRepositoryImport(true)
         const runItems = workbench?.runs?.items ?? snapshot?.runs ?? []
         const uncoveredRisks = risks.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0)
         const runningRuns = runItems.filter(run => run.lifecycle_status === 'running')
@@ -1277,7 +1510,9 @@ window.__ModuleLoader__.load({
           h('section', { style: styles.homeHero },
             h('div', null,
               h('div', { style: styles.homeTitle }, '测试工作台')),
-            h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => openProductPage('analysis', 'PANGEA 分析') }, '新建分析')),
+            h('div', { style: { display: 'flex', gap: 10 } },
+              h('button', { type: 'button', style: { ...styles.environmentSecondaryButton, height: 42 }, onClick: openRepositoryImport }, '添加仓库'),
+              h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => openProductPage('analysis', 'PANGEA 分析') }, '新建分析'))),
           h('div', { style: styles.metricGrid, 'aria-label': '真实运行指标' },
             metricCard('running', '#2da44e', '运行中', runningRuns.length, `当前已载入 ${runItems.length}/${totalRuns} 个 Run`),
             metricCard('review', '#e07a00', '待复核', reviewRuns.length, '当前列表处于复核或补齐阶段'),
@@ -1485,8 +1720,8 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.itemTitle }, '执行这份计划'),
             h('div', { style: styles.itemMeta }, '系统会创建独立执行记录，并保留本次选择、环境和结果。'),
             h('select', { style: { ...styles.search, marginTop: 8 }, value: selectedEnvironment, onChange: event => setSelectedEnvironment(event.target.value) },
-              h('option', { value: '' }, environments.length ? '选择执行环境' : '请先在“执行结果”配置环境'),
-              environments.map(environment => h('option', { key: environment.id, value: environment.id }, `${environment.name} · ${environment.host_alias} + ${environment.array_alias}`))),
+              h('option', { value: '' }, environments.length ? '选择执行环境' : '请先在“环境配置”中新增环境'),
+              environments.map(environment => h('option', { key: environment.id, value: environment.id }, `${environment.name} · ${environment.host?.ip || '未配置主机'} + ${environment.array?.ip || '未配置阵列'}`))),
             h('div', { style: styles.row },
               h('div', { style: styles.itemMeta }, `已选 ${selectedCaseIds.length} 条`),
               h('div', { style: styles.chips },
@@ -1519,14 +1754,10 @@ window.__ModuleLoader__.load({
           }) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
       }
 
-      function renderExecution() {
+      function renderExecutionResults() {
         const executorRuns = snapshot?.executor_runs ?? []
         const completedRuns = executorRuns.filter(run => ['PASS', 'passed', 'complete', 'completed', 'success'].includes(run.result_status ?? run.phase)).length
         const unresolvedRuns = executorRuns.filter(run => (run.unresolved?.length ?? 0) > 0 || ['FAILED', 'failed', 'error', 'UNRESOLVED'].includes(run.result_status ?? run.phase)).length
-        const formInput = (fieldName, placeholder) => h('input', {
-          style: { ...styles.search, marginBottom: 0 }, value: environmentForm[fieldName], placeholder,
-          onChange: event => setEnvironmentForm(value => ({ ...value, [fieldName]: event.target.value })),
-        })
         return h(React.Fragment, null,
           h('div', { style: styles.decisionHero },
             h('div', { style: styles.eyebrow }, '执行结果'),
@@ -1538,28 +1769,71 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '需处理'), h('div', { style: styles.decisionValue }, unresolvedRuns)))),
           h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, `测试执行记录（${executorRuns.length}）`),
-            executorRuns.length ? h('div', { style: { marginTop: 8 } }, executorRuns.map(run => h('div', { key: run.executor_run_id, style: { ...styles.card, marginBottom: 7 } },
-              h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, run.executor_run_id), h('span', { style: styles.badge }, run.result_status ?? run.phase)),
-              h('div', { style: styles.itemMeta }, `${run.selected_test_case_ids.length} 条用例 · ${run.environment_id} · ${run.automation_id}`),
-              run.unresolved?.length ? h('div', { style: { ...styles.error, marginTop: 6 } }, run.unresolved.join('；')) : null,
-              h('div', { style: styles.chips }, run.artifacts?.plan ? chip('查看执行计划', () => openSidebarFile(run.artifacts.plan, 'PANGEA executable plan')) : null, run.artifacts?.result ? chip('查看执行结果', () => openSidebarFile(run.artifacts.result, 'PANGEA execution result')) : null)))) : h('div', { style: { ...styles.empty, marginTop: 8 } }, '当前分析还没有执行记录。')),
-          h('div', { style: styles.card },
-            h('div', { style: styles.itemTitle }, '可用测试环境'),
-            h('div', { style: styles.itemMeta }, '连接凭据仍由 dsh-ssh 管理；这里仅记录执行计划所需的环境引用。'),
-            environments.length ? h('div', { style: { marginTop: 8 } }, environments.map(environment => h('div', { key: environment.id, style: { ...styles.card, marginBottom: 7 } },
-              h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, environment.name), h('span', { style: styles.badge }, environment.id)),
-              h('div', { style: styles.itemMeta }, `主机 ${environment.host_alias} · 阵列 ${environment.array_alias} · 自动化 ${environment.automation_id}`),
-              h('div', { style: styles.chips }, chip('编辑', () => editEnvironment(environment)), chip('删除', () => { void deleteEnvironment(environment.id) }))))) : h('div', { style: { ...styles.empty, marginTop: 8 } }, '还没有执行环境。')),
-          h('div', { style: styles.card },
-            h('div', { style: styles.itemTitle }, environmentForm.id ? '编辑环境' : '新增环境'),
-            h('div', { style: styles.formGrid },
-              formInput('id', '环境 ID，例如 lab-a'),
-              formInput('name', '环境名称'),
-              formInput('host_alias', 'dsh-ssh 主机 alias'),
-              formInput('array_alias', 'dsh-ssh 阵列 alias'),
-              formInput('automation_id', 'pangea-data/test-automation 下的目录名'),
-              h('textarea', { style: styles.textarea, value: environmentForm.bindings, 'aria-label': '设备绑定 JSON', placeholder: '{"portal":"10.0.0.2","iqn":"...","attach_target":"xx"}', onChange: event => setEnvironmentForm(value => ({ ...value, bindings: event.target.value })) }),
-              h('button', { type: 'button', style: styles.primaryButton, onClick: () => { void submitEnvironment() } }, '保存执行环境'))))
+            executorRuns.length ? h('div', { style: { marginTop: 8 } }, executorRuns.map(run => {
+              const environmentName = run.environment_name ?? environments.find(item => item.id === run.environment_id)?.name ?? '执行环境已删除'
+              return h('div', { key: run.executor_run_id, style: { ...styles.card, marginBottom: 7 } },
+                h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, run.executor_run_id), h('span', { style: styles.badge }, run.result_status ?? run.phase)),
+                h('div', { style: styles.itemMeta }, `${run.selected_test_case_ids.length} 条用例 · ${environmentName}`),
+                run.unresolved?.length ? h('div', { style: { ...styles.error, marginTop: 6 } }, run.unresolved.join('；')) : null,
+                h('div', { style: styles.chips }, run.artifacts?.plan ? chip('查看执行计划', () => openSidebarFile(run.artifacts.plan, 'PANGEA executable plan')) : null, run.artifacts?.result ? chip('查看执行结果', () => openSidebarFile(run.artifacts.result, 'PANGEA execution result')) : null))
+            })) : h('div', { style: { ...styles.empty, marginTop: 8 } }, '当前分析还没有执行记录。')))
+      }
+
+      function renderEnvironmentPage() {
+        const updateField = fieldName => event => setEnvironmentForm(value => ({ ...value, [fieldName]: event.target.value }))
+        const environmentField = (label, fieldName, options = {}) => h('label', { style: { ...styles.environmentField, ...(options.wide ? styles.environmentFieldWide : {}) } },
+          h('span', { style: styles.environmentLabel }, label),
+          h('input', {
+            type: options.type ?? 'text', value: environmentForm[fieldName], placeholder: options.placeholder,
+            style: styles.environmentInput, onChange: updateField(fieldName), autoComplete: 'off',
+          }))
+        const connectionIcon = kind => h('span', { style: styles.environmentConnectionIcon }, kind === 'host'
+          ? h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 }, h('rect', { x: 4, y: 3, width: 16, height: 18, rx: 2 }), h('path', { d: 'M8 8h8M8 12h8M8 16h4' }))
+          : h('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 }, h('path', { d: 'M4 6h16v5H4zM4 13h16v5H4z' }), h('circle', { cx: 17, cy: 8.5, r: .7 }), h('circle', { cx: 17, cy: 15.5, r: .7 })))
+        const testLabel = kind => {
+          const value = environmentTests[kind]
+          if (value.state === 'testing') return '正在检查连接…'
+          if (value.state === 'ok') return '连接成功'
+          if (value.state === 'error') return value.message || '连接失败'
+          return '尚未检查连接'
+        }
+        const connectionCard = (kind, title, ipLabel) => {
+          const prefix = kind === 'host' ? 'host' : 'array'
+          const test = environmentTests[kind]
+          return h('div', { style: styles.environmentConnectionCard },
+            h('div', { style: styles.environmentConnectionTitle }, connectionIcon(kind), title),
+            h('div', { style: styles.environmentFieldGrid },
+              environmentField(ipLabel, `${prefix}_ip`, { wide: true, placeholder: kind === 'host' ? '例如 192.168.10.21' : '例如 192.168.10.80' }),
+              environmentField('用户名', `${prefix}_username`, { placeholder: kind === 'host' ? 'root' : 'admin' }),
+              environmentField('密码', `${prefix}_password`, { type: 'password', placeholder: '输入登录密码' }),
+              environmentForm.advanced ? environmentField('SSH 端口', `${prefix}_port`, { wide: true, placeholder: '22' }) : null),
+            h('div', { style: styles.environmentConnectionFoot },
+              h('span', { style: { ...styles.environmentTestState, color: test.state === 'ok' ? '#25884b' : test.state === 'error' ? '#c7000b' : '#7a818c' } }, testLabel(kind)),
+              h('button', { type: 'button', disabled: test.state === 'testing', style: styles.environmentSecondaryButton, onClick: () => { void testEnvironment(kind) } }, test.state === 'testing' ? '检查中…' : '测试连接')))
+        }
+        return h('div', { style: styles.environmentContent },
+          h('section', { style: styles.environmentSection },
+            h('div', { style: styles.environmentSectionHead }, h('div', { style: styles.environmentSectionTitle }, '基本信息'), h('div', { style: styles.environmentSectionHint }, '用于在测试任务中识别环境')),
+            h('div', { style: styles.environmentSectionBody }, environmentField('环境名称', 'name', { placeholder: '例如：昆仑实验室 · NVMe-oF 联调环境' }))),
+          h('section', { style: styles.environmentSection },
+            h('div', { style: styles.environmentSectionHead }, h('div', { style: styles.environmentSectionTitle }, '连接信息'), h('div', { style: styles.environmentSectionHint }, '主机或阵列至少配置一个')),
+            h('div', { style: styles.environmentSectionBody },
+              h('div', { style: styles.environmentConnections }, connectionCard('host', '测试主机', '主机 IP'), connectionCard('array', '存储阵列', '阵列管理 IP')),
+              h('label', { style: { ...styles.environmentAdvanced, display: 'flex', alignItems: 'center', gap: 8, marginTop: 14 } },
+                h('input', { type: 'checkbox', checked: environmentForm.advanced, onChange: event => setEnvironmentForm(value => ({ ...value, advanced: event.target.checked })) }),
+                '高级设置：自定义 SSH 端口（默认 22）'))),
+          h('div', { style: styles.environmentActions },
+            h('button', { type: 'button', style: styles.environmentSecondaryButton, onClick: () => { setEnvironmentForm(emptyEnvironmentForm()); setEnvironmentTests({ host: { state: 'idle' }, array: { state: 'idle' } }) } }, '取消'),
+            h('button', { type: 'button', style: styles.environmentPrimaryButton, onClick: () => { void submitEnvironment() } }, environmentForm.id ? '保存修改' : '保存环境')),
+          environments.length ? h('section', { style: { ...styles.environmentSection, marginTop: 24 } },
+            h('div', { style: styles.environmentSectionHead }, h('div', { style: styles.environmentSectionTitle }, '已配置环境'), h('div', { style: styles.environmentSectionHint }, `${environments.length} 个`)),
+            h('div', { style: { ...styles.environmentSectionBody, ...styles.environmentList } }, environments.map(environment => h('div', { key: environment.id, style: styles.environmentListItem },
+              h('div', null,
+                h('div', { style: styles.itemTitle }, environment.name),
+                h('div', { style: styles.itemMeta }, [environment.host?.ip ? `主机 ${environment.host.ip}` : '', environment.array?.ip ? `阵列 ${environment.array.ip}` : ''].filter(Boolean).join(' · ') || '旧环境配置，编辑后补充连接信息')),
+              h('div', { style: { display: 'flex', gap: 8 } },
+                h('button', { type: 'button', style: styles.environmentSecondaryButton, onClick: () => editEnvironment(environment) }, '编辑'),
+                h('button', { type: 'button', style: { ...styles.environmentSecondaryButton, color: '#c7000b' }, onClick: () => { void deleteEnvironment(environment.id) } }, '删除')))))) : null)
       }
 
       function renderCaseDetail() {
@@ -1622,6 +1896,7 @@ window.__ModuleLoader__.load({
 
       let body
       if (screen.type === 'home') body = renderHome()
+      else if (screen.type === 'repository-import') body = renderRepositoryImport(false)
       else if (screen.type === 'overview') body = renderOverview()
       else if (screen.type === 'create') body = renderCreate()
       else if (screen.type === 'workflow') body = renderWorkflow()
@@ -1629,26 +1904,36 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'risk') body = renderRiskDetail()
       else if (screen.type === 'cases') body = renderCases()
       else if (screen.type === 'case') body = renderCaseDetail()
-      else if (screen.type === 'execution') body = renderExecution()
+      else if (screen.type === 'execution') body = renderExecutionResults()
+      else if (screen.type === 'environment') body = renderEnvironmentPage()
       else if (screen.type === 'flows') body = renderFlows()
       else if (screen.type === 'evidence') body = renderEvidence()
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()
 
-      const healthAlert = !['home', 'overview'].includes(screen.type) && health?.trusted === false ? renderHealthCard(true) : null
+      const healthAlert = !['home', 'overview', 'environment'].includes(screen.type) && health?.trusted === false ? renderHealthCard(true) : null
       const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
         h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load({ foreground: true }) } }, '重试')) : null
-      const requiresSnapshot = !['create', 'execution'].includes(screen.type)
+      const requiresSnapshot = !['home', 'create', 'environment', 'repository-import'].includes(screen.type)
       const initialLoading = requiresSnapshot && loading && snapshot === undefined
-      const contentBody = initialLoading
+      const repositoryGate = pageMode === 'home' && repositoryState === undefined
+        ? h('div', { style: styles.onboardingShell }, h('div', { style: { ...styles.onboardingCard, textAlign: 'center' }, role: repositoryError ? 'alert' : 'status' },
+          h('div', { style: styles.onboardingEyebrow }, 'PANGEA DESKTOP'),
+          h('div', { style: { ...styles.onboardingTitle, fontSize: 24 } }, repositoryError ? '无法检查工作区状态' : '正在初始化 PANGEA'),
+          h('div', { style: styles.onboardingLead }, repositoryError || '正在确认本地数据目录与源码仓库，请稍候…'),
+          repositoryError ? h('button', { type: 'button', disabled: repositoryLoading, style: { ...styles.redButton, marginTop: 20 }, onClick: () => { void loadRepositories() } }, repositoryLoading ? '正在重试…' : '重试') : null))
+        : null
+      const contentBody = repositoryGate ?? (initialLoading
         ? h('div', { style: styles.card, role: 'status' }, h('div', { style: styles.empty }, '正在读取当前 Run…'))
-        : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body)
+        : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body))
       const actionFeedback = actionNotice ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 测试工作台' },
         screen.type === 'home' ? null : header,
-        h('div', { style: screen.type === 'home' ? styles.homeContent : styles.content }, actionFeedback, errorNotice, contentBody))
+        h('div', { style: screen.type === 'home' && repositoryState?.onboarding_required ? { padding: 0 }
+          : screen.type === 'home' ? styles.homeContent
+            : ['environment', 'repository-import'].includes(screen.type) ? { padding: 0 } : styles.content }, actionFeedback, errorNotice, contentBody))
     }
 
     function apply(ctx) {
@@ -1665,9 +1950,9 @@ window.__ModuleLoader__.load({
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
       ctx.effect(() => pangea.registerPage({
-        id: 'execution', title: () => '环境与执行', icon, order: 20,
+        id: 'execution', title: () => '环境配置', icon, order: 20,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'execution', pageMode: 'execution' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'environment', pageMode: 'execution' }),
       }), 'dsh-pangea-companion: execution page')
     }
 
@@ -1680,6 +1965,8 @@ window.__ModuleLoader__.load({
     exports.launchExecution = launchExecution
     exports.requestWorkbench = requestWorkbench
     exports.requestWorkbenchAction = requestWorkbenchAction
+    exports.requestRepositoryStatus = requestRepositoryStatus
+    exports.requestRepositoryImport = requestRepositoryImport
     exports.filePathFromLocation = filePathFromLocation
     exports.evidenceIdentity = evidenceIdentity
     exports.evidenceTabLabel = evidenceTabLabel

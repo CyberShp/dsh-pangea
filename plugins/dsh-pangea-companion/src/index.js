@@ -4,8 +4,9 @@ import { createRuntimeMonitor } from './monitor.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
-import { createRun, runAdapter } from './pangea-api.js'
-import { launchAnalysisSession, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { createRun, runAdapter, workspaceRoot } from './pangea-api.js'
+import { dataRootFor, launchAnalysisSession, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
 export const inject = ['tools', 'webServer', 'agents', 'apiProxy']
@@ -15,6 +16,7 @@ const SOURCE_API_PATH = '/api/pangea-companion/source'
 const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
 const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
+const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
 
 const STATUS_PARAMETERS = {
   type: 'object',
@@ -163,11 +165,15 @@ function sourceRouteHandler(req, res) {
     .catch(error => json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) }))
 }
 
-async function environmentRouteHandler(req, res, store) {
+async function environmentRouteHandler(req, res, store, ssh) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   try {
     if (req.method === 'GET') return json(res, 200, { status: 'ok', environments: await store.list() })
-    if (req.method === 'POST') return json(res, 200, { status: 'ok', environment: await store.save(await requestJson(req)) })
+    if (req.method === 'POST') {
+      const input = await requestJson(req)
+      if (input?.action === 'test') return json(res, 200, { status: 'ok', result: await ssh.test(input.endpoint) })
+      return json(res, 200, { status: 'ok', environment: await store.save(input) })
+    }
     if (req.method === 'DELETE') {
       const url = new URL(req.url ?? ENVIRONMENT_API_PATH, 'http://localhost')
       const id = url.searchParams.get('id')
@@ -231,6 +237,27 @@ async function workbenchRouteHandler(req, res, api) {
   }
 }
 
+async function repositoryRouteHandler(req, res) {
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  const url = new URL(req.url ?? REPOSITORY_API_PATH, 'http://localhost')
+  const cwd = url.searchParams.get('cwd') ?? process.env.PANGEA_WORKSPACE_ROOT ?? undefined
+  const explicitDataRoot = url.searchParams.get('data_root') ?? undefined
+  try {
+    const dataRoot = dataRootFor(workspaceRoot(cwd), explicitDataRoot ?? process.env.PANGEA_DATA_ROOT)
+    if (req.method === 'GET') return json(res, 200, await repositoryStatus(dataRoot))
+    if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+    const body = await requestJson(req)
+    const imported = await importRepository({
+      dataRoot,
+      sourcePath: body.source_path,
+      repositoryId: body.repository_name,
+    })
+    return json(res, 200, { status: 'ok', repository: imported })
+  } catch (error) {
+    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 function toolOutput() {
   return { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
 }
@@ -239,7 +266,7 @@ export function apply(ctx) {
   const monitor = createRuntimeMonitor()
   const disposeMonitor = monitor.start(ctx)
   const environments = new EnvironmentStore()
-  const ssh = new PangeaSshRuntime()
+  const ssh = new PangeaSshRuntime(environments)
 
   const toolDisposers = [ctx.tools.register({
     name: 'pangea_run_create',
@@ -287,7 +314,7 @@ export function apply(ctx) {
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => renderStatus(value) },
   }), ctx.tools.register({
     name: 'pangea_environment_get',
-    description: '读取 PANGEA 用例执行环境，返回主机/阵列 SSH alias、自动化仓库 ID 和非秘密设备绑定。',
+    description: '读取 PANGEA 用例执行环境，返回环境名称、主机与阵列连接信息，以及供 SSH 工具使用的内部目标。',
     parameters: { type: 'object', additionalProperties: false, required: ['environment_id'], properties: { environment_id: { type: 'string' } } },
     async execute(args) {
       const environment = await environments.get(args.environment_id)
@@ -297,7 +324,7 @@ export function apply(ctx) {
     output: toolOutput(),
   }), ctx.tools.register({
     name: 'pangea_ssh_exec',
-    description: '在 DSH SSH 配置中的主机或阵列 alias 上执行一条非交互命令。',
+    description: '在环境返回的主机或阵列 SSH 目标上执行一条非交互命令。',
     parameters: { type: 'object', additionalProperties: false, required: ['alias', 'command'], properties: { alias: { type: 'string' }, command: { type: 'string' }, timeout_ms: { type: 'integer' } } },
     execute: args => ssh.exec(args.alias, args.command, args.timeout_ms),
     output: toolOutput(),
@@ -335,10 +362,12 @@ export function apply(ctx) {
 
   const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
-  const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments) })
+  const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
   const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy) })
+  const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
   ctx.effect?.(() => async () => {
+    disposeRepositoryRoute()
     disposeWorkbenchRoute()
     disposeExecutionRoute()
     disposeEnvironmentRoute()
@@ -347,7 +376,7 @@ export function apply(ctx) {
     for (const dispose of toolDisposers) dispose()
     await ssh.dispose()
     await disposeMonitor()
-  }, 'dsh-pangea-companion: state, executor environments, SSH tools, and execution launch')
+  }, 'dsh-pangea-companion: state, repositories, executor environments, SSH tools, and execution launch')
 }
 
 export { companionSnapshot } from './reader.js'
@@ -357,3 +386,4 @@ export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
 export { createRun, runAdapter, runPangea, workspaceRoot } from './pangea-api.js'
 export { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'

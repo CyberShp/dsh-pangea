@@ -147,11 +147,53 @@ window.__ModuleLoader__.load({
           color: #fff; background: linear-gradient(135deg, #c7000b 0%, #df0011 100%);
           box-shadow: 0 10px 22px rgba(199,0,11,.22);
         }
+        [data-pangea-tool-button][data-active="true"] {
+          color: var(--pangea-red); background: #fff0f1;
+          box-shadow: inset 3px 0 var(--pangea-red); font-weight: 680;
+        }
         [data-pangea-nav-icon] { width: 25px; height: 25px; display: grid; place-items: center; }
         [data-pangea-nav-divider] { height: 1px; margin: 18px 7px 12px; background: #e5e7eb; }
         [data-pangea-tool-list] { margin-top: auto; }
-        [data-pangea-page] { min-width: 0; min-height: 0; display: flex; overflow: hidden; background: #f5f6f8; }
+        [data-pangea-page] { position: relative; min-width: 0; min-height: 0; display: flex; overflow: hidden; background: #f5f6f8; }
         [data-pangea-page] > * { flex: 1; min-width: 0; min-height: 0; }
+        [data-pangea-utility-host] {
+          width: 100%; height: 100%; min-width: 0; min-height: 0; display: grid;
+          grid-template-rows: 49px minmax(0, 1fr); overflow: hidden; background: #fff;
+        }
+        [data-pangea-utility-head] {
+          min-width: 0; display: flex; align-items: center; gap: 10px; padding: 0 14px;
+          border-bottom: 1px solid #dfe3e8; background: #fff;
+        }
+        [data-pangea-utility-title] {
+          align-self: end; min-width: 150px; height: 35px; display: flex; align-items: center; gap: 8px;
+          padding: 0 13px; border: 1px solid #d9dde3; border-bottom-color: #fff;
+          border-radius: 6px 6px 0 0; box-shadow: inset 0 2px var(--pangea-red);
+          color: #24282e; background: #fff; font-size: 13px; font-weight: 650;
+        }
+        [data-pangea-utility-spacer] { flex: 1; }
+        [data-pangea-utility-close] {
+          width: 31px; height: 31px; display: grid; place-items: center; border: 1px solid #d9dde3;
+          border-radius: 5px; color: #555d68; background: #fff; cursor: pointer;
+        }
+        [data-pangea-utility-body] { min-width: 0; min-height: 0; overflow: hidden; background: #fff; }
+        [data-pangea-utility-body] > * { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+        [data-pangea-terminal-dock] {
+          position: absolute; z-index: 12; left: 0; right: 0; bottom: 0; height: min(42%, 365px);
+          min-height: 270px; display: grid; grid-template-rows: 46px minmax(0, 1fr);
+          border-top: 3px solid var(--pangea-red); color: #e4e7eb; background: #171a1f;
+          box-shadow: 0 -12px 28px rgba(24,29,36,.22);
+        }
+        [data-pangea-terminal-dock] [data-pangea-utility-head] {
+          border-color: #343a43; color: #e4e7eb; background: #242830;
+        }
+        [data-pangea-terminal-dock] [data-pangea-utility-title] {
+          align-self: center; height: 33px; border: 0; border-radius: 5px 5px 0 0;
+          box-shadow: none; color: #fff; background: #171a1f;
+        }
+        [data-pangea-terminal-dock] [data-pangea-utility-close] {
+          border-color: #3d434c; color: #e4e7eb; background: #242830;
+        }
+        [data-pangea-terminal-dock] [data-pangea-utility-body] { background: #171a1f; }
 
         @media (min-width: 1180px) {
           body[data-pangea-product-shell] #root {
@@ -315,7 +357,7 @@ window.__ModuleLoader__.load({
           lineIcon([h('path', { key: 'a', d: 'm8 10 4 4 4-4' })], 18, 1.7)))
     }
 
-    function ProductShell({ service, betterSidebar, page, scope, tab, visible, children }) {
+    function ProductShell({ service, betterSidebar, page, scope, tab, visible, tabProps, children }) {
       const snapshot = React.useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
       const sidebarSnapshot = React.useSyncExternalStore(
         betterSidebar.subscribeState,
@@ -378,12 +420,56 @@ window.__ModuleLoader__.load({
           window.removeEventListener('pangea:run-context', onRunContext)
         }
       }, [productStateKey, productVisible])
-      const openUtility = (type, title) => betterSidebar.openTab({ type, title }, scope)
+      const utility = ['editor', 'terminal', 'browser'].includes(tab?.meta?.pangeaUtility)
+        ? tab.meta.pangeaUtility : undefined
+      const mergedEditorStore = React.useMemo(() => {
+        const store = tabProps?.store
+        if (!store) return store
+        let sourceSnapshot
+        let mergedSnapshot
+        return new Proxy(store, {
+          get(target, property) {
+            if (property === 'getSnapshot') return () => {
+              const next = target.getSnapshot()
+              if (next !== sourceSnapshot) {
+                sourceSnapshot = next
+                mergedSnapshot = { ...next, prefs: { ...next.prefs, editorExplorer: true } }
+              }
+              return mergedSnapshot
+            }
+            const value = Reflect.get(target, property, target)
+            return typeof value === 'function' ? value.bind(target) : value
+          },
+        })
+      }, [tabProps?.store])
+      const openUtility = (type, title) => service.openTool(scope, type, { tabId: tab?.id, title })
+      const closeUtility = () => service.closeTool(scope, tab?.id, page.id)
       const pageMeta = {
         workbench: { label: '工作台', icon: 'workbench' },
         analysis: { label: 'PANGEA 分析', icon: 'analysis' },
         execution: { label: '环境配置', icon: 'execution' },
         assets: { label: '测试资产', icon: 'assets' },
+      }
+      const utilityLabels = { editor: '文件工作区', terminal: '环境终端', browser: '内置浏览器' }
+      const renderUtility = type => {
+        const descriptor = betterSidebar.getTab(type)
+        if (!descriptor || !tabProps?.store) {
+          return h('div', { 'data-pangea-utility-host': true },
+            h('div', { 'data-pangea-utility-head': true }, h('div', { 'data-pangea-utility-title': true }, utilityLabels[type]), h('span', { 'data-pangea-utility-spacer': true }), h('button', { type: 'button', 'data-pangea-utility-close': true, onClick: closeUtility }, '×')),
+            h('div', { 'data-pangea-utility-body': true, style: { display: 'grid', placeItems: 'center', color: '#737b86' } }, '当前 DSH 工具不可用'))
+        }
+        const toolTab = { ...tab, type, title: utilityLabels[type] }
+        return h('div', { 'data-pangea-utility-host': true, 'data-utility': type },
+          h('div', { 'data-pangea-utility-head': true },
+            h('div', { 'data-pangea-utility-title': true }, utilityIcon(type === 'editor' ? 'file' : type), utilityLabels[type]),
+            h('span', { 'data-pangea-utility-spacer': true }),
+            h('button', { type: 'button', 'data-pangea-utility-close': true, 'aria-label': `关闭${utilityLabels[type]}`, onClick: closeUtility }, '×')),
+          h('div', { 'data-pangea-utility-body': true }, h(descriptor.component, {
+            ...tabProps,
+            store: type === 'editor' ? mergedEditorStore : tabProps.store,
+            tab: toolTab,
+            visible: productVisible,
+          })))
       }
       return h('div', { 'data-pangea-shell': true },
         h(ProductHeader, { scope, systemState }),
@@ -396,10 +482,12 @@ window.__ModuleLoader__.load({
           h('span', { 'data-pangea-nav-label': true }, pageMeta[item.id]?.label ?? (typeof item.title === 'function' ? item.title() : item.title))))),
           h('div', { 'data-pangea-nav-divider': true }),
           h('div', { 'data-pangea-tool-list': true },
-            h('button', { type: 'button', 'data-pangea-tool-button': true, onClick: () => openUtility('editor', '文件') }, utilityIcon('file'), h('span', { 'data-pangea-nav-label': true }, '文件')),
-            h('button', { type: 'button', 'data-pangea-tool-button': true, onClick: () => openUtility('terminal', '终端') }, utilityIcon('terminal'), h('span', { 'data-pangea-nav-label': true }, '终端')),
-            h('button', { type: 'button', 'data-pangea-tool-button': true, onClick: () => openUtility('browser', '浏览器') }, utilityIcon('browser'), h('span', { 'data-pangea-nav-label': true }, '浏览器')))),
-        h('main', { 'data-pangea-page': page.id }, React.cloneElement(children, { visible: productVisible })))
+            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'editor' ? 'true' : 'false', onClick: () => openUtility('editor', '文件') }, utilityIcon('file'), h('span', { 'data-pangea-nav-label': true }, '文件')),
+            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'terminal' ? 'true' : 'false', onClick: () => openUtility('terminal', '终端') }, utilityIcon('terminal'), h('span', { 'data-pangea-nav-label': true }, '终端')),
+            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'browser' ? 'true' : 'false', onClick: () => openUtility('browser', '浏览器') }, utilityIcon('browser'), h('span', { 'data-pangea-nav-label': true }, '浏览器')))),
+        h('main', { 'data-pangea-page': page.id },
+          utility === 'editor' || utility === 'browser' ? renderUtility(utility) : React.cloneElement(children, { visible: productVisible }),
+          utility === 'terminal' ? h('div', { 'data-pangea-terminal-dock': true }, ...renderUtility('terminal').props.children) : null))
     }
 
     function allTabs(tree) {
@@ -525,6 +613,7 @@ window.__ModuleLoader__.load({
           badge: descriptor.badge,
           component: props => h(ProductShell, {
             service: publicService, betterSidebar, page, scope: props.scope, tab: props.tab, visible: props.visible,
+            tabProps: props,
           }, h(descriptor.component, props)),
         })
         nativeDisposers.set(id, disposeNative)
@@ -581,12 +670,47 @@ window.__ModuleLoader__.load({
       function openPage(scope, pageId) {
         const page = pages.get(pageId)
         if (!page) return false
+        const state = betterSidebar.getSnapshot?.()?.state
+        const existing = state ? [...allTabs(state.splits), ...allTabs(state.bottomSplits)].find(item => item.type === page.nativeId) : undefined
+        if (existing) betterSidebar.updateTab?.(existing.id, { title: typeof page.title === 'function' ? page.title() : page.title, path: '', meta: { ...(existing.meta && typeof existing.meta === 'object' ? existing.meta : {}), pangeaUtility: null } })
         betterSidebar.openTab({ type: page.nativeId }, scope)
+        return true
+      }
+
+      function openTool(scope, type, seed = {}) {
+        if (!['editor', 'terminal', 'browser'].includes(type) || !scope?.sessionId) return false
+        const state = betterSidebar.getSnapshot?.()?.state
+        const tabs = state ? [...allTabs(state.splits), ...allTabs(state.bottomSplits)] : []
+        const target = tabs.find(item => item.id === seed.tabId)
+          ?? tabs.find(item => item.type?.startsWith(PAGE_PREFIX) && tabIsActive(state?.splits, item.id))
+          ?? tabs.find(item => item.type?.startsWith(PAGE_PREFIX))
+        if (!target) return false
+        betterSidebar.updateTab?.(target.id, {
+          ...(typeof seed.path === 'string' ? { path: seed.path } : {}),
+          title: seed.title ?? target.title,
+          meta: { ...(target.meta && typeof target.meta === 'object' ? target.meta : {}), pangeaUtility: type },
+        })
+        betterSidebar.activateTab?.(target.id, scope)
+        return true
+      }
+
+      function closeTool(scope, tabId, pageId) {
+        const page = pages.get(pageId)
+        const state = betterSidebar.getSnapshot?.()?.state
+        const target = state ? [...allTabs(state.splits), ...allTabs(state.bottomSplits)].find(item => item.id === tabId) : undefined
+        if (!target) return false
+        betterSidebar.updateTab?.(target.id, {
+          title: page ? (typeof page.title === 'function' ? page.title() : page.title) : target.title,
+          path: '',
+          meta: { ...(target.meta && typeof target.meta === 'object' ? target.meta : {}), pangeaUtility: null },
+        })
+        betterSidebar.activateTab?.(target.id, scope)
         return true
       }
 
       function openFile(scope, path, title) {
         if (!scope?.sessionId || typeof path !== 'string' || path.trim() === '') return false
+        if (openTool(scope, 'editor', { path, title: title ?? path.split(/[\\/]/).pop() })) return true
         betterSidebar.openFile(scope, path, title)
         return true
       }
@@ -602,6 +726,8 @@ window.__ModuleLoader__.load({
       publicService = Object.freeze({
         registerPage,
         openPage,
+        openTool,
+        closeTool,
         openFile,
         getPages,
         subscribe,

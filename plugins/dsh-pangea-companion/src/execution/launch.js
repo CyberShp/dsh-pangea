@@ -13,7 +13,8 @@ function promptForExecution(input, environment) {
     `分析 Run：${input.analysis_run_id}`,
     `选中用例：${input.test_case_ids.join(', ')}`,
     `环境：${environment.id}`,
-    `自动化仓库：${environment.automation_id}`,
+    `测试主机目标：${environment.host_alias || '未配置'}`,
+    `存储阵列目标：${environment.array_alias || '未配置'}`,
     `PANGEA 数据目录：${input.data_root}`,
     '创建 Executor Run 后，派发 pangea-executor 子 Agent完成计划与执行；每条用例失败后完成清理，再继续下一条。',
   ].join('\n')
