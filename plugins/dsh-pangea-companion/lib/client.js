@@ -131,7 +131,12 @@ window.__ModuleLoader__.load({
     const REVIEW = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决', UNREADABLE: '结果不可读' }
     const SEVERITY = { Critical: '严重', High: '高', Medium: '中', Low: '低' }
     const CONFIDENCE = { high: '高', medium: '中', low: '低' }
-    const TRANSLATION = { 'Blackbox-ready': '黑盒可执行', 'Graybox-ready': '灰盒可执行', 'Developer-confirm': '需开发确认' }
+    const TRANSLATION = {
+      'Blackbox-ready': '黑盒可执行', 'Graybox-ready': '灰盒可执行', 'Developer-confirm': '需开发确认',
+      'Test-ready': '已有测试覆盖', Unreachable: '受支持入口不可达', Uncovered: '尚未覆盖',
+    }
+    const isUnreachableRisk = risk => risk?.translation_status === 'Unreachable'
+    const isUncoveredRisk = risk => !isUnreachableRisk(risk) && (risk?.linked_test_case_ids?.length ?? 0) === 0
     const RISK_STATUS = {
       pending: '待确认', accepted: '已采纳', confirmed: '已确认', false_positive: '误报',
       claimed_fixed: '声称已修复', verified_fixed: '已验证修复',
@@ -864,7 +869,7 @@ window.__ModuleLoader__.load({
           `Run：${current.run_id}`,
           `阶段：${PHASE[current.phase] ?? current.phase ?? '未知'}`,
           `质量结论：${QUALITY[current.quality_status] ?? current.quality_status ?? '待定'}`,
-          `风险：${risks.length} 条（其中 ${risks.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0).length} 条未关联测试用例）`,
+          `风险：${risks.length} 条（其中 ${risks.filter(isUncoveredRisk).length} 条尚未覆盖，${risks.filter(isUnreachableRisk).length} 条从受支持入口不可达）`,
           `测试用例：${testCases.length} 条`,
           `执行记录：${snapshot?.executor_runs?.length ?? 0} 个`,
           '',
@@ -1476,7 +1481,7 @@ window.__ModuleLoader__.load({
       function renderHome() {
         if (repositoryState?.onboarding_required) return renderRepositoryImport(true)
         const runItems = workbench?.runs?.items ?? snapshot?.runs ?? []
-        const uncoveredRisks = risks.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0)
+        const uncoveredRisks = risks.filter(isUncoveredRisk)
         const runningRuns = runItems.filter(run => run.lifecycle_status === 'running')
         const reviewRuns = runItems.filter(run => ['reviewing', 'closing'].includes(String(run.phase ?? '').toLowerCase()))
         const highRisks = risks.filter(item => ['Critical', 'High'].includes(item.severity))
@@ -1557,7 +1562,7 @@ window.__ModuleLoader__.load({
         if (!current) return h(React.Fragment, null, renderCompatibility(), h('div', { style: styles.card },
           h('div', { style: styles.empty }, '当前还没有可读取的 Run。'),
           workbench?.compatibility?.compatible === true ? h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => jump('create') }, '创建第一个分析') : null))
-        const uncoveredRisks = risks.filter(risk => (risk.linked_test_case_ids?.length ?? 0) === 0)
+        const uncoveredRisks = risks.filter(isUncoveredRisk)
         const executorRuns = snapshot?.executor_runs ?? []
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
@@ -1647,7 +1652,8 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.decisionHint }, '按现有分析单元和业务流程组织。这里不自动改写结论，也不替测试工程师做语义取舍。'),
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '高优先级'), h('div', { style: styles.decisionValue }, risks.filter(item => ['Critical', 'High'].includes(item.severity)).length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '未关联用例'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0).length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '尚未覆盖'), h('div', { style: styles.decisionValue }, risks.filter(isUncoveredRisk).length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '入口不可达'), h('div', { style: styles.decisionValue }, risks.filter(isUnreachableRisk).length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已有用例'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.linked_test_case_ids?.length ?? 0) > 0).length)))),
           h('input', { style: styles.search, value: riskQuery, 'aria-label': '搜索风险', placeholder: '搜索风险编号、标题、触发条件…', onChange: event => setRiskQuery(event.target.value) }),
           h('div', { style: styles.filters }, ['全部', 'Critical', 'High', 'Medium', 'Low'].map(level => h('button', { key: level, type: 'button', style: { ...styles.filter, ...(riskSeverity === level ? styles.filterActive : {}) }, onClick: () => setRiskSeverity(level) }, level === '全部' ? '全部' : SEVERITY[level] ?? level))),
@@ -1655,7 +1661,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
             const unit = unitById.get(unitId)
             const unitFlows = flowsByUnit.get(unitId) ?? []
-            const uncovered = items.filter(item => (item.linked_test_case_ids?.length ?? 0) === 0).length
+            const uncovered = items.filter(isUncoveredRisk).length
             return h('section', { key: unitId, style: styles.group },
               h('div', { style: styles.groupHeader },
                 h('div', null,
@@ -1686,6 +1692,14 @@ window.__ModuleLoader__.load({
           renderRiskSelectionWorkbench(risk),
           renderSourcePreview('risk', risk, previewEvidence, riskEvidenceOptions),
           section('触发条件', risk.trigger), section('系统结果', risk.system_result), section('外部可观察现象', risk.external_observation), section('排除条件', risk.exclusion_condition),
+          isUnreachableRisk(risk) ? h('div', { style: styles.card },
+            h('div', { style: styles.itemTitle }, '不可达处置'),
+            h('div', { style: { ...styles.label, marginTop: 8 } }, '原因'),
+            h('div', { style: styles.text }, text(risk.unreachable_reason, '未记录不可达原因')),
+            h('div', { style: { ...styles.label, marginTop: 8 } }, '源码证据'),
+            Array.isArray(risk.unreachable_evidence) && risk.unreachable_evidence.length
+              ? h('div', { style: { marginTop: 5 } }, risk.unreachable_evidence.map((item, index) => h('div', { key: `${item.repo_id ?? ''}:${item.path ?? ''}:${item.line_start ?? index}`, style: styles.itemMeta }, `${text(item.repo_id, '仓库')}:${text(item.path, '未记录路径')}:${item.line_start ?? '—'} · ${text(item.observation, '未记录观察')}`)))
+              : h('div', { style: { ...styles.empty, marginTop: 6 } }, '未记录不可达证据。')) : null,
           semantics ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '上游语义核对'), h('hr', { style: styles.separator }),
             h('div', { style: styles.label }, '入口可达性'), h('div', { style: styles.text }, semantics.reachability),
             h('div', { style: { ...styles.label, marginTop: 7 } }, '调用方限制'), h('div', { style: styles.text }, semantics.caller_constraints),
