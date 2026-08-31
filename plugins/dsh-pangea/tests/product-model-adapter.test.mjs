@@ -8,7 +8,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const adapterPath = path.resolve(here, '..', 'src', 'product-model-adapter.js')
 const buildPath = path.resolve(here, '..', 'scripts', 'build-client.mjs')
 
-test('owns model settings entry inside the PANGEA product shell', async () => {
+test('owns internal model settings entry inside the PANGEA product shell', async () => {
   const source = await readFile(adapterPath, 'utf8')
   assert.match(source, /data-pangea-tool-list/)
   assert.match(source, /data-pangea-native-model-settings/)
@@ -16,6 +16,8 @@ test('owns model settings entry inside the PANGEA product shell', async () => {
   assert.match(source, /pangea:open-model-settings/)
   assert.match(source, /pangea:model-onboarding-state/)
   assert.match(source, /pangea:query-model-onboarding/)
+  assert.doesNotMatch(source, /选择模型提供方/)
+  assert.match(source, /mode: 'internal'/)
 })
 
 test('build appends the product model adapter to the shipped client', async () => {
