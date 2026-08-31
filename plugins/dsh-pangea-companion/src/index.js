@@ -1,11 +1,12 @@
 import { companionSnapshot } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
 import { createRuntimeMonitor } from './monitor.js'
+import { createTaskStore } from './task-store.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runAdapter, workspaceRoot } from './pangea-api.js'
-import { dataRootFor, launchAnalysisSession, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { createTaskConversation, dataRootFor, launchAnalysisSession, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -135,7 +136,7 @@ async function requestJson(req) {
   return value
 }
 
-async function stateRouteHandler(req, res, monitor) {
+async function stateRouteHandler(req, res, monitor, tasks) {
   if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? API_PATH, 'http://localhost')
@@ -145,7 +146,10 @@ async function stateRouteHandler(req, res, monitor) {
   const sessionId = url.searchParams.get('session_id') ?? undefined
   try {
     const snapshot = await companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
-    if (runId === undefined && sessionId && snapshot.current) await monitor.bindRun(sessionId, snapshot.current)
+    if (runId === undefined && sessionId && snapshot.current) {
+      await monitor.bindRun(sessionId, snapshot.current)
+      await tasks.bindRunBySession(sessionId, snapshot.current)
+    }
     snapshot.monitor = await monitor.snapshot({ sessionId, runId: snapshot.current?.run_id })
     json(res, 200, snapshot)
   } catch (error) {
@@ -206,27 +210,81 @@ async function executionRouteHandler(req, res, store, api) {
   }
 }
 
-async function workbenchRouteHandler(req, res, api) {
+function requireWorkspaceTask(task, cwd, taskId) {
+  if (!task) throw new Error(`task not found: ${taskId}`)
+  if (task.workspace !== workspaceRoot(cwd)) throw new Error(`task does not belong to current workspace: ${taskId}`)
+  return task
+}
+
+async function workbenchRouteHandler(req, res, api, tasks) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
   const dataRoot = url.searchParams.get('data_root') ?? undefined
   const runId = url.searchParams.get('run_id') ?? undefined
+  const taskId = url.searchParams.get('task_id') ?? undefined
+  const sessionId = url.searchParams.get('session_id') ?? undefined
   try {
     if (req.method === 'GET') {
-      return json(res, 200, await workbenchSnapshot({
+      const snapshot = await workbenchSnapshot({
         cwd,
         dataRoot,
         runId,
         cursor: url.searchParams.get('cursor') ?? 0,
         limit: url.searchParams.get('limit') ?? 20,
-      }))
+      })
+      await tasks.reconcileRuns(snapshot.runs?.items)
+      const taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+      const selectedCandidate = taskId ? await tasks.get(taskId) : sessionId ? await tasks.getBySession(sessionId) : null
+      const selectedTask = selectedCandidate?.workspace === workspaceRoot(cwd) ? selectedCandidate : null
+      return json(res, 200, {
+        ...snapshot,
+        tasks: { items: taskItems, total: taskItems.length },
+        selected_task_id: selectedTask?.task_id ?? null,
+      })
     }
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
-    if (body.action === 'create') {
-      return json(res, 200, await launchAnalysisSession(api, { cwd, dataRoot: actionDataRoot, input: body.input }))
+    if (body.action === 'task-create') {
+      const root = workspaceRoot(cwd)
+      const task = await tasks.create({
+        workspace: root,
+        dataRoot: dataRootFor(root, actionDataRoot),
+        input: body.input,
+      })
+      return json(res, 200, { status: 'ok', task })
+    }
+    if (body.action === 'task-start') {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (task.run_id) throw new Error('task already has a Run')
+      try {
+        const launched = await launchAnalysisSession(api, {
+          cwd,
+          dataRoot: actionDataRoot ?? task.data_root,
+          input: task,
+        }, undefined, session => tasks.addConversation(task.task_id, {
+          sessionId: session.session_id,
+          title: `${task.title} · 分析`,
+          kind: 'analysis',
+        }))
+        return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })
+      } catch (error) {
+        await tasks.markLaunchFailed(task.task_id, error instanceof Error ? error.message : String(error))
+        throw error
+      }
+    }
+    if (body.action === 'task-conversation-create') {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      const title = typeof body.title === 'string' && body.title.trim() ? body.title.trim() : `${task.title} · 新会话`
+      const created = await createTaskConversation(api, { cwd, title })
+      const updated = await tasks.addConversation(task.task_id, { sessionId: created.session_id, title })
+      return json(res, 200, { ...created, task: updated })
+    }
+    if (body.action === 'task-conversation-activate') {
+      requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      const task = await tasks.activateConversation(body.task_id, body.conversation_id)
+      return json(res, 200, { status: 'ok', task })
     }
     if (body.action === 'stop') {
       return json(res, 200, await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id }))
@@ -265,6 +323,7 @@ function toolOutput() {
 export function apply(ctx) {
   const monitor = createRuntimeMonitor()
   const disposeMonitor = monitor.start(ctx)
+  const tasks = createTaskStore()
   const environments = new EnvironmentStore()
   const ssh = new PangeaSshRuntime(environments)
 
@@ -360,11 +419,11 @@ export function apply(ctx) {
     output: toolOutput(),
   })]
 
-  const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor) })
+  const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
-  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy) })
+  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks) })
   const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
   ctx.effect?.(() => async () => {
     disposeRepositoryRoute()
@@ -375,6 +434,7 @@ export function apply(ctx) {
     disposeStateRoute()
     for (const dispose of toolDisposers) dispose()
     await ssh.dispose()
+    await tasks.flush()
     await disposeMonitor()
   }, 'dsh-pangea-companion: state, repositories, executor environments, SSH tools, and execution launch')
 }
@@ -382,6 +442,7 @@ export function apply(ctx) {
 export { companionSnapshot } from './reader.js'
 export { parseEvidenceLocation, readEvidenceSnippet, resolveEvidenceFile } from './source.js'
 export { createRuntimeMonitor, RuntimeMonitor } from './monitor.js'
+export { createTaskStore, TaskStore } from './task-store.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
 export { createRun, runAdapter, runPangea, workspaceRoot } from './pangea-api.js'

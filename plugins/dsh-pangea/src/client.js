@@ -44,6 +44,7 @@ window.__ModuleLoader__.load({
       ctx,
       desktopBridge = globalThis.dshDesktop,
       isActive = () => true,
+      onProductSession = () => {},
     ) {
       if (
         typeof desktopBridge?.productWorkspace !== 'function'
@@ -58,6 +59,7 @@ window.__ModuleLoader__.load({
       if (!workspace?.workspaceId) throw new Error('PANGEA product workspace registration returned no id')
       const sessionId = await ctx.workspaces.connectWorkspace(workspace.workspaceId)
       if (!sessionId) throw new Error('PANGEA product workspace returned no session')
+      onProductSession(sessionId)
       if (isActive()) {
         ctx.sessions.open(sessionId)
         await desktopBridge.productWorkspaceReady?.()
@@ -65,9 +67,9 @@ window.__ModuleLoader__.load({
       return true
     }
 
-    function installProductWorkspaceBootstrap(ctx) {
+    function installProductWorkspaceBootstrap(ctx, service) {
       let active = true
-      void bootstrapProductWorkspace(ctx, globalThis.dshDesktop, () => active)
+      void bootstrapProductWorkspace(ctx, globalThis.dshDesktop, () => active, sessionId => service.registerProductSession(sessionId))
         .catch(error => console.error('[dsh-pangea] product workspace bootstrap failed', error))
       return () => { active = false }
     }
@@ -233,7 +235,7 @@ window.__ModuleLoader__.load({
           }
           body[data-pangea-product-shell] #root .pI_x6G_frame {
             box-sizing: border-box; padding-top: var(--pangea-topbar-height);
-            grid-template-columns: 0 minmax(0, 1fr) var(--pangea-ai-width) !important;
+            grid-template-columns: 0 minmax(0, 1fr) 0 !important;
           }
           body[data-pangea-product-shell] #root .pI_x6G_sidebarCol { display: none !important; }
           body[data-pangea-product-shell] #root [data-pane="details"] {
@@ -241,8 +243,15 @@ window.__ModuleLoader__.load({
           }
           body[data-pangea-product-shell] #root [data-pane="conversation"] {
             grid-column: 3; grid-row: 1; min-width: 0; margin: 0 !important;
-            box-sizing: border-box; padding-top: 166px;
+            box-sizing: border-box; padding-top: 204px;
             border-left: 1px solid #dfe3e8; background: #fbfcfd;
+            display: none !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant] #root .pI_x6G_frame {
+            grid-template-columns: 0 minmax(0, 1fr) var(--pangea-ai-width) !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant] #root [data-pane="conversation"] {
+            display: flex !important;
           }
           body[data-pangea-product-shell] #root [data-pane="conversation"] > * { min-height: 0; flex: 1; }
           body[data-pangea-product-shell] #root [data-pane="conversation"] .pXSMma_stack { display: none !important; }
@@ -252,10 +261,13 @@ window.__ModuleLoader__.load({
           body[data-pangea-product-shell] #root [data-pane="conversation"] .wSkVaW_heroGlow { display: none !important; }
           body[data-pangea-product-shell] #root .pI_x6G_handle { display: none !important; }
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panel {
-            left: 0 !important; right: var(--pangea-ai-width) !important; width: auto !important;
+            left: 0 !important; right: 0 !important; width: auto !important;
             border-left: 0 !important; border-right: 1px solid var(--dsw-alias-border-l2);
             padding-top: var(--pangea-topbar-height) !important; transform: none !important;
             visibility: visible !important; pointer-events: auto !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant] [data-dsh-panel-host] .nArs4W_panel {
+            right: var(--pangea-ai-width) !important;
           }
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelResize,
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_tabBar,
@@ -263,10 +275,10 @@ window.__ModuleLoader__.load({
             display: none !important;
           }
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelBody { height: 100%; }
-          [data-pangea-assistant-head] {
+          body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-head] {
             display: block; position: fixed; z-index: 35; top: var(--pangea-topbar-height);
             left: calc(100vw - var(--pangea-ai-width)); right: auto;
-            box-sizing: border-box; width: var(--pangea-ai-width); height: 166px;
+            box-sizing: border-box; width: var(--pangea-ai-width); height: 204px;
             padding: 0 24px 16px; border-left: 1px solid #dfe3e8; border-bottom: 1px solid #e5e8ec;
             color: var(--pangea-ink); background: rgba(251,252,253,.98);
           }
@@ -286,6 +298,15 @@ window.__ModuleLoader__.load({
           [data-pangea-assistant-name] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 700; }
           [data-pangea-assistant-meta] { margin-top: 5px; color: #757c87; font-size: 12px; line-height: 1.35; }
           [data-pangea-assistant-progress] { margin-top: 5px; color: #68707c; font-size: 11px; }
+          [data-pangea-assistant-actions] { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+          [data-pangea-assistant-select] {
+            min-width: 0; flex: 1; height: 30px; border: 1px solid #d9dde3; border-radius: 5px;
+            padding: 0 8px; color: #34383f; background: #fff; font: inherit; font-size: 12px;
+          }
+          [data-pangea-assistant-new] {
+            height: 30px; border: 1px solid #c7000b; border-radius: 5px; padding: 0 10px;
+            color: #c7000b; background: #fff; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+          }
         }
 
         @media (min-width: 1180px) and (max-width: 1479px) {
@@ -378,6 +399,7 @@ window.__ModuleLoader__.load({
 
     function AssistantHeader({ context }) {
       const percent = Number.isFinite(context?.percent) ? Math.max(0, Math.min(100, context.percent)) : undefined
+      const conversations = Array.isArray(context?.conversations) ? context.conversations : []
       return h('aside', { 'data-pangea-assistant-head': true, 'aria-label': 'AI 助手当前任务' },
         h('div', { 'data-pangea-assistant-title': true }, h('span', null, 'AI 助手')),
         h('div', { 'data-pangea-assistant-card': true },
@@ -386,7 +408,17 @@ window.__ModuleLoader__.load({
             h('span', { 'data-pangea-assistant-name': true, style: { display: 'block' }, title: context?.runId }, context?.title ?? '选择一个 PANGEA Run'),
             h('span', { 'data-pangea-assistant-meta': true, style: { display: 'block' } }, context?.phase ? `阶段：${context.phase}` : '对话将使用当前工作区上下文'),
             h('span', { 'data-pangea-assistant-progress': true, style: { display: 'block' } }, percent === undefined ? '等待任务上下文' : `进度：${percent}%`)),
-          lineIcon([h('path', { key: 'a', d: 'm8 10 4 4 4-4' })], 18, 1.7)))
+          lineIcon([h('path', { key: 'a', d: 'm8 10 4 4 4-4' })], 18, 1.7)),
+        h('div', { 'data-pangea-assistant-actions': true },
+          h('select', {
+            'data-pangea-assistant-select': true,
+            'aria-label': '切换任务会话',
+            value: context?.activeConversationId ?? '',
+            onChange: event => context?.onSelectConversation?.(event.target.value),
+          }, conversations.length
+            ? conversations.map(item => h('option', { key: item.conversation_id, value: item.conversation_id }, item.title))
+            : h('option', { value: '' }, '尚未创建会话')),
+          h('button', { type: 'button', 'data-pangea-assistant-new': true, onClick: () => context?.onCreateConversation?.() }, '新建会话')))
     }
 
     function ProductShell({ service, betterSidebar, page, scope, tab, visible, tabProps, children }) {
@@ -411,6 +443,16 @@ window.__ModuleLoader__.load({
           if (document.body.getAttribute('data-pangea-product-shell') === page.id) document.body.removeAttribute('data-pangea-product-shell')
         }
       }, [page.id, productVisible])
+      React.useEffect(() => {
+        const showAssistant = productVisible && page.id === 'analysis' && Boolean(assistantContext?.taskId)
+        if (showAssistant) document.body.setAttribute('data-pangea-task-assistant', assistantContext.taskId)
+        else document.body.removeAttribute('data-pangea-task-assistant')
+        return () => {
+          if (document.body.getAttribute('data-pangea-task-assistant') === assistantContext?.taskId) {
+            document.body.removeAttribute('data-pangea-task-assistant')
+          }
+        }
+      }, [assistantContext?.taskId, page.id, productVisible])
       React.useLayoutEffect(() => {
         if (!productVisible) return undefined
         const body = document.body
@@ -583,20 +625,58 @@ window.__ModuleLoader__.load({
       const nativeDisposers = new Map()
       const listeners = new Set()
       const runDraftListeners = new Set()
+      const taskSelectionListeners = new Set()
       const registeredNativeIds = new Set()
       let sequence = 0
       let revision = 0
       let defaultPageId
       let snapshot = Object.freeze({ revision, pages: Object.freeze([]) })
       let runDraft = Object.freeze({ revision: 0, requestId: 0, assetIds: Object.freeze([]) })
+      let selectedTaskId
       const initializedDefaultSessions = new Set()
+      const productSessions = new Set()
+      const lastPageBySession = new Map()
       let publicService
 
-      function ensureDefaultPage() {
-        const sessionId = betterSidebar.getSnapshot?.()?.sessionId
-        if (!sessionId || !defaultPageId || initializedDefaultSessions.has(sessionId)) return
-        initializedDefaultSessions.add(sessionId)
-        openPage({ sessionId }, defaultPageId)
+      function activePageId(state) {
+        for (const page of pages.values()) {
+          const tab = [...allTabs(state?.splits), ...allTabs(state?.bottomSplits)].find(item => item.type === page.nativeId)
+          if (tab && (tabIsActive(state?.splits, tab.id) || tabIsActive(state?.bottomSplits, tab.id))) return page.id
+        }
+        return undefined
+      }
+
+      function ensureProductPage() {
+        const current = betterSidebar.getSnapshot?.()
+        const sessionId = current?.sessionId
+        const state = current?.state
+        if (!sessionId || !defaultPageId) return
+        const activePage = activePageId(state)
+        if (activePage) {
+          initializedDefaultSessions.add(sessionId)
+          lastPageBySession.set(sessionId, activePage)
+          return
+        }
+        if (!initializedDefaultSessions.has(sessionId)) {
+          initializedDefaultSessions.add(sessionId)
+          openPage({ sessionId }, lastPageBySession.get(sessionId) ?? defaultPageId)
+          return
+        }
+        if (!productSessions.has(sessionId)) return
+        const pageId = lastPageBySession.get(sessionId) ?? defaultPageId
+        const page = pages.get(pageId) ?? pages.get(defaultPageId)
+        if (!page) return
+        const existing = [...allTabs(state?.splits), ...allTabs(state?.bottomSplits)].find(item => item.type === page.nativeId)
+        console.info('[dsh-pangea] restoring product page', { sessionId, pageId: page.id, previousActiveTab: state?.splits?.active ?? state?.bottomSplits?.active ?? null })
+        if (existing) betterSidebar.activateTab?.(existing.id, { sessionId })
+        else openPage({ sessionId }, page.id)
+      }
+
+      function registerProductSession(sessionId) {
+        if (typeof sessionId !== 'string' || sessionId.trim() === '') return false
+        productSessions.add(sessionId)
+        ensureProductPage()
+        return true
       }
 
       function rebuild() {
@@ -651,7 +731,7 @@ window.__ModuleLoader__.load({
         nativeDisposers.set(id, disposeNative)
         if (descriptor.default === true) {
           defaultPageId = id
-          ensureDefaultPage()
+          ensureProductPage()
         }
         applyBuiltinPolicy(betterSidebar)
         rebuild()
@@ -699,13 +779,30 @@ window.__ModuleLoader__.load({
         return () => runDraftListeners.delete(listener)
       }
 
+      function selectTask(taskId) {
+        const next = typeof taskId === 'string' && taskId.trim() !== '' ? taskId.trim() : undefined
+        if (next === selectedTaskId) return selectedTaskId
+        selectedTaskId = next
+        for (const listener of [...taskSelectionListeners]) listener()
+        return selectedTaskId
+      }
+
+      function getSelectedTaskId() { return selectedTaskId }
+
+      function subscribeTaskSelection(listener) {
+        taskSelectionListeners.add(listener)
+        return () => taskSelectionListeners.delete(listener)
+      }
+
       function openPage(scope, pageId) {
         const page = pages.get(pageId)
         if (!page) return false
+        if (scope?.sessionId) lastPageBySession.set(scope.sessionId, page.id)
         const state = betterSidebar.getSnapshot?.()?.state
         const existing = state ? [...allTabs(state.splits), ...allTabs(state.bottomSplits)].find(item => item.type === page.nativeId) : undefined
         if (existing) betterSidebar.updateTab?.(existing.id, { title: typeof page.title === 'function' ? page.title() : page.title, path: '', meta: { ...(existing.meta && typeof existing.meta === 'object' ? existing.meta : {}), pangeaUtility: null } })
-        betterSidebar.openTab({ type: page.nativeId }, scope)
+        if (existing) betterSidebar.activateTab?.(existing.id, scope)
+        else betterSidebar.openTab({ type: page.nativeId }, scope)
         return true
       }
 
@@ -753,7 +850,7 @@ window.__ModuleLoader__.load({
       }
 
       const disposePolicy = installSidebarPolicy(betterSidebar, registeredNativeIds)
-      const disposeDefaultState = betterSidebar.subscribeState?.(ensureDefaultPage) ?? (() => {})
+      const disposeDefaultState = betterSidebar.subscribeState?.(ensureProductPage) ?? (() => {})
 
       publicService = Object.freeze({
         registerPage,
@@ -767,6 +864,10 @@ window.__ModuleLoader__.load({
         updateRunDraft,
         subscribeRunDraft,
         requestRunCreation,
+        registerProductSession,
+        selectTask,
+        getSelectedTaskId,
+        subscribeTaskSelection,
         getSnapshot,
         disposePolicy: () => {
           disposeDefaultState()
@@ -782,7 +883,7 @@ window.__ModuleLoader__.load({
       ctx.effect(installProductStyles, 'dsh-pangea: product shell styles')
       const service = createPangeaService(betterSidebar)
       ctx.provide('pangea', service)
-      ctx.effect(() => installProductWorkspaceBootstrap(ctx), 'dsh-pangea: product workspace bootstrap')
+      ctx.effect(() => installProductWorkspaceBootstrap(ctx, service), 'dsh-pangea: product workspace bootstrap')
       ctx.effect(() => service.disposePolicy, 'dsh-pangea: sidebar policy')
     }
 

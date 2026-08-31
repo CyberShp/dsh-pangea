@@ -28,12 +28,20 @@ function fakeSidebar() {
   ])
   const opened = []
   const closed = []
+  const activated = []
+  const updated = []
   const registryListeners = new Set()
   const stateListeners = new Set()
   let state = { splits: { tabs: [] }, bottomSplits: { tabs: [] } }
+  let sessionId = 'session-1'
+  const notifyState = () => { for (const listener of stateListeners) listener() }
+  const activate = (tree, id) => Array.isArray(tree?.tabs) && tree.tabs.some(tab => tab.id === id)
+    ? { ...tree, active: id }
+    : tree
   return {
-    tabs, opened, closed,
-    setState(value) { state = value },
+    tabs, opened, closed, activated, updated,
+    setState(value) { state = value; notifyState() },
+    setSession(value) { sessionId = value; notifyState() },
     getTab(id) { return tabs.get(id) },
     registerTab(tab) {
       if (tabs.has(tab.id)) throw new Error(`duplicate ${tab.id}`)
@@ -42,6 +50,12 @@ function fakeSidebar() {
       return () => { tabs.delete(tab.id); for (const listener of registryListeners) listener() }
     },
     openTab(seed, scope) { opened.push({ seed, scope }) },
+    updateTab(id, patch) { updated.push({ id, patch }) },
+    activateTab(id, scope) {
+      activated.push({ id, scope })
+      state = { ...state, splits: activate(state.splits, id), bottomSplits: activate(state.bottomSplits, id) }
+      notifyState()
+    },
     openFile(scope, filePath, title) { opened.push({ scope, filePath, title }) },
     closeTab(id, scope) {
       closed.push({ id, scope })
@@ -50,7 +64,7 @@ function fakeSidebar() {
         : tree
       state = { ...state, splits: remove(state.splits), bottomSplits: remove(state.bottomSplits) }
     },
-    getSnapshot() { return { sessionId: 'session-1', state } },
+    getSnapshot() { return { sessionId, state } },
     subscribe(listener) { registryListeners.add(listener); return () => registryListeners.delete(listener) },
     subscribeState(listener) { stateListeners.add(listener); return () => stateListeners.delete(listener) },
   }
@@ -83,6 +97,7 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
   const calls = []
   const opened = []
   let ready = false
+  let productSession
   const result = await exported.bootstrapProductWorkspace({
     workspaces: {
       async create(input) {
@@ -98,7 +113,7 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
   }, {
     async productWorkspace() { return 'C:\\Users\\tester\\AppData\\Roaming\\pangea-desktop\\launch-root' },
     async productWorkspaceReady() { ready = true },
-  })
+  }, undefined, sessionId => { productSession = sessionId })
 
   assert.equal(result, true)
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
@@ -106,6 +121,7 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
     ['connect', 'workspace-pangea'],
   ])
   assert.deepEqual(opened, ['session-pangea'])
+  assert.equal(productSession, 'session-pangea')
   assert.equal(ready, true)
 })
 
@@ -185,6 +201,46 @@ test('forwards page and file opens through Better Sidebar', async () => {
   assert.equal(sidebar.opened[1].filePath, '/tmp/report.md')
 })
 
+test('activates an existing PANGEA page instead of reopening it', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'assets', title: '资产', component: () => null })
+  sidebar.setState({
+    splits: { active: 'editor:1', tabs: [{ id: 'assets:1', type: 'dsh-pangea:assets' }, { id: 'editor:1', type: 'editor' }] },
+    bottomSplits: { tabs: [] },
+  })
+  assert.equal(service.openPage({ sessionId: 'session-1' }, 'assets'), true)
+  assert.deepEqual(sidebar.activated.map(item => item.id), ['assets:1'])
+  assert.equal(sidebar.opened.length, 0)
+})
+
+test('restores the last PANGEA page only for registered Desktop product sessions', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'workbench', title: '工作台', default: true, component: () => null })
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  sidebar.setState({
+    splits: { active: 'analysis:1', tabs: [{ id: 'analysis:1', type: 'dsh-pangea:analysis' }, { id: 'editor:1', type: 'editor' }] },
+    bottomSplits: { tabs: [] },
+  })
+  service.registerProductSession('session-1')
+  sidebar.setState({
+    splits: { active: 'editor:1', tabs: [{ id: 'analysis:1', type: 'dsh-pangea:analysis' }, { id: 'editor:1', type: 'editor' }] },
+    bottomSplits: { tabs: [] },
+  })
+  assert.equal(sidebar.activated.at(-1).id, 'analysis:1')
+
+  sidebar.setSession('ordinary-session')
+  const activationCount = sidebar.activated.length
+  sidebar.setState({
+    splits: { active: 'editor:1', tabs: [{ id: 'analysis:1', type: 'dsh-pangea:analysis' }, { id: 'editor:1', type: 'editor' }] },
+    bottomSplits: { tabs: [] },
+  })
+  assert.equal(sidebar.activated.length, activationCount)
+})
+
 test('shares a deduplicated asset selection with the analysis page', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()
@@ -199,6 +255,21 @@ test('shares a deduplicated asset selection with the analysis page', async () =>
   assert.equal(service.getRunDraft().requestId, 1)
   assert.equal(changes.length, 1)
   assert.equal(sidebar.opened[0].seed.type, 'dsh-pangea:analysis')
+
+  dispose()
+})
+
+test('shares a selected Task between the workbench and analysis page', async () => {
+  const { exported } = await loadClient()
+  const service = exported.createPangeaService(fakeSidebar())
+  const changes = []
+  const dispose = service.subscribeTaskSelection(() => changes.push(service.getSelectedTaskId()))
+
+  assert.equal(service.selectTask(' task-17 '), 'task-17')
+  assert.equal(service.getSelectedTaskId(), 'task-17')
+  assert.deepEqual(changes, ['task-17'])
+  assert.equal(service.selectTask('task-17'), 'task-17')
+  assert.deepEqual(changes, ['task-17'])
 
   dispose()
 })

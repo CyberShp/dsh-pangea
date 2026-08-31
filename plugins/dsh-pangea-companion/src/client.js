@@ -86,9 +86,11 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestWorkbench({ cwd, runId, cursor = 0, limit = 20, signal, fetcher = fetch }) {
+    async function requestWorkbench({ cwd, runId, taskId, sessionId, cursor = 0, limit = 20, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd, cursor: String(cursor), limit: String(limit) })
       if (runId) query.set('run_id', runId)
+      if (taskId) query.set('task_id', taskId)
+      if (sessionId) query.set('session_id', sessionId)
       const response = await fetcher(`${WORKBENCH_API_PATH}?${query}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
@@ -152,18 +154,18 @@ window.__ModuleLoader__.load({
     }
 
     const styles = {
-      root: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: '#17191d', background: '#f5f6f8', fontFamily: '"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif', WebkitFontSmoothing: 'antialiased' },
+      root: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: '#17191d', background: '#f5f6f8', fontFamily: '"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif', fontSize: 14, WebkitFontSmoothing: 'antialiased' },
       sticky: { position: 'sticky', top: 0, zIndex: 5, padding: '17px 22px 0', background: 'var(--dsw-alias-bg-layer-1, #fff)', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))' },
       header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
       headerLeft: { minWidth: 0, display: 'flex', alignItems: 'center', gap: 7 },
-      title: { fontSize: 17, fontWeight: 720, letterSpacing: '-0.012em', lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-      subline: { marginTop: 5, color: 'var(--dsw-alias-label-tertiary, #7a818b)', fontSize: 11, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-      backButton: { border: 0, background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', padding: '4px 2px', cursor: 'pointer', fontSize: 11, whiteSpace: 'nowrap' },
-      button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 10 },
-      primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '7px 9px', cursor: 'pointer', fontSize: 11, fontWeight: 700 },
+      title: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.012em', lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      subline: { marginTop: 5, color: 'var(--dsw-alias-label-tertiary, #7a818b)', fontSize: 12, lineHeight: 1.45, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      backButton: { border: 0, background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', padding: '4px 2px', cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' },
+      button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '7px 10px', cursor: 'pointer', fontSize: 13 },
+      primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '9px 12px', cursor: 'pointer', fontSize: 14, fontWeight: 600 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
       nav: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(72px, 1fr))', gap: 0, marginTop: 12, overflowX: 'auto' },
-      navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '9px 2px 8px', cursor: 'pointer', fontSize: 10 },
+      navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '11px 4px 10px', cursor: 'pointer', fontSize: 13 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '20px 22px 30px' },
       homeContent: { padding: '32px 36px 42px', background: '#f5f6f8' },
@@ -172,86 +174,86 @@ window.__ModuleLoader__.load({
       healthError: { borderColor: 'var(--dsw-alias-state-error-secondary, #e66767)', background: 'var(--dsw-alias-interactive-bg-hover-danger, var(--dsw-alias-bg-layer-1, transparent))' },
       healthWarning: { borderColor: 'var(--dsw-alias-state-warn-secondary, #c9974f)', background: 'var(--dsw-alias-state-warn-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
       clickableCard: { width: '100%', textAlign: 'left', color: 'inherit', cursor: 'pointer' },
-      label: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, fontWeight: 650, letterSpacing: '0.055em' },
-      value: { fontSize: 13, fontWeight: 680, lineHeight: 1.45, marginTop: 4, overflowWrap: 'anywhere' },
+      label: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 12, fontWeight: 500, letterSpacing: '0.02em' },
+      value: { fontSize: 14, fontWeight: 500, lineHeight: 1.5, marginTop: 4, overflowWrap: 'anywhere' },
       grid: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 7, marginTop: 8 },
       metric: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14))', borderRadius: 7, padding: 9, background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))', color: 'inherit' },
       metricClickable: { cursor: 'pointer', width: '100%', textAlign: 'left' },
       metricNumber: { fontSize: 17, fontWeight: 740, lineHeight: 1.1 },
-      metricName: { color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, marginTop: 3 },
+      metricName: { color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 12, marginTop: 3 },
       progressTrack: { height: 5, borderRadius: 999, overflow: 'hidden', background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.16))', marginTop: 7 },
       progressFill: { height: '100%', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
-      sectionTitle: { fontSize: 13, fontWeight: 760, letterSpacing: '-0.005em', margin: '18px 0 8px' },
-      itemTitle: { fontSize: 12, fontWeight: 720, lineHeight: 1.45 },
-      itemMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, marginTop: 5, lineHeight: 1.55 },
+      sectionTitle: { fontSize: 16, fontWeight: 600, letterSpacing: '-0.005em', margin: '20px 0 9px' },
+      itemTitle: { fontSize: 14, fontWeight: 600, lineHeight: 1.5 },
+      itemMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 12, marginTop: 5, lineHeight: 1.6 },
       row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 7 },
-      badge: { display: 'inline-flex', alignItems: 'center', borderRadius: 999, padding: '2px 6px', color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 9, background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', whiteSpace: 'nowrap' },
+      badge: { display: 'inline-flex', alignItems: 'center', borderRadius: 999, padding: '3px 8px', color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 12, background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', whiteSpace: 'nowrap' },
       statusRow: { display: 'flex', alignItems: 'center', gap: 6 },
       statusDot: { width: 6, height: 6, flex: '0 0 auto', borderRadius: '50%', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       chips: { display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 7 },
-      chip: { border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, padding: '3px 7px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 10 },
-      search: { width: '100%', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '7px 8px', outline: 'none', fontSize: 11, marginBottom: 7 },
+      chip: { border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, padding: '5px 9px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 12 },
+      search: { width: '100%', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '9px 10px', outline: 'none', fontSize: 14, marginBottom: 8 },
       filters: { display: 'flex', gap: 5, overflowX: 'auto', paddingBottom: 5, marginBottom: 3 },
-      filter: { flex: '0 0 auto', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, background: 'transparent', color: 'inherit', padding: '4px 8px', fontSize: 10, cursor: 'pointer' },
+      filter: { flex: '0 0 auto', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, background: 'transparent', color: 'inherit', padding: '5px 10px', fontSize: 13, cursor: 'pointer' },
       filterActive: { background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', fontWeight: 700 },
-      text: { fontSize: 11, lineHeight: 1.65, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
-      list: { margin: '6px 0 0', paddingLeft: 18, fontSize: 11, lineHeight: 1.65 },
+      text: { fontSize: 14, lineHeight: 1.65, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+      list: { margin: '6px 0 0', paddingLeft: 20, fontSize: 14, lineHeight: 1.65 },
       separator: { border: 0, borderTop: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', margin: '10px 0' },
-      empty: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 11, lineHeight: 1.6 },
-      error: { whiteSpace: 'pre-wrap', fontSize: 11, color: 'var(--dsw-alias-state-error-primary, #e66767)' },
+      empty: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 13, lineHeight: 1.6 },
+      error: { whiteSpace: 'pre-wrap', fontSize: 13, color: 'var(--dsw-alias-state-error-primary, #e66767)' },
       runButton: { width: '100%', textAlign: 'left', border: 0, borderRadius: 7, padding: '7px 8px', marginBottom: 3, cursor: 'pointer', color: 'inherit', background: 'transparent' },
       runActive: { background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.1))' },
       toolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 7, flexWrap: 'wrap' },
       formGrid: { display: 'grid', gap: 8, marginTop: 9 },
-      textarea: { width: '100%', minHeight: 74, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '8px 9px', outline: 'none', fontSize: 11, lineHeight: 1.5 },
+      textarea: { width: '100%', minHeight: 74, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '8px 9px', outline: 'none', fontSize: 13, lineHeight: 1.5 },
       compatibility: { borderLeft: '3px solid var(--dsw-alias-state-business-primary, #4d9ad6)' },
       stageRail: { display: 'grid', gap: 7, marginTop: 8 },
       stageItem: { display: 'grid', gridTemplateColumns: '9px minmax(0, 1fr) auto', gap: 8, alignItems: 'start', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.13))', paddingBottom: 8 },
       stageDot: { width: 7, height: 7, marginTop: 5, borderRadius: 2, background: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       flowStep: { borderLeft: '2px solid var(--dsw-alias-border-l2, #555)', paddingLeft: 9, marginTop: 7 },
       actionCard: { borderColor: 'var(--dsw-alias-state-business-secondary, var(--dsw-alias-border-l2, #555))', background: 'var(--dsw-alias-state-business-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
-      success: { color: 'var(--dsw-alias-state-success-primary, #38a892)', fontSize: 10, lineHeight: 1.5 },
-      source: { maxHeight: 200, margin: '9px 0 0', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, overflow: 'auto', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))', fontFamily: 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 10, lineHeight: 1.55 },
+      success: { color: 'var(--dsw-alias-state-success-primary, #38a892)', fontSize: 12, lineHeight: 1.5 },
+      source: { maxHeight: 200, margin: '9px 0 0', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, overflow: 'auto', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08))', fontFamily: 'var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 12, lineHeight: 1.55 },
       sourceLine: { display: 'flex', minWidth: 'max-content', whiteSpace: 'pre' },
       sourceTarget: { background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
       sourceNumber: { width: 42, flex: '0 0 42px', boxSizing: 'border-box', paddingRight: 9, textAlign: 'right', userSelect: 'none', color: 'var(--dsw-alias-label-tertiary, #888)', borderRight: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12))' },
       sourceCode: { padding: '0 9px', color: 'var(--dsw-alias-label-primary, inherit)' },
       evidenceTabs: { display: 'flex', gap: 5, overflowX: 'auto', marginTop: 8, paddingBottom: 3 },
-      evidenceTab: { flex: '0 0 auto', maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, padding: '4px 7px', background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', cursor: 'pointer', fontSize: 9 },
+      evidenceTab: { flex: '0 0 auto', maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, padding: '5px 8px', background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', cursor: 'pointer', fontSize: 12 },
       evidenceTabActive: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))', color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700 },
       choiceGrid: { display: 'grid', gap: 6, marginTop: 7 },
-      choiceButton: { width: '100%', textAlign: 'left', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '7px 8px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 10, lineHeight: 1.45 },
+      choiceButton: { width: '100%', textAlign: 'left', border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '8px 9px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 12, lineHeight: 1.45 },
       choiceButtonActive: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
       evidenceChecks: { display: 'grid', gap: 5, marginTop: 7 },
       formGrid: { display: 'grid', gap: 7, marginTop: 8 },
-      textarea: { width: '100%', minHeight: 86, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '7px 8px', outline: 'none', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 10 },
+      textarea: { width: '100%', minHeight: 86, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '8px 9px', outline: 'none', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 13 },
       caseSelect: { display: 'flex', alignItems: 'flex-start', gap: 8 },
       caseDetailButton: { flex: 1, minWidth: 0, border: 0, background: 'transparent', color: 'inherit', padding: 0, textAlign: 'left', cursor: 'pointer' },
-      evidenceCheck: { display: 'flex', alignItems: 'flex-start', gap: 7, border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '6px 7px', cursor: 'pointer', fontSize: 10, lineHeight: 1.4 },
+      evidenceCheck: { display: 'flex', alignItems: 'flex-start', gap: 7, border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '7px 8px', cursor: 'pointer', fontSize: 12, lineHeight: 1.4 },
       evidenceCheckSelected: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
       monitorHero: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', borderRadius: 10, padding: 14, marginBottom: 12, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
       monitorState: { fontSize: 20, lineHeight: 1.2, fontWeight: 780, letterSpacing: '-0.02em' },
-      monitorHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, lineHeight: 1.55 },
+      monitorHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 12, lineHeight: 1.55 },
       boundary: { borderTop: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', paddingTop: 11, marginTop: 11 },
       timeline: { position: 'relative', marginTop: 2 },
       timelineItem: { position: 'relative', padding: '0 0 13px 18px', borderLeft: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', marginLeft: 4 },
       timelineDot: { position: 'absolute', left: -4, top: 4, width: 7, height: 7, borderRadius: '50%', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', boxShadow: '0 0 0 3px var(--dsw-alias-bg-base, #111)' },
-      timelineTime: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, fontVariantNumeric: 'tabular-nums' },
-      timelineTitle: { marginTop: 2, fontSize: 11, fontWeight: 690, lineHeight: 1.45 },
-      timelineDetail: { marginTop: 3, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, lineHeight: 1.5, overflowWrap: 'anywhere' },
-      eyebrow: { color: 'var(--dsw-alias-state-business-primary, #4d9ad6)', fontSize: 9, fontWeight: 760, letterSpacing: '0.09em', textTransform: 'uppercase' },
+      timelineTime: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 12, fontVariantNumeric: 'tabular-nums' },
+      timelineTitle: { marginTop: 2, fontSize: 13, fontWeight: 600, lineHeight: 1.45 },
+      timelineDetail: { marginTop: 3, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 12, lineHeight: 1.5, overflowWrap: 'anywhere' },
+      eyebrow: { color: 'var(--dsw-alias-state-business-primary, #4d9ad6)', fontSize: 12, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' },
       decisionHero: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', borderLeft: '3px solid var(--dsw-alias-state-business-primary, #4d9ad6)', borderRadius: 8, padding: 13, marginBottom: 11, background: 'linear-gradient(135deg, var(--dsw-alias-bg-layer-1, #171717), var(--dsw-alias-bg-layer-2, #202020))' },
       decisionTitle: { marginTop: 5, fontSize: 18, fontWeight: 780, lineHeight: 1.3, letterSpacing: '-0.02em' },
-      decisionHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 10, lineHeight: 1.55 },
+      decisionHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 13, lineHeight: 1.55 },
       decisionBand: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 6, marginTop: 11 },
       decisionItem: { minWidth: 0, borderTop: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', paddingTop: 7 },
-      decisionValue: { marginTop: 3, fontSize: 11, fontWeight: 700, lineHeight: 1.4, overflowWrap: 'anywhere' },
+      decisionValue: { marginTop: 3, fontSize: 14, fontWeight: 600, lineHeight: 1.4, overflowWrap: 'anywhere' },
       group: { marginBottom: 14 },
       groupHeader: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, padding: '0 2px 7px', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))' },
       groupTitle: { fontSize: 12, fontWeight: 760, lineHeight: 1.4 },
-      groupMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 9, lineHeight: 1.45, marginTop: 2 },
+      groupMeta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 12, lineHeight: 1.45, marginTop: 2 },
       compactCard: { border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 7, padding: 10, marginTop: 7 },
-      scenarioIndex: { width: 24, flex: '0 0 24px', color: 'var(--dsw-alias-label-tertiary, #888)', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 9, paddingTop: 2 },
+      scenarioIndex: { width: 24, flex: '0 0 24px', color: 'var(--dsw-alias-label-tertiary, #888)', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 12, paddingTop: 2 },
       technical: { border: '1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.32))', borderRadius: 8, padding: 10, marginBottom: 11, background: 'transparent' },
       homeHero: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, padding: '4px 4px 26px', marginBottom: 0 },
       homeTitle: { fontSize: 32, fontWeight: 720, lineHeight: 1.15, letterSpacing: '-0.045em', color: '#14161a' },
@@ -529,10 +531,11 @@ window.__ModuleLoader__.load({
     function chip(label, onClick) { return h('button', { type: 'button', style: styles.chip, onClick }, label) }
     function navType(screen) {
       if (screen.type === 'home') return 'home'
+      if (screen.type === 'tasks') return 'tasks'
       if (screen.type === 'risk') return 'risks'
       if (screen.type === 'case') return 'cases'
-      if (screen.type === 'evidence-detail') return 'risks'
-      if (['workflow', 'flows', 'evidence', 'review'].includes(screen.type)) return 'overview'
+      if (screen.type === 'evidence-detail') return 'evidence'
+      if (['workflow', 'flows', 'review'].includes(screen.type)) return 'overview'
       return screen.type
     }
 
@@ -551,6 +554,9 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState(undefined)
       const [workbenchError, setWorkbenchError] = React.useState(undefined)
       const [selectedRun, setSelectedRun] = React.useState(undefined)
+      const [selectedTaskId, setSelectedTaskId] = React.useState(ctx?.pangea?.getSelectedTaskId?.())
+      const [taskQuery, setTaskQuery] = React.useState('')
+      const [taskStatus, setTaskStatus] = React.useState('全部')
       const [loading, setLoading] = React.useState(false)
       const [workbenchLoading, setWorkbenchLoading] = React.useState(false)
       const [repositoryState, setRepositoryState] = React.useState(undefined)
@@ -642,7 +648,15 @@ window.__ModuleLoader__.load({
         workbenchRequestRef.current.controller = controller
         setWorkbenchLoading(true)
         try {
-          const body = await requestWorkbench({ cwd, runId: selectedRun ?? snapshot?.current?.run_id, cursor: runCursor, limit: 20, signal: controller.signal })
+          const body = await requestWorkbench({
+            cwd,
+            runId: selectedRun ?? snapshot?.current?.run_id,
+            taskId: selectedTaskId,
+            sessionId: scope?.sessionId,
+            cursor: runCursor,
+            limit: 20,
+            signal: controller.signal,
+          })
           if (sequence !== workbenchRequestRef.current.sequence) return
           setWorkbench(body)
           setWorkbenchError(undefined)
@@ -653,7 +667,7 @@ window.__ModuleLoader__.load({
         } finally {
           if (sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
         }
-      }, [cwd, pageMode, runCursor, selectedRun, snapshot?.current?.run_id])
+      }, [cwd, pageMode, runCursor, scope?.sessionId, selectedRun, selectedTaskId, snapshot?.current?.run_id])
 
       const loadEnvironments = React.useCallback(async () => {
         try {
@@ -687,10 +701,34 @@ window.__ModuleLoader__.load({
         snapshotFingerprintRef.current = ''
         setSnapshot(undefined)
         setSelectedRun(undefined)
+        setSelectedTaskId(undefined)
         setScreen({ type: initialScreen })
         setHistory([])
         setSelectedCaseIds([])
       }, [cwd, initialScreen])
+      React.useEffect(() => {
+        const sync = () => {
+          const taskId = ctx?.pangea?.getSelectedTaskId?.()
+          if (!taskId || pageMode !== 'analysis') return
+          setSelectedTaskId(taskId)
+          setScreen({ type: 'overview' })
+          setHistory([])
+        }
+        sync()
+        return ctx?.pangea?.subscribeTaskSelection?.(sync)
+      }, [ctx?.pangea, pageMode])
+      React.useEffect(() => {
+        if (pageMode !== 'analysis' || selectedTaskId || !workbench?.selected_task_id) return
+        setSelectedTaskId(workbench.selected_task_id)
+        const task = workbench?.tasks?.items?.find(item => item.task_id === workbench.selected_task_id)
+        setSelectedRun(task?.run_id ?? undefined)
+        setScreen({ type: 'overview' })
+        setHistory([])
+      }, [pageMode, selectedTaskId, workbench?.selected_task_id, workbench?.tasks?.items])
+      React.useEffect(() => {
+        const task = workbench?.tasks?.items?.find(item => item.task_id === selectedTaskId)
+        if (task?.run_id && task.run_id !== selectedRun) setSelectedRun(task.run_id)
+      }, [selectedRun, selectedTaskId, workbench?.tasks?.items])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
         const sync = () => setRunDraft(ctx?.pangea?.getRunDraft?.() ?? { requestId: 0, assetIds: [] })
@@ -764,6 +802,8 @@ window.__ModuleLoader__.load({
       React.useEffect(() => { if (visible && pageMode === 'home') void loadRepositories() }, [visible, pageMode, loadRepositories])
 
       const current = snapshot?.current
+      const taskItems = workbench?.tasks?.items ?? []
+      const selectedTask = taskItems.find(item => item.task_id === selectedTaskId)
       const monitor = snapshot?.monitor
       const monitoredSession = monitor?.session
       const monitoredRun = monitor?.run
@@ -786,13 +826,19 @@ window.__ModuleLoader__.load({
         window.dispatchEvent(new CustomEvent('pangea:system-state', { detail: systemState }))
         const contextTotal = current?.analysis?.total ?? 0
         const contextCompleted = current?.analysis?.completed ?? 0
-        window.dispatchEvent(new CustomEvent('pangea:run-context', { detail: current ? {
-          runId: current.run_id,
-          title: current.target ?? current.run_id,
-          phase: PHASE[String(current.phase ?? '').toUpperCase()] ?? PHASE[current.phase] ?? current.phase,
+        const assistantVisible = pageMode === 'analysis' && selectedTask && !['tasks', 'create'].includes(screen.type)
+        window.dispatchEvent(new CustomEvent('pangea:run-context', { detail: assistantVisible ? {
+          taskId: selectedTask.task_id,
+          runId: current?.run_id,
+          title: selectedTask.title,
+          phase: current ? (PHASE[String(current.phase ?? '').toUpperCase()] ?? PHASE[current.phase] ?? current.phase) : '正在准备',
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
+          conversations: selectedTask.conversations ?? [],
+          activeConversationId: selectedTask.active_conversation_id,
+          onSelectConversation: conversationId => { void selectTaskConversation(conversationId) },
+          onCreateConversation: () => { void createTaskConversationForCurrent() },
         } : null }))
-      }, [current, error, health?.status, visible, workbench?.compatibility?.compatible, workbenchError])
+      }, [current, error, health?.status, pageMode, screen.type, selectedTask, visible, workbench?.compatibility?.compatible, workbenchError])
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
       const methodologyDetailError = workbench?.run_detail?.run_id === current?.run_id && workbench?.run_detail?.status === 'error'
         ? workbench.run_detail.error : ''
@@ -848,6 +894,72 @@ window.__ModuleLoader__.load({
         setScreen(history[history.length - 1]); setHistory(history.slice(0, -1))
       }, [history, initialScreen])
       const chooseRun = React.useCallback((runId) => { setSelectedRun(runId); setScreen({ type: initialScreen }); setHistory([]) }, [initialScreen])
+
+      function chooseTask(task, targetScreen = 'overview') {
+        if (!task) return
+        ctx?.pangea?.selectTask?.(task.task_id)
+        setSelectedTaskId(task.task_id)
+        setSelectedRun(task.run_id ?? undefined)
+        setScreen({ type: targetScreen })
+        setHistory([])
+      }
+
+      function openTaskFromWorkbench(task) {
+        if (!task) return
+        ctx?.pangea?.selectTask?.(task.task_id)
+        const activeConversation = task.conversations?.find(item => item.conversation_id === task.active_conversation_id)
+          ?? task.conversations?.[0]
+        if (activeConversation?.session_id) {
+          ctx?.pangea?.registerProductSession?.(activeConversation.session_id)
+          ctx?.sessions?.open?.(activeConversation.session_id)
+        }
+        openProductPage('analysis', '分析任务')
+      }
+
+      async function startTask(task) {
+        if (!task || creatingRun) return
+        setCreatingRun(true)
+        try {
+          const launched = await requestWorkbenchAction({ cwd, action: 'task-start', payload: { task_id: task.task_id, data_root: task.data_root } })
+          ctx?.pangea?.registerProductSession?.(launched.session_id)
+          showActionNotice('分析任务已启动。')
+          ctx?.sessions?.open?.(launched.session_id)
+          await loadWorkbench()
+        } catch (reason) {
+          showActionNotice(`启动失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+          await loadWorkbench()
+        } finally {
+          setCreatingRun(false)
+        }
+      }
+
+      async function createTaskConversationForCurrent() {
+        if (!selectedTask || creatingRun) return
+        setCreatingRun(true)
+        try {
+          const created = await requestWorkbenchAction({ cwd, action: 'task-conversation-create', payload: { task_id: selectedTask.task_id } })
+          ctx?.pangea?.registerProductSession?.(created.session_id)
+          ctx?.sessions?.open?.(created.session_id)
+          await loadWorkbench()
+        } catch (reason) {
+          showActionNotice(`无法新建会话：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        } finally {
+          setCreatingRun(false)
+        }
+      }
+
+      async function selectTaskConversation(conversationId) {
+        if (!selectedTask || !conversationId) return
+        const conversation = selectedTask.conversations?.find(item => item.conversation_id === conversationId)
+        if (!conversation) return
+        try {
+          await requestWorkbenchAction({ cwd, action: 'task-conversation-activate', payload: { task_id: selectedTask.task_id, conversation_id: conversationId } })
+          ctx?.pangea?.registerProductSession?.(conversation.session_id)
+          ctx?.sessions?.open?.(conversation.session_id)
+        } catch (reason) {
+          showActionNotice(`无法切换会话：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
+      }
 
       function showActionNotice(message, isError = false) {
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
@@ -936,10 +1048,11 @@ window.__ModuleLoader__.load({
       async function submitNewRun() {
         if (!cwd || creatingRun || workbench?.compatibility?.compatible !== true) return
         setCreatingRun(true)
+        let createdTask
         try {
-          const launched = await requestWorkbenchAction({
+          const created = await requestWorkbenchAction({
             cwd,
-            action: 'create',
+            action: 'task-create',
             payload: {
               input: {
                 repository: createForm.repository,
@@ -951,17 +1064,27 @@ window.__ModuleLoader__.load({
               },
             },
           })
+          createdTask = created.task
           ctx?.pangea?.updateRunDraft?.({ assetIds: [] })
+          setWorkbench(value => ({
+            ...(value ?? {}),
+            tasks: {
+              items: [createdTask, ...(value?.tasks?.items ?? []).filter(item => item.task_id !== createdTask.task_id)],
+              total: (value?.tasks?.items ?? []).filter(item => item.task_id !== createdTask.task_id).length + 1,
+            },
+          }))
+          ctx?.pangea?.selectTask?.(createdTask.task_id)
+          setSelectedTaskId(createdTask.task_id)
+          setSelectedRun(undefined)
           setScreen({ type: 'overview' })
           setHistory([])
-          showActionNotice(`已创建分析会话：${launched.session_id}`)
-          ctx?.sessions?.open?.(launched.session_id)
-          await loadWorkbench()
+          showActionNotice(`任务“${createdTask.title}”已创建，正在准备分析。`)
         } catch (reason) {
           showActionNotice(`创建失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
         } finally {
           setCreatingRun(false)
         }
+        if (createdTask) await startTask(createdTask)
       }
       async function stopCurrentRun() {
         if (!cwd || !current || current.terminal) return
@@ -1177,6 +1300,7 @@ window.__ModuleLoader__.load({
       const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
       const activeNav = navType(screen)
       const screenTitle = screen.type === 'home' ? '测试工作台'
+        : screen.type === 'tasks' ? '分析任务'
         : screen.type === 'overview' ? 'PANGEA 总览'
         : screen.type === 'create' ? '新建分析'
           : screen.type === 'workflow' ? '运行流程'
@@ -1191,8 +1315,8 @@ window.__ModuleLoader__.load({
                       : screen.type === 'environment' ? (environmentForm.id ? '编辑测试环境' : '新增测试环境')
                         : screen.type === 'repository-import' ? '添加源码仓库' : '复核'
 
-      const navigationItems = pageMode !== 'analysis' ? [] : [
-        ['overview', '总览'], ['risks', '待处理'], ['cases', '测试计划'], ['execution', '执行结果'],
+      const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? [] : [
+        ['overview', '概览'], ['risks', '风险'], ['cases', '测试用例'], ['evidence', '分析资产'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -1205,10 +1329,15 @@ window.__ModuleLoader__.load({
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
-            !['home', 'overview', 'risks', 'cases', 'execution', 'environment'].includes(screen.type) ? h('button', { type: 'button', style: styles.backButton, onClick: goBack }, '← 返回') : null,
+            screen.type !== 'home' && screen.type !== 'tasks' ? h('button', { type: 'button', style: styles.backButton, onClick: () => {
+              if (pageMode === 'analysis' && ['overview', 'risks', 'cases', 'evidence'].includes(screen.type)) jump('tasks')
+              else goBack()
+            } }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
-              h('div', { style: styles.subline }, current ? `${current.run_id} · ${PHASE[current.phase] ?? current.phase}` : 'PANGEA 测试平台'))),
+              h('div', { style: styles.subline }, selectedTask
+                ? `${selectedTask.title} · ${selectedTask.task_id}`
+                : 'PANGEA 测试平台'))),
           h('div', { style: styles.chips },
             pageMode === 'analysis' && screen.type !== 'create' ? h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => jump('create') }, '新建分析') : null,
             h('button', {
@@ -1363,7 +1492,7 @@ window.__ModuleLoader__.load({
               formArea('分析重点', 'focus', '错误路径\n恢复行为\n外部可观测结果'),
               formArea('结构化资产 ID', 'asset_ids', '可从“资产”页勾选后带入'),
               formArea('少量用例示例文件', 'test_case_examples', 'tests/auth_cases.yaml')),
-            h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建分析会话…' : '创建并开始分析')))
+            h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务')))
       }
 
       function renderWorkflow() {
@@ -1481,20 +1610,12 @@ window.__ModuleLoader__.load({
       function renderHome() {
         if (repositoryState?.onboarding_required) return renderRepositoryImport(true)
         const runItems = workbench?.runs?.items ?? snapshot?.runs ?? []
-        const uncoveredRisks = risks.filter(isUncoveredRisk)
-        const runningRuns = runItems.filter(run => run.lifecycle_status === 'running')
-        const reviewRuns = runItems.filter(run => ['reviewing', 'closing'].includes(String(run.phase ?? '').toLowerCase()))
-        const highRisks = risks.filter(item => ['Critical', 'High'].includes(item.severity))
+        const runningTasks = taskItems.filter(task => ['preparing', 'running'].includes(task.status))
+        const attentionTasks = taskItems.filter(task => ['needs_attention', 'failed'].includes(task.status))
+        const completedTasks = taskItems.filter(task => task.status === 'completed')
         const reportRuns = runItems.filter(run => run.report_available === true)
-        const totalRuns = workbench?.runs?.total ?? runItems.length
-        const workRows = [current, ...runItems.filter(run => run.run_id !== current?.run_id)].filter(Boolean).slice(0, 3)
+        const workRows = attentionTasks.slice(0, 4)
         const reportRows = reportRuns.slice(0, 5)
-        const runProgress = run => {
-          const total = run.run_id === current?.run_id ? current?.analysis?.total ?? run.unit_count ?? 0 : run.unit_count ?? 0
-          const completed = run.run_id === current?.run_id ? current?.analysis?.completed ?? run.completed_unit_count ?? 0 : run.completed_unit_count ?? 0
-          return { total, completed, percent: total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0 }
-        }
-        const runStatus = run => QUALITY[run.quality_status] ?? PHASE[String(run.phase ?? '').toUpperCase()] ?? PHASE[run.phase] ?? (run.lifecycle_status === 'running' ? '运行中' : run.lifecycle_status ?? '待定')
         const metricCard = (kind, color, label, value, caption) => h('section', { style: styles.metricCard, title: caption },
           dashboardIcon(kind, color),
           h('div', null, h('div', { style: styles.metricLabel }, label), h('div', { style: { ...styles.metricValue, color } }, value)),
@@ -1504,11 +1625,6 @@ window.__ModuleLoader__.load({
         }, h('span', { style: styles.appMark, 'aria-hidden': true }, appGlyph(kind)),
         h('span', null, h('span', { style: styles.appTitle }, title), h('span', { style: { ...styles.appCopy, display: 'block' } }, copy)),
         h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))
-        const runStatusColor = run => run.quality_status === 'UNRESOLVED' || run.quality_status === 'REWORK'
-          ? '#c7000b'
-          : ['reviewing', 'closing'].includes(String(run.phase ?? '').toLowerCase())
-            ? '#d97706'
-            : run.lifecycle_status === 'running' ? '#2da44e' : '#2f7acb'
         const runUpdatedAt = run => run.updated_at ?? run.updated_at_ms ?? run.completed_at ?? run.created_at
 
         return h(React.Fragment, null,
@@ -1518,52 +1634,111 @@ window.__ModuleLoader__.load({
             h('div', { style: { display: 'flex', gap: 10 } },
               h('button', { type: 'button', style: { ...styles.environmentSecondaryButton, height: 42 }, onClick: openRepositoryImport }, '添加仓库'),
               h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => openProductPage('analysis', 'PANGEA 分析') }, '新建分析'))),
-          h('div', { style: styles.metricGrid, 'aria-label': '真实运行指标' },
-            metricCard('running', '#2da44e', '运行中', runningRuns.length, `当前已载入 ${runItems.length}/${totalRuns} 个 Run`),
-            metricCard('review', '#e07a00', '待复核', reviewRuns.length, '当前列表处于复核或补齐阶段'),
-            metricCard('risk', '#cf0a2c', '高风险', highRisks.length, current ? '当前 Run 的 Critical 与 High 风险' : '选择 Run 后显示'),
-            metricCard('report', '#2878d0', '已有报告', reportRuns.length, '当前已载入列表中可读取的报告')),
+          h('div', { style: styles.metricGrid, 'aria-label': '任务指标' },
+            metricCard('running', '#2f7acb', '进行中', runningTasks.length, '正在准备或分析中的任务'),
+            metricCard('review', '#cf0a2c', '需要处理', attentionTasks.length, '需要用户继续判断或重新启动的任务'),
+            metricCard('risk', '#2da44e', '已完成', completedTasks.length, '已完成完整分析流程的任务'),
+            metricCard('report', '#2878d0', '已有报告', reportRuns.length, '当前已载入的最终报告')),
           h('section', { style: styles.homeSection },
             h('div', { style: styles.homeSectionHeader },
               h('div', { style: styles.homeSectionTitle }, '需要处理'),
-              h('span', { style: styles.itemMeta }, current ? `${uncoveredRisks.length} 条风险尚未关联测试用例` : '暂无当前 Run')),
+              h('button', { type: 'button', style: styles.backButton, onClick: () => openProductPage('analysis', '分析任务') }, '查看全部任务')),
             h('div', { style: styles.homeTableHeader },
-              h('span', null, '名称'), h('span', null, '阶段'), h('span', null, '进度'), h('span', null, '状态'), h('span', null, '更新时间'), h('span', null)),
-            workRows.length ? workRows.map(run => {
-              const progress = runProgress(run)
-              return h('button', { key: run.run_id, type: 'button', style: styles.homeTableRow, onClick: () => chooseRun(run.run_id) },
-                h('span', { style: { fontSize: 13, fontWeight: 620, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, run.run_id),
-                h('span', { style: { color: '#59616c', fontSize: 12 } }, PHASE[String(run.phase ?? '').toUpperCase()] ?? PHASE[run.phase] ?? run.phase ?? '待定'),
-                h('span', null,
-                  h('span', { style: { display: 'flex', alignItems: 'center', gap: 9 } },
-                    h('span', { style: { ...styles.progressLine, flex: 1 } }, h('span', { style: { display: 'block', width: `${progress.percent}%`, height: '100%', borderRadius: 999, background: '#2da44e' } })),
-                    h('span', { style: { color: '#59616c', fontSize: 11, minWidth: 32, fontVariantNumeric: 'tabular-nums' } }, `${progress.percent}%`))),
-                h('span', { style: { ...styles.homeStatus, color: runStatusColor(run) } }, runStatus(run)),
-                h('span', { style: { color: '#59616c', fontSize: 12, fontVariantNumeric: 'tabular-nums' } }, formatDate(runUpdatedAt(run))),
+              h('span', null, '任务'), h('span', null, '仓库'), h('span', null, '目标'), h('span', null, '状态'), h('span', null, '更新时间'), h('span', null)),
+            workRows.length ? workRows.map(task => {
+              return h('button', { key: task.task_id, type: 'button', style: styles.homeTableRow, onClick: () => openTaskFromWorkbench(task) },
+                h('span', { style: { fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: task.title }, task.title),
+                h('span', { style: { color: '#59616c', fontSize: 13 } }, task.repository),
+                h('span', { style: { color: '#59616c', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.target),
+                h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.status) } }, taskStatusLabel(task.status)),
+                h('span', { style: { color: '#59616c', fontSize: 13, fontVariantNumeric: 'tabular-nums' } }, formatDate(task.updated_at)),
                 h('span', { style: { color: '#7a818b', fontSize: 20, lineHeight: 1, letterSpacing: 1 }, 'aria-hidden': true }, '⋮'))
-            }) : h('div', { style: { ...styles.empty, padding: 18 } }, '当前没有可显示的 Run。')),
+            }) : h('div', { style: { ...styles.empty, padding: 18 } }, '当前没有需要处理的任务。')),
           h('div', { style: styles.homeColumns },
             h('section', { style: { ...styles.homeSection, padding: 16 } },
-              h('div', { style: { ...styles.homeSectionTitle, margin: '2px 2px 14px' } }, '测试应用'),
-              h('div', { style: styles.appGrid, 'aria-label': '测试应用' },
-                appCard('analysis', 'PANGEA 分析', '源码语义分析、风险与测试用例', () => openProductPage('analysis', 'PANGEA 分析')),
-                appCard('environment', '环境配置', 'AI 对话式测试环境操作', () => openProductPage('execution', '环境与执行')))),
+              h('div', { style: { ...styles.homeSectionTitle, margin: '2px 2px 14px' } }, '快捷入口'),
+              h('div', { style: styles.appGrid, 'aria-label': '快捷入口' },
+                appCard('analysis', '分析任务', '创建、跟踪并进入 PANGEA 分析任务', () => openProductPage('analysis', '分析任务')),
+                appCard('assets', '测试资产', '需求、历史缺陷、覆盖率与方法论资产', () => openProductPage('assets', '测试资产')))),
             h('section', { style: { ...styles.homeSection, padding: '16px 18px' } },
-              h('div', { style: { ...styles.row, minHeight: 32, marginBottom: 4 } }, h('div', { style: styles.homeSectionTitle }, '最近报告'), h('span', { style: { color: '#7a818b', fontSize: 11 } }, `${reportRows.length} 份已载入`)),
-              reportRows.length ? reportRows.map(run => h('button', { key: run.run_id, type: 'button', style: styles.reportRow, onClick: () => { chooseRun(run.run_id); openProductPage('analysis', 'PANGEA 分析') } },
+              h('div', { style: { ...styles.row, minHeight: 32, marginBottom: 4 } }, h('div', { style: styles.homeSectionTitle }, '最近报告'), h('span', { style: { color: '#7a818b', fontSize: 12 } }, `${reportRows.length} 份已载入`)),
+              reportRows.length ? reportRows.map(run => h('button', { key: run.run_id, type: 'button', style: styles.reportRow, onClick: () => openProductPage('analysis', '分析任务') },
                 reportGlyph(),
                 h('span', { style: { minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, run.run_id),
-                h('span', { style: { color: '#737b86', fontSize: 11, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, formatDate(runUpdatedAt(run))),
+                h('span', { style: { color: '#737b86', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, formatDate(runUpdatedAt(run))),
                 h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))) : h('div', { style: { ...styles.empty, padding: '16px 0' } }, '当前已载入列表中没有报告。'))))
+      }
+
+      function taskStatusLabel(status) {
+        return {
+          preparing: '正在准备',
+          running: '分析中',
+          needs_attention: '需要处理',
+          completed: '已完成',
+          failed: '启动失败',
+        }[status] ?? status ?? '待定'
+      }
+
+      function taskStatusColor(status) {
+        if (status === 'failed' || status === 'needs_attention') return '#c7000b'
+        if (status === 'preparing') return '#d97706'
+        if (status === 'running') return '#2f7acb'
+        return '#2da44e'
+      }
+
+      function renderTasks() {
+        const query = taskQuery.trim().toLowerCase()
+        const filtered = taskItems.filter(task => {
+          if (taskStatus !== '全部' && task.status !== taskStatus) return false
+          return !query || [task.title, task.target, task.repository, task.task_id, task.run_id].filter(Boolean).join(' ').toLowerCase().includes(query)
+        })
+        const statusFilters = [
+          ['全部', '全部'], ['preparing', '正在准备'], ['running', '分析中'],
+          ['needs_attention', '需要处理'], ['completed', '已完成'], ['failed', '失败'],
+        ]
+        const columns = 'minmax(220px, 1.7fr) minmax(130px, .8fr) minmax(100px, .62fr) minmax(140px, .9fr) minmax(120px, .7fr)'
+        return h(React.Fragment, null,
+          renderCompatibility(),
+          h('section', { style: styles.homeHero },
+            h('div', null,
+              h('div', { style: { ...styles.homeTitle, fontSize: 28 } }, '分析任务'),
+              h('div', { style: styles.homeLead }, '创建、跟踪并进入一个明确的 PANGEA 分析任务。Run 和 DSH Session 收纳在任务详情中。')),
+            h('button', { type: 'button', style: styles.redButton, onClick: () => jump('create') }, '新建分析任务')),
+          h('input', { style: styles.search, value: taskQuery, 'aria-label': '搜索分析任务', placeholder: '搜索任务名称、仓库或任务编号…', onChange: event => setTaskQuery(event.target.value) }),
+          h('div', { style: styles.filters }, statusFilters.map(([value, label]) => h('button', {
+            key: value, type: 'button', style: { ...styles.filter, ...(taskStatus === value ? styles.filterActive : {}) }, onClick: () => setTaskStatus(value),
+          }, label))),
+          h('section', { style: { ...styles.homeSection, marginTop: 8 } },
+            h('div', { style: { ...styles.homeTableHeader, gridTemplateColumns: columns } },
+              h('span', null, '任务名称'), h('span', null, '仓库'), h('span', null, '状态'), h('span', null, '任务编号'), h('span', null, '更新时间')),
+            filtered.length ? filtered.map(task => h('button', {
+              key: task.task_id,
+              type: 'button',
+              style: { ...styles.homeTableRow, gridTemplateColumns: columns },
+              onClick: () => chooseTask(task),
+            },
+            h('span', { style: { fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.title),
+            h('span', { style: { color: '#59616c', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.repository),
+            h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.status) } }, taskStatusLabel(task.status)),
+            h('span', { style: { color: '#59616c', fontSize: 12, fontFamily: 'ui-monospace, monospace' } }, task.task_id),
+            h('span', { style: { color: '#59616c', fontSize: 13, fontVariantNumeric: 'tabular-nums' } }, formatDate(task.updated_at))))
+              : h('div', { style: { ...styles.empty, padding: 24 } }, query || taskStatus !== '全部' ? '没有符合条件的任务。' : '还没有分析任务。')))
       }
 
       function renderOverview() {
         const runItems = workbench?.runs?.items ?? snapshot?.runs ?? []
-        if (!current) return h(React.Fragment, null, renderCompatibility(), h('div', { style: styles.card },
-          h('div', { style: styles.empty }, '当前还没有可读取的 Run。'),
-          workbench?.compatibility?.compatible === true ? h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => jump('create') }, '创建第一个分析') : null))
+        if (!selectedTask) return h(React.Fragment, null, renderCompatibility(), h('div', { style: styles.card },
+          h('div', { style: styles.empty }, '请先从任务列表选择一个分析任务。'),
+          h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 10 }, onClick: () => jump('tasks') }, '返回任务列表')))
+        if (!current) return h(React.Fragment, null, renderCompatibility(), h('div', { style: { ...styles.card, padding: 20 } },
+          h('div', { style: styles.row },
+            h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, selectedTask.task_id)),
+            h('span', { style: { ...styles.homeStatus, color: taskStatusColor(selectedTask.status) } }, taskStatusLabel(selectedTask.status))),
+          h('div', { style: { ...styles.text, marginTop: 14 } }, selectedTask.status === 'failed'
+            ? selectedTask.launch_error ?? '分析启动失败。'
+            : '任务已经保存，正在准备分析会话和 PANGEA Run。'),
+          selectedTask.status === 'failed' ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在重试…' : '重试启动') : null))
         const uncoveredRisks = risks.filter(isUncoveredRisk)
-        const executorRuns = snapshot?.executor_runs ?? []
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
         const nextAction = health?.trusted === false
@@ -1573,8 +1748,8 @@ window.__ModuleLoader__.load({
             : uncoveredRisks.length > 0
               ? { label: `处理 ${uncoveredRisks.length} 条未覆盖风险`, hint: '这些风险还没有关联可执行测试用例。', target: 'risks' }
               : testCases.length > 0
-                ? { label: '形成并执行测试计划', hint: `${testCases.length} 条用例已可选择，先确认环境再执行。`, target: 'cases' }
-                : { label: '查看分析结论', hint: '当前没有可进入执行阶段的测试用例。', target: 'risks' }
+                ? { label: '查看测试用例', hint: `${testCases.length} 条用例可供查看和继续讨论。`, target: 'cases' }
+                : { label: '查看分析结论', hint: '当前没有生成测试用例。', target: 'risks' }
         return h(React.Fragment, null,
           renderCompatibility(),
           h('div', { style: styles.decisionHero },
@@ -1585,7 +1760,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析可信度'), h('div', { style: styles.decisionValue }, health?.trusted === false ? '不可用于决策' : HEALTH[health?.status] ?? health?.status ?? '未知')),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, `${testCases.length} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '执行进展'), h('div', { style: styles.decisionValue }, `${executorRuns.length} 个执行记录`)))),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, `${evidence.length} 条证据`)))),
           renderHealthCard(false),
           h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前任务'), h('div', { style: styles.itemTitle }, current.run_id)), h('span', { style: styles.badge }, PHASE[current.phase] ?? current.phase)),
@@ -1608,7 +1783,7 @@ window.__ModuleLoader__.load({
               current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html')) : null,
               current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md')) : null)) : null,
           h('details', { style: styles.technical },
-            h('summary', { style: { cursor: 'pointer', fontSize: 11, fontWeight: 720 } }, '技术详情'),
+            h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, '技术详情'),
             h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '这里保留流程、证据和复核原始信息，不参与日常主导航。'),
             h('div', { style: styles.chips },
               chip(`运行流程 · ${workflow.actions.length}`, () => jump('workflow')),
@@ -1622,7 +1797,7 @@ window.__ModuleLoader__.load({
                 : h('button', { type: 'button', style: styles.button, onClick: () => setPendingStopRun(current.run_id) }, '停止 Run'))) : null,
           current.errors?.length ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), h('div', { style: { ...styles.card, ...styles.error } }, JSON.stringify(current.errors, null, 2))) : null,
           runItems.length ? h('details', { style: styles.technical },
-            h('summary', { style: { cursor: 'pointer', fontSize: 11, fontWeight: 720 } }, `历史任务 · ${workbench?.runs?.total ?? runItems.length}`),
+            h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `历史 Run · ${workbench?.runs?.total ?? runItems.length}`),
             h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, runItems.map(run => {
               const active = current.run_id === run.run_id
               return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, run.run_id), h('span', { style: styles.badge }, QUALITY[run.quality_status] ?? PHASE[run.phase] ?? run.quality_status ?? run.phase)))
@@ -1910,6 +2085,7 @@ window.__ModuleLoader__.load({
 
       let body
       if (screen.type === 'home') body = renderHome()
+      else if (screen.type === 'tasks') body = renderTasks()
       else if (screen.type === 'repository-import') body = renderRepositoryImport(false)
       else if (screen.type === 'overview') body = renderOverview()
       else if (screen.type === 'create') body = renderCreate()
@@ -1930,7 +2106,7 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
         h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load({ foreground: true }) } }, '重试')) : null
-      const requiresSnapshot = !['home', 'create', 'environment', 'repository-import'].includes(screen.type)
+      const requiresSnapshot = !['home', 'tasks', 'create', 'environment', 'repository-import'].includes(screen.type)
       const initialLoading = requiresSnapshot && loading && snapshot === undefined
       const repositoryGate = pageMode === 'home' && repositoryState === undefined
         ? h('div', { style: styles.onboardingShell }, h('div', { style: { ...styles.onboardingCard, textAlign: 'center' }, role: repositoryError ? 'alert' : 'status' },
@@ -1961,11 +2137,11 @@ window.__ModuleLoader__.load({
       ctx.effect(() => pangea.registerPage({
         id: 'analysis', title: () => 'PANGEA 分析', icon, order: 10,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'overview', pageMode: 'analysis' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'tasks', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
       ctx.effect(() => pangea.registerPage({
         id: 'execution', title: () => '环境配置', icon, order: 20,
-        available: (_ctx, scope) => Boolean(scope?.cwd),
+        available: () => false,
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'environment', pageMode: 'execution' }),
       }), 'dsh-pangea-companion: execution page')
     }

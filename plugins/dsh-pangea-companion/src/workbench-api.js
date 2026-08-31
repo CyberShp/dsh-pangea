@@ -128,7 +128,7 @@ async function createDshSession(api, root, title) {
   return sessionId
 }
 
-export async function launchAnalysisSession(api, { cwd, dataRoot, input }, runner = runPangea) {
+export async function launchAnalysisSession(api, { cwd, dataRoot, input }, runner = runPangea, onSession = async () => {}) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
   const capabilities = await runner({
@@ -137,6 +137,7 @@ export async function launchAnalysisSession(api, { cwd, dataRoot, input }, runne
   })
   const request = normalizeAnalysisInput(input, capabilities, true)
   const sessionId = await createDshSession(api, root, `PANGEA 分析 · ${request.target}`)
+  await onSession({ session_id: sessionId, input: request, data_root: resolvedDataRoot })
   const scopeInstructions = request.source_scope.length > 0
     ? ['用户已经指定 source_scope，逐字使用下面输入中的路径，不得自行扩大范围。']
     : [
@@ -161,6 +162,17 @@ export async function launchAnalysisSession(api, { cwd, dataRoot, input }, runne
     content: [{ type: 'text', text: prompt }],
   })))
   return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot }
+}
+
+export async function createTaskConversation(api, { cwd, title }) {
+  const root = workspaceRoot(cwd)
+  const sessionId = await createDshSession(api, root, textTitle(title))
+  return { status: 'ok', session_id: sessionId }
+}
+
+function textTitle(value) {
+  const title = typeof value === 'string' ? value.trim() : ''
+  return title || 'PANGEA 任务会话'
 }
 
 export async function stopAnalysisRun({ cwd, dataRoot, runId, runner = runPangea }) {

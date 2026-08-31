@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { createTaskConversation, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
 async function workspace() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-workbench-'))
@@ -85,23 +85,46 @@ test('keeps the workbench available when one public runs get detail cannot be re
 test('launches a dedicated DSH session that owns the complete Run lifecycle', async () => {
   const root = await workspace()
   try {
-    const prompts = []
+    const events = []
     const api = {
       workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
       sessions: {
-        async create(value) { assert.equal(value.payload.workspaceId, 'workspace-1'); return ok({ sessionId: 'session-1' }) },
+        async create(value) { assert.equal(value.payload.workspaceId, 'workspace-1'); events.push('create'); return ok({ sessionId: 'session-1' }) },
         async rename(value) { assert.match(value.payload.title, /session/); return ok({}) },
-        async prompt(value) { prompts.push(value.payload); return ok({}) },
+        async prompt(value) { events.push(['prompt', value.payload]); return ok({}) },
       },
     }
     const result = await launchAnalysisSession(api, {
       cwd: root,
       input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'], asset_ids: ['asset-1'] },
-    }, async () => ({ repositories: ['repo-one'] }))
+    }, async () => ({ repositories: ['repo-one'] }), async session => {
+      events.push(['persist', session])
+    })
     assert.equal(result.session_id, 'session-1')
-    assert.match(prompts[0].content[0].text, /pangea_run_create/)
-    assert.match(prompts[0].content[0].text, /"asset_ids": \[/)
-    assert.match(prompts[0].content[0].text, /完整 action 流程/)
+    assert.equal(events[1][0], 'persist')
+    assert.equal(events[1][1].session_id, 'session-1')
+    assert.equal(events[2][0], 'prompt')
+    assert.match(events[2][1].content[0].text, /pangea_run_create/)
+    assert.match(events[2][1].content[0].text, /"asset_ids": \[/)
+    assert.match(events[2][1].content[0].text, /完整 action 流程/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('creates an additional DSH conversation without starting another Run', async () => {
+  const root = await workspace()
+  try {
+    const calls = []
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        async create(value) { calls.push(['create', value.payload]); return ok({ sessionId: 'session-2' }) },
+        async rename(value) { calls.push(['rename', value.payload]); return ok({}) },
+      },
+    }
+    const result = await createTaskConversation(api, { cwd: root, title: '任务会话 2' })
+    assert.equal(result.session_id, 'session-2')
+    assert.deepEqual(calls[0], ['create', { workspaceId: 'workspace-1' }])
+    assert.equal(calls[1][1].title, '任务会话 2')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

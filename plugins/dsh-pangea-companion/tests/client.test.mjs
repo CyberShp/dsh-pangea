@@ -19,10 +19,10 @@ function fakeReact() {
   }
 }
 
-test('PANGEA client registers the test workbench, analysis, and execution pages', async () => {
+test('PANGEA client registers the workbench and task-oriented product pages', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /测试工作台/)
-  assert.match(source, /真实运行指标/)
+  assert.match(source, /任务指标/)
   assert.match(source, /需要处理/)
   assert.match(source, /已有报告/)
   assert.match(source, /data-pangea-product-mode/)
@@ -34,10 +34,10 @@ test('PANGEA client registers the test workbench, analysis, and execution pages'
   assert.match(source, /source_catalog_path/)
   assert.match(source, /用户方法论/)
   assert.match(source, /source_item_ids/)
-  assert.match(source, /总览/)
+  assert.match(source, /分析任务/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
   assert.match(source, /repeat\(4, minmax\(72px, 1fr\)\)/)
-  assert.match(source, /\['overview', '总览'\], \['risks', '待处理'\], \['cases', '测试计划'\], \['execution', '执行结果'\]/)
+  assert.match(source, /\['overview', '概览'\], \['risks', '风险'\], \['cases', '测试用例'\], \['evidence', '分析资产'\]/)
   assert.doesNotMatch(source, /\['workflow', '流程'\], \['risks', '风险'\]/)
   assert.doesNotMatch(source, /\['monitor', '监控'\]/)
   assert.doesNotMatch(source, /if \(screen\.type === 'monitor'\) body = renderMonitor/)
@@ -50,8 +50,9 @@ test('PANGEA client registers the test workbench, analysis, and execution pages'
   assert.match(source, /Action 生命周期/)
   assert.match(source, /后端与工作台不兼容/)
   assert.match(source, /停止 Run/)
-  assert.match(source, /执行环境/)
-  assert.match(source, /开始执行计划/)
+  assert.match(source, /task-conversation-create/)
+  assert.match(source, /task-conversation-activate/)
+  assert.match(source, /registerProductSession/)
   assert.match(source, /优先失败场景/)
   assert.match(source, /技术详情/)
   assert.match(source, /未归入分析单元/)
@@ -106,6 +107,7 @@ test('PANGEA client registers the test workbench, analysis, and execution pages'
   assert.deepEqual(pages.map(page => page.id), ['workbench', 'analysis', 'execution'])
   assert.deepEqual(pages.map(page => page.title()), ['工作台', 'PANGEA 分析', '环境配置'])
   assert.deepEqual(pages.map(page => page.order), [0, 10, 20])
+  assert.equal(pages[2].available(), false)
 })
 
 test('workbench API lists runs and starts or stops through explicit actions', async () => {
