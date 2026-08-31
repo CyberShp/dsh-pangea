@@ -15,6 +15,14 @@ function replaceExactlyOnce(source, needle, replacement, label) {
   return source.slice(0, first) + replacement + source.slice(first + needle.length)
 }
 
+function replacePatternExactlyOnce(source, pattern, replacement, label) {
+  const matches = [...source.matchAll(pattern)]
+  if (matches.length !== 1) {
+    throw new Error(`dsh-pangea-companion build: expected 1 ${label} anchor, found ${matches.length}`)
+  }
+  return source.replace(pattern, replacement)
+}
+
 let source = await readFile(sourcePath, 'utf8')
 
 source = replaceExactlyOnce(
@@ -24,10 +32,10 @@ source = replaceExactlyOnce(
   'workbench test application',
 )
 
-source = replaceExactlyOnce(
+source = replacePatternExactlyOnce(
   source,
-  "        id: 'execution', title: () => '环境配置', icon, order: 20,\n        available: (_ctx, scope) => Boolean(scope?.cwd),",
-  "        id: 'execution', title: () => '环境配置', icon, order: 20,\n        available: () => false,",
+  /(id: 'execution', title: \(\) => '环境配置', icon, order: 20,\r?\n\s*)available: \(_ctx, scope\) => Boolean\(scope\?\.cwd\),/g,
+  '$1available: () => false,',
   'hidden execution page availability',
 )
 
