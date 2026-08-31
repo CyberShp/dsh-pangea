@@ -438,6 +438,38 @@ test('dispatch retries bind with the original child instead of spawning a duplic
   }
 })
 
+test('dispatch inherits the live request route instead of the session creation options', async () => {
+  const root = fixture()
+  try {
+    const harness = policyHarness()
+    const parent = fakeAgent(root)
+    parent.options = { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' }
+    parent.session.requestHeader = () => ({
+      config: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed', reasoningEffort: 'medium' },
+    })
+    const dataRoot = join(root, 'pangea-data')
+    const taskPath = join(dataRoot, 'runs', 'run-live-route', 'agent-tasks', 'planning.json')
+    mkdirSync(dirname(taskPath), { recursive: true })
+    writeFileSync(taskPath, JSON.stringify({ result_path: join(dataRoot, 'planning.json') }))
+    const currentAction = { ...action(taskPath, 'run-live-route:planning'), role: 'planning', stage: 'planning' }
+    await harness.post(fakeExec(parent, 'pangea_run_create', {}), {
+      run_id: 'run-live-route', data_root: dataRoot, actions: [currentAction],
+    })
+
+    const dispatch = fakeExec(parent, 'pangea_action_dispatch', { action_id: currentAction.action_id })
+    const started = await harness.tool('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+
+    assert.deepEqual(harness.starts[0].request.agentOptions, {
+      provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed', reasoningEffort: 'medium',
+    })
+    assert.equal(started.provider, 'minimax-1')
+    assert.equal(started.model, 'MiniMax-M2.7-highspeed')
+    assert.equal(started.route_class, 'inherited-live-session')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('validation failure can return to the same child and result writes stay scoped', async () => {
   const root = fixture()
   try {

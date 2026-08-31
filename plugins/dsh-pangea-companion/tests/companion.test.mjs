@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { apply, companionSnapshot, createRuntimeMonitor } from '../src/index.js'
+import { apply, companionSnapshot, createRuntimeMonitor, sessionFailure } from '../src/index.js'
 import { discoverPangeaDataRoot, summarizeRun } from '../src/reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet, resolveEvidenceFile } from '../src/source.js'
 
@@ -14,6 +14,12 @@ async function writeJson(filePath, value) {
 }
 
 function evidence(chunkId, location, observation) { return { chunk_id: chunkId, location, observation } }
+
+test('reads the structured terminal model failure from session history', () => {
+  assert.deepEqual(sessionFailure({ events: [{ event: {
+    type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'MISSING_CREDENTIAL', message: 'credential not configured' } } },
+  } }] }), { code: 'MISSING_CREDENTIAL', message: 'credential not configured' })
+})
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-companion-'))
@@ -172,6 +178,33 @@ test('reads the current lifecycle stage and action concurrency from v3 progress'
     assert.equal(summary.phase, 'ANALYZING')
     assert.deepEqual(summary.analysis, {
       total: 3, completed: 1, reworked: 0, running: 1, pending: 1, submitted: 1, max_parallel: 8,
+    })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('projects a failed Worker action as attention-required and terminal', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-attention-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runDirectory = path.join(dataRoot, 'runs', 'run-attention')
+  try {
+    await writeJson(path.join(runDirectory, 'progress.json'), {
+      schema_version: '3.0', run_id: 'run-attention', lifecycle_status: 'running', stage: 'planning',
+      analysis_units: [], completed_analysis_units: [], completed_closure_units: [], quality_status: null,
+      actions: {
+        planning: {
+          action_id: 'run-attention:planning', role: 'planning', status: 'failed',
+          error: { code: 'MISSING_CREDENTIAL', message: 'credential not configured' },
+        },
+      },
+      errors: [],
+    })
+    const summary = await summarizeRun(dataRoot, 'run-attention')
+    assert.equal(summary.phase, 'INCOMPLETE')
+    assert.equal(summary.terminal, true)
+    assert.equal(summary.attention_required, true)
+    assert.equal(summary.lifecycle_status, 'attention_required')
+    assert.deepEqual(summary.errors[0], {
+      action_id: 'run-attention:planning', role: 'planning', code: 'MISSING_CREDENTIAL', message: 'credential not configured',
     })
   } finally { await rm(root, { recursive: true, force: true }) }
 })

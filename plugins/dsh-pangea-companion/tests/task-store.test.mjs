@@ -13,12 +13,18 @@ test('persists a Task before any DSH session or Run exists', async () => {
     const store = createTaskStore({ storePath, now: () => 1000, idFactory: () => 'task-001' })
     const task = await store.create({
       workspace: '/workspace', dataRoot: '/workspace/pangea-data',
-      input: { repository: 'repo-one', target: '认证恢复', source_scope: ['src/auth.c'] },
+      input: {
+        repository: 'repo-one', target: '认证恢复', source_scope: ['src/auth.c'],
+        model_route: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
+      },
     })
     assert.equal(task.task_id, 'task-001')
     assert.equal(task.status, 'preparing')
     assert.equal(task.run_id, null)
     assert.deepEqual(task.conversations, [])
+    assert.deepEqual(task.model_route, {
+      provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed', route_class: 'configured-internal',
+    })
     const stored = JSON.parse(await readFile(storePath, 'utf8'))
     assert.equal(stored.tasks['task-001'].target, '认证恢复')
   } finally { await rm(root, { recursive: true, force: true }) }
@@ -51,5 +57,20 @@ test('keeps launch failures visible for retry', async () => {
     const failed = await store.markLaunchFailed('task-003', '模型服务不可用')
     assert.equal(failed.status, 'failed')
     assert.equal(failed.launch_error, '模型服务不可用')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('marks an attention-required Run as incomplete instead of running', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-attention-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-004' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: 'Worker 失败' } })
+    await store.addConversation('task-004', { sessionId: 'session-attention', title: '分析会话', kind: 'analysis' })
+    const task = await store.bindRunBySession('session-attention', {
+      run_id: 'run-attention', lifecycle_status: 'attention_required', phase: 'PLANNING',
+    })
+    assert.equal(task.status, 'needs_attention')
+    assert.equal(task.launch_error_code, 'RUN_ATTENTION_REQUIRED')
+    assert.match(task.launch_error, /未正常完成/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })

@@ -421,6 +421,19 @@ function workflowStart(exec) {
   return exec.name === 'pangea_run_create'
 }
 
+export function effectiveChildAgentOptions(agent) {
+  const base = agent?.options && typeof agent.options === 'object' ? agent.options : {}
+  const live = agent?.session?.requestHeader?.()?.config
+  const options = { ...base }
+  if (typeof live?.provider === 'string' && live.provider && typeof live?.model === 'string' && live.model) {
+    options.provider = live.provider
+    options.model = live.model
+    if (typeof live.reasoningEffort === 'string' && live.reasoningEffort) options.reasoningEffort = live.reasoningEffort
+    else delete options.reasoningEffort
+  }
+  return options
+}
+
 export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
   const states = new Map()
   const childTasks = new Map()
@@ -438,8 +451,9 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
         type: 'object', additionalProperties: false,
         properties: {
           kind: { type: 'string' }, subagent_id: { type: 'string' }, action_id: { type: 'string' }, bound: { type: 'boolean' },
+          provider: { type: 'string' }, model: { type: 'string' }, route_class: { type: 'string' },
         },
-        required: ['kind', 'subagent_id', 'action_id', 'bound'],
+        required: ['kind', 'subagent_id', 'action_id', 'bound', 'provider', 'model', 'route_class'],
       },
       render: (_args, value) => [{ type: 'text', text: `已派发并绑定 ${value.action_id}，subagent_id=${value.subagent_id}` }],
     },
@@ -450,6 +464,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
       const state = stateFor(exec.agent)
       const action = state?.pendingActions.get(args.action_id)
       if (!action) throw new Error(`PANGEA action 当前不可派发：${args.action_id}`)
+      const route = effectiveChildAgentOptions(exec.agent)
       const previous = state.dispatchAttempts.get(action.action_id)
       if (previous) {
         await adapter(workspaceCwd(exec), 'bind', {
@@ -461,6 +476,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
         return {
           kind: 'continuable', subagent_id: previous.childId,
           action_id: action.action_id, bound: true,
+          provider: route.provider, model: route.model, route_class: 'inherited-live-session',
         }
       }
       if (action.action === 'continue_agent') {
@@ -486,6 +502,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
         return {
           kind: 'continuable', subagent_id: action.task_id,
           action_id: action.action_id, bound: true,
+          provider: route.provider, model: route.model, route_class: 'inherited-live-session',
         }
       }
       const started = await ctx.subagents.startContinuable({
@@ -496,7 +513,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
           prompt: [{ type: 'text', text: action.task_path }],
           parent: exec.agent,
           persona: roleInstructions(exec, action),
-          agentOptions: { ...exec.agent.options },
+          agentOptions: route,
         },
         signal: exec.signal,
       })
@@ -507,7 +524,10 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
         action_id: action.action_id,
         task_id: started.childId,
       })
-      return { kind: 'continuable', subagent_id: started.childId, action_id: action.action_id, bound: true }
+      return {
+        kind: 'continuable', subagent_id: started.childId, action_id: action.action_id, bound: true,
+        provider: route.provider, model: route.model, route_class: 'inherited-live-session',
+      }
     },
   })
 

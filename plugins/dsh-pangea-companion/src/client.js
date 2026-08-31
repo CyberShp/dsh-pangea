@@ -18,6 +18,22 @@ window.__ModuleLoader__.load({
     const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
     const ACTIVE_POLL_INTERVAL_MS = 10_000
     const IDLE_POLL_INTERVAL_MS = 45_000
+    const WORKBENCH_ACTIVE_POLL_INTERVAL_MS = 5_000
+    const MODEL_SELECTION_STORAGE_KEY = 'pangea.internal-model-route.v1'
+
+    function modelSelectionKey(value) {
+      return value?.provider && value?.model
+        ? JSON.stringify([value.provider, value.model, value.reasoning_effort ?? ''])
+        : ''
+    }
+
+    function modelRouteFromKey(value) {
+      try {
+        const [provider, model, reasoningEffort] = JSON.parse(value)
+        if (typeof provider !== 'string' || !provider || typeof model !== 'string' || !model) return null
+        return { provider, model, ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}) }
+      } catch { return null }
+    }
 
     function snapshotFingerprint(value) {
       try { return JSON.stringify(value) } catch { return null }
@@ -582,7 +598,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', focus: '', asset_ids: '', test_case_examples: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', focus: '', asset_ids: '', test_case_examples: '', model_key: '' })
       const [creatingRun, setCreatingRun] = React.useState(false)
       const [pendingStopRun, setPendingStopRun] = React.useState('')
       const [flowQuery, setFlowQuery] = React.useState('')
@@ -640,13 +656,13 @@ window.__ModuleLoader__.load({
         }
       }, [cwd, selectedRun, scope?.sessionId])
 
-      const loadWorkbench = React.useCallback(async () => {
+      const loadWorkbench = React.useCallback(async ({ background = false } = {}) => {
         if (!cwd || pageMode === 'execution') return
         const sequence = ++workbenchRequestRef.current.sequence
         workbenchRequestRef.current.controller?.abort()
         const controller = new AbortController()
         workbenchRequestRef.current.controller = controller
-        setWorkbenchLoading(true)
+        if (!background) setWorkbenchLoading(true)
         try {
           const body = await requestWorkbench({
             cwd,
@@ -665,7 +681,7 @@ window.__ModuleLoader__.load({
             setWorkbenchError(reason instanceof Error ? reason.message : String(reason))
           }
         } finally {
-          if (sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
+          if (!background && sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
         }
       }, [cwd, pageMode, runCursor, scope?.sessionId, selectedRun, selectedTaskId, snapshot?.current?.run_id])
 
@@ -747,6 +763,19 @@ window.__ModuleLoader__.load({
         if (repositories.length > 0) setCreateForm(value => value.repository ? value : { ...value, repository: repositories[0] })
       }, [workbench?.capabilities])
       React.useEffect(() => {
+        const options = (workbench?.model_routing?.models ?? []).filter(item => item.credential_configured)
+        if (options.length === 0) return
+        setCreateForm(value => {
+          if (options.some(item => modelSelectionKey(item) === value.model_key)) return value
+          let remembered = ''
+          try { remembered = window.localStorage?.getItem(MODEL_SELECTION_STORAGE_KEY) ?? '' } catch { /* storage unavailable */ }
+          const selected = options.some(item => modelSelectionKey(item) === remembered)
+            ? remembered
+            : options.length === 1 ? modelSelectionKey(options[0]) : ''
+          return selected ? { ...value, model_key: selected } : value
+        })
+      }, [workbench?.model_routing?.models])
+      React.useEffect(() => {
         if (!visible || pageMode === 'execution') {
           requestRef.current.controller?.abort()
           return undefined
@@ -804,6 +833,14 @@ window.__ModuleLoader__.load({
       const current = snapshot?.current
       const taskItems = workbench?.tasks?.items ?? []
       const selectedTask = taskItems.find(item => item.task_id === selectedTaskId)
+      React.useEffect(() => {
+        if (!visible || pageMode === 'execution' || !taskItems.some(task => ['preparing', 'running'].includes(task.status))) return undefined
+        let stopped = false
+        const timer = window.setInterval(() => {
+          if (!stopped && document.visibilityState !== 'hidden' && document.hasFocus()) void loadWorkbench({ background: true })
+        }, WORKBENCH_ACTIVE_POLL_INTERVAL_MS)
+        return () => { stopped = true; window.clearInterval(timer) }
+      }, [loadWorkbench, pageMode, taskItems.some(task => ['preparing', 'running'].includes(task.status)), visible])
       const monitor = snapshot?.monitor
       const monitoredSession = monitor?.session
       const monitoredRun = monitor?.run
@@ -1061,6 +1098,7 @@ window.__ModuleLoader__.load({
                 focus: multilineValues(createForm.focus),
                 asset_ids: multilineValues(createForm.asset_ids),
                 test_case_examples: multilineValues(createForm.test_case_examples),
+                model_route: modelRouteFromKey(createForm.model_key),
               },
             },
           })
@@ -1471,8 +1509,10 @@ window.__ModuleLoader__.load({
 
       function renderCreate() {
         const repositories = workbench?.capabilities?.repositories ?? []
+        const modelOptions = workbench?.model_routing?.models ?? []
+        const usableModels = modelOptions.filter(item => item.credential_configured)
         const compatible = workbench?.compatibility?.compatible === true
-        const canSubmit = compatible && createForm.repository && createForm.target.trim() && !creatingRun
+        const canSubmit = compatible && createForm.repository && createForm.target.trim() && createForm.model_key && !creatingRun
         const formField = (label, key, placeholder) => h('label', null,
           h('div', { style: styles.label }, label),
           h('input', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm[key], placeholder, onChange: event => setCreateForm(value => ({ ...value, [key]: event.target.value })) }))
@@ -1487,6 +1527,14 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.formGrid },
               h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
                 h('option', { value: '' }, repositories.length ? '选择仓库' : '没有可用仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository)))),
+              h('label', null, h('div', { style: styles.label }, '内部模型'), h('select', {
+                style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.model_key,
+                onChange: event => {
+                  const modelKey = event.target.value
+                  setCreateForm(value => ({ ...value, model_key: modelKey }))
+                  try { if (modelKey) window.localStorage?.setItem(MODEL_SELECTION_STORAGE_KEY, modelKey) } catch { /* storage unavailable */ }
+                },
+              }, h('option', { value: '' }, usableModels.length ? '选择内部模型' : '没有可用的内部模型'), usableModels.map(item => h('option', { key: modelSelectionKey(item), value: modelSelectionKey(item) }, `${item.provider_name} · ${item.model_name}`)))),
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               formArea('源码范围（可选）', 'source_scope', '可留空，由 Agent 自动识别；也可每行填写一个源码路径'),
               formArea('分析重点', 'focus', '错误路径\n恢复行为\n外部可观测结果'),
@@ -1734,14 +1782,17 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.row },
             h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, selectedTask.task_id)),
             h('span', { style: { ...styles.homeStatus, color: taskStatusColor(selectedTask.status) } }, taskStatusLabel(selectedTask.status))),
-          h('div', { style: { ...styles.text, marginTop: 14 } }, selectedTask.status === 'failed'
+          h('div', { style: { ...styles.text, marginTop: 14 } }, ['failed', 'needs_attention'].includes(selectedTask.status)
             ? selectedTask.launch_error ?? '分析启动失败。'
             : '任务已经保存，正在准备分析会话和 PANGEA Run。'),
           selectedTask.status === 'failed' ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在重试…' : '重试启动') : null))
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
-        const nextAction = health?.trusted === false
+        const runNeedsAttention = current.attention_required || selectedTask.status === 'needs_attention'
+        const nextAction = runNeedsAttention
+          ? { label: '分析需要处理', hint: '当前 Run 未正常完成，请先查看下方错误，再决定是否重新启动。', target: 'workflow' }
+          : health?.trusted === false
           ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
           : !current.terminal
             ? { label: '等待分析完成', hint: `当前 ${completed}/${total} 个分析单元完成，可查看运行细节。`, target: 'workflow' }
@@ -1790,12 +1841,16 @@ window.__ModuleLoader__.load({
               chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')),
               chip(`证据 · ${evidence.length}`, () => jump('evidence')),
               chip(`复核问题 · ${details.review_issues?.length ?? 0}`, () => jump('review')))),
-          !current.terminal ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
+          !current.terminal && !runNeedsAttention ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '运行控制'), h('div', { style: styles.itemMeta }, '停止后保留已有产物和运行记录。')),
               pendingStopRun === current.run_id
                 ? h('div', { style: styles.chips }, chip('取消', () => setPendingStopRun('')), h('button', { type: 'button', style: { ...styles.button, color: 'var(--dsw-alias-state-error-primary, #e66767)' }, onClick: () => { void stopCurrentRun() } }, '确认停止'))
                 : h('button', { type: 'button', style: styles.button, onClick: () => setPendingStopRun(current.run_id) }, '停止 Run'))) : null,
-          current.errors?.length ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), h('div', { style: { ...styles.card, ...styles.error } }, JSON.stringify(current.errors, null, 2))) : null,
+          current.errors?.length || (runNeedsAttention && selectedTask.launch_error)
+            ? h(React.Fragment, null,
+                h('div', { style: styles.sectionTitle }, '当前错误'),
+                h('div', { style: { ...styles.card, ...styles.error } }, current.errors?.length ? JSON.stringify(current.errors, null, 2) : selectedTask.launch_error))
+            : null,
           runItems.length ? h('details', { style: styles.technical },
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `历史 Run · ${workbench?.runs?.total ?? runItems.length}`),
             h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, runItems.map(run => {

@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createTaskConversation, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
 async function workspace() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-workbench-'))
@@ -14,6 +14,53 @@ async function workspace() {
 }
 
 function ok(value) { return { result: { ok: true, value } } }
+
+function internalModelApi(events = []) {
+  return {
+    llm: {
+      async providers() { return ok({ providers: [
+        { provider: 'minimax-1', displayName: 'MiniMax', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'minimax-1'], active: true, declared: true },
+        { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [], active: true, declared: true },
+      ] }) },
+      async models() { return ok({ groups: [
+        { id: 'minimax-1', name: 'MiniMax', models: [{ id: 'MiniMax-M2.7-highspeed', name: 'M2.7 highspeed' }] },
+        { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'V4 Flash' }] },
+      ], failures: [] }) },
+    },
+    settings: { async describe() { return ok({ namespaces: [{ ns: 'llm-pi-ai', value: { providers: { 'minimax-1': { apiKeyEnv: 'MINIMAX_1_API_KEY' } } } }] }) } },
+    credentials: { async describe() { return ok({ credentials: { MINIMAX_1_API_KEY: { configured: true, writable: true } } }) } },
+    workspace: { async list() { throw new Error('workspace.list not configured') } },
+    sessions: {
+      async selectModel(value) { events.push(['select-model', value.payload]); return ok({ selected: value.payload }) },
+    },
+  }
+}
+
+test('offers only configured internal provider routes', async () => {
+  const catalog = await internalModelOptions(internalModelApi())
+  assert.deepEqual(catalog.models.map(item => `${item.provider}/${item.model}`), ['minimax-1/MiniMax-M2.7-highspeed'])
+  assert.equal(catalog.models[0].credential_configured, true)
+})
+
+test('fails closed before creating a session when the internal credential is missing', async () => {
+  const root = await workspace()
+  let created = false
+  try {
+    const api = internalModelApi()
+    api.credentials.describe = async () => ok({ credentials: { MINIMAX_1_API_KEY: { configured: false, writable: true } } })
+    api.workspace.list = async () => ok({ items: [{ workspaceId: 'workspace-1', path: root }] })
+    api.sessions.create = async () => { created = true; return ok({ sessionId: 'unexpected' }) }
+    await assert.rejects(
+      launchAnalysisSession(api, {
+        cwd: root,
+        input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] },
+        model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
+      }, async () => ({ repositories: ['repo-one'] })),
+      /尚未配置凭证/,
+    )
+    assert.equal(created, false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('normalizes Run input and rejects unregistered repositories', () => {
   const input = normalizeRunInput({
@@ -87,8 +134,10 @@ test('launches a dedicated DSH session that owns the complete Run lifecycle', as
   try {
     const events = []
     const api = {
+      ...internalModelApi(events),
       workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
       sessions: {
+        ...internalModelApi(events).sessions,
         async create(value) { assert.equal(value.payload.workspaceId, 'workspace-1'); events.push('create'); return ok({ sessionId: 'session-1' }) },
         async rename(value) { assert.match(value.payload.title, /session/); return ok({}) },
         async prompt(value) { events.push(['prompt', value.payload]); return ok({}) },
@@ -97,16 +146,19 @@ test('launches a dedicated DSH session that owns the complete Run lifecycle', as
     const result = await launchAnalysisSession(api, {
       cwd: root,
       input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'], asset_ids: ['asset-1'] },
+      model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
     }, async () => ({ repositories: ['repo-one'] }), async session => {
       events.push(['persist', session])
     })
     assert.equal(result.session_id, 'session-1')
-    assert.equal(events[1][0], 'persist')
-    assert.equal(events[1][1].session_id, 'session-1')
-    assert.equal(events[2][0], 'prompt')
-    assert.match(events[2][1].content[0].text, /pangea_run_create/)
-    assert.match(events[2][1].content[0].text, /"asset_ids": \[/)
-    assert.match(events[2][1].content[0].text, /完整 action 流程/)
+    assert.equal(events[1][0], 'select-model')
+    assert.deepEqual(events[1][1], { sessionId: 'session-1', provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' })
+    assert.equal(events[2][0], 'persist')
+    assert.equal(events[2][1].session_id, 'session-1')
+    assert.equal(events[3][0], 'prompt')
+    assert.match(events[3][1].content[0].text, /pangea_run_create/)
+    assert.match(events[3][1].content[0].text, /"asset_ids": \[/)
+    assert.match(events[3][1].content[0].text, /完整 action 流程/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

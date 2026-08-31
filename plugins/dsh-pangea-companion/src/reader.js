@@ -402,7 +402,18 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false, ch
   const finalStateRecord = await readFinalState(runDirectory)
   const finalState = finalStateRecord.value
   const lifecycle = typeof progress?.lifecycle_status === 'string' ? progress.lifecycle_status : null
-  const phase = lifecycle === 'stopped' ? 'STOPPED'
+  const actions = Object.values(progress?.actions ?? {})
+  const failedActions = actions.filter(action => {
+    const status = String(action?.status ?? '').toLowerCase()
+    return ['failed', 'attention_required'].includes(status)
+      || (action?.error && typeof action.error === 'object' && !['accepted', 'settled'].includes(status))
+  })
+  const attentionRequired = progress?.attention_required === true
+    || String(progress?.status ?? '').toLowerCase() === 'attention_required'
+    || String(lifecycle ?? '').toLowerCase() === 'attention_required'
+    || failedActions.length > 0
+  const phase = attentionRequired ? 'INCOMPLETE'
+    : lifecycle === 'stopped' ? 'STOPPED'
     : lifecycle === 'failed' ? 'FAILED'
       : typeof progress?.stage === 'string' ? (STAGE_PHASES[progress.stage] ?? progress.stage.toUpperCase())
         : typeof progress?.phase === 'string' ? progress.phase
@@ -413,14 +424,22 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false, ch
   const completedReworkUnits = Array.isArray(progress?.completed_closure_units)
     ? progress.completed_closure_units
     : Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : []
-  const analysisActions = Object.values(progress?.actions ?? {}).filter(
+  const analysisActions = actions.filter(
     action => action?.role === 'analysis',
   )
   const legacySessions = Object.values(progress?.agent_sessions ?? {}).filter(
     session => session?.role === 'analysis',
   )
   const review = includeDetails ? await readReview(runDirectory, finalState) : null
-  const errors = Array.isArray(progress?.errors) ? progress.errors : stateArray(finalState, 'errors')
+  const recordedErrors = Array.isArray(progress?.errors) ? progress.errors : stateArray(finalState, 'errors')
+  const errors = recordedErrors.length > 0
+    ? recordedErrors
+    : failedActions.map(action => ({
+        action_id: action.action_id ?? null,
+        role: action.role ?? null,
+        code: action.error?.code ?? 'WORKER_FAILED',
+        message: action.error?.message ?? String(action.error ?? 'Worker 未正常完成'),
+      }))
   const errorHistory = Array.isArray(progress?.error_history) ? progress.error_history : []
   const reportMd = path.join(runDirectory, 'report.md')
   const reportHtml = path.join(runDirectory, 'report.html')
@@ -453,6 +472,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false, ch
     run_id: runId,
     phase,
     terminal: TERMINAL_PHASES.has(phase),
+    lifecycle_status: attentionRequired ? 'attention_required' : lifecycle,
+    attention_required: attentionRequired,
     quality_status: typeof progress?.quality_status === 'string' ? progress.quality_status : qualityFromFinal,
     analysis: {
       total: analysisUnits.length,

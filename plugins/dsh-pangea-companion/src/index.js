@@ -6,7 +6,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runAdapter, workspaceRoot } from './pangea-api.js'
-import { createTaskConversation, dataRootFor, launchAnalysisSession, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -18,6 +18,15 @@ const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
 const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
 const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
+
+function rpc(payload) {
+  return { rpcId: `pangea-companion-${Date.now()}-${Math.random()}`, payload }
+}
+
+function apiValue(response) {
+  if (!response?.result?.ok) throw new Error(response?.result?.error?.message ?? 'DSH API request failed')
+  return response.result.value
+}
 
 const STATUS_PARAMETERS = {
   type: 'object',
@@ -216,7 +225,57 @@ function requireWorkspaceTask(task, cwd, taskId) {
   return task
 }
 
-async function workbenchRouteHandler(req, res, api, tasks) {
+function sessionFailure(history) {
+  const entries = Array.isArray(history?.events) ? history.events : []
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const event = entries[index]?.event ?? entries[index]
+    if (event?.type !== 'turn/end' && event?.name !== 'turn/end') continue
+    const data = event.data ?? event.payload ?? {}
+    if (data?.reason?.kind !== 'error') return null
+    const error = data.reason.error ?? data.error
+    return {
+      code: typeof error?.code === 'string' ? error.code : 'MODEL_REQUEST_FAILED',
+      message: typeof error?.message === 'string' ? error.message : '模型请求失败，未创建 PANGEA Run',
+    }
+  }
+  return null
+}
+
+async function resolveTaskModel(api, requested) {
+  if (requested?.provider && requested?.model) return requireInternalModel(api, requested)
+  const catalog = await internalModelOptions(api)
+  const usable = catalog.models.filter(item => item.credential_configured)
+  if (usable.length === 1) return requireInternalModel(api, usable[0])
+  if (usable.length === 0) throw new Error('没有可用的内部模型，请先在“模型”设置中完成配置')
+  throw new Error('请选择本次 PANGEA 任务使用的内部模型')
+}
+
+async function reconcileTaskLaunches(api, tasks, taskItems, now = Date.now()) {
+  const timeoutMs = 5 * 60 * 1000
+  for (const task of taskItems) {
+    if (task.status !== 'preparing' || task.run_id) continue
+    const conversation = [...task.conversations].reverse().find(item => item.kind === 'analysis')
+    if (!conversation) continue
+    try {
+      const history = apiValue(await api.sessions.history(rpc({ sessionId: conversation.session_id, maxMessages: 12 })))
+      const failure = sessionFailure(history)
+      if (failure) {
+        await tasks.markLaunchFailed(task.task_id, failure.message, failure.code)
+        continue
+      }
+      if (task.launch_started_at && now - task.launch_started_at >= timeoutMs) {
+        try { apiValue(await api.sessions.cancel(rpc({ sessionId: conversation.session_id }))) } catch { /* already stopped */ }
+        await tasks.markLaunchFailed(task.task_id, '启动超时：会话未在 5 分钟内创建 PANGEA Run', 'LAUNCH_TIMEOUT')
+      }
+    } catch (error) {
+      if (task.launch_started_at && now - task.launch_started_at >= timeoutMs) {
+        await tasks.markLaunchFailed(task.task_id, `无法恢复启动会话：${error instanceof Error ? error.message : String(error)}`, 'SESSION_RECONCILE_FAILED')
+      }
+    }
+  }
+}
+
+async function workbenchRouteHandler(req, res, api, tasks, launchLocks) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
@@ -234,12 +293,21 @@ async function workbenchRouteHandler(req, res, api, tasks) {
         limit: url.searchParams.get('limit') ?? 20,
       })
       await tasks.reconcileRuns(snapshot.runs?.items)
-      const taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+      let taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+      await reconcileTaskLaunches(api, tasks, taskItems)
+      taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+      let modelRouting
+      try {
+        modelRouting = { status: 'ok', ...await internalModelOptions(api) }
+      } catch (error) {
+        modelRouting = { status: 'error', models: [], failures: [], error: error instanceof Error ? error.message : String(error) }
+      }
       const selectedCandidate = taskId ? await tasks.get(taskId) : sessionId ? await tasks.getBySession(sessionId) : null
       const selectedTask = selectedCandidate?.workspace === workspaceRoot(cwd) ? selectedCandidate : null
       return json(res, 200, {
         ...snapshot,
         tasks: { items: taskItems, total: taskItems.length },
+        model_routing: modelRouting,
         selected_task_id: selectedTask?.task_id ?? null,
       })
     }
@@ -248,21 +316,27 @@ async function workbenchRouteHandler(req, res, api, tasks) {
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)
+      const selectedModel = await resolveTaskModel(api, body.input?.model_route)
       const task = await tasks.create({
         workspace: root,
         dataRoot: dataRootFor(root, actionDataRoot),
-        input: body.input,
+        input: { ...body.input, model_route: selectedModel },
       })
       return json(res, 200, { status: 'ok', task })
     }
     if (body.action === 'task-start') {
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
       if (task.run_id) throw new Error('task already has a Run')
+      if (launchLocks.has(task.task_id)) throw new Error('task launch is already in progress')
+      launchLocks.add(task.task_id)
       try {
+        const selectedModel = await resolveTaskModel(api, body.model_route ?? task.model_route)
+        await tasks.prepareLaunch(task.task_id, selectedModel)
         const launched = await launchAnalysisSession(api, {
           cwd,
           dataRoot: actionDataRoot ?? task.data_root,
           input: task,
+          model: selectedModel,
         }, undefined, session => tasks.addConversation(task.task_id, {
           sessionId: session.session_id,
           title: `${task.title} · 分析`,
@@ -272,6 +346,8 @@ async function workbenchRouteHandler(req, res, api, tasks) {
       } catch (error) {
         await tasks.markLaunchFailed(task.task_id, error instanceof Error ? error.message : String(error))
         throw error
+      } finally {
+        launchLocks.delete(task.task_id)
       }
     }
     if (body.action === 'task-conversation-create') {
@@ -324,6 +400,7 @@ export function apply(ctx) {
   const monitor = createRuntimeMonitor()
   const disposeMonitor = monitor.start(ctx)
   const tasks = createTaskStore()
+  const launchLocks = new Set()
   const environments = new EnvironmentStore()
   const ssh = new PangeaSshRuntime(environments)
 
@@ -331,7 +408,12 @@ export function apply(ctx) {
     name: 'pangea_run_create',
     description: '创建新的 PANGEA 模块分析 Run。首次准备仅可在 pangea-data/repositories 下列目录、按文件名搜索或 grep 符号，用于确定仓库和最小 source_scope，随后直接调用本工具；不得在创建 Run 前 Read、分段读取或通读业务源码。不得先列举或读取 pangea-data/runs、历史契约和报告。不要读取 PANGEA CLI 源码、graph、schema，也不要手写 pending contract 来学习用法。target 必须逐字复制用户确认的分析对象，不得增删或改写。返回的 actions 必须逐条派发。',
     parameters: RUN_CREATE_PARAMETERS,
-    execute: (args, exec) => createRun(workspaceCwd(exec), args),
+    async execute(args, exec) {
+      const run = await createRun(workspaceCwd(exec), args)
+      await monitor.bindRun(String(exec.agent.id), run)
+      await tasks.bindRunBySession(String(exec.agent.id), run)
+      return run
+    },
     output: toolOutput(),
   }), ctx.tools.register({
     name: 'pangea_action_bind',
@@ -423,7 +505,7 @@ export function apply(ctx) {
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
-  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks) })
+  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks) })
   const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
   ctx.effect?.(() => async () => {
     disposeRepositoryRoute()
@@ -448,3 +530,4 @@ export { PangeaSshRuntime } from './execution/ssh.js'
 export { createRun, runAdapter, runPangea, workspaceRoot } from './pangea-api.js'
 export { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'
+export { sessionFailure }

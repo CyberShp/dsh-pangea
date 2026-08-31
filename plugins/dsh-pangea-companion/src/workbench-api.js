@@ -3,6 +3,7 @@ import path from 'node:path'
 import { runPangea, workspaceRoot } from './pangea-api.js'
 
 const DEFAULT_PAGE_SIZE = 20
+const INTERNAL_PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 
 function rpc(payload) {
   return { rpcId: `pangea-workbench-${Date.now()}-${Math.random()}`, payload }
@@ -13,6 +14,82 @@ function apiValue(response) {
     throw new Error(response?.result?.error?.message ?? 'DSH API request failed')
   }
   return response.result.value
+}
+
+function valueAtPath(value, path) {
+  let current = value
+  for (const segment of Array.isArray(path) ? path : []) {
+    if (!current || typeof current !== 'object' || !Object.hasOwn(current, segment)) return undefined
+    current = current[segment]
+  }
+  return current
+}
+
+function modelRoute(value) {
+  const provider = typeof value?.provider === 'string' ? value.provider.trim() : ''
+  const model = typeof value?.model === 'string' ? value.model.trim() : ''
+  const reasoningEffort = typeof value?.reasoning_effort === 'string' ? value.reasoning_effort.trim() : ''
+  if (!provider || !model) return null
+  return { provider, model, ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}) }
+}
+
+export async function internalModelOptions(api) {
+  const [providerValue, modelValue, settingsValue] = await Promise.all([
+    apiValue(await api.llm.providers(rpc({}))),
+    apiValue(await api.llm.models(rpc({}))),
+    apiValue(await api.settings.describe(rpc({}))),
+  ])
+  const namespaces = new Map((settingsValue.namespaces ?? []).map(item => [item.ns, item]))
+  const providers = (providerValue.providers ?? []).filter(item => (
+    item.settingsNs === INTERNAL_PROVIDER_SETTINGS_NS
+    && item.declared === true
+    && item.active === true
+  ))
+  const providerRows = providers.map(entry => {
+    const namespace = namespaces.get(entry.settingsNs)
+    const profile = valueAtPath(namespace?.value, entry.settingsPath)
+    const apiKeyEnv = typeof profile?.apiKeyEnv === 'string' && profile.apiKeyEnv.trim()
+      ? profile.apiKeyEnv.trim()
+      : null
+    return { entry, apiKeyEnv }
+  })
+  const refs = [...new Set(providerRows.map(item => item.apiKeyEnv).filter(Boolean))]
+  const credentials = refs.length > 0
+    ? apiValue(await api.credentials.describe(rpc({ refs }))).credentials ?? {}
+    : {}
+  const groups = new Map((modelValue.groups ?? []).map(group => [group.id, group]))
+  const options = []
+  for (const { entry, apiKeyEnv } of providerRows) {
+    const credentialConfigured = apiKeyEnv === null || credentials[apiKeyEnv]?.configured === true
+    for (const model of groups.get(entry.provider)?.models ?? []) {
+      options.push({
+        provider: entry.provider,
+        provider_name: entry.displayName,
+        model: model.id,
+        model_name: model.name,
+        reasoning: model.reasoning ?? null,
+        credential_configured: credentialConfigured,
+        route_class: 'configured-internal',
+      })
+    }
+  }
+  return { models: options, failures: modelValue.failures ?? [] }
+}
+
+export async function requireInternalModel(api, value) {
+  const selected = modelRoute(value)
+  if (!selected) throw new Error('请选择一个已配置的内部模型')
+  const catalog = await internalModelOptions(api)
+  const option = catalog.models.find(item => item.provider === selected.provider && item.model === selected.model)
+  if (!option) throw new Error(`所选模型不属于当前已配置的内部模型：${selected.provider}/${selected.model}`)
+  if (!option.credential_configured) throw new Error(`所选内部模型尚未配置凭证：${selected.provider}/${selected.model}`)
+  if (selected.reasoning_effort) {
+    const efforts = option.reasoning?.efforts ?? []
+    if (!efforts.some(item => item.id === selected.reasoning_effort)) {
+      throw new Error(`所选模型不支持推理级别：${selected.reasoning_effort}`)
+    }
+  }
+  return { ...selected, route_class: option.route_class }
 }
 
 function dataRootFor(root, explicit) {
@@ -128,7 +205,7 @@ async function createDshSession(api, root, title) {
   return sessionId
 }
 
-export async function launchAnalysisSession(api, { cwd, dataRoot, input }, runner = runPangea, onSession = async () => {}) {
+export async function launchAnalysisSession(api, { cwd, dataRoot, input, model }, runner = runPangea, onSession = async () => {}) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
   const capabilities = await runner({
@@ -136,8 +213,15 @@ export async function launchAnalysisSession(api, { cwd, dataRoot, input }, runne
     args: ['system', 'capabilities', '--data-root', resolvedDataRoot],
   })
   const request = normalizeAnalysisInput(input, capabilities, true)
+  const selectedModel = await requireInternalModel(api, model)
   const sessionId = await createDshSession(api, root, `PANGEA 分析 · ${request.target}`)
-  await onSession({ session_id: sessionId, input: request, data_root: resolvedDataRoot })
+  apiValue(await api.sessions.selectModel(rpc({
+    sessionId,
+    provider: selectedModel.provider,
+    model: selectedModel.model,
+    ...(selectedModel.reasoning_effort ? { reasoningEffort: selectedModel.reasoning_effort } : {}),
+  })))
+  await onSession({ session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel })
   const scopeInstructions = request.source_scope.length > 0
     ? ['用户已经指定 source_scope，逐字使用下面输入中的路径，不得自行扩大范围。']
     : [
@@ -161,7 +245,7 @@ export async function launchAnalysisSession(api, { cwd, dataRoot, input }, runne
     mode: 'queue',
     content: [{ type: 'text', text: prompt }],
   })))
-  return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot }
+  return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel }
 }
 
 export async function createTaskConversation(api, { cwd, title }) {
