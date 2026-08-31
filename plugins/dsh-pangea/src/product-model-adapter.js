@@ -11,10 +11,19 @@
   const QUERY_EVENT = 'pangea:query-model-onboarding'
   const SETTINGS_ATTR = 'data-pangea-native-model-settings'
   const ONBOARDING_ATTR = 'data-pangea-model-onboarding'
+  const CHROME_STYLE_ID = 'dsh-pangea-product-chrome-policy'
 
   let modelState = { known: false, required: false, customAvailable: false }
   let dismissed = false
   let queriedShell = null
+
+  function installProductChromePolicy() {
+    if (document.getElementById(CHROME_STYLE_ID)) return
+    const style = document.createElement('style')
+    style.id = CHROME_STYLE_ID
+    style.textContent = '[data-pangea-system-state]{display:none!important}'
+    document.head.appendChild(style)
+  }
 
   function gearIcon() {
     const ns = 'http://www.w3.org/2000/svg'
@@ -131,6 +140,7 @@
   }
 
   function reconcile() {
+    installProductChromePolicy()
     ensureSettingsButton()
     queryForVisibleShell()
     syncOnboarding()
