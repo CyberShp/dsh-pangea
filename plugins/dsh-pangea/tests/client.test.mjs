@@ -97,12 +97,12 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
   const calls = []
   const opened = []
   let ready = false
-  let productSession
+  const productSessions = []
   const result = await exported.bootstrapProductWorkspace({
     workspaces: {
       async create(input) {
         calls.push(['create', input])
-        return { workspaceId: 'workspace-pangea' }
+        return { workspaceId: 'workspace-pangea', sessionIds: ['session-restored'] }
       },
       async connectWorkspace(workspaceId) {
         calls.push(['connect', workspaceId])
@@ -113,7 +113,7 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
   }, {
     async productWorkspace() { return 'C:\\Users\\tester\\AppData\\Roaming\\pangea-desktop\\launch-root' },
     async productWorkspaceReady() { ready = true },
-  }, undefined, sessionId => { productSession = sessionId })
+  }, undefined, sessionId => { productSessions.push(sessionId) })
 
   assert.equal(result, true)
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
@@ -121,7 +121,7 @@ test('registers and opens the Desktop-owned PANGEA workspace on first launch', a
     ['connect', 'workspace-pangea'],
   ])
   assert.deepEqual(opened, ['session-pangea'])
-  assert.equal(productSession, 'session-pangea')
+  assert.deepEqual(productSessions, ['session-restored', 'session-pangea'])
   assert.equal(ready, true)
 })
 
@@ -139,6 +139,14 @@ test('registers each feature page as one native sidebar tab', async () => {
   assert.throws(() => service.registerPage({ id: 'analysis', title: 'Again', component }), /already registered/)
   disposeExecution()
   assert.equal(sidebar.tabs.has('dsh-pangea:execution'), false)
+})
+
+test('omits unavailable pages from the product navigation', async () => {
+  const { exported } = await loadClient()
+  const scope = { sessionId: 'session-1', cwd: '/tmp/project' }
+  assert.equal(exported.pageIsAvailable({ id: 'analysis', available: (_ctx, value) => Boolean(value?.cwd) }, scope), true)
+  assert.equal(exported.pageIsAvailable({ id: 'execution', available: () => false }, scope), false)
+  assert.equal(exported.pageIsAvailable({ id: 'assets' }, scope), true)
 })
 
 test('opens the product workbench once when a session becomes active', async () => {

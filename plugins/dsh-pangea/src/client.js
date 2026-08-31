@@ -57,6 +57,7 @@ window.__ModuleLoader__.load({
       if (typeof path !== 'string' || path.trim() === '') return false
       const workspace = await ctx.workspaces.create({ path })
       if (!workspace?.workspaceId) throw new Error('PANGEA product workspace registration returned no id')
+      for (const existingSessionId of workspace.sessionIds ?? []) onProductSession(existingSessionId)
       const sessionId = await ctx.workspaces.connectWorkspace(workspace.workspaceId)
       if (!sessionId) throw new Error('PANGEA product workspace returned no session')
       onProductSession(sessionId)
@@ -549,7 +550,7 @@ window.__ModuleLoader__.load({
         h(ProductHeader, { scope, systemState }),
         h(AssistantHeader, { context: assistantContext }),
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
-          h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.map(item => h('button', {
+          h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => pageIsAvailable(item, scope)).map(item => h('button', {
             key: item.id, type: 'button', 'data-pangea-nav-button': true, 'data-active': item.id === page.id ? 'true' : 'false',
             onClick: () => service.openPage(scope, item.id),
           }, h('span', { 'data-pangea-nav-icon': true }, productIcon(pageMeta[item.id]?.icon ?? item.id, 23)),
@@ -578,6 +579,10 @@ window.__ModuleLoader__.load({
 
     function nativePageId(pageId) {
       return `${PAGE_PREFIX}${pageId}`
+    }
+
+    function pageIsAvailable(page, scope) {
+      return typeof page?.available !== 'function' || page.available(undefined, scope) !== false
     }
 
     function applyBuiltinPolicy(betterSidebar) {
@@ -889,6 +894,7 @@ window.__ModuleLoader__.load({
 
     exports.inject = inject
     exports.nativePageId = nativePageId
+    exports.pageIsAvailable = pageIsAvailable
     exports.installModuleSystemBridge = installModuleSystemBridge
     exports.bootstrapProductWorkspace = bootstrapProductWorkspace
     exports.applyBuiltinPolicy = applyBuiltinPolicy
