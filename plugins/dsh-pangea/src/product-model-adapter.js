@@ -1,6 +1,6 @@
-// PANGEA product-shell adapter for DSH-owned model configuration.
-// The product shell replaces DSH navigation, so model affordances must live in
-// the PANGEA UI while all model state and writes remain owned by DSH.
+// PANGEA product-shell adapter for DSH-owned internal model configuration.
+// PANGEA replaces the DSH navigation, so the product owns the visible entry
+// points while DSH remains the single source of truth for model state/writes.
 ;(() => {
   if (typeof window === 'undefined' || typeof document === 'undefined') return
   if (globalThis.__dshPangeaProductModelAdapter === true) return
@@ -38,10 +38,10 @@
     return svg
   }
 
-  function openModels(mode) {
+  function openInternalModels() {
     dismissed = true
     syncOnboarding()
-    window.dispatchEvent(new CustomEvent(OPEN_EVENT, mode === 'custom' ? { detail: { mode: 'custom' } } : undefined))
+    window.dispatchEvent(new CustomEvent(OPEN_EVENT, { detail: { mode: 'internal' } }))
   }
 
   function createSettingsButton() {
@@ -61,7 +61,7 @@
     label.setAttribute('data-pangea-nav-label', 'true')
     label.textContent = '设置'
     button.append(icon, label)
-    button.addEventListener('click', () => openModels('models'))
+    button.addEventListener('click', openInternalModels)
     return button
   }
 
@@ -76,17 +76,6 @@
     document.querySelector(`[${ONBOARDING_ATTR}]`)?.remove()
   }
 
-  function createAction(label, primary, onClick) {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.textContent = label
-    button.style.cssText = primary
-      ? 'min-height:42px;border:0;border-radius:7px;padding:0 16px;background:#c7000b;color:#fff;font:inherit;font-weight:650;cursor:pointer'
-      : 'min-height:42px;border:1px solid #d7dbe1;border-radius:7px;padding:0 16px;background:#fff;color:#2f353d;font:inherit;font-weight:600;cursor:pointer'
-    button.addEventListener('click', onClick)
-    return button
-  }
-
   function createOnboarding() {
     const overlay = document.createElement('div')
     overlay.setAttribute(ONBOARDING_ATTR, 'true')
@@ -95,22 +84,21 @@
     const card = document.createElement('section')
     card.setAttribute('role', 'dialog')
     card.setAttribute('aria-modal', 'true')
-    card.setAttribute('aria-label', '首次配置模型')
+    card.setAttribute('aria-label', '首次配置内部模型')
     card.style.cssText = 'box-sizing:border-box;width:min(600px,calc(100vw - 48px));padding:30px;border:1px solid #dfe3e8;border-radius:12px;background:#fff;box-shadow:0 24px 70px rgba(0,0,0,.24);color:#17191d;font-family:"Huawei Sans","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI",sans-serif'
 
     const title = document.createElement('h2')
-    title.textContent = '配置模型'
+    title.textContent = '配置内部模型'
     title.style.cssText = 'margin:0;font-size:22px;line-height:30px'
     const description = document.createElement('p')
-    description.textContent = 'PANGEA 需要可用模型才能进行 AI 分析。模型配置仍由 DSH 管理，只需要在这里完成一次接入。'
+    description.textContent = 'PANGEA 使用团队内部自定义 LLM。模型配置由 DSH 管理，请先完成内部模型接入。'
     description.style.cssText = 'margin:10px 0 22px;color:#68707c;font-size:14px;line-height:22px'
 
-    const actions = document.createElement('div')
-    actions.style.cssText = 'display:grid;gap:10px'
-    if (modelState.customAvailable) {
-      actions.appendChild(createAction('自定义 / 内部模型提供方', true, () => openModels('custom')))
-    }
-    actions.appendChild(createAction('选择模型提供方', !modelState.customAvailable, () => openModels('models')))
+    const action = document.createElement('button')
+    action.type = 'button'
+    action.textContent = '自定义 / 内部模型提供方'
+    action.style.cssText = 'width:100%;min-height:44px;border:0;border-radius:7px;padding:0 16px;background:#c7000b;color:#fff;font:inherit;font-weight:650;cursor:pointer'
+    action.addEventListener('click', openInternalModels)
 
     const later = document.createElement('button')
     later.type = 'button'
@@ -121,7 +109,7 @@
       removeOnboarding()
     })
 
-    card.append(title, description, actions, later)
+    card.append(title, description, action, later)
     overlay.appendChild(card)
     return overlay
   }
