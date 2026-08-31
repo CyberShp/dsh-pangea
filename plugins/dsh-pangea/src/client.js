@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
-    const inject = ['betterSidebar']
+    const inject = ['betterSidebar', 'workspaces', 'sessions']
     const PAGE_PREFIX = 'dsh-pangea:'
     const PRODUCT_STYLE_ID = 'dsh-pangea-product-shell'
     const DEFAULT_PRODUCT_STATE = Object.freeze({
