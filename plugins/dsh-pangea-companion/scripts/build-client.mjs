@@ -15,14 +15,6 @@ function replaceExactlyOnce(source, needle, replacement, label) {
   return source.slice(0, first) + replacement + source.slice(first + needle.length)
 }
 
-function replaceRegexExactlyOnce(source, pattern, replacement, label) {
-  const matches = [...source.matchAll(pattern)]
-  if (matches.length !== 1) {
-    throw new Error(`dsh-pangea-companion build: expected 1 ${label} match, found ${matches.length}`)
-  }
-  return source.replace(pattern, replacement)
-}
-
 let source = await readFile(sourcePath, 'utf8')
 
 source = replaceExactlyOnce(
@@ -32,11 +24,11 @@ source = replaceExactlyOnce(
   'workbench test application',
 )
 
-source = replaceRegexExactlyOnce(
+source = replaceExactlyOnce(
   source,
-  /      ctx\.effect\(\(\) => pangea\.registerPage\(\{\r?\n        id: 'execution',[\s\S]*?      \}\), 'dsh-pangea-companion: execution page'\)\r?\n/g,
-  '',
-  'execution page registration',
+  "        id: 'execution', title: () => '环境配置', icon, order: 20,\n        available: (_ctx, scope) => Boolean(scope?.cwd),",
+  "        id: 'execution', title: () => '环境配置', icon, order: 20,\n        available: () => false,",
+  'hidden execution page availability',
 )
 
 await mkdir(path.join(root, 'lib'), { recursive: true })
