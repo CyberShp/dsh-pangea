@@ -20,6 +20,12 @@ test('owns internal model settings entry inside the PANGEA product shell', async
   assert.match(source, /mode: 'internal'/)
 })
 
+test('hides the placeholder system-check status from product chrome', async () => {
+  const source = await readFile(adapterPath, 'utf8')
+  assert.match(source, /data-pangea-system-state/)
+  assert.match(source, /display:none!important/)
+})
+
 test('build appends the product model adapter to the shipped client', async () => {
   const source = await readFile(buildPath, 'utf8')
   assert.match(source, /product-model-adapter\.js/)
