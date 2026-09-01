@@ -42,9 +42,10 @@ test('offers only configured internal provider routes', async () => {
   assert.equal(catalog.models[0].credential_configured, true)
 })
 
-test('fails closed before creating a session when the internal credential is missing', async () => {
+test('fails closed before creating a session when the internal credential is missing and records the failing stage', async () => {
   const root = await workspace()
   let created = false
+  const launchEvents = []
   try {
     const api = internalModelApi()
     api.credentials.describe = async () => ok({ credentials: { MINIMAX_1_API_KEY: { configured: false, writable: true } } })
@@ -55,10 +56,12 @@ test('fails closed before creating a session when the internal credential is mis
         cwd: root,
         input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] },
         model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
-      }, async () => ({ repositories: ['repo-one'] })),
+      }, async () => ({ repositories: ['repo-one'] }), undefined, event => { launchEvents.push(event) }),
       /尚未配置凭证/,
     )
     assert.equal(created, false)
+    assert.equal(launchEvents.some(event => event.stage === 'model_validate' && event.status === 'error'), true)
+    assert.equal(launchEvents.some(event => event.stage === 'session_create'), false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -129,10 +132,11 @@ test('keeps the workbench available when one public runs get detail cannot be re
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('launches a dedicated DSH session that owns the complete Run lifecycle', async () => {
+test('launches a dedicated DSH session that owns the complete Run lifecycle and reports startup stages', async () => {
   const root = await workspace()
   try {
     const events = []
+    const launchEvents = []
     const api = {
       ...internalModelApi(events),
       workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
@@ -149,7 +153,7 @@ test('launches a dedicated DSH session that owns the complete Run lifecycle', as
       model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
     }, async () => ({ repositories: ['repo-one'] }), async session => {
       events.push(['persist', session])
-    })
+    }, async event => { launchEvents.push(event) })
     assert.equal(result.session_id, 'session-1')
     assert.equal(events[1][0], 'select-model')
     assert.deepEqual(events[1][1], { sessionId: 'session-1', provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' })
@@ -159,6 +163,10 @@ test('launches a dedicated DSH session that owns the complete Run lifecycle', as
     assert.match(events[3][1].content[0].text, /pangea_run_create/)
     assert.match(events[3][1].content[0].text, /"asset_ids": \[/)
     assert.match(events[3][1].content[0].text, /完整 action 流程/)
+    for (const stage of ['capabilities_check', 'model_validate', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'waiting_for_run']) {
+      assert.equal(launchEvents.some(event => event.stage === stage), true, `missing launch stage ${stage}`)
+    }
+    assert.equal(launchEvents.find(event => event.stage === 'session_create' && event.status === 'ok')?.session_id, 'session-1')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
