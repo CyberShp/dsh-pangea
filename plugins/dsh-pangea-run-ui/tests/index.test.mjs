@@ -35,6 +35,27 @@ test('rework is conditional and raw worker outputs are preserved', async () => {
   assert.equal(after.rework[0].attempt, 1)
 })
 
+test('run action status is exposed so UI failure color matches run details', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'pangea-run-ui-action-'))
+  const run = path.join(cwd, 'pangea-data', 'runs', 'run-action')
+  await writeJson(path.join(run, 'progress.json'), {
+    stage: 'planning',
+    lifecycle_status: 'running',
+    actions: {
+      planning: {
+        action_id: 'planning-1', role: 'planning', stage: 'unit_planning', status: 'failed', task_id: 'task-1',
+        error: { code: 'PLANNING_FAILED', message: 'planning failed' },
+      },
+    },
+  })
+  const output = await readRunOutputs({ cwd, runId: 'run-action' })
+  assert.equal(output.progress.stage, 'planning')
+  assert.equal(output.progress.actions[0].role, 'planning')
+  assert.equal(output.progress.actions[0].stage, 'unit_planning')
+  assert.equal(output.progress.actions[0].status, 'failed')
+  assert.equal(output.progress.actions[0].error.code, 'PLANNING_FAILED')
+})
+
 test('desktop environment data root can be used without browser cwd', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-run-ui-env-'))
   const dataRoot = path.join(root, 'pangea-data')
