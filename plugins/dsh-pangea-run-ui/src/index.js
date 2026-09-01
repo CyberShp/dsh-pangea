@@ -108,6 +108,18 @@ function resultRecord(kind, file, value) {
   }
 }
 
+function actionRecords(progress) {
+  return Object.values(progress?.actions ?? {}).map(action => ({
+    action_id: action?.action_id ?? null,
+    action: action?.action ?? null,
+    role: action?.role ?? null,
+    stage: action?.stage ?? null,
+    status: action?.status ?? null,
+    task_id: action?.task_id ?? null,
+    error: action?.error ?? null,
+  }))
+}
+
 async function readResultDirectory(runDirectory, kind) {
   const directory = path.join(runDirectory, 'agent-results', kind)
   const records = []
@@ -134,12 +146,15 @@ export async function readRunOutputs({ cwd, runId, dataRoot } = {}) {
     readJsonIfPresent(path.join(runDirectory, 'agent-results', 'comparison-review.json')),
   ])
   const reportPresent = await pathKind(path.join(runDirectory, 'report.md')) === 'file' || await pathKind(path.join(runDirectory, 'report.html')) === 'file'
-  const completedRework = Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units.length : 0
+  const completedRework = Array.isArray(progress?.completed_closure_units)
+    ? progress.completed_closure_units.length
+    : Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units.length : 0
   const hasRework = rework.length > 0 || completedRework > 0 || progress?.stage === 'closing'
   const reviews = [
     independentReview ? resultRecord('independent-review', 'review.json', independentReview) : null,
     comparisonReview ? resultRecord('comparison-review', 'comparison-review.json', comparisonReview) : null,
   ].filter(Boolean)
+  const actions = actionRecords(progress)
 
   return {
     status: 'ok',
@@ -148,10 +163,14 @@ export async function readRunOutputs({ cwd, runId, dataRoot } = {}) {
       stage: typeof progress?.stage === 'string' ? progress.stage : null,
       phase: typeof progress?.phase === 'string' ? progress.phase : null,
       lifecycle_status: typeof progress?.lifecycle_status === 'string' ? progress.lifecycle_status : null,
+      attention_required: progress?.attention_required === true || String(progress?.status ?? '').toLowerCase() === 'attention_required',
       quality_status: typeof progress?.quality_status === 'string' ? progress.quality_status : null,
       analysis_units: Array.isArray(progress?.analysis_units) ? progress.analysis_units : [],
       completed_analysis_units: Array.isArray(progress?.completed_analysis_units) ? progress.completed_analysis_units : [],
-      completed_rework_units: Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : [],
+      completed_rework_units: Array.isArray(progress?.completed_closure_units)
+        ? progress.completed_closure_units
+        : Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : [],
+      actions,
     },
     plan: plan ? resultRecord('planning', 'plan.json', plan) : null,
     analysis,
