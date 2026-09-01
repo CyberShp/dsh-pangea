@@ -2,6 +2,17 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
+let exported
+const previousWindow = globalThis.window
+globalThis.window = {
+  __ModuleLoader__: {
+    load(definition) { exported = definition.factory(() => undefined) },
+  },
+}
+await import('../src/client-native.js')
+if (previousWindow === undefined) delete globalThis.window
+else globalThis.window = previousWindow
+
 const source = await readFile(new URL('../src/client-native.js', import.meta.url), 'utf8')
 const build = await readFile(new URL('../scripts/build-client.mjs', import.meta.url), 'utf8')
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
@@ -50,6 +61,23 @@ test('worker diagnostics are embedded into native analysis unit details', () => 
   assert.match(source, /Worker 执行轨迹/)
   assert.match(source, /result_path/)
   assert.match(source, /查看 Agent 结构化输出/)
+})
+
+test('worker diagnostics use the API field and closure output takes precedence', () => {
+  const value = {
+    worker_diagnostics: [{ unit_id: 'U01', role: 'closure', status: 'dispatched' }],
+    analysis: [{ unit_id: 'U01', raw: { summary: 'first pass' } }],
+    rework: [{ unit_id: 'U01', raw: { summary: 'targeted closure' } }],
+  }
+  const selected = exported.unitDiagnosticData('U01', value)
+  assert.equal(selected.diagnostic.role, 'closure')
+  assert.equal(selected.record.raw.summary, 'targeted closure')
+})
+
+test('DOM sync pauses observation and cancels pending animation on disposal', () => {
+  assert.match(source, /observer\?\.disconnect\(\)/)
+  assert.match(source, /observer\?\.observe\(document\.documentElement/)
+  assert.match(source, /cancelAnimationFrame\(syncFrame\)/)
 })
 
 test('assistant card no longer exposes the misleading progress element', () => {

@@ -114,12 +114,12 @@ function unitIdFromTask(task, fallback = null) {
 
 function resultRecord(kind, file, value) {
   const raw = value && typeof value === 'object' ? value : {}
-  const fileUnit = ['analysis', 'rework'].includes(kind) ? path.basename(file, '.json') : null
+  const fileUnit = ['analysis', 'closure', 'rework'].includes(kind) ? path.basename(file, '.json') : null
   return {
     kind,
     file,
     unit_id: typeof raw.unit_id === 'string' && raw.unit_id !== '' ? raw.unit_id : fileUnit,
-    attempt: Number.isInteger(raw.attempt) ? raw.attempt : kind === 'rework' ? 1 : 0,
+    attempt: Number.isInteger(raw.attempt) ? raw.attempt : ['closure', 'rework'].includes(kind) ? 1 : 0,
     worker_id: typeof raw.worker_id === 'string' ? raw.worker_id : typeof raw.reviewer_id === 'string' ? raw.reviewer_id : null,
     summary: typeof raw.summary === 'string' ? raw.summary : null,
     analyzed_scope: Array.isArray(raw.analyzed_scope) ? raw.analyzed_scope : [],
@@ -184,17 +184,25 @@ async function appendTrace(binding, event) {
 async function resultState(task, actionStatus) {
   const resultPath = resolveTaskPath(task.__cwd, task?.result_path)
   const skeletonPath = resolveTaskPath(task.__cwd, task?.result_skeleton_path)
+  const originalPath = resolveTaskPath(task.__cwd, task?.original_result_path)
   if (!resultPath) return { state: 'unknown', result_path: null }
   if (await pathKind(resultPath) !== 'file') return { state: 'missing', result_path: resultPath }
   let result
   try { result = await readJson(resultPath) } catch { return { state: 'invalid_json', result_path: resultPath } }
+  if (actionStatus === 'accepted') return { state: 'accepted', result_path: resultPath }
   if (skeletonPath && await pathKind(skeletonPath) === 'file') {
     try {
       const skeleton = await readJson(skeletonPath)
       if (JSON.stringify(result) === JSON.stringify(skeleton)) return { state: 'skeleton', result_path: resultPath }
     } catch { /* result still counts as written if skeleton cannot be read */ }
   }
-  return { state: actionStatus === 'accepted' ? 'accepted' : 'written', result_path: resultPath }
+  if (originalPath && await pathKind(originalPath) === 'file') {
+    try {
+      const original = await readJson(originalPath)
+      if (JSON.stringify(result) === JSON.stringify(original)) return { state: 'baseline', result_path: resultPath }
+    } catch { /* result still counts as written if the original cannot be read */ }
+  }
+  return { state: 'written', result_path: resultPath }
 }
 
 async function actionBinding({ cwd, dataRoot, runId, actionId, childId } = {}) {
@@ -360,7 +368,7 @@ function actionStatusLabel(status) {
 
 function resultStateLabel(state) {
   return {
-    skeleton: '仍为骨架', written: '已写入', accepted: '已校验', missing: '结果文件缺失', invalid_json: '结果 JSON 不可读', unknown: '未知',
+    skeleton: '仍为骨架', baseline: '等待补齐', written: '已写入', accepted: '已校验', missing: '结果文件缺失', invalid_json: '结果 JSON 不可读', unknown: '未知',
   }[state] ?? state
 }
 
@@ -457,18 +465,18 @@ export async function readRunOutputs({ cwd, runId, dataRoot } = {}) {
   if (await pathKind(runDirectory) !== 'directory') throw new Error(`PANGEA run does not exist: ${resolvedRunId}`)
   const effectiveCwd = cwd ?? process.env.PANGEA_WORKSPACE_ROOT ?? path.dirname(resolvedDataRoot)
 
-  const [progress, plan, rawAnalysis, rawRework, independentReview, comparisonReview, traceRecords] = await Promise.all([
+  const [progress, plan, rawAnalysis, rawClosure, independentReview, comparisonReview, traceRecords] = await Promise.all([
     readJsonIfPresent(path.join(runDirectory, 'progress.json')),
-    readJsonIfPresent(path.join(runDirectory, 'agent-results', 'plan.json')),
+    readJsonIfPresent(path.join(runDirectory, 'agent-results', 'planning.json')),
     readResultDirectory(runDirectory, 'analysis'),
-    readResultDirectory(runDirectory, 'rework'),
+    readResultDirectory(runDirectory, 'closure'),
     readJsonIfPresent(path.join(runDirectory, 'agent-results', 'review.json')),
     readJsonIfPresent(path.join(runDirectory, 'agent-results', 'comparison-review.json')),
     readTraceRecords(runDirectory),
   ])
   const diagnostics = await buildWorkerDiagnostics({ cwd: effectiveCwd, progress, runDirectory, traceRecords })
   const analysis = attachDiagnostics(rawAnalysis, diagnostics, 'analysis')
-  const rework = attachDiagnostics(rawRework, diagnostics, ['closure', 'rework'])
+  const rework = attachDiagnostics(rawClosure, diagnostics, ['closure', 'rework'])
   const reportPresent = await pathKind(path.join(runDirectory, 'report.md')) === 'file' || await pathKind(path.join(runDirectory, 'report.html')) === 'file'
   const completedRework = Array.isArray(progress?.completed_closure_units)
     ? progress.completed_closure_units.length
@@ -496,7 +504,7 @@ export async function readRunOutputs({ cwd, runId, dataRoot } = {}) {
         : Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : [],
       actions,
     },
-    plan: plan ? resultRecord('planning', 'plan.json', plan) : null,
+    plan: plan ? resultRecord('planning', 'planning.json', plan) : null,
     analysis,
     rework,
     reviews,

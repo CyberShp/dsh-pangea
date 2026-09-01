@@ -23,6 +23,9 @@ window.__ModuleLoader__.load({
     let launchController = null
     let timer = null
     let syncQueued = false
+    let syncFrame = null
+    let observer = null
+    let disposed = false
 
     const STAGE_LABELS = {
       preparing: '准备',
@@ -68,6 +71,7 @@ window.__ModuleLoader__.load({
 
     const RESULT_STATUS = {
       skeleton: '仍为骨架',
+      baseline: '等待补齐',
       written: '已写入',
       accepted: '已校验',
       missing: '结果文件缺失',
@@ -397,7 +401,7 @@ window.__ModuleLoader__.load({
     function diagnosticTone(diagnostic) {
       const status = String(diagnostic?.status ?? '').toLowerCase()
       if (status === 'failed') return 'failed'
-      if (status === 'attention_required' || (diagnostic?.settled && diagnostic?.result_state === 'skeleton')) return 'warning'
+      if (status === 'attention_required' || (diagnostic?.settled && ['skeleton', 'baseline'].includes(diagnostic?.result_state))) return 'warning'
       return 'active'
     }
 
@@ -425,10 +429,16 @@ window.__ModuleLoader__.load({
       box.appendChild(details)
     }
 
-    function buildUnitDiagnostic(unitId, value) {
-      const diagnostics = Array.isArray(value?.diagnostics) ? value.diagnostics : []
+    function unitDiagnosticData(unitId, value) {
+      const diagnostics = Array.isArray(value?.worker_diagnostics) ? value.worker_diagnostics : []
       const diagnostic = [...diagnostics].reverse().find(item => item?.unit_id === unitId && ['analysis', 'closure', 'rework'].includes(item?.role))
-      const record = [...(value?.rework ?? []), ...(value?.analysis ?? [])].reverse().find(item => item?.unit_id === unitId)
+      const record = [...(value?.rework ?? [])].reverse().find(item => item?.unit_id === unitId)
+        ?? [...(value?.analysis ?? [])].reverse().find(item => item?.unit_id === unitId)
+      return { diagnostic, record }
+    }
+
+    function buildUnitDiagnostic(unitId, value) {
+      const { diagnostic, record } = unitDiagnosticData(unitId, value)
       if (!diagnostic && !record) return null
 
       const box = make('div', UNIT_DIAGNOSTIC_CLASS)
@@ -485,26 +495,33 @@ window.__ModuleLoader__.load({
 
     function syncDom() {
       syncQueued = false
-      protectAssistantSelect(runContext)
-      mountLaunchDiagnostic()
-      if (!output || output.run_id !== runContext?.runId) {
-        document.getElementById(OVERVIEW_ID)?.remove()
-        return
+      syncFrame = null
+      if (disposed) return
+      observer?.disconnect()
+      try {
+        protectAssistantSelect(runContext)
+        mountLaunchDiagnostic()
+        if (!output || output.run_id !== runContext?.runId) {
+          document.getElementById(OVERVIEW_ID)?.remove()
+          return
+        }
+        const card = actionLifecycleCard()
+        if (card?.parentElement) {
+          const old = document.getElementById(OVERVIEW_ID)
+          const next = renderOverview(output)
+          if (old) old.replaceWith(next)
+          else card.parentElement.insertBefore(next, card)
+        }
+        decorateUnits(output)
+      } finally {
+        if (!disposed) observer?.observe(document.documentElement, { childList: true, subtree: true })
       }
-      const card = actionLifecycleCard()
-      if (card?.parentElement) {
-        const old = document.getElementById(OVERVIEW_ID)
-        const next = renderOverview(output)
-        if (old) old.replaceWith(next)
-        else card.parentElement.insertBefore(next, card)
-      }
-      decorateUnits(output)
     }
 
     function scheduleSync() {
-      if (syncQueued) return
+      if (syncQueued || disposed) return
       syncQueued = true
-      requestAnimationFrame(syncDom)
+      syncFrame = requestAnimationFrame(syncDom)
     }
 
     async function refreshOutput() {
@@ -571,6 +588,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      disposed = false
       const disposeStyle = installStyles()
       const onRunContext = event => {
         const previousKey = `${runContext?.taskId ?? ''}\u0000${runContext?.runId ?? ''}`
@@ -585,10 +603,15 @@ window.__ModuleLoader__.load({
         scheduleSync()
       }
       window.addEventListener('pangea:run-context', onRunContext)
-      const observer = new MutationObserver(scheduleSync)
+      observer = new MutationObserver(scheduleSync)
       observer.observe(document.documentElement, { childList: true, subtree: true })
       ctx.effect?.(() => () => {
-        observer.disconnect()
+        disposed = true
+        observer?.disconnect()
+        observer = null
+        if (syncFrame !== null) cancelAnimationFrame(syncFrame)
+        syncFrame = null
+        syncQueued = false
         window.removeEventListener('pangea:run-context', onRunContext)
         outputController?.abort()
         launchController?.abort()
@@ -603,6 +626,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     exports.stageNames = stageNames
     exports.stageIndex = stageIndex
+    exports.unitDiagnosticData = unitDiagnosticData
     exports.apply = apply
     return module.exports
   },

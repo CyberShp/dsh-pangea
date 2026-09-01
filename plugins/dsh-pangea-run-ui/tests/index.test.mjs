@@ -11,12 +11,13 @@ async function writeJson(file, value) {
   await writeFile(file, JSON.stringify(value), 'utf8')
 }
 
-test('rework is conditional and raw worker outputs are preserved', async () => {
+test('closure is conditional and locked Agent output paths are preserved', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'pangea-run-ui-'))
   const run = path.join(cwd, 'pangea-data', 'runs', 'run-1')
   await writeJson(path.join(run, 'progress.json'), {
-    stage: 'reviewing', lifecycle_status: 'running', analysis_units: ['U01'], completed_analysis_units: ['U01'], completed_rework_units: [],
+    stage: 'reviewing', lifecycle_status: 'running', analysis_units: ['U01'], completed_analysis_units: ['U01'], completed_closure_units: [],
   })
+  await writeJson(path.join(run, 'agent-results', 'planning.json'), { summary: 'planning summary' })
   await writeJson(path.join(run, 'agent-results', 'analysis', 'U01.json'), {
     unit_id: 'U01', attempt: 0, worker_id: 'worker-a', summary: 'analysis summary', analyzed_scope: ['a.c'], risks: [{ risk_id: 'R1' }], test_cases: [], evidence: [], business_flows: [], errors: [],
   })
@@ -24,15 +25,39 @@ test('rework is conditional and raw worker outputs are preserved', async () => {
 
   const before = await readRunOutputs({ cwd, runId: 'run-1' })
   assert.equal(before.has_rework, false)
+  assert.equal(before.plan.raw.summary, 'planning summary')
   assert.equal(before.analysis[0].worker_id, 'worker-a')
   assert.equal(before.analysis[0].raw.summary, 'analysis summary')
 
-  await writeJson(path.join(run, 'agent-results', 'rework', 'U01.json'), {
+  await writeJson(path.join(run, 'agent-results', 'closure', 'U01.json'), {
     unit_id: 'U01', attempt: 1, worker_id: 'worker-b', summary: 'targeted rework', risks: [], test_cases: [], evidence: [], business_flows: [], errors: [],
   })
   const after = await readRunOutputs({ cwd, runId: 'run-1' })
   assert.equal(after.has_rework, true)
+  assert.equal(after.rework[0].kind, 'closure')
   assert.equal(after.rework[0].attempt, 1)
+})
+
+test('closure diagnostics distinguish the copied baseline from Worker changes', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'pangea-run-ui-closure-'))
+  const run = path.join(cwd, 'pangea-data', 'runs', 'run-closure')
+  const taskPath = path.join(run, 'agent-tasks', 'closure', 'U01.json')
+  const originalPath = path.join(run, 'validated-results', 'run-closure__analysis__U01.json')
+  const resultPath = path.join(run, 'agent-results', 'closure', 'U01.json')
+  const original = { unit_id: 'U01', summary: 'first pass', evidence: [] }
+  await writeJson(originalPath, original)
+  await writeJson(resultPath, original)
+  await writeJson(taskPath, { task_type: 'closure', unit: { unit_id: 'U01' }, original_result_path: originalPath, result_path: resultPath })
+  const progress = {
+    actions: { c1: { action_id: 'c1', role: 'closure', stage: 'targeted_closure', status: 'dispatched', task_id: 'child-1', task_path: taskPath } },
+  }
+
+  const waiting = await buildWorkerDiagnostics({ cwd, progress, runDirectory: run, traceRecords: [] })
+  assert.equal(waiting[0].result_state, 'baseline')
+
+  await writeJson(resultPath, { ...original, summary: 'targeted closure' })
+  const written = await buildWorkerDiagnostics({ cwd, progress, runDirectory: run, traceRecords: [] })
+  assert.equal(written[0].result_state, 'written')
 })
 
 test('run action status is exposed so UI failure color matches run details', async () => {

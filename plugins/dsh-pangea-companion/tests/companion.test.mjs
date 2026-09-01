@@ -414,6 +414,7 @@ test('registers read status plus executor environment and SSH tools', () => {
   assert.equal(tools[4].parameters.properties.run_id.minLength, 1)
   assert.deepEqual(routes.map(route => route.path), [
     '/api/pangea-companion/state', '/api/pangea-companion/source',
+    '/api/pangea-companion/launch-log',
     '/api/pangea-companion/environments', '/api/pangea-companion/executions',
     '/api/pangea-companion/workbench',
     '/api/pangea-companion/repositories',
