@@ -24,6 +24,13 @@ test('current workflow stage uses a blue pulse while failures stay red', () => {
   assert.match(source, /is-failed \.pangea-stage-dot \{ border-color:#c7000b; background:#c7000b;/)
 })
 
+test('current stage failure is derived from PANGEA action status', () => {
+  assert.match(source, /function currentStageActionTone/)
+  assert.match(source, /output\.progress\.actions\.filter\(action => action\?\.role === role\)/)
+  assert.match(source, /status === 'failed'/)
+  assert.match(source, /if \(actionTone\) return actionTone/)
+})
+
 test('rework stages remain conditional', () => {
   assert.match(source, /output\?\.has_rework \? \['定向补齐', '再复核'\] : \[\]/)
   assert.match(source, /if \(output\?\.has_rework\) appendGroup\(card, '定向补齐'/)
