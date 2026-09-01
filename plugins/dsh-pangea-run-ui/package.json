@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "description": "PANGEA run workflow presentation, isolated assistant sessions, and persisted Agent output viewer",
   "type": "module",
-  "main": "./src/index.js",
+  "main": "./src/entry.js",
   "exports": {
-    ".": "./src/index.js",
-    "./client": "./src/client.js",
+    ".": "./src/entry.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
-  "files": ["src", "tests", "README.md"],
+  "files": ["src", "lib", "scripts", "tests", "README.md"],
   "license": "UNLICENSED",
   "private": true,
   "dsh": {
@@ -28,7 +28,7 @@
   },
   "engines": { "node": "^22.19.0 || >=24.0.0" },
   "scripts": {
-    "build": "node --check src/client.js",
-    "test": "npm run build && node --check src/index.js && node --test tests/*.test.mjs"
+    "build": "node scripts/build-client.mjs",
+    "test": "npm run build && node --check src/entry.js && node --check src/index.js && node --check lib/client.js && node --test tests/*.test.mjs"
   }
 }
