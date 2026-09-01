@@ -1,5 +1,4 @@
-// PANGEA run presentation fixes: safe assistant sessions, conditional workflow stages,
-// in-place persisted Agent output, and visual consistency across PANGEA pages.
+// PANGEA run presentation fixes: safe assistant sessions and in-place Run detail enhancement.
 window.__ModuleLoader__.load({
   id: 'dsh-pangea-run-ui',
   factory: (require) => {
@@ -47,23 +46,6 @@ window.__ModuleLoader__.load({
           color:#7a828d; font-size:11px; line-height:16px; padding-top:1px;
         }
         body[data-pangea-product-shell] [data-pangea-assistant-select] { min-width:0!important; width:100%!important; }
-
-        body[data-pangea-product-mode="assets"],
-        body[data-pangea-product-mode="assets"] button,
-        body[data-pangea-product-mode="assets"] input,
-        body[data-pangea-product-mode="assets"] select,
-        body[data-pangea-product-mode="assets"] textarea,
-        body[data-pangea-product-mode="assets"] summary {
-          font-family:"Huawei Sans","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI",sans-serif!important;
-          -webkit-font-smoothing:antialiased;
-        }
-        body[data-pangea-product-mode="assets"] [style*="font-size: 9px"] { font-size:11px!important; }
-        body[data-pangea-product-mode="assets"] [style*="font-size: 10px"] { font-size:12px!important; }
-        body[data-pangea-product-mode="assets"] [style*="font-size: 12px"] { font-size:13px!important; }
-        body[data-pangea-product-mode="assets"] button,
-        body[data-pangea-product-mode="assets"] input,
-        body[data-pangea-product-mode="assets"] select,
-        body[data-pangea-product-mode="assets"] textarea { font-size:13px!important; }
 
         #${ENHANCEMENT_ID} { margin:16px 0 4px; color:inherit; font-family:inherit; }
         #${ENHANCEMENT_ID} .pangea-run-ui-title { font-size:14px; font-weight:700; margin:0 0 9px; }
