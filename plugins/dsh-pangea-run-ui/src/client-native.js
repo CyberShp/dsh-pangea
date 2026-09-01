@@ -9,14 +9,18 @@ window.__ModuleLoader__.load({
 
     const inject = ['pangea']
     const API_PATH = '/api/pangea-run-ui/outputs'
+    const LAUNCH_LOG_API_PATH = '/api/pangea-companion/launch-log'
     const STYLE_ID = 'dsh-pangea-run-ui-native-style'
     const OVERVIEW_ID = 'pangea-run-native-workflow-overview'
+    const LAUNCH_DIAGNOSTIC_ID = 'pangea-task-launch-diagnostic'
     const UNIT_DIAGNOSTIC_CLASS = 'pangea-run-unit-diagnostic'
     const creationThrottle = new Map()
 
     let runContext = null
     let output = null
-    let controller = null
+    let launchLog = null
+    let outputController = null
+    let launchController = null
     let timer = null
     let syncQueued = false
 
@@ -28,6 +32,29 @@ window.__ModuleLoader__.load({
       closing: '定向补齐',
       reporting: '生成报告',
       complete: '完成',
+    }
+
+    const LAUNCH_STAGE_LABELS = {
+      task_created: '任务已创建',
+      launch_requested: '开始启动',
+      model_route_resolve: '解析模型配置',
+      task_prepare: '准备任务状态',
+      workspace_resolved: '确认工作区',
+      capabilities_check: '检查 PANGEA 能力',
+      input_validated: '校验分析输入',
+      model_validate: '校验模型与凭证',
+      session_create: '创建 Analysis Session',
+      model_select: '设置 Analysis Session 模型',
+      session_record: '记录 Analysis Session',
+      prompt_submit: '投递分析 Prompt',
+      waiting_for_run: '等待创建 PANGEA Run',
+      pangea_run_create: '创建 PANGEA Run',
+      run_bound: '绑定 PANGEA Run',
+      session_launch_complete: 'Analysis Session 启动完成',
+      session_turn_end: 'Analysis Session 异常结束',
+      launch_timeout: '启动超时',
+      session_reconcile: '恢复启动会话',
+      launch_failed: '启动失败',
     }
 
     const ACTION_STATUS = {
@@ -98,6 +125,30 @@ window.__ModuleLoader__.load({
         #${OVERVIEW_ID} .pangea-native-line { width:30px; height:1px; margin:0 5px; flex:0 0 auto; background:#d9dde3; }
         #${OVERVIEW_ID} .pangea-native-line.is-done { background:#8fcaa0; }
 
+        #${LAUNCH_DIAGNOSTIC_ID} {
+          box-sizing:border-box; margin:12px 0 2px; padding:0;
+          border:1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+          border-radius:8px; background:var(--dsw-alias-bg-layer-2, rgba(127,127,127,.05)); color:inherit;
+        }
+        #${LAUNCH_DIAGNOSTIC_ID} > summary {
+          display:flex; align-items:center; justify-content:space-between; gap:12px;
+          padding:10px 12px; cursor:pointer; list-style:none; font-size:13px; font-weight:700;
+        }
+        #${LAUNCH_DIAGNOSTIC_ID} > summary::-webkit-details-marker { display:none; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-state { font-size:12px; font-weight:650; color:#2f7acb; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-state.is-done { color:#2da44e; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-state.is-failed { color:#c7000b; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-body { padding:0 12px 11px; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-path { margin-bottom:8px; color:#7a818b; font-size:11px; overflow-wrap:anywhere; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-row { display:grid; grid-template-columns:64px 18px minmax(0,1fr); gap:7px; align-items:start; padding:5px 0; border-top:1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.1)); font-size:12px; line-height:1.45; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-row:first-of-type { border-top:0; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-time { color:#8a929d; font-variant-numeric:tabular-nums; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-icon { color:#2f7acb; font-weight:800; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-row.is-ok .pangea-launch-icon { color:#2da44e; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-row.is-error .pangea-launch-icon { color:#c7000b; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-message { color:#69717c; font-size:11px; margin-top:2px; overflow-wrap:anywhere; }
+        #${LAUNCH_DIAGNOSTIC_ID} .pangea-launch-empty { color:#7a818b; font-size:12px; padding:2px 0; }
+
         .${UNIT_DIAGNOSTIC_CLASS} { margin:10px 0 2px; padding:10px 11px; border-radius:7px; background:var(--dsw-alias-bg-layer-2, rgba(127,127,127,.07)); }
         .${UNIT_DIAGNOSTIC_CLASS} .pangea-unit-runtime-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
         .${UNIT_DIAGNOSTIC_CLASS} .pangea-unit-runtime-title { font-size:12px; font-weight:700; }
@@ -151,6 +202,13 @@ window.__ModuleLoader__.load({
 
     async function requestOutputs(runId, signal) {
       const response = await fetch(`${API_PATH}?${new URLSearchParams({ run_id: runId })}`, { cache: 'no-store', signal })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
+    async function requestLaunchLog(taskId, signal) {
+      const response = await fetch(`${LAUNCH_LOG_API_PATH}?${new URLSearchParams({ task_id: taskId })}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -227,6 +285,16 @@ window.__ModuleLoader__.load({
       return leafByText(text => /^分析单元（\d+）$/.test(text))
     }
 
+    function taskOverviewCard(taskId) {
+      const idNode = leafByText(text => text === taskId)
+      return idNode?.parentElement?.parentElement?.parentElement ?? null
+    }
+
+    function currentTaskCard() {
+      const heading = leafByText(text => text === '当前任务')
+      return heading?.parentElement?.parentElement?.parentElement ?? null
+    }
+
     function renderOverview(value) {
       const card = make('section')
       card.id = OVERVIEW_ID
@@ -250,6 +318,80 @@ window.__ModuleLoader__.load({
       scroll.appendChild(rail)
       card.appendChild(scroll)
       return card
+    }
+
+    function launchTime(value) {
+      const date = new Date(value)
+      return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    }
+
+    function launchState(record) {
+      const events = Array.isArray(record?.events) ? record.events : []
+      const latest = events[events.length - 1]
+      if (latest?.status === 'error') return { tone: 'failed', label: '启动失败', open: true }
+      if (events.some(event => event.stage === 'run_bound' && event.status === 'ok')) return { tone: 'done', label: '已进入 Run', open: false }
+      if (runContext?.taskId) return { tone: 'active', label: '启动中', open: !runContext?.runId }
+      return { tone: 'active', label: '等待启动', open: false }
+    }
+
+    function renderLaunchDiagnostic(record) {
+      const state = launchState(record)
+      const details = make('details')
+      details.id = LAUNCH_DIAGNOSTIC_ID
+      details.open = state.open
+      const summary = make('summary')
+      summary.appendChild(make('span', '', '启动诊断'))
+      summary.appendChild(make('span', `pangea-launch-state is-${state.tone}`, state.label))
+      details.appendChild(summary)
+      const body = make('div', 'pangea-launch-body')
+      if (record?.path) body.appendChild(make('div', 'pangea-launch-path', `日志文件：${record.path}`))
+      const events = Array.isArray(record?.events) ? record.events : []
+      if (!events.length) {
+        body.appendChild(make('div', 'pangea-launch-empty', '尚未记录启动事件；旧版本创建的任务不会补造历史日志。'))
+      } else {
+        for (const event of events.slice(-30)) {
+          const row = make('div', `pangea-launch-row is-${event.status ?? 'info'}`)
+          row.appendChild(make('div', 'pangea-launch-time', launchTime(event.at)))
+          row.appendChild(make('div', 'pangea-launch-icon', event.status === 'error' ? '✕' : event.status === 'ok' ? '✓' : '●'))
+          const content = make('div')
+          const label = LAUNCH_STAGE_LABELS[event.stage] ?? event.stage ?? '启动事件'
+          content.appendChild(make('div', '', label))
+          const parts = [event.message, event.error, event.error_code ? `错误码：${event.error_code}` : null, event.session_id ? `Session：${event.session_id}` : null, event.run_id ? `Run：${event.run_id}` : null]
+            .filter(Boolean)
+          if (parts.length) content.appendChild(make('div', 'pangea-launch-message', parts.join(' · ')))
+          row.appendChild(content)
+          body.appendChild(row)
+        }
+      }
+      details.appendChild(body)
+      return details
+    }
+
+    function mountLaunchDiagnostic() {
+      const existing = document.getElementById(LAUNCH_DIAGNOSTIC_ID)
+      if (!runContext?.taskId || !launchLog) {
+        existing?.remove()
+        return
+      }
+      const next = renderLaunchDiagnostic(launchLog)
+      if (!runContext.runId) {
+        const card = taskOverviewCard(runContext.taskId)
+        if (!card) { existing?.remove(); return }
+        const retry = [...card.children].find(node => node.tagName === 'BUTTON')
+        if (existing && existing.parentElement === card) existing.replaceWith(next)
+        else {
+          existing?.remove()
+          card.insertBefore(next, retry ?? null)
+        }
+        return
+      }
+      const card = currentTaskCard()
+      if (!card?.parentElement) { existing?.remove(); return }
+      if (existing && existing.parentElement === card.parentElement) existing.replaceWith(next)
+      else {
+        existing?.remove()
+        card.parentElement.insertBefore(next, card.nextSibling)
+      }
     }
 
     function diagnosticTone(diagnostic) {
@@ -344,6 +486,7 @@ window.__ModuleLoader__.load({
     function syncDom() {
       syncQueued = false
       protectAssistantSelect(runContext)
+      mountLaunchDiagnostic()
       if (!output || output.run_id !== runContext?.runId) {
         document.getElementById(OVERVIEW_ID)?.remove()
         return
@@ -364,21 +507,21 @@ window.__ModuleLoader__.load({
       requestAnimationFrame(syncDom)
     }
 
-    async function refresh() {
+    async function refreshOutput() {
       const runId = runContext?.runId
       if (!runId) {
-        controller?.abort()
-        controller = null
+        outputController?.abort()
+        outputController = null
         output = null
         scheduleSync()
         return
       }
-      controller?.abort()
+      outputController?.abort()
       const current = new AbortController()
-      controller = current
+      outputController = current
       try {
         const next = await requestOutputs(runId, current.signal)
-        if (controller !== current || runContext?.runId !== runId) return
+        if (outputController !== current || runContext?.runId !== runId) return
         output = next
         scheduleSync()
       } catch (error) {
@@ -389,21 +532,54 @@ window.__ModuleLoader__.load({
       }
     }
 
+    async function refreshLaunchLog() {
+      const taskId = runContext?.taskId
+      if (!taskId) {
+        launchController?.abort()
+        launchController = null
+        launchLog = null
+        scheduleSync()
+        return
+      }
+      launchController?.abort()
+      const current = new AbortController()
+      launchController = current
+      try {
+        const next = await requestLaunchLog(taskId, current.signal)
+        if (launchController !== current || runContext?.taskId !== taskId) return
+        launchLog = next
+        scheduleSync()
+      } catch (error) {
+        if (error?.name !== 'AbortError' && runContext?.taskId === taskId) {
+          launchLog = { task_id: taskId, path: null, events: [] }
+          scheduleSync()
+        }
+      }
+    }
+
     function restartPolling() {
       if (timer) clearInterval(timer)
       timer = null
-      void refresh()
-      if (runContext?.runId) timer = setInterval(() => { void refresh() }, 5000)
+      void refreshOutput()
+      void refreshLaunchLog()
+      if (runContext?.taskId || runContext?.runId) {
+        timer = setInterval(() => {
+          void refreshLaunchLog()
+          if (runContext?.runId) void refreshOutput()
+        }, 5000)
+      }
     }
 
     function apply(ctx) {
       const disposeStyle = installStyles()
       const onRunContext = event => {
-        const previous = runContext?.runId
+        const previousKey = `${runContext?.taskId ?? ''}\u0000${runContext?.runId ?? ''}`
         runContext = event?.detail ?? null
         ensureAssistantConversation(runContext)
-        if (previous !== runContext?.runId) {
+        const nextKey = `${runContext?.taskId ?? ''}\u0000${runContext?.runId ?? ''}`
+        if (previousKey !== nextKey) {
           output = null
+          launchLog = null
           restartPolling()
         }
         scheduleSync()
@@ -414,9 +590,11 @@ window.__ModuleLoader__.load({
       ctx.effect?.(() => () => {
         observer.disconnect()
         window.removeEventListener('pangea:run-context', onRunContext)
-        controller?.abort()
+        outputController?.abort()
+        launchController?.abort()
         if (timer) clearInterval(timer)
         document.getElementById(OVERVIEW_ID)?.remove()
+        document.getElementById(LAUNCH_DIAGNOSTIC_ID)?.remove()
         for (const node of document.querySelectorAll(`.${UNIT_DIAGNOSTIC_CLASS}`)) node.remove()
         disposeStyle()
       }, 'dsh-pangea-run-ui-native')
