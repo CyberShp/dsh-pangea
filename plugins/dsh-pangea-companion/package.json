@@ -60,6 +60,6 @@
   },
   "scripts": {
     "build": "node scripts/build-client.mjs",
-    "test": "npm run build && node --check src/index.js && node --check src/pangea-api.js && node --check src/reader.js && node --check src/source.js && node --check src/monitor.js && node --check src/task-store.js && node --check src/report-policy.js && node --check src/workbench-api.js && node --check lib/client.js && node --test tests/*.test.mjs"
+    "test": "npm run build && node --check src/index.js && node --check src/pangea-api.js && node --check src/reader.js && node --check src/source.js && node --check src/monitor.js && node --check src/task-store.js && node --check src/launch-log.js && node --check src/report-policy.js && node --check src/workbench-api.js && node --check lib/client.js && node --test tests/*.test.mjs"
   }
 }
