@@ -162,15 +162,39 @@ window.__ModuleLoader__.load({
       return Number.isInteger(map[stage]) ? map[stage] : -1
     }
 
+    function currentStageRole(output) {
+      return {
+        planning: 'planning',
+        analyzing: 'analysis',
+        reviewing: 'review',
+        closing: 'closure',
+        reporting: 'reporting',
+      }[String(output?.progress?.stage ?? '').toLowerCase()] ?? null
+    }
+
+    function currentStageActionTone(output) {
+      const role = currentStageRole(output)
+      if (!role) return null
+      const actions = Array.isArray(output?.progress?.actions) ? output.progress.actions.filter(action => action?.role === role) : []
+      if (actions.some(action => {
+        const status = String(action?.status ?? '').toLowerCase()
+        return status === 'failed' || (action?.error && !['accepted', 'settled'].includes(status))
+      })) return 'failed'
+      if (actions.some(action => String(action?.status ?? '').toLowerCase() === 'attention_required')) return 'warning'
+      return null
+    }
+
     function stageTone(output, index, active) {
       const lifecycle = String(output?.progress?.lifecycle_status ?? '').toLowerCase()
       const complete = String(output?.progress?.stage ?? '').toLowerCase() === 'complete' || lifecycle === 'completed'
       if (complete) return 'done'
       if (index < active) return 'done'
       if (index !== active) return 'pending'
+      const actionTone = currentStageActionTone(output)
+      if (actionTone) return actionTone
       if (lifecycle === 'failed') return 'failed'
       if (lifecycle === 'stopped') return 'stopped'
-      if (lifecycle === 'attention_required' || lifecycle === 'incomplete') return 'warning'
+      if (output?.progress?.attention_required === true || lifecycle === 'attention_required' || lifecycle === 'incomplete') return 'warning'
       return 'active'
     }
 
