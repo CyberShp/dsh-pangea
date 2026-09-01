@@ -2,38 +2,45 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+const source = await readFile(new URL('../src/client-native.js', import.meta.url), 'utf8')
+const build = await readFile(new URL('../scripts/build-client.mjs', import.meta.url), 'utf8')
+const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+
+test('native client is the packaged client entry', () => {
+  assert.equal(pkg.exports['./client'], './lib/client.js')
+  assert.match(build, /client-native\.js/)
+  assert.match(build, /lib', 'client\.js/)
+})
 
 test('assistant is isolated from the analysis conversation', () => {
   assert.match(source, /active && active\.kind !== 'analysis'/)
   assert.match(source, /filter\(item => item\.kind === 'analysis'\)/)
-  assert.match(source, /option\.disabled = isAnalysis/)
+  assert.match(source, /option\.disabled = blocked/)
   assert.match(source, /独立会话 · 不影响正在运行的分析/)
 })
 
-test('Agent output is embedded in run details instead of a standalone page', () => {
-  assert.match(source, /运行时间线/)
-  assert.match(source, /Agent 分析/)
-  assert.doesNotMatch(source, /registerPage\(\{[\s\S]*id: 'agent-output'/)
-  assert.doesNotMatch(source, /当前未触发定向补齐/)
+test('workflow overview mounts before the native Action lifecycle card', () => {
+  assert.match(source, /text === 'Action 生命周期'/)
+  assert.match(source, /card\.parentElement\.insertBefore\(next, card\)/)
+  assert.match(source, /完整流程/)
+  assert.match(source, /当前阶段：/)
 })
 
 test('current workflow stage uses a blue pulse while failures stay red', () => {
-  assert.match(source, /@keyframes pangeaStagePulse/)
-  assert.match(source, /is-active \.pangea-stage-dot \{ border-color:#2f7acb; background:#2f7acb;/)
-  assert.match(source, /is-failed \.pangea-stage-dot \{ border-color:#c7000b; background:#c7000b;/)
-})
-
-test('current stage failure is derived from PANGEA action status', () => {
-  assert.match(source, /function currentStageActionTone/)
-  assert.match(source, /output\.progress\.actions\.filter\(action => action\?\.role === role\)/)
-  assert.match(source, /status === 'failed'/)
-  assert.match(source, /if \(actionTone\) return actionTone/)
+  assert.match(source, /@keyframes pangeaNativeStagePulse/)
+  assert.match(source, /is-active \.pangea-native-dot \{ border-color:#2f7acb; background:#2f7acb;/)
+  assert.match(source, /is-failed \.pangea-native-dot \{ border-color:#c7000b; background:#c7000b;/)
 })
 
 test('rework stages remain conditional', () => {
-  assert.match(source, /output\?\.has_rework \? \['定向补齐', '再复核'\] : \[\]/)
-  assert.match(source, /if \(output\?\.has_rework\) appendGroup\(card, '定向补齐'/)
+  assert.match(source, /value\?\.has_rework \? \['定向补齐', '再复核'\] : \[\]/)
+})
+
+test('worker diagnostics are embedded into native analysis unit details', () => {
+  assert.match(source, /分析单元（\\d\+）/)
+  assert.match(source, /Worker 执行轨迹/)
+  assert.match(source, /result_path/)
+  assert.match(source, /查看 Agent 结构化输出/)
 })
 
 test('assistant card no longer exposes the misleading progress element', () => {
