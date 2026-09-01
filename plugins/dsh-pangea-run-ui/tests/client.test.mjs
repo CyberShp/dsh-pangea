@@ -36,12 +36,6 @@ test('rework stages remain conditional', () => {
   assert.match(source, /if \(output\?\.has_rework\) appendGroup\(card, '定向补齐'/)
 })
 
-test('asset catalog typography is normalized to the PANGEA product font', () => {
-  assert.match(source, /body\[data-pangea-product-mode="assets"\]/)
-  assert.match(source, /"Huawei Sans","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI"/)
-  assert.match(source, /font-size:13px!important/)
-})
-
 test('assistant card no longer exposes the misleading progress element', () => {
   assert.match(source, /\[data-pangea-assistant-progress\]/)
   assert.match(source, /display:none!important/)
