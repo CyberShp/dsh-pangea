@@ -1,5 +1,5 @@
-// PANGEA run presentation fixes: isolated assistant sessions, conditional rework stages,
-// and a read-only view of persisted Agent outputs.
+// PANGEA run presentation fixes: safe assistant sessions, conditional workflow stages,
+// in-place persisted Agent output, and visual consistency across PANGEA pages.
 window.__ModuleLoader__.load({
   id: 'dsh-pangea-run-ui',
   factory: (require) => {
@@ -7,15 +7,18 @@ window.__ModuleLoader__.load({
     const exports = module.exports
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
-    const React = require('react')
-    const h = React.createElement
     const inject = ['pangea']
     const API_PATH = '/api/pangea-run-ui/outputs'
     const STYLE_ID = 'dsh-pangea-run-ui-style'
-    const contextListeners = new Set()
+    const ENHANCEMENT_ID = 'pangea-run-detail-enhancement'
     const creationThrottle = new Map()
-    const reworkSeen = new Set()
     let lastRunContext = null
+    let lastOutput = null
+    let outputRunId = null
+    let outputController = null
+    let outputTimer = null
+    let syncPending = false
+    let renderedSignature = ''
 
     function installStyles() {
       if (document.getElementById(STYLE_ID)) return () => {}
@@ -23,6 +26,11 @@ window.__ModuleLoader__.load({
       style.id = STYLE_ID
       style.dataset.plugin = 'dsh-pangea-run-ui'
       style.textContent = `
+        @keyframes pangeaStagePulse {
+          0% { box-shadow: 0 0 0 0 rgba(47,122,203,.34); }
+          65% { box-shadow: 0 0 0 7px rgba(47,122,203,0); }
+          100% { box-shadow: 0 0 0 0 rgba(47,122,203,0); }
+        }
         body[data-pangea-product-shell] [data-pangea-assistant-card] {
           height:auto!important; min-height:0!important; display:block!important;
           padding:10px 0 4px!important; border:0!important; border-radius:0!important;
@@ -39,13 +47,59 @@ window.__ModuleLoader__.load({
           color:#7a828d; font-size:11px; line-height:16px; padding-top:1px;
         }
         body[data-pangea-product-shell] [data-pangea-assistant-select] { min-width:0!important; width:100%!important; }
+
+        body[data-pangea-product-mode="assets"],
+        body[data-pangea-product-mode="assets"] button,
+        body[data-pangea-product-mode="assets"] input,
+        body[data-pangea-product-mode="assets"] select,
+        body[data-pangea-product-mode="assets"] textarea,
+        body[data-pangea-product-mode="assets"] summary {
+          font-family:"Huawei Sans","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI",sans-serif!important;
+          -webkit-font-smoothing:antialiased;
+        }
+        body[data-pangea-product-mode="assets"] [style*="font-size: 9px"] { font-size:11px!important; }
+        body[data-pangea-product-mode="assets"] [style*="font-size: 10px"] { font-size:12px!important; }
+        body[data-pangea-product-mode="assets"] [style*="font-size: 12px"] { font-size:13px!important; }
+        body[data-pangea-product-mode="assets"] button,
+        body[data-pangea-product-mode="assets"] input,
+        body[data-pangea-product-mode="assets"] select,
+        body[data-pangea-product-mode="assets"] textarea { font-size:13px!important; }
+
+        #${ENHANCEMENT_ID} { margin:16px 0 4px; color:inherit; font-family:inherit; }
+        #${ENHANCEMENT_ID} .pangea-run-ui-title { font-size:14px; font-weight:700; margin:0 0 9px; }
+        #${ENHANCEMENT_ID} .pangea-run-ui-card {
+          border:1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
+          background:var(--dsw-alias-bg-layer-1, transparent); border-radius:9px; padding:13px; margin-bottom:14px;
+        }
+        #${ENHANCEMENT_ID} .pangea-stage-rail { display:flex; align-items:center; overflow-x:auto; padding:4px 2px 3px; }
+        #${ENHANCEMENT_ID} .pangea-stage { min-width:92px; display:flex; align-items:center; gap:8px; color:#747b85; font-size:12px; white-space:nowrap; }
+        #${ENHANCEMENT_ID} .pangea-stage-dot { width:11px; height:11px; border-radius:50%; border:2px solid #c7ccd3; background:#fff; box-sizing:border-box; flex:0 0 auto; }
+        #${ENHANCEMENT_ID} .pangea-stage.is-done .pangea-stage-dot { border-color:#2da44e; background:#2da44e; }
+        #${ENHANCEMENT_ID} .pangea-stage.is-active { color:var(--dsw-alias-label-primary, #17191d); font-weight:700; }
+        #${ENHANCEMENT_ID} .pangea-stage.is-active .pangea-stage-dot { border-color:#2f7acb; background:#2f7acb; animation:pangeaStagePulse 1.55s ease-out infinite; }
+        #${ENHANCEMENT_ID} .pangea-stage.is-warning .pangea-stage-dot { border-color:#d97706; background:#d97706; animation:none; }
+        #${ENHANCEMENT_ID} .pangea-stage.is-failed .pangea-stage-dot { border-color:#c7000b; background:#c7000b; animation:none; }
+        #${ENHANCEMENT_ID} .pangea-stage.is-stopped .pangea-stage-dot { border-color:#8a929d; background:#8a929d; animation:none; }
+        #${ENHANCEMENT_ID} .pangea-stage-line { width:34px; height:1px; background:#d9dde3; flex:0 0 auto; margin:0 5px; }
+        #${ENHANCEMENT_ID} .pangea-stage-line.is-done { background:#8fcaa0; }
+        #${ENHANCEMENT_ID} .pangea-agent-group { margin-top:14px; }
+        #${ENHANCEMENT_ID} .pangea-agent-group-title { font-size:13px; font-weight:700; margin-bottom:7px; }
+        #${ENHANCEMENT_ID} .pangea-agent-record { border-top:1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.14)); padding:11px 0; }
+        #${ENHANCEMENT_ID} .pangea-agent-record:first-child { border-top:0; padding-top:1px; }
+        #${ENHANCEMENT_ID} .pangea-agent-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+        #${ENHANCEMENT_ID} .pangea-agent-name { font-size:13px; font-weight:680; }
+        #${ENHANCEMENT_ID} .pangea-agent-meta { color:#7a818b; font-size:11px; }
+        #${ENHANCEMENT_ID} .pangea-agent-summary { margin-top:6px; white-space:pre-wrap; font-size:13px; line-height:1.58; }
+        #${ENHANCEMENT_ID} .pangea-agent-scope { margin-top:5px; color:#69717c; font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+        #${ENHANCEMENT_ID} .pangea-agent-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+        #${ENHANCEMENT_ID} .pangea-agent-chip { padding:3px 7px; border-radius:999px; background:var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08)); font-size:11px; }
+        #${ENHANCEMENT_ID} details { margin-top:8px; }
+        #${ENHANCEMENT_ID} summary { cursor:pointer; color:#59616c; font-size:12px; }
+        #${ENHANCEMENT_ID} pre { max-height:380px; overflow:auto; padding:11px; border-radius:7px; background:var(--dsw-alias-bg-layer-2, #f6f7f9); font-size:11px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
+        #${ENHANCEMENT_ID} .pangea-agent-empty { color:#7a818b; font-size:12px; line-height:1.55; }
       `
       document.head.appendChild(style)
       return () => style.remove()
-    }
-
-    function notifyContext() {
-      for (const listener of contextListeners) listener(lastRunContext)
     }
 
     function activeConversation(context) {
@@ -81,49 +135,8 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function domShowsRework(context) {
-      if (context?.phase && /定向补齐|返工|再复核/.test(context.phase)) return true
-      for (const element of document.querySelectorAll('div,span')) {
-        if (element.textContent?.trim() !== '定向补齐单元') continue
-        const parent = element.parentElement
-        if (parent && /[1-9]\d*/.test(parent.textContent ?? '')) return true
-      }
-      return false
-    }
-
-    function conditionalStageRows(context) {
-      if (!context?.taskId) return
-      if (domShowsRework(context)) reworkSeen.add(context.taskId)
-      const visible = reworkSeen.has(context.taskId)
-      const labels = new Set(['定向补齐', '返工', '返工复核', '再复核'])
-      for (const element of document.querySelectorAll('div,span')) {
-        const label = element.textContent?.trim()
-        if (!labels.has(label)) continue
-        let row = element
-        for (let depth = 0; depth < 5 && row?.parentElement; depth += 1, row = row.parentElement) {
-          const columns = row.style?.gridTemplateColumns ?? ''
-          if (row.style?.display === 'grid' && /9px|minmax/.test(columns)) break
-        }
-        if (row) row.style.display = visible ? '' : 'none'
-      }
-    }
-
-    function syncDom(context) {
-      assistantSelectSafety(context)
-      conditionalStageRows(context)
-    }
-
-    function useRunContext() {
-      const [context, setContext] = React.useState(lastRunContext)
-      React.useEffect(() => {
-        contextListeners.add(setContext)
-        return () => contextListeners.delete(setContext)
-      }, [])
-      return context
-    }
-
-    async function requestOutputs({ cwd, runId, signal }) {
-      const query = new URLSearchParams({ cwd, run_id: runId })
+    async function requestOutputs({ runId, signal }) {
+      const query = new URLSearchParams({ run_id: runId })
       const response = await fetch(`${API_PATH}?${query}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
@@ -135,7 +148,7 @@ window.__ModuleLoader__.load({
     }
 
     function stageIndex(output) {
-      const stage = output?.progress?.stage
+      const stage = String(output?.progress?.stage ?? '').toLowerCase()
       const hasRework = output?.has_rework === true
       const map = {
         preparing: 0,
@@ -149,157 +162,232 @@ window.__ModuleLoader__.load({
       return Number.isInteger(map[stage]) ? map[stage] : -1
     }
 
-    const ui = {
-      root: { height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '24px 28px 40px', background: '#f5f6f8', color: '#17191d' },
-      head: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', marginBottom: 18 },
-      title: { fontSize: 24, lineHeight: 1.2, fontWeight: 720, letterSpacing: '-.03em' },
-      sub: { marginTop: 6, color: '#747b85', fontSize: 13, lineHeight: 1.55 },
-      card: { border: '1px solid #dce1e6', borderRadius: 9, background: '#fff', padding: 16, marginBottom: 14, boxShadow: '0 1px 2px rgba(20,29,40,.03)' },
-      stages: { display: 'flex', alignItems: 'center', gap: 0, overflowX: 'auto', padding: '6px 0 2px' },
-      stage: { minWidth: 92, display: 'grid', gridTemplateColumns: '18px minmax(62px,1fr)', alignItems: 'center', gap: 7, color: '#747b85', fontSize: 12 },
-      dot: { width: 10, height: 10, borderRadius: '50%', border: '2px solid #c7ccd3', background: '#fff', boxSizing: 'border-box' },
-      doneDot: { borderColor: '#2da44e', background: '#2da44e' },
-      activeDot: { borderColor: '#c7000b', background: '#c7000b', boxShadow: '0 0 0 3px #fff0f1' },
-      line: { width: 34, height: 1, background: '#d9dde3', flex: '0 0 auto' },
-      section: { fontSize: 16, fontWeight: 680, margin: '22px 0 10px' },
-      record: { borderTop: '1px solid #edf0f2', padding: '13px 0' },
-      recordHead: { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' },
-      recordTitle: { fontSize: 14, fontWeight: 680 },
-      meta: { color: '#7a818b', fontSize: 12 },
-      summary: { marginTop: 7, whiteSpace: 'pre-wrap', lineHeight: 1.6, fontSize: 13 },
-      chips: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 },
-      chip: { padding: '3px 7px', borderRadius: 999, background: '#f0f2f4', color: '#505761', fontSize: 11 },
-      pre: { maxHeight: 420, overflow: 'auto', padding: 12, borderRadius: 7, background: '#f6f7f9', fontSize: 11, lineHeight: 1.55, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
-      empty: { color: '#7a818b', fontSize: 13, lineHeight: 1.6 },
-      error: { color: '#c7000b', fontSize: 13, whiteSpace: 'pre-wrap' },
+    function stageTone(output, index, active) {
+      const lifecycle = String(output?.progress?.lifecycle_status ?? '').toLowerCase()
+      const complete = String(output?.progress?.stage ?? '').toLowerCase() === 'complete' || lifecycle === 'completed'
+      if (complete) return 'done'
+      if (index < active) return 'done'
+      if (index !== active) return 'pending'
+      if (lifecycle === 'failed') return 'failed'
+      if (lifecycle === 'stopped') return 'stopped'
+      if (lifecycle === 'attention_required' || lifecycle === 'incomplete') return 'warning'
+      return 'active'
     }
 
-    function StageRail({ output }) {
+    function make(tag, className, text) {
+      const element = document.createElement(tag)
+      if (className) element.className = className
+      if (text !== undefined && text !== null) element.textContent = String(text)
+      return element
+    }
+
+    function renderStageRail(output) {
+      const card = make('div', 'pangea-run-ui-card')
+      card.appendChild(make('div', 'pangea-run-ui-title', '完整流程'))
+      const rail = make('div', 'pangea-stage-rail')
       const stages = stageNames(output)
       const active = stageIndex(output)
-      return h('div', { style: ui.stages }, stages.flatMap((name, index) => [
-        index > 0 ? h('span', { key: `line-${name}`, style: ui.line }) : null,
-        h('span', { key: name, style: ui.stage },
-          h('span', { style: { ...ui.dot, ...(index < active ? ui.doneDot : index === active ? ui.activeDot : {}) } }),
-          h('span', { style: index === active ? { color: '#17191d', fontWeight: 680 } : undefined }, name)),
-      ]).filter(Boolean))
-    }
-
-    function CountChips({ record }) {
-      const labels = [
-        ['业务流程', record.counts?.business_flows], ['证据', record.counts?.evidence], ['风险', record.counts?.risks],
-        ['用例', record.counts?.test_cases], ['错误', record.counts?.errors],
-      ]
-      return h('div', { style: ui.chips }, labels.map(([label, value]) => h('span', { key: label, style: ui.chip }, `${label} ${value ?? 0}`)))
-    }
-
-    function RecordCard({ record, fallbackTitle }) {
-      const title = record.unit_id ? `${record.unit_id} · Attempt ${record.attempt}` : fallbackTitle
-      return h('div', { style: ui.record },
-        h('div', { style: ui.recordHead },
-          h('div', { style: ui.recordTitle }, title),
-          h('div', { style: ui.meta }, [record.worker_id, record.file].filter(Boolean).join(' · '))),
-        record.summary ? h('div', { style: ui.summary }, record.summary) : null,
-        record.analyzed_scope?.length ? h('div', { style: ui.meta }, `分析范围：${record.analyzed_scope.join('、')}`) : null,
-        record.analyzed_context_scope?.length ? h('div', { style: ui.meta }, `上下文范围：${record.analyzed_context_scope.join('、')}`) : null,
-        h(CountChips, { record }),
-        h('details', { style: { marginTop: 9 } },
-          h('summary', { style: { cursor: 'pointer', fontSize: 12, color: '#4f5966' } }, '查看完整结构化输出'),
-          h('pre', { style: ui.pre }, JSON.stringify(record.raw ?? {}, null, 2))))
-    }
-
-    function RecordSection({ title, records, empty }) {
-      return h(React.Fragment, null,
-        h('div', { style: ui.section }, title),
-        h('div', { style: ui.card }, records?.length
-          ? records.map((record, index) => h(RecordCard, { key: `${record.kind}-${record.file}-${index}`, record, fallbackTitle: title }))
-          : h('div', { style: ui.empty }, empty)))
-    }
-
-    function AgentOutputPage({ scope }) {
-      const context = useRunContext()
-      const runId = context?.runId
-      const cwd = scope?.cwd
-      const [output, setOutput] = React.useState(null)
-      const [error, setError] = React.useState('')
-
-      React.useEffect(() => {
-        if (!runId || !cwd) {
-          setOutput(null)
-          setError('')
-          return undefined
+      stages.forEach((name, index) => {
+        if (index > 0) {
+          const line = make('span', `pangea-stage-line${index <= active ? ' is-done' : ''}`)
+          rail.appendChild(line)
         }
-        let disposed = false
-        let controller = null
-        const load = async () => {
-          controller?.abort()
-          controller = new AbortController()
-          try {
-            const value = await requestOutputs({ cwd, runId, signal: controller.signal })
-            if (!disposed) { setOutput(value); setError('') }
-          } catch (reason) {
-            if (!disposed && reason?.name !== 'AbortError') setError(reason instanceof Error ? reason.message : String(reason))
-          }
-        }
-        void load()
-        const timer = window.setInterval(load, 5000)
-        return () => { disposed = true; controller?.abort(); window.clearInterval(timer) }
-      }, [cwd, runId])
-
-      if (!runId) return h('div', { style: ui.root }, h('div', { style: ui.title }, 'Agent 输出'), h('div', { style: ui.sub }, '先在“PANGEA 分析”中选择一个 Run。'))
-      return h('div', { style: ui.root },
-        h('div', { style: ui.head }, h('div', null,
-          h('div', { style: ui.title }, 'Agent 输出'),
-          h('div', { style: ui.sub }, `${context?.title ?? runId} · ${runId}`))),
-        error ? h('div', { style: { ...ui.card, ...ui.error } }, error) : null,
-        output ? h(React.Fragment, null,
-          h('div', { style: ui.card },
-            h('div', { style: { fontSize: 13, fontWeight: 680, marginBottom: 8 } }, '完整流程'),
-            h(StageRail, { output }),
-            h('div', { style: { ...ui.sub, marginTop: 10 } }, output.has_rework
-              ? '独立复核已触发定向补齐；补齐与再复核作为条件分支展示。'
-              : '当前未触发定向补齐，因此不展示返工相关阶段。')),
-          output.plan ? h(RecordSection, { title: '规划 Agent', records: [output.plan], empty: '暂无规划输出。' }) : null,
-          h(RecordSection, { title: '分析 Worker', records: output.analysis, empty: '暂无已持久化的分析 Worker 输出。' }),
-          output.has_rework ? h(RecordSection, { title: '定向补齐', records: output.rework, empty: '已触发定向补齐，等待 Worker 写入结果。' }) : null,
-          h(RecordSection, { title: 'Reviewer', records: output.reviews, empty: '暂无已持久化的 Reviewer 输出。' }))
-          : h('div', { style: ui.card }, h('div', { style: ui.empty }, '正在读取 Agent 输出…')))
+        const tone = stageTone(output, index, active)
+        const stage = make('span', `pangea-stage is-${tone}`)
+        stage.appendChild(make('span', 'pangea-stage-dot'))
+        stage.appendChild(make('span', '', name))
+        rail.appendChild(stage)
+      })
+      card.appendChild(rail)
+      return card
     }
 
-    function icon() {
-      return h('svg', { viewBox: '0 0 24 24', width: 22, height: 22, fill: 'none', stroke: 'currentColor', strokeWidth: 1.7 },
-        h('path', { d: 'M5 4.5h14v15H5z' }), h('path', { d: 'M8 8h8M8 12h8M8 16h5' }))
+    function recordTitle(record, fallback) {
+      if (record?.unit_id) return `${record.unit_id} · Attempt ${record.attempt ?? 0}`
+      return fallback
+    }
+
+    function appendRecord(parent, record, fallbackTitle) {
+      const row = make('div', 'pangea-agent-record')
+      const head = make('div', 'pangea-agent-head')
+      head.appendChild(make('div', 'pangea-agent-name', recordTitle(record, fallbackTitle)))
+      head.appendChild(make('div', 'pangea-agent-meta', [record?.worker_id, record?.file].filter(Boolean).join(' · ')))
+      row.appendChild(head)
+      if (record?.summary) row.appendChild(make('div', 'pangea-agent-summary', record.summary))
+      if (record?.analyzed_scope?.length) row.appendChild(make('div', 'pangea-agent-scope', `分析范围：${record.analyzed_scope.join('、')}`))
+      if (record?.analyzed_context_scope?.length) row.appendChild(make('div', 'pangea-agent-scope', `上下文范围：${record.analyzed_context_scope.join('、')}`))
+      const counts = record?.counts ?? {}
+      const chips = make('div', 'pangea-agent-chips')
+      for (const [label, value] of [['业务流程', counts.business_flows], ['证据', counts.evidence], ['风险', counts.risks], ['用例', counts.test_cases], ['错误', counts.errors]]) {
+        chips.appendChild(make('span', 'pangea-agent-chip', `${label} ${value ?? 0}`))
+      }
+      row.appendChild(chips)
+      const details = make('details')
+      details.appendChild(make('summary', '', '查看完整结构化输出'))
+      const pre = make('pre')
+      pre.textContent = JSON.stringify(record?.raw ?? {}, null, 2)
+      details.appendChild(pre)
+      row.appendChild(details)
+      parent.appendChild(row)
+    }
+
+    function appendGroup(parent, title, records, emptyText) {
+      const group = make('div', 'pangea-agent-group')
+      group.appendChild(make('div', 'pangea-agent-group-title', title))
+      if (records?.length) {
+        for (const record of records) appendRecord(group, record, title)
+      } else {
+        group.appendChild(make('div', 'pangea-agent-empty', emptyText))
+      }
+      parent.appendChild(group)
+    }
+
+    function renderAgentAnalysis(output) {
+      const card = make('div', 'pangea-run-ui-card')
+      card.appendChild(make('div', 'pangea-run-ui-title', 'Agent 分析'))
+      const stage = String(output?.progress?.stage ?? '').toLowerCase()
+      if (output?.plan) appendGroup(card, '规划 Agent', [output.plan], '')
+      else if (stage === 'planning') appendGroup(card, '规划 Agent', [], '正在规划，持久化结果生成后会显示在这里。')
+
+      const analysisEmpty = stage === 'analyzing'
+        ? '分析 Worker 正在运行，已写入的结果会逐步显示在这里。'
+        : '暂无分析 Worker 输出。'
+      appendGroup(card, '分析 Worker', output?.analysis ?? [], analysisEmpty)
+
+      if (output?.reviews?.length || stage === 'reviewing') {
+        appendGroup(card, output?.has_rework ? '复核' : '独立复核', output?.reviews ?? [], stage === 'reviewing' ? '复核正在进行。' : '暂无复核输出。')
+      }
+      if (output?.has_rework) appendGroup(card, '定向补齐', output?.rework ?? [], stage === 'closing' ? '正在定向补齐。' : '暂无补齐输出。')
+      return card
+    }
+
+    function timelineHeading() {
+      for (const element of document.querySelectorAll('div')) {
+        const value = element.textContent?.trim() ?? ''
+        if (element.childElementCount === 0 && /^运行时间线（\d+）$/.test(value)) return element
+      }
+      return null
+    }
+
+    function removeEnhancement() {
+      document.getElementById(ENHANCEMENT_ID)?.remove()
+      renderedSignature = ''
+    }
+
+    function renderRunDetailEnhancement(output) {
+      const heading = timelineHeading()
+      if (!heading || !output || output.run_id !== lastRunContext?.runId) {
+        if (!heading) removeEnhancement()
+        return
+      }
+      const existing = document.getElementById(ENHANCEMENT_ID)
+      const signature = JSON.stringify([output.run_id, output.progress, output.has_rework, output.plan, output.analysis, output.rework, output.reviews])
+      if (existing && renderedSignature === signature && existing.parentElement === heading.parentElement) return
+      const container = existing ?? make('section')
+      container.id = ENHANCEMENT_ID
+      container.replaceChildren(renderStageRail(output), renderAgentAnalysis(output))
+      renderedSignature = signature
+      if (!existing) heading.parentElement?.insertBefore(container, heading)
+    }
+
+    function conditionalExistingUi(output) {
+      if (!output) return
+      const visible = output.has_rework === true
+      const labels = new Set(['定向补齐', '返工', '返工复核', '再复核', '定向补齐单元'])
+      for (const element of document.querySelectorAll('div,span')) {
+        if (!labels.has(element.textContent?.trim())) continue
+        if (element.closest(`#${ENHANCEMENT_ID}`)) continue
+        let row = element.parentElement
+        if (!row) continue
+        for (let depth = 0; depth < 4 && row.parentElement; depth += 1) {
+          if (row.style?.display === 'grid' || row.tagName === 'LI') break
+          row = row.parentElement
+        }
+        row.style.display = visible ? '' : 'none'
+      }
+    }
+
+    function syncDom() {
+      syncPending = false
+      assistantSelectSafety(lastRunContext)
+      if (lastOutput?.run_id === lastRunContext?.runId) {
+        conditionalExistingUi(lastOutput)
+        renderRunDetailEnhancement(lastOutput)
+      } else {
+        removeEnhancement()
+      }
+    }
+
+    function scheduleSync() {
+      if (syncPending) return
+      syncPending = true
+      window.requestAnimationFrame(syncDom)
+    }
+
+    async function refreshOutput() {
+      const runId = lastRunContext?.runId
+      if (!runId) {
+        outputController?.abort()
+        outputController = null
+        outputRunId = null
+        lastOutput = null
+        removeEnhancement()
+        return
+      }
+      outputController?.abort()
+      const controller = new AbortController()
+      outputController = controller
+      try {
+        const output = await requestOutputs({ runId, signal: controller.signal })
+        if (controller !== outputController || runId !== lastRunContext?.runId) return
+        outputRunId = runId
+        lastOutput = output
+        scheduleSync()
+      } catch (error) {
+        if (error?.name !== 'AbortError' && runId === lastRunContext?.runId) {
+          outputRunId = runId
+          lastOutput = null
+          scheduleSync()
+        }
+      }
+    }
+
+    function restartOutputPolling() {
+      if (outputTimer) window.clearInterval(outputTimer)
+      outputTimer = null
+      void refreshOutput()
+      if (lastRunContext?.runId) outputTimer = window.setInterval(() => { void refreshOutput() }, 5000)
     }
 
     function apply(ctx) {
-      if (!ctx.pangea) return
       const disposeStyle = installStyles()
       const onRunContext = event => {
-        const context = event.detail
-        if (!context) return
-        lastRunContext = context
-        ensureAssistantConversation(context)
-        window.requestAnimationFrame(() => syncDom(context))
-        notifyContext()
+        const previousRunId = lastRunContext?.runId
+        lastRunContext = event?.detail ?? null
+        ensureAssistantConversation(lastRunContext)
+        if (previousRunId !== lastRunContext?.runId) {
+          lastOutput = null
+          outputRunId = null
+          restartOutputPolling()
+        }
+        scheduleSync()
       }
       window.addEventListener('pangea:run-context', onRunContext)
-      const observer = new MutationObserver(() => lastRunContext && syncDom(lastRunContext))
+      const observer = new MutationObserver(scheduleSync)
       observer.observe(document.documentElement, { subtree: true, childList: true })
-      const disposePage = ctx.pangea.registerPage({
-        id: 'agent-output', title: () => 'Agent 输出', icon, order: 15,
-        available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: AgentOutputPage,
-      })
       ctx.effect?.(() => () => {
-        disposePage?.()
         observer.disconnect()
         window.removeEventListener('pangea:run-context', onRunContext)
+        outputController?.abort()
+        if (outputTimer) window.clearInterval(outputTimer)
+        removeEnhancement()
         disposeStyle()
       }, 'dsh-pangea-run-ui')
     }
 
     exports.inject = inject
     exports.stageNames = stageNames
+    exports.stageIndex = stageIndex
     exports.apply = apply
     return module.exports
   },
