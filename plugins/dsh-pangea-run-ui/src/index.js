@@ -101,7 +101,9 @@ function safeRunId(runId) {
 
 function resolveTaskPath(cwd, value) {
   if (typeof value !== 'string' || value.trim() === '') return null
-  return path.isAbsolute(value) ? path.resolve(value) : path.resolve(cwd, value)
+  if (path.isAbsolute(value)) return path.resolve(value)
+  const base = typeof cwd === 'string' && cwd.trim() !== '' ? cwd : process.cwd()
+  return path.resolve(base, value)
 }
 
 function unitIdFromTask(task, fallback = null) {
@@ -240,13 +242,30 @@ function toolTarget(exec) {
   return null
 }
 
+function toolFailure(result, downstream) {
+  if (result?.isError === true) {
+    const value = result?.error ?? result?.value
+    if (typeof value === 'string') return value
+    if (typeof value?.message === 'string') return value.message
+    return 'tool execution failed'
+  }
+  if (downstream?.kind === 'block') {
+    const value = downstream.reason ?? downstream.error ?? downstream.message
+    if (typeof value === 'string') return value
+    if (typeof value?.message === 'string') return value.message
+    return 'tool execution blocked'
+  }
+  return null
+}
+
 function settledReason(message) {
+  if (typeof message?.source?.summary === 'string' && message.source.summary.trim() !== '') return message.source.summary.trim()
   const candidates = [message?.source?.reason, message?.reason, message?.data?.reason]
   for (const value of candidates) {
     if (typeof value === 'string' && value) return value
     if (typeof value?.kind === 'string' && value.kind) return value.kind
   }
-  return 'subagent-settled'
+  return null
 }
 
 export function createWorkerTraceObserver(ctx) {
@@ -272,10 +291,12 @@ export function createWorkerTraceObserver(ctx) {
     const downstream = await next()
     try {
       const cwd = workspaceCwd(exec)
-      if (!cwd || result?.isError) return downstream
+      if (!cwd) return downstream
+      const failure = toolFailure(result, downstream)
       const value = acceptedToolValue(result, downstream)
 
       if (exec.name === 'pangea_action_dispatch') {
+        if (failure) return downstream
         const childId = value?.subagent_id ?? value?.subagentId
         const actionId = exec.arguments?.action_id
         if (childId && actionId) {
@@ -296,8 +317,10 @@ export function createWorkerTraceObserver(ctx) {
           const state = await resultState(binding.task, value?.status === 'valid' ? 'accepted' : 'settled')
           await appendTrace(binding, {
             type: 'validation', child_id: binding.child_id, action_id: binding.action_id, unit_id: binding.unit_id,
-            status: value?.status ?? null, result_state: state.state, attention_required: value?.attention_required === true,
-            error: value?.error?.message ?? value?.error ?? null,
+            status: failure ? 'tool_error' : value?.status ?? value?.validation?.status ?? null,
+            result_state: state.state,
+            attention_required: value?.attention_required === true || value?.validation?.attention_required === true,
+            error: failure ?? value?.error?.message ?? value?.validation?.error?.message ?? value?.error ?? null,
           })
         }
         return downstream
@@ -311,7 +334,7 @@ export function createWorkerTraceObserver(ctx) {
       const state = await resultState(binding.task, 'dispatched')
       await appendTrace(binding, {
         type: 'tool', child_id: childId, action_id: binding.action_id, unit_id: binding.unit_id,
-        tool: exec.name ?? 'unknown', target: toolTarget(exec), ok: true, result_state: state.state,
+        tool: exec.name ?? 'unknown', target: toolTarget(exec), ok: !failure, error: failure, result_state: state.state,
       })
     } catch { /* diagnostics must never affect workflow */ }
     return downstream
@@ -341,31 +364,50 @@ function resultStateLabel(state) {
   }[state] ?? state
 }
 
+function recentActivityLabel(event) {
+  if (event?.type === 'tool') {
+    const target = typeof event.target === 'string' && event.target ? ` ${event.target}` : ''
+    return `${event.ok === false ? '失败 ' : ''}${event.tool ?? 'tool'}${target}`
+  }
+  if (event?.type === 'validation') return `校验 ${event.status ?? '未知'}`
+  if (event?.type === 'settled') return `Worker 结束${event.reason ? `：${event.reason}` : ''}`
+  if (event?.type === 'started') return 'Worker 开始/续接'
+  return event?.type ?? 'activity'
+}
+
 function runtimeSummary(diagnostic) {
   if (!diagnostic) return null
+  const failedTools = diagnostic.failed_tool_count > 0 ? `（失败 ${diagnostic.failed_tool_count}）` : ''
   const traceLabel = diagnostic.trace_observed
-    ? `task ${diagnostic.task_read ? '已读' : '未观察到读取'} · 工具 ${diagnostic.tool_count}`
+    ? `task ${diagnostic.task_read ? '已读' : '未观察到读取'} · 工具 ${diagnostic.tool_count}${failedTools}`
     : '本次运行没有可用的历史工具轨迹'
-  const settled = diagnostic.settled ? ` · Worker 已结束${diagnostic.settled_reason ? `(${diagnostic.settled_reason})` : ''}` : ''
-  const validation = diagnostic.validation_status ? ` · 校验 ${diagnostic.validation_status}` : ''
-  return `执行轨迹：${actionStatusLabel(diagnostic.status)} · ${traceLabel} · result_path ${resultStateLabel(diagnostic.result_state)}${settled}${validation}`
+  const settled = diagnostic.settled ? ` · Worker 已结束${diagnostic.settled_reason ? `：${diagnostic.settled_reason}` : ''}` : ''
+  const validation = diagnostic.validation_status ? ` · 最近校验 ${diagnostic.validation_status}` : ''
+  const repair = diagnostic.incomplete_attempts > 0 ? ` · 空提交 ${diagnostic.incomplete_attempts} 次` : diagnostic.validation_failures > 0 ? ` · 校验失败 ${diagnostic.validation_failures} 次` : ''
+  const recent = diagnostic.recent_activity?.length
+    ? `\n最近活动：${diagnostic.recent_activity.slice(-3).map(recentActivityLabel).join('；')}`
+    : ''
+  return `执行轨迹：${actionStatusLabel(diagnostic.status)} · ${traceLabel} · result_path ${resultStateLabel(diagnostic.result_state)}${settled}${validation}${repair}${recent}`
 }
 
 export async function buildWorkerDiagnostics({ cwd, progress, runDirectory, traceRecords = [] }) {
   const diagnostics = []
   for (const action of Object.values(progress?.actions ?? {})) {
-    if (!['analysis', 'closure', 'planning', 'review'].includes(action?.role)) continue
+    if (!['analysis', 'closure', 'rework', 'planning', 'review'].includes(action?.role)) continue
     const taskPath = resolveTaskPath(cwd, action?.task_path)
     const taskValue = taskPath ? await readJsonIfPresent(taskPath) : null
     const task = taskValue && typeof taskValue === 'object' ? { ...taskValue, __cwd: cwd } : { __cwd: cwd }
-    const unitId = unitIdFromTask(taskValue, action?.role === 'analysis' || action?.role === 'closure' ? null : action?.role)
+    const unitRole = ['analysis', 'closure', 'rework'].includes(action?.role)
+    const unitId = unitIdFromTask(taskValue, unitRole ? null : action?.role)
     const state = await resultState(task, action?.status)
     const events = traceRecords.filter(item => item?.action_id === action?.action_id || (action?.task_id && item?.child_id === action.task_id))
     const tools = events.filter(item => item.type === 'tool')
     const taskRead = tools.some(item => samePath(cwd, item.target, taskPath))
     const resultTouched = tools.some(item => samePath(cwd, item.target, state.result_path) || ['written', 'accepted'].includes(item.result_state))
-    const settled = [...events].reverse().find(item => item.type === 'settled')
+    const lastStarted = [...events].reverse().find(item => item.type === 'started')
+    const lastSettled = [...events].reverse().find(item => item.type === 'settled')
     const validation = [...events].reverse().find(item => item.type === 'validation')
+    const settledAfterLastStart = Boolean(lastSettled) && (!lastStarted || Number(lastSettled.at ?? 0) >= Number(lastStarted.at ?? 0))
     diagnostics.push({
       action_id: action?.action_id ?? null,
       unit_id: unitId,
@@ -379,9 +421,10 @@ export async function buildWorkerDiagnostics({ cwd, progress, runDirectory, trac
       trace_observed: events.length > 0,
       task_read: taskRead,
       tool_count: tools.length,
+      failed_tool_count: tools.filter(item => item.ok === false).length,
       result_write_observed: resultTouched,
-      settled: Boolean(settled) || ['settled', 'accepted', 'failed'].includes(action?.status),
-      settled_reason: settled?.reason ?? null,
+      settled: ['settled', 'accepted', 'failed'].includes(action?.status) || settledAfterLastStart,
+      settled_reason: settledAfterLastStart ? lastSettled?.reason ?? null : null,
       validation_status: validation?.status ?? (action?.status === 'accepted' ? 'valid' : null),
       incomplete_attempts: Number.isInteger(action?.incomplete_attempts) ? action.incomplete_attempts : 0,
       validation_failures: Number.isInteger(action?.validation_failures) ? action.validation_failures : 0,
@@ -392,9 +435,10 @@ export async function buildWorkerDiagnostics({ cwd, progress, runDirectory, trac
   return diagnostics
 }
 
-function attachDiagnostics(records, diagnostics, role) {
+function attachDiagnostics(records, diagnostics, roles) {
+  const acceptedRoles = new Set(Array.isArray(roles) ? roles : [roles])
   return records.map(record => {
-    const diagnostic = diagnostics.find(item => item.role === role && item.unit_id === record.unit_id)
+    const diagnostic = diagnostics.find(item => acceptedRoles.has(item.role) && item.unit_id === record.unit_id)
     if (!diagnostic) return record
     const runtime = runtimeSummary(diagnostic)
     return {
@@ -424,7 +468,7 @@ export async function readRunOutputs({ cwd, runId, dataRoot } = {}) {
   ])
   const diagnostics = await buildWorkerDiagnostics({ cwd: effectiveCwd, progress, runDirectory, traceRecords })
   const analysis = attachDiagnostics(rawAnalysis, diagnostics, 'analysis')
-  const rework = attachDiagnostics(rawRework, diagnostics, 'closure')
+  const rework = attachDiagnostics(rawRework, diagnostics, ['closure', 'rework'])
   const reportPresent = await pathKind(path.join(runDirectory, 'report.md')) === 'file' || await pathKind(path.join(runDirectory, 'report.html')) === 'file'
   const completedRework = Array.isArray(progress?.completed_closure_units)
     ? progress.completed_closure_units.length
