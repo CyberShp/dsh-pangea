@@ -35,6 +35,23 @@ test('rework is conditional and raw worker outputs are preserved', async () => {
   assert.equal(after.rework[0].attempt, 1)
 })
 
+test('desktop environment data root can be used without browser cwd', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-run-ui-env-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const run = path.join(dataRoot, 'runs', 'run-env')
+  await writeJson(path.join(run, 'progress.json'), { stage: 'planning', lifecycle_status: 'running' })
+  const previous = process.env.PANGEA_DATA_ROOT
+  process.env.PANGEA_DATA_ROOT = dataRoot
+  try {
+    const output = await readRunOutputs({ runId: 'run-env' })
+    assert.equal(output.run_id, 'run-env')
+    assert.equal(output.progress.stage, 'planning')
+  } finally {
+    if (previous === undefined) delete process.env.PANGEA_DATA_ROOT
+    else process.env.PANGEA_DATA_ROOT = previous
+  }
+})
+
 test('run id traversal is rejected', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'pangea-run-ui-'))
   await mkdir(path.join(cwd, 'pangea-data', 'runs'), { recursive: true })
