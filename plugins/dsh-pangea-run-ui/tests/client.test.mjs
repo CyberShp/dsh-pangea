@@ -26,6 +26,15 @@ test('workflow overview mounts before the native Action lifecycle card', () => {
   assert.match(source, /当前阶段：/)
 })
 
+test('task overview exposes persistent launch diagnostics before retry', () => {
+  assert.match(source, /LAUNCH_LOG_API_PATH/)
+  assert.match(source, /启动诊断/)
+  assert.match(source, /日志文件：/)
+  assert.match(source, /taskOverviewCard/)
+  assert.match(source, /card\.insertBefore\(next, retry \?\? null\)/)
+  assert.match(source, /pangea_run_create: '创建 PANGEA Run'/)
+})
+
 test('current workflow stage uses a blue pulse while failures stay red', () => {
   assert.match(source, /@keyframes pangeaNativeStagePulse/)
   assert.match(source, /is-active \.pangea-native-dot \{ border-color:#2f7acb; background:#2f7acb;/)
