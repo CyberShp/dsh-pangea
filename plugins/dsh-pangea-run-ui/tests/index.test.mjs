@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { readRunOutputs } from '../src/index.js'
+import { buildWorkerDiagnostics, readRunOutputs } from '../src/index.js'
 
 async function writeJson(file, value) {
   await mkdir(path.dirname(file), { recursive: true })
@@ -54,6 +54,76 @@ test('run action status is exposed so UI failure color matches run details', asy
   assert.equal(output.progress.actions[0].stage, 'unit_planning')
   assert.equal(output.progress.actions[0].status, 'failed')
   assert.equal(output.progress.actions[0].error.code, 'PLANNING_FAILED')
+})
+
+test('worker diagnostics distinguish running skeleton from settled written results', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'pangea-run-ui-trace-'))
+  const run = path.join(cwd, 'pangea-data', 'runs', 'run-trace')
+  const taskPath = path.join(run, 'tasks', 'analysis-U01.json')
+  const resultPath = path.join(run, 'agent-results', 'analysis', 'U01.json')
+  const skeletonPath = path.join(run, 'contracts', 'analysis-result-skeleton.json')
+  const skeleton = { summary: '', business_flows: [], evidence: [], risks: [], test_cases: [], errors: [] }
+  await writeJson(skeletonPath, skeleton)
+  await writeJson(resultPath, skeleton)
+  await writeJson(taskPath, {
+    task_type: 'analysis', unit: { unit_id: 'U01' }, result_path: resultPath, result_skeleton_path: skeletonPath,
+  })
+  await writeJson(path.join(run, 'progress.json'), {
+    stage: 'analyzing', lifecycle_status: 'running', analysis_units: [{ unit_id: 'U01' }],
+    actions: {
+      a1: { action_id: 'a1', action: 'dispatch_agent', role: 'analysis', stage: 'analysis', status: 'dispatched', task_id: 'child-1', task_path: taskPath },
+    },
+  })
+  await mkdir(path.join(run, 'runtime'), { recursive: true })
+  await writeFile(path.join(run, 'runtime', 'worker-trace.jsonl'), [
+    JSON.stringify({ at: 1, type: 'started', action_id: 'a1', child_id: 'child-1', unit_id: 'U01' }),
+    JSON.stringify({ at: 2, type: 'tool', action_id: 'a1', child_id: 'child-1', unit_id: 'U01', tool: 'read', target: taskPath, result_state: 'skeleton' }),
+    JSON.stringify({ at: 3, type: 'tool', action_id: 'a1', child_id: 'child-1', unit_id: 'U01', tool: 'read', target: 'src/a.c', result_state: 'skeleton' }),
+  ].join('\n') + '\n', 'utf8')
+
+  const running = await readRunOutputs({ cwd, runId: 'run-trace' })
+  const runtime = running.analysis[0].runtime
+  assert.equal(runtime.status, 'dispatched')
+  assert.equal(runtime.result_state, 'skeleton')
+  assert.equal(runtime.task_read, true)
+  assert.equal(runtime.tool_count, 2)
+  assert.match(running.analysis[0].summary, /分析中/)
+  assert.match(running.analysis[0].summary, /result_path 仍为骨架/)
+
+  await writeJson(resultPath, { ...skeleton, summary: 'real result', evidence: [{ path: 'src/a.c' }] })
+  await writeJson(path.join(run, 'progress.json'), {
+    stage: 'analyzing', lifecycle_status: 'running', analysis_units: [{ unit_id: 'U01' }],
+    actions: {
+      a1: { action_id: 'a1', action: 'dispatch_agent', role: 'analysis', stage: 'analysis', status: 'settled', task_id: 'child-1', task_path: taskPath },
+    },
+  })
+  await writeFile(path.join(run, 'runtime', 'worker-trace.jsonl'), JSON.stringify({ at: 4, type: 'settled', action_id: 'a1', child_id: 'child-1', unit_id: 'U01', reason: 'stop' }) + '\n', { flag: 'a' })
+
+  const settled = await readRunOutputs({ cwd, runId: 'run-trace' })
+  assert.equal(settled.analysis[0].runtime.status, 'settled')
+  assert.equal(settled.analysis[0].runtime.result_state, 'written')
+  assert.equal(settled.analysis[0].runtime.settled, true)
+  assert.equal(settled.analysis[0].runtime.settled_reason, 'stop')
+  assert.match(settled.analysis[0].summary, /待校验/)
+  assert.match(settled.analysis[0].summary, /result_path 已写入/)
+})
+
+test('accepted worker result is reported as completed and validated', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'pangea-run-ui-accepted-'))
+  const run = path.join(cwd, 'pangea-data', 'runs', 'run-accepted')
+  const taskPath = path.join(run, 'tasks', 'analysis-U01.json')
+  const resultPath = path.join(run, 'agent-results', 'analysis', 'U01.json')
+  const skeletonPath = path.join(run, 'contracts', 'skeleton.json')
+  await writeJson(skeletonPath, { summary: '', evidence: [] })
+  await writeJson(resultPath, { summary: 'done', evidence: [{ path: 'a.c' }] })
+  await writeJson(taskPath, { unit: { unit_id: 'U01' }, result_path: resultPath, result_skeleton_path: skeletonPath })
+  const progress = {
+    actions: { a1: { action_id: 'a1', role: 'analysis', stage: 'analysis', status: 'accepted', task_id: 'child-1', task_path: taskPath } },
+  }
+  const diagnostics = await buildWorkerDiagnostics({ cwd, progress, runDirectory: run, traceRecords: [] })
+  assert.equal(diagnostics[0].status, 'accepted')
+  assert.equal(diagnostics[0].result_state, 'accepted')
+  assert.equal(diagnostics[0].validation_status, 'valid')
 })
 
 test('desktop environment data root can be used without browser cwd', async () => {
