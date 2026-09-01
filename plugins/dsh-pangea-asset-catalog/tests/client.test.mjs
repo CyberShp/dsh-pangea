@@ -52,6 +52,16 @@ test('registers a PANGEA-owned asset management page', async () => {
   assert.equal(pages[0].title(), '测试资产')
 })
 
+test('uses the same product typography scale as PANGEA analysis pages', async () => {
+  const { source } = await loadClient()
+  assert.match(source, /"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI"/)
+  assert.match(source, /fontSize: 14/)
+  assert.match(source, /button: \{[\s\S]*fontSize: 13/)
+  assert.match(source, /meta: \{[\s\S]*fontSize: 12/)
+  assert.doesNotMatch(source, /fontSize: 9/)
+  assert.doesNotMatch(source, /fontSize: 10/)
+})
+
 test('client uses server pagination status and type filters detail loading and explicit actions', async () => {
   const { exported } = await loadClient()
   const calls = []
