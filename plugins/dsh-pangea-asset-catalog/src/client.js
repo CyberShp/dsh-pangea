@@ -96,28 +96,32 @@ window.__ModuleLoader__.load({
     }
 
     const styles = {
-      root: { height: '100%', overflow: 'auto', color: 'var(--dsw-alias-label-primary, inherit)' },
+      root: {
+        height: '100%', overflow: 'auto', color: 'var(--dsw-alias-label-primary, inherit)',
+        fontFamily: '"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif',
+        fontSize: 14, WebkitFontSmoothing: 'antialiased',
+      },
       header: { position: 'sticky', top: 0, zIndex: 3, padding: 14, background: 'var(--dsw-alias-bg-layer-1, #111)', borderBottom: '1px solid var(--dsw-alias-border-l2, #444)' },
       content: { padding: '14px 14px 24px' },
       row: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
       wrap: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
-      title: { fontSize: 16, fontWeight: 760 }, itemTitle: { fontSize: 12, fontWeight: 720 },
-      meta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 10, lineHeight: 1.5, marginTop: 5, overflowWrap: 'anywhere' },
+      title: { fontSize: 18, fontWeight: 700 }, itemTitle: { fontSize: 13, fontWeight: 680 },
+      meta: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 12, lineHeight: 1.5, marginTop: 5, overflowWrap: 'anywhere' },
       card: { border: '1px solid var(--dsw-alias-border-l2, #444)', borderRadius: 9, padding: 11, marginBottom: 9, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
       notice: { borderColor: 'var(--dsw-alias-state-business-secondary, #4d9ad6)' },
       error: { borderColor: 'var(--dsw-alias-state-error-secondary, #e66767)', color: 'var(--dsw-alias-state-error-primary, #e66767)' },
-      button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '6px 9px', cursor: 'pointer', fontSize: 10 },
+      button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '7px 10px', cursor: 'pointer', fontSize: 13 },
       primary: { background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: '#fff', fontWeight: 700 },
       active: { background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.18))', fontWeight: 700 },
-      input: { boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, background: 'var(--dsw-alias-bg-layer-2, #222)', color: 'inherit', padding: '6px 7px', fontSize: 10 },
+      input: { boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 6, background: 'var(--dsw-alias-bg-layer-2, #222)', color: 'inherit', padding: '7px 9px', fontSize: 13, fontFamily: 'inherit' },
       grow: { flex: '1 1 180px', minWidth: 0 },
-      chip: { borderRadius: 999, padding: '2px 6px', background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', fontSize: 9 },
-      pre: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflow: 'auto', fontSize: 10, lineHeight: 1.5 },
+      chip: { borderRadius: 999, padding: '3px 7px', background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', fontSize: 11 },
+      pre: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 360, overflow: 'auto', fontSize: 12, lineHeight: 1.5 },
       resultGrid: { display: 'grid', gap: 7 },
       resultItem: { borderLeft: '2px solid var(--dsw-alias-state-business-primary, #4d9ad6)', paddingLeft: 8 },
       methodologyGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 9, marginTop: 10 },
       methodologyCard: { border: '1px solid var(--dsw-alias-border-l2, #444)', borderRadius: 9, padding: 12, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
-      sourceList: { margin: '7px 0 0', paddingLeft: 17, fontSize: 10, lineHeight: 1.55 },
+      sourceList: { margin: '7px 0 0', paddingLeft: 17, fontSize: 12, lineHeight: 1.55 },
     }
 
     function structuredItems(result) {
