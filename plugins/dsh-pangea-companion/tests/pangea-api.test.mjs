@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createRun, runAdapter, workspaceRoot } from '../src/pangea-api.js'
+import { createRun, normalizeAdapterResult, runAdapter, workspaceRoot } from '../src/pangea-api.js'
 
 test('creates one managed pending contract and removes it after Run creation', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-run-api-'))
@@ -49,4 +49,24 @@ test('maps action tools to exact adapter arguments', async () => {
     'adapter', 'bind', '--data-root', '/workspace/pangea-data', '--run-id', 'run-01',
     '--action-id', 'action-01', '--task-id', 'child-01',
   ])
+})
+
+test('normalizes a recoverable repair action into the workflow action envelope', () => {
+  const repairAction = {
+    action_id: 'analysis-U01', action: 'continue_agent', role: 'analysis', stage: 'unit_analysis',
+    task_path: 'pangea-data/runs/run-01/tasks/U01.json', task_id: 'child-01', status: 'pending',
+  }
+  const result = normalizeAdapterResult({
+    status: 'incomplete', recoverable: true, attention_required: false, repair_action: repairAction,
+  })
+  assert.deepEqual(result.action, repairAction)
+})
+
+test('does not auto-queue another repair after attention is required', () => {
+  const repairAction = { action_id: 'analysis-U01', action: 'continue_agent' }
+  const result = normalizeAdapterResult({
+    status: 'incomplete', recoverable: true, attention_required: true, repair_action: repairAction,
+  })
+  assert.equal(result.action, undefined)
+  assert.deepEqual(result.repair_action, repairAction)
 })
