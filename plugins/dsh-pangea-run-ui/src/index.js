@@ -44,14 +44,15 @@ async function listJson(directory) {
   }
 }
 
-async function discoverDataRoot(cwd, explicitDataRoot) {
-  if (typeof explicitDataRoot === 'string' && explicitDataRoot.trim()) {
-    const resolved = path.resolve(explicitDataRoot)
-    if (await pathKind(path.join(resolved, 'runs')) !== 'directory') throw new Error(`PANGEA data_root does not contain runs/: ${resolved}`)
-    return resolved
-  }
-  if (typeof cwd !== 'string' || !cwd.trim()) throw new Error('cwd is required')
-  let cursor = path.resolve(cwd)
+async function validDataRoot(value) {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  const resolved = path.resolve(value)
+  return await pathKind(path.join(resolved, 'runs')) === 'directory' ? resolved : null
+}
+
+async function findDataRootFrom(startPath) {
+  if (typeof startPath !== 'string' || startPath.trim() === '') return null
+  let cursor = path.resolve(startPath)
   for (let depth = 0; depth < 8; depth += 1) {
     if (path.basename(cursor) === 'pangea-data' && await pathKind(path.join(cursor, 'runs')) === 'directory') return cursor
     const candidate = path.join(cursor, 'pangea-data')
@@ -60,7 +61,24 @@ async function discoverDataRoot(cwd, explicitDataRoot) {
     if (parent === cursor) break
     cursor = parent
   }
-  throw new Error(`No pangea-data/runs directory found from workspace: ${cwd}`)
+  return null
+}
+
+async function discoverDataRoot(cwd, explicitDataRoot) {
+  if (explicitDataRoot !== undefined) {
+    const resolved = await validDataRoot(explicitDataRoot)
+    if (!resolved) throw new Error(`PANGEA data_root does not contain runs/: ${path.resolve(String(explicitDataRoot))}`)
+    return resolved
+  }
+
+  const environmentRoot = await validDataRoot(process.env.PANGEA_DATA_ROOT)
+  if (environmentRoot) return environmentRoot
+
+  for (const candidate of [cwd, process.env.PANGEA_WORKSPACE_ROOT]) {
+    const discovered = await findDataRootFrom(candidate)
+    if (discovered) return discovered
+  }
+  throw new Error('Cannot discover PANGEA data root for the current workspace')
 }
 
 function safeRunId(runId) {
@@ -126,7 +144,6 @@ export async function readRunOutputs({ cwd, runId, dataRoot } = {}) {
   return {
     status: 'ok',
     run_id: resolvedRunId,
-    data_root: resolvedDataRoot,
     progress: {
       stage: typeof progress?.stage === 'string' ? progress.stage : null,
       phase: typeof progress?.phase === 'string' ? progress.phase : null,
