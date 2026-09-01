@@ -100,23 +100,8 @@ export async function createRun(cwd, input, runner = runPangea) {
   }
 }
 
-export function normalizeAdapterResult(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
-  if (
-    value.attention_required !== true
-    && value.recoverable === true
-    && value.repair_action
-    && typeof value.repair_action === 'object'
-    && !Array.isArray(value.repair_action)
-    && !value.action
-  ) {
-    return { ...value, action: value.repair_action }
-  }
-  return value
-}
-
-export async function runAdapter(cwd, operation, input, runner = runPangea) {
-  const result = await runner({
+export function runAdapter(cwd, operation, input, runner = runPangea) {
+  return runner({
     cwd,
     args: [
       'adapter', operation, '--data-root', input.data_root,
@@ -124,5 +109,4 @@ export async function runAdapter(cwd, operation, input, runner = runPangea) {
       ...(operation === 'bind' ? ['--task-id', input.task_id] : []),
     ],
   })
-  return normalizeAdapterResult(result)
 }
