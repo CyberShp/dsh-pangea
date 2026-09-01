@@ -205,23 +205,64 @@ async function createDshSession(api, root, title) {
   return sessionId
 }
 
-export async function launchAnalysisSession(api, { cwd, dataRoot, input, model }, runner = runPangea, onSession = async () => {}) {
+async function emitLaunch(onEvent, event) {
+  try { await onEvent(event) } catch { /* logging must never change launch behavior */ }
+}
+
+async function launchStep(onEvent, stage, action, successDetails = () => ({})) {
+  await emitLaunch(onEvent, { stage, status: 'start' })
+  try {
+    const value = await action()
+    await emitLaunch(onEvent, { stage, status: 'ok', ...successDetails(value) })
+    return value
+  } catch (error) {
+    await emitLaunch(onEvent, { stage, status: 'error', error })
+    throw error
+  }
+}
+
+export async function launchAnalysisSession(
+  api,
+  { cwd, dataRoot, input, model },
+  runner = runPangea,
+  onSession = async () => {},
+  onEvent = async () => {},
+) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
-  const capabilities = await runner({
+  await emitLaunch(onEvent, { stage: 'workspace_resolved', status: 'ok' })
+  const capabilities = await launchStep(onEvent, 'capabilities_check', () => runner({
     cwd: root,
     args: ['system', 'capabilities', '--data-root', resolvedDataRoot],
-  })
+  }), value => ({ repository_count: Array.isArray(value?.repositories) ? value.repositories.length : 0 }))
   const request = normalizeAnalysisInput(input, capabilities, true)
-  const selectedModel = await requireInternalModel(api, model)
-  const sessionId = await createDshSession(api, root, `PANGEA 分析 · ${request.target}`)
-  apiValue(await api.sessions.selectModel(rpc({
-    sessionId,
-    provider: selectedModel.provider,
-    model: selectedModel.model,
-    ...(selectedModel.reasoning_effort ? { reasoningEffort: selectedModel.reasoning_effort } : {}),
-  })))
-  await onSession({ session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel })
+  await emitLaunch(onEvent, { stage: 'input_validated', status: 'ok' })
+  const selectedModel = await launchStep(
+    onEvent,
+    'model_validate',
+    () => requireInternalModel(api, model),
+    value => ({ provider: value.provider, model: value.model }),
+  )
+  const sessionId = await launchStep(
+    onEvent,
+    'session_create',
+    () => createDshSession(api, root, `PANGEA 分析 · ${request.target}`),
+    value => ({ session_id: value }),
+  )
+  await launchStep(onEvent, 'model_select', async () => {
+    apiValue(await api.sessions.selectModel(rpc({
+      sessionId,
+      provider: selectedModel.provider,
+      model: selectedModel.model,
+      ...(selectedModel.reasoning_effort ? { reasoningEffort: selectedModel.reasoning_effort } : {}),
+    })))
+  }, () => ({ session_id: sessionId, provider: selectedModel.provider, model: selectedModel.model }))
+  await launchStep(onEvent, 'session_record', () => onSession({
+    session_id: sessionId,
+    input: request,
+    data_root: resolvedDataRoot,
+    model: selectedModel,
+  }), () => ({ session_id: sessionId }))
   const scopeInstructions = request.source_scope.length > 0
     ? ['用户已经指定 source_scope，逐字使用下面输入中的路径，不得自行扩大范围。']
     : [
@@ -240,11 +281,14 @@ export async function launchAnalysisSession(api, { cwd, dataRoot, input, model }
     '[PANGEA Run 输入]',
     JSON.stringify({ ...agentInput, data_root: resolvedDataRoot }, null, 2),
   ].join('\n')
-  apiValue(await api.sessions.prompt(rpc({
-    sessionId,
-    mode: 'queue',
-    content: [{ type: 'text', text: prompt }],
-  })))
+  await launchStep(onEvent, 'prompt_submit', async () => {
+    apiValue(await api.sessions.prompt(rpc({
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: prompt }],
+    })))
+  }, () => ({ session_id: sessionId }))
+  await emitLaunch(onEvent, { stage: 'waiting_for_run', status: 'info', session_id: sessionId, message: 'Analysis Session 已启动，等待主 Agent 调用 pangea_run_create。' })
   return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel }
 }
 
