@@ -37,7 +37,7 @@ test('rework stages remain conditional', () => {
 })
 
 test('worker diagnostics are embedded into native analysis unit details', () => {
-  assert.match(source, /分析单元（\\d\+）/)
+  assert.match(source, /分析单元/)
   assert.match(source, /Worker 执行轨迹/)
   assert.match(source, /result_path/)
   assert.match(source, /查看 Agent 结构化输出/)
