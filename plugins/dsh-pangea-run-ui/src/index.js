@@ -497,6 +497,13 @@ export async function readRunOutputs({ cwd, runId, dataRoot } = {}) {
       lifecycle_status: typeof progress?.lifecycle_status === 'string' ? progress.lifecycle_status : null,
       attention_required: progress?.attention_required === true || String(progress?.status ?? '').toLowerCase() === 'attention_required',
       quality_status: typeof progress?.quality_status === 'string' ? progress.quality_status : null,
+      skill: progress?.skill && typeof progress.skill === 'object'
+        ? {
+            skill_id: typeof progress.skill.skill_id === 'string' ? progress.skill.skill_id : null,
+            version: typeof progress.skill.version === 'string' ? progress.skill.version : null,
+          }
+        : null,
+      skill_step_ids: Array.isArray(progress?.skill_step_ids) ? progress.skill_step_ids.map(String) : [],
       analysis_units: Array.isArray(progress?.analysis_units) ? progress.analysis_units : [],
       completed_analysis_units: Array.isArray(progress?.completed_analysis_units) ? progress.completed_analysis_units : [],
       completed_rework_units: Array.isArray(progress?.completed_closure_units)

@@ -5,6 +5,15 @@ import path from 'node:path'
 
 const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_CONTRACT = path.join('pangea-data', '.pangea', 'pending-task-contract.json')
+const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.0.0' })
+
+export function assertCodetalksSkill(capabilities) {
+  const skill = capabilities?.analysis_skill
+  if (skill?.skill_id !== REQUIRED_ANALYSIS_SKILL.skill_id || skill?.version !== REQUIRED_ANALYSIS_SKILL.version) {
+    throw new Error('PANGEA backend must provide codetalks-skill 1.0.0')
+  }
+  return skill
+}
 
 export function workspaceRoot(cwd) {
   if (typeof cwd !== 'string' || cwd.trim() === '') throw new Error('workspace cwd is required')
@@ -90,6 +99,11 @@ export async function createRun(cwd, input, runner = runPangea) {
     source_scope: input.source_scope,
     focus: input.focus ?? [],
   }
+  const capabilities = await runner({
+    cwd: root,
+    args: ['system', 'capabilities', '--data-root', dataRoot],
+  })
+  assertCodetalksSkill(capabilities)
   await mkdir(path.dirname(pendingPath), { recursive: true })
   await rm(pendingPath, { force: true })
   await writeFile(pendingPath, `${JSON.stringify(contract, null, 2)}\n`, 'utf8')

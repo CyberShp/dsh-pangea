@@ -1,6 +1,6 @@
 import path from 'node:path'
 
-import { runPangea, workspaceRoot } from './pangea-api.js'
+import { assertCodetalksSkill, runPangea, workspaceRoot } from './pangea-api.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const INTERNAL_PROVIDER_SETTINGS_NS = 'llm-pi-ai'
@@ -111,6 +111,7 @@ function stringList(value) {
 }
 
 function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
+  assertCodetalksSkill(capabilities)
   const repository = typeof value?.repository === 'string' ? value.repository.trim() : ''
   const target = typeof value?.target === 'string' ? value.target.trim() : ''
   const sourceScope = stringList(value?.source_scope)
@@ -275,6 +276,7 @@ export async function launchAnalysisSession(
     : Object.fromEntries(Object.entries(request).filter(([key]) => key !== 'source_scope'))
   const prompt = [
     '创建一个新的 PANGEA 模块分析并走完完整 action 流程，直到生成最终报告。',
+    '本次 Run 固定使用 codetalks-skill 1.0.0；Skill 与当前步骤只以 progress.json 和 task.skill 为准。',
     '必须读取 .agents/pangea/dsh.md，并直接调用 pangea_run_create；不得手写 pending contract 或自行推进 graph。',
     ...scopeInstructions,
     '',

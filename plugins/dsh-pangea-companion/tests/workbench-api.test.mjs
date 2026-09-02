@@ -6,6 +6,8 @@ import test from 'node:test'
 
 import { createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
+const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.0.0' } }
+
 async function workspace() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-workbench-'))
   await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
@@ -56,7 +58,7 @@ test('fails closed before creating a session when the internal credential is mis
         cwd: root,
         input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] },
         model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
-      }, async () => ({ repositories: ['repo-one'] }), undefined, event => { launchEvents.push(event) }),
+      }, async () => capabilities, undefined, event => { launchEvents.push(event) }),
       /尚未配置凭证/,
     )
     assert.equal(created, false)
@@ -69,9 +71,10 @@ test('normalizes Run input and rejects unregistered repositories', () => {
   const input = normalizeRunInput({
     repository: 'repo-one', target: 'session', source_scope: ['src/session.c', 'src/session.c', ''],
     focus: ['recovery'], asset_ids: ['asset-1'], test_case_examples: ['TC-1'],
-  }, { repositories: ['repo-one'] })
+  }, capabilities)
   assert.deepEqual(input.source_scope, ['src/session.c'])
-  assert.throws(() => normalizeRunInput({ repository: 'other', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /not registered/)
+  assert.throws(() => normalizeRunInput({ repository: 'other', target: 'x', source_scope: ['x.c'] }, capabilities), /not registered/)
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.0\.0/)
 })
 
 test('returns paginated Run metadata and reports incompatible backends explicitly', async () => {
@@ -151,7 +154,7 @@ test('launches a dedicated DSH session that owns the complete Run lifecycle and 
       cwd: root,
       input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'], asset_ids: ['asset-1'] },
       model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
-    }, async () => ({ repositories: ['repo-one'] }), async session => {
+    }, async () => capabilities, async session => {
       events.push(['persist', session])
     }, async event => { launchEvents.push(event) })
     assert.equal(result.session_id, 'session-1')
@@ -163,6 +166,7 @@ test('launches a dedicated DSH session that owns the complete Run lifecycle and 
     assert.match(events[3][1].content[0].text, /pangea_run_create/)
     assert.match(events[3][1].content[0].text, /"asset_ids": \[/)
     assert.match(events[3][1].content[0].text, /完整 action 流程/)
+    assert.match(events[3][1].content[0].text, /codetalks-skill 1\.0\.0/)
     for (const stage of ['capabilities_check', 'model_validate', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'waiting_for_run']) {
       assert.equal(launchEvents.some(event => event.stage === stage), true, `missing launch stage ${stage}`)
     }

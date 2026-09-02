@@ -16,6 +16,8 @@ test('closure is conditional and locked Agent output paths are preserved', async
   const run = path.join(cwd, 'pangea-data', 'runs', 'run-1')
   await writeJson(path.join(run, 'progress.json'), {
     stage: 'reviewing', lifecycle_status: 'running', analysis_units: ['U01'], completed_analysis_units: ['U01'], completed_closure_units: [],
+    skill: { skill_id: 'codetalks-skill', version: '1.0.0', derived_from: 'codetalks-fused-v2.4' },
+    skill_step_ids: ['08'],
   })
   await writeJson(path.join(run, 'agent-results', 'planning.json'), { summary: 'planning summary' })
   await writeJson(path.join(run, 'agent-results', 'analysis', 'U01.json'), {
@@ -28,6 +30,8 @@ test('closure is conditional and locked Agent output paths are preserved', async
   assert.equal(before.plan.raw.summary, 'planning summary')
   assert.equal(before.analysis[0].worker_id, 'worker-a')
   assert.equal(before.analysis[0].raw.summary, 'analysis summary')
+  assert.deepEqual(before.progress.skill, { skill_id: 'codetalks-skill', version: '1.0.0' })
+  assert.deepEqual(before.progress.skill_step_ids, ['08'])
 
   await writeJson(path.join(run, 'agent-results', 'closure', 'U01.json'), {
     unit_id: 'U01', attempt: 1, worker_id: 'worker-b', summary: 'targeted rework', risks: [], test_cases: [], evidence: [], business_flows: [], errors: [],

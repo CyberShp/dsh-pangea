@@ -113,6 +113,7 @@ window.__ModuleLoader__.load({
         }
         #${OVERVIEW_ID} .pangea-native-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:11px; }
         #${OVERVIEW_ID} .pangea-native-title { font-size:14px; font-weight:700; }
+        #${OVERVIEW_ID} .pangea-native-skill { margin-left:8px; padding:3px 7px; border-radius:999px; background:var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08)); color:#69717c; font-size:11px; font-weight:600; white-space:nowrap; }
         #${OVERVIEW_ID} .pangea-native-current { font-size:12px; font-weight:650; color:#2f7acb; }
         #${OVERVIEW_ID} .pangea-native-current.is-warning { color:#d97706; }
         #${OVERVIEW_ID} .pangea-native-current.is-failed { color:#c7000b; }
@@ -303,7 +304,13 @@ window.__ModuleLoader__.load({
       const card = make('section')
       card.id = OVERVIEW_ID
       const head = make('div', 'pangea-native-head')
-      head.appendChild(make('div', 'pangea-native-title', '完整流程'))
+      const title = make('div', 'pangea-native-title', '完整流程')
+      const skill = value?.progress?.skill
+      const stepIds = Array.isArray(value?.progress?.skill_step_ids) ? value.progress.skill_step_ids : []
+      if (skill?.skill_id && skill?.version) {
+        title.appendChild(make('span', 'pangea-native-skill', `${skill.skill_id} · ${skill.version}${stepIds.length ? ` · 步骤 ${stepIds.join(' / ')}` : ''}`))
+      }
+      head.appendChild(title)
       const stageKey = String(value?.progress?.stage ?? '').toLowerCase()
       const current = make('div', `pangea-native-current is-${currentTone(value)}`, `当前阶段：${STAGE_LABELS[stageKey] ?? stageKey ?? '未知'}`)
       head.appendChild(current)

@@ -17,16 +17,22 @@ test('creates one managed pending contract and removes it after Run creation', a
     await mkdir(nested, { recursive: true })
     await writeFile(path.join(marker, 'dsh.md'), 'rules\n', 'utf8')
     let observed
+    const calls = []
     const result = await createRun(nested, {
       repository: 'repo-one', target: 'session and retry', source_scope: ['src/session.c'], focus: ['failure'],
       asset_ids: ['asset-not-in-current-contract'], test_case_examples: ['TC-not-in-current-contract'],
     }, async call => {
+      calls.push(call)
+      if (call.args[0] === 'system') {
+        return { analysis_skill: { skill_id: 'codetalks-skill', version: '1.0.0' } }
+      }
       observed = { call, contract: JSON.parse(await readFile(pending, 'utf8')) }
       return { run_id: 'run-01', data_root: path.join(root, 'pangea-data'), actions: [] }
     })
     assert.equal(workspaceRoot(nested), root)
     assert.equal(result.run_id, 'run-01')
     assert.deepEqual(observed.call.args, ['runs', 'create', '--contract', pending])
+    assert.deepEqual(calls[0].args.slice(0, 2), ['system', 'capabilities'])
     assert.equal(observed.contract.repository, 'repo-one')
     assert.equal(observed.contract.target, 'session and retry')
     assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
@@ -34,6 +40,20 @@ test('creates one managed pending contract and removes it after Run creation', a
     assert.equal(observed.contract.asset_ids, undefined)
     assert.equal(observed.contract.test_case_examples, undefined)
     assert.equal(existsSync(pending), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('refuses to create a Run against a backend without codetalks-skill 1.0.0', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-skill-api-'))
+  try {
+    await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
+    await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
+    await assert.rejects(
+      () => createRun(root, { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] }, async () => ({ repositories: ['repo-one'] })),
+      /codetalks-skill 1\.0\.0/,
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

@@ -49,6 +49,7 @@ window.__ModuleLoader__.load({
 
         #${ENHANCEMENT_ID} { margin:16px 0 4px; color:inherit; font-family:inherit; }
         #${ENHANCEMENT_ID} .pangea-run-ui-title { font-size:14px; font-weight:700; margin:0 0 9px; }
+        #${ENHANCEMENT_ID} .pangea-run-ui-skill { margin-left:8px; padding:3px 7px; border-radius:999px; background:var(--dsw-alias-bg-layer-2, rgba(127,127,127,.08)); color:#69717c; font-size:11px; font-weight:600; white-space:nowrap; }
         #${ENHANCEMENT_ID} .pangea-run-ui-card {
           border:1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22));
           background:var(--dsw-alias-bg-layer-1, transparent); border-radius:9px; padding:13px; margin-bottom:14px;
@@ -189,7 +190,13 @@ window.__ModuleLoader__.load({
 
     function renderStageRail(output) {
       const card = make('div', 'pangea-run-ui-card')
-      card.appendChild(make('div', 'pangea-run-ui-title', '完整流程'))
+      const title = make('div', 'pangea-run-ui-title', '完整流程')
+      const skill = output?.progress?.skill
+      const stepIds = Array.isArray(output?.progress?.skill_step_ids) ? output.progress.skill_step_ids : []
+      if (skill?.skill_id && skill?.version) {
+        title.appendChild(make('span', 'pangea-run-ui-skill', `${skill.skill_id} · ${skill.version}${stepIds.length ? ` · 步骤 ${stepIds.join(' / ')}` : ''}`))
+      }
+      card.appendChild(title)
       const rail = make('div', 'pangea-stage-rail')
       const stages = stageNames(output)
       const active = stageIndex(output)

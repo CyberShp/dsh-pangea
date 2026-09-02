@@ -35,6 +35,8 @@ test('workflow overview mounts before the native Action lifecycle card', () => {
   assert.match(source, /card\.parentElement\.insertBefore\(next, card\)/)
   assert.match(source, /完整流程/)
   assert.match(source, /当前阶段：/)
+  assert.match(source, /pangea-native-skill/)
+  assert.match(source, /skill_step_ids/)
 })
 
 test('task overview exposes persistent launch diagnostics before retry', () => {
