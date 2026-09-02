@@ -9,8 +9,11 @@ const INTERNAL_PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 // model routes.  This keeps credentials and process ownership in DSH.
 export function acpProviderOptions(env = process.env) {
   return [
-    { id: 'nga', label: 'NGA', command: env.PANGEA_NGA_ACP_COMMAND || 'nga', args: ['acp'] },
-    { id: 'codeagent', label: 'CodeAgent', command: env.PANGEA_CODEAGENT_ACP_COMMAND || 'codeagent', args: ['acp'] },
+    // Keep the ids identical to the providerName values registered by the
+    // dsh-subagent-acp services in cordis.patch.yml.  The id is sent through
+    // the task/run API and is also the key used by subagents.getProvider().
+    { id: 'pangea-nga', label: 'NGA', command: env.PANGEA_NGA_ACP_COMMAND || 'nga', args: ['acp'] },
+    { id: 'pangea-codeagent', label: 'CodeAgent', command: env.PANGEA_CODEAGENT_ACP_COMMAND || 'codeagent', args: ['acp'] },
   ]
 }
 
