@@ -378,7 +378,14 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       return json(res, 200, { status: 'ok', task })
     }
     if (body.action === 'stop') {
-      return json(res, 200, await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id }))
+      const task = requireWorkspaceTask(await tasks.getByRun(body.run_id), cwd, body.run_id)
+      const analysis = [...task.conversations].reverse().find(item => item.kind === 'analysis')
+      if (analysis) {
+        apiValue(await api.sessions.cancel(rpc({ sessionId: analysis.session_id })))
+      }
+      const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot ?? task.data_root, runId: body.run_id })
+      await tasks.reconcileRuns([stopped.run])
+      return json(res, 200, { ...stopped, session_id: analysis?.session_id ?? null, task: await tasks.get(task.task_id) })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
   } catch (error) {

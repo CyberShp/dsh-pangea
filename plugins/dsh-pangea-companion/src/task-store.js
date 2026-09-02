@@ -68,7 +68,7 @@ function normalizeTask(taskId, value) {
     asset_ids: strings(value?.asset_ids),
     test_case_examples: strings(value?.test_case_examples),
     model_route: normalizeModelRoute(value?.model_route),
-    status: ['preparing', 'running', 'needs_attention', 'completed', 'failed'].includes(value?.status)
+    status: ['preparing', 'running', 'needs_attention', 'completed', 'stopped', 'failed'].includes(value?.status)
       ? value.status
       : 'preparing',
     run_id: text(value?.run_id) || null,
@@ -88,7 +88,8 @@ function taskStatusFromRun(run) {
   const status = text(run?.status).toLowerCase()
   const quality = text(run?.quality_status).toUpperCase()
   const phase = text(run?.phase).toUpperCase()
-  if (['failed', 'stopped', 'cancelled'].includes(lifecycle)) return 'failed'
+  if (['stopped', 'cancelled'].includes(lifecycle)) return 'stopped'
+  if (lifecycle === 'failed') return 'failed'
   if (
     run?.attention_required === true
     || lifecycle === 'attention_required'
@@ -179,6 +180,14 @@ export class TaskStore {
     const id = text(sessionId)
     if (!id) return null
     const task = Object.values(this.store.tasks).find(item => item.conversations.some(conversation => conversation.session_id === id))
+    return task ? structuredClone(task) : null
+  }
+
+  async getByRun(runId) {
+    await this.ready
+    const id = text(runId)
+    if (!id) return null
+    const task = Object.values(this.store.tasks).find(item => item.run_id === id)
     return task ? structuredClone(task) : null
   }
 

@@ -1710,12 +1710,14 @@ window.__ModuleLoader__.load({
           running: '分析中',
           needs_attention: '需要处理',
           completed: '已完成',
-          failed: '启动失败',
+          stopped: '已停止',
+          failed: '失败',
         }[status] ?? status ?? '待定'
       }
 
       function taskStatusColor(status) {
         if (status === 'failed' || status === 'needs_attention') return '#c7000b'
+        if (status === 'stopped') return '#6b7280'
         if (status === 'preparing') return '#d97706'
         if (status === 'running') return '#2f7acb'
         return '#2da44e'
@@ -1729,7 +1731,7 @@ window.__ModuleLoader__.load({
         })
         const statusFilters = [
           ['全部', '全部'], ['preparing', '正在准备'], ['running', '分析中'],
-          ['needs_attention', '需要处理'], ['completed', '已完成'], ['failed', '失败'],
+          ['needs_attention', '需要处理'], ['completed', '已完成'], ['stopped', '已停止'], ['failed', '失败'],
         ]
         const columns = 'minmax(220px, 1.7fr) minmax(130px, .8fr) minmax(100px, .62fr) minmax(140px, .9fr) minmax(120px, .7fr)'
         return h(React.Fragment, null,

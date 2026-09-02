@@ -74,3 +74,16 @@ test('marks an attention-required Run as incomplete instead of running', async (
     assert.match(task.launch_error, /未正常完成/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('looks up a Task by Run and preserves stopped as its own lifecycle state', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-stopped-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-005' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '停止分析' } })
+    await store.addConversation('task-005', { sessionId: 'session-stop', title: '分析会话', kind: 'analysis' })
+    await store.bindRunBySession('session-stop', { run_id: 'run-stop', lifecycle_status: 'running' })
+    assert.equal((await store.getByRun('run-stop')).task_id, 'task-005')
+    await store.reconcileRuns([{ run_id: 'run-stop', lifecycle_status: 'stopped', phase: 'STOPPED' }])
+    assert.equal((await store.get('task-005')).status, 'stopped')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
