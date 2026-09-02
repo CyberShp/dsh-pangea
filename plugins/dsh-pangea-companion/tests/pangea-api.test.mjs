@@ -5,7 +5,18 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createRun, workspaceRoot } from '../src/pangea-api.js'
+import { createRun, normalizeSourceScope, workspaceRoot } from '../src/pangea-api.js'
+
+test('accepts a copied Windows repository address as source scope', () => {
+  assert.deepEqual(
+    normalizeSourceScope(['D:\\sources\\repo-one\\src\\session.c', 'src\\retry.c'], 'repo-one'),
+    ['src/session.c', 'src/retry.c'],
+  )
+  assert.throws(
+    () => normalizeSourceScope(['D:\\sources\\another-repo\\src\\session.c'], 'repo-one'),
+    /不属于已选仓库“repo-one”/,
+  )
+})
 
 test('creates one managed pending Skill request and removes it after Run creation', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-run-api-'))

@@ -7,6 +7,23 @@ const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
 const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.0.0' })
 
+export function normalizeSourceScope(values, repository) {
+  const items = Array.isArray(values) ? values : []
+  const repositoryName = typeof repository === 'string' ? repository.trim() : ''
+  return [...new Set(items.map(item => {
+    const value = typeof item === 'string' ? item.trim() : ''
+    if (!value) return ''
+    const absolute = path.win32.isAbsolute(value) || path.posix.isAbsolute(value)
+    if (!absolute) return value.replaceAll('\\', '/').replace(/^\.\/+/, '')
+    const parts = value.split(/[\\/]+/).filter(Boolean)
+    const repositoryIndex = parts.map(part => part.toLowerCase()).lastIndexOf(repositoryName.toLowerCase())
+    if (!repositoryName || repositoryIndex < 0) {
+      throw new Error(`源码范围不属于已选仓库“${repositoryName}”：${value}。请粘贴该仓库内的地址，或填写仓库相对路径。`)
+    }
+    return parts.slice(repositoryIndex + 1).join('/') || '.'
+  }).filter(Boolean))]
+}
+
 export function assertCodetalksSkill(capabilities) {
   const skill = capabilities?.analysis_skill
   if (skill?.skill_id !== REQUIRED_ANALYSIS_SKILL.skill_id || skill?.version !== REQUIRED_ANALYSIS_SKILL.version) {
@@ -58,6 +75,8 @@ export function runPangea({ cwd, args }) {
       cwd: root,
       env: {
         ...process.env,
+        PYTHONUTF8: '1',
+        PYTHONIOENCODING: 'utf-8',
         PYTHONPATH: [path.join(root, 'src'), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
       },
       windowsHide: true,
@@ -95,7 +114,7 @@ export async function createRun(cwd, input, runner = runPangea) {
     data_root: dataRoot,
     repository: input.repository,
     target: input.target,
-    source_scope: input.source_scope,
+    source_scope: normalizeSourceScope(input.source_scope, input.repository),
     focus: input.focus ?? [],
     asset_ids: input.asset_ids ?? [],
     test_case_examples: input.test_case_examples ?? [],

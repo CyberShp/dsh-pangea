@@ -47,6 +47,8 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.doesNotMatch(source, /Action 生命周期/)
   assert.match(source, /后端与工作台不兼容/)
   assert.match(source, /停止 Run/)
+  assert.match(source, /失败阶段：/)
+  assert.match(source, /setSelectedRun\(task\.run_id \?\? null\)/)
   assert.match(source, /task-conversation-create/)
   assert.match(source, /task-conversation-activate/)
   assert.match(source, /registerProductSession/)
@@ -324,6 +326,15 @@ test('client state request encodes workspace and run, passes cancellation, and r
   assert.match(calls[0].url, /session_id=session\+17/)
   assert.equal(calls[0].options.cache, 'no-store')
   assert.equal(calls[0].options.signal, signal)
+
+  await exported.requestSnapshot({
+    cwd: '/tmp/pangea',
+    runId: null,
+    async fetcher(url) {
+      assert.match(url, /run_id=/)
+      return { ok: true, status: 200, async json() { return { status: 'ok', current: null } } }
+    },
+  })
 
   await assert.rejects(() => exported.requestSnapshot({
     cwd: '/tmp/pangea',

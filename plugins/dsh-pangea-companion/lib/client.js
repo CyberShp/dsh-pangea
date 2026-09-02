@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
 
     async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
-      if (runId) query.set('run_id', runId)
+      if (runId !== undefined) query.set('run_id', runId ?? '')
       if (sessionId) query.set('session_id', sessionId)
       const response = await fetcher(`${API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
       const body = await response.json()
@@ -104,7 +104,7 @@ window.__ModuleLoader__.load({
 
     async function requestWorkbench({ cwd, runId, taskId, sessionId, cursor = 0, limit = 20, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd, cursor: String(cursor), limit: String(limit) })
-      if (runId) query.set('run_id', runId)
+      if (runId !== undefined) query.set('run_id', runId ?? '')
       if (taskId) query.set('task_id', taskId)
       if (sessionId) query.set('session_id', sessionId)
       const response = await fetcher(`${WORKBENCH_API_PATH}?${query}`, { cache: 'no-store', signal })
@@ -668,7 +668,7 @@ window.__ModuleLoader__.load({
         try {
           const body = await requestWorkbench({
             cwd,
-            runId: selectedRun ?? snapshot?.current?.run_id,
+            runId: selectedRun === undefined ? snapshot?.current?.run_id : selectedRun,
             taskId: selectedTaskId,
             sessionId: scope?.sessionId,
             cursor: runCursor,
@@ -745,7 +745,9 @@ window.__ModuleLoader__.load({
       }, [pageMode, selectedTaskId, workbench?.selected_task_id, workbench?.tasks?.items])
       React.useEffect(() => {
         const task = workbench?.tasks?.items?.find(item => item.task_id === selectedTaskId)
-        if (task?.run_id && task.run_id !== selectedRun) setSelectedRun(task.run_id)
+        if (!task) return
+        const taskRun = task.run_id ?? null
+        if (taskRun !== selectedRun) setSelectedRun(taskRun)
       }, [selectedRun, selectedTaskId, workbench?.tasks?.items])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
@@ -938,7 +940,7 @@ window.__ModuleLoader__.load({
         if (!task) return
         ctx?.pangea?.selectTask?.(task.task_id)
         setSelectedTaskId(task.task_id)
-        setSelectedRun(task.run_id ?? undefined)
+        setSelectedRun(task.run_id ?? null)
         setScreen({ type: targetScreen })
         setHistory([])
       }
@@ -1538,7 +1540,7 @@ window.__ModuleLoader__.load({
                 },
               }, h('option', { value: '' }, usableModels.length ? '选择内部模型' : '没有可用的内部模型'), usableModels.map(item => h('option', { key: modelSelectionKey(item), value: modelSelectionKey(item) }, `${item.provider_name} · ${item.model_name}`)))),
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
-              formArea('源码范围（可选）', 'source_scope', '可留空，由 Agent 自动识别；也可每行填写一个源码路径'),
+              formArea('源码范围（可选）', 'source_scope', '可留空，由 Agent 自动识别；也可每行粘贴一个 Windows 文件栏地址或填写仓库相对路径'),
               formArea('分析重点', 'focus', '错误路径\n恢复行为\n外部可观测结果'),
               formArea('结构化资产 ID', 'asset_ids', '可从“资产”页勾选后带入'),
               formArea('少量用例示例文件', 'test_case_examples', 'tests/auth_cases.yaml')),
@@ -1767,14 +1769,23 @@ window.__ModuleLoader__.load({
         if (!selectedTask) return h(React.Fragment, null, renderCompatibility(), h('div', { style: styles.card },
           h('div', { style: styles.empty }, '请先从任务列表选择一个分析任务。'),
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 10 }, onClick: () => jump('tasks') }, '返回任务列表')))
-        if (!current) return h(React.Fragment, null, renderCompatibility(), h('div', { style: { ...styles.card, padding: 20 } },
+        if (!current) {
+          const launchEvents = workbench?.launch_log?.events ?? []
+          const launchFailure = [...launchEvents].reverse().find(event => event.status === 'error' && event.stage !== 'launch_failed')
+            ?? [...launchEvents].reverse().find(event => event.status === 'error')
+          return h(React.Fragment, null, renderCompatibility(), h('div', { style: { ...styles.card, padding: 20 } },
           h('div', { style: styles.row },
             h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, selectedTask.task_id)),
             h('span', { style: { ...styles.homeStatus, color: taskStatusColor(selectedTask.status) } }, taskStatusLabel(selectedTask.status))),
           h('div', { style: { ...styles.text, marginTop: 14 } }, ['failed', 'needs_attention'].includes(selectedTask.status)
             ? selectedTask.launch_error ?? '分析启动失败。'
             : '任务已经保存，正在准备分析会话和 PANGEA Run。'),
+          launchFailure ? h('div', { style: { ...styles.error, marginTop: 14 }, role: 'alert' },
+            h('div', { style: styles.itemTitle }, `失败阶段：${launchFailure.stage}`),
+            launchFailure.error_code ? h('div', { style: styles.itemMeta }, `错误码：${launchFailure.error_code}`) : null,
+            h('div', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, launchFailure.error ?? launchFailure.message ?? selectedTask.launch_error)) : null,
           selectedTask.status === 'failed' ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在重试…' : '重试启动') : null))
+        }
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
