@@ -16,9 +16,9 @@ window.__ModuleLoader__.load({
     const EXECUTION_API_PATH = '/api/pangea-companion/executions'
     const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
     const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
-    const ACTIVE_POLL_INTERVAL_MS = 10_000
+    const ACTIVE_POLL_INTERVAL_MS = 2_000
     const IDLE_POLL_INTERVAL_MS = 45_000
-    const WORKBENCH_ACTIVE_POLL_INTERVAL_MS = 5_000
+    const WORKBENCH_ACTIVE_POLL_INTERVAL_MS = 2_000
     const MODEL_SELECTION_STORAGE_KEY = 'pangea.internal-model-route.v1'
 
     function modelSelectionKey(value) {
@@ -141,9 +141,11 @@ window.__ModuleLoader__.load({
     }
 
     const PHASE = {
-      PREPARING: '准备中', PLANNING: '规划分析单元', ANALYZING: '并行分析中', REVIEWING: '独立复核中',
-      CLOSING: '定向补齐中', REPORTING: '生成报告中', COMPLETE: '已完成', INCOMPLETE: '未完整结束',
-      STOPPED: '已停止', FAILED: '已失败', UNKNOWN: '未知',
+      PREPARING: '等待 Skill 初始化', STEP_BOOTSTRAP: '初始化 Skill',
+      STEP_01: 'Step 01 · 范围和任务契约', STEP_02: 'Step 02 · 输入与计划', STEP_03: 'Step 03 · 广度盘点',
+      STEP_04: 'Step 04 · 深度讲解', STEP_05: 'Step 05 · 场景与风险', STEP_06: 'Step 06 · SFMEA 翻译',
+      STEP_07: 'Step 07 · 测试设计', STEP_08: 'Step 08 · 独立 Judge', STEP_09: 'Step 09 · 正式交付',
+      COMPLETE: '已完成', INCOMPLETE: '校验未通过', STOPPED: '已停止', FAILED: '已失败', UNKNOWN: '未知',
     }
     const QUALITY = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决' }
     const REVIEW = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决', UNREADABLE: '结果不可读' }
@@ -1503,7 +1505,7 @@ window.__ModuleLoader__.load({
         if (!workbench || workbench.compatibility?.compatible === true) return null
         return h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
           h('div', { style: styles.itemTitle }, '当前 PANGEA 后端与工作台不兼容'),
-          h('div', { style: styles.itemMeta }, '请切换到提供 assets / runs / system / adapter 稳定接口的 PANGEA 工作区。'),
+          h('div', { style: styles.itemMeta }, '请切换到提供 assets / runs / system 稳定接口的 Codetalks Skill 工作区。'),
           h('div', { style: { ...styles.error, marginTop: 7 } }, workbench.compatibility?.error ?? '无法读取后端能力。'))
       }
 
@@ -1523,7 +1525,7 @@ window.__ModuleLoader__.load({
           renderCompatibility(),
           h('div', { style: { ...styles.card, ...styles.compatibility } },
             h('div', { style: styles.itemTitle }, '分析输入'),
-            h('div', { style: styles.itemMeta }, '分析目标必填；源码范围可选。不填写时，Agent 会先在所选仓库中识别最小范围，再按 PANGEA action 契约完成分析。'),
+            h('div', { style: styles.itemMeta }, '分析目标必填；源码范围可选。提交后立即启动 Codetalks Skill，不填范围时由 Step 01 在仓库内收敛。'),
             h('div', { style: styles.formGrid },
               h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
                 h('option', { value: '' }, repositories.length ? '选择仓库' : '没有可用仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository)))),
@@ -1545,51 +1547,36 @@ window.__ModuleLoader__.load({
 
       function renderWorkflow() {
         if (!current) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '选择一个 Run 后查看流程。'))
-        const roleLabel = { planning: '规划', analysis: '分析', review: '复核', closure: '定向补齐', reporting: '报告' }
-        const statusLabel = { pending: '等待', dispatched: '运行中', settled: '待校验', accepted: '已接收', failed: '失败' }
-        const methodologyKind = { general: '通用', specialized: '专项', task: '任务', user: '用户方法论' }
-        const renderMethodologies = unitId => {
-          if (methodologyDetailError) {
-            return h('div', { style: { ...styles.error, marginTop: 8 } }, `无法读取 PANGEA 方法论清单：${methodologyDetailError}`)
-          }
-          if (!methodologyDetailAvailable) {
-            return h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, '正在读取 PANGEA 返回的方法论清单。')
-          }
-          const items = methodologiesByUnit.get(unitId) ?? []
-          if (items.length === 0) {
-            return h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, 'PANGEA 尚未返回该单元已冻结的方法论。')
-          }
-          return h('div', { style: { marginTop: 10 } },
-            h('div', { style: styles.label }, `实际加载方法论（${items.length}）`),
-            items.map(item => h('div', { key: `${unitId}:${item.methodology_id}:${item.content_sha256}`, style: styles.compactCard },
-              h('div', { style: styles.row },
-                h('div', { style: styles.itemTitle }, text(item.title, item.methodology_id)),
-                h('span', { style: styles.badge }, methodologyKind[item.selection_kind] ?? item.selection_kind ?? '—')),
-              h('div', { style: styles.itemMeta }, `ID：${text(item.methodology_id, '—')}`),
-              h('div', { style: { ...styles.itemMeta, overflowWrap: 'anywhere' } }, `SHA-256：${text(item.content_sha256, '—')}`),
-              h('div', { style: styles.itemMeta }, `来源基线：${text(item.source_baseline, '—')}`),
-              h('div', { style: styles.itemMeta }, `选择依据：${text(item.selection_reason, '—')}`),
-              Array.isArray(item.source_item_ids) && item.source_item_ids.length
-                ? h('div', { style: { ...styles.itemMeta, overflowWrap: 'anywhere' } }, `来源条目：${item.source_item_ids.join('、')}`) : null,
-              hasText(item.path) ? h('div', { style: { ...styles.itemMeta, overflowWrap: 'anywhere' } }, `加载路径：${item.path}`) : null,
-              hasText(item.source_catalog_path) ? h('div', { style: { ...styles.itemMeta, overflowWrap: 'anywhere' } }, `来源目录：${item.source_catalog_path}`) : null)))
-        }
+        const steps = workflow.steps ?? []
+        const statusLabel = { pending: '等待', running: '执行中', completed: '已完成', failed: '失败' }
+        const statusColor = status => status === 'failed'
+          ? 'var(--dsw-alias-state-error-primary, #e66767)'
+          : status === 'completed'
+            ? 'var(--dsw-alias-state-success-primary, #38a892)'
+            : status === 'running' ? 'var(--dsw-alias-state-business-primary, #4d9ad6)' : '#c7cdd4'
+        const ackCount = Object.keys(workflow.core_rules_ack ?? {}).length
+        const judgeStatus = workflow.judge?.status ?? 'pending'
         return h(React.Fragment, null,
           h('div', { style: styles.card },
-            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Action 生命周期'), h('span', { style: styles.badge }, `${workflow.actions.length} 个 action`)),
-            h('div', { style: styles.stageRail }, workflow.actions.length ? workflow.actions.map(action => h('div', { key: action.action_id, style: styles.stageItem },
-              h('span', { style: { ...styles.stageDot, background: action.status === 'failed' ? 'var(--dsw-alias-state-error-primary, #e66767)' : action.status === 'accepted' ? 'var(--dsw-alias-state-success-primary, #38a892)' : undefined } }),
-              h('div', null, h('div', { style: styles.itemTitle }, `${roleLabel[action.role] ?? action.role} · ${action.stage}`), h('div', { style: styles.itemMeta }, `${action.action_id}${action.task_id ? ` · DSH ${action.task_id}` : ''}`), action.error ? h('div', { style: styles.error }, String(action.error)) : null),
-              h('span', { style: styles.badge }, statusLabel[action.status] ?? action.status))) : h('div', { style: styles.empty }, '尚未生成 action。'))),
-          h('div', { style: styles.sectionTitle }, `分析单元（${workflow.units.length}）`),
-          workflow.units.length ? workflow.units.map(unit => h('details', { key: unit.unit_id, style: styles.card },
-            h('summary', { style: { cursor: 'pointer' } }, `${unit.unit_id} · ${unit.title ?? '未命名单元'} · ${unit.status}`),
-            h('div', { style: styles.itemMeta }, `源码：${(unit.source_scope ?? []).join('、') || '—'}`),
-            h('div', { style: styles.itemMeta }, `上下文：${(unit.context_scope ?? []).join('、') || '—'}`),
-            unit.rationale ? h('div', { style: { ...styles.text, marginTop: 8 } }, unit.rationale) : null,
-            unit.summary ? h('div', { style: { ...styles.flowStep, ...styles.text } }, unit.summary) : null,
-            renderMethodologies(unit.unit_id))) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '规划尚未产生分析单元。')),
-          workflow.quality_checks?.length ? stringList('质量门禁', workflow.quality_checks) : null,
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Codetalks Skill 完整流程'), h('span', { style: styles.badge }, `${workflow.completed_steps?.length ?? 0} / 9`)),
+            h('div', { style: styles.grid },
+              field('核心规则 ACK', `${ackCount} / 3`),
+              field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : '等待初始化'),
+              field('独立 Judge', judgeStatus),
+              field('运行状态', PHASE[current.phase] ?? current.phase)),
+            h('div', { style: styles.chips },
+              current.artifacts?.request ? chip('打开任务请求', () => openSidebarFile(current.artifacts.request, 'Codetalks request.md')) : null,
+              current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null)),
+          h('div', { style: styles.sectionTitle }, 'Step 01–09 生命周期'),
+          h('div', { style: styles.card }, h('div', { style: styles.stageRail }, steps.map(step => h('div', { key: step.step, style: styles.stageItem },
+            h('span', { style: { ...styles.stageDot, background: statusColor(step.status) } }),
+            h('div', { style: { flex: 1, minWidth: 0 } },
+              h('div', { style: styles.itemTitle }, `Step ${step.step} · ${step.title}`),
+              step.artifacts?.length ? h('div', { style: styles.chips }, step.artifacts.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file)))) : h('div', { style: styles.itemMeta }, '尚无 Markdown 产物')),
+            h('span', { style: styles.badge }, statusLabel[step.status] ?? step.status))))),
+          current.artifacts?.formal_outputs?.length ? h('div', { style: styles.card },
+            h('div', { style: styles.itemTitle }, `正式输出（${current.artifacts.formal_outputs.length}）`),
+            h('div', { style: styles.chips }, current.artifacts.formal_outputs.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file))))) : null,
           workflow.unresolved?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '未解决事项'), h('pre', { style: styles.text }, JSON.stringify(workflow.unresolved, null, 2))) : null,
           workflow.error_history?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '错误历史'), h('pre', { style: styles.text }, JSON.stringify(workflow.error_history, null, 2))) : null)
       }
@@ -1795,7 +1782,7 @@ window.__ModuleLoader__.load({
           : health?.trusted === false
           ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
           : !current.terminal
-            ? { label: '等待分析完成', hint: `当前 ${completed}/${total} 个分析单元完成，可查看运行细节。`, target: 'workflow' }
+            ? { label: '等待分析完成', hint: `Codetalks Skill 已完成 ${completed}/${total} 个步骤，可查看完整流程。`, target: 'workflow' }
             : uncoveredRisks.length > 0
               ? { label: `处理 ${uncoveredRisks.length} 条未覆盖风险`, hint: '这些风险还没有关联可执行测试用例。', target: 'risks' }
               : testCases.length > 0
@@ -1837,7 +1824,7 @@ window.__ModuleLoader__.load({
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, '技术详情'),
             h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '这里保留流程、证据和复核原始信息，不参与日常主导航。'),
             h('div', { style: styles.chips },
-              chip(`运行流程 · ${workflow.actions.length}`, () => jump('workflow')),
+              chip(`Skill 流程 · ${workflow.steps?.length ?? 0}`, () => jump('workflow')),
               chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')),
               chip(`证据 · ${evidence.length}`, () => jump('evidence')),
               chip(`复核问题 · ${details.review_issues?.length ?? 0}`, () => jump('review')))),

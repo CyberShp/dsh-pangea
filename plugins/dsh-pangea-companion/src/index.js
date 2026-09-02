@@ -6,7 +6,7 @@ import { createLaunchLogStore } from './launch-log.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
-import { createRun, runAdapter, workspaceRoot } from './pangea-api.js'
+import { workspaceRoot } from './pangea-api.js'
 import { createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
@@ -45,43 +45,11 @@ const STATUS_PARAMETERS = {
   },
 }
 
-const RUN_CREATE_PARAMETERS = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['repository', 'target', 'source_scope'],
-  properties: {
-    repository: { type: 'string', minLength: 1, description: '从当前工作区 pangea-data/repositories 的一级目录中确定的仓库 ID。准备阶段只可列目录、按文件名搜索或 grep 符号，不得 Read/通读业务源码；不得从历史 Run 或 PANGEA 自身实现中推测。' },
-    target: {
-      type: 'string', minLength: 1,
-      description: '逐字复制用户确认的本次分析对象；不得添加仓库名、产品名或范围说明，不翻译、不重排、不自行缩写。',
-    },
-    source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '通过列目录、文件名搜索或 grep 符号确定、相对仓库根目录的最小源码路径集合。准备该字段时不得 Read/通读文件内容，也不得读取 pangea-data/runs、CLI、graph 或 schema。' },
-    focus: { type: 'array', items: { type: 'string', minLength: 1 } },
-    asset_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
-    test_case_examples: { type: 'array', items: { type: 'string', minLength: 1 }, description: '可选：当前工作区中少量已有用例文件的路径；不是自然语言用例描述。没有文件就省略。' },
-    data_root: { type: 'string', description: '可选。默认使用当前 PANGEA 工作区的 pangea-data。' },
-  },
-}
-
-const ACTION_PARAMETERS = {
-  type: 'object', additionalProperties: false,
-  required: ['data_root', 'run_id', 'action_id'],
-  properties: {
-    data_root: { type: 'string', minLength: 1 },
-    run_id: { type: 'string', minLength: 1 },
-    action_id: { type: 'string', minLength: 1 },
-  },
-}
-
-const ACTION_BIND_PARAMETERS = {
-  ...ACTION_PARAMETERS,
-  required: [...ACTION_PARAMETERS.required, 'task_id'],
-  properties: { ...ACTION_PARAMETERS.properties, task_id: { type: 'string', minLength: 1 } },
-}
-
 const PHASE_LABELS = {
-  PREPARING: '准备输入', PLANNING: '规划分析单元', ANALYZING: '并行分析',
-  REVIEWING: '独立复核', CLOSING: '定向补齐', REPORTING: '生成报告',
+  PREPARING: '等待 Skill 初始化', STEP_BOOTSTRAP: '初始化 Skill',
+  STEP_01: 'Step 01 · 范围与契约', STEP_02: 'Step 02 · 输入与计划', STEP_03: 'Step 03 · 广度盘点',
+  STEP_04: 'Step 04 · 深度讲解', STEP_05: 'Step 05 · 场景与风险', STEP_06: 'Step 06 · SFMEA 翻译',
+  STEP_07: 'Step 07 · 测试设计', STEP_08: 'Step 08 · 独立 Judge', STEP_09: 'Step 09 · 正式交付',
   COMPLETE: '已完成', INCOMPLETE: '未完整结束', STOPPED: '已停止', FAILED: '运行失败', UNKNOWN: '未知',
 }
 const QUALITY_LABELS = { PASS: '通过', UNRESOLVED: '未解决' }
@@ -109,8 +77,8 @@ function renderStatus(value) {
     `PANGEA Run：${run.run_id}`,
     `阶段：${PHASE_LABELS[run.phase] ?? run.phase}`,
     `质量状态：${QUALITY_LABELS[run.quality_status] ?? run.quality_status ?? '待定'}`,
-    `分析进度：${run.analysis.completed}/${run.analysis.total}`,
-    `Worker：运行 ${run.analysis.running ?? 0} / 等待 ${run.analysis.pending ?? 0} / 已提交 ${run.analysis.submitted ?? 0}（最大并发 ${run.analysis.max_parallel ?? 8}）`,
+    `Skill 步骤：${run.analysis.completed}/${run.analysis.total}`,
+    `执行：当前 ${run.analysis.running ?? 0} / 等待 ${run.analysis.pending ?? 0} / 已完成 ${run.analysis.submitted ?? 0}`,
     renderCount(run, 'risks', '风险'),
     renderCount(run, 'test_cases', '测试用例'),
     `证据：${run.counts.evidence}`,
@@ -384,6 +352,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           title: `${task.title} · 分析`,
           kind: 'analysis',
         }), event => launchLogs.append(task.task_id, event))
+        await tasks.bindRunBySession(launched.session_id, launched.run)
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id })
         return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })
       } catch (error) {
@@ -452,65 +421,6 @@ export function apply(ctx) {
   const ssh = new PangeaSshRuntime(environments)
 
   const toolDisposers = [ctx.tools.register({
-    name: 'pangea_run_create',
-    description: '创建新的 PANGEA 模块分析 Run。首次准备仅可在 pangea-data/repositories 下列目录、按文件名搜索或 grep 符号，用于确定仓库和最小 source_scope，随后直接调用本工具；不得在创建 Run 前 Read、分段读取或通读业务源码。不得先列举或读取 pangea-data/runs、历史契约和报告。不要读取 PANGEA CLI 源码、graph、schema，也不要手写 pending contract 来学习用法。target 必须逐字复制用户确认的本次分析对象，不得增删或改写。返回的 actions 必须逐条派发。',
-    parameters: RUN_CREATE_PARAMETERS,
-    async execute(args, exec) {
-      const sessionId = String(exec.agent.id)
-      const task = await tasks.getBySession(sessionId)
-      await appendLaunchSafe(launchLogs, task?.task_id, {
-        stage: 'pangea_run_create', status: 'start', session_id: sessionId,
-      })
-      try {
-        const run = await createRun(workspaceCwd(exec), args)
-        await appendLaunchSafe(launchLogs, task?.task_id, {
-          stage: 'pangea_run_create', status: 'ok', session_id: sessionId, run_id: run.run_id,
-        })
-        await monitor.bindRun(sessionId, run)
-        await tasks.bindRunBySession(sessionId, run)
-        await appendLaunchSafe(launchLogs, task?.task_id, {
-          stage: 'run_bound', status: 'ok', session_id: sessionId, run_id: run.run_id,
-        })
-        return run
-      } catch (error) {
-        await appendLaunchSafe(launchLogs, task?.task_id, {
-          stage: 'pangea_run_create', status: 'error', session_id: sessionId, error,
-        })
-        throw error
-      }
-    },
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_action_bind',
-    description: '兼容接口：手动把 action 与真实 DSH subagent_id 绑定。pangea_action_dispatch 已自动完成绑定，正常流程无需调用。',
-    parameters: ACTION_BIND_PARAMETERS,
-    execute: (args, exec) => runAdapter(workspaceCwd(exec), 'bind', args),
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_action_validate',
-    description: '兼容接口，当前流程已停用。子 Agent 结束后直接调用 pangea_action_settle；settle 会完成校验，并在失败时返回原 Agent 的返修 action。',
-    parameters: ACTION_PARAMETERS,
-    isConcurrencySafe: () => false,
-    async execute(args, exec) {
-      try {
-        return await runAdapter(workspaceCwd(exec), 'validate', args)
-      } catch (error) {
-        return {
-          action_id: args.action_id,
-          status: 'invalid',
-          error: error instanceof Error ? error.message : String(error),
-        }
-      }
-    },
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_action_settle',
-    description: '子 Agent 结束后直接调用。工具会校验并接收当前 action；失败时返回携带结构化错误的原 Agent 返修 action，通过时返回下一批 actions 或最终 Run 状态。',
-    parameters: ACTION_PARAMETERS,
-    isConcurrencySafe: () => false,
-    execute: (args, exec) => runAdapter(workspaceCwd(exec), 'settle', args),
-    output: toolOutput(),
-  }), ctx.tools.register({
     name: 'pangea_status',
     description: '只读查看一个明确 run_id 的 PANGEA 阶段、质量状态、分析进度、结果数量和读取健康状态；不得用它扫描或猜测历史 Run。',
     parameters: STATUS_PARAMETERS,
@@ -595,7 +505,7 @@ export { createTaskStore, TaskStore } from './task-store.js'
 export { createLaunchLogStore, LaunchLogStore } from './launch-log.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
-export { createRun, runAdapter, runPangea, workspaceRoot } from './pangea-api.js'
+export { createRun, runPangea, workspaceRoot } from './pangea-api.js'
 export { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'
 export { sessionFailure }

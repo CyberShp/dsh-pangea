@@ -1,11 +1,17 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 
-const TERMINAL_PHASES = new Set(['COMPLETE', 'INCOMPLETE', 'STOPPED', 'FAILED'])
-const STAGE_PHASES = {
-  preparing: 'PREPARING', planning: 'PLANNING', analyzing: 'ANALYZING',
-  reviewing: 'REVIEWING', closing: 'CLOSING', reporting: 'REPORTING', complete: 'COMPLETE',
-}
+const STEP_TITLES = [
+  '范围和任务契约',
+  '输入材料消费和运行计划',
+  '广度盘点和模块地图',
+  '开发给测试讲代码',
+  '多源场景增殖和风险解释',
+  'SFMEA 和黑盒翻译',
+  '测试场景、流程和用例设计',
+  '独立审查',
+  '正式交付',
+]
 
 async function pathKind(filePath) {
   try {
@@ -23,26 +29,26 @@ async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'))
 }
 
-async function listJsonFiles(directory) {
-  try {
-    const entries = await readdir(directory, { withFileTypes: true })
-    return entries
-      .filter(entry => entry.isFile() && entry.name.endsWith('.json'))
-      .map(entry => path.join(directory, entry.name))
-      .sort()
-  } catch (error) {
-    if (error?.code === 'ENOENT') return []
-    throw error
+async function markdownFiles(root) {
+  if (await pathKind(root) !== 'directory') return []
+  const output = []
+  const visit = async directory => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name)
+      if (entry.isDirectory()) await visit(candidate)
+      else if (entry.isFile() && entry.name.endsWith('.md')) output.push(candidate)
+    }
   }
+  await visit(root)
+  return output.sort()
 }
 
 async function findPangeaDataFrom(startPath) {
   let cursor = path.resolve(startPath)
   if (await pathKind(cursor) === 'file') cursor = path.dirname(cursor)
   for (let depth = 0; depth < 8; depth += 1) {
-    if (path.basename(cursor) === 'pangea-data' && await pathKind(path.join(cursor, 'runs')) === 'directory') return cursor
-    const candidate = path.join(cursor, 'pangea-data')
-    if (await pathKind(path.join(candidate, 'runs')) === 'directory') return candidate
+    const direct = path.basename(cursor) === 'pangea-data' ? cursor : path.join(cursor, 'pangea-data')
+    if (await pathKind(path.join(direct, 'runs')) === 'directory') return direct
     const parent = path.dirname(cursor)
     if (parent === cursor) break
     cursor = parent
@@ -60,542 +66,128 @@ export async function discoverPangeaDataRoot({ cwd, dataRoot } = {}) {
   }
   if (typeof cwd !== 'string' || cwd.trim() === '') throw new Error('Cannot discover PANGEA data root without a workspace cwd or explicit data_root')
   const discovered = await findPangeaDataFrom(cwd)
-  if (discovered === undefined) throw new Error(`No pangea-data/runs directory found from workspace: ${cwd}`)
+  if (!discovered) throw new Error(`No pangea-data/runs directory found from workspace: ${cwd}`)
   return discovered
 }
 
-async function readWorkerResults(runDirectory, acceptedAnalysis, acceptedRework) {
-  const roots = [path.join(runDirectory, 'agent-results', 'analysis'), path.join(runDirectory, 'agent-results', 'rework')]
-  const byUnit = new Map()
-  for (const root of roots) {
-    for (const filePath of await listJsonFiles(root)) {
-      let value
-      try { value = await readJson(filePath) } catch { continue }
-      const unitId = typeof value?.unit_id === 'string' && value.unit_id !== '' ? value.unit_id : path.basename(filePath, '.json')
-      const attempt = Number.isInteger(value?.attempt) ? value.attempt : root.endsWith(`${path.sep}rework`) ? 1 : 0
-      const accepted = attempt >= 1 ? acceptedRework.has(unitId) : acceptedAnalysis.has(unitId)
-      if (!accepted) continue
-      const previous = byUnit.get(unitId)
-      if (previous === undefined || attempt >= previous.attempt) byUnit.set(unitId, { ...value, unit_id: unitId, attempt })
-    }
-  }
-  return [...byUnit.values()]
+function lifecycle(metadata, state) {
+  if (metadata?.status === 'stopped') return { lifecycle_status: 'stopped', phase: 'STOPPED', terminal: true }
+  if (!state) return { lifecycle_status: 'preparing', phase: 'PREPARING', terminal: false }
+  if (state.status === 'complete') return { lifecycle_status: 'complete', phase: 'COMPLETE', terminal: true }
+  if (state.status === 'validation_failed') return { lifecycle_status: 'attention_required', phase: 'INCOMPLETE', terminal: true }
+  return { lifecycle_status: 'running', phase: `STEP_${state.current_step || 'BOOTSTRAP'}`, terminal: false }
 }
 
-function evidenceKey(value) {
-  return [value?.chunk_id ?? '', value?.location ?? '', value?.observation ?? ''].join('\u0000')
-}
-
-function buildDetails(workerResults, review) {
-  const risks = []
-  const testCases = []
-  const businessFlows = []
-  const evidenceByKey = new Map()
-
-  const addEvidence = (raw, { unitId, riskId } = {}) => {
-    if (!raw || typeof raw !== 'object') return
-    const normalized = {
-      chunk_id: typeof raw.chunk_id === 'string' ? raw.chunk_id : typeof raw.evidence_id === 'string' ? raw.evidence_id : '',
-      location: typeof raw.location === 'string' ? raw.location : typeof raw.source === 'string' ? raw.source : typeof raw.path === 'string' ? raw.path : '',
-      observation: typeof raw.observation === 'string' ? raw.observation : typeof raw.summary === 'string' ? raw.summary : typeof raw.reason === 'string' ? raw.reason : '',
-      unit_ids: [],
-      risk_ids: [],
-    }
-    const key = evidenceKey(normalized)
-    let current = evidenceByKey.get(key)
-    if (current === undefined) {
-      current = normalized
-      evidenceByKey.set(key, current)
-    }
-    if (unitId && !current.unit_ids.includes(unitId)) current.unit_ids.push(unitId)
-    if (riskId && !current.risk_ids.includes(riskId)) current.risk_ids.push(riskId)
-  }
-
-  for (const result of workerResults) {
-    const unitId = result.unit_id
-    const attempt = result.attempt
-    for (const raw of Array.isArray(result.risks) ? result.risks : []) {
-      if (!raw || typeof raw !== 'object') continue
-      const riskId = typeof raw.risk_id === 'string' ? raw.risk_id : typeof raw.id === 'string' ? raw.id : ''
-      const risk = { ...raw, risk_id: riskId, unit_id: unitId, attempt, linked_test_case_ids: [] }
-      risks.push(risk)
-      for (const item of Array.isArray(raw.evidence) ? raw.evidence : []) addEvidence(item, { unitId, riskId })
-    }
-    for (const raw of Array.isArray(result.test_cases) ? result.test_cases : []) {
-      if (!raw || typeof raw !== 'object') continue
-      const testCaseId = typeof raw.test_case_id === 'string' ? raw.test_case_id : typeof raw.id === 'string' ? raw.id : ''
-      testCases.push({ ...raw, test_case_id: testCaseId, unit_id: unitId, attempt })
-    }
-    for (const raw of Array.isArray(result.evidence) ? result.evidence : []) addEvidence(raw, { unitId })
-    for (const raw of Array.isArray(result.business_flows) ? result.business_flows : []) {
-      if (!raw || typeof raw !== 'object') continue
-      businessFlows.push({ ...raw, unit_id: unitId, attempt })
-      for (const item of Array.isArray(raw.evidence) ? raw.evidence : []) addEvidence(item, { unitId })
-    }
-  }
-
-  const risksById = new Map(risks.filter(item => item.risk_id).map(item => [item.risk_id, item]))
-  for (const testCase of testCases) {
-    for (const riskId of Array.isArray(testCase.linked_risk_ids) ? testCase.linked_risk_ids : []) {
-      const risk = risksById.get(riskId)
-      if (risk && !risk.linked_test_case_ids.includes(testCase.test_case_id)) risk.linked_test_case_ids.push(testCase.test_case_id)
-    }
-  }
-
-  risks.sort((a, b) => String(a.risk_id).localeCompare(String(b.risk_id)))
-  testCases.sort((a, b) => String(a.test_case_id).localeCompare(String(b.test_case_id)))
-  businessFlows.sort((a, b) => String(a.title ?? '').localeCompare(String(b.title ?? '')))
-  const evidence = [...evidenceByKey.values()].sort((a, b) => String(a.location).localeCompare(String(b.location)))
-
-  return { risks, test_cases: testCases, evidence, business_flows: businessFlows, review_issues: Array.isArray(review?.issues) ? review.issues : [] }
-}
-
-function stateArray(state, ...names) {
-  for (const name of names) {
-    if (Array.isArray(state?.[name])) return state[name]
-  }
-  return []
-}
-
-function finalStateHasResultCollections(state) {
-  if (!state || typeof state !== 'object') return false
-  return ['risks', 'risk_cards', 'test_cases', 'testcases', 'cases', 'business_flows', 'flows', 'flow_diagrams']
-    .some(name => Object.prototype.hasOwnProperty.call(state, name))
-}
-
-function buildDetailsFromFinalState(state, review) {
-  const synthetic = {
-    unit_id: 'final-state',
-    attempt: 2,
-    risks: stateArray(state, 'risks', 'risk_cards'),
-    test_cases: stateArray(state, 'test_cases', 'testcases', 'cases'),
-    evidence: stateArray(state, 'evidence'),
-    business_flows: stateArray(state, 'business_flows', 'flows', 'flow_diagrams'),
-  }
-  return buildDetails([synthetic], review)
-}
-
-async function readFinalState(runDirectory) {
-  const finalStatePath = path.join(runDirectory, 'final-state.json')
-  if (await pathKind(finalStatePath) !== 'file') return { path: null, value: null, error: null }
-  try {
-    return { path: finalStatePath, value: await readJson(finalStatePath), error: null }
-  } catch (error) {
-    return { path: finalStatePath, value: null, error: error instanceof Error ? error.message : String(error) }
-  }
-}
-
-function plainReportText(raw, format) {
-  if (format !== 'html') return raw
-  return raw
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;|&#160;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-}
-
-function parseReportCounts(raw, format) {
-  const text = plainReportText(raw, format)
-  const pick = pattern => {
-    const match = pattern.exec(text)
-    if (match === null) return null
-    const value = Number(match[1])
-    return Number.isSafeInteger(value) && value >= 0 ? value : null
-  }
-  return {
-    business_flows: pick(/(\d+)\s*条业务流程/),
-    risks: pick(/(\d+)\s*个风险/),
-    test_cases: pick(/(\d+)\s*个测试用例/),
-  }
-}
-
-async function readReportCounts(runDirectory, { checked = true } = {}) {
-  const candidates = [
-    { path: path.join(runDirectory, 'report.md'), format: 'markdown' },
-    { path: path.join(runDirectory, 'report.html'), format: 'html' },
-  ]
-  const existing = []
-  for (const candidate of candidates) {
-    if (await pathKind(candidate.path) === 'file') existing.push(candidate)
-  }
-  if (existing.length === 0) {
-    return { present: false, checked, path: null, format: null, counts: null, parseable: false, warnings: [] }
-  }
-  if (!checked) {
-    return { present: true, checked: false, path: existing[0].path, format: existing[0].format, counts: null, parseable: false, warnings: [] }
-  }
-
-  const warnings = []
-  let firstUnreadable = null
-  for (const candidate of existing) {
-    try {
-      const raw = await readFile(candidate.path, 'utf8')
-      const counts = parseReportCounts(raw, candidate.format)
-      const parseable = Object.values(counts).some(Number.isInteger)
-      if (parseable) return { present: true, checked: true, path: candidate.path, format: candidate.format, counts, parseable: true, warnings }
-      firstUnreadable ??= { path: candidate.path, format: candidate.format, counts }
-    } catch (error) {
-      warnings.push(`${path.basename(candidate.path)} 读取失败：${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-  return {
-    present: true,
-    checked: true,
-    path: firstUnreadable?.path ?? existing[0].path,
-    format: firstUnreadable?.format ?? existing[0].format,
-    counts: firstUnreadable?.counts ?? null,
-    parseable: false,
-    warnings,
-  }
-}
-
-async function readReviewArtifact(filePath) {
-  if (await pathKind(filePath) !== 'file') return null
-  try {
-    return { path: filePath, value: await readJson(filePath), error: null }
-  } catch (error) {
-    return { path: filePath, value: null, error: error instanceof Error ? error.message : String(error) }
-  }
-}
-
-function reviewIssue(value) {
-  if (!value || typeof value !== 'object') return null
-  const affectedUnits = Array.isArray(value.affected_unit_ids) ? value.affected_unit_ids : []
-  return {
-    ...value,
-    issue_id: value.issue_id ?? value.finding_key ?? null,
-    unit_id: value.unit_id ?? affectedUnits[0] ?? null,
-    reason: value.reason ?? value.summary ?? value.conclusion ?? null,
-    required_change: value.required_change ?? value.required_check ?? null,
-  }
-}
-
-function effectiveReviewIssues(independent, comparison, finalState) {
-  if (Array.isArray(finalState?.review_findings)) {
-    return finalState.review_findings.map(reviewIssue).filter(Boolean)
-  }
-  const independentFindings = Array.isArray(independent?.findings)
-    ? independent.findings
-    : Array.isArray(independent?.issues) ? independent.issues : []
-  if (!comparison) return independentFindings.map(reviewIssue).filter(Boolean)
-  const decisions = new Map((comparison.independent_finding_decisions ?? []).map(item => [item.finding_key, item.disposition]))
-  return [
-    ...independentFindings.filter(item => decisions.get(item.finding_key) !== 'dismissed'),
-    ...(Array.isArray(comparison.findings) ? comparison.findings : []),
-  ].map(reviewIssue).filter(Boolean)
-}
-
-async function readReview(runDirectory, finalState) {
-  const independentRecord = await readReviewArtifact(path.join(runDirectory, 'agent-results', 'review.json'))
-  const comparisonRecord = await readReviewArtifact(path.join(runDirectory, 'agent-results', 'comparison-review.json'))
-  if (!independentRecord && !comparisonRecord && !Array.isArray(finalState?.review_findings)) return null
-  const independent = independentRecord?.value
-  const comparison = comparisonRecord?.value
-  const decisions = Array.isArray(comparison?.independent_finding_decisions) ? comparison.independent_finding_decisions : []
-  const independentFindings = Array.isArray(independent?.findings)
-    ? independent.findings
-    : Array.isArray(independent?.issues) ? independent.issues : []
-  const issues = effectiveReviewIssues(independent, comparison, finalState)
-  return {
-    status: finalState?.quality_report?.status ?? (comparisonRecord ? 'COMPLETE' : independentRecord?.error ? 'UNREADABLE' : 'INDEPENDENT_COMPLETE'),
-    reviewer_id: independent?.reviewer_id ?? comparison?.reviewer_id ?? null,
-    summary: comparison?.summary ?? independent?.summary ?? null,
-    issues,
-    counts: {
-      independent: independentFindings.length,
-      dismissed: decisions.filter(item => item.disposition === 'dismissed').length,
-      confirmed: decisions.filter(item => item.disposition !== 'dismissed').length,
-      added: Array.isArray(comparison?.findings) ? comparison.findings.length : 0,
-      effective: issues.length,
-    },
-    independent: independentRecord ? {
-      summary: independent?.summary ?? null,
-      findings: independentFindings.map(reviewIssue).filter(Boolean),
-      unresolved: Array.isArray(independent?.unresolved) ? independent.unresolved : [],
-      path: independentRecord.path,
-      error: independentRecord.error,
-    } : null,
-    comparison: comparisonRecord ? {
-      summary: comparison?.summary ?? null,
-      decisions,
-      findings: Array.isArray(comparison?.findings) ? comparison.findings.map(reviewIssue).filter(Boolean) : [],
-      unresolved: Array.isArray(comparison?.unresolved) ? comparison.unresolved : [],
-      path: comparisonRecord.path,
-      error: comparisonRecord.error,
-    } : null,
-  }
-}
-
-function buildReaderHealth({ phase, dataSource, counts, finalStateRecord, reportRecord }) {
-  const issues = []
-  const countChecks = {}
-  const labels = { risks: '风险', test_cases: '测试用例', business_flows: '业务流程' }
-  let status = 'ok'
-  let trusted = true
-
-  if (finalStateRecord.error) {
-    status = 'warning'
-    issues.push(`final-state.json 读取失败：${finalStateRecord.error}`)
-  }
-  for (const warning of reportRecord.warnings ?? []) {
-    if (status === 'ok') status = 'warning'
-    issues.push(warning)
-  }
-
-  if (reportRecord.present && reportRecord.checked && !reportRecord.parseable) {
-    if (status === 'ok') status = 'warning'
-    issues.push('检测到报告，但无法从报告摘要提取风险/测试用例计数，无法自动对账。')
-  }
-
-  if (reportRecord.present && dataSource === 'worker-results') {
-    if (status === 'ok') status = 'warning'
-    issues.push('检测到已生成报告，但缺少可用的 final-state 聚合结果，当前使用 worker result 兼容回退。')
-  }
-
-  if (TERMINAL_PHASES.has(phase) && !reportRecord.present) {
-    if (status === 'ok') status = 'warning'
-    issues.push('Run 已进入终态，但未检测到 report.md/report.html。')
-  }
-
-  for (const key of ['risks', 'test_cases', 'business_flows']) {
-    const structured = Number.isInteger(counts?.[key]) ? counts[key] : null
-    const reported = reportRecord.checked && Number.isInteger(reportRecord.counts?.[key]) ? reportRecord.counts[key] : null
-    const check = {
-      structured,
-      report: reported,
-      status: reported === null || structured === null ? 'unknown' : structured === reported ? 'match' : 'mismatch',
-    }
-    countChecks[key] = check
-    if (check.status === 'mismatch') {
-      status = 'error'
-      trusted = false
-      issues.push(`${labels[key]}计数不一致：结构化数据 ${structured}，报告 ${reported}。`)
-    }
-  }
-
-  return {
-    status,
-    trusted,
-    data_source: dataSource,
-    report_checked: reportRecord.checked,
-    report_path: reportRecord.path,
-    count_checks: countChecks,
-    issues,
-  }
-}
-
-async function runModifiedAt(runDirectory, candidates) {
-  let latest = (await stat(runDirectory)).mtimeMs
-  for (const candidate of candidates) {
-    if (!candidate || await pathKind(candidate) !== 'file') continue
-    latest = Math.max(latest, (await stat(candidate)).mtimeMs)
-  }
-  return latest
-}
-
-export async function summarizeRun(dataRoot, runId, { includeDetails = false, checkReport = includeDetails } = {}) {
-  const runDirectory = path.join(dataRoot, 'runs', runId)
-  if (await pathKind(runDirectory) !== 'directory') throw new Error(`PANGEA run does not exist: ${runId}`)
-  const progressPath = path.join(runDirectory, 'progress.json')
-  const progress = await pathKind(progressPath) === 'file' ? await readJson(progressPath) : {}
-  const finalStateRecord = await readFinalState(runDirectory)
-  const finalState = finalStateRecord.value
-  const lifecycle = typeof progress?.lifecycle_status === 'string' ? progress.lifecycle_status : null
-  const actions = Object.values(progress?.actions ?? {})
-  const failedActions = actions.filter(action => {
-    const status = String(action?.status ?? '').toLowerCase()
-    return ['failed', 'attention_required'].includes(status)
-      || (action?.error && typeof action.error === 'object' && !['accepted', 'settled'].includes(status))
+function stepRows(state, liveDocuments, formalOutputs) {
+  const completed = new Set(state?.completed_steps ?? [])
+  const current = state?.current_step ?? null
+  return STEP_TITLES.map((title, index) => {
+    const step = String(index + 1).padStart(2, '0')
+    const status = completed.has(step) ? 'completed' : current === step ? 'running' : 'pending'
+    const artifacts = step === '09'
+      ? formalOutputs
+      : liveDocuments.filter(file => path.basename(file).startsWith(step + '-') || (step === '04' && file.includes(`${path.sep}流程讲解${path.sep}`)))
+    return { step, title, status, artifacts }
   })
-  const attentionRequired = progress?.attention_required === true
-    || String(progress?.status ?? '').toLowerCase() === 'attention_required'
-    || String(lifecycle ?? '').toLowerCase() === 'attention_required'
-    || failedActions.length > 0
-  const phase = attentionRequired ? 'INCOMPLETE'
-    : lifecycle === 'stopped' ? 'STOPPED'
-    : lifecycle === 'failed' ? 'FAILED'
-      : typeof progress?.stage === 'string' ? (STAGE_PHASES[progress.stage] ?? progress.stage.toUpperCase())
-        : typeof progress?.phase === 'string' ? progress.phase
-          : typeof finalState?.phase === 'string' ? finalState.phase
-            : typeof finalState?.run_status === 'string' ? finalState.run_status : 'UNKNOWN'
-  const analysisUnits = Array.isArray(progress?.analysis_units) ? progress.analysis_units : stateArray(finalState, 'analysis_units')
-  const completedAnalysisUnits = Array.isArray(progress?.completed_analysis_units) ? progress.completed_analysis_units : []
-  const completedReworkUnits = Array.isArray(progress?.completed_closure_units)
-    ? progress.completed_closure_units
-    : Array.isArray(progress?.completed_rework_units) ? progress.completed_rework_units : []
-  const analysisActions = actions.filter(
-    action => action?.role === 'analysis',
-  )
-  const legacySessions = Object.values(progress?.agent_sessions ?? {}).filter(
-    session => session?.role === 'analysis',
-  )
-  const review = includeDetails ? await readReview(runDirectory, finalState) : null
-  const recordedErrors = Array.isArray(progress?.errors) ? progress.errors : stateArray(finalState, 'errors')
-  const errors = recordedErrors.length > 0
-    ? recordedErrors
-    : failedActions.map(action => ({
-        action_id: action.action_id ?? null,
-        role: action.role ?? null,
-        code: action.error?.code ?? 'WORKER_FAILED',
-        message: action.error?.message ?? String(action.error ?? 'Worker 未正常完成'),
-      }))
-  const errorHistory = Array.isArray(progress?.error_history) ? progress.error_history : []
-  const reportMd = path.join(runDirectory, 'report.md')
-  const reportHtml = path.join(runDirectory, 'report.html')
-  const reportRecord = await readReportCounts(runDirectory, { checked: checkReport })
+}
 
-  const dataSource = finalStateHasResultCollections(finalState) ? 'final-state' : 'worker-results'
-  let details
-  let counts = { risks: null, test_cases: null, evidence: null, business_flows: null, review_issues: null }
-
-  if (includeDetails) {
-    if (dataSource === 'final-state') {
-      details = buildDetailsFromFinalState(finalState, review)
-    } else {
-      const workerResults = await readWorkerResults(runDirectory, new Set(completedAnalysisUnits), new Set(completedReworkUnits))
-      details = buildDetails(workerResults, review)
-    }
-    counts = {
-      risks: details.risks.length,
-      test_cases: details.test_cases.length,
-      evidence: details.evidence.length,
-      business_flows: details.business_flows.length,
-      review_issues: details.review_issues.length,
-    }
+export async function summarizeRun(dataRoot, runId, { includeDetails = false } = {}) {
+  const metadataPath = path.join(dataRoot, '.pangea', 'skill-runs', runId, 'metadata.json')
+  if (await pathKind(metadataPath) !== 'file') throw new Error(`Codetalks Skill run does not exist: ${runId}`)
+  const metadata = await readJson(metadataPath)
+  const runDirectory = metadata.run_root
+  const statePath = path.join(runDirectory, '内部索引', '运行状态.json')
+  const state = await pathKind(statePath) === 'file' ? await readJson(statePath) : null
+  const liveDocuments = await markdownFiles(path.join(runDirectory, '活文档'))
+  const formalOutputs = await markdownFiles(path.join(runDirectory, '正式输出'))
+  const reportMd = path.join(runDirectory, '正式输出', '完整分析报告.md')
+  const reportAvailable = await pathKind(reportMd) === 'file'
+  const life = lifecycle(metadata, state)
+  const completed = state?.completed_steps?.length ?? 0
+  const workflow = {
+    steps: stepRows(state, liveDocuments, formalOutputs),
+    completed_steps: state?.completed_steps ?? [],
+    current_step: state?.current_step ?? null,
+    core_rules_ack: state?.core_rules_ack ?? {},
+    judge: state?.judge ?? { required: true, status: 'pending' },
+    actions: [],
+    units: [],
+    quality_checks: [],
+    unresolved: [],
+    error_history: [],
   }
-  const readerHealth = buildReaderHealth({ phase, dataSource, counts, finalStateRecord, reportRecord })
-  const qualityFromFinal = typeof finalState?.quality_report?.status === 'string' ? finalState.quality_report.status : null
-  const completedFallback = TERMINAL_PHASES.has(phase) && analysisUnits.length > 0 ? analysisUnits.length : completedAnalysisUnits.length
-
   const summary = {
     run_id: runId,
-    phase,
-    terminal: TERMINAL_PHASES.has(phase),
-    lifecycle_status: attentionRequired ? 'attention_required' : lifecycle,
-    attention_required: attentionRequired,
-    quality_status: typeof progress?.quality_status === 'string' ? progress.quality_status : qualityFromFinal,
+    ...life,
+    target: metadata.request?.target ?? runId,
+    repository: metadata.request?.repository ?? null,
+    verdict: state?.verdict ?? null,
+    quality_status: state?.verdict ?? null,
+    attention_required: life.lifecycle_status === 'attention_required',
     analysis: {
-      total: analysisUnits.length,
-      completed: completedAnalysisUnits.length || completedFallback,
-      reworked: completedReworkUnits.length,
-      running: analysisActions.length
-        ? analysisActions.filter(action => action.status === 'dispatched').length
-        : legacySessions.filter(session => session.status === 'dispatched').length,
-      pending: analysisActions.length
-        ? analysisActions.filter(action => action.status === 'pending').length
-        : legacySessions.filter(session => session.status === 'pending').length,
-      submitted: analysisActions.length
-        ? analysisActions.filter(action => ['settled', 'accepted'].includes(action.status)).length
-        : legacySessions.filter(session => session.status === 'completed').length,
-      max_parallel: 8,
+      total: 9,
+      completed,
+      reworked: 0,
+      running: life.terminal ? 0 : 1,
+      pending: Math.max(0, 9 - completed - (state?.current_step ? 1 : 0)),
+      submitted: completed,
+      max_parallel: 1,
     },
-    counts,
-    errors,
-    error_history: errorHistory,
-    review,
-    data_source: dataSource,
-    reader_health: readerHealth,
-    reader_warnings: readerHealth.issues,
+    counts: { risks: null, test_cases: null, evidence: liveDocuments.length, business_flows: null, review_issues: null },
+    errors: state?.status === 'validation_failed' ? [{ code: 'SKILL_VALIDATION_FAILED', message: 'run_guard 最终校验未通过' }] : [],
+    error_history: [],
+    review: {
+      status: (state?.completed_steps ?? []).includes('08') ? 'COMPLETE' : 'PENDING',
+      summary: state?.judge?.status ?? 'pending',
+      issues: [],
+      counts: { effective: 0 },
+    },
+    data_source: 'codetalks-markdown',
+    reader_health: { status: 'ok', trusted: true, data_source: 'codetalks-markdown', issues: [], count_checks: {} },
+    reader_warnings: [],
     artifacts: {
       run_directory: runDirectory,
-      progress: await pathKind(progressPath) === 'file' ? progressPath : null,
-      final_state: finalStateRecord.path,
-      report_md: await pathKind(reportMd) === 'file' ? reportMd : null,
-      report_html: await pathKind(reportHtml) === 'file' ? reportHtml : null,
+      request: metadata.request_path,
+      state: await pathKind(statePath) === 'file' ? statePath : null,
+      live_documents: liveDocuments,
+      formal_outputs: formalOutputs,
+      report_md: reportAvailable ? reportMd : null,
+      report_html: null,
     },
-    modified_at: await runModifiedAt(runDirectory, [progressPath, finalStateRecord.path, reportMd, reportHtml]),
+    report_available: reportAvailable && life.lifecycle_status === 'complete',
+    modified_at: (await stat(runDirectory)).mtimeMs,
   }
   if (includeDetails) {
-    const completedSet = new Set(completedAnalysisUnits)
-    const closureSet = new Set(completedReworkUnits)
-    summary.details = details
-    summary.workflow = {
-      units: analysisUnits.map(value => {
-        const unit = typeof value === 'string' ? { unit_id: value } : value
-        return {
-          ...unit,
-          status: closureSet.has(unit.unit_id) ? 'reworked' : completedSet.has(unit.unit_id) ? 'completed' : 'pending',
-          summary: stateArray(finalState, 'analysis_summaries').find(item => item?.unit_id === unit.unit_id)?.summary ?? null,
-        }
-      }),
-      actions: Object.values(progress?.actions ?? {}).map(action => ({
-        action_id: action.action_id,
-        action: action.action,
-        role: action.role,
-        stage: action.stage,
-        status: action.status,
-        task_id: action.task_id ?? null,
-        error: action.error ?? null,
-      })),
-      error_history: errorHistory,
-      quality_checks: Array.isArray(finalState?.quality_report?.checks) ? finalState.quality_report.checks : [],
-      unresolved: Array.isArray(finalState?.quality_report?.unresolved) ? finalState.quality_report.unresolved : [],
-    }
+    summary.details = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
+    summary.workflow = workflow
   }
   return summary
 }
 
 export async function listRuns(dataRoot, { limit = 20 } = {}) {
-  const runsRoot = path.join(dataRoot, 'runs')
-  const entries = await readdir(runsRoot, { withFileTypes: true })
-  const summaries = []
-  for (const entry of entries) {
+  const root = path.join(dataRoot, '.pangea', 'skill-runs')
+  if (await pathKind(root) !== 'directory') return []
+  const values = []
+  for (const entry of await readdir(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
-    try { summaries.push(await summarizeRun(dataRoot, entry.name, { checkReport: false })) } catch { /* corrupt run must not hide healthy runs */ }
+    try { values.push(await summarizeRun(dataRoot, entry.name)) } catch { /* one damaged run must not hide others */ }
   }
-  summaries.sort((a, b) => b.modified_at - a.modified_at)
-  return summaries.slice(0, limit)
+  values.sort((a, b) => b.modified_at - a.modified_at)
+  return values.slice(0, limit)
 }
 
 export function chooseCurrentRun(runs) {
   return runs.find(run => !run.terminal) ?? runs[0] ?? null
 }
 
-export async function listExecutorRuns(dataRoot, { analysisRunId, limit = 20 } = {}) {
-  const root = path.join(dataRoot, 'executor-runs')
-  let entries
-  try { entries = await readdir(root, { withFileTypes: true }) } catch (error) {
-    if (error?.code === 'ENOENT') return []
-    throw error
-  }
-  const values = []
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const runDirectory = path.join(root, entry.name)
-    const progressPath = path.join(runDirectory, 'progress.json')
-    try {
-      const progress = await readJson(progressPath)
-      if (analysisRunId && progress.analysis_run_id !== analysisRunId) continue
-      const planPath = path.join(runDirectory, 'agent-results', 'plan.json')
-      const resultPath = path.join(runDirectory, 'agent-results', 'execution.json')
-      const plan = await pathKind(planPath) === 'file' ? await readJson(planPath).catch(() => null) : null
-      const result = await pathKind(resultPath) === 'file' ? await readJson(resultPath).catch(() => null) : null
-      values.push({
-        executor_run_id: entry.name,
-        analysis_run_id: progress.analysis_run_id,
-        phase: progress.phase,
-        result_status: progress.result_status ?? result?.status ?? null,
-        environment_id: progress.environment_id,
-        automation_id: progress.automation_id,
-        selected_test_case_ids: progress.selected_test_case_ids ?? [],
-        unresolved: plan?.unresolved ?? [],
-        case_results: result?.cases ?? [],
-        terminal: progress.phase === 'COMPLETE' || progress.phase === 'INCOMPLETE',
-        artifacts: { run_directory: runDirectory, plan: await pathKind(planPath) === 'file' ? planPath : null, result: await pathKind(resultPath) === 'file' ? resultPath : null },
-        modified_at: await runModifiedAt(runDirectory, [progressPath, planPath, resultPath]),
-      })
-    } catch { /* corrupt executor run must not hide healthy runs */ }
-  }
-  values.sort((a, b) => b.modified_at - a.modified_at)
-  return values.slice(0, limit)
+export async function listExecutorRuns() {
+  return []
 }
 
 export async function companionSnapshot({ cwd, dataRoot, runId, limit = 20 } = {}) {
   const resolvedDataRoot = await discoverPangeaDataRoot({ cwd, dataRoot })
   const runs = await listRuns(resolvedDataRoot, { limit })
-  const selected = runId !== undefined ? (runs.find(run => run.run_id === runId) ?? { run_id: runId }) : chooseCurrentRun(runs)
-  const current = selected === null ? null : await summarizeRun(resolvedDataRoot, selected.run_id, { includeDetails: true, checkReport: true })
-  const executorRuns = await listExecutorRuns(resolvedDataRoot, { analysisRunId: current?.run_id, limit })
-  return { status: 'ok', data_root: resolvedDataRoot, current, runs, executor_runs: executorRuns }
+  const selected = runId !== undefined ? runs.find(run => run.run_id === runId) : chooseCurrentRun(runs)
+  const current = selected ? await summarizeRun(resolvedDataRoot, selected.run_id, { includeDetails: true }) : null
+  return { status: 'ok', data_root: resolvedDataRoot, current, runs, executor_runs: [] }
 }

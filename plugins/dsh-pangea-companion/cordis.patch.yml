@@ -1,9 +1,3 @@
-- id: tool-subagent-report
-  name: '@deepseek-ai/dsh-tool-subagent-report'
-  disabled: true
-
 - insert:
     - id: pangea-companion
       name: dsh-pangea-companion
-    - id: pangea-report-policy
-      name: dsh-pangea-companion/report-policy

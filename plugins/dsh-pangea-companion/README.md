@@ -13,7 +13,7 @@
 - 会话删除后仍按 Run 保留最小关联摘要；历史 Run 不依赖原 DSH 会话继续存在。
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
 - 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止。
-- 新建分析会创建独立 DSH 会话，由会话调用 `pangea_run_create` 并完整执行 PANGEA action 生命周期；页面不另建状态机。
+- 新建分析会先创建 Codetalks Skill Run，立即启动独立 DSH 会话执行 Step 01–09；页面只监听 Skill 状态和 Markdown 产物。
 - 建立 `风险 ↔ 测试用例 ↔ 证据` 关联，便于从风险追到测试和源码证据，再按访问路径返回。
 - 只读同源接口 `GET /api/pangea-companion/state`，供 Web UI 使用。
 - 通过 `ctx.pangea` 向统一工作台注册“分析”和“执行”两页，不再直接注册 Better Sidebar Tab。

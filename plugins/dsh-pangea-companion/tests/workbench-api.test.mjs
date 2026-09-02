@@ -135,7 +135,7 @@ test('keeps the workbench available when one public runs get detail cannot be re
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('launches a dedicated DSH session that owns the complete Run lifecycle and reports startup stages', async () => {
+test('creates a Skill Run before launching its dedicated DSH session', async () => {
   const root = await workspace()
   try {
     const events = []
@@ -150,11 +150,16 @@ test('launches a dedicated DSH session that owns the complete Run lifecycle and 
         async prompt(value) { events.push(['prompt', value.payload]); return ok({}) },
       },
     }
+    const runner = async call => {
+      if (call.args[0] === 'system') return capabilities
+      assert.deepEqual(call.args.slice(0, 2), ['runs', 'create'])
+      return { run_id: 'skill-run-1', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    }
     const result = await launchAnalysisSession(api, {
       cwd: root,
       input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'], asset_ids: ['asset-1'] },
       model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
-    }, async () => capabilities, async session => {
+    }, runner, async session => {
       events.push(['persist', session])
     }, async event => { launchEvents.push(event) })
     assert.equal(result.session_id, 'session-1')
@@ -163,11 +168,12 @@ test('launches a dedicated DSH session that owns the complete Run lifecycle and 
     assert.equal(events[2][0], 'persist')
     assert.equal(events[2][1].session_id, 'session-1')
     assert.equal(events[3][0], 'prompt')
-    assert.match(events[3][1].content[0].text, /pangea_run_create/)
-    assert.match(events[3][1].content[0].text, /"asset_ids": \[/)
-    assert.match(events[3][1].content[0].text, /完整 action 流程/)
-    assert.match(events[3][1].content[0].text, /codetalks-skill 1\.0\.0/)
-    for (const stage of ['capabilities_check', 'model_validate', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'waiting_for_run']) {
+    assert.match(events[3][1].content[0].text, /\/runtime\/request\.md/)
+    assert.match(events[3][1].content[0].text, /skill-run-1/)
+    assert.match(events[3][1].content[0].text, /Step 01–09/)
+    assert.doesNotMatch(events[3][1].content[0].text, /pangea_run_create/)
+    assert.equal(result.run.run_id, 'skill-run-1')
+    for (const stage of ['capabilities_check', 'model_validate', 'skill_run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'skill_started']) {
       assert.equal(launchEvents.some(event => event.stage === stage), true, `missing launch stage ${stage}`)
     }
     assert.equal(launchEvents.find(event => event.stage === 'session_create' && event.status === 'ok')?.session_id, 'session-1')

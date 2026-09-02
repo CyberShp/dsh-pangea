@@ -1,6 +1,6 @@
 import path from 'node:path'
 
-import { assertCodetalksSkill, runPangea, workspaceRoot } from './pangea-api.js'
+import { assertCodetalksSkill, createRun, runPangea, workspaceRoot } from './pangea-api.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const INTERNAL_PROVIDER_SETTINGS_NS = 'llm-pi-ai'
@@ -244,6 +244,12 @@ export async function launchAnalysisSession(
     () => requireInternalModel(api, model),
     value => ({ provider: value.provider, model: value.model }),
   )
+  const run = await launchStep(
+    onEvent,
+    'skill_run_create',
+    () => createRun(root, { ...request, data_root: resolvedDataRoot }, runner),
+    value => ({ run_id: value.run_id, request_path: value.request_path }),
+  )
   const sessionId = await launchStep(
     onEvent,
     'session_create',
@@ -263,25 +269,18 @@ export async function launchAnalysisSession(
     input: request,
     data_root: resolvedDataRoot,
     model: selectedModel,
+    run,
   }), () => ({ session_id: sessionId }))
-  const scopeInstructions = request.source_scope.length > 0
-    ? ['用户已经指定 source_scope，逐字使用下面输入中的路径，不得自行扩大范围。']
-    : [
-        '用户没有手工指定 source_scope。调用 pangea_run_create 前，仅可在已选仓库中列目录、按文件名搜索或 grep 符号，以确定与 target 直接相关的最小源码路径集合。',
-        '不得为确定范围而 Read、分段读取或通读业务源码，也不得读取历史 Run、PANGEA CLI、graph 或 schema。',
-        '能够确定唯一合理范围时，直接补全非空 source_scope 并调用 pangea_run_create，不要再次要求用户填写。若存在多个明显不同且无法安全选择的范围，先在当前会话列出候选并等待用户确认。',
-      ]
-  const agentInput = request.source_scope.length > 0
-    ? request
-    : Object.fromEntries(Object.entries(request).filter(([key]) => key !== 'source_scope'))
   const prompt = [
-    '创建一个新的 PANGEA 模块分析并走完完整 action 流程，直到生成最终报告。',
-    '本次 Run 固定使用 codetalks-skill 1.0.0；Skill 与当前步骤只以 progress.json 和 task.skill 为准。',
-    '必须读取 .agents/pangea/dsh.md，并直接调用 pangea_run_create；不得手写 pending contract 或自行推进 graph。',
-    ...scopeInstructions,
+    '立即开始已经创建好的 Codetalks Skill 深度型模块分析，完整执行 Step 01–09，不需要再次确认，也不要创建第二个 Run。',
+    '必须先读取 `.agents/pangea/dsh.md`，再读取下面的 Skill 运行请求并严格执行。',
+    `运行请求：${run.request_path}`,
+    `Run ID：${run.run_id}`,
+    `运行根目录：${run.run_root}`,
+    '旧 PANGEA Graph、Planning、Worker action、Review、Closure、Reporting、bind、validate 和 settle 均不存在。',
+    '生命周期只以运行根目录中的 `内部索引/运行状态.json` 为准。',
     '',
-    '[PANGEA Run 输入]',
-    JSON.stringify({ ...agentInput, data_root: resolvedDataRoot }, null, 2),
+    '现在读取运行请求并执行。',
   ].join('\n')
   await launchStep(onEvent, 'prompt_submit', async () => {
     apiValue(await api.sessions.prompt(rpc({
@@ -290,8 +289,8 @@ export async function launchAnalysisSession(
       content: [{ type: 'text', text: prompt }],
     })))
   }, () => ({ session_id: sessionId }))
-  await emitLaunch(onEvent, { stage: 'waiting_for_run', status: 'info', session_id: sessionId, message: 'Analysis Session 已启动，等待主 Agent 调用 pangea_run_create。' })
-  return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel }
+  await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, run_id: run.run_id, message: 'Codetalks Skill 分析会话已启动。' })
+  return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
 }
 
 export async function createTaskConversation(api, { cwd, title }) {

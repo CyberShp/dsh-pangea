@@ -4,7 +4,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
-const PENDING_CONTRACT = path.join('pangea-data', '.pangea', 'pending-task-contract.json')
+const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
 const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.0.0' })
 
 export function assertCodetalksSkill(capabilities) {
@@ -87,17 +87,18 @@ export function runPangea({ cwd, args }) {
 
 export async function createRun(cwd, input, runner = runPangea) {
   const root = workspaceRoot(cwd)
-  const pendingPath = path.join(root, PENDING_CONTRACT)
+  const pendingPath = path.join(root, PENDING_REQUEST)
   const dataRoot = typeof input.data_root === 'string' && input.data_root.trim() !== ''
     ? path.resolve(root, input.data_root)
     : path.join(root, 'pangea-data')
-  const contract = {
+  const request = {
     data_root: dataRoot,
-    mode: 'module_analysis',
     repository: input.repository,
     target: input.target,
     source_scope: input.source_scope,
     focus: input.focus ?? [],
+    asset_ids: input.asset_ids ?? [],
+    test_case_examples: input.test_case_examples ?? [],
   }
   const capabilities = await runner({
     cwd: root,
@@ -106,21 +107,10 @@ export async function createRun(cwd, input, runner = runPangea) {
   assertCodetalksSkill(capabilities)
   await mkdir(path.dirname(pendingPath), { recursive: true })
   await rm(pendingPath, { force: true })
-  await writeFile(pendingPath, `${JSON.stringify(contract, null, 2)}\n`, 'utf8')
+  await writeFile(pendingPath, `${JSON.stringify(request, null, 2)}\n`, 'utf8')
   try {
-    return await runner({ cwd: root, args: ['runs', 'create', '--contract', pendingPath] })
+    return await runner({ cwd: root, args: ['runs', 'create', '--request', pendingPath] })
   } finally {
     await rm(pendingPath, { force: true })
   }
-}
-
-export function runAdapter(cwd, operation, input, runner = runPangea) {
-  return runner({
-    cwd,
-    args: [
-      'adapter', operation, '--data-root', input.data_root,
-      '--run-id', input.run_id, '--action-id', input.action_id,
-      ...(operation === 'bind' ? ['--task-id', input.task_id] : []),
-    ],
-  })
 }
