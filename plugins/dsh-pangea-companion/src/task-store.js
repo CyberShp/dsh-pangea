@@ -58,15 +58,14 @@ function normalizeTask(taskId, value) {
     : []
   return {
     task_id: taskId,
+    request_version: value?.request_version === '2.0' ? '2.0' : '1.0',
     workspace: text(value?.workspace),
     data_root: text(value?.data_root) || null,
     title: text(value?.title, text(value?.target, taskId)),
     repository: text(value?.repository),
     target: text(value?.target),
     source_scope: strings(value?.source_scope),
-    focus: strings(value?.focus),
     asset_ids: strings(value?.asset_ids),
-    test_case_examples: strings(value?.test_case_examples),
     model_route: normalizeModelRoute(value?.model_route),
     provider: text(value?.provider) || null,
     job_id: text(value?.job_id) || null,
@@ -152,12 +151,11 @@ export class TaskStore {
       workspace: root,
       data_root: text(dataRoot) || null,
       title: target,
+      request_version: '2.0',
       repository,
       target,
       source_scope: input?.source_scope,
-      focus: input?.focus,
       asset_ids: input?.asset_ids,
-      test_case_examples: input?.test_case_examples,
       model_route: input?.model_route,
       provider: input?.provider_id ?? input?.provider,
       status: 'preparing',
@@ -314,6 +312,22 @@ export class TaskStore {
     task.execution_status = 'stopped'
     task.launch_error = text(error) || null
     task.launch_error_code = text(error) ? 'STOP_FAILED' : null
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
+  // A portable install can move the repository without changing the durable
+  // task/run identity.  The stop endpoint may explicitly prove the target by
+  // supplying both task_id and its run_id; in that narrow case it can rebind
+  // the task to the current workspace so the stopped history remains visible.
+  async rebindWorkspace(taskId, workspace) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    const root = text(workspace)
+    if (!root) throw new Error('workspace is required')
+    if (task.workspace === root) return structuredClone(task)
+    task.workspace = root
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)

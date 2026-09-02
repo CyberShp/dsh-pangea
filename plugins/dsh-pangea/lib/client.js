@@ -905,7 +905,7 @@ window.__ModuleLoader__.load({
   },
 })
 
-// PANGEA product-shell adapter for DSH-owned internal model configuration.
+// PANGEA product-shell adapter for DSH-owned model configuration.
 // PANGEA replaces the DSH navigation, so the product owns the visible entry
 // points while DSH remains the single source of truth for model state/writes.
 ;(() => {
@@ -920,7 +920,7 @@ window.__ModuleLoader__.load({
   const ONBOARDING_ATTR = 'data-pangea-model-onboarding'
   const CHROME_STYLE_ID = 'dsh-pangea-product-chrome-policy'
 
-  let modelState = { known: false, required: false, customAvailable: false }
+  let modelState = { known: false, required: false, modelAvailable: false }
   let dismissed = false
   let queriedShell = null
 
@@ -1000,19 +1000,19 @@ window.__ModuleLoader__.load({
     const card = document.createElement('section')
     card.setAttribute('role', 'dialog')
     card.setAttribute('aria-modal', 'true')
-    card.setAttribute('aria-label', '首次配置内部模型')
+    card.setAttribute('aria-label', '首次配置模型与 API')
     card.style.cssText = 'box-sizing:border-box;width:min(600px,calc(100vw - 48px));padding:30px;border:1px solid #dfe3e8;border-radius:12px;background:#fff;box-shadow:0 24px 70px rgba(0,0,0,.24);color:#17191d;font-family:"Huawei Sans","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI",sans-serif'
 
     const title = document.createElement('h2')
-    title.textContent = '配置内部模型'
+    title.textContent = '配置模型与 API'
     title.style.cssText = 'margin:0;font-size:22px;line-height:30px'
     const description = document.createElement('p')
-    description.textContent = 'PANGEA 使用团队内部自定义 LLM。模型配置由 DSH 管理，请先完成内部模型接入。'
+    description.textContent = 'PANGEA 使用 DSH 管理的官方或自定义模型。请先完成模型与 API 接入。'
     description.style.cssText = 'margin:10px 0 22px;color:#68707c;font-size:14px;line-height:22px'
 
     const action = document.createElement('button')
     action.type = 'button'
-    action.textContent = '自定义 / 内部模型提供方'
+    action.textContent = '打开模型与 API 设置'
     action.style.cssText = 'width:100%;min-height:44px;border:0;border-radius:7px;padding:0 16px;background:#c7000b;color:#fff;font:inherit;font-weight:650;cursor:pointer'
     action.addEventListener('click', openInternalModels)
 
@@ -1058,7 +1058,7 @@ window.__ModuleLoader__.load({
     modelState = {
       known: true,
       required: detail.required === true,
-      customAvailable: detail.customAvailable === true,
+      modelAvailable: detail.modelAvailable === true,
     }
     if (!modelState.required) dismissed = false
     syncOnboarding()

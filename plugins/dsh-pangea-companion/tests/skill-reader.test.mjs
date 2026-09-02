@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -65,5 +65,32 @@ test('marks only a validated complete Skill state as terminal complete', async (
     assert.equal(current.report_available, true)
     assert.equal(current.artifacts.report_md, report)
     assert.equal(current.workflow.steps[8].status, 'completed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('opens an explicitly selected historical Run outside the first page', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-history-selection-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  try {
+    const create = async (runId, target) => {
+      const runRoot = path.join(dataRoot, 'runs', runId)
+      const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+      await writeJson(path.join(metadataRoot, 'metadata.json'), {
+        run_id: runId, status: 'active', run_root: runRoot,
+        request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target },
+      })
+      await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+        status: 'complete', current_step: '09', completed_steps: ['01', '02', '03', '04', '05', '06', '07', '08', '09'],
+      })
+    }
+    await create('historical-run', '历史失败任务')
+    await create('latest-run', '当前最新任务')
+    const oldTime = new Date(Date.now() - 60_000)
+    await utimes(path.join(dataRoot, 'runs', 'historical-run'), oldTime, oldTime)
+    const snapshot = await companionSnapshot({ dataRoot, runId: 'historical-run', limit: 1 })
+    assert.equal(snapshot.runs.length, 1)
+    assert.equal(snapshot.runs[0].run_id, 'latest-run')
+    assert.equal(snapshot.current.run_id, 'historical-run')
+    assert.equal(snapshot.current.target, '历史失败任务')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

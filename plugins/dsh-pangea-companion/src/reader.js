@@ -199,7 +199,13 @@ export async function listExecutorRuns() {
 export async function companionSnapshot({ cwd, dataRoot, runId, limit = 20 } = {}) {
   const resolvedDataRoot = await discoverPangeaDataRoot({ cwd, dataRoot })
   const runs = await listRuns(resolvedDataRoot, { limit })
-  const selected = runId !== undefined ? runs.find(run => run.run_id === runId) : chooseCurrentRun(runs)
+  // A requested historical Run must not fall back to the newest Run merely
+  // because it is older than the first page. Read that exact id directly and
+  // leave the result empty if it no longer exists.
+  let selected = runId !== undefined ? runs.find(run => run.run_id === runId) : chooseCurrentRun(runs)
+  if (runId !== undefined && !selected && typeof runId === 'string' && runId.trim() !== '') {
+    try { selected = await summarizeRun(resolvedDataRoot, runId, { includeDetails: false }) } catch { selected = null }
+  }
   const current = selected ? await summarizeRun(resolvedDataRoot, selected.run_id, { includeDetails: true }) : null
   return { status: 'ok', data_root: resolvedDataRoot, current, runs, executor_runs: [] }
 }

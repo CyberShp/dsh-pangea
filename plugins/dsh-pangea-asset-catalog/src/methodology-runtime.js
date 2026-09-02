@@ -18,7 +18,7 @@ function jobView(job) {
     session_id: job.sessionId,
     started_at: job.startedAt,
     source_asset_ids: job.assetIds,
-    task_path: job.action.task_path,
+    task_path: job.task.task_path,
     ...(job.completedAt ? { completed_at: job.completedAt } : {}),
     ...(job.error ? { error: job.error } : {}),
   }
@@ -79,7 +79,7 @@ export class MethodologyCandidateRuntime {
     if (uniqueAssetIds.length === 0) throw new Error('至少选择一个已批准历史缺陷资产')
     const active = this.latest.get(path.resolve(resolvedDataRoot))
     if (active && !['completed', 'failed'].includes(active.status) && sameAssets(active.assetIds, uniqueAssetIds)) {
-      return { session_id: active.sessionId, action: active.action, reused: true }
+      return { session_id: active.sessionId, task: active.task, execution: 'direct-skill', reused: true }
     }
     const recoverable = (await this.derivations(cwd, resolvedDataRoot)).find(item =>
       ['pending', 'ready'].includes(item.status) && sameAssets(item.source_asset_ids, uniqueAssetIds))
@@ -93,13 +93,10 @@ export class MethodologyCandidateRuntime {
     let prepared
     if (recoverable) {
       prepared = {
-        action: {
-          action_id: recoverable.action_id,
-          action: 'dispatch_agent',
-          role: 'methodology',
-          stage: 'candidate_derivation',
-          task_path: recoverable.task_path,
+        execution: 'direct-skill',
+        task: {
           task_id: recoverable.task_id,
+          task_path: recoverable.task_path,
         },
       }
     } else {
@@ -107,13 +104,15 @@ export class MethodologyCandidateRuntime {
       for (const assetId of uniqueAssetIds) deriveArgs.push('--asset-id', assetId)
       prepared = await this.runner({ cwd, args: deriveArgs })
     }
-    if (!prepared?.action?.task_path) throw new Error('PANGEA 未返回方法论提炼 task_path')
+    if (prepared?.execution !== 'direct-skill' || !prepared?.task?.task_path) {
+      throw new Error('PANGEA 未返回 direct-skill 方法论 task_path')
+    }
     const root = workspaceRoot(cwd)
     const workerPath = path.join(root, '.agents', 'pangea', 'methodology-worker.md')
     const sessionId = await this.createSession(cwd, 'PANGEA 方法论候选')
     const job = {
-      cwd, dataRoot: resolvedDataRoot, assetIds: uniqueAssetIds, action: prepared.action,
-      workerPath, sessionId, status: 'queued', retries: 0, startedAt: new Date().toISOString(),
+      cwd, dataRoot: resolvedDataRoot, assetIds: uniqueAssetIds, task: prepared.task,
+      workerPath, sessionId, status: 'queued', startedAt: new Date().toISOString(),
     }
     this.jobs.set(sessionId, job)
     this.latest.set(path.resolve(resolvedDataRoot), job)
@@ -124,12 +123,12 @@ export class MethodologyCandidateRuntime {
         type: 'text',
         text: [
           `读取 ${workerPath} 并严格执行。`,
-          `task_path: ${prepared.action.task_path}`,
-          '只读取 task 指定的输入，只把完整 JSON 写入 task 的 result_path；不要修改其他文件。',
+          `task_path: ${prepared.task.task_path}`,
+          '只读取 task 指定的输入，只把完整 JSON 写入 task 的 result_path；不要创建 action、绑定器或 settle 记录。',
         ].join('\n'),
       }],
     })))
-    return { session_id: sessionId, action: prepared.action }
+    return { session_id: sessionId, task: prepared.task, execution: 'direct-skill' }
   }
 
   async finish(job) {
@@ -138,34 +137,11 @@ export class MethodologyCandidateRuntime {
     try {
       await this.runner({
         cwd: job.cwd,
-        args: ['methodologies', 'complete-derivation', '--task', job.action.task_path],
+        args: ['methodologies', 'complete-derivation', '--task', job.task.task_path],
       })
       job.status = 'completed'
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (job.retries === 0) {
-        job.retries = 1
-        job.status = 'queued'
-        try {
-          apiValue(await this.api.sessions.prompt(rpc({
-            sessionId: job.sessionId,
-            mode: 'queue',
-            content: [{
-              type: 'text',
-              text: [
-                `PANGEA 方法论结果校验失败：${message}`,
-                `重新读取 ${job.workerPath} 和 task_path: ${job.action.task_path}。`,
-                '只修正同一 result_path，完成后结束。',
-              ].join('\n'),
-            }],
-          })))
-          return
-        } catch (promptError) {
-          job.error = promptError instanceof Error ? promptError.message : String(promptError)
-        }
-      } else {
-        job.error = message
-      }
+      job.error = error instanceof Error ? error.message : String(error)
       job.status = 'failed'
     }
     job.completedAt = new Date().toISOString()

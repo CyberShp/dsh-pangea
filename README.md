@@ -47,10 +47,10 @@ rc.8+ 的客户端模块加载方式，并在 `0.1.1-rc.1` 依赖线上开发验
 
 ### dsh-pangea-companion
 
-- “分析”页可新建、分页查看和停止 Run，并展示 action 流程、分析单元、业务流程、风险、用例、证据与复核结果。
+- “分析”页可新建、分页查看和停止 Run，并展示冻结 Skill 的 Step 01–09、业务流程、风险、用例、证据与复核结果。
 - “执行”页维护执行环境和独立 Executor 会话。
 - 提供 `pangea_status`、环境、执行和 SSH 工具。
-- 新建与停止只调用 PANGEA 的稳定 `system / runs` 接口；action 生命周期仍由 PANGEA Graph 决定。
+- 新建与停止只调用 PANGEA 的稳定 `system / runs` 接口；分析生命周期由冻结 Skill 的 `内部索引/运行状态.json` 决定，不再依赖分析 Graph/action。
 - 仅在 PANGEA 工作区调整 `subagent-report` 的唤醒时机。
 
 详细说明见 [`plugins/dsh-pangea-companion/README.md`](plugins/dsh-pangea-companion/README.md)。

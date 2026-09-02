@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
 import { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
 import { MethodologyCandidateRuntime } from './methodology-runtime.js'
 
@@ -6,7 +10,7 @@ export const inject = ['tools', 'webServer', 'apiProxy']
 
 const API_PATH = '/api/pangea-asset-catalog/state'
 const PAGE_SIZES = new Set([20, 50, 100])
-const ASSET_TYPES = new Set(['requirement', 'design', 'historical_defect', 'reference', 'coverage'])
+const ASSET_TYPES = new Set(['requirement', 'design', 'historical_defect', 'reference', 'coverage', 'test_case_example'])
 const ASSET_STATUSES = new Set(['imported', 'extracting', 'awaiting_review', 'available', 'no_items', 'rejected', 'failed', 'archived'])
 
 function workspaceCwd(exec) {
@@ -31,11 +35,31 @@ async function readBody(req) {
   let body = ''
   for await (const chunk of req) {
     body += chunk.toString('utf8')
-    if (body.length > 64 * 1024) throw new Error('request body is too large')
+    if (body.length > 32 * 1024 * 1024) throw new Error('request body is too large')
   }
   const value = JSON.parse(body || '{}')
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('request body must be an object')
   return value
+}
+
+async function materializeImportSource(body, dataRoot) {
+  if (typeof body.path === 'string' && body.path.trim() !== '') {
+    return { path: body.path.trim(), cleanup: async () => {} }
+  }
+  if (typeof body.file_data !== 'string' || body.file_data.trim() === '') {
+    throw new Error('请选择要导入的文件')
+  }
+  if (typeof body.file_name !== 'string' || path.basename(body.file_name) !== body.file_name || body.file_name.trim() === '') {
+    throw new Error('导入文件名无效')
+  }
+  const encoded = body.file_data.trim()
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw new Error('导入文件编码无效')
+  const content = Buffer.from(encoded, 'base64')
+  if (content.length === 0 || content.length > 24 * 1024 * 1024) throw new Error('导入文件超过 24 MiB 限制')
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'pangea-asset-import-'))
+  const temporaryPath = path.join(temporaryRoot, body.file_name)
+  await writeFile(temporaryPath, content)
+  return { path: temporaryPath, cleanup: () => rm(temporaryRoot, { recursive: true, force: true }) }
 }
 
 function positiveInteger(value, fallback) {
@@ -103,6 +127,9 @@ async function assetDetail({ cwd, dataRoot, runtime, assetId }) {
     status: 'ok', data_root: resolvedDataRoot,
     asset: { ...detail.asset, extraction_job: runtime.job(resolvedDataRoot, assetId) },
     result: detail.result,
+    normalized_preview: detail.normalized_preview ?? null,
+    integrity: detail.integrity ?? null,
+    allowed_steps: detail.allowed_steps ?? [],
   }
 }
 
@@ -135,12 +162,17 @@ async function routeHandler(req, res, runtime) {
     const body = await readBody(req)
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
     if (body.action === 'import') {
-      const args = [
-        'assets', 'import', '--data-root', resolvedDataRoot,
-        '--path', body.path, '--type', body.asset_type,
-      ]
-      if (body.title) args.push('--title', body.title)
-      await runPangea({ cwd, args })
+      const source = await materializeImportSource(body, resolvedDataRoot)
+      try {
+        const args = [
+          'assets', 'import', '--data-root', resolvedDataRoot,
+          '--path', source.path, '--type', body.asset_type,
+        ]
+        if (body.title) args.push('--title', body.title)
+        await runPangea({ cwd, args })
+      } finally {
+        await source.cleanup()
+      }
     } else if (body.action === 'extract') {
       await runtime.start({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id })
     } else if (body.action === 'review') {
@@ -199,19 +231,11 @@ export async function apply(ctx) {
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
   })]
-  const disposeStatus = ctx.on?.('agent/status', ({ agent, status }) => {
-    runtime.handleAgentStatus(agent, status)
-    runtime.methodologies.handleAgentStatus(agent, status)
-  }) ?? (() => {})
-  const disposeError = ctx.on?.('agent/error', ({ agent, error }) => {
-    runtime.handleAgentError(agent, error)
-    runtime.methodologies.handleAgentError(agent, error)
-  }) ?? (() => {})
   const disposeRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => routeHandler(req, res, runtime) })
   ctx.effect?.(() => () => {
-    disposeRoute(); disposeError(); disposeStatus()
+    disposeRoute()
     for (const dispose of toolDisposers) dispose()
-  }, 'dsh-pangea-asset-catalog: PANGEA asset and methodology API sessions')
+  }, 'dsh-pangea-asset-catalog: PANGEA Asset Management 2.0 API')
 }
 
 export { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'

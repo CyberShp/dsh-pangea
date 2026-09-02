@@ -119,3 +119,17 @@ test('keeps an observed session failure visible while its Run metadata still say
     assert.equal(task.launch_error, '模型 API 不可用')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('rebinds an explicitly stopped task after a portable workspace move', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-rebind-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-rebind' })
+    await store.create({ workspace: '/old/install/repo', dataRoot: '/old/install/repo/pangea-data', input: { repository: 'repo-one', target: '移动后停止' } })
+    await store.addConversation('task-rebind', { sessionId: 'session-rebind', title: '分析会话', kind: 'analysis' })
+    await store.bindRunBySession('session-rebind', { run_id: 'run-rebind', lifecycle_status: 'running' })
+    const rebound = await store.rebindWorkspace('task-rebind', '/new/install/repo')
+    assert.equal(rebound.workspace, '/new/install/repo')
+    assert.equal((await store.list({ workspace: '/new/install/repo' }))[0].run_id, 'run-rebind')
+    assert.equal((await store.list({ workspace: '/old/install/repo' })).length, 0)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

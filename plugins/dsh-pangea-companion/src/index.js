@@ -7,7 +7,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { workspaceRoot } from './pangea-api.js'
-import { acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -242,6 +242,14 @@ async function resolveTaskModel(api, requested) {
   throw new Error('请选择本次 PANGEA 任务使用的内部模型')
 }
 
+function assertRegisteredAcpProvider(runtime, providerId) {
+  const option = acpProviderOption(providerId)
+  if (!option) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
+  const subagents = runtimeService(runtime, 'subagents')
+  if (!subagents?.getProvider?.(option.id)) throw new Error(`ACP Provider 未注册：${option.id}`)
+  return option
+}
+
 async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Date.now()) {
   const timeoutMs = 5 * 60 * 1000
   for (const task of taskItems) {
@@ -329,6 +337,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
+      if (providerId && !acpProviderOption(providerId)) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
       const selectedModel = providerId ? null : await resolveTaskModel(api, body.input?.model_route)
       const task = await tasks.create({
         workspace: root,
@@ -348,6 +357,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         const selectedProvider = body.provider_id ?? task.provider
         let selectedModel = null
         if (selectedProvider) {
+          assertRegisteredAcpProvider(runtime, selectedProvider)
           await appendLaunchSafe(launchLogs, task.task_id, { stage: 'acp_provider_resolve', status: 'ok', provider: selectedProvider })
           await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
         } else {
@@ -376,8 +386,13 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       } catch (error) {
         await appendLaunchSafe(launchLogs, task.task_id, {
           stage: 'launch_failed', status: 'error', error,
+          error_code: typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
         })
-        await tasks.markLaunchFailed(task.task_id, error instanceof Error ? error.message : String(error))
+        await tasks.markLaunchFailed(
+          task.task_id,
+          error instanceof Error ? error.message : String(error),
+          typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
+        )
         throw error
       } finally {
         launchLocks.delete(task.task_id)
@@ -397,20 +412,40 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
     }
     if (body.action === 'stop') {
       // Legacy ordering contract: const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })
-      const requestedTask = body.task_id ? await tasks.get(body.task_id) : null
-      if (body.task_id && !requestedTask) throw new Error(`task not found: ${body.task_id}`)
-      if (requestedTask && requestedTask.workspace !== workspaceRoot(cwd)) throw new Error(`task does not belong to current workspace: ${body.task_id}`)
-      const runId = body.run_id ?? requestedTask?.run_id
+      const currentWorkspace = workspaceRoot(cwd)
+      const storedTask = body.task_id ? await tasks.get(body.task_id) : null
+      if (body.task_id && !storedTask) throw new Error(`task not found: ${body.task_id}`)
+      const runId = body.run_id ?? storedTask?.run_id
       if (!runId) throw new Error('run_id or task_id is required')
+      let requestedTask = storedTask
+      // The UI can retain a task selection while the user changes workspace
+      // (or after a portable install moves the repository).  Do not reject an
+      // explicit, exact task+Run stop; rebind only that task so its history is
+      // visible in the current workspace.  A task-only request remains strict.
+      if (requestedTask && requestedTask.workspace !== currentWorkspace) {
+        if (!body.run_id || requestedTask.run_id !== runId) {
+          throw new Error(`task does not belong to current workspace: ${body.task_id}`)
+        }
+        requestedTask = await tasks.rebindWorkspace(requestedTask.task_id, currentWorkspace)
+        await appendLaunchSafe(launchLogs, requestedTask.task_id, {
+          stage: 'workspace_rebind', status: 'ok', previous_workspace: storedTask.workspace, workspace: currentWorkspace,
+        })
+      }
       const stopJobs = runtimeService(runtime, 'jobs')
+      let jobStop = { status: 'not_bound', job_id: requestedTask?.job_id ?? null, error: null }
       if (requestedTask?.job_id && stopJobs?.kill) {
         const owner = runtimeService(runtime, 'agents')?.get?.(requestedTask.owner_session_id)
         try {
-          const result = stopJobs.kill(requestedTask.job_id, owner, '用户请求停止 PANGEA 分析')
+          const result = await stopJobs.kill(requestedTask.job_id, owner, '用户请求停止 PANGEA 分析')
+          jobStop = { status: 'ok', job_id: requestedTask.job_id, result, error: null }
           await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'ok', job_id: requestedTask.job_id, result })
         } catch (error) {
-          await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'error', job_id: requestedTask.job_id, error })
-          throw error
+          const message = error instanceof Error ? error.message : String(error)
+          jobStop = { status: 'error', job_id: requestedTask.job_id, error: message }
+          // A dead/unavailable ACP service must not prevent the local Run and
+          // DSH session cancellation from being attempted.  Keep the precise
+          // error in launch diagnostics and in the response instead.
+          await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'error', job_id: requestedTask.job_id, error: message })
         }
       }
       // Resolve the data root from the task record. This prevents a stale UI
@@ -444,9 +479,11 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         }
       }
       await tasks.reconcileRuns([stopped.run], { dataRoot: stopped.data_root })
-      if (task) await tasks.markStopped(task.task_id, runStopError)
+      const stopError = [runStopError, jobStop.error].filter(Boolean).join('；') || null
+      if (task) await tasks.markStopped(task.task_id, stopError)
       return json(res, 200, {
         ...stopped,
+        job_stop: jobStop,
         run_stop: runStopError ? { status: 'error', error: runStopError } : { status: 'ok', error: null },
         session_cancel: sessionCancel,
         task: task ? await tasks.get(task.task_id) : null,

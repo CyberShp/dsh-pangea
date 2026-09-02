@@ -34,8 +34,8 @@ test('registers a PANGEA-owned asset management page', async () => {
   const { source, exported } = await loadClient()
   for (const text of [
     '资产管理', '导入资产', '需求', '设计', '历史缺陷', '参考资料', 'Coverage',
-    '待人工审核', '审核通过', '拒绝', '已分析，无结构化条目', '打开提取会话',
-    '上一页', '下一页', '已有用例只在创建 Run 时作为示例提供', '资产状态',
+    '待人工审核', '审核通过', '拒绝', '已分析，无结构化条目', '资产已完成规范化',
+    '上一页', '下一页', '用例示例', '资产状态',
     '用于新分析', '结构化条目', '用户方法论', '生成方法论候选', '待启用',
     '内容更新后状态会自动回到待启用', 'enable_methodology', 'disable_methodology',
   ]) assert.match(source, new RegExp(text))
@@ -49,7 +49,7 @@ test('registers a PANGEA-owned asset management page', async () => {
   assert.deepEqual(Array.from(exported.inject), ['pangea', 'sessions'])
   assert.equal(pages.length, 1)
   assert.equal(pages[0].id, 'assets')
-  assert.equal(pages[0].title(), '测试资产')
+  assert.equal(pages[0].title(), '资产管理')
 })
 
 test('uses the same product typography scale as PANGEA analysis pages', async () => {

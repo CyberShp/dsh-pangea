@@ -1,26 +1,26 @@
 # dsh-pangea-companion
 
-`dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的伴生插件：按 PANGEA 返回的 action 派发专用子 Agent，展示 Run 进度与结果，并保留独立的用例执行能力。
+`dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的伴生插件：创建 Run 后立即通过 DSH 的内置模型或已注册 ACP Agent 启动 Codetalks Skill，监听冻结 Run 的 Markdown 产物和生命周期，并保留独立的用例执行能力。
 
-插件不自行判断下一阶段：它只会绑定真实 DSH 会话、校验该 Agent 的结果，然后通过 adapter 交回 PANGEA Graph 决定后续 action。用例执行仍使用 `pangea-data/executor-runs/` 中的独立 Executor Run。
+分析插件不自行生成阶段、结果或报告：它只负责创建唯一 Skill Run、启动已选择的执行 Agent、读取真实状态并展示诊断。用例执行仍使用 `pangea-data/executor-runs/` 中的独立 Executor Run，和分析生命周期分开。
 
 ## 当前能力
 
 - 自动从当前 DSH workspace 向上发现 `pangea-data/runs/`。
 - `pangea_status`：读取当前或指定 Run 的阶段、质量状态、分析进度、风险/用例/证据数量和读取健康状态，模型侧输出中文。
-- 自动选择最新的非终态 Run；没有活动 Run 时回退到最新 Run。
+- 自动选择最新的非终态 Run；没有活动 Run 时回退到最新 Run。用户点选历史 Run 时按明确 `run_id` 读取，不会回退到当前最新任务。
 - 将当前 DSH 会话与 PANGEA Run 做最小只读关联，只记录 Run、工作区、关联会话和 PANGEA 阶段/分析进度；DSH 自己负责展示 Agent、工具、子 Agent 和工作流轨迹。
 - 会话删除后仍按 Run 保留最小关联摘要；历史 Run 不依赖原 DSH 会话继续存在。
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
-- 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止。
-- 新建分析会先创建 Codetalks Skill Run，立即启动独立 DSH 会话执行 Step 01–09；页面只监听 Skill 状态和 Markdown 产物。
+- 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止；停止时即使 ACP 或 PANGEA API 一侧不可用，也会保留错误并继续尝试其余取消动作。
+- 新建分析会先创建冻结的 Codetalks Skill Run，随后使用用户选定的内置 API、NGA、CodeAgent、OpenCode 或 Claude Code 执行 Step 01–09；页面只监听 Skill 状态和 Markdown 产物。
+- 新建分析只接受仓库、目标、源码范围、资产库勾选和执行方式；分析重点由 Skill 固定，不接受手写 focus、结构化资产 ID 或示例文件路径。
 - 建立 `风险 ↔ 测试用例 ↔ 证据` 关联，便于从风险追到测试和源码证据，再按访问路径返回。
 - 只读同源接口 `GET /api/pangea-companion/state`，供 Web UI 使用。
 - 通过 `ctx.pangea` 向统一工作台注册“分析”和“执行”两页，不再直接注册 Better Sidebar Tab。
 - `dsh-pangea` 是客户端页面的必需 peer dependency；通用侧栏只由基座接入。
 - 当前 Agent 工作目录或其上级目录存在 `.agents/pangea/dsh.md` 时，`subagent-report` 静默投递，由原生 `subagent-settled` 在子 Agent 真正结束后唤醒根 Agent；其他工作区保持 DSH 默认行为。
-- 当 PANGEA CLI 返回 planning / analysis / review / closure action 时，最多同时派发 8 个待办 action，且严格使用 action 指定的角色规则和 task 文件。
-- 结果先通过 adapter 契约校验。若字段或引用不合法，原子 Agent 在同一会话内修正；根 Agent 不代填语义结果。
+- 内置 API Agent 和 ACP Agent 的启动失败都会写入持久化 launch log，并在任务总览中显示失败阶段、错误码和原始错误；不会用伪造结果或静默回退掩盖失败。
 - 在“执行”页维护主机 alias、阵列 alias、自动化仓库 ID 和设备绑定；SSH 用户名/密码继续使用 `dsh-ssh` 的 `~/.dsh/dsh-ssh.json`。
 - 在用例列表中多选测试用例和执行环境，一键创建真实 DSH 执行会话；执行会话按独立 Executor Graph 生成计划并运行。
 - 提供 `pangea_environment_get`、`pangea_ssh_exec/start/read/stop/interactive` 工具，支持普通命令、持续 IO 后台任务和同一阵列 PTY 内的 `diagnose_usr → attach → dtoe` 交互。
@@ -28,65 +28,24 @@
 
 ## 数据读取规则
 
-Companion 不把 `progress.completed_* + agent-results/` 当成所有 Run 的唯一数据来源。
+Companion 只读取冻结 Codetalks Skill Run 的 Markdown 和内部索引：
 
-读取顺序固定为：
+1. `内部索引/运行状态.json` 是唯一生命周期真相；状态为 `running` 时，当前步骤严格来自 `current_step`。
+2. `活文档/` 是运行中产物，按冻结 `workflow-manifest.json` 的步骤归属展示；例如 Step 03 本身允许生成 `03–07` 号广度盘点文档，不代表 Step 04–07 已完成。
+3. `正式输出/` 只在 Step 09/finalize 成功后作为交付展示；缺失或不完整时标记为未完成，不从文件名猜测成功。
+4. 旧版 Run 从自己的冻结 manifest 读取版本；当前 2.0 请求与 `codetalks-skill 1.2.0` Run 额外展示资产和方法论冻结信息。
 
-1. **存在 `final-state.json` 且包含聚合结果时，优先读取 `final-state.json`。** PANGEA 在进入最终报告阶段前已经把最终有效的 `risks / test_cases / business_flows` 聚合进 final state，`report.md` / `report.html` 也是由这份 state 渲染，因此这是终态和已生成报告 Run 的权威结构化数据源。
-2. **尚未形成 final state 的运行中 Run**，按 `progress.json` 的完成单元读取 `agent-results/analysis` 和定向补齐结果；若某单元被补齐，最终结果覆盖该单元的首次分析。
-3. **已生成报告但缺少可用 final-state 的旧 Run**，允许兼容回退读取 worker result，但会标记为 `warning`，不会伪装成标准路径。
+Reader 不创建风险、用例、复核结论或报告，也不读取旧 `progress.json`、`final-state.json`、`agent-results/` 作为分析结果来源。
 
-独立复核与对照复核分开展示。最终有效问题优先读取 `final-state.json` 的
-`review_findings`；没有 final state 时，再根据 `comparison-review.json` 排除已驳回的独立发现，
-避免把已消除的问题继续显示为待处理项。
+## Reader 与生命周期
 
-## v0.4.0 Reader 一致性层
+Reader 对每个 Run 只做确定性文件读取，不从自然语言或文件名推断阶段：
 
-报告现在只承担“交叉核对”职责，不会被解析成新的风险/用例对象。
-
-对于当前 Run，Reader 会先尝试从 `report.md` 提取报告摘要；Markdown 存在但格式无法识别时，会继续尝试 `report.html`。对账字段包括：
-
-- 业务流程数量；
-- 风险数量；
-- 测试用例数量。
-
-然后与当前结构化数据源的计数对账，并返回：
-
-```text
-reader_health.status      ok / warning / error
-reader_health.trusted     true / false
-reader_health.count_checks
-reader_health.issues
-```
-
-典型状态：
-
-```text
-正常
-数据源：final-state
-风险 17 = 报告 17
-测试用例 31 = 报告 31
-```
-
-如果出现：
-
-```text
-报告：17 个风险
-结构化读取：0 个风险
-```
-
-则直接返回：
-
-```text
-status = error
-trusted = false
-```
-
-PANGEA 工作台会显示“数据读取异常”，`pangea_status` 也会明确说明当前结构化结果不可信。此时 **0 不允许被解释为“没有风险/用例”**。
-
-如果报告存在但无法自动提取计数、终态 Run 缺少报告、final-state 读取失败，或报告 Run 只能退回 worker result，则返回 `warning` 和具体诊断原因。
-
-历史 Run 列表不会读取 Worker 结果、构建风险/用例/证据关联，也不会逐个解析整份报告；只有当前选中的 Run 才执行完整读取和报告对账，避免历史任务很多时拖慢侧栏。
+- `内部索引/运行状态.json` 的 `status`、`current_step` 和 `completed_steps` 映射为页面生命周期；`validation_failed` 显示为“未完整结束”。
+- `workflow-manifest.json` 决定 Markdown 产物属于哪个步骤。Step 03 的广度盘点可以一次产生 `03–07` 号文档，只有 `complete-step 03` 成功后才会进入 Step 04。
+- 运行中只读 `活文档/` 和内部索引；Step 09/finalize 成功后才展示 `正式输出/` 报告。
+- 文件缺失、状态损坏或旧 Run 不含新字段时返回明确的 `reader_warnings`；不会用空列表冒充“没有风险/用例”。
+- 历史 Run 列表只读取轻量摘要；用户明确选择 `run_id` 时直接读取该 Run，即使它不在当前分页首屏，也不会跳到最新 Run。
 
 ## PANGEA 侧边栏页面
 
@@ -94,8 +53,8 @@ Companion 在 Better Sidebar 中注册“分析”和“执行”两个顶层页
 
 - “分析”页内部固定导航：`总览 / 流程 / 风险 / 用例 / 业务流 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。
 - “执行”页用于维护执行环境和查看独立 Executor Run。
-- 总览显示后端兼容性、完整 Run 分页、当前 Run 进度和停止入口；“新建分析”表单接受仓库、目标、源码范围、分析重点、资产 ID 和少量用例示例。
-- “流程”页显示 action 生命周期、分析单元状态、定向补齐、质量门禁和错误历史；adapter bind / validate / settle 保持自动处理。
+- 总览显示后端兼容性、完整 Run 分页、当前 Run 进度和停止入口；“新建分析”表单接受仓库、目标、源码范围、资产库勾选、内置模型或 ACP Agent。
+- “流程”页显示冻结 Skill 的 Step 01–09 生命周期、Markdown 产物、核心规则 ACK、独立 Judge 和未解决事项；不显示已删除的 analysis action/bind/validate/settle 状态机。
 - “业务流”页展示结构化步骤、证据和 Mermaid 文本，支持搜索。
 - Companion 不重复展示 DSH 已有的 Agent / Tool / Subagent / Workflow 轨迹；总览只聚焦 PANGEA 阶段、进度、质量、风险、用例、证据和复核。
 - 即使原 DSH 会话已删除，历史 Run 的风险、用例、证据、复核和报告仍可查看；Companion 不保存 DSH 执行时间线。
@@ -141,19 +100,18 @@ $DSH_HOME/dsh-pangea-companion/monitor-v1.json
 依赖方向固定为：
 
 ```text
-pangea-agent JSON API / adapter  <- actions and results - dsh-pangea-companion
-pangea-agent executor Graph      <- DSH execution session follows actions
+pangea-agent direct Skill API    <- Run creation and state reads - dsh-pangea-companion
+pangea-agent executor Graph      <- DSH execution session follows actions (only for test execution)
 dsh-ssh host configuration       <- aliases/passwords - Companion SSH tools
 ```
 
 禁止 Companion：
 
-- 绕过 action 自行选择阶段、角色或 task。
-- 直接修改 `progress.json`、`final-state.json` 或代写 Agent 的语义结果。
+- 直接修改 Skill Run 的状态、Markdown、语义结果或正式报告。
 - 在 DSH 内另建一套 planning / analysis / review / closure 状态机。
 - 把 DSH 或 Companion 依赖反向引入 `pangea-agent`。
 
-因此卸载 DSH 或 Companion 后，PANGEA Graph 与语义契约仍是独立的；其他客户端只需实现同一 action/adapter 协议即可运行。
+因此卸载 DSH 或 Companion 后，冻结的 Skill Run 仍可由 pangea-agent 读取；用例执行的 Executor Graph 仍是独立边界。
 
 ## 用例执行准备
 

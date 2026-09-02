@@ -3,18 +3,24 @@ import path from 'node:path'
 import { assertCodetalksSkill, createRun, runPangea, workspaceRoot } from './pangea-api.js'
 
 const DEFAULT_PAGE_SIZE = 20
-const INTERNAL_PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 
 // External ACP agents are intentionally configured as commands rather than
 // model routes.  This keeps credentials and process ownership in DSH.
 export function acpProviderOptions(env = process.env) {
   return [
     // Keep the ids identical to the providerName values registered by the
-    // dsh-subagent-acp services in cordis.patch.yml.  The id is sent through
-    // the task/run API and is also the key used by subagents.getProvider().
+    // product's ACP/Claude providers. The id is sent through the task/run API
+    // and is also the key used by subagents.getProvider().
     { id: 'pangea-nga', label: 'NGA', command: env.PANGEA_NGA_ACP_COMMAND || 'nga', args: ['acp'] },
     { id: 'pangea-codeagent', label: 'CodeAgent', command: env.PANGEA_CODEAGENT_ACP_COMMAND || 'codeagent', args: ['acp'] },
+    { id: 'pangea-opencode', label: 'OpenCode', command: env.PANGEA_OPENCODE_ACP_COMMAND || 'opencode', args: ['acp'] },
+    { id: 'pangea-claude-code', label: 'Claude Code', kind: 'claude-code', command: 'DSH Claude Code Provider', args: [] },
   ]
+}
+
+export function acpProviderOption(providerId, env = process.env) {
+  const id = typeof providerId === 'string' ? providerId.trim() : ''
+  return acpProviderOptions(env).find(provider => provider.id === id) ?? null
 }
 
 function rpc(payload) {
@@ -52,11 +58,7 @@ export async function internalModelOptions(api) {
     apiValue(await api.settings.describe(rpc({}))),
   ])
   const namespaces = new Map((settingsValue.namespaces ?? []).map(item => [item.ns, item]))
-  const providers = (providerValue.providers ?? []).filter(item => (
-    item.settingsNs === INTERNAL_PROVIDER_SETTINGS_NS
-    && item.declared === true
-    && item.active === true
-  ))
+  const providers = (providerValue.providers ?? []).filter(item => item.declared === true && item.active === true)
   const providerRows = providers.map(entry => {
     const namespace = namespaces.get(entry.settingsNs)
     const profile = valueAtPath(namespace?.value, entry.settingsPath)
@@ -72,14 +74,16 @@ export async function internalModelOptions(api) {
   const groups = new Map((modelValue.groups ?? []).map(group => [group.id, group]))
   const options = []
   for (const { entry, apiKeyEnv } of providerRows) {
-    const credentialConfigured = apiKeyEnv === null || credentials[apiKeyEnv]?.configured === true
+    const credentialConfigured = apiKeyEnv === null
+      || credentials[apiKeyEnv]?.configured === true
+      || (typeof process.env[apiKeyEnv] === 'string' && process.env[apiKeyEnv].trim() !== '')
     for (const model of groups.get(entry.provider)?.models ?? []) {
       options.push({
         provider: entry.provider,
         provider_name: entry.displayName,
         model: model.id,
         model_name: model.name,
-        reasoning: model.reasoning ?? null,
+        reasoning: model.reasoning ?? entry.reasoning ?? null,
         credential_configured: credentialConfigured,
         route_class: 'configured-internal',
       })
@@ -124,6 +128,8 @@ function stringList(value) {
 
 function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   assertCodetalksSkill(capabilities)
+  const rejectedFields = ['focus', 'test_case_examples'].filter(field => Object.hasOwn(value ?? {}, field))
+  if (rejectedFields.length) throw new Error(`新建分析不支持字段：${rejectedFields.join(', ')}`)
   const repository = typeof value?.repository === 'string' ? value.repository.trim() : ''
   const target = typeof value?.target === 'string' ? value.target.trim() : ''
   const sourceScope = stringList(value?.source_scope)
@@ -136,12 +142,11 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     throw new Error(`repository is not registered: ${repository}`)
   }
   return {
+    request_version: '2.0',
     repository,
     target,
     source_scope: sourceScope,
-    focus: stringList(value?.focus),
     asset_ids: stringList(value?.asset_ids),
-    test_case_examples: stringList(value?.test_case_examples),
     provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,
   }
 }
@@ -304,7 +309,8 @@ export async function launchAnalysisSession(
   const request = normalizeAnalysisInput(input, capabilities, true)
   await emitLaunch(onEvent, { stage: 'input_validated', status: 'ok' })
   const selectedProvider = request.provider_id
-  const selectedModel = runtime && selectedProvider
+  if (selectedProvider && !runtime) throw new Error(`外部执行 Agent 需要 DSH ACP runtime：${selectedProvider}`)
+  const selectedModel = selectedProvider
     ? { provider: selectedProvider, route_class: 'external-acp' }
     : await launchStep(
       onEvent,

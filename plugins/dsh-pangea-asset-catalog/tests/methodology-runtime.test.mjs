@@ -28,17 +28,14 @@ test('semantic candidate session imports through the PANGEA methodology API', as
   const runner = async ({ args }) => {
     if (args.slice(0, 3).join(' ') === 'methodologies derivations list') {
       return derivationStatus === 'none' ? { items: [] } : { items: [{
-        task_id: 'methodology-1', action_id: 'methodology-1:derive', status: derivationStatus,
+        task_id: 'methodology-1', status: derivationStatus,
         created_at: '2026-08-30T00:00:00+08:00', completed_at: null,
         source_asset_ids: ['asset-1'], task_path: taskPath,
       }] }
     }
     if (args[0] === 'methodologies' && args[1] === 'derive') {
       derivationStatus = 'pending'
-      return { action: {
-        task_id: 'methodology-1', action_id: 'methodology-1:derive', action: 'dispatch_agent',
-        role: 'methodology', stage: 'candidate_derivation', task_path: taskPath,
-      } }
+      return { execution: 'direct-skill', task: { task_id: 'methodology-1', task_path: taskPath } }
     }
     if (args[0] === 'methodologies' && args[1] === 'complete-derivation') {
       derivationStatus = 'completed'
@@ -52,6 +49,7 @@ test('semantic candidate session imports through the PANGEA methodology API', as
     assert.equal(launched.session_id, 'session-1')
     assert.match(prompts[0].content[0].text, /methodology-worker\.md/)
     assert.match(prompts[0].content[0].text, /methodology-1[\\/]task\.json/)
+    assert.match(prompts[0].content[0].text, /不要创建 action、绑定器或 settle/)
     const repeated = await runtime.start({ cwd: root, dataRoot, assetIds: ['asset-1'] })
     assert.equal(repeated.reused, true)
     assert.equal(prompts.length, 1)

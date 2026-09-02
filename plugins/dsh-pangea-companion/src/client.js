@@ -16,10 +16,12 @@ window.__ModuleLoader__.load({
     const EXECUTION_API_PATH = '/api/pangea-companion/executions'
     const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
     const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
+    const ASSET_CATALOG_API_PATH = '/api/pangea-asset-catalog/state'
     const ACTIVE_POLL_INTERVAL_MS = 2_000
     const IDLE_POLL_INTERVAL_MS = 45_000
     const WORKBENCH_ACTIVE_POLL_INTERVAL_MS = 2_000
     const ACP_PROVIDER_STORAGE_KEY = 'pangea.acp-provider.v1'
+    const MODEL_ROUTE_STORAGE_KEY = 'pangea.model-route.v1'
 
     function modelSelectionKey(value) {
       return value?.provider && value?.model
@@ -117,6 +119,13 @@ window.__ModuleLoader__.load({
       const response = await fetcher(`${WORKBENCH_API_PATH}?${new URLSearchParams({ cwd })}`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...payload }),
       })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
+    async function requestAssetCatalog({ cwd, fetcher = fetch }) {
+      const response = await fetcher(`${ASSET_CATALOG_API_PATH}?${new URLSearchParams({ cwd, page: '1', page_size: '100', status: 'available' })}`, { cache: 'no-store' })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -600,7 +609,11 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', focus: '', asset_ids: '', test_case_examples: '', provider_id: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', asset_ids: [], provider_id: '', model_route_key: '' })
+      const [assetCatalog, setAssetCatalog] = React.useState(null)
+      const [assetCatalogLoading, setAssetCatalogLoading] = React.useState(false)
+      const [assetCatalogError, setAssetCatalogError] = React.useState('')
+      const [assetSelectorOpen, setAssetSelectorOpen] = React.useState(false)
       const [creatingRun, setCreatingRun] = React.useState(false)
       const [pendingStopRun, setPendingStopRun] = React.useState('')
       const [launchDiagnosticsOpen, setLaunchDiagnosticsOpen] = React.useState(false)
@@ -740,13 +753,13 @@ window.__ModuleLoader__.load({
         return ctx?.pangea?.subscribeTaskSelection?.(sync)
       }, [ctx?.pangea, pageMode])
       React.useEffect(() => {
-        if (pageMode !== 'analysis' || selectedTaskId || !workbench?.selected_task_id) return
+        if (pageMode !== 'analysis' || selectedTaskId || selectedRun !== undefined || !workbench?.selected_task_id) return
         setSelectedTaskId(workbench.selected_task_id)
         const task = workbench?.tasks?.items?.find(item => item.task_id === workbench.selected_task_id)
         setSelectedRun(task?.run_id ?? undefined)
         setScreen({ type: 'overview' })
         setHistory([])
-      }, [pageMode, selectedTaskId, workbench?.selected_task_id, workbench?.tasks?.items])
+      }, [pageMode, selectedRun, selectedTaskId, workbench?.selected_task_id, workbench?.tasks?.items])
       React.useEffect(() => {
         const task = workbench?.tasks?.items?.find(item => item.task_id === selectedTaskId)
         if (!task) return
@@ -762,7 +775,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (pageMode !== 'analysis' || !runDraft?.requestId || runDraft.requestId === handledRunDraftRequest.current) return
         handledRunDraftRequest.current = runDraft.requestId
-        setCreateForm(value => ({ ...value, asset_ids: (runDraft.assetIds ?? []).join('\n') }))
+        setCreateForm(value => ({ ...value, asset_ids: [...new Set(runDraft.assetIds ?? [])] }))
         setScreen({ type: 'create' })
         setHistory([])
       }, [pageMode, runDraft?.requestId])
@@ -781,6 +794,20 @@ window.__ModuleLoader__.load({
           return selected ? { ...value, provider_id: selected } : value
         })
       }, [workbench?.acp_providers])
+      React.useEffect(() => {
+        const options = (workbench?.model_routing?.models ?? []).filter(item => item.credential_configured === true)
+        if (options.length === 0) return
+        setCreateForm(value => {
+          const current = modelRouteFromKey(value.model_route_key)
+          if (current && options.some(item => item.provider === current.provider && item.model === current.model)) return value
+          let remembered = ''
+          try { remembered = window.localStorage?.getItem(MODEL_ROUTE_STORAGE_KEY) ?? '' } catch { /* storage unavailable */ }
+          const rememberedRoute = modelRouteFromKey(remembered)
+          const rememberedAvailable = rememberedRoute && options.some(item => item.provider === rememberedRoute.provider && item.model === rememberedRoute.model)
+          const selected = rememberedAvailable ? remembered : options.length === 1 ? modelSelectionKey(options[0]) : ''
+          return selected ? { ...value, model_route_key: selected } : value
+        })
+      }, [workbench?.model_routing?.models])
       React.useEffect(() => {
         if (!visible || pageMode === 'execution') {
           requestRef.current.controller?.abort()
@@ -938,10 +965,11 @@ window.__ModuleLoader__.load({
       }, [history, initialScreen])
       function chooseRun(runId) {
         const task = workbench?.tasks?.items?.find(item => item.run_id === runId)
-        if (task) {
-          ctx?.pangea?.selectTask?.(task.task_id)
-          setSelectedTaskId(task.task_id)
-        }
+        // Clear a stale task selection when a historical Run has no matching
+        // Task record; otherwise the next refresh can attach the new run to
+        // the previously selected task and make it look like the latest Run.
+        ctx?.pangea?.selectTask?.(task?.task_id)
+        setSelectedTaskId(task?.task_id)
         setSelectedRun(runId)
         setScreen({ type: initialScreen })
         setHistory([])
@@ -1018,7 +1046,10 @@ window.__ModuleLoader__.load({
       function showActionNotice(message, isError = false) {
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
         setActionNotice({ message, isError })
-        noticeTimerRef.current = window.setTimeout(() => setActionNotice(undefined), 2600)
+        // Errors contain the actionable launch/stop reason.  Keep them on
+        // screen until the next user action instead of hiding them after a
+        // short toast timeout.
+        noticeTimerRef.current = isError ? null : window.setTimeout(() => setActionNotice(undefined), 2600)
       }
       function launchEventLabel(event) {
         const status = event?.status === 'error' ? '失败' : event?.status === 'ok' ? '完成' : event?.status === 'start' ? '开始' : '信息'
@@ -1067,6 +1098,29 @@ window.__ModuleLoader__.load({
       }
       function multilineValues(value) {
         return [...new Set(String(value ?? '').split(/\r?\n/).map(item => item.trim()).filter(Boolean))]
+      }
+      async function openAssetSelector() {
+        if (assetSelectorOpen) { setAssetSelectorOpen(false); return }
+        setAssetSelectorOpen(true)
+        if (assetCatalog || assetCatalogLoading) return
+        setAssetCatalogLoading(true)
+        setAssetCatalogError('')
+        try {
+          setAssetCatalog(await requestAssetCatalog({ cwd }))
+        } catch (reason) {
+          setAssetCatalogError(reason instanceof Error ? reason.message : String(reason))
+        } finally {
+          setAssetCatalogLoading(false)
+        }
+      }
+      function toggleCreateAsset(assetId) {
+        if (!assetId) return
+        setCreateForm(value => ({
+          ...value,
+          asset_ids: value.asset_ids.includes(assetId)
+            ? value.asset_ids.filter(item => item !== assetId)
+            : [...value.asset_ids, assetId],
+        }))
       }
       function repositoryNameFromPath(value) {
         return String(value ?? '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
@@ -1130,18 +1184,19 @@ window.__ModuleLoader__.load({
             action: 'task-create',
             payload: {
               input: {
+                request_version: '2.0',
                 repository: createForm.repository,
                 target: createForm.target,
                 source_scope: multilineValues(createForm.source_scope),
-                focus: multilineValues(createForm.focus),
-                asset_ids: multilineValues(createForm.asset_ids),
-                test_case_examples: multilineValues(createForm.test_case_examples),
-                provider_id: createForm.provider_id,
+                asset_ids: createForm.asset_ids,
+                provider_id: createForm.provider_id || null,
+                model_route: createForm.provider_id ? null : modelRouteFromKey(createForm.model_route_key),
               },
             },
           })
           createdTask = created.task
           ctx?.pangea?.updateRunDraft?.({ assetIds: [] })
+          setCreateForm(value => ({ ...value, asset_ids: [] }))
           setWorkbench(value => ({
             ...(value ?? {}),
             tasks: {
@@ -1171,6 +1226,8 @@ window.__ModuleLoader__.load({
             showActionNotice(`Agent 已停止，但 PANGEA 状态同步失败：${stopped.run_stop.error}`, true)
           } else if (stopped.session_cancel?.status === 'error') {
             showActionNotice(`Run 已停止；DSH 会话取消失败：${stopped.session_cancel.error}`, true)
+          } else if (stopped.job_stop?.status === 'error') {
+            showActionNotice(`Run 已停止；ACP Agent 停止失败：${stopped.job_stop.error}`, true)
           } else {
             showActionNotice(`已停止 ${current.run_id}`)
           }
@@ -1554,14 +1611,49 @@ window.__ModuleLoader__.load({
       function renderCreate() {
         const repositories = workbench?.capabilities?.repositories ?? []
         const providerOptions = workbench?.acp_providers ?? []
+        const modelRouting = workbench?.model_routing ?? { status: 'loading', models: [], failures: [] }
+        const modelOptions = (modelRouting.models ?? [])
+        const selectedModel = modelRouteFromKey(createForm.model_route_key)
+        const selectedModelOption = selectedModel
+          ? modelOptions.find(item => item.provider === selectedModel.provider && item.model === selectedModel.model)
+          : null
+        const selectedProvider = providerOptions.find(item => item.id === createForm.provider_id)
         const compatible = workbench?.compatibility?.compatible === true
-        const canSubmit = compatible && createForm.repository && createForm.target.trim() && createForm.provider_id && !creatingRun
+        const executionReady = createForm.provider_id
+          ? selectedProvider?.registered === true
+          : selectedModelOption?.credential_configured === true
+        const canSubmit = compatible && createForm.repository && createForm.target.trim() && executionReady && !creatingRun
+        const assetItems = assetCatalog?.assets ?? []
+        const selectedAssets = assetItems.filter(item => createForm.asset_ids.includes(item.asset_id))
+        const assetTypeLabels = { requirement: '需求', design: '设计', historical_defect: '历史缺陷', reference: '参考资料', coverage: 'Coverage', test_case_example: '用例示例' }
         const formField = (label, key, placeholder) => h('label', null,
           h('div', { style: styles.label }, label),
           h('input', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm[key], placeholder, onChange: event => setCreateForm(value => ({ ...value, [key]: event.target.value })) }))
         const formArea = (label, key, placeholder) => h('label', null,
           h('div', { style: styles.label }, label),
           h('textarea', { style: styles.textarea, value: createForm[key], placeholder, onChange: event => setCreateForm(value => ({ ...value, [key]: event.target.value })) }))
+        const internalModelFields = !createForm.provider_id ? h(React.Fragment, null,
+          h('label', null,
+            h('div', { style: styles.label }, '内置 API 模型'),
+            h('select', {
+              style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.model_route_key,
+              onChange: event => {
+                const key = event.target.value
+                setCreateForm(value => ({ ...value, model_route_key: key }))
+                try { if (key) window.localStorage?.setItem(MODEL_ROUTE_STORAGE_KEY, key) } catch { /* storage unavailable */ }
+              },
+            },
+            h('option', { value: '' }, modelOptions.length ? '选择已配置模型' : modelRouting.status === 'error' ? '无法读取模型目录' : '没有已配置模型'),
+            modelOptions.map(item => h('option', {
+              key: `${item.provider}/${item.model}`, value: modelSelectionKey(item), disabled: item.credential_configured !== true,
+            }, `${item.provider_name ?? item.provider} · ${item.model_name ?? item.model}${item.credential_configured === true ? '' : ' · 未配置凭证'}`)))),
+          selectedModelOption?.reasoning?.efforts?.length ? h('label', null,
+            h('div', { style: styles.label }, '推理级别'),
+            h('select', {
+              style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: selectedModel?.reasoning_effort ?? '',
+              onChange: event => setCreateForm(value => ({ ...value, model_route_key: modelSelectionKey({ ...selectedModel, reasoning_effort: event.target.value }) })),
+            }, h('option', { value: '' }, '默认'), selectedModelOption.reasoning.efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name ?? effort.id)))) : null,
+        ) : null
         return h(React.Fragment, null,
           renderCompatibility(),
           h('div', { style: { ...styles.card, ...styles.compatibility } },
@@ -1570,20 +1662,39 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.formGrid },
               h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
                 h('option', { value: '' }, repositories.length ? '选择仓库' : '没有可用仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository)))),
-              h('label', null, h('div', { style: styles.label }, '执行 Agent'), h('select', {
+              h('label', null, h('div', { style: styles.label }, '执行方式'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.provider_id,
                 onChange: event => {
                   const providerId = event.target.value
                   setCreateForm(value => ({ ...value, provider_id: providerId }))
                   try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ }
                 },
-              }, h('option', { value: '' }, providerOptions.length ? '选择执行 Agent' : '没有可用的 ACP Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id }, `${item.label} · ${item.command} ${item.args.join(' ')}`)))),
+              }, h('option', { value: '' }, '内置 API Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: item.registered !== true }, `${item.label}${item.registered === true ? '' : ' · 未加载'}`))))),
+              internalModelFields,
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               formArea('源码范围（可选）', 'source_scope', '可留空，由 Agent 自动识别；也可每行粘贴一个 Windows 文件栏地址或填写仓库相对路径'),
-              formArea('分析重点', 'focus', '错误路径\n恢复行为\n外部可观测结果'),
-              formArea('结构化资产 ID', 'asset_ids', '可从“资产”页勾选后带入'),
-              formArea('少量用例示例文件', 'test_case_examples', 'tests/auth_cases.yaml')),
-            h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务')))
+              h('div', { style: { gridColumn: '1 / -1' } },
+                h('div', { style: styles.label }, '分析资产'),
+                h('div', { style: styles.itemMeta }, '分析重点由 Codetalks Skill 固定；这里仅选择资产库中已通过完整性校验的输入。用例示例只能在 Step 07 作为格式/粒度参考。'),
+                h('div', { style: { ...styles.chips, marginTop: 7 } }, selectedAssets.length
+                  ? selectedAssets.map(item => h('span', { key: item.asset_id, style: styles.badge }, `${assetTypeLabels[item.asset_type] ?? item.asset_type} · ${item.title}`))
+                  : h('span', { style: styles.itemMeta }, '未选择资产（可直接分析源码）')),
+                h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void openAssetSelector() } }, assetSelectorOpen ? '收起资产库' : '从资产库选择'),
+                assetSelectorOpen ? h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } },
+                  assetCatalogLoading ? h('div', { style: styles.itemMeta }, '正在读取可用资产…') : null,
+                  assetCatalogError ? h('div', { style: styles.error, role: 'alert' }, assetCatalogError) : null,
+                  !assetCatalogLoading && !assetCatalogError && assetItems.length === 0 ? h('div', { style: styles.itemMeta }, '暂无可用资产，请先在“资产管理”页导入并完成审核。') : null,
+                  assetItems.map(item => h('label', { key: item.asset_id, style: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12))' } },
+                    h('input', { type: 'checkbox', checked: createForm.asset_ids.includes(item.asset_id), onChange: () => toggleCreateAsset(item.asset_id) }),
+                    h('span', { style: { minWidth: 0 } }, h('span', { style: styles.itemTitle }, item.title), h('span', { style: { ...styles.itemMeta, display: 'block' } }, `${assetTypeLabels[item.asset_type] ?? item.asset_type} · revision ${item.revision ?? 1} · ${item.source_name ?? item.source_path}`))))) : null),
+              ),
+            modelRouting.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 }, role: 'alert' }, `模型目录读取失败：${modelRouting.error ?? '未知错误'}`) : null,
+            modelRouting.status === 'ok' && modelOptions.length === 0 && !createForm.provider_id ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, '没有可用的内置 API 模型，请先到“设置”配置模型与 API。', h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })) }, '打开模型设置')) : null,
+            createForm.provider_id && selectedProvider?.registered === true ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, selectedProvider.kind === 'claude-code'
+              ? 'Claude Code 使用 DSH 已加载的官方 Provider；请在本机 Claude Code 设置中完成登录或 API 配置。'
+              : `ACP 命令：${selectedProvider.command} ${(selectedProvider.args ?? []).join(' ')} · 请先在对应 Agent 的本机配置中完成登录或 API 配置。`) : null,
+            createForm.provider_id && selectedProvider?.registered !== true ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, `${selectedProvider?.label ?? createForm.provider_id} 尚未在当前 Desktop 加载，请检查插件配置。`) : null,
+            h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务'))
       }
 
       function renderWorkflow() {
@@ -1735,7 +1846,7 @@ window.__ModuleLoader__.load({
               h('div', { style: { ...styles.homeSectionTitle, margin: '2px 2px 14px' } }, '快捷入口'),
               h('div', { style: styles.appGrid, 'aria-label': '快捷入口' },
                 appCard('analysis', '分析任务', '创建、跟踪并进入 PANGEA 分析任务', () => openProductPage('analysis', '分析任务')),
-                appCard('assets', '测试资产', '需求、历史缺陷、覆盖率与方法论资产', () => openProductPage('assets', '测试资产')))),
+                appCard('assets', '资产管理', '需求、历史缺陷、覆盖率与方法论资产', () => openProductPage('assets', '资产管理')))),
             h('section', { style: { ...styles.homeSection, padding: '16px 18px' } },
               h('div', { style: { ...styles.row, minHeight: 32, marginBottom: 4 } }, h('div', { style: styles.homeSectionTitle }, '最近报告'), h('span', { style: { color: '#7a818b', fontSize: 12 } }, `${reportRows.length} 份已载入`)),
               reportRows.length ? reportRows.map(run => h('button', { key: run.run_id, type: 'button', style: styles.reportRow, onClick: () => openProductPage('analysis', '分析任务') },

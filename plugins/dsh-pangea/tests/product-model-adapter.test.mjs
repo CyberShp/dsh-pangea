@@ -12,7 +12,7 @@ test('owns internal model settings entry inside the PANGEA product shell', async
   const source = await readFile(adapterPath, 'utf8')
   assert.match(source, /data-pangea-tool-list/)
   assert.match(source, /data-pangea-native-model-settings/)
-  assert.match(source, /自定义 \/ 内部模型提供方/)
+  assert.match(source, /打开模型与 API 设置/)
   assert.match(source, /pangea:open-model-settings/)
   assert.match(source, /pangea:model-onboarding-state/)
   assert.match(source, /pangea:query-model-onboarding/)

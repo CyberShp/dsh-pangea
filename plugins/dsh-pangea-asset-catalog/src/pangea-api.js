@@ -2,17 +2,6 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 
-function rpc(payload) {
-  return { rpcId: `pangea-asset-${Date.now()}-${Math.random()}`, payload }
-}
-
-function apiValue(response) {
-  if (!response?.result?.ok) {
-    throw new Error(response?.result?.error?.message ?? 'DSH API request failed')
-  }
-  return response.result.value
-}
-
 function workspaceRoot(cwd) {
   if (typeof cwd !== 'string' || cwd.trim() === '') throw new Error('workspace cwd is required')
   let cursor = path.resolve(cwd)
@@ -89,8 +78,10 @@ export function dataRootFor(cwd, explicit) {
 }
 
 export class AssetActionRuntime {
-  constructor(api, runner = runPangea) {
-    this.api = api
+  // Compatibility name for hosts that already construct this runtime. Asset
+  // processing is now deterministic and local; it never creates a DSH model
+  // session and never binds, repairs, validates, or settles an action.
+  constructor(_api, runner = runPangea) {
     this.runner = runner
     this.jobs = new Map()
   }
@@ -100,123 +91,38 @@ export class AssetActionRuntime {
     if (!value) return null
     return {
       status: value.status,
-      session_id: value.sessionId,
       started_at: value.startedAt,
       ...(value.completedAt ? { completed_at: value.completedAt } : {}),
       ...(value.error ? { error: value.error } : {}),
     }
   }
 
-  async createSession(cwd, title) {
-    const root = workspaceRoot(cwd)
-    let payload = { cwd: root }
-    if (this.api.workspace?.list) {
-      const workspaces = apiValue(await this.api.workspace.list(rpc({}))).items
-      const workspace = workspaces.find(item => path.resolve(item.path) === root)
-      if (!workspace) throw new Error(`current DSH workspace is not registered: ${root}`)
-      payload = { workspaceId: workspace.workspaceId }
-    }
-    const sessionId = apiValue(await this.api.sessions.create(rpc(payload))).sessionId
-    apiValue(await this.api.sessions.rename(rpc({ sessionId, title })))
-    return sessionId
-  }
-
   async start({ cwd, dataRoot, assetId }) {
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
-    const prepared = await this.runner({
-      cwd,
-      args: ['assets', 'extract', '--data-root', resolvedDataRoot, '--asset-id', assetId],
-    })
-    if (!prepared.action) return { completed: true, asset: prepared.asset }
-    const sessionId = await this.createSession(cwd, `资产提取 · ${prepared.asset.title}`)
-    await this.runner({
-      cwd,
-      args: [
-        'adapter', 'bind', '--data-root', resolvedDataRoot, '--asset-id', assetId,
-        '--action-id', prepared.action.action_id, '--task-id', sessionId,
-      ],
-    })
+    const key = `${path.resolve(resolvedDataRoot)}\n${assetId}`
     const job = {
-      cwd, dataRoot: resolvedDataRoot, assetId, action: prepared.action,
-      sessionId, status: 'queued', retries: 0, startedAt: new Date().toISOString(),
+      cwd, dataRoot: resolvedDataRoot, assetId, status: 'running',
+      startedAt: new Date().toISOString(),
     }
-    this.jobs.set(`${path.resolve(resolvedDataRoot)}\n${assetId}`, job)
-    this.jobs.set(sessionId, job)
-    const prompted = await this.api.sessions.prompt(rpc({
-      sessionId,
-      mode: 'queue',
-      content: [{
-        type: 'text',
-        text: [
-          '读取 .agents/pangea/asset-extraction-worker.md 并严格执行。',
-          `task_path: ${prepared.action.task_path}`,
-          '只把完整结构化 JSON 写入 task 的 result_path；不要修改其他文件。',
-        ].join('\n'),
-      }],
-    }))
-    apiValue(prompted)
-    return { completed: false, session_id: sessionId, asset: prepared.asset, action: prepared.action }
-  }
-
-  async finish(job) {
-    if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
-    job.status = 'finalizing'
+    this.jobs.set(key, job)
     try {
-      await this.runner({
-        cwd: job.cwd,
-        args: [
-          'adapter', 'validate', '--data-root', job.dataRoot, '--asset-id', job.assetId,
-          '--action-id', job.action.action_id,
-        ],
-      })
-      await this.runner({
-        cwd: job.cwd,
-        args: [
-          'adapter', 'settle', '--data-root', job.dataRoot, '--asset-id', job.assetId,
-          '--action-id', job.action.action_id,
-        ],
+      const prepared = await this.runner({
+        cwd,
+        args: ['assets', 'extract', '--data-root', resolvedDataRoot, '--asset-id', assetId],
       })
       job.status = 'completed'
+      job.completedAt = new Date().toISOString()
+      return { completed: true, asset: prepared.asset }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (job.retries === 0) {
-        job.retries = 1
-        job.status = 'queued'
-        try {
-          apiValue(await this.api.sessions.prompt(rpc({
-            sessionId: job.sessionId,
-            mode: 'queue',
-            content: [{
-              type: 'text',
-              text: `PANGEA 结果契约校验失败：${message}\n请读取原 task，只修正同一 result_path 后结束。`,
-            }],
-          })))
-          return
-        } catch (promptError) {
-          job.error = promptError instanceof Error ? promptError.message : String(promptError)
-        }
-      } else {
-        job.error = message
-      }
       job.status = 'failed'
+      job.error = error instanceof Error ? error.message : String(error)
+      job.completedAt = new Date().toISOString()
+      throw error
     }
-    job.completedAt = new Date().toISOString()
   }
 
-  handleAgentStatus(agent, status) {
-    const job = this.jobs.get(agent?.session?.id)
-    if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
-    if (status === 'running') job.status = 'running'
-    if (status === 'idle' && job.status === 'running') void this.finish(job)
-  }
-
-  handleAgentError(agent, error) {
-    const job = this.jobs.get(agent?.session?.id)
-    if (!job || ['completed', 'failed'].includes(job.status)) return
-    job.status = 'failed'
-    job.error = error instanceof Error ? error.message : String(error)
-    job.completedAt = new Date().toISOString()
-  }
+  handleAgentStatus() {}
+  handleAgentError() {}
 }
 
 export { workspaceRoot }

@@ -5,20 +5,22 @@ import path from 'node:path'
 
 const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
-const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.0.0' })
+const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.2.0' })
 
 export function normalizeSourceScope(values, repository) {
   const items = Array.isArray(values) ? values : []
   const repositoryName = typeof repository === 'string' ? repository.trim() : ''
   return [...new Set(items.map(item => {
-    const value = typeof item === 'string' ? item.trim() : ''
+    const original = typeof item === 'string' ? item.trim() : ''
+    let value = original.replace(/^['"]|['"]$/g, '')
+    if (/^file:\/\//i.test(value)) value = value.replace(/^file:\/\/+?/i, '')
     if (!value) return ''
     const absolute = path.win32.isAbsolute(value) || path.posix.isAbsolute(value)
     if (!absolute) return value.replaceAll('\\', '/').replace(/^\.\/+/, '')
     const parts = value.split(/[\\/]+/).filter(Boolean)
     const repositoryIndex = parts.map(part => part.toLowerCase()).lastIndexOf(repositoryName.toLowerCase())
     if (!repositoryName || repositoryIndex < 0) {
-      throw new Error(`源码范围不属于已选仓库“${repositoryName}”：${value}。请粘贴该仓库内的地址，或填写仓库相对路径。`)
+      throw new Error(`源码范围不属于已选仓库“${repositoryName}”：${original}。请粘贴该仓库内的地址，或填写仓库相对路径。`)
     }
     return parts.slice(repositoryIndex + 1).join('/') || '.'
   }).filter(Boolean))]
@@ -27,7 +29,7 @@ export function normalizeSourceScope(values, repository) {
 export function assertCodetalksSkill(capabilities) {
   const skill = capabilities?.analysis_skill
   if (skill?.skill_id !== REQUIRED_ANALYSIS_SKILL.skill_id || skill?.version !== REQUIRED_ANALYSIS_SKILL.version) {
-    throw new Error('PANGEA backend must provide codetalks-skill 1.0.0')
+    throw new Error('PANGEA backend must provide codetalks-skill 1.2.0')
   }
   return skill
 }
@@ -106,18 +108,19 @@ export function runPangea({ cwd, args }) {
 
 export async function createRun(cwd, input, runner = runPangea) {
   const root = workspaceRoot(cwd)
+  const rejectedFields = ['focus', 'test_case_examples'].filter(field => Object.hasOwn(input ?? {}, field))
+  if (rejectedFields.length) throw new Error(`新建分析不支持字段：${rejectedFields.join(', ')}`)
   const pendingPath = path.join(root, PENDING_REQUEST)
   const dataRoot = typeof input.data_root === 'string' && input.data_root.trim() !== ''
     ? path.resolve(root, input.data_root)
     : path.join(root, 'pangea-data')
   const request = {
+    request_version: '2.0',
     data_root: dataRoot,
     repository: input.repository,
     target: input.target,
     source_scope: normalizeSourceScope(input.source_scope, input.repository),
-    focus: input.focus ?? [],
     asset_ids: input.asset_ids ?? [],
-    test_case_examples: input.test_case_examples ?? [],
   }
   const capabilities = await runner({
     cwd: root,

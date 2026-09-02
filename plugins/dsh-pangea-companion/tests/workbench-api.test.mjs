@@ -4,9 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
-const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.0.0' } }
+const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.2.0' } }
 
 async function workspace() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-workbench-'))
@@ -40,8 +40,16 @@ function internalModelApi(events = []) {
 
 test('offers only configured internal provider routes', async () => {
   const catalog = await internalModelOptions(internalModelApi())
-  assert.deepEqual(catalog.models.map(item => `${item.provider}/${item.model}`), ['minimax-1/MiniMax-M2.7-highspeed'])
+  assert.deepEqual(catalog.models.map(item => `${item.provider}/${item.model}`), ['minimax-1/MiniMax-M2.7-highspeed', 'deepseek-official/deepseek-v4-flash'])
   assert.equal(catalog.models[0].credential_configured, true)
+})
+
+test('advertises NGA, CodeAgent, OpenCode, and Claude Code ACP routes', () => {
+  assert.deepEqual(acpProviderOptions({}).map(item => item.id), [
+    'pangea-nga', 'pangea-codeagent', 'pangea-opencode', 'pangea-claude-code',
+  ])
+  assert.deepEqual(acpProviderOptions({ PANGEA_OPENCODE_ACP_COMMAND: 'opencode-custom' })[2].command, 'opencode-custom')
+  assert.deepEqual(acpProviderOptions({})[3].kind, 'claude-code')
 })
 
 test('fails closed before creating a session when the internal credential is missing and records the failing stage', async () => {
@@ -67,14 +75,18 @@ test('fails closed before creating a session when the internal credential is mis
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('normalizes Run input and rejects unregistered repositories', () => {
+test('normalizes Run input and rejects legacy fields and unregistered repositories', () => {
   const input = normalizeRunInput({
     repository: 'repo-one', target: 'session', source_scope: ['src/session.c', 'src/session.c', ''],
-    focus: ['recovery'], asset_ids: ['asset-1'], test_case_examples: ['TC-1'],
+    asset_ids: ['asset-1'],
   }, capabilities)
   assert.deepEqual(input.source_scope, ['src/session.c'])
+  assert.equal(input.request_version, '2.0')
+  assert.deepEqual(input.asset_ids, ['asset-1'])
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], focus: ['recovery'] }, capabilities), /不支持字段.*focus/)
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], test_case_examples: ['TC-1'] }, capabilities), /不支持字段.*test_case_examples/)
   assert.throws(() => normalizeRunInput({ repository: 'other', target: 'x', source_scope: ['x.c'] }, capabilities), /not registered/)
-  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.0\.0/)
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.2\.0/)
 })
 
 test('returns paginated Run metadata and reports incompatible backends explicitly', async () => {
@@ -247,5 +259,18 @@ test('starts a selected ACP provider through a DSH background job', async () => 
     assert.equal(result.provider, 'pangea-nga')
     assert.equal(providerStarted, true)
     assert.equal(promptCalled, false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('does not silently fall back to the internal model when an ACP runtime is missing', async () => {
+  const root = await workspace()
+  try {
+    await assert.rejects(
+      launchAnalysisSession({ sessions: {} }, {
+        cwd: root,
+        input: { repository: 'repo-one', target: 'ACP missing', source_scope: [], provider_id: 'pangea-opencode' },
+      }, async call => call.args[0] === 'system' ? capabilities : { run_id: 'unused' }),
+      /外部执行 Agent 需要 DSH ACP runtime：pangea-opencode/,
+    )
   } finally { await rm(root, { recursive: true, force: true }) }
 })
