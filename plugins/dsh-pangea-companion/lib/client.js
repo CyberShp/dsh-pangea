@@ -603,6 +603,7 @@ window.__ModuleLoader__.load({
       const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', focus: '', asset_ids: '', test_case_examples: '', provider_id: '' })
       const [creatingRun, setCreatingRun] = React.useState(false)
       const [pendingStopRun, setPendingStopRun] = React.useState('')
+      const [launchDiagnosticsOpen, setLaunchDiagnosticsOpen] = React.useState(false)
       const [flowQuery, setFlowQuery] = React.useState('')
       const [runDraft, setRunDraft] = React.useState(ctx?.pangea?.getRunDraft?.() ?? { requestId: 0, assetIds: [] })
       const requestRef = React.useRef({ sequence: 0, controller: null })
@@ -724,6 +725,9 @@ window.__ModuleLoader__.load({
         setHistory([])
         setSelectedCaseIds([])
       }, [cwd, initialScreen])
+      React.useEffect(() => {
+        setLaunchDiagnosticsOpen(false)
+      }, [selectedTaskId])
       React.useEffect(() => {
         const sync = () => {
           const taskId = ctx?.pangea?.getSelectedTaskId?.()
@@ -1015,6 +1019,27 @@ window.__ModuleLoader__.load({
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
         setActionNotice({ message, isError })
         noticeTimerRef.current = window.setTimeout(() => setActionNotice(undefined), 2600)
+      }
+      function launchEventLabel(event) {
+        const status = event?.status === 'error' ? '失败' : event?.status === 'ok' ? '完成' : event?.status === 'start' ? '开始' : '信息'
+        const stage = event?.stage ?? 'unknown'
+        const time = event?.at ? formatTime(event.at) : ''
+        const detail = event?.error ?? event?.message ?? ''
+        const context = [event?.provider, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
+        return [time, status, stage, context, detail].filter(Boolean).join(' · ')
+      }
+      function renderLaunchDiagnostics(events) {
+        if (!Array.isArray(events) || events.length === 0) return null
+        return h('details', {
+          style: styles.technical,
+          open: launchDiagnosticsOpen,
+          onToggle: event => setLaunchDiagnosticsOpen(event.currentTarget.open),
+        },
+        h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `启动诊断 · ${events.length} 条`),
+        h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, events.map((event, index) => h('div', {
+          key: `${event.at ?? index}:${event.stage ?? 'unknown'}:${index}`,
+          style: { ...styles.itemMeta, color: event.status === 'error' ? 'var(--dsw-alias-state-error-primary, #e66767)' : undefined, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+        }, launchEventLabel(event)))))
       }
       function openProductPage(pageId, label) {
         const opened = ctx?.pangea?.openPage?.(scope, pageId) === true
@@ -1798,6 +1823,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.itemTitle }, `失败阶段：${launchFailure.stage}`),
             launchFailure.error_code ? h('div', { style: styles.itemMeta }, `错误码：${launchFailure.error_code}`) : null,
             h('div', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, launchFailure.error ?? launchFailure.message ?? selectedTask.launch_error)) : null,
+          renderLaunchDiagnostics(launchEvents),
           selectedTask.status === 'failed' ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在重试…' : '重试启动') : null))
         }
         const uncoveredRisks = risks.filter(isUncoveredRisk)
@@ -1847,6 +1873,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.chips },
               current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html')) : null,
               current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md')) : null)) : null,
+          renderLaunchDiagnostics(workbench?.launch_log?.events),
           h('details', { style: styles.technical },
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, '技术详情'),
             h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '这里保留流程、证据和复核原始信息，不参与日常主导航。'),
