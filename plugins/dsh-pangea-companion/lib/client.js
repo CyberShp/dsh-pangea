@@ -955,6 +955,8 @@ window.__ModuleLoader__.load({
       function openTaskFromWorkbench(task) {
         if (!task) return
         ctx?.pangea?.selectTask?.(task.task_id)
+        setSelectedTaskId(task.task_id)
+        setSelectedRun(task.run_id ?? null)
         const activeConversation = task.conversations?.find(item => item.conversation_id === task.active_conversation_id)
           ?? task.conversations?.[0]
         if (activeConversation?.session_id) {
@@ -1140,7 +1142,9 @@ window.__ModuleLoader__.load({
         try {
           const stopped = await requestWorkbenchAction({ cwd, action: 'stop', payload: { task_id: selectedTask?.task_id, run_id: current.run_id, data_root: snapshot?.data_root } })
           setPendingStopRun('')
-          if (stopped.session_cancel?.status === 'error') {
+          if (stopped.run_stop?.status === 'error') {
+            showActionNotice(`Agent 已停止，但 PANGEA 状态同步失败：${stopped.run_stop.error}`, true)
+          } else if (stopped.session_cancel?.status === 'error') {
             showActionNotice(`Run 已停止；DSH 会话取消失败：${stopped.session_cancel.error}`, true)
           } else {
             showActionNotice(`已停止 ${current.run_id}`)
@@ -1785,7 +1789,7 @@ window.__ModuleLoader__.load({
             ?? [...launchEvents].reverse().find(event => event.status === 'error')
           return h(React.Fragment, null, renderCompatibility(), h('div', { style: { ...styles.card, padding: 20 } },
           h('div', { style: styles.row },
-            h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, selectedTask.task_id)),
+            h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, `${selectedTask.task_id} · 执行 Agent：${selectedTask.provider ?? '未选择'}`)),
             h('span', { style: { ...styles.homeStatus, color: taskStatusColor(selectedTask.status) } }, taskStatusLabel(selectedTask.status))),
           h('div', { style: { ...styles.text, marginTop: 14 } }, ['failed', 'needs_attention'].includes(selectedTask.status)
             ? selectedTask.launch_error ?? '分析启动失败。'
@@ -1851,7 +1855,7 @@ window.__ModuleLoader__.load({
               chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')),
               chip(`证据 · ${evidence.length}`, () => jump('evidence')),
               chip(`复核问题 · ${details.review_issues?.length ?? 0}`, () => jump('review')))),
-          !current.terminal ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
+          !current.terminal && selectedTask.status !== 'stopped' ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '运行控制'), h('div', { style: styles.itemMeta }, '停止后保留已有产物和运行记录。')),
               pendingStopRun === current.run_id
                 ? h('div', { style: styles.chips }, chip('取消', () => setPendingStopRun('')), h('button', { type: 'button', style: { ...styles.button, color: 'var(--dsw-alias-state-error-primary, #e66767)' }, onClick: () => { void stopCurrentRun() } }, '确认停止'))

@@ -246,6 +246,7 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Da
   const timeoutMs = 5 * 60 * 1000
   for (const task of taskItems) {
     if (!['preparing', 'running'].includes(task.status)) continue
+    if (task.job_id) continue
     const conversation = [...task.conversations].reverse().find(item => item.kind === 'analysis')
     if (!conversation) continue
     try {
@@ -414,7 +415,19 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       }
       // Resolve the data root from the task record. This prevents a stale UI
       // selection from stopping a run in another workspace/data directory.
-      const stopped = await stopAnalysisRun({ cwd, dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
+      let stopped
+      let runStopError = null
+      try {
+        stopped = await stopAnalysisRun({ cwd, dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
+      } catch (error) {
+        runStopError = error instanceof Error ? error.message : String(error)
+        stopped = {
+          status: 'partial',
+          data_root: requestedTask?.data_root ?? actionDataRoot,
+          run: { run_id: runId, lifecycle_status: 'stopped', status: 'stopped' },
+        }
+        if (requestedTask) await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'run_stop_sync', status: 'error', error: runStopError })
+      }
       const task = requestedTask ?? await tasks.getByRun(runId, { dataRoot: stopped.data_root })
       const analysis = task ? [...task.conversations].reverse().find(item => item.kind === 'analysis') : null
       let sessionCancel = { status: 'not_bound', session_id: null, error: null }
@@ -431,8 +444,13 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         }
       }
       await tasks.reconcileRuns([stopped.run], { dataRoot: stopped.data_root })
-      if (task) await tasks.markStopped(task.task_id)
-      return json(res, 200, { ...stopped, session_cancel: sessionCancel, task: task ? await tasks.get(task.task_id) : null })
+      if (task) await tasks.markStopped(task.task_id, runStopError)
+      return json(res, 200, {
+        ...stopped,
+        run_stop: runStopError ? { status: 'error', error: runStopError } : { status: 'ok', error: null },
+        session_cancel: sessionCancel,
+        task: task ? await tasks.get(task.task_id) : null,
+      })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
   } catch (error) {
