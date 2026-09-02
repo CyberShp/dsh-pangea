@@ -11,5 +11,15 @@ test('task launch diagnostics are wired through direct Skill startup', () => {
   assert.match(source, /launchAnalysisSession/)
   assert.match(source, /stage: 'session_launch_complete'/)
   assert.match(source, /stage: 'launch_timeout'/)
+  assert.match(source, /!\['preparing', 'running'\]\.includes\(task\.status\)/)
   assert.match(source, /launchLogRouteHandler/)
+})
+
+test('stops the local Run before attempting DSH session cancellation', () => {
+  const stop = source.indexOf("const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })")
+  const cancel = source.indexOf('api.sessions.cancel', stop)
+  assert.notEqual(stop, -1)
+  assert.ok(cancel > stop)
+  assert.doesNotMatch(source.slice(stop, cancel), /requireWorkspaceTask/)
+  assert.match(source.slice(stop), /sessionCancel = \{\s*status: 'error'/)
 })

@@ -87,3 +87,35 @@ test('looks up a Task by Run and preserves stopped as its own lifecycle state', 
     assert.equal((await store.get('task-005')).status, 'stopped')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('scopes duplicate Run ids by data root', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-scope-'))
+  let id = 0
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => `task-scope-${++id}` })
+    for (const dataRoot of ['/workspace-a/pangea-data', '/workspace-b/pangea-data']) {
+      const task = await store.create({ workspace: path.dirname(dataRoot), dataRoot, input: { repository: 'repo-one', target: dataRoot } })
+      await store.addConversation(task.task_id, { sessionId: `session-${id}`, title: '分析会话', kind: 'analysis' })
+      await store.bindRunBySession(`session-${id}`, { run_id: 'same-run', lifecycle_status: 'running' })
+    }
+    assert.equal((await store.getByRun('same-run', { dataRoot: '/workspace-b/pangea-data' })).workspace, '/workspace-b')
+    await store.reconcileRuns([{ run_id: 'same-run', lifecycle_status: 'stopped' }], { dataRoot: '/workspace-b/pangea-data' })
+    assert.equal((await store.list({ workspace: '/workspace-a' }))[0].status, 'running')
+    assert.equal((await store.list({ workspace: '/workspace-b' }))[0].status, 'stopped')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('keeps an observed session failure visible while its Run metadata still says running', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-session-failure-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-session-failure' })
+    await store.create({ workspace: '/workspace', dataRoot: '/workspace/pangea-data', input: { repository: 'repo-one', target: 'API 失败' } })
+    await store.addConversation('task-session-failure', { sessionId: 'session-failure', title: '分析会话', kind: 'analysis' })
+    await store.bindRunBySession('session-failure', { run_id: 'run-failure', lifecycle_status: 'running' })
+    await store.markLaunchFailed('task-session-failure', '模型 API 不可用', 'MODEL_REQUEST_FAILED')
+    await store.reconcileRuns([{ run_id: 'run-failure', lifecycle_status: 'running' }], { dataRoot: '/workspace/pangea-data' })
+    const task = await store.get('task-session-failure')
+    assert.equal(task.status, 'failed')
+    assert.equal(task.launch_error, '模型 API 不可用')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

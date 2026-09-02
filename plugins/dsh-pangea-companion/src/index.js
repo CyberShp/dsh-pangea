@@ -241,7 +241,7 @@ async function resolveTaskModel(api, requested) {
 async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Date.now()) {
   const timeoutMs = 5 * 60 * 1000
   for (const task of taskItems) {
-    if (task.status !== 'preparing' || task.run_id) continue
+    if (!['preparing', 'running'].includes(task.status)) continue
     const conversation = [...task.conversations].reverse().find(item => item.kind === 'analysis')
     if (!conversation) continue
     try {
@@ -255,7 +255,7 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Da
         await tasks.markLaunchFailed(task.task_id, failure.message, failure.code)
         continue
       }
-      if (task.launch_started_at && now - task.launch_started_at >= timeoutMs) {
+      if (!task.run_id && task.launch_started_at && now - task.launch_started_at >= timeoutMs) {
         try { apiValue(await api.sessions.cancel(rpc({ sessionId: conversation.session_id }))) } catch { /* already stopped */ }
         await appendLaunchSafe(launchLogs, task.task_id, {
           stage: 'launch_timeout', status: 'error', session_id: conversation.session_id,
@@ -264,7 +264,7 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Da
         await tasks.markLaunchFailed(task.task_id, '启动超时：会话未在 5 分钟内创建 PANGEA Run', 'LAUNCH_TIMEOUT')
       }
     } catch (error) {
-      if (task.launch_started_at && now - task.launch_started_at >= timeoutMs) {
+      if (!task.run_id && task.launch_started_at && now - task.launch_started_at >= timeoutMs) {
         const message = `无法恢复启动会话：${error instanceof Error ? error.message : String(error)}`
         await appendLaunchSafe(launchLogs, task.task_id, {
           stage: 'session_reconcile', status: 'error', session_id: conversation.session_id,
@@ -293,7 +293,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         cursor: url.searchParams.get('cursor') ?? 0,
         limit: url.searchParams.get('limit') ?? 20,
       })
-      await tasks.reconcileRuns(snapshot.runs?.items)
+      await tasks.reconcileRuns(snapshot.runs?.items, { dataRoot: snapshot.data_root })
       let taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       await reconcileTaskLaunches(api, tasks, taskItems, launchLogs)
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
@@ -378,14 +378,24 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       return json(res, 200, { status: 'ok', task })
     }
     if (body.action === 'stop') {
-      const task = requireWorkspaceTask(await tasks.getByRun(body.run_id), cwd, body.run_id)
-      const analysis = [...task.conversations].reverse().find(item => item.kind === 'analysis')
+      const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })
+      const task = await tasks.getByRun(body.run_id, { dataRoot: stopped.data_root })
+      const analysis = task ? [...task.conversations].reverse().find(item => item.kind === 'analysis') : null
+      let sessionCancel = { status: 'not_bound', session_id: null, error: null }
       if (analysis) {
-        apiValue(await api.sessions.cancel(rpc({ sessionId: analysis.session_id })))
+        try {
+          apiValue(await api.sessions.cancel(rpc({ sessionId: analysis.session_id })))
+          sessionCancel = { status: 'ok', session_id: analysis.session_id, error: null }
+        } catch (error) {
+          sessionCancel = {
+            status: 'error',
+            session_id: analysis.session_id,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        }
       }
-      const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot ?? task.data_root, runId: body.run_id })
-      await tasks.reconcileRuns([stopped.run])
-      return json(res, 200, { ...stopped, session_id: analysis?.session_id ?? null, task: await tasks.get(task.task_id) })
+      await tasks.reconcileRuns([stopped.run], { dataRoot: stopped.data_root })
+      return json(res, 200, { ...stopped, session_cancel: sessionCancel, task: task ? await tasks.get(task.task_id) : null })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
   } catch (error) {

@@ -1131,9 +1131,13 @@ window.__ModuleLoader__.load({
       async function stopCurrentRun() {
         if (!cwd || !current || current.terminal) return
         try {
-          await requestWorkbenchAction({ cwd, action: 'stop', payload: { run_id: current.run_id, data_root: snapshot?.data_root } })
+          const stopped = await requestWorkbenchAction({ cwd, action: 'stop', payload: { run_id: current.run_id, data_root: snapshot?.data_root } })
           setPendingStopRun('')
-          showActionNotice(`已停止 ${current.run_id}`)
+          if (stopped.session_cancel?.status === 'error') {
+            showActionNotice(`Run 已停止；DSH 会话取消失败：${stopped.session_cancel.error}`, true)
+          } else {
+            showActionNotice(`已停止 ${current.run_id}`)
+          }
           await Promise.all([load(), loadWorkbench()])
         } catch (reason) {
           showActionNotice(`停止失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
@@ -1789,7 +1793,7 @@ window.__ModuleLoader__.load({
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
-        const runNeedsAttention = current.attention_required || selectedTask.status === 'needs_attention'
+        const runNeedsAttention = current.attention_required || ['needs_attention', 'failed'].includes(selectedTask.status)
         const nextAction = runNeedsAttention
           ? { label: '分析需要处理', hint: '当前 Run 未正常完成，请先查看下方错误，再决定是否重新启动。', target: 'workflow' }
           : health?.trusted === false
@@ -1841,7 +1845,7 @@ window.__ModuleLoader__.load({
               chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')),
               chip(`证据 · ${evidence.length}`, () => jump('evidence')),
               chip(`复核问题 · ${details.review_issues?.length ?? 0}`, () => jump('review')))),
-          !current.terminal && !runNeedsAttention ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
+          !current.terminal ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '运行控制'), h('div', { style: styles.itemMeta }, '停止后保留已有产物和运行记录。')),
               pendingStopRun === current.run_id
                 ? h('div', { style: styles.chips }, chip('取消', () => setPendingStopRun('')), h('button', { type: 'button', style: { ...styles.button, color: 'var(--dsw-alias-state-error-primary, #e66767)' }, onClick: () => { void stopCurrentRun() } }, '确认停止'))

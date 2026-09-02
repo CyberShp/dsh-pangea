@@ -183,11 +183,15 @@ export class TaskStore {
     return task ? structuredClone(task) : null
   }
 
-  async getByRun(runId) {
+  async getByRun(runId, { dataRoot } = {}) {
     await this.ready
     const id = text(runId)
+    const root = text(dataRoot)
     if (!id) return null
-    const task = Object.values(this.store.tasks).find(item => item.run_id === id)
+    const task = Object.values(this.store.tasks).find(item => (
+      item.run_id === id
+      && (!root || (item.data_root && path.resolve(item.data_root) === path.resolve(root)))
+    ))
     return task ? structuredClone(task) : null
   }
 
@@ -271,14 +275,17 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async reconcileRuns(runs) {
+  async reconcileRuns(runs, { dataRoot } = {}) {
     await this.ready
+    const root = text(dataRoot)
     const byId = new Map((Array.isArray(runs) ? runs : []).map(run => [text(run?.run_id), run]))
     let changed = false
     for (const task of Object.values(this.store.tasks)) {
+      if (root && (!task.data_root || path.resolve(task.data_root) !== path.resolve(root))) continue
       const run = task.run_id ? byId.get(task.run_id) : undefined
       if (!run) continue
       const status = taskStatusFromRun(run)
+      if (status === 'running' && task.status === 'failed' && task.launch_error_code && task.launch_error_code !== 'RUN_ATTENTION_REQUIRED') continue
       if (task.status !== status) {
         task.status = status
         if (status === 'needs_attention' && !task.launch_error) {
