@@ -78,15 +78,27 @@ function lifecycle(metadata, state) {
   return { lifecycle_status: 'running', phase: `STEP_${state.current_step || 'BOOTSTRAP'}`, terminal: false }
 }
 
-function stepRows(state, liveDocuments, formalOutputs) {
+async function stepRows(state, liveDocuments, formalOutputs, skillRoot) {
   const completed = new Set(state?.completed_steps ?? [])
   const current = state?.current_step ?? null
+  let ownership = new Map()
+  try {
+    const manifest = await readJson(path.join(skillRoot, 'workflow-manifest.json'))
+    for (const step of manifest.steps ?? []) {
+      for (const artifact of step.required ?? []) {
+        const name = path.basename(artifact)
+        ownership.set(name, String(step.id ?? '').padStart(2, '0'))
+      }
+    }
+  } catch { /* older runs may not contain a manifest */ }
   return STEP_TITLES.map((title, index) => {
     const step = String(index + 1).padStart(2, '0')
     const status = completed.has(step) ? 'completed' : current === step ? 'running' : 'pending'
     const artifacts = step === '09'
       ? formalOutputs
-      : liveDocuments.filter(file => path.basename(file).startsWith(step + '-') || (step === '04' && file.includes(`${path.sep}流程讲解${path.sep}`)))
+      : liveDocuments.filter(file => ownership.size > 0
+        ? ownership.get(path.basename(file)) === step
+        : path.basename(file).startsWith(step + '-'))
     return { step, title, status, artifacts }
   })
 }
@@ -105,7 +117,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const life = lifecycle(metadata, state)
   const completed = state?.completed_steps?.length ?? 0
   const workflow = {
-    steps: stepRows(state, liveDocuments, formalOutputs),
+    steps: await stepRows(state, liveDocuments, formalOutputs, metadata.skill_root),
     completed_steps: state?.completed_steps ?? [],
     current_step: state?.current_step ?? null,
     core_rules_ack: state?.core_rules_ack ?? {},

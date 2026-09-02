@@ -1,3 +1,9 @@
 - insert:
     - id: pangea-companion
       name: dsh-pangea-companion
+    - id: dsh-jobs-local
+      name: '@deepseek-ai/dsh-jobs-local'
+    - id: dsh-subagent
+      name: '@deepseek-ai/dsh-subagent'
+    - id: dsh-subagent-acp
+      name: '@deepseek-ai/dsh-subagent-acp'

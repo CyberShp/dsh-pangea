@@ -7,11 +7,11 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { workspaceRoot } from './pangea-api.js'
-import { createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
-export const inject = ['tools', 'webServer', 'agents', 'apiProxy']
+export const inject = ['tools', 'webServer', 'agents', 'apiProxy', 'subagents', 'jobs']
 
 const API_PATH = '/api/pangea-companion/state'
 const SOURCE_API_PATH = '/api/pangea-companion/source'
@@ -28,6 +28,10 @@ function rpc(payload) {
 function apiValue(response) {
   if (!response?.result?.ok) throw new Error(response?.result?.error?.message ?? 'DSH API request failed')
   return response.result.value
+}
+
+function runtimeService(runtime, name) {
+  return runtime?.[name] ?? runtime?.get?.(name)
 }
 
 async function appendLaunchSafe(launchLogs, taskId, event) {
@@ -276,7 +280,7 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Da
   }
 }
 
-async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLogs) {
+async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLogs, runtime) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
@@ -310,6 +314,10 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         ...snapshot,
         tasks: { items: taskItems, total: taskItems.length },
         model_routing: modelRouting,
+        acp_providers: acpProviderOptions().map(provider => ({
+          ...provider,
+          registered: Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id)),
+        })),
         selected_task_id: selectedTask?.task_id ?? null,
         launch_log: launchLog,
       })
@@ -319,11 +327,12 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)
-      const selectedModel = await resolveTaskModel(api, body.input?.model_route)
+      const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
+      const selectedModel = providerId ? null : await resolveTaskModel(api, body.input?.model_route)
       const task = await tasks.create({
         workspace: root,
         dataRoot: dataRootFor(root, actionDataRoot),
-        input: { ...body.input, model_route: selectedModel },
+        input: { ...body.input, provider_id: providerId || null, model_route: selectedModel },
       })
       await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_created', status: 'ok' })
       return json(res, 200, { status: 'ok', task })
@@ -335,23 +344,31 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       launchLocks.add(task.task_id)
       await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `启动尝试 ${task.launch_attempts + 1}` })
       try {
-        await appendLaunchSafe(launchLogs, task.task_id, { stage: 'model_route_resolve', status: 'start' })
-        const selectedModel = await resolveTaskModel(api, body.model_route ?? task.model_route)
-        await appendLaunchSafe(launchLogs, task.task_id, {
-          stage: 'model_route_resolve', status: 'ok', provider: selectedModel.provider, model: selectedModel.model,
-        })
-        await tasks.prepareLaunch(task.task_id, selectedModel)
+        const selectedProvider = body.provider_id ?? task.provider
+        let selectedModel = null
+        if (selectedProvider) {
+          await appendLaunchSafe(launchLogs, task.task_id, { stage: 'acp_provider_resolve', status: 'ok', provider: selectedProvider })
+          await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
+        } else {
+          await appendLaunchSafe(launchLogs, task.task_id, { stage: 'model_route_resolve', status: 'start' })
+          selectedModel = await resolveTaskModel(api, body.model_route ?? task.model_route)
+          await appendLaunchSafe(launchLogs, task.task_id, {
+            stage: 'model_route_resolve', status: 'ok', provider: selectedModel.provider, model: selectedModel.model,
+          })
+          await tasks.prepareLaunch(task.task_id, selectedModel)
+        }
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_prepare', status: 'ok' })
         const launched = await launchAnalysisSession(api, {
           cwd,
           dataRoot: actionDataRoot ?? task.data_root,
-          input: task,
+          input: { ...task, provider_id: selectedProvider || null },
           model: selectedModel,
         }, undefined, session => tasks.addConversation(task.task_id, {
           sessionId: session.session_id,
           title: `${task.title} · 分析`,
           kind: 'analysis',
-        }), event => launchLogs.append(task.task_id, event))
+        }), event => launchLogs.append(task.task_id, event), runtime)
+        if (launched.job_id) await tasks.bindJob(task.task_id, { jobId: launched.job_id, provider: launched.provider, ownerSessionId: launched.session_id })
         await tasks.bindRunBySession(launched.session_id, launched.run)
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id })
         return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })
@@ -378,8 +395,27 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       return json(res, 200, { status: 'ok', task })
     }
     if (body.action === 'stop') {
-      const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })
-      const task = await tasks.getByRun(body.run_id, { dataRoot: stopped.data_root })
+      // Legacy ordering contract: const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })
+      const requestedTask = body.task_id ? await tasks.get(body.task_id) : null
+      if (body.task_id && !requestedTask) throw new Error(`task not found: ${body.task_id}`)
+      if (requestedTask && requestedTask.workspace !== workspaceRoot(cwd)) throw new Error(`task does not belong to current workspace: ${body.task_id}`)
+      const runId = body.run_id ?? requestedTask?.run_id
+      if (!runId) throw new Error('run_id or task_id is required')
+      const stopJobs = runtimeService(runtime, 'jobs')
+      if (requestedTask?.job_id && stopJobs?.kill) {
+        const owner = runtimeService(runtime, 'agents')?.get?.(requestedTask.owner_session_id)
+        try {
+          const result = stopJobs.kill(requestedTask.job_id, owner, '用户请求停止 PANGEA 分析')
+          await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'ok', job_id: requestedTask.job_id, result })
+        } catch (error) {
+          await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'error', job_id: requestedTask.job_id, error })
+          throw error
+        }
+      }
+      // Resolve the data root from the task record. This prevents a stale UI
+      // selection from stopping a run in another workspace/data directory.
+      const stopped = await stopAnalysisRun({ cwd, dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
+      const task = requestedTask ?? await tasks.getByRun(runId, { dataRoot: stopped.data_root })
       const analysis = task ? [...task.conversations].reverse().find(item => item.kind === 'analysis') : null
       let sessionCancel = { status: 'not_bound', session_id: null, error: null }
       if (analysis) {
@@ -395,6 +431,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         }
       }
       await tasks.reconcileRuns([stopped.run], { dataRoot: stopped.data_root })
+      if (task) await tasks.markStopped(task.task_id)
       return json(res, 200, { ...stopped, session_cancel: sessionCancel, task: task ? await tasks.get(task.task_id) : null })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
@@ -498,7 +535,10 @@ export function apply(ctx) {
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
-  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs) })
+  const jobs = ctx.jobs ?? ctx.get?.('jobs')
+  const disposeJobController = jobs?.attachController?.('pangea-companion')
+  const disposeJobDone = jobs?.onJobDone?.((snapshot) => tasks.settleJob(String(snapshot.id), snapshot).catch(() => undefined))
+  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs, ctx) })
   const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
   ctx.effect?.(() => async () => {
     disposeRepositoryRoute()
@@ -508,6 +548,8 @@ export function apply(ctx) {
     disposeLaunchLogRoute()
     disposeSourceRoute()
     disposeStateRoute()
+    disposeJobDone?.()
+    disposeJobController?.()
     for (const dispose of toolDisposers) dispose()
     await ssh.dispose()
     await tasks.flush()

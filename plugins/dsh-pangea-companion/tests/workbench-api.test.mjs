@@ -208,3 +208,44 @@ test('stops one explicit Run through the public runs API', async () => {
     assert.equal(result.run.lifecycle_status, 'stopped')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('starts a selected ACP provider through a DSH background job', async () => {
+  const root = await workspace()
+  try {
+    let promptCalled = false
+    let providerStarted = false
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        async create() { return ok({ sessionId: 'owner-session' }) },
+        async rename() { return ok({}) },
+        async prompt() { promptCalled = true; return ok({}) },
+      },
+    }
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get(id) { return id === owner.id ? owner : undefined } },
+      subagents: {
+        getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+        async start() {
+          providerStarted = true
+          return { result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }), dispose: async () => {} }
+        },
+      },
+      jobs: {
+        start(spec) { const hooks = spec.run(); void hooks.done; return 'subagent-1' },
+      },
+    }
+    const runner = async call => call.args[0] === 'system'
+      ? capabilities
+      : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    const result = await launchAnalysisSession(api, {
+      cwd: root,
+      input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime)
+    assert.equal(result.job_id, 'subagent-1')
+    assert.equal(result.provider, 'pangea-nga')
+    assert.equal(providerStarted, true)
+    assert.equal(promptCalled, false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

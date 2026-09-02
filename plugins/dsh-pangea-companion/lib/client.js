@@ -19,7 +19,7 @@ window.__ModuleLoader__.load({
     const ACTIVE_POLL_INTERVAL_MS = 2_000
     const IDLE_POLL_INTERVAL_MS = 45_000
     const WORKBENCH_ACTIVE_POLL_INTERVAL_MS = 2_000
-    const MODEL_SELECTION_STORAGE_KEY = 'pangea.internal-model-route.v1'
+    const ACP_PROVIDER_STORAGE_KEY = 'pangea.acp-provider.v1'
 
     function modelSelectionKey(value) {
       return value?.provider && value?.model
@@ -600,7 +600,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', focus: '', asset_ids: '', test_case_examples: '', model_key: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope: '', focus: '', asset_ids: '', test_case_examples: '', provider_id: '' })
       const [creatingRun, setCreatingRun] = React.useState(false)
       const [pendingStopRun, setPendingStopRun] = React.useState('')
       const [flowQuery, setFlowQuery] = React.useState('')
@@ -767,18 +767,16 @@ window.__ModuleLoader__.load({
         if (repositories.length > 0) setCreateForm(value => value.repository ? value : { ...value, repository: repositories[0] })
       }, [workbench?.capabilities])
       React.useEffect(() => {
-        const options = (workbench?.model_routing?.models ?? []).filter(item => item.credential_configured)
+        const options = workbench?.acp_providers ?? []
         if (options.length === 0) return
         setCreateForm(value => {
-          if (options.some(item => modelSelectionKey(item) === value.model_key)) return value
+          if (options.some(item => item.id === value.provider_id)) return value
           let remembered = ''
-          try { remembered = window.localStorage?.getItem(MODEL_SELECTION_STORAGE_KEY) ?? '' } catch { /* storage unavailable */ }
-          const selected = options.some(item => modelSelectionKey(item) === remembered)
-            ? remembered
-            : options.length === 1 ? modelSelectionKey(options[0]) : ''
-          return selected ? { ...value, model_key: selected } : value
+          try { remembered = window.localStorage?.getItem(ACP_PROVIDER_STORAGE_KEY) ?? '' } catch { /* storage unavailable */ }
+          const selected = options.some(item => item.id === remembered) ? remembered : options.length === 1 ? options[0].id : ''
+          return selected ? { ...value, provider_id: selected } : value
         })
-      }, [workbench?.model_routing?.models])
+      }, [workbench?.acp_providers])
       React.useEffect(() => {
         if (!visible || pageMode === 'execution') {
           requestRef.current.controller?.abort()
@@ -934,7 +932,16 @@ window.__ModuleLoader__.load({
         if (history.length === 0) { setScreen({ type: initialScreen }); return }
         setScreen(history[history.length - 1]); setHistory(history.slice(0, -1))
       }, [history, initialScreen])
-      const chooseRun = React.useCallback((runId) => { setSelectedRun(runId); setScreen({ type: initialScreen }); setHistory([]) }, [initialScreen])
+      function chooseRun(runId) {
+        const task = workbench?.tasks?.items?.find(item => item.run_id === runId)
+        if (task) {
+          ctx?.pangea?.selectTask?.(task.task_id)
+          setSelectedTaskId(task.task_id)
+        }
+        setSelectedRun(runId)
+        setScreen({ type: initialScreen })
+        setHistory([])
+      }
 
       function chooseTask(task, targetScreen = 'overview') {
         if (!task) return
@@ -1102,7 +1109,7 @@ window.__ModuleLoader__.load({
                 focus: multilineValues(createForm.focus),
                 asset_ids: multilineValues(createForm.asset_ids),
                 test_case_examples: multilineValues(createForm.test_case_examples),
-                model_route: modelRouteFromKey(createForm.model_key),
+                provider_id: createForm.provider_id,
               },
             },
           })
@@ -1131,7 +1138,7 @@ window.__ModuleLoader__.load({
       async function stopCurrentRun() {
         if (!cwd || !current || current.terminal) return
         try {
-          const stopped = await requestWorkbenchAction({ cwd, action: 'stop', payload: { run_id: current.run_id, data_root: snapshot?.data_root } })
+          const stopped = await requestWorkbenchAction({ cwd, action: 'stop', payload: { task_id: selectedTask?.task_id, run_id: current.run_id, data_root: snapshot?.data_root } })
           setPendingStopRun('')
           if (stopped.session_cancel?.status === 'error') {
             showActionNotice(`Run 已停止；DSH 会话取消失败：${stopped.session_cancel.error}`, true)
@@ -1517,10 +1524,9 @@ window.__ModuleLoader__.load({
 
       function renderCreate() {
         const repositories = workbench?.capabilities?.repositories ?? []
-        const modelOptions = workbench?.model_routing?.models ?? []
-        const usableModels = modelOptions.filter(item => item.credential_configured)
+        const providerOptions = workbench?.acp_providers ?? []
         const compatible = workbench?.compatibility?.compatible === true
-        const canSubmit = compatible && createForm.repository && createForm.target.trim() && createForm.model_key && !creatingRun
+        const canSubmit = compatible && createForm.repository && createForm.target.trim() && createForm.provider_id && !creatingRun
         const formField = (label, key, placeholder) => h('label', null,
           h('div', { style: styles.label }, label),
           h('input', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm[key], placeholder, onChange: event => setCreateForm(value => ({ ...value, [key]: event.target.value })) }))
@@ -1535,14 +1541,14 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.formGrid },
               h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
                 h('option', { value: '' }, repositories.length ? '选择仓库' : '没有可用仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository)))),
-              h('label', null, h('div', { style: styles.label }, '内部模型'), h('select', {
-                style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.model_key,
+              h('label', null, h('div', { style: styles.label }, '执行 Agent'), h('select', {
+                style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.provider_id,
                 onChange: event => {
-                  const modelKey = event.target.value
-                  setCreateForm(value => ({ ...value, model_key: modelKey }))
-                  try { if (modelKey) window.localStorage?.setItem(MODEL_SELECTION_STORAGE_KEY, modelKey) } catch { /* storage unavailable */ }
+                  const providerId = event.target.value
+                  setCreateForm(value => ({ ...value, provider_id: providerId }))
+                  try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ }
                 },
-              }, h('option', { value: '' }, usableModels.length ? '选择内部模型' : '没有可用的内部模型'), usableModels.map(item => h('option', { key: modelSelectionKey(item), value: modelSelectionKey(item) }, `${item.provider_name} · ${item.model_name}`)))),
+              }, h('option', { value: '' }, providerOptions.length ? '选择执行 Agent' : '没有可用的 ACP Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id }, `${item.label} · ${item.command} ${item.args.join(' ')}`)))),
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               formArea('源码范围（可选）', 'source_scope', '可留空，由 Agent 自动识别；也可每行粘贴一个 Windows 文件栏地址或填写仓库相对路径'),
               formArea('分析重点', 'focus', '错误路径\n恢复行为\n外部可观测结果'),

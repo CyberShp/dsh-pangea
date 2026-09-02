@@ -5,6 +5,15 @@ import { assertCodetalksSkill, createRun, runPangea, workspaceRoot } from './pan
 const DEFAULT_PAGE_SIZE = 20
 const INTERNAL_PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 
+// External ACP agents are intentionally configured as commands rather than
+// model routes.  This keeps credentials and process ownership in DSH.
+export function acpProviderOptions(env = process.env) {
+  return [
+    { id: 'nga', label: 'NGA', command: env.PANGEA_NGA_ACP_COMMAND || 'nga', args: ['acp'] },
+    { id: 'codeagent', label: 'CodeAgent', command: env.PANGEA_CODEAGENT_ACP_COMMAND || 'codeagent', args: ['acp'] },
+  ]
+}
+
 function rpc(payload) {
   return { rpcId: `pangea-workbench-${Date.now()}-${Math.random()}`, payload }
 }
@@ -130,6 +139,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     focus: stringList(value?.focus),
     asset_ids: stringList(value?.asset_ids),
     test_case_examples: stringList(value?.test_case_examples),
+    provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,
   }
 }
 
@@ -222,12 +232,64 @@ async function launchStep(onEvent, stage, action, successDetails = () => ({})) {
   }
 }
 
+function runtimeService(runtime, name) {
+  return runtime?.[name] ?? runtime?.get?.(name)
+}
+
+async function settleAcpRun(start, signal) {
+  let run
+  try {
+    run = await start
+    const result = await run.result
+    const text = (result.output ?? [])
+      .filter(item => item?.type === 'text')
+      .map(item => item.text)
+      .join('')
+    if (result.stopReason === 'completed') return { status: 'completed', output: text }
+    if (result.stopReason === 'aborted' && result.diagnostic === undefined && signal.aborted) return { status: 'killed' }
+    return { status: 'failed', detail: result.diagnostic ? `${result.stopReason}; diagnostic: ${result.diagnostic}` : result.stopReason }
+  } catch (error) {
+    return { status: signal.aborted ? 'killed' : 'failed', ...(signal.aborted ? {} : { detail: error instanceof Error ? error.message : String(error) }) }
+  } finally {
+    try { await run?.dispose?.() } catch { /* job settlement retains the failure */ }
+  }
+}
+
+function startAcpJob(runtime, parent, providerId, prompt, label) {
+  const subagents = runtimeService(runtime, 'subagents')
+  const jobs = runtimeService(runtime, 'jobs')
+  if (!subagents?.start) throw new Error('DSH subagent runtime unavailable: load dsh-subagent')
+  if (!jobs?.start) throw new Error('DSH background jobs unavailable: load dsh-jobs and dsh-jobs-local')
+  if (!parent) throw new Error('DSH owner Agent is not live for this analysis session')
+  if (!subagents.getProvider?.(providerId)) throw new Error(`ACP Provider 未注册：${providerId}`)
+  const jobId = jobs.start({
+    kind: 'subagent',
+    label,
+    owner: parent,
+    run: () => {
+      const controller = new AbortController()
+      const start = subagents.start(providerId, {
+        label,
+        prompt: [{ type: 'text', text: prompt }],
+        parent,
+        signal: controller.signal,
+      })
+      return {
+        cancel: reason => controller.abort(reason ?? 'PANGEA analysis stopped'),
+        done: settleAcpRun(start, controller.signal),
+      }
+    },
+  })
+  return jobId
+}
+
 export async function launchAnalysisSession(
   api,
   { cwd, dataRoot, input, model },
   runner = runPangea,
   onSession = async () => {},
   onEvent = async () => {},
+  runtime,
 ) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
@@ -238,16 +300,22 @@ export async function launchAnalysisSession(
   }), value => ({ repository_count: Array.isArray(value?.repositories) ? value.repositories.length : 0 }))
   const request = normalizeAnalysisInput(input, capabilities, true)
   await emitLaunch(onEvent, { stage: 'input_validated', status: 'ok' })
-  const selectedModel = await launchStep(
-    onEvent,
-    'model_validate',
-    () => requireInternalModel(api, model),
-    value => ({ provider: value.provider, model: value.model }),
-  )
+  const selectedProvider = request.provider_id
+  const selectedModel = runtime && selectedProvider
+    ? { provider: selectedProvider, route_class: 'external-acp' }
+    : await launchStep(
+      onEvent,
+      'model_validate',
+      () => requireInternalModel(api, model),
+      value => ({ provider: value.provider, model: value.model }),
+    )
   const run = await launchStep(
     onEvent,
     'skill_run_create',
-    () => createRun(root, { ...request, data_root: resolvedDataRoot }, runner),
+    () => {
+      const { provider_id: _providerId, ...skillRequest } = request
+      return createRun(root, { ...skillRequest, data_root: resolvedDataRoot }, runner)
+    },
     value => ({ run_id: value.run_id, request_path: value.request_path }),
   )
   const sessionId = await launchStep(
@@ -256,7 +324,7 @@ export async function launchAnalysisSession(
     () => createDshSession(api, root, `PANGEA 分析 · ${request.target}`),
     value => ({ session_id: value }),
   )
-  await launchStep(onEvent, 'model_select', async () => {
+  if (!runtime || !selectedProvider) await launchStep(onEvent, 'model_select', async () => {
     apiValue(await api.sessions.selectModel(rpc({
       sessionId,
       provider: selectedModel.provider,
@@ -282,12 +350,14 @@ export async function launchAnalysisSession(
     '',
     '现在读取运行请求并执行。',
   ].join('\n')
+  if (runtime && selectedProvider) {
+    const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
+    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`), value => ({ job_id: value, provider: selectedProvider }))
+    await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
+    return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, run }
+  }
   await launchStep(onEvent, 'prompt_submit', async () => {
-    apiValue(await api.sessions.prompt(rpc({
-      sessionId,
-      mode: 'queue',
-      content: [{ type: 'text', text: prompt }],
-    })))
+    apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
   }, () => ({ session_id: sessionId }))
   await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, run_id: run.run_id, message: 'Codetalks Skill 分析会话已启动。' })
   return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
