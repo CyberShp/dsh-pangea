@@ -64,6 +64,8 @@ export function acpProviderOptions(env = process.env) {
       resolution_status: typeof value?.resolution_status === 'string' ? value.resolution_status : null,
       resolution_error: typeof value?.resolution_error === 'string' ? value.resolution_error : null,
       version: typeof value?.version === 'string' ? value.version : null,
+      version_status: typeof value?.version_status === 'string' ? value.version_status : null,
+      version_error: typeof value?.version_error === 'string' ? value.version_error : null,
       login_status: typeof value?.login_status === 'string' ? value.login_status : null,
     }
   })

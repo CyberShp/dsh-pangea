@@ -61,6 +61,27 @@ test('advertises NGA, CodeAgent, OpenCode, and Claude Code ACP routes', () => {
   assert.deepEqual(acpProviderOptions({})[3].kind, 'claude-code')
 })
 
+test('preserves structured command and version probe status for the runtime UI', () => {
+  const [provider] = acpProviderOptions({ PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify({
+    version: 1,
+    providers: {
+      'pangea-nga': {
+        command: 'nga',
+        args: ['acp'],
+        models: [],
+        available: true,
+        resolved_command: 'C:\\Tools\\nga.cmd',
+        resolution_status: 'resolved',
+        version_status: 'unavailable',
+        version_error: '--version exited with code 2',
+      },
+    },
+  }) })
+  assert.equal(provider.resolution_status, 'resolved')
+  assert.equal(provider.version_status, 'unavailable')
+  assert.equal(provider.version_error, '--version exited with code 2')
+})
+
 test('requires an exact configured ACP model and effort without internal fallback', () => {
   const env = { PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify(acpRuntimeConfig) }
   assert.deepEqual(requireAcpModel('pangea-nga', {

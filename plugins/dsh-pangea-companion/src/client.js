@@ -618,6 +618,23 @@ window.__ModuleLoader__.load({
       })
     }
 
+    function acpResolutionLabel(value) {
+      return ({
+        resolved: '已解析',
+        not_found: '未找到命令',
+        probe_error: '探测失败',
+        'built-in': '内置 Provider',
+        not_checked: '尚未检查',
+      })[value] ?? value ?? '待重启检查'
+    }
+
+    function acpVersionLabel(provider) {
+      if (provider.version) return provider.version
+      if (provider.version_status === 'unavailable') return '命令可用，未返回版本'
+      if (provider.version_status === 'not_checked') return '尚未检查'
+      return '未读取'
+    }
+
     function AcpSettingsPanel({ visible }) {
       const [snapshot, setSnapshot] = React.useState(undefined)
       const [draft, setDraft] = React.useState({})
@@ -698,11 +715,12 @@ window.__ModuleLoader__.load({
                 h('span', { style: styles.badge }, provider.registered ? 'Provider 已注册' : 'Provider 未注册')),
               h('div', { style: styles.environmentSectionBody },
                 h('div', { style: styles.grid },
-                  h('div', { style: styles.metric }, h('div', { style: styles.label }, '命令解析'), h('div', { style: styles.value }, provider.resolution_status ?? '待重启检查')),
-                  h('div', { style: styles.metric }, h('div', { style: styles.label }, '版本'), h('div', { style: styles.value }, provider.version ?? '未读取')),
+                  h('div', { style: styles.metric }, h('div', { style: styles.label }, '命令解析'), h('div', { style: styles.value }, acpResolutionLabel(provider.resolution_status))),
+                  h('div', { style: styles.metric }, h('div', { style: styles.label }, '版本'), h('div', { style: styles.value }, acpVersionLabel(provider))),
                   h('div', { style: styles.metric }, h('div', { style: styles.label }, '登录状态'), h('div', { style: styles.value }, provider.login_status === 'not_checked' ? '尚未检测' : provider.login_status ?? '未知')),
                   h('div', { style: styles.metric }, h('div', { style: styles.label }, '绝对路径'), h('div', { style: styles.value }, provider.resolved_command ?? '待解析'))),
                 provider.resolution_error ? h('div', { style: { ...styles.error, margin: '10px 0' } }, provider.resolution_error) : null,
+                provider.version_error ? h('div', { style: { ...styles.healthWarning, margin: '10px 0' } }, `版本检查：${provider.version_error}`) : null,
                 h('div', { style: styles.environmentField }, h('label', { style: styles.environmentLabel }, '启动命令'), h('input', {
                   style: styles.environmentInput, value: value.command ?? '', onChange: event => setField(provider.id, 'command', event.target.value),
                 })),
