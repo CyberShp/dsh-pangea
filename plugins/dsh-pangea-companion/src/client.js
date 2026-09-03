@@ -56,8 +56,9 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestSourceSnippet({ cwd, dataRoot, location, signal, fetcher = fetch }) {
+    async function requestSourceSnippet({ cwd, dataRoot, runId, location, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd, data_root: dataRoot, location })
+      if (runId) query.set('run_id', runId)
       const response = await fetcher(`${SOURCE_API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
@@ -448,12 +449,15 @@ window.__ModuleLoader__.load({
       const separator = cwd.includes('\\') ? '\\' : '/'
       return `${cwd.replace(/[\\/]+$/, '')}${separator}${value.replace(/^[\\/]+/, '')}`
     }
-    function evidenceFilePath(location, cwd, dataRoot) {
+    function evidenceFilePath(location, cwd, dataRoot, runDirectory) {
       const value = filePathFromLocation(location)
       if (!value) return undefined
       if (/^(?:\/|[A-Za-z]:[\\/])/.test(value)) return value
       const repositoryLocation = value.match(/^([^:/\\]+):(.+)$/)
       if (repositoryLocation && hasText(dataRoot)) {
+        if (hasText(runDirectory)) {
+          return absoluteWorkspacePath(runDirectory, `inputs/source/repository/${repositoryLocation[2]}`)
+        }
         const repositoryRoot = absoluteWorkspacePath(dataRoot, `repositories/${repositoryLocation[1]}`)
         return absoluteWorkspacePath(repositoryRoot, repositoryLocation[2])
       }
@@ -773,7 +777,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', asset_ids: [], provider_id: '', model_route_key: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', asset_ids: [], provider_id: '', model_route_key: '' })
       const [assetCatalog, setAssetCatalog] = React.useState(null)
       const [assetCatalogLoading, setAssetCatalogLoading] = React.useState(false)
       const [assetCatalogError, setAssetCatalogError] = React.useState('')
@@ -1113,7 +1117,7 @@ window.__ModuleLoader__.load({
         }
         const controller = new AbortController()
         setSourcePreview({ key: previewKey, status: 'loading' })
-        requestSourceSnippet({ cwd, dataRoot: snapshot.data_root, location: previewEvidence.location, signal: controller.signal })
+        requestSourceSnippet({ cwd, dataRoot: snapshot.data_root, runId: current?.run_id, location: previewEvidence.location, signal: controller.signal })
           .then(value => setSourcePreview({ key: previewKey, status: 'ready', value }))
           .catch(reason => {
             if (reason?.name !== 'AbortError') setSourcePreview({ key: previewKey, status: 'error', error: reason instanceof Error ? reason.message : String(reason) })
@@ -1374,7 +1378,7 @@ window.__ModuleLoader__.load({
                 request_version: '2.0',
                 repository: createForm.repository,
                 target: createForm.target,
-                source_scope: [],
+                source_scope: createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean),
                 asset_ids: createForm.asset_ids,
                 provider_id: createForm.provider_id || null,
                 model_route: modelRouteFromKey(createForm.model_route_key),
@@ -1545,7 +1549,7 @@ window.__ModuleLoader__.load({
         showActionNotice(`正在读取 ${selectedEvidence.length} 条证据源码…`)
         try {
           const sourceSnippets = await Promise.all(selectedEvidence.map(item => requestSourceSnippet({
-            cwd, dataRoot: snapshot?.data_root, location: item.location,
+            cwd, dataRoot: snapshot?.data_root, runId: current?.run_id, location: item.location,
           })))
           const draft = buildDiscussionDraft({
             kind: 'risk', item: risk, intent, runId: current?.run_id, risks, testCases,
@@ -1592,7 +1596,7 @@ window.__ModuleLoader__.load({
       }
       function renderSourcePreview(kind, item, evidenceItem, evidenceOptions = []) {
         if (!evidenceItem?.location) return null
-        const sourcePath = evidenceFilePath(evidenceItem.location, cwd, snapshot?.data_root)
+        const sourcePath = evidenceFilePath(evidenceItem.location, cwd, snapshot?.data_root, current?.artifacts?.run_directory)
         const preview = sourcePreview.key === previewKey ? sourcePreview : { status: 'loading' }
         const snippet = preview.status === 'ready' ? preview.value : undefined
         return h('div', { style: styles.card },
@@ -1678,14 +1682,16 @@ window.__ModuleLoader__.load({
       function countCheck(key) { return health?.count_checks?.[key] }
       function displayCount(key, number) {
         const check = countCheck(key)
-        return check?.status === 'mismatch' ? `${number} / 报告 ${check.report}` : String(number ?? 0)
+        if (check?.status === 'mismatch') return `${number} / 报告 ${check.report}`
+        if (number === null || number === undefined) return '暂不可读取'
+        return String(number)
       }
       function metric(number, name, target, countKey) {
         const props = target ? { type: 'button', onClick: () => jump(target), style: { ...styles.metric, ...styles.metricClickable } } : { style: styles.metric }
         return h(target ? 'button' : 'div', props, h('div', { style: styles.metricNumber }, countKey ? displayCount(countKey, number) : String(number ?? 0)), h('div', { style: styles.metricName }, name))
       }
       function collectionEmpty(key, normal) {
-        return countCheck(key)?.status === 'mismatch' ? '数据读取异常：当前列表与报告计数不一致，不能把空列表解释为“没有数据”。' : normal
+        return countCheck(key)?.status === 'mismatch' || health?.trusted === false ? '数据读取异常：不能把空列表解释为“没有数据”。' : normal
       }
       function healthStyle() {
         if (health?.status === 'error') return { ...styles.card, ...styles.healthError }
@@ -1815,7 +1821,8 @@ window.__ModuleLoader__.load({
             && selectedExternalModel !== null
             && (selectedExternalModel.efforts.length === 0 || Boolean(selectedModel?.reasoning_effort))
           : selectedModelOption?.credential_configured === true
-        const canSubmit = compatible && createForm.repository && createForm.target.trim() && executionReady && !creatingRun
+        const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
+        const canSubmit = compatible && createForm.repository && createForm.target.trim() && sourceScope.length > 0 && executionReady && !creatingRun
         const assetItems = assetCatalog?.assets ?? []
         const selectedAssets = assetItems.filter(item => createForm.asset_ids.includes(item.asset_id))
         const assetTypeLabels = { requirement: '需求', design: '设计', historical_defect: '历史缺陷', reference: '参考资料', coverage: 'Coverage', test_case_example: '用例示例' }
@@ -1866,9 +1873,9 @@ window.__ModuleLoader__.load({
         ) : null
         return h(React.Fragment, null,
           renderCompatibility(),
-          h('div', { style: { ...styles.card, ...styles.compatibility } },
-            h('div', { style: styles.itemTitle }, '分析输入'),
-            h('div', { style: styles.itemMeta }, '选择仓库、资产和执行 Agent；源码范围由 Codetalks Skill Step 01 基于仓库证据确定。'),
+            h('div', { style: { ...styles.card, ...styles.compatibility } },
+              h('div', { style: styles.itemTitle }, '分析输入'),
+            h('div', { style: styles.itemMeta }, '选择仓库、源码范围、资产和执行 Agent。Run 创建后将只读取这里冻结的源码副本。'),
             h('div', { style: styles.formGrid },
               h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
                 h('option', { value: '' }, repositories.length ? '选择仓库' : '没有可用仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository)))),
@@ -1891,6 +1898,10 @@ window.__ModuleLoader__.load({
               internalModelFields,
               externalModelFields,
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
+              h('label', { style: { gridColumn: '1 / -1' } },
+                h('div', { style: styles.label }, '源码冻结范围'),
+                h('textarea', { 'aria-label': '源码冻结范围', style: { ...styles.textarea, marginTop: 5, minHeight: 72 }, value: createForm.source_scope_text, placeholder: '. 或填写相对仓库根目录的文件/目录，每行一个', onChange: event => setCreateForm(value => ({ ...value, source_scope_text: event.target.value })) }),
+                h('div', { style: styles.itemMeta }, '使用 . 表示整个仓库；创建后原始仓库的后续修改不会影响本次 Run。')),
               h('div', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '分析资产'),
                 h('div', { style: styles.itemMeta }, '分析重点由 Codetalks Skill 固定；这里仅选择资产库中已通过完整性校验的输入。用例示例只能在 Step 07 作为格式/粒度参考。'),
@@ -1936,10 +1947,20 @@ window.__ModuleLoader__.load({
               field('核心规则 ACK', `${ackCount} / 3`),
               field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : '等待初始化'),
               field('独立 Judge', judgeStatus),
-              field('运行状态', PHASE[current.phase] ?? current.phase)),
+              field('运行状态', PHASE[current.phase] ?? current.phase),
+              field('源码快照', current.source_snapshot?.status === 'verified' ? `${current.source_snapshot.file_count ?? 0} 个文件，已冻结` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查')),
             h('div', { style: styles.chips },
               current.artifacts?.request ? chip('打开任务请求', () => openSidebarFile(current.artifacts.request, 'Codetalks request.md')) : null,
-              current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null)),
+              current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null,
+              current.artifacts?.source_snapshot_manifest ? chip('打开源码快照清单', () => openSidebarFile(current.artifacts.source_snapshot_manifest, 'source manifest.json')) : null)),
+          workflow.step_progress?.step ? h('div', { style: { ...styles.card, ...styles.notice } },
+            h('div', { style: styles.row },
+              h('div', { style: styles.itemTitle }, `Step ${workflow.step_progress.step} 当前业务进度`),
+              workflow.step_progress.total === null || workflow.step_progress.total === undefined
+                ? h('span', { style: styles.badge }, `${workflow.step_progress.completed ?? 0} 个已完成`)
+                : h('span', { style: styles.badge }, `${workflow.step_progress.completed ?? 0} / ${workflow.step_progress.total}`)),
+            workflow.step_progress.current ? h('div', { style: styles.itemMeta }, `当前处理：${workflow.step_progress.current.id} · ${workflow.step_progress.current.title}`) : null,
+            workflow.step_progress.updated_at ? h('div', { style: styles.itemMeta }, `最近更新：${workflow.step_progress.updated_at}`) : null) : null,
           h('div', { style: styles.sectionTitle }, 'Step 01–09 生命周期'),
           h('div', { style: styles.card }, h('div', { style: styles.stageRail }, steps.map(step => h('div', { key: step.step, style: styles.stageItem },
             h('span', { style: { ...styles.stageDot, background: statusColor(step.status) } }),
@@ -1951,6 +1972,11 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.itemTitle }, `正式输出（${current.artifacts.formal_outputs.length}）`),
             h('div', { style: styles.chips }, current.artifacts.formal_outputs.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file))))) : null,
           workflow.unresolved?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '未解决事项'), h('pre', { style: styles.text }, JSON.stringify(workflow.unresolved, null, 2))) : null,
+          current.validation?.status === 'failed' ? h('div', { style: { ...styles.card, ...styles.error } },
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '校验失败详情'), h('span', { style: styles.badge }, `${current.validation.error_count ?? current.validation.errors?.length ?? 0} 条`)),
+            h('div', { style: styles.resultGrid }, (current.validation.errors ?? []).map((item, index) => h('div', { key: `${item.code}:${index}`, style: styles.resultItem },
+              h('div', { style: styles.itemTitle }, `${item.code ?? 'validation_error'}${item.step ? ` · Step ${item.step}` : ''}`),
+              h('div', { style: styles.text }, item.message ?? String(item)))))) : null,
           workflow.error_history?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '错误历史'), h('pre', { style: styles.text }, JSON.stringify(workflow.error_history, null, 2))) : null)
       }
 

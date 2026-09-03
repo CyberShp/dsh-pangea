@@ -1,4 +1,5 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 const STEP_TITLES = [
@@ -27,6 +28,64 @@ async function pathKind(filePath) {
 
 async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'))
+}
+
+async function readWorkbenchProjection(runDirectory, runId) {
+  const projectionPath = path.join(runDirectory, '内部索引', '工作台投影.json')
+  if (await pathKind(projectionPath) !== 'file') {
+    return { status: 'legacy_unavailable', path: projectionPath, value: null, issues: ['缺少工作台结构化投影'] }
+  }
+  try {
+    const value = await readJson(projectionPath)
+    const issues = []
+    if (!value || typeof value !== 'object' || Array.isArray(value)) issues.push('工作台投影必须是 JSON 对象')
+    if (value?.schema_version !== '1.0') issues.push('工作台投影 schema_version 不受支持')
+    if (value?.run_id !== runId) issues.push('工作台投影 run_id 与当前 Run 不一致')
+    for (const key of ['business_flows', 'risks', 'test_cases', 'evidence', 'review_issues']) {
+      if (!Array.isArray(value?.[key])) issues.push(`工作台投影缺少数组：${key}`)
+    }
+    return { status: issues.length ? 'invalid' : 'verified', path: projectionPath, value, issues }
+  } catch (error) {
+    return { status: 'invalid', path: projectionPath, value: null, issues: [error instanceof Error ? error.message : String(error)] }
+  }
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+async function verifySourceSnapshot(runDirectory, runId) {
+  const manifestPath = path.join(runDirectory, 'inputs', 'source', 'manifest.json')
+  if (await pathKind(manifestPath) !== 'file') return { status: 'legacy_unavailable', issues: [] }
+  try {
+    const manifest = await readJson(manifestPath)
+    const root = path.resolve(runDirectory, 'inputs', 'source', 'repository')
+    const issues = []
+    if (manifest.run_id !== runId) issues.push('源码快照 run_id 与当前 Run 不一致')
+    const files = manifest.files
+    if (!Array.isArray(files) || files.length === 0) issues.push('源码快照清单没有文件')
+    if (manifest.file_count !== files?.length) issues.push('源码快照 file_count 与清单不一致')
+    if (typeof manifest.snapshot_digest !== 'string') {
+      issues.push('源码快照缺少 snapshot_digest')
+    } else if (manifest.snapshot_digest !== `sha256:${createHash('sha256').update(canonicalJson(files ?? [])).digest('hex')}`) {
+      issues.push('源码快照清单 digest 不匹配')
+    }
+    for (const item of files ?? []) {
+      if (!item?.path || typeof item.sha256 !== 'string') { issues.push('源码快照清单包含非法文件项'); continue }
+      const candidate = path.resolve(root, item.path)
+      if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) { issues.push(`源码快照路径越界：${item.path}`); continue }
+      if (await pathKind(candidate) !== 'file') { issues.push(`源码快照文件缺失：${item.path}`); continue }
+      const digest = createHash('sha256').update(await readFile(candidate)).digest('hex')
+      if (digest !== item.sha256) issues.push(`源码快照哈希不匹配：${item.path}`)
+    }
+    return { status: issues.length ? 'corrupt' : 'verified', issues, manifest }
+  } catch (error) {
+    return { status: 'corrupt', issues: [error instanceof Error ? error.message : String(error)] }
+  }
 }
 
 async function markdownFiles(root) {
@@ -115,6 +174,9 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const reportMd = path.join(runDirectory, '正式输出', '完整分析报告.md')
   const reportAvailable = await pathKind(reportMd) === 'file'
   const life = lifecycle(metadata, state)
+  const projection = await readWorkbenchProjection(runDirectory, runId)
+  const sourceSnapshot = { ...(metadata.source_snapshot ?? { status: 'legacy_unavailable', snapshot_digest: null, file_count: null }), ...(await verifySourceSnapshot(runDirectory, runId)) }
+  const validation = state?.validation ?? { status: 'not_checked', error_count: 0, errors: [] }
   const completed = state?.completed_steps?.length ?? 0
   const workflow = {
     steps: await stepRows(state, liveDocuments, formalOutputs, metadata.skill_root),
@@ -127,7 +189,12 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     quality_checks: [],
     unresolved: [],
     error_history: [],
+    step_progress: state?.step_progress ?? null,
   }
+  if (projection.status !== 'verified') {
+    workflow.unresolved = projection.issues.map(message => ({ code: 'PROJECTION_UNAVAILABLE', message }))
+  }
+  const projectionValue = projection.value ?? {}
   const summary = {
     run_id: runId,
     ...life,
@@ -145,8 +212,14 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       submitted: completed,
       max_parallel: 1,
     },
-    counts: { risks: null, test_cases: null, evidence: liveDocuments.length, business_flows: null, review_issues: null },
-    errors: state?.status === 'validation_failed' ? [{ code: 'SKILL_VALIDATION_FAILED', message: 'run_guard 最终校验未通过' }] : [],
+    counts: {
+      risks: projection.status === 'verified' ? projectionValue.risks.length : null,
+      test_cases: projection.status === 'verified' ? projectionValue.test_cases.length : null,
+      evidence: projection.status === 'verified' ? projectionValue.evidence.length : liveDocuments.length,
+      business_flows: projection.status === 'verified' ? projectionValue.business_flows.length : null,
+      review_issues: projection.status === 'verified' ? projectionValue.review_issues.length : null,
+    },
+    errors: validation.status === 'failed' ? validation.errors : [],
     error_history: [],
     review: {
       status: (state?.completed_steps ?? []).includes('08') ? 'COMPLETE' : 'PENDING',
@@ -154,9 +227,15 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       issues: [],
       counts: { effective: 0 },
     },
-    data_source: 'codetalks-markdown',
-    reader_health: { status: 'ok', trusted: true, data_source: 'codetalks-markdown', issues: [], count_checks: {} },
-    reader_warnings: [],
+    data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
+    reader_health: {
+      status: projection.status === 'verified' && sourceSnapshot.status !== 'corrupt' ? 'ok' : 'warning',
+      trusted: projection.status === 'verified' && sourceSnapshot.status !== 'corrupt',
+      data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
+      issues: [...projection.issues, ...(sourceSnapshot.status === 'corrupt' ? ['源码快照完整性校验失败'] : [])],
+      count_checks: {},
+    },
+    reader_warnings: projection.issues,
     artifacts: {
       run_directory: runDirectory,
       request: metadata.request_path,
@@ -165,12 +244,24 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       formal_outputs: formalOutputs,
       report_md: reportAvailable ? reportMd : null,
       report_html: null,
+      source_snapshot_manifest: await pathKind(path.join(runDirectory, 'inputs', 'source', 'manifest.json')) === 'file'
+        ? path.join(runDirectory, 'inputs', 'source', 'manifest.json') : null,
     },
+    source_snapshot: sourceSnapshot,
+    validation,
     report_available: reportAvailable && life.lifecycle_status === 'complete',
     modified_at: (await stat(runDirectory)).mtimeMs,
   }
   if (includeDetails) {
-    summary.details = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
+    summary.details = projection.status === 'verified'
+      ? {
+          risks: projectionValue.risks,
+          test_cases: projectionValue.test_cases,
+          evidence: projectionValue.evidence,
+          business_flows: projectionValue.business_flows,
+          review_issues: projectionValue.review_issues,
+        }
+      : { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
     summary.workflow = workflow
   }
   return summary

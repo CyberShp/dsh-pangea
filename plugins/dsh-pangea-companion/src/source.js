@@ -25,11 +25,25 @@ export function parseEvidenceLocation(location) {
   return { source, startLine, endLine }
 }
 
-export function resolveEvidenceFile({ cwd, dataRoot, location }) {
+export function resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId }) {
   const parsed = parseEvidenceLocation(location)
-  if (path.isAbsolute(parsed.source)) return { ...parsed, filePath: path.resolve(parsed.source) }
+  if (path.isAbsolute(parsed.source)) {
+    if (hasText(snapshotRoot)) throw new Error('frozen Run evidence must use repo_id:path:line locations')
+    return { ...parsed, filePath: path.resolve(parsed.source) }
+  }
 
   const repositoryLocation = /^([^:/\\]+):(.+)$/.exec(parsed.source)
+  if (repositoryLocation !== null && hasText(snapshotRoot) && (!repositoryId || repositoryLocation[1] === repositoryId)) {
+    const snapshotRepository = path.resolve(snapshotRoot, 'repository')
+    const filePath = path.resolve(snapshotRepository, repositoryLocation[2])
+    if (filePath !== snapshotRepository && !filePath.startsWith(`${snapshotRepository}${path.sep}`)) {
+      throw new Error('evidence path escapes the frozen source snapshot')
+    }
+    return { ...parsed, filePath }
+  }
+  if (repositoryLocation !== null && hasText(snapshotRoot)) {
+    throw new Error('evidence repository does not match the frozen Run source')
+  }
   if (repositoryLocation !== null && hasText(dataRoot)) {
     return {
       ...parsed,
@@ -40,8 +54,8 @@ export function resolveEvidenceFile({ cwd, dataRoot, location }) {
   return { ...parsed, filePath: path.resolve(cwd, parsed.source) }
 }
 
-export async function readEvidenceSnippet({ cwd, dataRoot, location, contextLines = 3, maxLines = 160 }) {
-  const resolved = resolveEvidenceFile({ cwd, dataRoot, location })
+export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, contextLines = 3, maxLines = 160 }) {
+  const resolved = resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId })
   const raw = await readFile(resolved.filePath, 'utf8')
   if (raw.includes('\u0000')) throw new Error('evidence file is not readable text')
 
