@@ -1,5 +1,7 @@
 import { companionSnapshot } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
 import { createRuntimeMonitor } from './monitor.js'
 import { createTaskStore } from './task-store.js'
 import { createLaunchLogStore } from './launch-log.js'
@@ -72,6 +74,7 @@ function renderCount(run, key, label) {
   if (check?.status === 'mismatch') {
     return `${label}：读取异常（结构化 ${check.structured} / 报告 ${check.report}）`
   }
+  if (run.counts?.[key] === null || run.counts?.[key] === undefined) return `${label}：暂不可读取`
   return `${label}：${run.counts?.[key] ?? 0}`
 }
 
@@ -89,12 +92,16 @@ function renderStatus(value) {
     renderCount(run, 'test_cases', '测试用例'),
     `证据：${run.counts.evidence}`,
     `数据源：${SOURCE_LABELS[run.data_source] ?? run.data_source ?? '未知'}`,
+    `源码快照：${run.source_snapshot?.status === 'verified' ? `${run.source_snapshot.file_count ?? 0} 个文件，已冻结` : run.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'}`,
     `读取健康：${HEALTH_LABELS[health?.status] ?? health?.status ?? '未知'}`,
   ]
   if (health?.trusted === false) {
     lines.push('重要：当前结构化结果与报告不一致，不能把 0 条风险/用例解释为“没有风险/用例”。')
   }
-  if (run.errors.length > 0) lines.push(`当前错误：${run.errors.length}`)
+  if (run.errors.length > 0) {
+    lines.push(`当前错误：${run.errors.length}`)
+    lines.push(...run.errors.slice(0, 20).map(item => `- ${item.code ?? 'validation_error'}${item.step ? ` · Step ${item.step}` : ''}: ${item.message ?? item}`))
+  }
   if (Array.isArray(health?.issues) && health.issues.length > 0) {
     lines.push(`读取诊断：${health.issues.join('；')}`)
   }
@@ -147,16 +154,29 @@ async function stateRouteHandler(req, res, monitor, tasks) {
   }
 }
 
-function sourceRouteHandler(req, res) {
+async function sourceRouteHandler(req, res) {
   if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? SOURCE_API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
   const dataRoot = url.searchParams.get('data_root') ?? undefined
   const location = url.searchParams.get('location') ?? undefined
-  readEvidenceSnippet({ cwd, dataRoot, location })
-    .then(snippet => json(res, 200, snippet))
-    .catch(error => json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) }))
+  const runId = url.searchParams.get('run_id') ?? undefined
+  try {
+    let snapshotRoot
+    let repositoryId
+    if (runId && dataRoot) {
+      const metadataPath = path.join(dataRoot, '.pangea', 'skill-runs', runId, 'metadata.json')
+      const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
+      repositoryId = metadata.request?.repository
+      const candidate = path.join(metadata.run_root, 'inputs', 'source')
+      if (metadata.source_snapshot && candidate) snapshotRoot = candidate
+    }
+    const snippet = await readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId })
+    json(res, 200, snippet)
+  } catch (error) {
+    json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 async function launchLogRouteHandler(req, res, launchLogs) {

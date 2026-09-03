@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
       ['historical_defect', '历史缺陷'], ['reference', '参考资料'], ['coverage', 'Coverage'],
       ['test_case_example', '用例示例'],
     ]
-    const STATUS = {
+      const STATUS = {
       imported: '待规范化', extracting: '提取中', awaiting_review: '待人工审核',
       available: '可用于分析', no_items: '已分析，无结构化条目', rejected: '已拒绝',
       failed: '失败', archived: '已归档',
@@ -167,6 +167,7 @@ window.__ModuleLoader__.load({
       const [queryDraft, setQueryDraft] = React.useState('')
       const [expanded, setExpanded] = React.useState({})
       const [details, setDetails] = React.useState({})
+      const [reviewDrafts, setReviewDrafts] = React.useState({})
       const [importPath, setImportPath] = React.useState('')
       const [importFile, setImportFile] = React.useState(null)
       const [importOpen, setImportOpen] = React.useState(false)
@@ -235,7 +236,7 @@ window.__ModuleLoader__.load({
           } else {
             setNotice(action === 'import' ? '资产已导入。'
               : action === 'extract' ? '资产已完成规范化。'
-                : action === 'review' ? '审核结果已保存。'
+                : action === 'review' || action === 'review_items' ? '审核结果已保存。'
                   : action === 'enable_methodology' ? '方法论已启用，后续新 Run 可以冻结引用。'
                     : action === 'disable_methodology' ? '方法论已停用，后续新 Run 不再引用。'
                       : action === 'restore' ? '资产已恢复。'
@@ -354,6 +355,37 @@ window.__ModuleLoader__.load({
           const value = await requestAssetDetail({ cwd, assetId })
           setDetails(current => ({ ...current, [assetId]: value }))
         } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
+      }
+
+      function reviewItemsFor(assetId, detail) {
+        const sourceItems = Array.isArray(detail?.result?.items) ? detail.result.items : []
+        const saved = new Map((detail?.review?.items ?? []).map(item => [item.item_id, item]))
+        const drafts = reviewDrafts[assetId] ?? {}
+        return sourceItems.map(item => {
+          const current = drafts[item.item_id] ?? saved.get(item.item_id) ?? { decision: 'pending', note: '' }
+          return { ...item, decision: current.decision ?? 'pending', note: current.note ?? '' }
+        })
+      }
+
+      function updateReviewDraft(assetId, itemId, field, value) {
+        setReviewDrafts(current => ({
+          ...current,
+          [assetId]: {
+            ...(current[assetId] ?? {}),
+            [itemId]: { ...(current[assetId]?.[itemId] ?? {}), [field]: value },
+          },
+        }))
+      }
+
+      async function saveReviewItems(assetId, detail) {
+        const items = reviewItemsFor(assetId, detail)
+        await act('review_items', {
+          asset_id: assetId,
+          revision: detail.asset.revision,
+          result_sha256: detail.review.result_sha256,
+          decisions: items.map(item => ({ item_id: item.item_id, decision: item.decision, note: item.note })),
+        })
+        setReviewDrafts(current => { const next = { ...current }; delete next[assetId]; return next })
       }
 
       async function toggleMethodology(methodologyId) {
@@ -501,6 +533,19 @@ window.__ModuleLoader__.load({
                 detail?.failure_record ? h('div', { style: { ...styles.error, marginTop: 8 } },
                   h('div', null, detail.failure_record.last_error ?? '资产处理失败'),
                   h('button', { type: 'button', style: { ...styles.button, marginTop: 7 }, onClick: () => downloadFailureRecord(detail) }, '下载失败记录')) : null,
+                detail?.asset?.asset_type === 'historical_defect' && detail?.result?.items?.length ? h('div', { style: { ...styles.card, marginTop: 10, marginBottom: 10 } },
+                  h('div', { style: styles.row },
+                    h('div', { style: styles.itemTitle }, '逐条审核历史缺陷'),
+                    detail.review ? h('span', { style: styles.chip }, `待审核 ${detail.review.counts?.pending ?? 0} · 已接受 ${detail.review.counts?.accepted ?? 0} · 已拒绝 ${detail.review.counts?.rejected ?? 0}`) : null),
+                  reviewItemsFor(asset.asset_id, detail).map(item => h('div', { key: item.item_id, style: { ...styles.resultItem, marginTop: 9 } },
+                    h('div', { style: styles.row },
+                      h('div', { style: styles.itemTitle }, `${item.item_id} · ${item.title ?? '未命名缺陷'}`),
+                      h('select', { 'aria-label': `审核状态 ${item.item_id}`, style: styles.input, value: item.decision, onChange: event => updateReviewDraft(asset.asset_id, item.item_id, 'decision', event.target.value) },
+                        h('option', { value: 'pending' }, '待定'), h('option', { value: 'accepted' }, '接受'), h('option', { value: 'rejected' }, '拒绝'))),
+                    item.symptom ? h('div', { style: styles.meta }, `现象：${item.symptom}`) : null,
+                    item.defect_mechanism ? h('div', { style: styles.meta }, `机制：${item.defect_mechanism}`) : null,
+                    h('input', { 'aria-label': `审核备注 ${item.item_id}`, placeholder: '审核备注（可选）', style: { ...styles.input, ...styles.grow, marginTop: 6 }, value: item.note ?? '', onChange: event => updateReviewDraft(asset.asset_id, item.item_id, 'note', event.target.value) }))),
+                  h('button', { type: 'button', disabled: busy || !detail.review, style: { ...styles.button, ...styles.primary, marginTop: 10 }, onClick: () => { void saveReviewItems(asset.asset_id, detail) } }, '保存逐条审核')) : null,
                 detail?.result ? renderStructuredResult(detail.result) : detail?.normalized_preview
                   ? h('pre', { style: styles.pre }, detail.normalized_preview)
                   : h('div', { style: styles.meta }, '正在加载资产详情…')) : null)

@@ -135,6 +135,7 @@ async function assetDetail({ cwd, dataRoot, runtime, assetId }) {
     normalized_preview: detail.normalized_preview ?? null,
     integrity: detail.integrity ?? null,
     allowed_steps: detail.allowed_steps ?? [],
+    review: detail.review ?? null,
   }
 }
 
@@ -224,6 +225,25 @@ async function routeHandler(req, res, runtime) {
           '--asset-id', body.asset_id, '--decision', body.decision,
         ],
       })
+    } else if (body.action === 'review_items') {
+      if (!Number.isInteger(body.revision) || typeof body.result_sha256 !== 'string' || !Array.isArray(body.decisions)) {
+        throw new Error('逐条审核需要 revision、result_sha256 和 decisions')
+      }
+      const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'pangea-review-'))
+      const decisionsPath = path.join(temporaryRoot, 'decisions.json')
+      try {
+        await writeFile(decisionsPath, `${JSON.stringify(body.decisions)}\n`, 'utf8')
+        await runPangea({
+          cwd,
+          args: [
+            'assets', 'review-items', '--data-root', resolvedDataRoot,
+            '--asset-id', body.asset_id, '--revision', String(body.revision),
+            '--result-sha256', body.result_sha256, '--decisions', decisionsPath,
+          ],
+        })
+      } finally {
+        await rm(temporaryRoot, { recursive: true, force: true })
+      }
     } else if (body.action === 'archive') {
       await runPangea({
         cwd,
