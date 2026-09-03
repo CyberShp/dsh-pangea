@@ -38,6 +38,8 @@ test('registers a PANGEA-owned asset management page', async () => {
     '上一页', '下一页', '用例示例', '资产状态',
     '用于新分析', '结构化条目', '用户方法论', '生成方法论候选', '待启用',
     '内容更新后状态会自动回到待启用', 'enable_methodology', 'disable_methodology',
+    'Semantic 语义资产', 'Evidence 证据资产', '预览导入', '导入冲突策略',
+    '编辑资产信息', '下载失败记录', '恢复', '废弃',
   ]) assert.match(source, new RegExp(text))
   assert.doesNotMatch(source, /生成目录文件|自动化文件|修正后确认/)
 
@@ -69,7 +71,7 @@ test('client uses server pagination status and type filters detail loading and e
     calls.push({ url, options })
     return { ok: true, status: 200, async json() { return { status: 'ok', assets: [], pagination: {} } } }
   }
-  await exported.requestState({ cwd: '/tmp/workspace', page: 2, pageSize: 50, type: 'design', status: 'available', query: 'tcp', fetcher })
+  await exported.requestState({ cwd: '/tmp/workspace', page: 2, pageSize: 50, type: 'design', status: 'available', kind: 'semantic', query: 'tcp', fetcher })
   await exported.requestAssetDetail({ cwd: '/tmp/workspace', assetId: 'asset-1', fetcher })
   await exported.requestMethodologyDetail({ cwd: '/tmp/workspace', methodologyId: 'method-1', fetcher })
   await exported.requestAction({ cwd: '/tmp/workspace', action: 'extract', payload: { asset_id: 'asset-1' }, fetcher })
@@ -78,6 +80,7 @@ test('client uses server pagination status and type filters detail loading and e
   assert.equal(listUrl.searchParams.get('page_size'), '50')
   assert.equal(listUrl.searchParams.get('type'), 'design')
   assert.equal(listUrl.searchParams.get('status'), 'available')
+  assert.equal(listUrl.searchParams.get('kind'), 'semantic')
   assert.equal(listUrl.searchParams.get('q'), 'tcp')
   assert.equal(new URL(calls[1].url, 'http://localhost').searchParams.get('asset_id'), 'asset-1')
   assert.equal(new URL(calls[2].url, 'http://localhost').searchParams.get('methodology_id'), 'method-1')

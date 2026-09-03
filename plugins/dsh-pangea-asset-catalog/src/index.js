@@ -12,6 +12,7 @@ const API_PATH = '/api/pangea-asset-catalog/state'
 const PAGE_SIZES = new Set([20, 50, 100])
 const ASSET_TYPES = new Set(['requirement', 'design', 'historical_defect', 'reference', 'coverage', 'test_case_example'])
 const ASSET_STATUSES = new Set(['imported', 'extracting', 'awaiting_review', 'available', 'no_items', 'rejected', 'failed', 'archived'])
+const KNOWLEDGE_KINDS = new Set(['semantic', 'evidence'])
 
 function workspaceCwd(exec) {
   const cwd = exec?.agent?.session?.header?.cwd
@@ -71,11 +72,13 @@ export function listOptions(searchParams) {
   const pageSizeValue = positiveInteger(searchParams.get('page_size'), 20)
   const typeValue = searchParams.get('type') ?? ''
   const statusValue = searchParams.get('status') ?? ''
+  const kindValue = searchParams.get('kind') ?? ''
   return {
     page: positiveInteger(searchParams.get('page'), 1),
     pageSize: PAGE_SIZES.has(pageSizeValue) ? pageSizeValue : 20,
     type: ASSET_TYPES.has(typeValue) ? typeValue : '',
     status: ASSET_STATUSES.has(statusValue) ? statusValue : '',
+    kind: KNOWLEDGE_KINDS.has(kindValue) ? kindValue : '',
     query: (searchParams.get('q') ?? '').trim().slice(0, 200),
   }
 }
@@ -89,6 +92,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   ]
   if (options.type) args.push('--type', options.type)
   if (options.status) args.push('--status', options.status)
+  if (options.kind) args.push('--kind', options.kind)
   if (options.query) args.push('--query', options.query)
   const [result, methodologies, capabilities, methodologyJob] = await Promise.all([
     runPangea({ cwd, args }),
@@ -104,6 +108,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
       ...asset,
       extraction_job: runtime.job(resolvedDataRoot, asset.asset_id),
     })),
+    summary: result.summary ?? {},
     methodologies: {
       ...methodologies,
       candidate_schema_path: capabilities.methodologies?.candidate_schema_path ?? capabilities.candidate_schema_path ?? null,
@@ -161,13 +166,49 @@ async function routeHandler(req, res, runtime) {
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await readBody(req)
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
-    if (body.action === 'import') {
+    if (body.action === 'preview_import') {
       const source = await materializeImportSource(body, resolvedDataRoot)
       try {
         const args = [
-          'assets', 'import', '--data-root', resolvedDataRoot,
+          'assets', 'preview', '--data-root', resolvedDataRoot,
           '--path', source.path, '--type', body.asset_type,
         ]
+        if (body.title) args.push('--title', body.title)
+        return json(res, 200, { status: 'ok', preview: await runPangea({ cwd, args }) })
+      } finally {
+        await source.cleanup()
+      }
+    } else if (body.action === 'import') {
+      const source = await materializeImportSource(body, resolvedDataRoot)
+      try {
+        const previewArgs = [
+          'assets', 'preview', '--data-root', resolvedDataRoot,
+          '--path', source.path, '--type', body.asset_type,
+        ]
+        if (body.title) previewArgs.push('--title', body.title)
+        const preview = await runPangea({ cwd, args: previewArgs })
+        if (body.confirmed_sha256 !== preview.source_sha256) {
+          throw new Error('资产内容已变化，请重新预览后再导入')
+        }
+        if (preview.duplicate) {
+          throw new Error(`检测到重复资产：${preview.duplicate.asset_id}`)
+        }
+        const strategy = body.strategy ?? 'create_new'
+        const args = strategy === 'new_revision'
+          ? [
+              'assets', 'revise', '--data-root', resolvedDataRoot,
+              '--asset-id', body.conflict_asset_id, '--path', source.path,
+            ]
+          : strategy === 'create_new'
+            ? [
+                'assets', 'import', '--data-root', resolvedDataRoot,
+                '--path', source.path, '--type', body.asset_type,
+              ]
+            : null
+        if (!args) throw new Error(`不支持的冲突策略：${strategy}`)
+        if (strategy === 'new_revision' && !preview.conflicts.some(item => item.asset_id === body.conflict_asset_id)) {
+          throw new Error('新修订目标不在本次预览的冲突列表中')
+        }
         if (body.title) args.push('--title', body.title)
         await runPangea({ cwd, args })
       } finally {
@@ -188,6 +229,26 @@ async function routeHandler(req, res, runtime) {
         cwd,
         args: ['assets', 'archive', '--data-root', resolvedDataRoot, '--asset-id', body.asset_id],
       })
+    } else if (body.action === 'restore') {
+      await runPangea({
+        cwd,
+        args: ['assets', 'restore', '--data-root', resolvedDataRoot, '--asset-id', body.asset_id],
+      })
+    } else if (body.action === 'update_metadata') {
+      if (typeof body.title !== 'string' || body.title.trim() === '') throw new Error('资产标题不能为空')
+      for (const field of ['repository_ids', 'module_tags', 'language_tags']) {
+        if (body[field] !== undefined && (!Array.isArray(body[field]) || body[field].some(value => typeof value !== 'string'))) {
+          throw new Error(`${field} 必须是字符串数组`)
+        }
+      }
+      const args = [
+        'assets', 'update-metadata', '--data-root', resolvedDataRoot,
+        '--asset-id', body.asset_id, '--title', body.title.trim(),
+      ]
+      for (const value of body.repository_ids ?? []) args.push('--repository-id', value)
+      for (const value of body.module_tags ?? []) args.push('--module-tag', value)
+      for (const value of body.language_tags ?? []) args.push('--language-tag', value)
+      await runPangea({ cwd, args })
     } else if (body.action === 'generate_methodology') {
       await runtime.methodologies.start({ cwd, dataRoot: resolvedDataRoot, assetIds: body.asset_ids })
     } else if (body.action === 'enable_methodology' || body.action === 'disable_methodology') {
@@ -217,13 +278,13 @@ export async function apply(ctx) {
       type: 'object', additionalProperties: false,
       properties: {
         data_root: { type: 'string' }, type: { type: 'string' },
-        status: { type: 'string' }, query: { type: 'string' },
+        status: { type: 'string' }, kind: { type: 'string' }, query: { type: 'string' },
       },
     },
     async execute(args, exec) {
       return listState({
         cwd: workspaceCwd(exec), dataRoot: args.data_root, runtime,
-        options: { page: 1, pageSize: 50, type: args.type ?? '', status: args.status ?? '', query: args.query ?? '' },
+        options: { page: 1, pageSize: 50, type: args.type ?? '', status: args.status ?? '', kind: args.kind ?? '', query: args.query ?? '' },
       })
     },
     output: {

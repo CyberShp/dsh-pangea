@@ -26,16 +26,17 @@ window.__ModuleLoader__.load({
     ]
     const METHODOLOGY_STATUS = { candidate: '待启用', enabled: '已启用', disabled: '已停用' }
 
-    function listSearch({ cwd, page = 1, pageSize = 20, type = '', status = '', query = '', assetId }) {
+    function listSearch({ cwd, page = 1, pageSize = 20, type = '', status = '', kind = '', query = '', assetId }) {
       return new URLSearchParams({
         cwd, page: String(page), page_size: String(pageSize),
         ...(type ? { type } : {}), ...(status ? { status } : {}),
+        ...(kind ? { kind } : {}),
         ...(query ? { q: query } : {}), ...(assetId ? { asset_id: assetId } : {}),
       }).toString()
     }
 
-    async function requestState({ cwd, page = 1, pageSize = 20, type = '', status = '', query = '', signal, fetcher = fetch }) {
-      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, type, status, query })}`, { cache: 'no-store', signal })
+    async function requestState({ cwd, page = 1, pageSize = 20, type = '', status = '', kind = '', query = '', signal, fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, type, status, kind, query })}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -55,8 +56,8 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestAction({ cwd, action, payload = {}, page = 1, pageSize = 20, type = '', status = '', query = '', fetcher = fetch }) {
-      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, type, status, query })}`, {
+    async function requestAction({ cwd, action, payload = {}, page = 1, pageSize = 20, type = '', status = '', kind = '', query = '', fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, type, status, kind, query })}`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...payload }),
       })
       const body = await response.json()
@@ -123,6 +124,8 @@ window.__ModuleLoader__.load({
       methodologyGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 9, marginTop: 10 },
       methodologyCard: { border: '1px solid var(--dsw-alias-border-l2, #444)', borderRadius: 9, padding: 12, background: 'var(--dsw-alias-bg-layer-1, transparent)' },
       sourceList: { margin: '7px 0 0', paddingLeft: 17, fontSize: 12, lineHeight: 1.55 },
+      summaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8, marginBottom: 10 },
+      summaryValue: { fontSize: 22, fontWeight: 750, marginTop: 5 },
     }
 
     function structuredItems(result) {
@@ -159,6 +162,7 @@ window.__ModuleLoader__.load({
       const [pageSize, setPageSize] = React.useState(20)
       const [type, setType] = React.useState('')
       const [status, setStatus] = React.useState('')
+      const [kind, setKind] = React.useState('')
       const [query, setQuery] = React.useState('')
       const [queryDraft, setQueryDraft] = React.useState('')
       const [expanded, setExpanded] = React.useState({})
@@ -168,7 +172,15 @@ window.__ModuleLoader__.load({
       const [importOpen, setImportOpen] = React.useState(false)
       const [importType, setImportType] = React.useState('requirement')
       const [importTitle, setImportTitle] = React.useState('')
+      const [importPreview, setImportPreview] = React.useState(null)
+      const [importStrategy, setImportStrategy] = React.useState('')
+      const [importConflictId, setImportConflictId] = React.useState('')
       const [selectedAssetIds, setSelectedAssetIds] = React.useState([])
+      const [editingAssetId, setEditingAssetId] = React.useState('')
+      const [editTitle, setEditTitle] = React.useState('')
+      const [editRepositories, setEditRepositories] = React.useState('')
+      const [editModules, setEditModules] = React.useState('')
+      const [editLanguages, setEditLanguages] = React.useState('')
       const [expandedMethodology, setExpandedMethodology] = React.useState('')
       const [methodologyDetails, setMethodologyDetails] = React.useState({})
 
@@ -184,11 +196,11 @@ window.__ModuleLoader__.load({
         if (!cwd) return
         try {
           setError('')
-          setState(await requestState({ cwd, page, pageSize, type, status, query, signal }))
+          setState(await requestState({ cwd, page, pageSize, type, status, kind, query, signal }))
         } catch (value) {
           if (value?.name !== 'AbortError') setError(value instanceof Error ? value.message : String(value))
         }
-      }, [cwd, page, pageSize, type, status, query])
+      }, [cwd, page, pageSize, type, status, kind, query])
 
       React.useEffect(() => {
         if (visible === false || !cwd) return undefined
@@ -210,9 +222,13 @@ window.__ModuleLoader__.load({
       async function act(action, payload = {}) {
         setBusy(true); setError(''); setNotice('')
         try {
-          const value = await requestAction({ cwd, action, payload, page, pageSize, type, status, query })
+          const value = await requestAction({ cwd, action, payload, page, pageSize, type, status, kind, query })
           setState(value)
           if (action === 'archive' && payload.asset_id) setSelectedAssetIds(values => values.filter(id => id !== payload.asset_id))
+          if (payload.asset_id) setDetails(current => {
+            const next = { ...current }; delete next[payload.asset_id]; return next
+          })
+          if (payload.asset_id) setExpanded(current => ({ ...current, [payload.asset_id]: false }))
           if (action === 'generate_methodology' && value.methodologies?.generation_job?.session_id) {
             setNotice('方法论候选会话已启动。候选提交后会进入待启用状态。')
             await openAnalysisSession(ctx.sessions, value.methodologies.generation_job.session_id)
@@ -222,7 +238,9 @@ window.__ModuleLoader__.load({
                 : action === 'review' ? '审核结果已保存。'
                   : action === 'enable_methodology' ? '方法论已启用，后续新 Run 可以冻结引用。'
                     : action === 'disable_methodology' ? '方法论已停用，后续新 Run 不再引用。'
-                      : '资产已归档。')
+                      : action === 'restore' ? '资产已恢复。'
+                        : action === 'update_metadata' ? '资产信息已更新。'
+                          : '资产已归档。')
           }
         } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
         finally { setBusy(false) }
@@ -237,8 +255,7 @@ window.__ModuleLoader__.load({
         })
       }
 
-      async function submitImport() {
-        if (busy || (!importFile && !importPath.trim())) return
+      async function importSourcePayload() {
         const payload = { asset_type: importType, title: importTitle.trim() }
         if (importFile) {
           payload.file_name = importFile.name
@@ -246,11 +263,77 @@ window.__ModuleLoader__.load({
         } else {
           payload.path = importPath.trim()
         }
-        await act('import', payload)
+        return payload
+      }
+
+      async function previewImport() {
+        if (busy || (!importFile && !importPath.trim())) return
+        setBusy(true); setError(''); setNotice('')
+        try {
+          const value = await requestAction({ cwd, action: 'preview_import', payload: await importSourcePayload(), kind })
+          setImportPreview(value.preview)
+          setImportStrategy(value.preview.conflicts?.length ? '' : 'create_new')
+          setImportConflictId('')
+        } catch (value) {
+          setError(value instanceof Error ? value.message : String(value))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      async function submitImport() {
+        if (busy || !importPreview || importPreview.duplicate || !importStrategy) return
+        await act('import', {
+          ...await importSourcePayload(),
+          confirmed_sha256: importPreview.source_sha256,
+          strategy: importStrategy,
+          ...(importStrategy === 'new_revision' ? { conflict_asset_id: importConflictId } : {}),
+        })
         setImportPath('')
         setImportFile(null)
         setImportTitle('')
+        setImportPreview(null)
+        setImportStrategy('')
+        setImportConflictId('')
         setImportOpen(false)
+      }
+
+      function resetImportPreview() {
+        setImportPreview(null); setImportStrategy(''); setImportConflictId('')
+      }
+
+      function startEdit(asset) {
+        setEditingAssetId(asset.asset_id)
+        setEditTitle(asset.title)
+        setEditRepositories((asset.repository_ids ?? []).join(', '))
+        setEditModules((asset.module_tags ?? []).join(', '))
+        setEditLanguages((asset.language_tags ?? []).join(', '))
+      }
+
+      function valuesFromText(value) {
+        return value.split(',').map(item => item.trim()).filter(Boolean)
+      }
+
+      async function saveEdit(assetId) {
+        await act('update_metadata', {
+          asset_id: assetId,
+          title: editTitle.trim(),
+          repository_ids: valuesFromText(editRepositories),
+          module_tags: valuesFromText(editModules),
+          language_tags: valuesFromText(editLanguages),
+        })
+        setEditingAssetId('')
+      }
+
+      function downloadFailureRecord(detail) {
+        if (!detail?.failure_record) return
+        const blob = new Blob([`${JSON.stringify(detail.failure_record, null, 2)}\n`], { type: 'application/json' })
+        const href = URL.createObjectURL(blob)
+        const anchor = document.createElement('a')
+        anchor.href = href
+        anchor.download = `${detail.failure_record.asset_id}-failure.json`
+        anchor.click()
+        URL.revokeObjectURL(href)
       }
 
       function toggleSelectedAsset(assetId) {
@@ -285,6 +368,7 @@ window.__ModuleLoader__.load({
 
       const pagination = state?.pagination ?? { page, page_size: pageSize, total: 0, total_pages: 1 }
       const assets = state?.assets ?? []
+      const summary = state?.summary ?? {}
       const methodologies = state?.methodologies?.items ?? []
       const selectedHistoricalIds = selectedAssetIds.filter(assetId => {
         const asset = assets.find(item => item.asset_id === assetId)
@@ -292,21 +376,42 @@ window.__ModuleLoader__.load({
       })
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 资产管理' },
         h('div', { style: styles.header }, h('div', { style: styles.title }, '资产管理'), h('div', { style: styles.meta }, cwd)),
+        h('div', { style: styles.content },
+          h('div', { style: styles.summaryGrid }, [
+            ['资产总数', summary.total ?? 0], ['语义资产', summary.semantic ?? 0],
+            ['证据资产', summary.evidence ?? 0], ['可用于分析', summary.available ?? 0],
+            ['待审核', summary.review ?? 0], ['失败', summary.failed ?? 0],
+          ].map(([label, value]) => h('div', { key: label, style: styles.card },
+            h('div', { style: styles.meta }, label), h('div', { style: styles.summaryValue }, String(value))))),
           h('div', { style: { ...styles.card, ...styles.notice } },
             h('div', { style: styles.row },
               h('div', null, h('div', { style: styles.title }, '资产库'), h('div', { style: styles.meta }, '统一管理需求、设计、缺陷、Coverage、参考资料和用例示例；导入后自动记录 SHA256、修订和规范化状态。')),
               h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, onClick: () => setImportOpen(value => !value) }, importOpen ? '收起导入' : '导入资产'))),
           importOpen ? h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, '导入新资产'),
-            h('div', { style: styles.meta }, '优先使用文件选择器；路径输入仅用于非 Desktop 调试。相同内容会按 SHA256 拒绝重复导入。'),
+            h('div', { style: styles.meta }, '先预览内容指纹和冲突，再明确选择新资产或新修订；不会静默生成重复资产。'),
             h('div', { style: { ...styles.wrap, marginTop: 8 } },
-              h('input', { type: 'file', 'aria-label': '选择资产文件', style: { ...styles.input, ...styles.grow }, onChange: event => setImportFile(event.target.files?.[0] ?? null) }),
-              h('select', { 'aria-label': '资产类型', style: styles.input, value: importType, onChange: event => setImportType(event.target.value) }, TYPES.filter(([value]) => value).map(([value, label]) => h('option', { key: value, value }, label))),
-              h('input', { 'aria-label': '资产标题', placeholder: '标题（可选）', style: { ...styles.input, ...styles.grow }, value: importTitle, onChange: event => setImportTitle(event.target.value) })),
+              h('input', { type: 'file', 'aria-label': '选择资产文件', style: { ...styles.input, ...styles.grow }, onChange: event => { setImportFile(event.target.files?.[0] ?? null); setImportPath(''); resetImportPreview() } }),
+              h('select', { 'aria-label': '资产类型', style: styles.input, value: importType, onChange: event => { setImportType(event.target.value); resetImportPreview() } }, TYPES.filter(([value]) => value).map(([value, label]) => h('option', { key: value, value }, label))),
+              h('input', { 'aria-label': '资产标题', placeholder: '标题（可选）', style: { ...styles.input, ...styles.grow }, value: importTitle, onChange: event => { setImportTitle(event.target.value); resetImportPreview() } })),
             h('div', { style: { ...styles.wrap, marginTop: 7 } },
-              h('input', { 'aria-label': '资产文件路径（调试）', placeholder: '调试：文件绝对路径', style: { ...styles.input, ...styles.grow }, value: importPath, onChange: event => { setImportPath(event.target.value); if (event.target.value) setImportFile(null) } }),
+              h('input', { 'aria-label': '资产文件路径（调试）', placeholder: '调试：文件绝对路径', style: { ...styles.input, ...styles.grow }, value: importPath, onChange: event => { setImportPath(event.target.value); if (event.target.value) setImportFile(null); resetImportPreview() } }),
               importFile ? h('span', { style: styles.chip }, `已选择：${importFile.name}`) : null,
-              h('button', { type: 'button', disabled: busy || (!importFile && !importPath.trim()), style: { ...styles.button, ...styles.primary }, onClick: () => { void submitImport() } }, busy ? '导入中…' : '确认导入'))) : null,
+              h('button', { type: 'button', disabled: busy || (!importFile && !importPath.trim()), style: styles.button, onClick: () => { void previewImport() } }, busy ? '预览中…' : '预览导入')),
+            importPreview ? h('div', { style: { ...styles.card, marginTop: 10, marginBottom: 0 } },
+              h('div', { style: styles.itemTitle }, '导入预览'),
+              h('div', { style: styles.meta }, `${importPreview.source_name} · ${importPreview.source_size} bytes · SHA256 ${importPreview.source_sha256}`),
+              h('div', { style: styles.meta }, `归类：${importPreview.knowledge_kind === 'semantic' ? 'Semantic 语义资产' : 'Evidence 证据资产'}`),
+              importPreview.duplicate ? h('div', { style: { ...styles.error, marginTop: 8 } }, `内容已存在：${importPreview.duplicate.title}（${importPreview.duplicate.asset_id}），禁止重复导入。`) : null,
+              !importPreview.duplicate ? h('div', { style: { ...styles.wrap, marginTop: 9 } },
+                importPreview.conflicts?.length ? h('select', { 'aria-label': '导入冲突策略', style: styles.input, value: importStrategy, onChange: event => { setImportStrategy(event.target.value); if (event.target.value !== 'new_revision') setImportConflictId('') } },
+                  h('option', { value: '' }, '请选择冲突处理方式'),
+                  h('option', { value: 'create_new' }, '保留为独立新资产'),
+                  h('option', { value: 'new_revision' }, '更新为已有资产的新修订')) : h('span', { style: styles.chip }, '新建独立资产'),
+                importStrategy === 'new_revision' ? h('select', { 'aria-label': '新修订目标', style: styles.input, value: importConflictId, onChange: event => setImportConflictId(event.target.value) },
+                  h('option', { value: '' }, '请选择已有资产'),
+                  importPreview.conflicts.map(item => h('option', { key: item.asset_id, value: item.asset_id }, `${item.title} · ${item.asset_id}`))) : null,
+                h('button', { type: 'button', disabled: busy || !importStrategy || (importStrategy === 'new_revision' && !importConflictId), style: { ...styles.button, ...styles.primary }, onClick: () => { void submitImport() } }, busy ? '导入中…' : '确认导入')) : null) : null) : null,
           notice ? h('div', { style: styles.card }, notice) : null,
           error ? h('div', { style: { ...styles.card, ...styles.error }, role: 'alert' }, error) : null,
           selectedAssetIds.length ? h('div', { style: { ...styles.card, ...styles.notice, ...styles.row } },
@@ -348,7 +453,9 @@ window.__ModuleLoader__.load({
                   h('div', { style: styles.itemTitle }, '来源条目'), h('ul', { style: styles.sourceList }, (detail.source_item_ids ?? []).map(item => h('li', { key: item }, item)))) : null)
             })) : h('div', { style: { ...styles.meta, marginTop: 10 } }, '暂无候选。请先选择已批准历史缺陷，再启动语义生成会话。')),
           h('div', { style: { ...styles.wrap, marginBottom: 10 } },
-            TYPES.map(([value, label]) => h('button', { key: value || 'all', type: 'button', style: { ...styles.button, ...(type === value ? styles.active : {}) }, onClick: () => { setPage(1); setType(value) } }, label)),
+            [['', '全部资产'], ['semantic', 'Semantic 语义资产'], ['evidence', 'Evidence 证据资产']].map(([value, label]) =>
+              h('button', { key: value || 'all-kind', type: 'button', style: { ...styles.button, ...(kind === value ? styles.active : {}) }, onClick: () => { setPage(1); setKind(value); setType('') } }, label)),
+            TYPES.map(([value, label]) => h('button', { key: value || 'all', type: 'button', style: { ...styles.button, ...(type === value && !kind ? styles.active : {}) }, onClick: () => { setPage(1); setKind(''); setType(value) } }, label)),
             h('select', { 'aria-label': '资产状态', style: styles.input, value: status, onChange: event => { setPage(1); setStatus(event.target.value) } }, STATUS_FILTERS.map(([value, label]) => h('option', { key: value || 'all-status', value }, label))),
             h('form', { style: { ...styles.wrap, ...styles.grow }, onSubmit: event => { event.preventDefault(); setPage(1); setQuery(queryDraft.trim()) } },
               h('input', { 'aria-label': '搜索资产', placeholder: '搜索标题、ID 或路径', style: { ...styles.input, ...styles.grow }, value: queryDraft, onChange: event => setQueryDraft(event.target.value) }),
@@ -372,13 +479,28 @@ window.__ModuleLoader__.load({
                 asset.status === 'awaiting_review' ? h(React.Fragment, null,
                   h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'approve' }) } }, '审核通过'),
                   h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'reject' }) } }, '拒绝')) : null,
-                asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('archive', { asset_id: asset.asset_id }) } }, '归档') : null),
+                asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => startEdit(asset) }, '编辑信息') : null,
+                asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('archive', { asset_id: asset.asset_id }) } }, '废弃')
+                  : h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('restore', { asset_id: asset.asset_id }) } }, '恢复')),
+              editingAssetId === asset.asset_id ? h('div', { style: { ...styles.card, marginTop: 9, marginBottom: 0 } },
+                h('div', { style: styles.itemTitle }, '编辑资产信息'),
+                h('div', { style: { ...styles.wrap, marginTop: 8 } },
+                  h('input', { 'aria-label': '编辑资产标题', style: { ...styles.input, ...styles.grow }, value: editTitle, onChange: event => setEditTitle(event.target.value) }),
+                  h('input', { 'aria-label': '关联仓库', placeholder: '仓库 ID，逗号分隔', style: { ...styles.input, ...styles.grow }, value: editRepositories, onChange: event => setEditRepositories(event.target.value) }),
+                  h('input', { 'aria-label': '模块标签', placeholder: '模块标签，逗号分隔', style: { ...styles.input, ...styles.grow }, value: editModules, onChange: event => setEditModules(event.target.value) }),
+                  h('input', { 'aria-label': '语言标签', placeholder: '语言标签，逗号分隔', style: { ...styles.input, ...styles.grow }, value: editLanguages, onChange: event => setEditLanguages(event.target.value) })),
+                h('div', { style: { ...styles.wrap, marginTop: 8 } },
+                  h('button', { type: 'button', disabled: busy || !editTitle.trim(), style: { ...styles.button, ...styles.primary }, onClick: () => { void saveEdit(asset.asset_id) } }, '保存'),
+                  h('button', { type: 'button', style: styles.button, onClick: () => setEditingAssetId('') }, '取消'))) : null,
               isExpanded ? h('div', { style: { marginTop: 9, borderTop: '1px solid var(--dsw-alias-border-l2, #444)', paddingTop: 9 } },
                 asset.status === 'no_items' ? h('div', { style: styles.meta }, '已完成分析，没有可结构化条目。') : null,
                 detail?.asset ? h('div', { style: styles.meta }, `revision ${detail.asset.revision ?? 1} · SHA256 ${detail.asset.source_sha256 ?? '未记录'} · ${detail.integrity?.source_sha256_matches === true ? '完整性通过' : '请重新校验原文'}`) : null,
                 detail?.asset?.normalized_text_path ? h('div', { style: styles.meta }, `规范化文本：${detail.asset.normalized_text_path}`) : null,
                 detail?.allowed_steps?.length ? h('div', { style: styles.meta }, `允许步骤：${detail.allowed_steps.join('、')}`) : null,
                 asset.warnings?.length ? h('div', { style: styles.meta }, `提示：${asset.warnings.join('；')}`) : null,
+                detail?.failure_record ? h('div', { style: { ...styles.error, marginTop: 8 } },
+                  h('div', null, detail.failure_record.last_error ?? '资产处理失败'),
+                  h('button', { type: 'button', style: { ...styles.button, marginTop: 7 }, onClick: () => downloadFailureRecord(detail) }, '下载失败记录')) : null,
                 detail?.result ? renderStructuredResult(detail.result) : detail?.normalized_preview
                   ? h('pre', { style: styles.pre }, detail.normalized_preview)
                   : h('div', { style: styles.meta }, '正在加载资产详情…')) : null)
@@ -388,7 +510,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.wrap },
               h('select', { style: styles.input, value: pagination.page_size, onChange: event => { setPage(1); setPageSize(Number(event.target.value)) } }, [20, 50, 100].map(value => h('option', { key: value, value }, value))),
               h('button', { type: 'button', disabled: pagination.page <= 1, style: styles.button, onClick: () => setPage(pagination.page - 1) }, '上一页'),
-              h('button', { type: 'button', disabled: pagination.page >= pagination.total_pages, style: styles.button, onClick: () => setPage(pagination.page + 1) }, '下一页'))))
+              h('button', { type: 'button', disabled: pagination.page >= pagination.total_pages, style: styles.button, onClick: () => setPage(pagination.page + 1) }, '下一页')))))
     }
 
     const icon = h('svg', { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.8 }, h('path', { d: 'M4 5.5h6l2 2H20v11H4z' }), h('path', { d: 'M8 12h8M8 15h6' }))
