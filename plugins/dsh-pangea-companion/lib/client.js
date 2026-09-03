@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
-    const inject = ['pangea']
+    const inject = ['pangea', 'sessions']
     const API_PATH = '/api/pangea-companion/state'
     const SOURCE_API_PATH = '/api/pangea-companion/source'
     const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'

@@ -95,7 +95,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
 
-  assert.deepEqual(Array.from(exported.inject), ['pangea'])
+  assert.deepEqual(Array.from(exported.inject), ['pangea', 'sessions'])
   const pages = []
   exported.apply({
     pangea: { registerPage(page) { pages.push(page); return () => {} } },
