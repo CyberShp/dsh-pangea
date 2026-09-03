@@ -3,11 +3,12 @@ import { readEvidenceSnippet } from './source.js'
 import { createRuntimeMonitor } from './monitor.js'
 import { createTaskStore } from './task-store.js'
 import { createLaunchLogStore } from './launch-log.js'
+import { createAcpSettingsStore } from './acp-settings.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
-import { workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { runPangea, workspaceRoot } from './pangea-api.js'
+import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireAcpModel, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -20,6 +21,7 @@ const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
 const LAUNCH_LOG_API_PATH = '/api/pangea-companion/launch-log'
 const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
+const ACP_SETTINGS_API_PATH = '/api/pangea-companion/acp-settings'
 
 function rpc(payload) {
   return { rpcId: `pangea-companion-${Date.now()}-${Math.random()}`, payload }
@@ -289,6 +291,101 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Da
   }
 }
 
+function jobOwner(runtime, task) {
+  return runtimeService(runtime, 'agents')?.get?.(task.owner_session_id)
+}
+
+function readJobSnapshot(runtime, task) {
+  if (!task?.job_id) return null
+  const jobs = runtimeService(runtime, 'jobs')
+  if (!jobs?.get) return null
+  return jobs.get(task.job_id, jobOwner(runtime, task))
+}
+
+async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea) {
+  if (snapshot?.kind !== 'subagent') return null
+  const task = await tasks.getByJob(String(snapshot.id))
+  if (!task) return null
+  let output = ''
+  try {
+    output = runtimeService(runtime, 'jobs')?.read?.(snapshot.id, owner)?.text ?? ''
+  } catch { /* terminal state remains authoritative even if final output cannot be read */ }
+  if (output) await tasks.recordJobActivity(String(snapshot.id), output)
+  let outcome = snapshot
+  if (snapshot.status === 'completed') {
+    try {
+      const run = await runner({
+        cwd: task.workspace,
+        args: ['runs', 'get', '--data-root', task.data_root, '--run-id', task.run_id],
+      })
+      if (run.lifecycle_status !== 'complete' || run.report_available !== true) {
+        outcome = {
+          ...snapshot,
+          status: 'failed',
+          detail: `ACP Agent 已结束，但 Run 未形成通过验证的正式交付（${run.phase ?? run.lifecycle_status ?? 'unknown'}）`,
+        }
+      }
+    } catch (error) {
+      outcome = {
+        ...snapshot,
+        status: 'failed',
+        detail: `ACP Agent 已结束，但无法验证 Run 正式交付：${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+  await appendLaunchSafe(launchLogs, task.task_id, {
+    stage: 'acp_job_settled',
+    status: outcome.status === 'completed' ? 'ok' : outcome.status === 'killed' ? 'info' : 'error',
+    job_id: String(snapshot.id),
+    provider: task.provider,
+    model: task.model_route?.model,
+    reasoning_effort: task.model_route?.reasoning_effort,
+    exit_status: outcome.status,
+    detail: outcome.detail,
+    output,
+  })
+  return tasks.settleJob(String(snapshot.id), outcome)
+}
+
+async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
+  for (const task of taskItems) {
+    if (!task.job_id || !['starting', 'running', 'stopping'].includes(task.execution_status)) continue
+    let snapshot
+    try {
+      const owner = jobOwner(runtime, task)
+      const jobs = runtimeService(runtime, 'jobs')
+      const update = jobs?.read?.(task.job_id, owner)
+      snapshot = update?.snapshot ?? readJobSnapshot(runtime, task)
+      if (update?.text) {
+        await tasks.recordJobActivity(task.job_id, update.text)
+        await appendLaunchSafe(launchLogs, task.task_id, {
+          stage: 'acp_output', status: 'info', job_id: task.job_id, output: update.text,
+        })
+      }
+    } catch (error) {
+      const message = `无法恢复 ACP Job ${task.job_id}：${error instanceof Error ? error.message : String(error)}`
+      await appendLaunchSafe(launchLogs, task.task_id, {
+        stage: 'acp_job_reconcile', status: 'error', job_id: task.job_id,
+        error_code: 'ACP_JOB_LOST', error: message,
+      })
+      await tasks.markInterrupted(task.task_id, message)
+      continue
+    }
+    if (!snapshot) {
+      const message = `ACP Job ${task.job_id} 不存在，无法证明外部 Agent 仍在运行`
+      await appendLaunchSafe(launchLogs, task.task_id, {
+        stage: 'acp_job_reconcile', status: 'error', job_id: task.job_id,
+        error_code: 'ACP_JOB_LOST', error: message,
+      })
+      await tasks.markInterrupted(task.task_id, message)
+      continue
+    }
+    if (snapshot && ['completed', 'killed', 'failed'].includes(snapshot.status)) {
+      await settleAcpTask(runtime, tasks, launchLogs, snapshot, jobOwner(runtime, task))
+    }
+  }
+}
+
 async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLogs, runtime) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
@@ -308,6 +405,8 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       })
       await tasks.reconcileRuns(snapshot.runs?.items, { dataRoot: snapshot.data_root })
       let taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+      await reconcileAcpJobs(runtime, tasks, taskItems, launchLogs)
+      taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       await reconcileTaskLaunches(api, tasks, taskItems, launchLogs)
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       let modelRouting
@@ -319,6 +418,10 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       const selectedCandidate = taskId ? await tasks.get(taskId) : sessionId ? await tasks.getBySession(sessionId) : null
       const selectedTask = selectedCandidate?.workspace === workspaceRoot(cwd) ? selectedCandidate : null
       const launchLog = selectedTask ? await launchLogs.read(selectedTask.task_id, { limit: 100 }) : null
+      let acpJob = null
+      if (selectedTask?.job_id && ['starting', 'running', 'stopping'].includes(selectedTask.execution_status)) {
+        try { acpJob = readJobSnapshot(runtime, selectedTask) } catch { /* reconciliation already persisted the exact error */ }
+      }
       return json(res, 200, {
         ...snapshot,
         tasks: { items: taskItems, total: taskItems.length },
@@ -328,6 +431,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           registered: Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id)),
         })),
         selected_task_id: selectedTask?.task_id ?? null,
+        acp_job: acpJob,
         launch_log: launchLog,
       })
     }
@@ -338,7 +442,9 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       const root = workspaceRoot(cwd)
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
       if (providerId && !acpProviderOption(providerId)) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
-      const selectedModel = providerId ? null : await resolveTaskModel(api, body.input?.model_route)
+      const selectedModel = providerId
+        ? requireAcpModel(providerId, body.input?.model_route)
+        : await resolveTaskModel(api, body.input?.model_route)
       const task = await tasks.create({
         workspace: root,
         dataRoot: dataRootFor(root, actionDataRoot),
@@ -358,8 +464,12 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         let selectedModel = null
         if (selectedProvider) {
           assertRegisteredAcpProvider(runtime, selectedProvider)
-          await appendLaunchSafe(launchLogs, task.task_id, { stage: 'acp_provider_resolve', status: 'ok', provider: selectedProvider })
-          await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
+          selectedModel = requireAcpModel(selectedProvider, body.model_route ?? task.model_route)
+          await appendLaunchSafe(launchLogs, task.task_id, {
+            stage: 'acp_provider_resolve', status: 'ok', provider: selectedProvider,
+            model: selectedModel.model, reasoning_effort: selectedModel.reasoning_effort,
+          })
+          await tasks.prepareProviderLaunch(task.task_id, selectedProvider, selectedModel)
         } else {
           await appendLaunchSafe(launchLogs, task.task_id, { stage: 'model_route_resolve', status: 'start' })
           selectedModel = await resolveTaskModel(api, body.model_route ?? task.model_route)
@@ -378,9 +488,17 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           sessionId: session.session_id,
           title: `${task.title} · 分析`,
           kind: 'analysis',
-        }), event => launchLogs.append(task.task_id, event), runtime)
-        if (launched.job_id) await tasks.bindJob(task.task_id, { jobId: launched.job_id, provider: launched.provider, ownerSessionId: launched.session_id })
+        }), async event => {
+          await launchLogs.append(task.task_id, event)
+          if (event.stage === 'acp_session_created') {
+            await tasks.bindAgentRuntime(task.task_id, {
+              agentSessionId: event.agent_session_id,
+              processId: event.pid,
+            })
+          }
+        }, runtime)
         await tasks.bindRunBySession(launched.session_id, launched.run)
+        if (launched.job_id) await tasks.bindJob(task.task_id, { jobId: launched.job_id, provider: launched.provider, ownerSessionId: launched.session_id })
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id })
         return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })
       } catch (error) {
@@ -516,6 +634,43 @@ async function repositoryRouteHandler(req, res) {
   }
 }
 
+async function acpSettingsRouteHandler(req, res, settings, runtime) {
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  try {
+    if (req.method === 'GET') {
+      const config = await settings.read()
+      return json(res, 200, {
+        status: 'ok',
+        config,
+        providers: acpProviderOptions().map(provider => ({
+          ...provider,
+          registered: Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id)),
+        })),
+      })
+    }
+    if (req.method === 'POST') {
+      const body = await requestJson(req)
+      if (body.action === 'test') {
+        const checks = acpProviderOptions().map(provider => {
+          const registered = Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id))
+          const reasons = []
+          if (!provider.available) reasons.push(provider.resolution_error ?? '启动命令不可用')
+          if (!registered) reasons.push('Provider 未注册')
+          if (provider.models.length === 0) reasons.push('尚未配置模型目录')
+          return { id: provider.id, label: provider.label, ok: reasons.length === 0, registered, reasons }
+        })
+        return json(res, 200, { status: 'ok', checks })
+      }
+      if (body.action !== 'save') return json(res, 400, { status: 'error', error: 'unsupported-action' })
+      const config = await settings.save(body.config)
+      return json(res, 200, { status: 'ok', config, restart_required: true })
+    }
+    return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  } catch (error) {
+    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
 function toolOutput() {
   return { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
 }
@@ -525,6 +680,8 @@ export function apply(ctx) {
   const disposeMonitor = monitor.start(ctx)
   const tasks = createTaskStore()
   const launchLogs = createLaunchLogStore()
+  const acpSettings = createAcpSettingsStore()
+  acpSettings.loadIntoEnvironment()
   const launchLocks = new Set()
   const environments = new EnvironmentStore()
   const ssh = new PangeaSshRuntime(environments)
@@ -590,15 +747,17 @@ export function apply(ctx) {
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
+  const disposeAcpSettingsRoute = ctx.webServer.register({ kind: 'exact', path: ACP_SETTINGS_API_PATH, handler: (req, res) => acpSettingsRouteHandler(req, res, acpSettings, ctx) })
   const jobs = ctx.jobs ?? ctx.get?.('jobs')
   const disposeJobController = jobs?.attachController?.('pangea-companion')
-  const disposeJobDone = jobs?.onJobDone?.((snapshot) => tasks.settleJob(String(snapshot.id), snapshot).catch(() => undefined))
+  const disposeJobDone = jobs?.onJobDone?.((snapshot, owner) => settleAcpTask(ctx, tasks, launchLogs, snapshot, owner).catch(() => undefined))
   const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs, ctx) })
   const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
   ctx.effect?.(() => async () => {
     disposeRepositoryRoute()
     disposeWorkbenchRoute()
     disposeExecutionRoute()
+    disposeAcpSettingsRoute()
     disposeEnvironmentRoute()
     disposeLaunchLogRoute()
     disposeSourceRoute()
@@ -617,9 +776,10 @@ export { parseEvidenceLocation, readEvidenceSnippet, resolveEvidenceFile } from 
 export { createRuntimeMonitor, RuntimeMonitor } from './monitor.js'
 export { createTaskStore, TaskStore } from './task-store.js'
 export { createLaunchLogStore, LaunchLogStore } from './launch-log.js'
+export { AcpSettingsStore, createAcpSettingsStore } from './acp-settings.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
 export { createRun, runPangea, workspaceRoot } from './pangea-api.js'
 export { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'
-export { sessionFailure }
+export { reconcileAcpJobs, sessionFailure, settleAcpTask }

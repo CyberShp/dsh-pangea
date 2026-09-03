@@ -359,6 +359,8 @@ window.__ModuleLoader__.load({
             ? [h('path', { key: 'a', d: 'M8.2 3.8h7.6l4.2 6.6-4.2 6.8H8.2L4 10.4Z' }), h('circle', { key: 'b', cx: 12, cy: 10.5, r: 2.6 }), h('path', { key: 'c', d: 'M9.5 20h5' })]
             : kind === 'assets'
               ? [h('path', { key: 'a', d: 'm12 3 8 4-8 4-8-4Z' }), h('path', { key: 'b', d: 'm4 12 8 4 8-4' }), h('path', { key: 'c', d: 'm4 17 8 4 8-4' })]
+              : kind === 'agent-runtime'
+                ? [h('circle', { key: 'a', cx: 12, cy: 12, r: 3 }), h('path', { key: 'b', d: 'M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5 7 7M17 17l1.5 1.5M18.5 5.5 17 7M7 17l-1.5 1.5' })]
               : kind === 'terminal'
                 ? [h('path', { key: 'a', d: 'm5 7 4 4-4 4' }), h('path', { key: 'b', d: 'M11 16h7' })]
                 : kind === 'browser'
@@ -524,6 +526,7 @@ window.__ModuleLoader__.load({
         analysis: { label: 'PANGEA 分析', icon: 'analysis' },
         execution: { label: '环境配置', icon: 'execution' },
         assets: { label: '测试资产', icon: 'assets' },
+        'agent-runtime': { label: 'Agent Runtime', icon: 'agent-runtime' },
       }
       const utilityLabels = { editor: '文件工作区', terminal: '环境终端', browser: '内置浏览器' }
       const renderUtility = type => {

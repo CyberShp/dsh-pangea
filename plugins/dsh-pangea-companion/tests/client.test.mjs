@@ -48,6 +48,8 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /后端与工作台不兼容/)
   assert.match(source, /停止 Run/)
   assert.match(source, /失败阶段：/)
+  assert.match(source, /Agent 尚未产生可显示的消息输出/)
+  assert.match(source, /field\('PID'/)
   assert.match(source, /setSelectedRun\(task\.run_id \?\? null\)/)
   assert.match(source, /task-conversation-create/)
   assert.match(source, /task-conversation-activate/)
@@ -101,10 +103,10 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
     pangea: { registerPage(page) { pages.push(page); return () => {} } },
     effect(factory) { return factory() },
   })
-  assert.equal(pages.length, 3)
-  assert.deepEqual(pages.map(page => page.id), ['workbench', 'analysis', 'execution'])
-  assert.deepEqual(pages.map(page => page.title()), ['工作台', 'PANGEA 分析', '环境配置'])
-  assert.deepEqual(pages.map(page => page.order), [0, 10, 20])
+  assert.equal(pages.length, 4)
+  assert.deepEqual(pages.map(page => page.id), ['workbench', 'analysis', 'execution', 'agent-runtime'])
+  assert.deepEqual(pages.map(page => page.title()), ['工作台', 'PANGEA 分析', '环境配置', 'Agent Runtime'])
+  assert.deepEqual(pages.map(page => page.order), [0, 10, 20, 30])
   assert.equal(pages[2].available(), false)
 })
 
@@ -122,12 +124,14 @@ test('workbench API lists runs and starts or stops through explicit actions', as
 
   await exported.requestWorkbench({ cwd: '/tmp/workspace', cursor: 20, limit: 10, fetcher })
   await exported.requestWorkbenchAction({ cwd: '/tmp/workspace', action: 'stop', payload: { run_id: 'run-1' }, fetcher })
+  await exported.testAcpSettings(fetcher)
 
   const listUrl = new URL(calls[0].url, 'http://localhost')
   assert.equal(listUrl.searchParams.get('cursor'), '20')
   assert.equal(listUrl.searchParams.get('limit'), '10')
   assert.equal(calls[1].options.method, 'POST')
   assert.deepEqual(JSON.parse(calls[1].options.body), { action: 'stop', run_id: 'run-1' })
+  assert.deepEqual(JSON.parse(calls[2].options.body), { action: 'test' })
 })
 
 test('client builds focused discussion drafts, appends them to the active DSH composer, and resolves evidence paths', async () => {

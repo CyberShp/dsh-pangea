@@ -3,24 +3,97 @@ import path from 'node:path'
 import { assertCodetalksSkill, createRun, runPangea, workspaceRoot } from './pangea-api.js'
 
 const DEFAULT_PAGE_SIZE = 20
+const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
+
+const ACP_PROVIDER_DEFAULTS = [
+  { id: 'pangea-nga', label: 'NGA', command: 'nga', args: ['acp'] },
+  { id: 'pangea-codeagent', label: 'CodeAgent', command: 'codeagent', args: ['acp'] },
+  { id: 'pangea-opencode', label: 'OpenCode', command: 'opencode', args: ['acp'] },
+  { id: 'pangea-claude-code', label: 'Claude Code', kind: 'claude-code', command: 'DSH Claude Code Provider', args: [] },
+]
+
+function configuredProviders(env) {
+  const raw = env[ACP_RUNTIME_CONFIG_ENV]
+  if (typeof raw !== 'string' || raw.trim() === '') return {}
+  let parsed
+  try { parsed = JSON.parse(raw) } catch (error) {
+    throw new Error(`${ACP_RUNTIME_CONFIG_ENV} 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (parsed?.version !== 1 || !parsed.providers || typeof parsed.providers !== 'object' || Array.isArray(parsed.providers)) {
+    throw new Error(`${ACP_RUNTIME_CONFIG_ENV} 必须包含 version=1 和 providers 对象`)
+  }
+  return parsed.providers
+}
+
+function configuredModel(value, providerId) {
+  const id = typeof value?.id === 'string' ? value.id.trim() : ''
+  if (!id) throw new Error(`${providerId} 的模型缺少 id`)
+  const label = typeof value?.label === 'string' && value.label.trim() ? value.label.trim() : id
+  if (!Array.isArray(value?.efforts)) throw new Error(`${providerId}/${id} 的 efforts 必须是字符串数组`)
+  const efforts = [...new Set(value.efforts.map(item => typeof item === 'string' ? item.trim() : '').filter(Boolean))]
+  if (efforts.length !== value.efforts.length) throw new Error(`${providerId}/${id} 的 efforts 包含空值或重复值`)
+  return { id, label, efforts }
+}
 
 // External ACP agents are intentionally configured as commands rather than
 // model routes.  This keeps credentials and process ownership in DSH.
 export function acpProviderOptions(env = process.env) {
-  return [
-    // Keep the ids identical to the providerName values registered by the
-    // product's ACP/Claude providers. The id is sent through the task/run API
-    // and is also the key used by subagents.getProvider().
-    { id: 'pangea-nga', label: 'NGA', command: env.PANGEA_NGA_ACP_COMMAND || 'nga', args: ['acp'] },
-    { id: 'pangea-codeagent', label: 'CodeAgent', command: env.PANGEA_CODEAGENT_ACP_COMMAND || 'codeagent', args: ['acp'] },
-    { id: 'pangea-opencode', label: 'OpenCode', command: env.PANGEA_OPENCODE_ACP_COMMAND || 'opencode', args: ['acp'] },
-    { id: 'pangea-claude-code', label: 'Claude Code', kind: 'claude-code', command: 'DSH Claude Code Provider', args: [] },
-  ]
+  const configured = configuredProviders(env)
+  return ACP_PROVIDER_DEFAULTS.map(defaults => {
+    const value = configured[defaults.id]
+    if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) {
+      throw new Error(`${defaults.id} 的 ACP 配置必须是对象`)
+    }
+    const command = typeof value?.command === 'string' && value.command.trim() ? value.command.trim() : defaults.command
+    const args = value?.args === undefined ? defaults.args : value.args
+    if (!Array.isArray(args) || args.some(item => typeof item !== 'string' || !item.trim())) {
+      throw new Error(`${defaults.id} 的 args 必须是非空字符串数组`)
+    }
+    if (value?.models !== undefined && !Array.isArray(value.models)) {
+      throw new Error(`${defaults.id} 的 models 必须是数组`)
+    }
+    const models = (value?.models ?? []).map(item => configuredModel(item, defaults.id))
+    return {
+      ...defaults,
+      command,
+      args: args.map(item => item.trim()),
+      models,
+      configured: value !== undefined,
+      resolved_command: typeof value?.resolved_command === 'string' && value.resolved_command.trim() ? value.resolved_command.trim() : null,
+      available: value?.available !== false,
+      resolution_status: typeof value?.resolution_status === 'string' ? value.resolution_status : null,
+      resolution_error: typeof value?.resolution_error === 'string' ? value.resolution_error : null,
+      version: typeof value?.version === 'string' ? value.version : null,
+      login_status: typeof value?.login_status === 'string' ? value.login_status : null,
+    }
+  })
+}
+
+export function validateAcpRuntimeConfig(value) {
+  const encoded = JSON.stringify(value)
+  acpProviderOptions({ ...process.env, [ACP_RUNTIME_CONFIG_ENV]: encoded })
+  return JSON.parse(encoded)
 }
 
 export function acpProviderOption(providerId, env = process.env) {
   const id = typeof providerId === 'string' ? providerId.trim() : ''
   return acpProviderOptions(env).find(provider => provider.id === id) ?? null
+}
+
+export function requireAcpModel(providerId, value, env = process.env) {
+  const provider = acpProviderOption(providerId, env)
+  if (!provider) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
+  const selected = modelRoute(value)
+  if (!selected || selected.provider !== provider.id) throw new Error(`请选择 ${provider.label} 的执行模型`)
+  const model = provider.models.find(item => item.id === selected.model)
+  if (!model) throw new Error(`所选模型不属于 ${provider.label} 当前配置：${selected.model}`)
+  if (selected.reasoning_effort && !model.efforts.includes(selected.reasoning_effort)) {
+    throw new Error(`${provider.label}/${model.id} 不支持推理级别：${selected.reasoning_effort}`)
+  }
+  if (!selected.reasoning_effort && model.efforts.length > 0) {
+    throw new Error(`请选择 ${provider.label}/${model.id} 的推理级别`)
+  }
+  return { ...selected, route_class: 'external-acp' }
 }
 
 function rpc(payload) {
@@ -263,7 +336,7 @@ async function settleAcpRun(start, signal) {
   }
 }
 
-function startAcpJob(runtime, parent, providerId, prompt, label) {
+function startAcpJob(runtime, parent, providerId, model, prompt, label, onEvent) {
   const subagents = runtimeService(runtime, 'subagents')
   const jobs = runtimeService(runtime, 'jobs')
   if (!subagents?.start) throw new Error('DSH subagent runtime unavailable: load dsh-subagent')
@@ -276,15 +349,30 @@ function startAcpJob(runtime, parent, providerId, prompt, label) {
     owner: parent,
     run: () => {
       const controller = new AbortController()
+      let activeRun
       const start = subagents.start(providerId, {
         label,
         prompt: [{ type: 'text', text: prompt }],
         parent,
         signal: controller.signal,
+        agentOptions: {
+          model: model.model,
+          ...(model.reasoning_effort ? { reasoningEffort: model.reasoning_effort } : {}),
+        },
+      })
+      const observed = Promise.resolve(start).then(run => {
+        activeRun = run
+        void emitLaunch(onEvent, {
+          stage: 'acp_session_created', status: 'ok', provider: providerId,
+          model: model.model, reasoning_effort: model.reasoning_effort,
+          agent_session_id: String(run.id), pid: Number.isInteger(run.processId) ? run.processId : undefined,
+        })
+        return run
       })
       return {
         cancel: reason => controller.abort(reason ?? 'PANGEA analysis stopped'),
-        done: settleAcpRun(start, controller.signal),
+        done: settleAcpRun(observed, controller.signal),
+        readOutput: () => typeof activeRun?.readOutput === 'function' ? activeRun.readOutput() : '',
       }
     },
   })
@@ -298,6 +386,7 @@ export async function launchAnalysisSession(
   onSession = async () => {},
   onEvent = async () => {},
   runtime,
+  env = process.env,
 ) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
@@ -311,7 +400,7 @@ export async function launchAnalysisSession(
   const selectedProvider = request.provider_id
   if (selectedProvider && !runtime) throw new Error(`外部执行 Agent 需要 DSH ACP runtime：${selectedProvider}`)
   const selectedModel = selectedProvider
-    ? { provider: selectedProvider, route_class: 'external-acp' }
+    ? requireAcpModel(selectedProvider, model, env)
     : await launchStep(
       onEvent,
       'model_validate',
@@ -361,9 +450,9 @@ export async function launchAnalysisSession(
   ].join('\n')
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
-    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`), value => ({ job_id: value, provider: selectedProvider }))
-    await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
-    return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, run }
+    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, selectedModel, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent), value => ({ job_id: value, provider: selectedProvider, model: selectedModel.model }))
+    await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, model: selectedModel.model, reasoning_effort: selectedModel.reasoning_effort, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
+    return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
   }
   await launchStep(onEvent, 'prompt_submit', async () => {
     apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))

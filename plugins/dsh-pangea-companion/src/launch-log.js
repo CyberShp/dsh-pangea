@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 
 const MAX_READ_RECORDS = 200
+const MAX_EVENT_TEXT = 8192
 
 function logRoot() {
   const configured = process.env.DSH_HOME
@@ -32,10 +33,14 @@ function compactEvent(value = {}) {
     stage: typeof value.stage === 'string' ? value.stage : 'unknown',
     status: ['start', 'ok', 'error', 'info'].includes(value.status) ? value.status : 'info',
   }
-  for (const key of ['message', 'session_id', 'run_id', 'provider', 'model', 'error_code']) {
-    if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = value[key].trim()
+  for (const key of [
+    'message', 'session_id', 'agent_session_id', 'run_id', 'job_id', 'provider', 'model',
+    'reasoning_effort', 'error_code', 'exit_status', 'detail', 'output',
+  ]) {
+    if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = value[key].trim().slice(0, MAX_EVENT_TEXT)
   }
   if (Number.isInteger(value.repository_count) && value.repository_count >= 0) event.repository_count = value.repository_count
+  if (Number.isInteger(value.pid) && value.pid > 0) event.pid = value.pid
   const error = errorMessage(value.error)
   if (error) event.error = error
   return event

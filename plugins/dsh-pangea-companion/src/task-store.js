@@ -48,7 +48,7 @@ function normalizeModelRoute(value) {
     provider,
     model,
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-    route_class: 'configured-internal',
+    route_class: value?.route_class === 'external-acp' ? 'external-acp' : 'configured-internal',
   }
 }
 
@@ -70,11 +70,14 @@ function normalizeTask(taskId, value) {
     provider: text(value?.provider) || null,
     job_id: text(value?.job_id) || null,
     owner_session_id: text(value?.owner_session_id) || null,
+    agent_session_id: text(value?.agent_session_id) || null,
+    process_id: Number.isInteger(value?.process_id) && value.process_id > 0 ? value.process_id : null,
     execution_status: ['queued', 'starting', 'running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'].includes(value?.execution_status)
       ? value.execution_status
       : null,
     terminal_error: text(value?.terminal_error) || null,
     last_activity_at: Number.isFinite(value?.last_activity_at) ? value.last_activity_at : null,
+    last_output: text(value?.last_output) || null,
     status: ['preparing', 'running', 'needs_attention', 'completed', 'stopped', 'failed'].includes(value?.status)
       ? value.status
       : 'preparing',
@@ -243,12 +246,17 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async prepareProviderLaunch(taskId, provider) {
+  async prepareProviderLaunch(taskId, provider, modelRoute) {
     await this.ready
     const task = this.requireTask(taskId)
     const selected = text(provider)
     if (!selected) throw new Error('请选择一个 ACP 执行 Agent')
+    const selectedModel = normalizeModelRoute(modelRoute)
+    if (!selectedModel || selectedModel.provider !== selected || selectedModel.route_class !== 'external-acp') {
+      throw new Error('请选择当前 ACP 执行 Agent 的模型')
+    }
     task.provider = selected
+    task.model_route = selectedModel
     task.status = 'preparing'
     task.execution_status = 'starting'
     task.terminal_error = null
@@ -275,6 +283,38 @@ export class TaskStore {
     return structuredClone(task)
   }
 
+  async getByJob(jobId) {
+    await this.ready
+    const id = text(jobId)
+    if (!id) return null
+    const task = Object.values(this.store.tasks).find(item => item.job_id === id)
+    return task ? structuredClone(task) : null
+  }
+
+  async bindAgentRuntime(taskId, { agentSessionId, processId }) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    task.agent_session_id = text(agentSessionId) || task.agent_session_id
+    task.process_id = Number.isInteger(processId) && processId > 0 ? processId : task.process_id
+    task.last_activity_at = this.now()
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
+  async recordJobActivity(jobId, output) {
+    await this.ready
+    const id = text(jobId)
+    const task = Object.values(this.store.tasks).find(item => item.job_id === id)
+    if (!task) return null
+    const chunk = typeof output === 'string' ? output : ''
+    if (chunk) task.last_output = `${task.last_output ?? ''}${chunk}`.slice(-8192)
+    task.last_activity_at = this.now()
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
   async settleJob(jobId, snapshot) {
     await this.ready
     const id = text(jobId)
@@ -282,7 +322,7 @@ export class TaskStore {
     if (!task) return null
     const status = snapshot?.status === 'completed' ? 'completed' : snapshot?.status === 'killed' ? 'stopped' : 'failed'
     task.execution_status = status
-    if (status === 'completed') task.status = task.run_id ? task.status : 'completed'
+    if (status === 'completed') task.status = 'completed'
     else task.status = status
     task.terminal_error = status === 'failed' ? text(snapshot?.detail, 'ACP Agent 执行失败') : null
     task.launch_error = task.terminal_error
@@ -312,6 +352,20 @@ export class TaskStore {
     task.execution_status = 'stopped'
     task.launch_error = text(error) || null
     task.launch_error_code = text(error) ? 'STOP_FAILED' : null
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
+  async markInterrupted(taskId, error) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    task.status = 'failed'
+    task.execution_status = 'interrupted'
+    task.terminal_error = text(error, 'ACP Job 已丢失，无法证明外部 Agent 仍在运行')
+    task.launch_error = task.terminal_error
+    task.launch_error_code = 'ACP_JOB_LOST'
+    task.last_activity_at = this.now()
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
@@ -370,6 +424,7 @@ export class TaskStore {
       if (root && (!task.data_root || path.resolve(task.data_root) !== path.resolve(root))) continue
       const run = task.run_id ? byId.get(task.run_id) : undefined
       if (!run) continue
+      if (task.model_route?.route_class === 'external-acp' && ['starting', 'running', 'stopping'].includes(task.execution_status)) continue
       const status = taskStatusFromRun(run)
       if (status === 'running' && task.status === 'failed' && task.launch_error_code && task.launch_error_code !== 'RUN_ATTENTION_REQUIRED') continue
       if (task.status !== status) {

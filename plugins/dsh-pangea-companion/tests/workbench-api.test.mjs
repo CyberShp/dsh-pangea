@@ -4,9 +4,15 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireAcpModel, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
-const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.2.0' } }
+const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
+const acpRuntimeConfig = {
+  version: 1,
+  providers: {
+    'pangea-nga': { command: 'nga', args: ['acp'], models: [{ id: 'nga-model', label: 'NGA Model', efforts: ['low', 'high'] }] },
+  },
+}
 
 async function workspace() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-workbench-'))
@@ -48,8 +54,22 @@ test('advertises NGA, CodeAgent, OpenCode, and Claude Code ACP routes', () => {
   assert.deepEqual(acpProviderOptions({}).map(item => item.id), [
     'pangea-nga', 'pangea-codeagent', 'pangea-opencode', 'pangea-claude-code',
   ])
-  assert.deepEqual(acpProviderOptions({ PANGEA_OPENCODE_ACP_COMMAND: 'opencode-custom' })[2].command, 'opencode-custom')
+  const configured = acpProviderOptions({ PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify({
+    version: 1, providers: { 'pangea-opencode': { command: 'opencode-custom', args: ['acp'], models: [] } },
+  }) })
+  assert.deepEqual(configured[2].command, 'opencode-custom')
   assert.deepEqual(acpProviderOptions({})[3].kind, 'claude-code')
+})
+
+test('requires an exact configured ACP model and effort without internal fallback', () => {
+  const env = { PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify(acpRuntimeConfig) }
+  assert.deepEqual(requireAcpModel('pangea-nga', {
+    provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high',
+  }, env), {
+    provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high', route_class: 'external-acp',
+  })
+  assert.throws(() => requireAcpModel('pangea-nga', { provider: 'pangea-nga', model: 'missing' }, env), /不属于 NGA/)
+  assert.throws(() => requireAcpModel('pangea-nga', { provider: 'pangea-nga', model: 'nga-model' }, env), /请选择.*推理级别/)
 })
 
 test('fails closed before creating a session when the internal credential is missing and records the failing stage', async () => {
@@ -86,7 +106,7 @@ test('normalizes Run input and rejects legacy fields and unregistered repositori
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], focus: ['recovery'] }, capabilities), /不支持字段.*focus/)
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], test_case_examples: ['TC-1'] }, capabilities), /不支持字段.*test_case_examples/)
   assert.throws(() => normalizeRunInput({ repository: 'other', target: 'x', source_scope: ['x.c'] }, capabilities), /not registered/)
-  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.2\.0/)
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.3\.0/)
 })
 
 test('returns paginated Run metadata and reports incompatible backends explicitly', async () => {
@@ -254,7 +274,8 @@ test('starts a selected ACP provider through a DSH background job', async () => 
     const result = await launchAnalysisSession(api, {
       cwd: root,
       input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga' },
-    }, runner, async () => {}, async () => {}, runtime)
+      model: { provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high' },
+    }, runner, async () => {}, async () => {}, runtime, { PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify(acpRuntimeConfig) })
     assert.equal(result.job_id, 'subagent-1')
     assert.equal(result.provider, 'pangea-nga')
     assert.equal(providerStarted, true)

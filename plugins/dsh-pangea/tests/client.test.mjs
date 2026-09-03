@@ -83,6 +83,7 @@ test('publishes ctx.pangea without registering a wrapper tab', async () => {
   })
   assert.equal(provided.name, 'pangea')
   assert.equal(sidebar.tabs.has('dsh-pangea:workbench'), false)
+  assert.match(source, /'agent-runtime': \{ label: 'Agent Runtime'/)
 })
 
 test('bridges the DSH module loader for Better Sidebar lazy terminal chunks', async () => {

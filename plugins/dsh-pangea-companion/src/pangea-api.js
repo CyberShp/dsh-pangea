@@ -5,7 +5,7 @@ import path from 'node:path'
 
 const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
-const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.2.0' })
+const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.3.0' })
 
 export function normalizeSourceScope(values, repository) {
   const items = Array.isArray(values) ? values : []
@@ -29,7 +29,7 @@ export function normalizeSourceScope(values, repository) {
 export function assertCodetalksSkill(capabilities) {
   const skill = capabilities?.analysis_skill
   if (skill?.skill_id !== REQUIRED_ANALYSIS_SKILL.skill_id || skill?.version !== REQUIRED_ANALYSIS_SKILL.version) {
-    throw new Error('PANGEA backend must provide codetalks-skill 1.2.0')
+    throw new Error('PANGEA backend must provide codetalks-skill 1.3.0')
   }
   return skill
 }

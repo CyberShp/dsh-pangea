@@ -14,7 +14,11 @@
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
 - 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止；停止时即使 ACP 或 PANGEA API 一侧不可用，也会保留错误并继续尝试其余取消动作。
 - 新建分析会先创建冻结的 Codetalks Skill Run，随后使用用户选定的内置 API、NGA、CodeAgent、OpenCode 或 Claude Code 执行 Step 01–09；页面只监听 Skill 状态和 Markdown 产物。
-- 新建分析只接受仓库、目标、源码范围、资产库勾选和执行方式；分析重点由 Skill 固定，不接受手写 focus、结构化资产 ID 或示例文件路径。
+- 新建分析只接受仓库、目标、资产库勾选、执行 Agent、模型和 effort；分析重点与源码范围由 Skill 自动确定，不接受手写 focus、source scope、结构化资产 ID 或示例文件路径。
+- “Agent Runtime”页集中配置 NGA、CodeAgent、OpenCode 与 Claude Code 的命令、参数、模型目录和 effort。配置保存到 `$DSH_HOME/dsh-pangea-companion/acp-runtime-v1.json`，重启 Harness 后由 Desktop 解析并注册。
+- 外部 Agent 使用独立 `external-acp` 模型路由，不调用内部 API；模型或 effort 未配置、Provider 未注册、命令无法解析时禁止创建分析。
+- 外部 Job 持久化展示 Job ID、ACP Session、PID、开始时间、运行时长、最后活动和消息输出；取消、失败、进程丢失与恢复检查都有明确终态。
+- 外部 Agent 正常退出但 Skill Run 没有通过 `finalize` 且没有正式报告时仍判失败，不把 exit code 0 当作分析成功。
 - 建立 `风险 ↔ 测试用例 ↔ 证据` 关联，便于从风险追到测试和源码证据，再按访问路径返回。
 - 只读同源接口 `GET /api/pangea-companion/state`，供 Web UI 使用。
 - 通过 `ctx.pangea` 向统一工作台注册“分析”和“执行”两页，不再直接注册 Better Sidebar Tab。
@@ -33,7 +37,7 @@ Companion 只读取冻结 Codetalks Skill Run 的 Markdown 和内部索引：
 1. `内部索引/运行状态.json` 是唯一生命周期真相；状态为 `running` 时，当前步骤严格来自 `current_step`。
 2. `活文档/` 是运行中产物，按冻结 `workflow-manifest.json` 的步骤归属展示；例如 Step 03 本身允许生成 `03–07` 号广度盘点文档，不代表 Step 04–07 已完成。
 3. `正式输出/` 只在 Step 09/finalize 成功后作为交付展示；缺失或不完整时标记为未完成，不从文件名猜测成功。
-4. 旧版 Run 从自己的冻结 manifest 读取版本；当前 2.0 请求与 `codetalks-skill 1.2.0` Run 额外展示资产和方法论冻结信息。
+4. 旧版 Run 从自己的冻结 manifest 读取版本；当前 2.0 请求与 `codetalks-skill 1.3.0` Run 额外展示 Skill SHA-256、资产和方法论冻结信息。
 
 Reader 不创建风险、用例、复核结论或报告，也不读取旧 `progress.json`、`final-state.json`、`agent-results/` 作为分析结果来源。
 
@@ -49,11 +53,11 @@ Reader 对每个 Run 只做确定性文件读取，不从自然语言或文件�
 
 ## PANGEA 侧边栏页面
 
-Companion 在 Better Sidebar 中注册“分析”和“执行”两个顶层页签：
+Companion 在 PANGEA 产品导航中注册工作台、分析、环境配置和 Agent Runtime 页面：
 
 - “分析”页内部固定导航：`总览 / 流程 / 风险 / 用例 / 业务流 / 证据 / 复核`，任何页面都能直接跳转；总览是默认入口。
 - “执行”页用于维护执行环境和查看独立 Executor Run。
-- 总览显示后端兼容性、完整 Run 分页、当前 Run 进度和停止入口；“新建分析”表单接受仓库、目标、源码范围、资产库勾选、内置模型或 ACP Agent。
+- 总览显示后端兼容性、完整 Run 分页、当前 Run 进度和停止入口；“新建分析”表单接受仓库、目标、资产、执行 Agent、模型和 effort。
 - “流程”页显示冻结 Skill 的 Step 01–09 生命周期、Markdown 产物、核心规则 ACK、独立 Judge 和未解决事项；不显示已删除的 analysis action/bind/validate/settle 状态机。
 - “业务流”页展示结构化步骤、证据和 Mermaid 文本，支持搜索。
 - Companion 不重复展示 DSH 已有的 Agent / Tool / Subagent / Workflow 轨迹；总览只聚焦 PANGEA 阶段、进度、质量、风险、用例、证据和复核。
@@ -70,7 +74,7 @@ Companion 在 Better Sidebar 中注册“分析”和“执行”两个顶层页
 - 风险详情会把“系统结果”拆成可选结论；可以勾选任意数量的源码证据，只核对当前结论与选中证据，或把这组局部上下文转成定向测试。
 - 风险详情在同一张源码卡片中提供多证据选择器，默认预览首条可读取证据；切换时不离开当前风险。证据详情预览当前证据，源码片段显示真实行号，并轻量标出 PANGEA 指向的行范围。
 - “连同源码加入会话”会把当前对象、关联项和可见源码片段一起写入 DSH 草稿，不会自动发送。
-- 证据详情可经 `ctx.pangea.openFile()` 在 Better Sidebar 中打开完整文件；总览可直接打开 `report.html` 或 `report.md`。当前文件接口不支持指定光标行号，因此 Companion 在自己的预览卡片中完成准确行号定位，不伪装成编辑器已跳转。
+- 证据详情可经 `ctx.pangea.openFile()` 在 Better Sidebar 中打开完整文件；总览可直接打开 Markdown 正式报告。当前文件接口不支持指定光标行号，因此 Companion 在自己的预览卡片中完成准确行号定位，不伪装成编辑器已跳转。
 - 切换历史 Run 时自动回到该 Run 的总览，避免保留上一个 Run 的详情导航状态。
 - 当前 Run 使用顺序轮询：上一轮读取结束后才安排下一轮，不会堆叠请求；切换 Run 或工作区会取消旧请求，避免旧结果覆盖新页面。
 - 首次加载、后台同步失败和无工作区分别显示明确状态；短暂同步失败时保留上一次可信结果。
