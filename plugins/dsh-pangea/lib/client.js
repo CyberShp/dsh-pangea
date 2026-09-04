@@ -191,6 +191,34 @@ window.__ModuleLoader__.load({
         [data-pangea-tool-list] { margin-top: auto; }
         [data-pangea-page] { position: relative; min-width: 0; min-height: 0; display: flex; overflow: hidden; background: #f5f6f8; }
         [data-pangea-page] > * { flex: 1; min-width: 0; min-height: 0; }
+        [data-pangea-settings-page] {
+          box-sizing: border-box; width: 100%; height: 100%; overflow: auto;
+          padding: 42px clamp(28px, 5vw, 72px) 64px; color: var(--pangea-ink); background: #f5f6f8;
+        }
+        [data-pangea-settings-head] { max-width: 980px; margin: 0 auto 28px; }
+        [data-pangea-settings-title] { margin: 0; font-size: 30px; line-height: 40px; letter-spacing: -.025em; }
+        [data-pangea-settings-intro] { margin: 8px 0 0; color: var(--pangea-muted); font-size: 14px; line-height: 22px; }
+        [data-pangea-settings-grid] { max-width: 980px; margin: 0 auto; display: grid; gap: 18px; }
+        [data-pangea-settings-card] {
+          box-sizing: border-box; display: grid; grid-template-columns: minmax(0,1fr) auto;
+          align-items: center; gap: 24px; padding: 24px 26px; border: 1px solid var(--pangea-line);
+          border-radius: 10px; background: #fff; box-shadow: 0 2px 8px rgba(25,31,40,.035);
+        }
+        [data-pangea-settings-card-title] { margin: 0; font-size: 17px; line-height: 25px; font-weight: 700; }
+        [data-pangea-settings-card-description] { max-width: 680px; margin: 7px 0 0; color: var(--pangea-muted); font-size: 13px; line-height: 21px; }
+        [data-pangea-update-meta] { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 12px; color: #4d5560; font-size: 12px; line-height: 18px; }
+        [data-pangea-update-error] { margin: 10px 0 0; color: var(--pangea-red); font-size: 12px; line-height: 19px; overflow-wrap: anywhere; }
+        [data-pangea-settings-actions] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+        [data-pangea-settings-action] {
+          box-sizing: border-box; min-width: 126px; height: 38px; padding: 0 16px; border: 1px solid #cfd4da;
+          border-radius: 6px; color: #34383f; background: #fff; font: inherit; font-size: 13px;
+          font-weight: 620; white-space: nowrap; cursor: pointer;
+        }
+        [data-pangea-settings-action]:hover:not(:disabled) { border-color: #aeb5bd; background: #f6f7f8; }
+        [data-pangea-settings-action="primary"] { border-color: var(--pangea-red); color: #fff; background: var(--pangea-red); }
+        [data-pangea-settings-action="primary"]:hover:not(:disabled) { border-color: #a90009; background: #a90009; }
+        [data-pangea-settings-action]:disabled { cursor: default; opacity: .52; }
+        [data-pangea-settings-note] { max-width: 980px; margin: 16px auto 0; color: #7a828d; font-size: 12px; line-height: 19px; }
         [data-pangea-utility-host] {
           width: 100%; height: 100%; min-width: 0; min-height: 0; display: grid;
           grid-template-rows: 49px minmax(0, 1fr); overflow: hidden; background: #fff;
@@ -330,7 +358,7 @@ window.__ModuleLoader__.load({
         }
 
         body.dsh-desktop-windows-titlebar-layout [data-pangea-topbar] {
-          padding-right: calc(var(--dsh-desktop-windows-caption-width, 140px) + 56px);
+          padding-right: calc(var(--dsh-desktop-windows-caption-width, 140px) + 16px);
         }
       `
       document.head.appendChild(style)
@@ -361,6 +389,8 @@ window.__ModuleLoader__.load({
               ? [h('path', { key: 'a', d: 'm12 3 8 4-8 4-8-4Z' }), h('path', { key: 'b', d: 'm4 12 8 4 8-4' }), h('path', { key: 'c', d: 'm4 17 8 4 8-4' })]
               : kind === 'agent-runtime'
                 ? [h('circle', { key: 'a', cx: 12, cy: 12, r: 3 }), h('path', { key: 'b', d: 'M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5 7 7M17 17l1.5 1.5M18.5 5.5 17 7M7 17l-1.5 1.5' })]
+              : kind === 'settings'
+                ? [h('circle', { key: 'a', cx: 12, cy: 12, r: 3 }), h('path', { key: 'b', d: 'M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.86 2.86-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.86-2.86.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06L7.06 3.8l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.86 2.86-.06-.06A1.7 1.7 0 0 0 19.4 9c.12.39.33.74.6 1 .3.3.68.5 1.1.6h.1v4h-.1a1.7 1.7 0 0 0-1.7.4Z' })]
               : kind === 'terminal'
                 ? [h('path', { key: 'a', d: 'm5 7 4 4-4 4' }), h('path', { key: 'b', d: 'M11 16h7' })]
                 : kind === 'browser'
@@ -398,6 +428,111 @@ window.__ModuleLoader__.load({
         h('div', { 'data-pangea-system-state': true, 'data-state': systemState.state, role: 'status' },
           h('span', { 'data-pangea-system-dot': true }, systemState.state === 'ok' ? '✓' : '!'),
           h('span', null, systemState.label)))
+    }
+
+    function updateStatusCopy(status) {
+      if (!status) return '正在读取 Desktop 版本信息…'
+      if (status.phase === 'checking') return '正在读取并校验升级包…'
+      if (status.phase === 'downloading') return `正在校验升级包 ${Math.round(status.percent ?? 0)}%`
+      if (status.phase === 'downloaded') {
+        const packageLabel = status.packageType === 'patch' ? '增量补丁' : '完整升级包'
+        const route = status.baseVersion && status.availableVersion
+          ? `${status.baseVersion} → ${status.availableVersion}`
+          : status.availableVersion ?? ''
+        return `${packageLabel}${route ? ` ${route}` : ''} 已验证，可以安装。`
+      }
+      if (status.phase === 'install-error') return status.message ?? '升级未完成，当前版本已保留。'
+      if (status.phase === 'error') return status.message ?? '升级包校验失败。'
+      if (status.phase === 'unsupported') return status.message ?? '当前环境不支持应用内升级。'
+      return '当前没有待安装的升级包。'
+    }
+
+    function SettingsPage() {
+      const bridge = globalThis.dshDesktop
+      const updateAvailable = typeof bridge?.getUpdateStatus === 'function'
+        && typeof bridge?.importUpdatePackage === 'function'
+        && typeof bridge?.installUpdate === 'function'
+      const [updateStatus, setUpdateStatus] = React.useState(null)
+      const [busyAction, setBusyAction] = React.useState(null)
+      const [actionError, setActionError] = React.useState('')
+
+      React.useEffect(() => {
+        if (!updateAvailable) return undefined
+        let active = true
+        void bridge.getUpdateStatus()
+          .then(status => { if (active) setUpdateStatus(status) })
+          .catch(error => { if (active) setActionError(error instanceof Error ? error.message : String(error)) })
+        const subscriptionId = typeof bridge.subscribeUpdateStatus === 'function'
+          ? bridge.subscribeUpdateStatus(status => { if (active) setUpdateStatus(status) })
+          : undefined
+        return () => {
+          active = false
+          if (typeof subscriptionId === 'number') bridge.unsubscribeUpdateStatus?.(subscriptionId)
+        }
+      }, [bridge, updateAvailable])
+
+      const openModels = () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } }))
+      const importPackage = async () => {
+        if (!updateAvailable || busyAction) return
+        setBusyAction('import')
+        setActionError('')
+        try {
+          const status = await bridge.importUpdatePackage()
+          if (status) setUpdateStatus(status)
+        } catch (error) {
+          setActionError(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusyAction(null)
+        }
+      }
+      const installPackage = async () => {
+        if (!updateAvailable || busyAction || updateStatus?.phase !== 'downloaded') return
+        setBusyAction('install')
+        setActionError('')
+        try {
+          await bridge.installUpdate()
+          const status = await bridge.getUpdateStatus()
+          if (status) setUpdateStatus(status)
+        } catch (error) {
+          setActionError(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusyAction(null)
+        }
+      }
+      const updateError = actionError
+        || (['error', 'install-error', 'unsupported'].includes(updateStatus?.phase) ? updateStatus?.message : '')
+
+      return h('section', { 'data-pangea-settings-page': true },
+        h('header', { 'data-pangea-settings-head': true },
+          h('h1', { 'data-pangea-settings-title': true }, '设置'),
+          h('p', { 'data-pangea-settings-intro': true }, '管理 PANGEA Desktop 的模型接入、版本与本地升级。')),
+        h('div', { 'data-pangea-settings-grid': true },
+          h('article', { 'data-pangea-settings-card': true },
+            h('div', null,
+              h('h2', { 'data-pangea-settings-card-title': true }, '模型与 API'),
+              h('p', { 'data-pangea-settings-card-description': true }, '配置 DSH 官方模型、自定义模型提供方及 API 凭据。PANGEA 与 ACP 运行器统一使用这里维护的模型路由。')),
+            h('div', { 'data-pangea-settings-actions': true },
+              h('button', { type: 'button', 'data-pangea-settings-action': true, onClick: openModels }, '打开模型设置'))),
+          h('article', { 'data-pangea-settings-card': true },
+            h('div', null,
+              h('h2', { 'data-pangea-settings-card-title': true }, '版本与升级'),
+              h('p', { 'data-pangea-settings-card-description': true }, updateAvailable
+                ? updateStatusCopy(updateStatus)
+                : '应用内升级仅在已打包的 Windows PANGEA Desktop 中可用。'),
+              updateStatus?.currentVersion ? h('div', { 'data-pangea-update-meta': true },
+                h('span', null, `当前版本：${updateStatus.currentVersion}`),
+                updateStatus.availableVersion ? h('span', null, `目标版本：${updateStatus.availableVersion}`) : null) : null,
+              updateError ? h('p', { 'data-pangea-update-error': true, role: 'alert' }, updateError) : null),
+            h('div', { 'data-pangea-settings-actions': true },
+              h('button', {
+                type: 'button', 'data-pangea-settings-action': true,
+                disabled: !updateAvailable || Boolean(busyAction), onClick: importPackage,
+              }, busyAction === 'import' ? '正在读取…' : '导入升级包'),
+              updateStatus?.phase === 'downloaded' ? h('button', {
+                type: 'button', 'data-pangea-settings-action': 'primary',
+                disabled: Boolean(busyAction), onClick: installPackage,
+              }, busyAction === 'install' ? '正在重启…' : '安装并重启') : null))),
+        h('p', { 'data-pangea-settings-note': true }, '支持签名完整 ZIP 和与当前版本严格匹配的增量补丁 ZIP；请选择原始压缩包，不要提前解压。'))
     }
 
     function AssistantHeader({ context }) {
@@ -527,6 +662,7 @@ window.__ModuleLoader__.load({
         execution: { label: '环境配置', icon: 'execution' },
         assets: { label: '测试资产', icon: 'assets' },
         'agent-runtime': { label: 'Agent Runtime', icon: 'agent-runtime' },
+        settings: { label: '设置', icon: 'settings' },
       }
       const utilityLabels = { editor: '文件工作区', terminal: '环境终端', browser: '内置浏览器' }
       const renderUtility = type => {
@@ -553,7 +689,7 @@ window.__ModuleLoader__.load({
         h(ProductHeader, { scope, systemState }),
         h(AssistantHeader, { context: assistantContext }),
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
-          h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => pageIsAvailable(item, scope)).map(item => h('button', {
+          h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => item.id !== 'settings' && pageIsAvailable(item, scope)).map(item => h('button', {
             key: item.id, type: 'button', 'data-pangea-nav-button': true, 'data-active': item.id === page.id ? 'true' : 'false',
             onClick: () => service.openPage(scope, item.id),
           }, h('span', { 'data-pangea-nav-icon': true }, productIcon(pageMeta[item.id]?.icon ?? item.id, 23)),
@@ -562,7 +698,8 @@ window.__ModuleLoader__.load({
           h('div', { 'data-pangea-tool-list': true },
             h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'editor' ? 'true' : 'false', onClick: () => openUtility('editor', '文件') }, utilityIcon('file'), h('span', { 'data-pangea-nav-label': true }, '文件')),
             h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'terminal' ? 'true' : 'false', onClick: () => openUtility('terminal', '终端') }, utilityIcon('terminal'), h('span', { 'data-pangea-nav-label': true }, '终端')),
-            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'browser' ? 'true' : 'false', onClick: () => openUtility('browser', '浏览器') }, utilityIcon('browser'), h('span', { 'data-pangea-nav-label': true }, '浏览器')))),
+            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'browser' ? 'true' : 'false', onClick: () => openUtility('browser', '浏览器') }, utilityIcon('browser'), h('span', { 'data-pangea-nav-label': true }, '浏览器')),
+            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-pangea-native-model-settings': true, 'data-active': page.id === 'settings' ? 'true' : 'false', onClick: () => service.openPage(scope, 'settings') }, utilityIcon('settings'), h('span', { 'data-pangea-nav-label': true }, '设置')))),
         h('main', { 'data-pangea-page': page.id },
           utility === 'editor' || utility === 'browser' ? renderUtility(utility) : React.cloneElement(children, { visible: productVisible }),
           utility === 'terminal' ? h('div', { 'data-pangea-terminal-dock': true }, ...renderUtility('terminal').props.children) : null))
@@ -890,6 +1027,7 @@ window.__ModuleLoader__.load({
       if (!betterSidebar) return
       ctx.effect(installProductStyles, 'dsh-pangea: product shell styles')
       const service = createPangeaService(betterSidebar)
+      ctx.effect(() => service.registerPage({ id: 'settings', title: '设置', order: 1000, component: SettingsPage }), 'dsh-pangea: product settings page')
       ctx.provide('pangea', service)
       ctx.effect(() => installProductWorkspaceBootstrap(ctx, service), 'dsh-pangea: product workspace bootstrap')
       ctx.effect(() => service.disposePolicy, 'dsh-pangea: sidebar policy')
@@ -1051,7 +1189,6 @@ window.__ModuleLoader__.load({
 
   function reconcile() {
     installProductChromePolicy()
-    ensureSettingsButton()
     queryForVisibleShell()
     syncOnboarding()
   }

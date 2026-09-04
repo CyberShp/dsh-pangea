@@ -83,7 +83,30 @@ test('publishes ctx.pangea without registering a wrapper tab', async () => {
   })
   assert.equal(provided.name, 'pangea')
   assert.equal(sidebar.tabs.has('dsh-pangea:workbench'), false)
+  assert.equal(sidebar.tabs.has('dsh-pangea:settings'), true)
   assert.match(source, /'agent-runtime': \{ label: 'Agent Runtime'/)
+})
+
+test('owns a visible product settings page with Desktop update controls', async () => {
+  const { exported, source } = await loadClient()
+  assert.match(source, /data-pangea-settings-page/)
+  assert.match(source, /版本与升级/)
+  assert.match(source, /导入升级包/)
+  assert.match(source, /安装并重启/)
+  assert.match(source, /bridge\.getUpdateStatus\(\)/)
+  assert.match(source, /bridge\.importUpdatePackage\(\)/)
+  assert.match(source, /bridge\.installUpdate\(\)/)
+  assert.match(source, /onClick: \(\) => service\.openPage\(scope, 'settings'\)/)
+
+  const sidebar = fakeSidebar()
+  let service
+  exported.apply({
+    betterSidebar: sidebar,
+    provide(_name, value) { service = value },
+    effect(factory) { return factory() },
+  })
+  assert.equal(service.openPage({ sessionId: 'session-1' }, 'settings'), true)
+  assert.equal(sidebar.opened.at(-1).seed.type, 'dsh-pangea:settings')
 })
 
 test('bridges the DSH module loader for Better Sidebar lazy terminal chunks', async () => {

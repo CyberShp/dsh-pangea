@@ -141,7 +141,6 @@
 
   function reconcile() {
     installProductChromePolicy()
-    ensureSettingsButton()
     queryForVisibleShell()
     syncOnboarding()
   }
