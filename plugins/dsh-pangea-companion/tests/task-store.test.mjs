@@ -134,21 +134,22 @@ test('rebinds an explicitly stopped task after a portable workspace move', async
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('freezes an external ACP model route and keeps the job authoritative until settlement', async () => {
+test('keeps an external ACP provider authoritative without freezing its model', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-acp-'))
   let now = 2000
   try {
     const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), now: () => ++now, idFactory: () => 'task-acp' })
+    const legacyRoute = { provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high', route_class: 'external-acp' }
     await store.create({
       workspace: '/workspace', dataRoot: '/workspace/pangea-data',
-      input: { repository: 'repo-one', target: '外部分析', provider_id: 'pangea-nga' },
+      input: { repository: 'repo-one', target: '外部分析', provider_id: 'pangea-nga', model_route: legacyRoute },
     })
-    const route = { provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high', route_class: 'external-acp' }
-    await store.prepareProviderLaunch('task-acp', 'pangea-nga', route)
+    assert.deepEqual((await store.get('task-acp')).model_route, legacyRoute)
+    await store.prepareProviderLaunch('task-acp', 'pangea-nga')
     await store.addConversation('task-acp', { sessionId: 'owner-1', title: '分析', kind: 'analysis' })
     await store.bindRunBySession('owner-1', { run_id: 'run-acp', lifecycle_status: 'running' })
     const running = await store.bindJob('task-acp', { jobId: 'job-1', provider: 'pangea-nga', ownerSessionId: 'owner-1' })
-    assert.deepEqual(running.model_route, route)
+    assert.equal(running.model_route, null)
     assert.equal((await store.getByJob('job-1')).task_id, 'task-acp')
     await store.bindAgentRuntime('task-acp', { agentSessionId: 'acp-session-1', processId: 4242 })
     await store.recordJobActivity('job-1', '正在分析 Lua 状态机')

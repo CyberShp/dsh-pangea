@@ -6,7 +6,7 @@ import test from 'node:test'
 
 import { AcpSettingsStore } from '../src/acp-settings.js'
 
-test('persists a validated external Agent model and effort catalog atomically', async () => {
+test('persists external Agent command settings atomically', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-acp-settings-'))
   const filePath = path.join(root, 'acp-runtime-v1.json')
   const previous = process.env.PANGEA_ACP_RUNTIME_CONFIG
@@ -17,7 +17,6 @@ test('persists a validated external Agent model and effort catalog atomically', 
       providers: {
         'pangea-opencode': {
           command: 'C:\\Tools\\opencode.exe', args: ['acp'],
-          models: [{ id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', efforts: ['medium', 'high'] }],
         },
       },
     }
@@ -33,13 +32,15 @@ test('persists a validated external Agent model and effort catalog atomically', 
   }
 })
 
-test('rejects malformed model catalogs before changing the settings file', async () => {
+test('tolerates a legacy model catalog without making it part of provider validation', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-acp-settings-invalid-'))
   try {
     const store = new AcpSettingsStore({ filePath: path.join(root, 'acp-runtime-v1.json') })
-    await assert.rejects(() => store.save({
+    const legacy = {
       version: 1,
       providers: { 'pangea-nga': { command: 'nga', args: ['acp'], models: [{ id: '', efforts: [] }] } },
-    }), /模型缺少 id/)
+    }
+    assert.deepEqual(await store.save(legacy), legacy)
+    assert.deepEqual(await store.read(), legacy)
   } finally { await rm(root, { recursive: true, force: true }) }
 })

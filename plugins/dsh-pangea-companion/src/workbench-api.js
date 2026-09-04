@@ -25,16 +25,6 @@ function configuredProviders(env) {
   return parsed.providers
 }
 
-function configuredModel(value, providerId) {
-  const id = typeof value?.id === 'string' ? value.id.trim() : ''
-  if (!id) throw new Error(`${providerId} 的模型缺少 id`)
-  const label = typeof value?.label === 'string' && value.label.trim() ? value.label.trim() : id
-  if (!Array.isArray(value?.efforts)) throw new Error(`${providerId}/${id} 的 efforts 必须是字符串数组`)
-  const efforts = [...new Set(value.efforts.map(item => typeof item === 'string' ? item.trim() : '').filter(Boolean))]
-  if (efforts.length !== value.efforts.length) throw new Error(`${providerId}/${id} 的 efforts 包含空值或重复值`)
-  return { id, label, efforts }
-}
-
 // External ACP agents are intentionally configured as commands rather than
 // model routes.  This keeps credentials and process ownership in DSH.
 export function acpProviderOptions(env = process.env) {
@@ -49,15 +39,10 @@ export function acpProviderOptions(env = process.env) {
     if (!Array.isArray(args) || args.some(item => typeof item !== 'string' || !item.trim())) {
       throw new Error(`${defaults.id} 的 args 必须是非空字符串数组`)
     }
-    if (value?.models !== undefined && !Array.isArray(value.models)) {
-      throw new Error(`${defaults.id} 的 models 必须是数组`)
-    }
-    const models = (value?.models ?? []).map(item => configuredModel(item, defaults.id))
     return {
       ...defaults,
       command,
       args: args.map(item => item.trim()),
-      models,
       configured: value !== undefined,
       resolved_command: typeof value?.resolved_command === 'string' && value.resolved_command.trim() ? value.resolved_command.trim() : null,
       available: value?.available !== false,
@@ -80,22 +65,6 @@ export function validateAcpRuntimeConfig(value) {
 export function acpProviderOption(providerId, env = process.env) {
   const id = typeof providerId === 'string' ? providerId.trim() : ''
   return acpProviderOptions(env).find(provider => provider.id === id) ?? null
-}
-
-export function requireAcpModel(providerId, value, env = process.env) {
-  const provider = acpProviderOption(providerId, env)
-  if (!provider) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
-  const selected = modelRoute(value)
-  if (!selected || selected.provider !== provider.id) throw new Error(`请选择 ${provider.label} 的执行模型`)
-  const model = provider.models.find(item => item.id === selected.model)
-  if (!model) throw new Error(`所选模型不属于 ${provider.label} 当前配置：${selected.model}`)
-  if (selected.reasoning_effort && !model.efforts.includes(selected.reasoning_effort)) {
-    throw new Error(`${provider.label}/${model.id} 不支持推理级别：${selected.reasoning_effort}`)
-  }
-  if (!selected.reasoning_effort && model.efforts.length > 0) {
-    throw new Error(`请选择 ${provider.label}/${model.id} 的推理级别`)
-  }
-  return { ...selected, route_class: 'external-acp' }
 }
 
 function rpc(payload) {
@@ -338,7 +307,7 @@ async function settleAcpRun(start, signal) {
   }
 }
 
-function startAcpJob(runtime, parent, providerId, model, prompt, label, onEvent) {
+function startAcpJob(runtime, parent, providerId, prompt, label, onEvent) {
   const subagents = runtimeService(runtime, 'subagents')
   const jobs = runtimeService(runtime, 'jobs')
   if (!subagents?.start) throw new Error('DSH subagent runtime unavailable: load dsh-subagent')
@@ -357,16 +326,11 @@ function startAcpJob(runtime, parent, providerId, model, prompt, label, onEvent)
         prompt: [{ type: 'text', text: prompt }],
         parent,
         signal: controller.signal,
-        agentOptions: {
-          model: model.model,
-          ...(model.reasoning_effort ? { reasoningEffort: model.reasoning_effort } : {}),
-        },
       })
       const observed = Promise.resolve(start).then(run => {
         activeRun = run
         void emitLaunch(onEvent, {
           stage: 'acp_session_created', status: 'ok', provider: providerId,
-          model: model.model, reasoning_effort: model.reasoning_effort,
           agent_session_id: String(run.id), pid: Number.isInteger(run.processId) ? run.processId : undefined,
         })
         return run
@@ -402,7 +366,7 @@ export async function launchAnalysisSession(
   const selectedProvider = request.provider_id
   if (selectedProvider && !runtime) throw new Error(`外部执行 Agent 需要 DSH ACP runtime：${selectedProvider}`)
   const selectedModel = selectedProvider
-    ? requireAcpModel(selectedProvider, model, env)
+    ? null
     : await launchStep(
       onEvent,
       'model_validate',
@@ -452,8 +416,8 @@ export async function launchAnalysisSession(
   ].join('\n')
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
-    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, selectedModel, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent), value => ({ job_id: value, provider: selectedProvider, model: selectedModel.model }))
-    await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, model: selectedModel.model, reasoning_effort: selectedModel.reasoning_effort, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
+    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent), value => ({ job_id: value, provider: selectedProvider }))
+    await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
     return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
   }
   await launchStep(onEvent, 'prompt_submit', async () => {

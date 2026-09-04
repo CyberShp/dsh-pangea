@@ -246,17 +246,13 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async prepareProviderLaunch(taskId, provider, modelRoute) {
+  async prepareProviderLaunch(taskId, provider) {
     await this.ready
     const task = this.requireTask(taskId)
     const selected = text(provider)
     if (!selected) throw new Error('请选择一个 ACP 执行 Agent')
-    const selectedModel = normalizeModelRoute(modelRoute)
-    if (!selectedModel || selectedModel.provider !== selected || selectedModel.route_class !== 'external-acp') {
-      throw new Error('请选择当前 ACP 执行 Agent 的模型')
-    }
     task.provider = selected
-    task.model_route = selectedModel
+    task.model_route = null
     task.status = 'preparing'
     task.execution_status = 'starting'
     task.terminal_error = null
@@ -424,7 +420,7 @@ export class TaskStore {
       if (root && (!task.data_root || path.resolve(task.data_root) !== path.resolve(root))) continue
       const run = task.run_id ? byId.get(task.run_id) : undefined
       if (!run) continue
-      if (task.model_route?.route_class === 'external-acp' && ['starting', 'running', 'stopping'].includes(task.execution_status)) continue
+      if (task.provider && ['starting', 'running', 'stopping'].includes(task.execution_status)) continue
       const status = taskStatusFromRun(run)
       if (status === 'running' && task.status === 'failed' && task.launch_error_code && task.launch_error_code !== 'RUN_ATTENTION_REQUIRED') continue
       if (task.status !== status) {

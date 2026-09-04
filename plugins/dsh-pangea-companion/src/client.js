@@ -608,18 +608,7 @@ window.__ModuleLoader__.load({
       return Object.fromEntries((providers ?? []).map(provider => [provider.id, {
         command: provider.command ?? '',
         args: (provider.args ?? []).join('\n'),
-        models: (provider.models ?? []).map(model => `${model.id} | ${model.label ?? model.id} | ${(model.efforts ?? []).join(',')}`).join('\n'),
       }]))
-    }
-
-    function parseAcpModels(provider, textValue) {
-      return String(textValue ?? '').split(/\r?\n/).map(line => line.trim()).filter(Boolean).map((line, index) => {
-        const parts = line.split('|').map(part => part.trim())
-        if (!parts[0]) throw new Error(`${provider} 第 ${index + 1} 行模型缺少 ID`)
-        const efforts = (parts[2] ?? '').split(',').map(item => item.trim()).filter(Boolean)
-        if (new Set(efforts).size !== efforts.length) throw new Error(`${provider}/${parts[0]} 的 effort 有重复值`)
-        return { id: parts[0], label: parts[1] || parts[0], efforts }
-      })
     }
 
     function acpResolutionLabel(value) {
@@ -673,14 +662,13 @@ window.__ModuleLoader__.load({
             return [provider.id, {
               command: String(value.command ?? '').trim(),
               args: String(value.args ?? '').split(/\r?\n/).map(item => item.trim()).filter(Boolean),
-              models: parseAcpModels(provider.label, value.models),
             }]
           }))
           const saved = await saveAcpSettings({ version: 1, providers })
           await loadSettings()
           setRestartRequired(saved.restart_required === true)
           setNotice({ error: false, message: saved.restart_required
-            ? '配置已保存。请重启 Harness，使新的命令、模型和 effort 契约生效。'
+            ? '配置已保存。请重启 Harness，使新的启动命令生效。'
             : '配置已保存。' })
         } catch (error) {
           setNotice({ error: true, message: error instanceof Error ? error.message : String(error) })
@@ -692,7 +680,7 @@ window.__ModuleLoader__.load({
           const checks = await testAcpSettings()
           const failures = checks.filter(item => !item.ok)
           setNotice(failures.length === 0
-            ? { error: false, message: `运行时契约检查通过：${checks.length} 个 Agent 均已注册并配置模型目录。` }
+            ? { error: false, message: `运行时契约检查通过：${checks.length} 个 Agent 均已注册。` }
             : { error: true, message: failures.map(item => `${item.label}：${item.reasons.join('；')}`).join('\n') })
         } catch (error) {
           setNotice({ error: true, message: error instanceof Error ? error.message : String(error) })
@@ -701,7 +689,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'Agent Runtime 设置' },
         h('div', { style: styles.sticky }, h('div', { style: styles.header },
-          h('div', null, h('div', { style: styles.title }, 'Agent Runtime'), h('div', { style: styles.subline }, 'PANGEA External Agent Runtime 2.0 · 配置会冻结到每个分析任务。')),
+          h('div', null, h('div', { style: styles.title }, 'Agent Runtime'), h('div', { style: styles.subline }, 'PANGEA External Agent Runtime 2.0 · 模型与推理配置由 Agent 当前会话决定。')),
           h('button', { type: 'button', disabled: loading, style: styles.button, onClick: () => { void loadSettings() } }, loading ? '读取中…' : '刷新'))),
         h('div', { style: styles.environmentContent },
           notice ? h('div', { style: { ...styles.card, ...(notice.error ? styles.healthError : styles.healthOk) }, role: notice.error ? 'alert' : 'status' }, notice.message) : null,
@@ -710,7 +698,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', style: styles.button, onClick: () => { void window.dshDesktop.restartHarness() } }, '立即重启 Harness'))) : null,
           h('div', { style: { ...styles.card, ...styles.compatibility } },
             h('div', { style: styles.itemTitle }, '配置原则'),
-            h('div', { style: styles.itemMeta }, '命令由 Desktop 在 Windows 上通过 PowerShell 解析为绝对路径；DSH 持有子进程、输出和取消。模型及 effort 必须来自这里的显式目录，不会回退到内部 API。')),
+            h('div', { style: styles.itemMeta }, '命令由 Desktop 在 Windows 上通过 PowerShell 解析为绝对路径；DSH 持有子进程、输出和取消。模型与推理配置由 Agent 当前会话决定。')),
           (snapshot?.providers ?? []).map(provider => {
             const value = draft[provider.id] ?? {}
             return h('section', { key: provider.id, style: styles.environmentSection },
@@ -730,10 +718,7 @@ window.__ModuleLoader__.load({
                 })),
                 h('div', { style: { ...styles.environmentField, marginTop: 13 } }, h('label', { style: styles.environmentLabel }, '启动参数（每行一个）'), h('textarea', {
                   style: styles.textarea, value: value.args ?? '', placeholder: 'acp', onChange: event => setField(provider.id, 'args', event.target.value),
-                })),
-                h('div', { style: { ...styles.environmentField, marginTop: 13 } }, h('label', { style: styles.environmentLabel }, '模型目录'), h('textarea', {
-                  style: { ...styles.textarea, minHeight: 112 }, value: value.models ?? '', placeholder: 'model-id | 显示名 | low,medium,high', onChange: event => setField(provider.id, 'models', event.target.value),
-                }), h('div', { style: styles.repositoryHint }, '每行：model-id | 显示名 | effort1,effort2。effort 留空表示该模型不提供推理级别选择。')))
+                })))
             )
           }),
           h('div', { style: styles.environmentActions },
@@ -1235,10 +1220,9 @@ window.__ModuleLoader__.load({
           starting: '正在启动', running: '运行中', stopping: '正在停止',
           completed: '已完成', failed: '失败', killed: '已停止', stopped: '已停止', interrupted: '已中断',
         }[status] ?? status
-        const route = selectedTask.model_route
         return h('div', { style: styles.card },
           h('div', { style: styles.row },
-            h('div', null, h('div', { style: styles.itemTitle }, '外部 Agent Runtime'), h('div', { style: styles.itemMeta }, `${selectedTask.provider} · ${route?.model ?? '模型未知'} · effort ${route?.reasoning_effort ?? '不支持'}`)),
+            h('div', null, h('div', { style: styles.itemTitle }, '外部 Agent Runtime'), h('div', { style: styles.itemMeta }, selectedTask.provider)),
             h('span', { style: { ...styles.homeStatus, color: status === 'failed' || status === 'interrupted' ? 'var(--dsw-alias-state-error-primary, #e66767)' : status === 'completed' ? 'var(--dsw-alias-state-success-primary, #38a892)' : 'var(--dsw-alias-state-business-primary, #4d9ad6)' } }, statusLabel)),
           h('div', { style: { ...styles.grid, marginTop: 10 } },
             field('Job ID', selectedTask.job_id ?? '尚未创建'),
@@ -1381,7 +1365,7 @@ window.__ModuleLoader__.load({
                 source_scope: createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean),
                 asset_ids: createForm.asset_ids,
                 provider_id: createForm.provider_id || null,
-                model_route: modelRouteFromKey(createForm.model_route_key),
+                model_route: createForm.provider_id ? null : modelRouteFromKey(createForm.model_route_key),
               },
             },
           })
@@ -1811,15 +1795,9 @@ window.__ModuleLoader__.load({
           ? modelOptions.find(item => item.provider === selectedModel.provider && item.model === selectedModel.model)
           : null
         const selectedProvider = providerOptions.find(item => item.id === createForm.provider_id)
-        const externalModelOptions = selectedProvider?.models ?? []
-        const selectedExternalModel = selectedModel && selectedProvider
-          ? externalModelOptions.find(item => item.id === selectedModel.model && selectedModel.provider === selectedProvider.id)
-          : null
         const compatible = workbench?.compatibility?.compatible === true
         const executionReady = createForm.provider_id
           ? selectedProvider?.registered === true
-            && selectedExternalModel !== null
-            && (selectedExternalModel.efforts.length === 0 || Boolean(selectedModel?.reasoning_effort))
           : selectedModelOption?.credential_configured === true
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
         const canSubmit = compatible && createForm.repository && createForm.target.trim() && sourceScope.length > 0 && executionReady && !creatingRun
@@ -1851,26 +1829,6 @@ window.__ModuleLoader__.load({
               onChange: event => setCreateForm(value => ({ ...value, model_route_key: modelSelectionKey({ ...selectedModel, reasoning_effort: event.target.value }) })),
             }, h('option', { value: '' }, '默认'), selectedModelOption.reasoning.efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name ?? effort.id)))) : null,
         ) : null
-        const externalModelFields = createForm.provider_id ? h(React.Fragment, null,
-          h('label', null,
-            h('div', { style: styles.label }, `${selectedProvider?.label ?? '外部 Agent'} 模型`),
-            h('select', {
-              style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: selectedExternalModel ? modelSelectionKey(selectedModel) : '',
-              onChange: event => setCreateForm(value => ({ ...value, model_route_key: event.target.value })),
-            },
-            h('option', { value: '' }, externalModelOptions.length ? '选择模型' : '尚未配置模型'),
-            externalModelOptions.map(item => h('option', {
-              key: item.id,
-              value: modelSelectionKey({ provider: selectedProvider.id, model: item.id, reasoning_effort: item.efforts[0] }),
-            }, item.label ?? item.id)))),
-          selectedExternalModel?.efforts?.length ? h('label', null,
-            h('div', { style: styles.label }, 'Effort'),
-            h('select', {
-              style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: selectedModel?.reasoning_effort ?? '',
-              onChange: event => setCreateForm(value => ({ ...value, model_route_key: modelSelectionKey({ ...selectedModel, reasoning_effort: event.target.value }) })),
-            }, selectedExternalModel.efforts.map(effort => h('option', { key: effort, value: effort }, effort))))
-            : selectedExternalModel ? h('div', { style: styles.itemMeta }, '该模型未声明可配置的 effort。') : null,
-        ) : null
         return h(React.Fragment, null,
           renderCompatibility(),
             h('div', { style: { ...styles.card, ...styles.compatibility } },
@@ -1883,20 +1841,15 @@ window.__ModuleLoader__.load({
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.provider_id,
                 onChange: event => {
                   const providerId = event.target.value
-                  const provider = providerOptions.find(item => item.id === providerId)
-                  const firstModel = provider?.models?.[0]
                   setCreateForm(value => ({
                     ...value,
                     provider_id: providerId,
-                    model_route_key: providerId
-                      ? firstModel ? modelSelectionKey({ provider: providerId, model: firstModel.id, reasoning_effort: firstModel.efforts?.[0] }) : ''
-                      : '',
+                    model_route_key: providerId ? '' : value.model_route_key,
                   }))
                   try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ }
                 },
               }, h('option', { value: '' }, '内置 API Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: item.registered !== true }, `${item.label}${item.registered === true ? '' : ' · 未加载'}`))))),
               internalModelFields,
-              externalModelFields,
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               h('label', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '源码冻结范围'),
@@ -1919,12 +1872,7 @@ window.__ModuleLoader__.load({
               ),
             modelRouting.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 }, role: 'alert' }, `模型目录读取失败：${modelRouting.error ?? '未知错误'}`) : null,
             modelRouting.status === 'ok' && modelOptions.length === 0 && !createForm.provider_id ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, '没有可用的内置 API 模型，请先到“设置”配置模型与 API。', h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })) }, '打开模型设置')) : null,
-            createForm.provider_id && selectedProvider?.registered === true ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, selectedProvider.kind === 'claude-code'
-              ? `Claude Code 使用 DSH 官方 Provider。执行模型：${selectedModel?.model ?? '未选择'}；Effort：${selectedModel?.reasoning_effort ?? '不支持/未配置'}。`
-              : `ACP 命令：${selectedProvider.command} ${(selectedProvider.args ?? []).join(' ')} · 模型：${selectedModel?.model ?? '未选择'} · Effort：${selectedModel?.reasoning_effort ?? '不支持/未配置'}`) : null,
-            createForm.provider_id && selectedProvider?.registered === true && externalModelOptions.length === 0
-              ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, `${selectedProvider.label} 尚未配置可选择模型，请先到 Agent Runtime 设置中完成配置。`)
-              : null,
+            createForm.provider_id && selectedProvider?.registered === true ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `${selectedProvider.label} 将使用 Agent 当前会话的模型与推理配置。`) : null,
             createForm.provider_id && selectedProvider?.registered !== true ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, `${selectedProvider?.label ?? createForm.provider_id} 尚未在当前 Desktop 加载，请检查插件配置。`) : null,
             h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务'))
       }

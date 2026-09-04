@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireAcpModel, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
 const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
 const acpRuntimeConfig = {
@@ -82,15 +82,10 @@ test('preserves structured command and version probe status for the runtime UI',
   assert.equal(provider.version_error, '--version exited with code 2')
 })
 
-test('requires an exact configured ACP model and effort without internal fallback', () => {
+test('keeps legacy ACP model catalogs out of the provider launch contract', () => {
   const env = { PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify(acpRuntimeConfig) }
-  assert.deepEqual(requireAcpModel('pangea-nga', {
-    provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high',
-  }, env), {
-    provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high', route_class: 'external-acp',
-  })
-  assert.throws(() => requireAcpModel('pangea-nga', { provider: 'pangea-nga', model: 'missing' }, env), /不属于 NGA/)
-  assert.throws(() => requireAcpModel('pangea-nga', { provider: 'pangea-nga', model: 'nga-model' }, env), /请选择.*推理级别/)
+  const provider = acpProviderOptions(env).find(item => item.id === 'pangea-nga')
+  assert.equal(Object.hasOwn(provider, 'models'), false)
 })
 
 test('fails closed before creating a session when the internal credential is missing and records the failing stage', async () => {
@@ -262,11 +257,12 @@ test('stops one explicit Run through the public runs API', async () => {
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('starts a selected ACP provider through a DSH background job', async () => {
+test('starts an ACP provider with the Agent native session configuration', async () => {
   const root = await workspace()
   try {
     let promptCalled = false
     let providerStarted = false
+    let providerRequest
     const api = {
       workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
       sessions: {
@@ -280,8 +276,10 @@ test('starts a selected ACP provider through a DSH background job', async () => 
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
         getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
-        async start() {
+        async start(providerId, request) {
           providerStarted = true
+          assert.equal(providerId, 'pangea-nga')
+          providerRequest = request
           return { result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }), dispose: async () => {} }
         },
       },
@@ -295,11 +293,12 @@ test('starts a selected ACP provider through a DSH background job', async () => 
     const result = await launchAnalysisSession(api, {
       cwd: root,
       input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga' },
-      model: { provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high' },
     }, runner, async () => {}, async () => {}, runtime, { PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify(acpRuntimeConfig) })
     assert.equal(result.job_id, 'subagent-1')
     assert.equal(result.provider, 'pangea-nga')
     assert.equal(providerStarted, true)
+    assert.equal(Object.hasOwn(providerRequest, 'agentOptions'), false)
+    assert.equal(result.model, null)
     assert.equal(promptCalled, false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })

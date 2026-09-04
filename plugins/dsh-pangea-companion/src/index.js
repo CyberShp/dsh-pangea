@@ -10,7 +10,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { runPangea, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireAcpModel, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -462,9 +462,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       const root = workspaceRoot(cwd)
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
       if (providerId && !acpProviderOption(providerId)) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
-      const selectedModel = providerId
-        ? requireAcpModel(providerId, body.input?.model_route)
-        : await resolveTaskModel(api, body.input?.model_route)
+      const selectedModel = providerId ? null : await resolveTaskModel(api, body.input?.model_route)
       const task = await tasks.create({
         workspace: root,
         dataRoot: dataRootFor(root, actionDataRoot),
@@ -484,12 +482,10 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         let selectedModel = null
         if (selectedProvider) {
           assertRegisteredAcpProvider(runtime, selectedProvider)
-          selectedModel = requireAcpModel(selectedProvider, body.model_route ?? task.model_route)
           await appendLaunchSafe(launchLogs, task.task_id, {
             stage: 'acp_provider_resolve', status: 'ok', provider: selectedProvider,
-            model: selectedModel.model, reasoning_effort: selectedModel.reasoning_effort,
           })
-          await tasks.prepareProviderLaunch(task.task_id, selectedProvider, selectedModel)
+          await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
         } else {
           await appendLaunchSafe(launchLogs, task.task_id, { stage: 'model_route_resolve', status: 'start' })
           selectedModel = await resolveTaskModel(api, body.model_route ?? task.model_route)
@@ -676,7 +672,6 @@ async function acpSettingsRouteHandler(req, res, settings, runtime) {
           const reasons = []
           if (!provider.available) reasons.push(provider.resolution_error ?? '启动命令不可用')
           if (!registered) reasons.push('Provider 未注册')
-          if (provider.models.length === 0) reasons.push('尚未配置模型目录')
           return { id: provider.id, label: provider.label, ok: reasons.length === 0, registered, reasons }
         })
         return json(res, 200, { status: 'ok', checks })
