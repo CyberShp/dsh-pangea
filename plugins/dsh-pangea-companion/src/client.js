@@ -1948,7 +1948,7 @@ window.__ModuleLoader__.load({
               field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : '等待初始化'),
               field('独立 Judge', judgeStatus),
               field('运行状态', PHASE[current.phase] ?? current.phase),
-              field('源码快照', current.source_snapshot?.status === 'verified' ? `${current.source_snapshot.file_count ?? 0} 个文件，已冻结` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查')),
+              field('源码快照', ['verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已冻结` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查')),
             h('div', { style: styles.chips },
               current.artifacts?.request ? chip('打开任务请求', () => openSidebarFile(current.artifacts.request, 'Codetalks request.md')) : null,
               current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null,

@@ -92,7 +92,7 @@ function renderStatus(value) {
     renderCount(run, 'test_cases', '测试用例'),
     `证据：${run.counts.evidence}`,
     `数据源：${SOURCE_LABELS[run.data_source] ?? run.data_source ?? '未知'}`,
-    `源码快照：${run.source_snapshot?.status === 'verified' ? `${run.source_snapshot.file_count ?? 0} 个文件，已冻结` : run.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'}`,
+    `源码快照：${['verified', 'manifest_verified'].includes(run.source_snapshot?.status) ? `${run.source_snapshot.file_count ?? 0} 个文件，已冻结` : run.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'}`,
     `读取健康：${HEALTH_LABELS[health?.status] ?? health?.status ?? '未知'}`,
   ]
   if (health?.trusted === false) {

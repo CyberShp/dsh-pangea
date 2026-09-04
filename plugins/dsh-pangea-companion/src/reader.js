@@ -58,12 +58,11 @@ function canonicalJson(value) {
   return JSON.stringify(value)
 }
 
-async function verifySourceSnapshot(runDirectory, runId) {
+async function verifySourceSnapshot(runDirectory, runId, recordedSnapshot) {
   const manifestPath = path.join(runDirectory, 'inputs', 'source', 'manifest.json')
   if (await pathKind(manifestPath) !== 'file') return { status: 'legacy_unavailable', issues: [] }
   try {
     const manifest = await readJson(manifestPath)
-    const root = path.resolve(runDirectory, 'inputs', 'source', 'repository')
     const issues = []
     if (manifest.run_id !== runId) issues.push('源码快照 run_id 与当前 Run 不一致')
     const files = manifest.files
@@ -76,13 +75,12 @@ async function verifySourceSnapshot(runDirectory, runId) {
     }
     for (const item of files ?? []) {
       if (!item?.path || typeof item.sha256 !== 'string') { issues.push('源码快照清单包含非法文件项'); continue }
-      const candidate = path.resolve(root, item.path)
-      if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) { issues.push(`源码快照路径越界：${item.path}`); continue }
-      if (await pathKind(candidate) !== 'file') { issues.push(`源码快照文件缺失：${item.path}`); continue }
-      const digest = createHash('sha256').update(await readFile(candidate)).digest('hex')
-      if (digest !== item.sha256) issues.push(`源码快照哈希不匹配：${item.path}`)
+      const relative = path.normalize(item.path)
+      if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) issues.push(`源码快照路径越界：${item.path}`)
     }
-    return { status: issues.length ? 'corrupt' : 'verified', issues, manifest }
+    if (recordedSnapshot?.snapshot_digest && recordedSnapshot.snapshot_digest !== manifest.snapshot_digest) issues.push('源码快照清单与 Run 元数据不一致')
+    if (Number.isInteger(recordedSnapshot?.file_count) && recordedSnapshot.file_count !== manifest.file_count) issues.push('源码快照文件数与 Run 元数据不一致')
+    return { status: issues.length ? 'corrupt' : 'manifest_verified', issues, manifest }
   } catch (error) {
     return { status: 'corrupt', issues: [error instanceof Error ? error.message : String(error)] }
   }
@@ -175,7 +173,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const reportAvailable = await pathKind(reportMd) === 'file'
   const life = lifecycle(metadata, state)
   const projection = await readWorkbenchProjection(runDirectory, runId)
-  const sourceSnapshot = { ...(metadata.source_snapshot ?? { status: 'legacy_unavailable', snapshot_digest: null, file_count: null }), ...(await verifySourceSnapshot(runDirectory, runId)) }
+  const recordedSourceSnapshot = metadata.source_snapshot ?? { status: 'legacy_unavailable', snapshot_digest: null, file_count: null }
+  const sourceSnapshot = { ...recordedSourceSnapshot, ...(await verifySourceSnapshot(runDirectory, runId, recordedSourceSnapshot)) }
   const validation = state?.validation ?? { status: 'not_checked', error_count: 0, errors: [] }
   const completed = state?.completed_steps?.length ?? 0
   const workflow = {

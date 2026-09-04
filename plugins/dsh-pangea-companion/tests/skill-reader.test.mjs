@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,6 +10,12 @@ import { companionSnapshot } from '../src/reader.js'
 async function writeJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true })
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  return JSON.stringify(value)
 }
 
 test('reads Codetalks state and maps Step 01–09 Markdown lifecycle', async () => {
@@ -92,5 +99,26 @@ test('opens an explicitly selected historical Run outside the first page', async
     assert.equal(snapshot.runs[0].run_id, 'latest-run')
     assert.equal(snapshot.current.run_id, 'historical-run')
     assert.equal(snapshot.current.target, '历史失败任务')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('reads snapshot metadata without rehashing every frozen source file', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-snapshot-metadata-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'large-source-run'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  const files = [{ path: 'src/large.c', size: 1024, sha256: 'a'.repeat(64) }]
+  const snapshotDigest = `sha256:${createHash('sha256').update(canonicalJson(files)).digest('hex')}`
+  const sourceSnapshot = { run_id: runId, repo_id: 'repo', files, file_count: 1, snapshot_digest: snapshotDigest }
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot, source_snapshot: sourceSnapshot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'large source' },
+    })
+    await writeJson(path.join(runRoot, 'inputs', 'source', 'manifest.json'), sourceSnapshot)
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.source_snapshot.status, 'manifest_verified')
+    assert.equal(current.source_snapshot.file_count, 1)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
