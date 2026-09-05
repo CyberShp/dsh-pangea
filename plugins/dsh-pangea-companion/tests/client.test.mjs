@@ -33,7 +33,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /独立 Judge/)
   assert.match(source, /分析任务/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
-  assert.match(source, /repeat\(4, minmax\(72px, 1fr\)\)/)
+  assert.match(source, /repeat\(5, minmax\(72px, 1fr\)\)/)
   assert.match(source, /\['overview', '概览'\], \['risks', '风险'\], \['cases', '测试用例'\], \['workflow', '流程'\], \['review', '复核'\]/)
   assert.doesNotMatch(source, /\['monitor', '监控'\]/)
   assert.doesNotMatch(source, /if \(screen\.type === 'monitor'\) body = renderMonitor/)

@@ -219,7 +219,7 @@ window.__ModuleLoader__.load({
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '7px 10px', cursor: 'pointer', fontSize: 13 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '9px 12px', cursor: 'pointer', fontSize: 14, fontWeight: 600 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
-      nav: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(72px, 1fr))', gap: 0, marginTop: 12, overflowX: 'auto' },
+      nav: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(72px, 1fr))', gap: 0, marginTop: 12, overflowX: 'auto' },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '11px 4px 10px', cursor: 'pointer', fontSize: 13 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '20px 22px 30px' },
@@ -1917,6 +1917,8 @@ window.__ModuleLoader__.load({
         if (!current) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '选择一个 Run 后查看流程。'))
         const steps = workflow.steps ?? []
         const statusLabel = { pending: '等待', running: '执行中', completed: '已完成', failed: '失败' }
+        const publication = current.publication ?? { state: 'pending', revision: 0, step_id: null }
+        const publicationLabel = { pending: '阶段结果生成中', draft: '草稿已发布', final: '正式结果已发布', broken: '正式结果不可用' }
         const statusColor = status => status === 'failed'
           ? 'var(--dsw-alias-state-error-primary, #e66767)'
           : status === 'completed'
@@ -1932,7 +1934,8 @@ window.__ModuleLoader__.load({
               field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : '等待初始化'),
               field('独立 Judge', judgeStatus),
               field('运行状态', PHASE[current.phase] ?? current.phase),
-              field('源码快照', ['verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已冻结` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查')),
+              field('源码快照', ['verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已冻结` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'),
+              field('结果发布', `${publicationLabel[publication.state] ?? publication.state} · revision ${publication.revision ?? 0}${publication.step_id ? ` · Step ${publication.step_id}` : ''}`)),
             h('div', { style: styles.chips },
               current.artifacts?.request ? chip('打开任务请求', () => openSidebarFile(current.artifacts.request, 'Codetalks request.md')) : null,
               current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null,
@@ -1955,6 +1958,8 @@ window.__ModuleLoader__.load({
           current.artifacts?.formal_outputs?.length ? h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, `正式输出（${current.artifacts.formal_outputs.length}）`),
             h('div', { style: styles.chips }, current.artifacts.formal_outputs.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file))))) : null,
+          h('div', { style: styles.sectionTitle }, '业务流程与入口'),
+          renderFlows(),
           workflow.unresolved?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '未解决事项'), h('pre', { style: styles.text }, JSON.stringify(workflow.unresolved, null, 2))) : null,
           current.validation?.status === 'failed' ? h('div', { style: { ...styles.card, ...styles.error } },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '校验失败详情'), h('span', { style: styles.badge }, `${current.validation.error_count ?? current.validation.errors?.length ?? 0} 条`)),

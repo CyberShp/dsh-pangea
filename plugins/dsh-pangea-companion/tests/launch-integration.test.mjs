@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import { settleAcpTask } from '../src/index.js'
+import { applyTaskExecutionState, settleAcpTask } from '../src/index.js'
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
 
@@ -87,4 +87,24 @@ test('does not describe an expected pending projection as an untrusted result', 
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
   assert.match(source, /if \(health\?\.status === 'warning'\)/)
   assert.doesNotMatch(source, /if \(health\?\.trusted === false\)/)
+})
+
+test('projects a terminal ACP failure over a stale running Run', () => {
+  const snapshot = {
+    current: {
+      run_id: 'run-1', lifecycle_status: 'running', phase: 'STEP_06', terminal: false,
+      attention_required: false, errors: [],
+    },
+    runs: { items: [{ run_id: 'run-1', lifecycle_status: 'running' }] },
+  }
+  const result = applyTaskExecutionState(snapshot, {
+    task_id: 'task-1', status: 'failed', execution_status: 'failed', provider: 'pangea-opencode',
+    terminal_error: 'child does not support requested model',
+  })
+  assert.equal(result.current.lifecycle_status, 'failed')
+  assert.equal(result.current.phase, 'FAILED')
+  assert.equal(result.current.terminal, true)
+  assert.equal(result.current.attention_required, true)
+  assert.deepEqual(result.current.errors, [{ code: 'ACP_AGENT_FAILED', message: 'child does not support requested model' }])
+  assert.equal(snapshot.current.lifecycle_status, 'running')
 })

@@ -133,6 +133,41 @@ async function requestJson(req) {
   return value
 }
 
+// The ACP job is an execution boundary around a Skill Run.  If that boundary
+// reaches a terminal failure, the Run's own state file may still say
+// "running" because the Skill process did not get a chance to settle it.
+// Expose the stronger observed terminal state to readers immediately instead
+// of showing a red ACP error next to an apparently active analysis forever.
+export function applyTaskExecutionState(snapshot, task) {
+  if (!snapshot?.current || !task) return snapshot
+  const executionStatus = task.execution_status
+  const failed = task.status === 'failed' || ['failed', 'interrupted'].includes(executionStatus)
+  const stopped = task.status === 'stopped' || executionStatus === 'stopped'
+  if (!failed && !stopped) return snapshot
+  const current = snapshot.current
+  const message = task.terminal_error || task.launch_error || (failed ? '外部 Agent 执行失败' : 'Run 已停止')
+  const error = failed && !(current.errors ?? []).some(item => item?.code === 'ACP_AGENT_FAILED')
+    ? { code: 'ACP_AGENT_FAILED', message }
+    : null
+  return {
+    ...snapshot,
+    current: {
+      ...current,
+      lifecycle_status: failed ? 'failed' : 'stopped',
+      phase: failed ? 'FAILED' : 'STOPPED',
+      terminal: true,
+      attention_required: failed,
+      errors: error ? [...(current.errors ?? []), error] : current.errors,
+      external_execution: {
+        status: executionStatus || task.status,
+        provider: task.provider ?? null,
+        task_id: task.task_id,
+        message,
+      },
+    },
+  }
+}
+
 async function stateRouteHandler(req, res, monitor, tasks) {
   if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
@@ -143,12 +178,14 @@ async function stateRouteHandler(req, res, monitor, tasks) {
   const sessionId = url.searchParams.get('session_id') ?? undefined
   try {
     const snapshot = await companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
+    const task = snapshot.current?.run_id ? await tasks.getByRun(snapshot.current.run_id, { dataRoot: snapshot.data_root }) : null
+    const effectiveSnapshot = applyTaskExecutionState(snapshot, task)
     if (runId === undefined && sessionId && snapshot.current) {
-      await monitor.bindRun(sessionId, snapshot.current)
-      await tasks.bindRunBySession(sessionId, snapshot.current)
+      await monitor.bindRun(sessionId, effectiveSnapshot.current)
+      await tasks.bindRunBySession(sessionId, effectiveSnapshot.current)
     }
-    snapshot.monitor = await monitor.snapshot({ sessionId, runId: snapshot.current?.run_id })
-    json(res, 200, snapshot)
+    effectiveSnapshot.monitor = await monitor.snapshot({ sessionId, runId: effectiveSnapshot.current?.run_id })
+    json(res, 200, effectiveSnapshot)
   } catch (error) {
     json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
