@@ -1064,6 +1064,11 @@ window.__ModuleLoader__.load({
         const contextTotal = current?.analysis?.total ?? 0
         const contextCompleted = current?.analysis?.completed ?? 0
         const assistantVisible = pageMode === 'analysis' && selectedTask && !['tasks', 'create'].includes(screen.type)
+        const launchEvents = Array.isArray(workbench?.launch_log?.events) ? workbench.launch_log.events : []
+        const outputEvent = [...launchEvents].reverse().find(event => typeof event?.output === 'string' && event.output.trim() !== '')
+        const processStatus = selectedTask?.execution_status
+          ?? (selectedTask?.status === 'failed' ? 'failed' : selectedTask?.status === 'completed' ? 'completed' : selectedTask?.status)
+          ?? 'preparing'
         window.dispatchEvent(new CustomEvent('pangea:run-context', { detail: assistantVisible ? {
           taskId: selectedTask.task_id,
           runId: current?.run_id,
@@ -1072,10 +1077,19 @@ window.__ModuleLoader__.load({
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
           conversations: selectedTask.conversations ?? [],
           activeConversationId: selectedTask.active_conversation_id,
+          process: {
+            status: processStatus,
+            output: selectedTask.last_output || outputEvent?.output || '',
+            error: selectedTask.terminal_error || selectedTask.launch_error || outputEvent?.error || '',
+            events: launchEvents.slice(-12).map(event => ({
+              at: event?.at, stage: event?.stage,
+              label: launchEventLabel(event),
+            })),
+          },
           onSelectConversation: conversationId => { void selectTaskConversation(conversationId) },
           onCreateConversation: () => { void createTaskConversationForCurrent() },
         } : null }))
-      }, [current, error, health?.status, pageMode, screen.type, selectedTask, visible, workbench?.compatibility?.compatible, workbenchError])
+      }, [current, error, health?.status, pageMode, screen.type, selectedTask, visible, workbench?.compatibility?.compatible, workbench?.launch_log?.events, workbenchError])
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
       const methodologyDetailError = workbench?.run_detail?.run_id === current?.run_id && workbench?.run_detail?.status === 'error'
         ? workbench.run_detail.error : ''
@@ -2150,8 +2164,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.itemTitle }, `失败阶段：${launchFailure.stage}`),
             launchFailure.error_code ? h('div', { style: styles.itemMeta }, `错误码：${launchFailure.error_code}`) : null,
             h('div', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, launchFailure.error ?? launchFailure.message ?? selectedTask.launch_error)) : null,
-          renderAcpRuntime(),
-          renderLaunchDiagnostics(launchEvents),
+          /* ACP process output is rendered in the product shell's right assistant panel. */
           selectedTask.status === 'failed' ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在重试…' : '重试启动') : null))
         }
         const uncoveredRisks = risks.filter(isUncoveredRisk)
@@ -2201,8 +2214,6 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.chips },
               current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html')) : null,
               current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md')) : null)) : null,
-          renderAcpRuntime(),
-          renderLaunchDiagnostics(workbench?.launch_log?.events),
           h('details', { style: styles.technical },
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, '技术详情'),
             h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '这里保留流程、证据和复核原始信息，不参与日常主导航。'),

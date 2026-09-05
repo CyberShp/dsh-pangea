@@ -11,6 +11,8 @@ const ACP_PROVIDER_DEFAULTS = [
   { id: 'pangea-opencode', label: 'OpenCode', command: 'opencode', args: ['acp'] },
   { id: 'pangea-claude-code', label: 'Claude Code', kind: 'claude-code', command: 'DSH Claude Code Provider', args: [] },
 ]
+const ANALYSIS_SCENARIOS = new Set(['module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
+const ANALYSIS_MODES = new Set(['speed', 'depth'])
 
 function configuredProviders(env) {
   const raw = env[ACP_RUNTIME_CONFIG_ENV]
@@ -176,9 +178,13 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   if (rejectedFields.length) throw new Error(`新建分析不支持字段：${rejectedFields.join(', ')}`)
   const repository = typeof value?.repository === 'string' ? value.repository.trim() : ''
   const target = typeof value?.target === 'string' ? value.target.trim() : ''
+  const scenario = typeof value?.scenario === 'string' && value.scenario.trim() ? value.scenario.trim() : 'module-analysis'
+  const mode = typeof value?.mode === 'string' && value.mode.trim() ? value.mode.trim() : 'depth'
   const sourceScope = stringList(value?.source_scope)
   if (!repository) throw new Error('repository is required')
   if (!target) throw new Error('target is required')
+  if (!ANALYSIS_SCENARIOS.has(scenario)) throw new Error(`不支持的分析场景：${scenario}`)
+  if (!ANALYSIS_MODES.has(mode)) throw new Error(`不支持的分析模式：${mode}`)
   if (sourceScope.length === 0 && !allowEmptySourceScope) {
     throw new Error('source_scope must contain at least one path')
   }
@@ -189,6 +195,8 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     request_version: '2.0',
     repository,
     target,
+    scenario,
+    mode,
     source_scope: sourceScope,
     asset_ids: stringList(value?.asset_ids),
     provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,
@@ -404,7 +412,7 @@ export async function launchAnalysisSession(
     run,
   }), () => ({ session_id: sessionId }))
   const prompt = [
-    '立即开始已经创建好的 Codetalks Skill 深度型模块分析，完整执行 Step 01–09，不需要再次确认，也不要创建第二个 Run。',
+    `立即开始已经创建好的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，完整执行 Step 01–09，不需要再次确认，也不要创建第二个 Run。`,
     '必须先读取 `.agents/pangea/dsh.md`，再读取下面的 Skill 运行请求并严格执行。',
     `运行请求：${run.request_path}`,
     `Run ID：${run.run_id}`,

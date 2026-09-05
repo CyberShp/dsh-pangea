@@ -119,8 +119,14 @@ test('normalizes Run input and rejects legacy fields and unregistered repositori
   assert.deepEqual(input.source_scope, ['src/session.c'])
   assert.equal(input.request_version, '2.0')
   assert.deepEqual(input.asset_ids, ['asset-1'])
+  assert.equal(input.scenario, 'module-analysis')
+  assert.equal(input.mode, 'depth')
+  const speed = normalizeRunInput({ repository: 'repo-one', target: 'root cause', source_scope: ['src/session.c'], scenario: 'root-cause', mode: 'speed' }, capabilities)
+  assert.equal(speed.scenario, 'root-cause')
+  assert.equal(speed.mode, 'speed')
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], focus: ['recovery'] }, capabilities), /不支持字段.*focus/)
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], test_case_examples: ['TC-1'] }, capabilities), /不支持字段.*test_case_examples/)
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'], mode: 'preview' }, capabilities), /分析模式/)
   assert.throws(() => normalizeRunInput({ repository: 'other', target: 'x', source_scope: ['x.c'] }, capabilities), /not registered/)
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.3\.0/)
 })
@@ -292,12 +298,13 @@ test('starts an ACP provider with the Agent native session configuration', async
       : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     const result = await launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga' },
+      input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga', scenario: 'root-cause', mode: 'speed' },
     }, runner, async () => {}, async () => {}, runtime, { PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify(acpRuntimeConfig) })
     assert.equal(result.job_id, 'subagent-1')
     assert.equal(result.provider, 'pangea-nga')
     assert.equal(providerStarted, true)
     assert.equal(Object.hasOwn(providerRequest, 'agentOptions'), false)
+    assert.match(providerRequest.prompt[0].text, /速度型 root-cause 分析/)
     assert.equal(result.model, null)
     assert.equal(promptCalled, false)
   } finally { await rm(root, { recursive: true, force: true }) }
