@@ -305,3 +305,9 @@ test('shares a selected Task between the workbench and analysis page', async () 
 
   dispose()
 })
+
+test('keeps the product page mounted while a file or browser utility is open', async () => {
+  const { source } = await loadClient()
+  assert.match(source, /data-pangea-product-content/)
+  assert.match(source, /display: utility \? 'none' : undefined/)
+})

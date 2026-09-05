@@ -701,7 +701,8 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'browser' ? 'true' : 'false', onClick: () => openUtility('browser', '浏览器') }, utilityIcon('browser'), h('span', { 'data-pangea-nav-label': true }, '浏览器')),
             h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-pangea-native-model-settings': true, 'data-active': page.id === 'settings' ? 'true' : 'false', onClick: () => service.openPage(scope, 'settings') }, utilityIcon('settings'), h('span', { 'data-pangea-nav-label': true }, '设置')))),
         h('main', { 'data-pangea-page': page.id },
-          utility === 'editor' || utility === 'browser' ? renderUtility(utility) : React.cloneElement(children, { visible: productVisible }),
+          h('div', { 'data-pangea-product-content': true, style: { display: utility ? 'none' : undefined } }, React.cloneElement(children, { visible: productVisible })),
+          utility === 'editor' || utility === 'browser' ? h('div', { style: { position: 'absolute', inset: 0, zIndex: 10, display: 'flex' } }, renderUtility(utility)) : null,
           utility === 'terminal' ? h('div', { 'data-pangea-terminal-dock': true }, ...renderUtility('terminal').props.children) : null))
     }
 
