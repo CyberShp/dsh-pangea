@@ -403,6 +403,54 @@ test('records the local Job identity before releasing the ACP provider start', a
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('blocks ACP start when the durable lifecycle says the attempt is stopping', async () => {
+  const root = await workspace()
+  try {
+    let providerStarted = false
+    let jobHooks
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        async create() { return ok({ sessionId: 'owner-session' }) },
+        async rename() { return ok({}) },
+      },
+    }
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get(id) { return id === owner.id ? owner : undefined } },
+      subagents: {
+        getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+        async start() {
+          providerStarted = true
+          return { id: 'agent-session', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => {} }
+        },
+      },
+      jobs: {
+        start(spec) { jobHooks = spec.run(); void jobHooks.done; return 'subagent-1' },
+        get() { return { startedAt: 1234, status: 'running' } },
+      },
+    }
+    const runner = async call => call.args[0] === 'system'
+      ? capabilities
+      : { run_id: 'skill-run-stopping', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    await assert.rejects(
+      launchAnalysisSession(api, {
+        cwd: root,
+        input: { repository: 'repo-one', target: 'ACP stopping', source_scope: [], provider_id: 'pangea-nga' },
+      }, runner, async () => {}, async () => {}, runtime, process.env, {
+        onJobCreated() {
+          const error = new Error('PANGEA 分析已请求停止')
+          error.code = 'PANGEA_STOP_REQUESTED'
+          throw error
+        },
+      }),
+      /PANGEA 分析已请求停止/,
+    )
+    await jobHooks.done
+    assert.equal(providerStarted, false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('disposes a started ACP session when durable runtime binding fails', async () => {
   const root = await workspace()
   try {

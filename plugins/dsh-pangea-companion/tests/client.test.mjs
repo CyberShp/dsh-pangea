@@ -151,6 +151,16 @@ test('does not present a failed task as pending publication', async () => {
   assert.equal(running.executionLabel, '分析中')
   assert.equal(running.isAnimating, true)
   assert.equal(running.canResume, false)
+  const stopping = exported.deriveRunPresentation(
+    { status: 'running', execution_status: 'stopping', run_id: 'run-1' },
+    { publication: { state: 'pending' } },
+    { status: 'pending' },
+  )
+  assert.equal(stopping.stopping, true)
+  assert.equal(stopping.executionLabel, '正在停止')
+  assert.equal(stopping.publicationLabel, '未发布（停止中）')
+  assert.equal(stopping.isAnimating, false)
+  assert.equal(stopping.canResume, false)
 })
 
 test('returns from a run detail to its selected Run overview', async () => {

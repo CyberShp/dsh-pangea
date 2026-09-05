@@ -55,18 +55,19 @@ window.__ModuleLoader__.load({
         || ['failed', 'needs_attention'].includes(taskStatus)
         || current?.lifecycle_status === 'failed'
       const stopped = executionStatus === 'stopped' || taskStatus === 'stopped'
-      const running = !failed && !stopped && (executionStatus === 'starting' || executionStatus === 'running' || taskStatus === 'preparing' || taskStatus === 'running')
+      const stopping = !failed && !stopped && executionStatus === 'stopping'
+      const running = !failed && !stopped && !stopping && (executionStatus === 'starting' || executionStatus === 'running' || taskStatus === 'preparing' || taskStatus === 'running')
       const publicationState = current?.publication?.state ?? 'pending'
       const healthStatus = health?.status ?? 'pending'
-      const reliabilityLabel = failed ? '分析失败' : stopped ? '已停止' : healthStatus === 'warning' ? '不可用于决策' : healthStatus === 'pending' ? (running ? '阶段结果待发布' : '待验证') : HEALTH[healthStatus] ?? healthStatus
-      const publicationLabel = failed && publicationState === 'pending' ? '未发布（运行失败）' : publicationState === 'pending' && running ? '阶段结果待发布' : publicationState
-      const executionLabel = failed ? '分析失败' : stopped ? '已停止' : running ? '分析中' : executionStatus === 'completed' ? '已完成' : '等待启动'
+      const reliabilityLabel = failed ? '分析失败' : stopped ? '已停止' : stopping ? '等待停止确认' : healthStatus === 'warning' ? '不可用于决策' : healthStatus === 'pending' ? (running ? '阶段结果待发布' : '待验证') : HEALTH[healthStatus] ?? healthStatus
+      const publicationLabel = failed && publicationState === 'pending' ? '未发布（运行失败）' : stopped && publicationState === 'pending' ? '未发布（已停止）' : stopping && publicationState === 'pending' ? '未发布（停止中）' : publicationState === 'pending' && running ? '阶段结果待发布' : publicationState
+      const executionLabel = failed ? '分析失败' : stopped ? '已停止' : stopping ? '正在停止' : running ? '分析中' : executionStatus === 'completed' ? '已完成' : '等待启动'
       const dataTone = healthStatus === 'error' ? 'error' : publicationState === 'final' && healthStatus === 'ok' ? 'ok' : publicationState === 'draft' ? 'notice' : 'neutral'
       const countsAvailability = publicationState === 'pending' || failed || stopped ? 'unpublished' : publicationState === 'draft' ? 'draft' : 'verified'
       const qualityLabel = current?.quality_status ?? current?.verdict ?? 'PENDING'
       const canResume = Boolean(task?.run_id) && !running && !['stopping'].includes(executionStatus) && (failed || stopped || taskStatus === 'needs_attention')
       const resumeBlockedReason = canResume ? null : !task?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件'
-      return { executionStatus, executionLabel, failed, stopped, running, healthStatus, reliabilityLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason }
+      return { executionStatus, executionLabel, failed, stopped, stopping, running, healthStatus, reliabilityLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason }
     }
 
     async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
@@ -1527,6 +1528,8 @@ window.__ModuleLoader__.load({
             showActionNotice(`Run 已停止；DSH 会话取消失败：${stopped.session_cancel.error}`, true)
           } else if (stopped.job_stop?.status === 'error') {
             showActionNotice(`Run 已停止；ACP Agent 停止失败：${stopped.job_stop.error}`, true)
+          } else if (stopped.job_stop?.result === 'requested') {
+            showActionNotice(`已请求停止 ${current.run_id}，等待 ACP Job 确认`)
           } else {
             showActionNotice(`已停止 ${current.run_id}`)
           }
@@ -2193,7 +2196,7 @@ window.__ModuleLoader__.load({
       function renderHome() {
         if (repositoryState?.onboarding_required) return renderRepositoryImport(true)
         const runItems = workbench?.runs?.items ?? snapshot?.runs ?? []
-        const runningTasks = taskItems.filter(task => ['preparing', 'running'].includes(task.status))
+        const runningTasks = taskItems.filter(task => ['preparing', 'starting', 'running', 'stopping'].includes(task.execution_status) || ['preparing', 'running'].includes(task.status))
         const attentionTasks = taskItems.filter(task => ['needs_attention', 'failed'].includes(task.status))
         const completedTasks = taskItems.filter(task => task.status === 'completed')
         const reportRuns = runItems.filter(run => run.report_available === true)
@@ -2233,7 +2236,7 @@ window.__ModuleLoader__.load({
                 h('span', { style: { fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: task.title }, task.title),
                 h('span', { style: { color: '#59616c', fontSize: 13 } }, task.repository),
                 h('span', { style: { color: '#59616c', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.target),
-                h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.status) } }, taskStatusLabel(task.status)),
+                h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.execution_status === 'stopping' ? 'stopping' : task.status) } }, taskStatusLabel(task.execution_status === 'stopping' ? 'stopping' : task.status)),
                 h('span', { style: { color: '#59616c', fontSize: 13, fontVariantNumeric: 'tabular-nums' } }, formatDate(task.updated_at)),
                 h('span', { style: { color: '#7a818b', fontSize: 20, lineHeight: 1, letterSpacing: 1 }, 'aria-hidden': true }, '⋮'))
             }) : h('div', { style: { ...styles.empty, padding: 18 } }, '当前没有需要处理的任务。')),
@@ -2255,7 +2258,9 @@ window.__ModuleLoader__.load({
       function taskStatusLabel(status) {
         return {
           preparing: '正在准备',
+          starting: '正在启动',
           running: '分析中',
+          stopping: '正在停止',
           needs_attention: '需要处理',
           completed: '已完成',
           stopped: '已停止',
@@ -2267,6 +2272,7 @@ window.__ModuleLoader__.load({
         if (status === 'failed' || status === 'needs_attention') return '#c7000b'
         if (status === 'stopped') return '#6b7280'
         if (status === 'preparing') return '#d97706'
+        if (status === 'starting' || status === 'stopping') return '#6b7280'
         if (status === 'running') return '#2f7acb'
         return '#2da44e'
       }
@@ -2274,7 +2280,7 @@ window.__ModuleLoader__.load({
       function renderTasks() {
         const query = taskQuery.trim().toLowerCase()
         const filtered = taskItems.filter(task => {
-          if (taskStatus !== '全部' && task.status !== taskStatus) return false
+          if (taskStatus !== '全部' && task.status !== taskStatus && !(taskStatus === 'running' && ['starting', 'running', 'stopping'].includes(task.execution_status))) return false
           return !query || [task.title, task.target, task.repository, task.task_id, task.run_id].filter(Boolean).join(' ').toLowerCase().includes(query)
         })
         const statusFilters = [
@@ -2304,7 +2310,7 @@ window.__ModuleLoader__.load({
             },
             h('span', { style: { fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.title),
             h('span', { style: { color: '#59616c', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.repository),
-            h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.status) } }, taskStatusLabel(task.status)),
+            h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.execution_status === 'stopping' ? 'stopping' : task.status) } }, taskStatusLabel(task.execution_status === 'stopping' ? 'stopping' : task.status)),
             h('span', { style: { color: '#59616c', fontSize: 12, fontFamily: 'ui-monospace, monospace' } }, task.task_id),
             h('span', { style: { color: '#59616c', fontSize: 13, fontVariantNumeric: 'tabular-nums' } }, formatDate(task.updated_at))))
               : h('div', { style: { ...styles.empty, padding: 24 } }, query || taskStatus !== '全部' ? '没有符合条件的任务。' : '还没有分析任务。')))
@@ -2340,6 +2346,8 @@ window.__ModuleLoader__.load({
         const runNeedsAttention = current.attention_required || presentation.failed
         const nextAction = runNeedsAttention
           ? { label: '分析需要处理', hint: '当前 Run 未正常完成，请先查看下方错误，再决定是否重新启动。', target: 'workflow' }
+          : presentation.stopping
+          ? { label: '正在停止', hint: '已请求停止，等待 ACP Job 报告最终状态；确认前不能继续分析。', target: 'workflow' }
           : presentation.healthStatus === 'warning'
           ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
           : !current.terminal

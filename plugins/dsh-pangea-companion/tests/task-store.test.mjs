@@ -271,13 +271,14 @@ test('ignores late output from an older attempt at the task level', async () => 
       jobId: 'job-old', provider: 'pangea-opencode', ownerSessionId: 'owner',
       attemptId: 'attempt-old',
     })
+    const next = await store.prepareProviderLaunch('task-late-attempt', 'pangea-opencode')
     await store.bindJob('task-late-attempt', {
       jobId: 'job-new', provider: 'pangea-opencode', ownerSessionId: 'owner',
-      attemptId: 'attempt-new',
+      attemptId: next.attempt_id,
     })
     await store.recordJobActivity({ jobId: 'job-old', ownerSessionId: 'owner', attemptId: 'attempt-old' }, '旧输出')
     const task = await store.get('task-late-attempt')
-    assert.equal(task.attempt_id, 'attempt-new')
+    assert.equal(task.attempt_id, next.attempt_id)
     assert.equal(task.last_output, null)
     assert.equal(task.attempts.find(item => item.attempt_id === 'attempt-old').last_output, '旧输出')
   } finally { await rm(root, { recursive: true, force: true }) }
@@ -294,5 +295,44 @@ test('keeps the first terminal settlement for an attempt', async () => {
     assert.equal(completed.status, 'completed')
     assert.equal(lateFailure.status, 'completed')
     assert.equal(lateFailure.attempts[0].execution_status, 'completed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('keeps a requested stop pending until the Job reports a terminal state', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-stopping-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-stopping' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '停止确认' } })
+    await store.prepareProviderLaunch('task-stopping', 'pangea-opencode')
+    const stopping = await store.markStopping('task-stopping')
+    assert.equal(stopping.execution_status, 'stopping')
+    const bound = await store.bindJob('task-stopping', {
+      jobId: 'job-stopping', provider: 'pangea-opencode', ownerSessionId: 'owner', attemptId: stopping.attempt_id, jobStartedAt: 100,
+    })
+    assert.equal(bound.execution_status, 'stopping')
+    assert.equal(bound.status, 'preparing')
+    assert.equal((await store.get('task-stopping')).attempts[0].execution_status, 'stopping')
+    const stopped = await store.settleJob({ jobId: 'job-stopping', ownerSessionId: 'owner', attemptId: stopping.attempt_id }, { status: 'killed' })
+    assert.equal(stopped.execution_status, 'stopped')
+    assert.equal(stopped.status, 'stopped')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('does not promote a late Job binding from an older attempt to the current task', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-late-bind-'))
+  try {
+    let attempt = 0
+    const store = createTaskStore({
+      storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-late-bind', attemptIdFactory: () => `attempt-${++attempt}`,
+    })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '迟到绑定' } })
+    const first = await store.prepareProviderLaunch('task-late-bind', 'pangea-opencode')
+    const second = await store.prepareProviderLaunch('task-late-bind', 'pangea-opencode')
+    const bound = await store.bindJob('task-late-bind', {
+      jobId: 'job-old', provider: 'pangea-opencode', ownerSessionId: 'owner-old', attemptId: first.attempt_id,
+    })
+    assert.equal(bound.attempt_id, second.attempt_id)
+    assert.equal(bound.job_id, null)
+    assert.equal(bound.attempts.find(item => item.attempt_id === first.attempt_id).job_id, 'job-old')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

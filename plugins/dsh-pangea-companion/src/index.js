@@ -320,6 +320,7 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Da
   const timeoutMs = 5 * 60 * 1000
   for (const task of taskItems) {
     if (!['preparing', 'running'].includes(task.status)) continue
+    if (task.execution_status === 'stopping') continue
     if (task.job_id) continue
     const conversation = [...task.conversations].reverse().find(item => item.kind === 'analysis')
     if (!conversation) continue
@@ -606,13 +607,21 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
             attemptId: preparedTask.attempt_id,
             ownerSessionId,
           }),
-          onJobCreated: ({ jobId, ownerSessionId, jobStartedAt }) => tasks.bindJob(task.task_id, {
-            jobId,
-            provider: selectedProvider,
-            ownerSessionId,
-            attemptId: preparedTask.attempt_id,
-            jobStartedAt,
-          }),
+          onJobCreated: async ({ jobId, ownerSessionId, jobStartedAt }) => {
+            const bound = await tasks.bindJob(task.task_id, {
+              jobId,
+              provider: selectedProvider,
+              ownerSessionId,
+              attemptId: preparedTask.attempt_id,
+              jobStartedAt,
+            })
+            if (bound.execution_status === 'stopping') {
+              const error = new Error('PANGEA 分析已请求停止，ACP 尚未放行')
+              error.code = 'PANGEA_STOP_REQUESTED'
+              throw error
+            }
+            return bound
+          },
           onAgentStarted: ({ agent_session_id, pid }) => tasks.bindAgentRuntime(task.task_id, {
             attemptId: preparedTask.attempt_id,
             agentSessionId: agent_session_id,
@@ -626,11 +635,16 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           stage: 'launch_failed', status: 'error', error,
           error_code: typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
         })
-        await tasks.markLaunchFailed(
-          task.task_id,
-          error instanceof Error ? error.message : String(error),
-          typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
-        )
+        const latest = await tasks.get(task.task_id)
+        if (latest?.execution_status === 'stopping' || error?.code === 'PANGEA_STOP_REQUESTED') {
+          await tasks.markStopped(task.task_id, error?.code === 'PANGEA_STOP_REQUESTED' ? null : error)
+        } else {
+          await tasks.markLaunchFailed(
+            task.task_id,
+            error instanceof Error ? error.message : String(error),
+            typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
+          )
+        }
         throw error
       } finally {
         launchLocks.delete(task.task_id)
@@ -670,6 +684,9 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         })
       }
       const stopJobs = runtimeService(runtime, 'jobs')
+      if (requestedTask && ['preparing', 'starting', 'running'].includes(requestedTask.execution_status ?? (requestedTask.status === 'running' ? 'running' : ''))) {
+        requestedTask = await tasks.markStopping(requestedTask.task_id)
+      }
       let jobStop = { status: 'not_bound', job_id: requestedTask?.job_id ?? null, error: null }
       if (requestedTask?.job_id && stopJobs?.kill) {
         const owner = runtimeService(runtime, 'agents')?.get?.(requestedTask.owner_session_id)
@@ -718,7 +735,21 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       }
       await tasks.reconcileRuns([stopped.run], { dataRoot: stopped.data_root })
       const stopError = [runStopError, jobStop.error].filter(Boolean).join('；') || null
-      if (task) await tasks.markStopped(task.task_id, stopError)
+      const jobBound = Boolean(task?.job_id)
+      const stopConfirmed = !jobBound && !launchLocks.has(task?.task_id) || jobStop.result === 'already-finished'
+      if (task && stopConfirmed) {
+        if (jobStop.result === 'already-finished') {
+          try {
+            const snapshot = readJobSnapshot(runtime, task)
+            if (['completed', 'failed', 'killed'].includes(snapshot?.status)) {
+              await settleAcpTask(runtime, tasks, launchLogs, snapshot, jobOwner(runtime, task))
+            }
+          } catch { /* the stop response still reports the exact confirmation state */ }
+        }
+        await tasks.markStopped(task.task_id, stopError)
+      } else if (task && stopError) {
+        await tasks.markStopping(task.task_id, stopError)
+      }
       return json(res, 200, {
         ...stopped,
         job_stop: jobStop,

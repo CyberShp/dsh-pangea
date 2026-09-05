@@ -392,6 +392,8 @@ export class TaskStore {
     const now = this.now()
     const id = text(attemptId) || task.attempt_id || this.attemptIdFactory()
     const previousAttempt = task.attempts.find(item => item.attempt_id === id)
+    const preservedStopping = previousAttempt?.execution_status === 'stopping'
+    const bindCurrent = !task.attempt_id || task.attempt_id === id
     const attempt = normalizeAttempt({
       attempt_id: id,
       job_id: job,
@@ -400,22 +402,24 @@ export class TaskStore {
       runtime_instance_id: runtimeInstanceId,
       job_started_at: jobStartedAt,
       agent_session_id: agentSessionId,
-      execution_status: 'running',
+      execution_status: preservedStopping ? 'stopping' : 'running',
       last_activity_at: now,
       started_at: previousAttempt?.started_at ?? now,
     })
     task.attempts = task.attempts.filter(item => item.attempt_id !== id)
     task.attempts.push(attempt)
-    task.attempt_id = id
-    task.job_id = job
-    task.provider = text(provider) || task.provider
-    task.owner_session_id = text(ownerSessionId) || task.owner_session_id
-    task.runtime_instance_id = text(runtimeInstanceId) || task.runtime_instance_id
-    task.job_started_at = Number.isFinite(jobStartedAt) ? jobStartedAt : task.job_started_at
-    task.agent_session_id = text(agentSessionId) || task.agent_session_id
-    task.execution_status = 'running'
-    task.status = 'running'
-    task.last_activity_at = now
+    if (bindCurrent) {
+      task.attempt_id = id
+      task.job_id = job
+      task.provider = text(provider) || task.provider
+      task.owner_session_id = text(ownerSessionId) || task.owner_session_id
+      task.runtime_instance_id = text(runtimeInstanceId) || task.runtime_instance_id
+      task.job_started_at = Number.isFinite(jobStartedAt) ? jobStartedAt : task.job_started_at
+      task.agent_session_id = text(agentSessionId) || task.agent_session_id
+      task.execution_status = preservedStopping ? 'stopping' : 'running'
+      if (!preservedStopping) task.status = 'running'
+      task.last_activity_at = now
+    }
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
@@ -529,9 +533,28 @@ export class TaskStore {
     return structuredClone(task)
   }
 
+  async markStopping(taskId, error = null) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    if (['completed', 'failed', 'stopped', 'interrupted'].includes(task.execution_status)) return structuredClone(task)
+    task.execution_status = 'stopping'
+    if (error) task.launch_error = text(error)
+    const attempt = task.attempts.find(item => item.attempt_id === task.attempt_id)
+    if (attempt && !['completed', 'failed', 'stopped', 'interrupted'].includes(attempt.execution_status)) {
+      attempt.execution_status = 'stopping'
+      if (error) attempt.terminal_error = text(error)
+      attempt.last_activity_at = this.now()
+    }
+    task.last_activity_at = this.now()
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
   async markStopped(taskId, error = null) {
     await this.ready
     const task = this.requireTask(taskId)
+    if (['completed', 'failed', 'interrupted', 'stopped'].includes(task.execution_status)) return structuredClone(task)
     task.status = 'stopped'
     task.execution_status = 'stopped'
     task.launch_error = text(error) || null
