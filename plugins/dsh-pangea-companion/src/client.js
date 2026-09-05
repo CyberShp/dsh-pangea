@@ -593,7 +593,8 @@ window.__ModuleLoader__.load({
       if (screen.type === 'risk') return 'risks'
       if (screen.type === 'case') return 'cases'
       if (screen.type === 'evidence-detail') return 'evidence'
-      if (['workflow', 'flows', 'review'].includes(screen.type)) return 'overview'
+      if (screen.type === 'flows') return 'workflow'
+      if (screen.type === 'review') return 'review'
       return screen.type
     }
 
@@ -1640,9 +1641,9 @@ window.__ModuleLoader__.load({
         : screen.type === 'create' ? '新建分析'
           : screen.type === 'workflow' ? '运行流程'
             : screen.type === 'flows' ? '业务流程'
-          : screen.type === 'risks' ? '待处理'
+          : screen.type === 'risks' ? '风险'
           : screen.type === 'risk' ? (riskById.get(screen.id)?.risk_id || '风险详情')
-            : screen.type === 'cases' ? '测试计划'
+            : screen.type === 'cases' ? '测试用例'
               : screen.type === 'case' ? (caseById.get(screen.id)?.test_case_id || '用例详情')
                 : screen.type === 'evidence' ? '证据'
                   : screen.type === 'evidence-detail' ? '证据详情'
@@ -1651,7 +1652,7 @@ window.__ModuleLoader__.load({
                         : screen.type === 'repository-import' ? '添加源码仓库' : '复核'
 
       const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? [] : [
-        ['overview', '概览'], ['risks', '风险'], ['cases', '测试用例'], ['evidence', '分析资产'],
+        ['overview', '概览'], ['risks', '风险'], ['cases', '测试用例'], ['workflow', '流程'], ['review', '复核'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -1665,7 +1666,7 @@ window.__ModuleLoader__.load({
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
             screen.type !== 'home' && screen.type !== 'tasks' ? h('button', { type: 'button', style: styles.backButton, onClick: () => {
-              if (pageMode === 'analysis' && ['overview', 'risks', 'cases', 'evidence'].includes(screen.type)) jump('tasks')
+              if (pageMode === 'analysis' && ['overview', 'risks', 'cases', 'review'].includes(screen.type)) jump('tasks')
               else goBack()
             } }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
@@ -2287,7 +2288,7 @@ window.__ModuleLoader__.load({
                   h('span', { style: styles.badge }, `${risk.linked_test_case_ids?.length ?? 0} 条关联用例`),
                   h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'))))
             )
-          }) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('risks', '没有符合条件的风险。')))))
+          }) : h('div', { style: health?.status === 'warning' ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.status === 'warning' ? styles.error : styles.empty }, collectionEmpty('risks', '没有符合条件的风险。')))))
       }
 
       function renderRiskDetail() {
@@ -2376,7 +2377,7 @@ window.__ModuleLoader__.load({
                     h('div', { style: styles.itemMeta }, `${text(item.case_type, '未标注类型')} · ${item.linked_risk_ids?.length ?? 0} 条关联风险 · ${text(item.status, 'draft')}${selectable ? '' : ' · 分析完成后可加入计划'}`))))
               })
             )
-          }) : h('div', { style: health?.trusted === false ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.trusted === false ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
+          }) : h('div', { style: health?.status === 'warning' ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.status === 'warning' ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
       }
 
       function renderExecutionResults() {

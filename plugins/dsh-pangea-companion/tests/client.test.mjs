@@ -34,8 +34,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /分析任务/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
   assert.match(source, /repeat\(4, minmax\(72px, 1fr\)\)/)
-  assert.match(source, /\['overview', '概览'\], \['risks', '风险'\], \['cases', '测试用例'\], \['evidence', '分析资产'\]/)
-  assert.doesNotMatch(source, /\['workflow', '流程'\], \['risks', '风险'\]/)
+  assert.match(source, /\['overview', '概览'\], \['risks', '风险'\], \['cases', '测试用例'\], \['workflow', '流程'\], \['review', '复核'\]/)
   assert.doesNotMatch(source, /\['monitor', '监控'\]/)
   assert.doesNotMatch(source, /if \(screen\.type === 'monitor'\) body = renderMonitor/)
   assert.match(source, /风险/)
@@ -117,6 +116,7 @@ test('shows a health alert only for an actual reader warning', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /const healthAlert = .*health\?\.status === 'warning'/s)
   assert.doesNotMatch(source, /const healthAlert = .*health\?\.trusted === false/s)
+  assert.doesNotMatch(source, /health\?\.trusted === false/)
 })
 
 test('returns from a run detail to its selected Run overview', async () => {
