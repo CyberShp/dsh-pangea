@@ -177,6 +177,14 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const sourceSnapshot = { ...recordedSourceSnapshot, ...(await verifySourceSnapshot(runDirectory, runId, recordedSourceSnapshot)) }
   const validation = state?.validation ?? { status: 'not_checked', error_count: 0, errors: [] }
   const completed = state?.completed_steps?.length ?? 0
+  const finalExpected = life.lifecycle_status === 'complete'
+    || state?.status === 'complete'
+    || (state?.completed_steps ?? []).includes('09')
+    || reportAvailable
+  const publicationState = projection.status === 'verified'
+    ? (finalExpected ? 'final' : 'draft')
+    : (finalExpected ? 'broken' : 'pending')
+  const projectionIssues = projection.status === 'verified' || publicationState === 'pending' ? [] : projection.issues
   const workflow = {
     steps: await stepRows(state, liveDocuments, formalOutputs, metadata.skill_root),
     completed_steps: state?.completed_steps ?? [],
@@ -190,8 +198,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     error_history: [],
     step_progress: state?.step_progress ?? null,
   }
-  if (projection.status !== 'verified') {
-    workflow.unresolved = projection.issues.map(message => ({ code: 'PROJECTION_UNAVAILABLE', message }))
+  if (projectionIssues.length > 0) {
+    workflow.unresolved = projectionIssues.map(message => ({ code: 'PROJECTION_UNAVAILABLE', message }))
   }
   const projectionValue = projection.value ?? {}
   const summary = {
@@ -226,15 +234,22 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       issues: [],
       counts: { effective: 0 },
     },
+    publication: {
+      state: publicationState,
+      revision: projection.status === 'verified' ? 1 : 0,
+      step_id: projection.status === 'verified' ? '09' : null,
+    },
     data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
     reader_health: {
-      status: projection.status === 'verified' && sourceSnapshot.status !== 'corrupt' ? 'ok' : 'warning',
+      status: projection.status === 'verified' && sourceSnapshot.status !== 'corrupt'
+        ? 'ok'
+        : publicationState === 'pending' && sourceSnapshot.status !== 'corrupt' ? 'pending' : 'warning',
       trusted: projection.status === 'verified' && sourceSnapshot.status !== 'corrupt',
       data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
-      issues: [...projection.issues, ...(sourceSnapshot.status === 'corrupt' ? ['源码快照完整性校验失败'] : [])],
+      issues: [...projectionIssues, ...(sourceSnapshot.status === 'corrupt' ? ['源码快照完整性校验失败'] : [])],
       count_checks: {},
     },
-    reader_warnings: projection.issues,
+    reader_warnings: projectionIssues,
     artifacts: {
       run_directory: runDirectory,
       request: metadata.request_path,

@@ -46,6 +46,34 @@ test('reads Codetalks state and maps Step 01–09 Markdown lifecycle', async () 
     assert.equal(snapshot.current.workflow.steps[3].status, 'running')
     assert.equal(snapshot.current.workflow.actions.length, 0)
     assert.equal(snapshot.current.workflow.units.length, 0)
+    assert.equal(snapshot.current.publication.state, 'pending')
+    assert.equal(snapshot.current.reader_health.status, 'pending')
+    assert.deepEqual(snapshot.current.workflow.unresolved, [])
+    assert.deepEqual(snapshot.current.reader_warnings, [])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('marks a completed Run without its final projection as broken', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-missing-final-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'missing-final-projection'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'missing projection' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'complete', current_step: '09', completed_steps: ['01', '02', '03', '04', '05', '06', '07', '08', '09'],
+      verdict: 'PASS', judge: { required: true, status: 'complete' },
+    })
+    await mkdir(path.join(runRoot, '正式输出'), { recursive: true })
+    await writeFile(path.join(runRoot, '正式输出', '完整分析报告.md'), '# 完整分析报告\n', 'utf8')
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.publication.state, 'broken')
+    assert.equal(current.reader_health.status, 'warning')
+    assert.equal(current.workflow.unresolved[0].code, 'PROJECTION_UNAVAILABLE')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

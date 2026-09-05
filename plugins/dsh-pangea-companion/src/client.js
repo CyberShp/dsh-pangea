@@ -1675,7 +1675,7 @@ window.__ModuleLoader__.load({
         return h(target ? 'button' : 'div', props, h('div', { style: styles.metricNumber }, countKey ? displayCount(countKey, number) : String(number ?? 0)), h('div', { style: styles.metricName }, name))
       }
       function collectionEmpty(key, normal) {
-        return countCheck(key)?.status === 'mismatch' || health?.trusted === false ? '数据读取异常：不能把空列表解释为“没有数据”。' : normal
+        return countCheck(key)?.status === 'mismatch' || health?.status === 'warning' ? '数据读取异常：不能把空列表解释为“没有数据”。' : normal
       }
       function healthStyle() {
         if (health?.status === 'error') return { ...styles.card, ...styles.healthError }
@@ -1688,13 +1688,14 @@ window.__ModuleLoader__.load({
           .map(key => [key, health.count_checks?.[key]])
           .filter(([, check]) => check?.report !== null && check?.report !== undefined)
         const names = { risks: '风险', test_cases: '测试用例', business_flows: '业务流程' }
-        return h('div', { style: healthStyle(), role: health.trusted === false ? 'alert' : 'status' },
+        const warning = health.status === 'warning'
+        return h('div', { style: healthStyle(), role: warning ? 'alert' : 'status' },
           h('div', { style: styles.row },
-            h('div', { style: styles.itemTitle }, compact && health.trusted === false ? '数据读取异常' : '数据状态'),
+            h('div', { style: styles.itemTitle }, compact && warning ? '数据读取异常' : '数据状态'),
             h('span', { style: styles.badge }, HEALTH[health.status] ?? health.status ?? '未知')),
           h('div', { style: styles.itemMeta }, `数据源：${SOURCE[current?.data_source] ?? current?.data_source ?? '未知'}`),
           checks.length ? h('div', { style: { ...styles.itemMeta, marginTop: 5 } }, checks.map(([key, check]) => `${names[key]} ${check.structured}${check.status === 'match' ? ' = ' : ' ≠ '}报告 ${check.report}`).join(' · ')) : null,
-          health.trusted === false ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前结构化结果不可信。尤其当风险/用例显示 0 时，不能解释为“没有风险/用例”。') : null,
+          warning ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前结构化结果不可信。尤其当风险/用例显示 0 时，不能解释为“没有风险/用例”。') : null,
           !compact && health.issues?.length ? h('ul', { style: styles.list }, health.issues.map((item, index) => h('li', { key: `${index}:${item}` }, item))) : null)
       }
 
@@ -2139,7 +2140,7 @@ window.__ModuleLoader__.load({
         const runNeedsAttention = current.attention_required || ['needs_attention', 'failed'].includes(selectedTask.status)
         const nextAction = runNeedsAttention
           ? { label: '分析需要处理', hint: '当前 Run 未正常完成，请先查看下方错误，再决定是否重新启动。', target: 'workflow' }
-          : health?.trusted === false
+          : health?.status === 'warning'
           ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
           : !current.terminal
             ? { label: '等待分析完成', hint: `Codetalks Skill 已完成 ${completed}/${total} 个步骤，可查看完整流程。`, target: 'workflow' }
@@ -2156,7 +2157,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.decisionHint }, nextAction.hint),
             h('button', { type: 'button', style: { ...styles.button, marginTop: 9 }, onClick: () => jump(nextAction.target) }, nextAction.target === 'workflow' ? '查看运行细节' : '进入处理'),
             h('div', { style: styles.decisionBand },
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析可信度'), h('div', { style: styles.decisionValue }, health?.trusted === false ? '不可用于决策' : HEALTH[health?.status] ?? health?.status ?? '未知')),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析可信度'), h('div', { style: styles.decisionValue }, health?.status === 'warning' ? '不可用于决策' : health?.status === 'pending' ? '阶段结果生成中' : HEALTH[health?.status] ?? health?.status ?? '未知')),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, `${testCases.length} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, `${evidence.length} 条证据`)))),
           renderHealthCard(false),
@@ -2505,7 +2506,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()
 
-      const healthAlert = !['home', 'overview', 'environment'].includes(screen.type) && health?.trusted === false ? renderHealthCard(true) : null
+      const healthAlert = !['home', 'overview', 'environment'].includes(screen.type) && health?.status === 'warning' ? renderHealthCard(true) : null
       const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),

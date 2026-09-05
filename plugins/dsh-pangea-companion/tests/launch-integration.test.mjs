@@ -82,3 +82,9 @@ test('settles an ACP Job with its owner identity', async () => {
     jobId: 'job-identity', ownerSessionId: 'owner-1', runtimeInstanceId: 'runtime-1',
   })
 })
+
+test('does not describe an expected pending projection as an untrusted result', async () => {
+  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
+  assert.match(source, /if \(health\?\.status === 'warning'\)/)
+  assert.doesNotMatch(source, /if \(health\?\.trusted === false\)/)
+})

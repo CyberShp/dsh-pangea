@@ -113,6 +113,12 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.equal(pages[2].available(), false)
 })
 
+test('shows a health alert only for an actual reader warning', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  assert.match(source, /const healthAlert = .*health\?\.status === 'warning'/s)
+  assert.doesNotMatch(source, /const healthAlert = .*health\?\.trusted === false/s)
+})
+
 test('workbench API lists runs and starts or stops through explicit actions', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported

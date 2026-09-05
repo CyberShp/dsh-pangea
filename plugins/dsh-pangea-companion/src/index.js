@@ -95,7 +95,7 @@ function renderStatus(value) {
     `源码快照：${['verified', 'manifest_verified'].includes(run.source_snapshot?.status) ? `${run.source_snapshot.file_count ?? 0} 个文件，已冻结` : run.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'}`,
     `读取健康：${HEALTH_LABELS[health?.status] ?? health?.status ?? '未知'}`,
   ]
-  if (health?.trusted === false) {
+  if (health?.status === 'warning') {
     lines.push('重要：当前结构化结果与报告不一致，不能把 0 条风险/用例解释为“没有风险/用例”。')
   }
   if (run.errors.length > 0) {
