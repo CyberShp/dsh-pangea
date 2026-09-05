@@ -176,6 +176,7 @@ test('workbench API lists runs and starts or stops through explicit actions', as
 
   await exported.requestWorkbench({ cwd: '/tmp/workspace', cursor: 20, limit: 10, fetcher })
   await exported.requestWorkbenchAction({ cwd: '/tmp/workspace', action: 'stop', payload: { run_id: 'run-1' }, fetcher })
+  await exported.requestAssetCatalog({ cwd: '/tmp/workspace', repositoryId: 'repo-one', fetcher })
   await exported.testAcpSettings(fetcher)
 
   const listUrl = new URL(calls[0].url, 'http://localhost')
@@ -183,7 +184,10 @@ test('workbench API lists runs and starts or stops through explicit actions', as
   assert.equal(listUrl.searchParams.get('limit'), '10')
   assert.equal(calls[1].options.method, 'POST')
   assert.deepEqual(JSON.parse(calls[1].options.body), { action: 'stop', run_id: 'run-1' })
-  assert.deepEqual(JSON.parse(calls[2].options.body), { action: 'test' })
+  const assetsUrl = new URL(calls[2].url, 'http://localhost')
+  assert.equal(assetsUrl.searchParams.get('repository_id'), 'repo-one')
+  assert.equal(calls[3].options.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[3].options.body), { action: 'test' })
 })
 
 test('client builds focused discussion drafts, appends them to the active DSH composer, and resolves evidence paths', async () => {

@@ -2712,6 +2712,7 @@ window.__ModuleLoader__.load({
     exports.requestSnapshot = requestSnapshot
     exports.requestSourceSnippet = requestSourceSnippet
     exports.requestRunExport = requestRunExport
+    exports.requestAssetCatalog = requestAssetCatalog
     exports.requestEnvironments = requestEnvironments
     exports.saveEnvironment = saveEnvironment
     exports.removeEnvironment = removeEnvironment
