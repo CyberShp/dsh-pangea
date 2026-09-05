@@ -818,7 +818,7 @@ window.__ModuleLoader__.load({
       let revision = 0
       let defaultPageId
       let snapshot = Object.freeze({ revision, pages: Object.freeze([]) })
-      let runDraft = Object.freeze({ revision: 0, requestId: 0, assetIds: Object.freeze([]) })
+      let runDraft = Object.freeze({ revision: 0, requestId: 0, intent: 'create', runId: null, assetIds: Object.freeze([]) })
       let selectedTaskId
       const initializedDefaultSessions = new Set()
       const productSessions = new Set()
@@ -1032,7 +1032,14 @@ window.__ModuleLoader__.load({
       }
 
       function requestRunCreation(scope, patch = {}) {
-        updateRunDraft({ ...patch, requestId: runDraft.requestId + 1 })
+        updateRunDraft({ ...patch, intent: 'create', runId: null, requestId: runDraft.requestId + 1 })
+        return openPage(scope, 'analysis')
+      }
+
+      function requestRunSelection(scope, runId) {
+        const value = typeof runId === 'string' ? runId.trim() : ''
+        if (!value) return false
+        updateRunDraft({ intent: 'select-run', runId: value, requestId: runDraft.requestId + 1 })
         return openPage(scope, 'analysis')
       }
 
@@ -1051,6 +1058,7 @@ window.__ModuleLoader__.load({
         updateRunDraft,
         subscribeRunDraft,
         requestRunCreation,
+        requestRunSelection,
         registerProductSession,
         selectTask,
         getSelectedTaskId,

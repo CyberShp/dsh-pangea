@@ -306,6 +306,23 @@ test('shares a selected Task between the workbench and analysis page', async () 
   dispose()
 })
 
+test('deep-links a report to the selected Run without a task index entry', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  const scope = { sessionId: 'session-1', cwd: '/tmp/project' }
+
+  assert.equal(service.requestRunSelection(scope, 'analysis-260905-01'), true)
+  const draft = service.getRunDraft()
+  assert.equal(draft.revision, 1)
+  assert.equal(draft.requestId, 1)
+  assert.equal(draft.intent, 'select-run')
+  assert.equal(draft.runId, 'analysis-260905-01')
+  assert.deepEqual(Array.from(draft.assetIds), [])
+  assert.equal(sidebar.opened[0].seed.type, 'dsh-pangea:analysis')
+})
+
 test('keeps the product page mounted while a file or browser utility is open', async () => {
   const { source } = await loadClient()
   assert.match(source, /data-pangea-product-content/)

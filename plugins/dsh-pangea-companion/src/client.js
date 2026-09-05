@@ -966,10 +966,19 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (pageMode !== 'analysis' || !runDraft?.requestId || runDraft.requestId === handledRunDraftRequest.current) return
         handledRunDraftRequest.current = runDraft.requestId
+        if (runDraft.intent === 'select-run' && runDraft.runId) {
+          const task = workbench?.tasks?.items?.find(item => item.run_id === runDraft.runId)
+          ctx?.pangea?.selectTask?.(task?.task_id)
+          setSelectedTaskId(task?.task_id)
+          setSelectedRun(runDraft.runId)
+          setScreen({ type: 'overview' })
+          setHistory([])
+          return
+        }
         setCreateForm(value => ({ ...value, asset_ids: [...new Set(runDraft.assetIds ?? [])] }))
         setScreen({ type: 'create' })
         setHistory([])
-      }, [pageMode, runDraft?.requestId])
+      }, [ctx?.pangea, pageMode, runDraft?.assetIds, runDraft?.intent, runDraft?.requestId, runDraft?.runId, workbench?.tasks?.items])
       React.useEffect(() => {
         const repositories = workbench?.capabilities?.repositories ?? []
         if (repositories.length > 0) setCreateForm(value => value.repository ? value : { ...value, repository: repositories[0] })
@@ -1296,6 +1305,21 @@ window.__ModuleLoader__.load({
       function openProductPage(pageId, label) {
         const opened = ctx?.pangea?.openPage?.(scope, pageId) === true
         if (!opened) showActionNotice(`${label}当前不可用，请检查对应插件是否已加载。`, true)
+      }
+      function openAnalysisCreate() {
+        // The workbench already owns the analysis form state.  Move directly
+        // into it instead of sending the user through the task list first.
+        setScreen({ type: 'create' })
+        setHistory([])
+      }
+      function openAnalysisRun(run) {
+        const task = taskItems.find(item => item.run_id === run?.run_id)
+        if (task) {
+          openTaskFromWorkbench(task)
+          return
+        }
+        const selected = ctx?.pangea?.requestRunSelection?.(scope, run?.run_id)
+        if (!selected) showActionNotice('无法打开该历史 Run，请检查对应插件是否已加载。', true)
       }
       function discussCurrentRun() {
         if (!current) {
@@ -2101,7 +2125,7 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.homeTitle }, '测试工作台')),
             h('div', { style: { display: 'flex', gap: 10 } },
               h('button', { type: 'button', style: { ...styles.environmentSecondaryButton, height: 42 }, onClick: openRepositoryImport }, '添加仓库'),
-              h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => openProductPage('analysis', 'PANGEA 分析') }, '新建分析'))),
+              h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: openAnalysisCreate }, '新建分析'))),
           h('div', { style: styles.metricGrid, 'aria-label': '任务指标' },
             metricCard('running', '#2f7acb', '进行中', runningTasks.length, '正在准备或分析中的任务'),
             metricCard('review', '#cf0a2c', '需要处理', attentionTasks.length, '需要用户继续判断或重新启动的任务'),
@@ -2130,7 +2154,7 @@ window.__ModuleLoader__.load({
                 appCard('assets', '资产管理', '需求、历史缺陷、覆盖率与方法论资产', () => openProductPage('assets', '资产管理')))),
             h('section', { style: { ...styles.homeSection, padding: '16px 18px' } },
               h('div', { style: { ...styles.row, minHeight: 32, marginBottom: 4 } }, h('div', { style: styles.homeSectionTitle }, '最近报告'), h('span', { style: { color: '#7a818b', fontSize: 12 } }, `${reportRows.length} 份已载入`)),
-              reportRows.length ? reportRows.map(run => h('button', { key: run.run_id, type: 'button', style: styles.reportRow, onClick: () => openProductPage('analysis', '分析任务') },
+              reportRows.length ? reportRows.map(run => h('button', { key: run.run_id, type: 'button', style: styles.reportRow, onClick: () => openAnalysisRun(run) },
                 reportGlyph(),
                 h('span', { style: { minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, runLabel(run)),
                 h('span', { style: { color: '#737b86', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, formatDate(runUpdatedAt(run))),

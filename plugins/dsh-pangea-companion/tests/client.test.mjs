@@ -53,6 +53,8 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.doesNotMatch(source, /模型未知.*effort.*不支持/)
   assert.match(source, /field\('PID'/)
   assert.match(source, /setSelectedRun\(task\.run_id \?\? null\)/)
+  assert.match(source, /requestRunSelection/)
+  assert.match(source, /intent === 'select-run'/)
   assert.match(source, /task-conversation-create/)
   assert.match(source, /task-conversation-activate/)
   assert.match(source, /registerProductSession/)
