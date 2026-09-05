@@ -217,7 +217,7 @@ window.__ModuleLoader__.load({
       pending: '待确认', accepted: '已采纳', confirmed: '已确认', false_positive: '误报',
       claimed_fixed: '声称已修复', verified_fixed: '已验证修复',
     }
-    const HEALTH = { ok: '正常', warning: '需关注', error: '异常' }
+    const HEALTH = { ok: '正常', pending: '阶段生成中', warning: '需关注', error: '异常' }
     const SOURCE = { 'final-state': '最终聚合结果', 'worker-results': 'Worker 结果兼容读取' }
     const DISCUSSION_INTENTS = {
       review: '请结合证据和关联对象做独立判断：结论是否成立，还需要哪些信息。',
