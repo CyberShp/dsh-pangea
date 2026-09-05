@@ -421,6 +421,7 @@ window.__ModuleLoader__.load({
 
     function text(value, fallback = '—') { return typeof value === 'string' && value.trim() !== '' ? value : fallback }
     function hasText(value) { return typeof value === 'string' && value.trim() !== '' }
+    function runLabel(run) { return text(run?.target, text(run?.run_id, '未命名 Run')) }
     function shortId(value) { return hasText(value) ? value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value : '—' }
     function formatTime(value) {
       if (!Number.isFinite(value)) return '时间未知'
@@ -1787,7 +1788,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.boundary },
               h('div', { style: styles.grid },
                 field('DSH 会话', shortId(monitoredRun?.session_id ?? (historicalRun ? null : monitoredSession?.session_id))),
-                field('PANGEA Run', current.run_id),
+                field('PANGEA Run', `${runLabel(current)} · ${current.run_id}`),
                 field('Agent 状态', liveForRun ? monitoredSession.status === 'running' ? '运行中' : '空闲' : monitoredRun ? '会话已结束或已删除' : '原会话未记录'),
                 field('PANGEA 阶段', PHASE[current.phase] ?? current.phase)),
               h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `最近活动：${formatTime(liveForRun ? monitoredSession?.last_activity : monitoredRun?.last_seen ?? current.modified_at)}`))),
@@ -2131,7 +2132,7 @@ window.__ModuleLoader__.load({
               h('div', { style: { ...styles.row, minHeight: 32, marginBottom: 4 } }, h('div', { style: styles.homeSectionTitle }, '最近报告'), h('span', { style: { color: '#7a818b', fontSize: 12 } }, `${reportRows.length} 份已载入`)),
               reportRows.length ? reportRows.map(run => h('button', { key: run.run_id, type: 'button', style: styles.reportRow, onClick: () => openProductPage('analysis', '分析任务') },
                 reportGlyph(),
-                h('span', { style: { minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, run.run_id),
+                h('span', { style: { minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, runLabel(run)),
                 h('span', { style: { color: '#737b86', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, formatDate(runUpdatedAt(run))),
                 h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))) : h('div', { style: { ...styles.empty, padding: '16px 0' } }, '当前已载入列表中没有报告。'))))
       }
@@ -2245,7 +2246,7 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, `${evidence.length} 条证据`)))),
           renderHealthCard(false),
           h('div', { style: styles.card },
-            h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前任务'), h('div', { style: styles.itemTitle }, current.run_id)), h('span', { style: styles.badge }, PHASE[current.phase] ?? current.phase)),
+            h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前任务'), h('div', { style: styles.itemTitle }, runLabel(current)), h('div', { style: styles.itemMeta }, current.run_id)), h('span', { style: styles.badge }, PHASE[current.phase] ?? current.phase)),
             h('div', { style: { marginTop: 10 } },
               h('div', { style: styles.row }, h('span', { style: styles.label }, '分析进度'), h('span', { style: styles.label }, `${completed}/${total}`)),
               h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } }))),
@@ -2286,7 +2287,7 @@ window.__ModuleLoader__.load({
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `历史 Run · ${workbench?.runs?.total ?? runItems.length}`),
             h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, runItems.map(run => {
               const active = current.run_id === run.run_id
-              return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, run.run_id), h('span', { style: styles.badge }, QUALITY[run.quality_status] ?? PHASE[run.phase] ?? run.quality_status ?? run.phase)))
+              return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, runLabel(run)), h('span', { style: styles.badge }, QUALITY[run.quality_status] ?? PHASE[run.phase] ?? run.quality_status ?? run.phase)))
             })),
             h('div', { style: styles.toolbar },
               h('button', { type: 'button', disabled: runCursor <= 0, style: { ...styles.button, ...(runCursor <= 0 ? styles.buttonDisabled : {}) }, onClick: () => setRunCursor(Math.max(0, runCursor - 20)) }, '上一页'),
@@ -2656,6 +2657,7 @@ window.__ModuleLoader__.load({
     exports.filePathFromLocation = filePathFromLocation
     exports.evidenceIdentity = evidenceIdentity
     exports.evidenceTabLabel = evidenceTabLabel
+    exports.runLabel = runLabel
     exports.absoluteWorkspacePath = absoluteWorkspacePath
     exports.evidenceFilePath = evidenceFilePath
     exports.appendConversationDraft = appendConversationDraft
