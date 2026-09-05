@@ -72,6 +72,7 @@ test('client uses server pagination status and type filters detail loading and e
     return { ok: true, status: 200, async json() { return { status: 'ok', assets: [], pagination: {} } } }
   }
   await exported.requestState({ cwd: '/tmp/workspace', page: 2, pageSize: 50, type: 'design', status: 'available', kind: 'semantic', query: 'tcp', fetcher })
+  await exported.requestState({ cwd: '/tmp/workspace', repositoryId: 'repo-one', moduleTag: 'dhcp', fetcher })
   await exported.requestAssetDetail({ cwd: '/tmp/workspace', assetId: 'asset-1', fetcher })
   await exported.requestMethodologyDetail({ cwd: '/tmp/workspace', methodologyId: 'method-1', fetcher })
   await exported.requestAction({ cwd: '/tmp/workspace', action: 'extract', payload: { asset_id: 'asset-1' }, fetcher })
@@ -82,10 +83,13 @@ test('client uses server pagination status and type filters detail loading and e
   assert.equal(listUrl.searchParams.get('status'), 'available')
   assert.equal(listUrl.searchParams.get('kind'), 'semantic')
   assert.equal(listUrl.searchParams.get('q'), 'tcp')
-  assert.equal(new URL(calls[1].url, 'http://localhost').searchParams.get('asset_id'), 'asset-1')
-  assert.equal(new URL(calls[2].url, 'http://localhost').searchParams.get('methodology_id'), 'method-1')
-  assert.equal(calls[3].options.method, 'POST')
-  assert.deepEqual(JSON.parse(calls[3].options.body), { action: 'extract', asset_id: 'asset-1' })
+  const scopedUrl = new URL(calls[1].url, 'http://localhost')
+  assert.equal(scopedUrl.searchParams.get('repository_id'), 'repo-one')
+  assert.equal(scopedUrl.searchParams.get('module_tag'), 'dhcp')
+  assert.equal(new URL(calls[2].url, 'http://localhost').searchParams.get('asset_id'), 'asset-1')
+  assert.equal(new URL(calls[3].url, 'http://localhost').searchParams.get('methodology_id'), 'method-1')
+  assert.equal(calls[4].options.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[4].options.body), { action: 'extract', asset_id: 'asset-1' })
 })
 
 test('opens a real extraction session once DSH lists it', async () => {

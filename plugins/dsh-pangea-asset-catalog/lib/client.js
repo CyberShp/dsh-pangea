@@ -26,17 +26,19 @@ window.__ModuleLoader__.load({
     ]
     const METHODOLOGY_STATUS = { candidate: '待启用', enabled: '已启用', disabled: '已停用' }
 
-    function listSearch({ cwd, page = 1, pageSize = 20, type = '', status = '', kind = '', query = '', assetId }) {
+    function listSearch({ cwd, page = 1, pageSize = 20, type = '', status = '', kind = '', query = '', repositoryId = '', moduleTag = '', assetId }) {
       return new URLSearchParams({
         cwd, page: String(page), page_size: String(pageSize),
         ...(type ? { type } : {}), ...(status ? { status } : {}),
         ...(kind ? { kind } : {}),
+        ...(repositoryId ? { repository_id: repositoryId } : {}),
+        ...(moduleTag ? { module_tag: moduleTag } : {}),
         ...(query ? { q: query } : {}), ...(assetId ? { asset_id: assetId } : {}),
       }).toString()
     }
 
-    async function requestState({ cwd, page = 1, pageSize = 20, type = '', status = '', kind = '', query = '', signal, fetcher = fetch }) {
-      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, type, status, kind, query })}`, { cache: 'no-store', signal })
+    async function requestState({ cwd, page = 1, pageSize = 20, type = '', status = '', kind = '', query = '', repositoryId = '', moduleTag = '', signal, fetcher = fetch }) {
+      const response = await fetcher(`${API_PATH}?${listSearch({ cwd, page, pageSize, type, status, kind, query, repositoryId, moduleTag })}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body

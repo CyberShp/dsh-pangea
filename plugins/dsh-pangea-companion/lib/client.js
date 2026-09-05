@@ -142,8 +142,12 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestAssetCatalog({ cwd, fetcher = fetch }) {
-      const response = await fetcher(`${ASSET_CATALOG_API_PATH}?${new URLSearchParams({ cwd, page: '1', page_size: '100', status: 'available' })}`, { cache: 'no-store' })
+    async function requestAssetCatalog({ cwd, repositoryId = '', moduleTag = '', fetcher = fetch }) {
+      const response = await fetcher(`${ASSET_CATALOG_API_PATH}?${new URLSearchParams({
+        cwd, page: '1', page_size: '100', status: 'available',
+        ...(repositoryId ? { repository_id: repositoryId } : {}),
+        ...(moduleTag ? { module_tag: moduleTag } : {}),
+      })}`, { cache: 'no-store' })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -816,6 +820,7 @@ window.__ModuleLoader__.load({
       const snapshotFingerprintRef = React.useRef('')
       const handledRunDraftRequest = React.useRef(0)
       const noticeTimerRef = React.useRef(undefined)
+      const assetRepositoryRef = React.useRef('')
 
       React.useEffect(() => {
         if (!visible) return undefined
@@ -1008,6 +1013,18 @@ window.__ModuleLoader__.load({
           return selected ? { ...value, model_route_key: selected } : value
         })
       }, [workbench?.model_routing?.models])
+      React.useEffect(() => {
+        // Asset metadata is scoped to the selected repository. Do not leave
+        // an old repository's checked/visible assets in the create form.
+        const repository = createForm.repository
+        if (!repository) return
+        if (assetRepositoryRef.current && assetRepositoryRef.current !== repository) {
+          setAssetCatalog(null)
+          setAssetSelectorOpen(false)
+          setCreateForm(value => value.asset_ids.length ? { ...value, asset_ids: [] } : value)
+        }
+        assetRepositoryRef.current = repository
+      }, [createForm.repository])
       React.useEffect(() => {
         if (!visible || pageMode === 'execution') {
           requestRef.current.controller?.abort()
@@ -1363,7 +1380,7 @@ window.__ModuleLoader__.load({
         setAssetCatalogLoading(true)
         setAssetCatalogError('')
         try {
-          setAssetCatalog(await requestAssetCatalog({ cwd }))
+          setAssetCatalog(await requestAssetCatalog({ cwd, repositoryId: createForm.repository }))
         } catch (reason) {
           setAssetCatalogError(reason instanceof Error ? reason.message : String(reason))
         } finally {

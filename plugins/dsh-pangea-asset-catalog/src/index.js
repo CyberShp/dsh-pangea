@@ -73,12 +73,16 @@ export function listOptions(searchParams) {
   const typeValue = searchParams.get('type') ?? ''
   const statusValue = searchParams.get('status') ?? ''
   const kindValue = searchParams.get('kind') ?? ''
+  const repositoryValue = (searchParams.get('repository_id') ?? '').trim().slice(0, 200)
+  const moduleValue = (searchParams.get('module_tag') ?? '').trim().slice(0, 200)
   return {
     page: positiveInteger(searchParams.get('page'), 1),
     pageSize: PAGE_SIZES.has(pageSizeValue) ? pageSizeValue : 20,
     type: ASSET_TYPES.has(typeValue) ? typeValue : '',
     status: ASSET_STATUSES.has(statusValue) ? statusValue : '',
     kind: KNOWLEDGE_KINDS.has(kindValue) ? kindValue : '',
+    repositoryId: repositoryValue,
+    moduleTag: moduleValue,
     query: (searchParams.get('q') ?? '').trim().slice(0, 200),
   }
 }
@@ -93,6 +97,8 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   if (options.type) args.push('--type', options.type)
   if (options.status) args.push('--status', options.status)
   if (options.kind) args.push('--kind', options.kind)
+  if (options.repositoryId) args.push('--repository-id', options.repositoryId)
+  if (options.moduleTag) args.push('--module-tag', options.moduleTag)
   if (options.query) args.push('--query', options.query)
   const [result, methodologies, capabilities, methodologyJob] = await Promise.all([
     runPangea({ cwd, args }),
@@ -118,6 +124,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
       page: Math.min(options.page, totalPages), page_size: options.pageSize,
       total: result.total, total_pages: totalPages,
       type: options.type, status: options.status, query: options.query,
+      repository_id: options.repositoryId, module_tag: options.moduleTag,
     },
   }
 }

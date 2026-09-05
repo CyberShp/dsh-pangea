@@ -5,12 +5,12 @@ import { apply, listOptions } from '../src/index.js'
 
 test('normalizes asset pagination filters for the public API', () => {
   assert.deepEqual(
-    listOptions(new URLSearchParams('page=2&page_size=50&type=historical_defect&status=awaiting_review&kind=semantic&q=callback')),
-    { page: 2, pageSize: 50, type: 'historical_defect', status: 'awaiting_review', kind: 'semantic', query: 'callback' },
+    listOptions(new URLSearchParams('page=2&page_size=50&type=historical_defect&status=awaiting_review&kind=semantic&repository_id=repo-one&module_tag=dhcp&q=callback')),
+    { page: 2, pageSize: 50, type: 'historical_defect', status: 'awaiting_review', kind: 'semantic', repositoryId: 'repo-one', moduleTag: 'dhcp', query: 'callback' },
   )
   assert.deepEqual(
     listOptions(new URLSearchParams('page=-1&page_size=999&type=bad&status=bad')),
-    { page: 1, pageSize: 20, type: '', status: '', kind: '', query: '' },
+    { page: 1, pageSize: 20, type: '', status: '', kind: '', repositoryId: '', moduleTag: '', query: '' },
   )
 })
 
