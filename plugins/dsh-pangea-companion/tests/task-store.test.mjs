@@ -171,6 +171,21 @@ test('keeps an external ACP provider authoritative without freezing its model', 
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('does not resurrect a stopped ACP attempt from a stale running Run snapshot', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-stale-stop-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-stale-stop' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '停止竞态' } })
+    await store.addConversation('task-stale-stop', { sessionId: 'session-stop', title: '分析会话', kind: 'analysis' })
+    await store.bindRunBySession('session-stop', { run_id: 'run-stale-stop', lifecycle_status: 'running' })
+    await store.markStopped('task-stale-stop')
+    await store.reconcileRuns([{ run_id: 'run-stale-stop', lifecycle_status: 'running' }])
+    const task = await store.get('task-stale-stop')
+    assert.equal(task.status, 'stopped')
+    assert.equal(task.execution_status, 'stopped')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('isolates identical Job ids by owner and settles the matching attempt', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-attempts-'))
   let id = 0

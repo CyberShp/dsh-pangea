@@ -544,6 +544,12 @@ export class TaskStore {
       const run = task.run_id ? byId.get(task.run_id) : undefined
       if (!run) continue
       if (task.provider && ['starting', 'running', 'stopping'].includes(task.execution_status)) continue
+      // A terminal ACP/stop observation is stronger than a stale Run
+      // snapshot. The Runtime may publish its own terminal state slightly
+      // later; do not resurrect a stopped or interrupted attempt as running
+      // during that gap.
+      if (['failed', 'stopped', 'interrupted'].includes(task.execution_status)
+        && !['complete', 'failed', 'stopped', 'cancelled'].includes(text(run?.lifecycle_status).toLowerCase())) continue
       const status = taskStatusFromRun(run)
       if (status === 'running' && task.status === 'failed' && task.launch_error_code && task.launch_error_code !== 'RUN_ATTENTION_REQUIRED') continue
       if (task.status !== status) {
