@@ -315,6 +315,20 @@ function jobOwner(runtime, task) {
   return runtimeService(runtime, 'agents')?.get?.(task.owner_session_id)
 }
 
+function runtimeInstanceId(runtime) {
+  const id = runtime?.runtime_instance_id ?? runtime?.instance_id
+  return typeof id === 'string' && id.trim() ? id.trim() : null
+}
+
+function jobReference(runtime, task, jobId = task?.job_id) {
+  return {
+    jobId: String(jobId ?? ''),
+    ...(task?.attempt_id ? { attemptId: task.attempt_id } : {}),
+    ...(task?.owner_session_id ? { ownerSessionId: task.owner_session_id } : {}),
+    ...(runtimeInstanceId(runtime) ? { runtimeInstanceId: runtimeInstanceId(runtime) } : {}),
+  }
+}
+
 function readJobSnapshot(runtime, task) {
   if (!task?.job_id) return null
   const jobs = runtimeService(runtime, 'jobs')
@@ -324,13 +338,23 @@ function readJobSnapshot(runtime, task) {
 
 async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea) {
   if (snapshot?.kind !== 'subagent') return null
-  const task = await tasks.getByJob(String(snapshot.id))
+  const ownerSessionId = typeof owner?.id === 'string' ? owner.id : typeof owner?.session_id === 'string' ? owner.session_id : null
+  const runtimeId = runtimeInstanceId(runtime)
+  const lookup = {
+    ...(ownerSessionId ? { ownerSessionId } : {}),
+    ...(runtimeId ? { runtimeInstanceId: runtimeId } : {}),
+  }
+  const task = await tasks.getByJob(String(snapshot.id), lookup)
   if (!task) return null
+  const reference = jobReference(runtime, {
+    ...task,
+    owner_session_id: task.owner_session_id ?? ownerSessionId,
+  }, snapshot.id)
   let output = ''
   try {
     output = runtimeService(runtime, 'jobs')?.read?.(snapshot.id, owner)?.text ?? ''
   } catch { /* terminal state remains authoritative even if final output cannot be read */ }
-  if (output) await tasks.recordJobActivity(String(snapshot.id), output)
+  if (output) await tasks.recordJobActivity(reference, output)
   let outcome = snapshot
   if (snapshot.status === 'completed') {
     try {
@@ -364,7 +388,7 @@ async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner
     detail: outcome.detail,
     output,
   })
-  return tasks.settleJob(String(snapshot.id), outcome)
+  return tasks.settleJob(reference, outcome)
 }
 
 async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
@@ -377,7 +401,7 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
       const update = jobs?.read?.(task.job_id, owner)
       snapshot = update?.snapshot ?? readJobSnapshot(runtime, task)
       if (update?.text) {
-        await tasks.recordJobActivity(task.job_id, update.text)
+        await tasks.recordJobActivity(jobReference(runtime, task), update.text)
         await appendLaunchSafe(launchLogs, task.task_id, {
           stage: 'acp_output', status: 'info', job_id: task.job_id, output: update.text,
         })
@@ -514,7 +538,12 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           }
         }, runtime)
         await tasks.bindRunBySession(launched.session_id, launched.run)
-        if (launched.job_id) await tasks.bindJob(task.task_id, { jobId: launched.job_id, provider: launched.provider, ownerSessionId: launched.session_id })
+        if (launched.job_id) await tasks.bindJob(task.task_id, {
+          jobId: launched.job_id,
+          provider: launched.provider,
+          ownerSessionId: launched.session_id,
+          runtimeInstanceId: runtimeInstanceId(runtime),
+        })
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id })
         return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })
       } catch (error) {

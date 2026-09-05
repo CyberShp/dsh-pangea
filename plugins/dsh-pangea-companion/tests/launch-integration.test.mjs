@@ -48,3 +48,37 @@ test('treats exit 0 without validated final artifacts as an ACP failure', async 
   assert.equal(events[0].exit_status, 'failed')
   assert.equal(events[0].output, 'agent exited normally')
 })
+
+test('settles an ACP Job with its owner identity', async () => {
+  let lookup
+  let activity
+  let settled
+  const task = {
+    task_id: 'task-identity', workspace: '/workspace', data_root: '/workspace/pangea-data', run_id: 'run-identity',
+    provider: 'pangea-opencode', model_route: null,
+  }
+  const tasks = {
+    async getByJob(id, ref) { lookup = { id, ref }; return task },
+    async recordJobActivity(ref, output) { activity = { ref, output } },
+    async settleJob(ref, value) { settled = { ref, value }; return value },
+  }
+  const runtime = {
+    runtime_instance_id: 'runtime-1',
+    jobs: { read() { return { text: 'agent output' } } },
+  }
+  const owner = { id: 'owner-1' }
+  await settleAcpTask(runtime, tasks, { async append() {} }, {
+    id: 'job-identity', kind: 'subagent', status: 'failed', detail: 'failed',
+  }, owner)
+  assert.deepEqual(lookup, {
+    id: 'job-identity',
+    ref: { ownerSessionId: 'owner-1', runtimeInstanceId: 'runtime-1' },
+  })
+  assert.deepEqual(activity, {
+    ref: { jobId: 'job-identity', ownerSessionId: 'owner-1', runtimeInstanceId: 'runtime-1' },
+    output: 'agent output',
+  })
+  assert.deepEqual(settled.ref, {
+    jobId: 'job-identity', ownerSessionId: 'owner-1', runtimeInstanceId: 'runtime-1',
+  })
+})

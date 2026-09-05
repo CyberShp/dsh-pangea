@@ -155,6 +155,7 @@ test('keeps an external ACP provider authoritative without freezing its model', 
     await store.recordJobActivity('job-1', '正在分析 Lua 状态机')
     const active = await store.get('task-acp')
     assert.equal(active.agent_session_id, 'acp-session-1')
+    assert.equal(active.attempts[0].agent_session_id, 'acp-session-1')
     assert.equal(active.process_id, 4242)
     assert.equal(active.last_output, '正在分析 Lua 状态机')
 
@@ -164,5 +165,40 @@ test('keeps an external ACP provider authoritative without freezing its model', 
     const settled = await store.settleJob('job-1', { status: 'completed' })
     assert.equal(settled.status, 'completed')
     assert.equal(settled.execution_status, 'completed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('isolates identical Job ids by owner and settles the matching attempt', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-attempts-'))
+  let id = 0
+  try {
+    const store = createTaskStore({
+      storePath: path.join(root, 'tasks-v1.json'),
+      idFactory: () => `task-attempt-${++id}`,
+    })
+    const first = await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '第一条' } })
+    const second = await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '第二条' } })
+    await store.bindJob(first.task_id, {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-a',
+      runtimeInstanceId: 'runtime-a', attemptId: 'attempt-a',
+    })
+    await store.bindJob(second.task_id, {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-b',
+      runtimeInstanceId: 'runtime-b', attemptId: 'attempt-b',
+    })
+
+    assert.equal((await store.getByJob('subagent-1', { ownerSessionId: 'owner-a' })).task_id, first.task_id)
+    assert.equal((await store.getByJob('subagent-1', { ownerSessionId: 'owner-b' })).task_id, second.task_id)
+    await store.recordJobActivity({ jobId: 'subagent-1', ownerSessionId: 'owner-b' }, '第二条输出')
+    await store.settleJob({ jobId: 'subagent-1', ownerSessionId: 'owner-b' }, { status: 'failed', detail: '只失败第二条' })
+
+    const firstAfter = await store.get(first.task_id)
+    const secondAfter = await store.get(second.task_id)
+    assert.equal(firstAfter.status, 'running')
+    assert.equal(firstAfter.last_output, null)
+    assert.equal(secondAfter.status, 'failed')
+    assert.equal(secondAfter.last_output, '第二条输出')
+    assert.equal(secondAfter.attempts[0].attempt_id, 'attempt-b')
+    assert.equal(secondAfter.attempts[0].execution_status, 'failed')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

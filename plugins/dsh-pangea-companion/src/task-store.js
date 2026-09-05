@@ -52,10 +52,52 @@ function normalizeModelRoute(value) {
   }
 }
 
+function normalizeAttempt(value) {
+  const jobId = text(value?.job_id)
+  const attemptId = text(value?.attempt_id) || (jobId ? `legacy-${jobId}` : '')
+  if (!attemptId) return null
+  const executionStatus = ['queued', 'starting', 'running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'].includes(value?.execution_status)
+    ? value.execution_status
+    : null
+  return {
+    attempt_id: attemptId,
+    job_id: jobId || null,
+    provider: text(value?.provider) || null,
+    owner_session_id: text(value?.owner_session_id) || null,
+    runtime_instance_id: text(value?.runtime_instance_id) || null,
+    agent_session_id: text(value?.agent_session_id) || null,
+    execution_status: executionStatus,
+    terminal_error: text(value?.terminal_error) || null,
+    last_output: text(value?.last_output) || null,
+    last_activity_at: Number.isFinite(value?.last_activity_at) ? value.last_activity_at : null,
+    started_at: Number.isFinite(value?.started_at) ? value.started_at : null,
+    ended_at: Number.isFinite(value?.ended_at) ? value.ended_at : null,
+  }
+}
+
 function normalizeTask(taskId, value) {
   const conversations = Array.isArray(value?.conversations)
     ? value.conversations.map(normalizeConversation).filter(Boolean)
     : []
+  const attempts = Array.isArray(value?.attempts)
+    ? value.attempts.map(normalizeAttempt).filter(Boolean)
+    : []
+  if (attempts.length === 0 && value?.job_id) {
+    const legacyAttempt = normalizeAttempt({
+      attempt_id: value?.attempt_id,
+      job_id: value.job_id,
+      provider: value.provider,
+      owner_session_id: value.owner_session_id,
+      runtime_instance_id: value.runtime_instance_id,
+      agent_session_id: value.agent_session_id,
+      execution_status: value.execution_status,
+      terminal_error: value.terminal_error,
+      last_output: value.last_output,
+      last_activity_at: value.last_activity_at,
+      started_at: value.launch_started_at,
+    })
+    if (legacyAttempt) attempts.push(legacyAttempt)
+  }
   return {
     task_id: taskId,
     request_version: value?.request_version === '2.0' ? '2.0' : '1.0',
@@ -69,7 +111,9 @@ function normalizeTask(taskId, value) {
     model_route: normalizeModelRoute(value?.model_route),
     provider: text(value?.provider) || null,
     job_id: text(value?.job_id) || null,
+    attempt_id: text(value?.attempt_id) || attempts.at(-1)?.attempt_id || null,
     owner_session_id: text(value?.owner_session_id) || null,
+    runtime_instance_id: text(value?.runtime_instance_id) || null,
     agent_session_id: text(value?.agent_session_id) || null,
     process_id: Number.isInteger(value?.process_id) && value.process_id > 0 ? value.process_id : null,
     execution_status: ['queued', 'starting', 'running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'].includes(value?.execution_status)
@@ -87,10 +131,48 @@ function normalizeTask(taskId, value) {
     launch_started_at: Number.isFinite(value?.launch_started_at) ? value.launch_started_at : null,
     launch_attempts: Number.isInteger(value?.launch_attempts) && value.launch_attempts >= 0 ? value.launch_attempts : 0,
     conversations,
+    attempts,
     active_conversation_id: text(value?.active_conversation_id) || conversations[0]?.conversation_id || null,
     created_at: Number.isFinite(value?.created_at) ? value.created_at : null,
     updated_at: Number.isFinite(value?.updated_at) ? value.updated_at : null,
   }
+}
+
+function normalizeJobRef(value, options = {}) {
+  if (typeof value === 'string') return { jobId: text(value), ...options }
+  return {
+    jobId: text(value?.jobId ?? value?.job_id),
+    attemptId: text(value?.attemptId ?? value?.attempt_id) || null,
+    ownerSessionId: text(value?.ownerSessionId ?? value?.owner_session_id) || null,
+    runtimeInstanceId: text(value?.runtimeInstanceId ?? value?.runtime_instance_id) || null,
+    agentSessionId: text(value?.agentSessionId ?? value?.agent_session_id) || null,
+  }
+}
+
+function attemptMatches(attempt, ref) {
+  if (!attempt || (ref.jobId && attempt.job_id !== ref.jobId)) return false
+  if (ref.attemptId && attempt.attempt_id !== ref.attemptId) return false
+  if (ref.ownerSessionId && attempt.owner_session_id !== ref.ownerSessionId) return false
+  if (ref.runtimeInstanceId && attempt.runtime_instance_id !== ref.runtimeInstanceId) return false
+  if (ref.agentSessionId && attempt.agent_session_id !== ref.agentSessionId) return false
+  return true
+}
+
+function findAttempt(task, value, options = {}) {
+  const ref = normalizeJobRef(value, options)
+  if (!ref.jobId) return null
+  const attempts = task.attempts.filter(attempt => attemptMatches(attempt, ref))
+  if (attempts.length === 1) return attempts[0]
+  if (attempts.length > 1 && (ref.attemptId || ref.ownerSessionId || ref.runtimeInstanceId || ref.agentSessionId)) return null
+  if (attempts.length > 1) return null
+  if (task.job_id === ref.jobId && !task.attempts.length) return task
+  return null
+}
+
+function taskMatchesJob(task, value, options = {}) {
+  const ref = normalizeJobRef(value, options)
+  if (!ref.jobId) return false
+  return Boolean(findAttempt(task, ref)) || (!task.attempts.length && task.job_id === ref.jobId)
 }
 
 function taskStatusFromRun(run) {
@@ -265,25 +347,45 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async bindJob(taskId, { jobId, provider, ownerSessionId }) {
+  async bindJob(taskId, { jobId, provider, ownerSessionId, runtimeInstanceId, attemptId, agentSessionId }) {
     await this.ready
     const task = this.requireTask(taskId)
-    task.job_id = text(jobId) || null
+    const job = text(jobId)
+    if (!job) throw new Error('job_id is required')
+    const now = this.now()
+    const id = text(attemptId) || `attempt-${randomUUID()}`
+    const attempt = normalizeAttempt({
+      attempt_id: id,
+      job_id: job,
+      provider,
+      owner_session_id: ownerSessionId,
+      runtime_instance_id: runtimeInstanceId,
+      agent_session_id: agentSessionId,
+      execution_status: 'running',
+      last_activity_at: now,
+      started_at: now,
+    })
+    task.attempts = task.attempts.filter(item => item.attempt_id !== id)
+    task.attempts.push(attempt)
+    task.attempt_id = id
+    task.job_id = job
     task.provider = text(provider) || task.provider
     task.owner_session_id = text(ownerSessionId) || task.owner_session_id
+    task.runtime_instance_id = text(runtimeInstanceId) || task.runtime_instance_id
+    task.agent_session_id = text(agentSessionId) || task.agent_session_id
     task.execution_status = 'running'
     task.status = 'running'
-    task.last_activity_at = this.now()
+    task.last_activity_at = now
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
   }
 
-  async getByJob(jobId) {
+  async getByJob(jobId, options = {}) {
     await this.ready
-    const id = text(jobId)
-    if (!id) return null
-    const task = Object.values(this.store.tasks).find(item => item.job_id === id)
+    const ref = normalizeJobRef(jobId, options)
+    if (!ref.jobId) return null
+    const task = Object.values(this.store.tasks).find(item => taskMatchesJob(item, ref))
     return task ? structuredClone(task) : null
   }
 
@@ -293,37 +395,54 @@ export class TaskStore {
     task.agent_session_id = text(agentSessionId) || task.agent_session_id
     task.process_id = Number.isInteger(processId) && processId > 0 ? processId : task.process_id
     task.last_activity_at = this.now()
+    const attempt = task.attempts.at(-1)
+    if (attempt) {
+      attempt.agent_session_id = text(agentSessionId) || attempt.agent_session_id
+      attempt.last_activity_at = task.last_activity_at
+    }
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
   }
 
-  async recordJobActivity(jobId, output) {
+  async recordJobActivity(jobId, output, options = {}) {
     await this.ready
-    const id = text(jobId)
-    const task = Object.values(this.store.tasks).find(item => item.job_id === id)
+    const ref = normalizeJobRef(jobId, options)
+    const task = Object.values(this.store.tasks).find(item => taskMatchesJob(item, ref))
     if (!task) return null
+    const attempt = findAttempt(task, ref)
     const chunk = typeof output === 'string' ? output : ''
     if (chunk) task.last_output = `${task.last_output ?? ''}${chunk}`.slice(-8192)
+    if (attempt && chunk) attempt.last_output = `${attempt.last_output ?? ''}${chunk}`.slice(-8192)
+    if (attempt) attempt.last_activity_at = this.now()
     task.last_activity_at = this.now()
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
   }
 
-  async settleJob(jobId, snapshot) {
+  async settleJob(jobId, snapshot, options = {}) {
     await this.ready
-    const id = text(jobId)
-    const task = Object.values(this.store.tasks).find(item => item.job_id === id)
+    const ref = normalizeJobRef(jobId, options)
+    const task = Object.values(this.store.tasks).find(item => taskMatchesJob(item, ref))
     if (!task) return null
+    const attempt = findAttempt(task, ref)
     const status = snapshot?.status === 'completed' ? 'completed' : snapshot?.status === 'killed' ? 'stopped' : 'failed'
+    const ended = this.now()
+    if (attempt) {
+      attempt.execution_status = status
+      attempt.terminal_error = status === 'failed' ? text(snapshot?.detail, 'ACP Agent 执行失败') : null
+      attempt.ended_at = ended
+      attempt.last_activity_at = ended
+    }
     task.execution_status = status
+    task.attempt_id = attempt?.attempt_id ?? task.attempt_id
     if (status === 'completed') task.status = 'completed'
     else task.status = status
     task.terminal_error = status === 'failed' ? text(snapshot?.detail, 'ACP Agent 执行失败') : null
     task.launch_error = task.terminal_error
     task.launch_error_code = status === 'failed' ? 'ACP_AGENT_FAILED' : null
-    task.last_activity_at = this.now()
+    task.last_activity_at = ended
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
