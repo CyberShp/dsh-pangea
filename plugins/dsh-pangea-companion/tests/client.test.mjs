@@ -123,6 +123,36 @@ test('shows a health alert only for an actual reader warning', async () => {
   assert.doesNotMatch(source, /health\?\.trusted === false/)
 })
 
+test('does not present a failed task as pending publication', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+  const failed = exported.deriveRunPresentation(
+    { status: 'failed', execution_status: 'failed', run_id: 'run-1', terminal_error: 'ACP Agent 启动失败' },
+    { publication: { state: 'pending' } },
+    { status: 'pending' },
+  )
+  assert.equal(failed.failed, true)
+  assert.equal(failed.executionLabel, '分析失败')
+  assert.equal(failed.reliabilityLabel, '分析失败')
+  assert.equal(failed.healthStatus, 'pending')
+  assert.equal(failed.dataTone, 'neutral')
+  assert.equal(failed.publicationLabel, '未发布（运行失败）')
+  assert.equal(failed.countsAvailability, 'unpublished')
+  assert.equal(failed.canResume, true)
+  const running = exported.deriveRunPresentation(
+    { status: 'running', execution_status: 'running' },
+    { publication: { state: 'pending' } },
+    { status: 'pending' },
+  )
+  assert.equal(running.reliabilityLabel, '阶段结果待发布')
+  assert.equal(running.executionLabel, '分析中')
+  assert.equal(running.isAnimating, true)
+  assert.equal(running.canResume, false)
+})
+
 test('returns from a run detail to its selected Run overview', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported

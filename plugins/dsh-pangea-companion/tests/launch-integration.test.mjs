@@ -25,7 +25,7 @@ test('terminal tasks can resume the existing Run from its checkpoint', () => {
 })
 
 test('persists the Run identity as soon as creation succeeds', () => {
-  assert.match(source, /tasks\.bindRun\(task\.task_id, event\.run_id\)/)
+  assert.match(source, /onRunReady: run => tasks\.bindRun\(task\.task_id, run\.run_id\)/)
 })
 
 test('stops the local Run before attempting DSH session cancellation', () => {
@@ -73,24 +73,26 @@ test('settles an ACP Job with its owner identity', async () => {
     async recordJobActivity(ref, output) { activity = { ref, output } },
     async settleJob(ref, value) { settled = { ref, value }; return value },
   }
-  const runtime = {
-    runtime_instance_id: 'runtime-1',
-    jobs: { read() { return { text: 'agent output' } } },
-  }
+  const runtime = new Proxy({ jobs: { read() { return { text: 'agent output' } } } }, {
+    get(target, property, receiver) {
+      if (property === 'runtime_instance_id' || property === 'instance_id') throw new Error(`cannot get property "${String(property)}" without inject`)
+      return Reflect.get(target, property, receiver)
+    },
+  })
   const owner = { id: 'owner-1' }
   await settleAcpTask(runtime, tasks, { async append() {} }, {
     id: 'job-identity', kind: 'subagent', status: 'failed', detail: 'failed',
   }, owner)
   assert.deepEqual(lookup, {
     id: 'job-identity',
-    ref: { ownerSessionId: 'owner-1', runtimeInstanceId: 'runtime-1' },
+    ref: { ownerSessionId: 'owner-1' },
   })
   assert.deepEqual(activity, {
-    ref: { jobId: 'job-identity', ownerSessionId: 'owner-1', runtimeInstanceId: 'runtime-1' },
+    ref: { jobId: 'job-identity', ownerSessionId: 'owner-1' },
     output: 'agent output',
   })
   assert.deepEqual(settled.ref, {
-    jobId: 'job-identity', ownerSessionId: 'owner-1', runtimeInstanceId: 'runtime-1',
+    jobId: 'job-identity', ownerSessionId: 'owner-1',
   })
 })
 

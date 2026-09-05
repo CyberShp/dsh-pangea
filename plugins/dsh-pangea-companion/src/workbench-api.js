@@ -315,13 +315,20 @@ async function settleAcpRun(start, signal) {
   }
 }
 
-function startAcpJob(runtime, parent, providerId, prompt, label, onEvent) {
+async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, lifecycle = {}) {
   const subagents = runtimeService(runtime, 'subagents')
   const jobs = runtimeService(runtime, 'jobs')
   if (!subagents?.start) throw new Error('DSH subagent runtime unavailable: load dsh-subagent')
   if (!jobs?.start) throw new Error('DSH background jobs unavailable: load dsh-jobs and dsh-jobs-local')
   if (!parent) throw new Error('DSH owner Agent is not live for this analysis session')
   if (!subagents.getProvider?.(providerId)) throw new Error(`ACP Provider 未注册：${providerId}`)
+  let hooks
+  let releaseStart
+  let rejectStart
+  const startGate = new Promise((resolve, reject) => {
+    releaseStart = resolve
+    rejectStart = reject
+  })
   const jobId = jobs.start({
     kind: 'subagent',
     label,
@@ -329,27 +336,50 @@ function startAcpJob(runtime, parent, providerId, prompt, label, onEvent) {
     run: () => {
       const controller = new AbortController()
       let activeRun
-      const start = subagents.start(providerId, {
+      const observed = startGate.then(() => subagents.start(providerId, {
         label,
         prompt: [{ type: 'text', text: prompt }],
         parent,
         signal: controller.signal,
-      })
-      const observed = Promise.resolve(start).then(run => {
+      })).then(async run => {
         activeRun = run
+        await lifecycle.onAgentStarted?.({
+          provider: providerId,
+          agent_session_id: String(run.id),
+          pid: Number.isInteger(run.processId) ? run.processId : undefined,
+        })
         void emitLaunch(onEvent, {
           stage: 'acp_session_created', status: 'ok', provider: providerId,
           agent_session_id: String(run.id), pid: Number.isInteger(run.processId) ? run.processId : undefined,
         })
         return run
+      }).catch(async error => {
+        controller.abort(error)
+        try { await activeRun?.dispose?.() } catch { /* the failed launch remains observable through the Job */ }
+        throw error
       })
-      return {
+      hooks = {
         cancel: reason => controller.abort(reason ?? 'PANGEA analysis stopped'),
         done: settleAcpRun(observed, controller.signal),
         readOutput: () => typeof activeRun?.readOutput === 'function' ? activeRun.readOutput() : '',
       }
+      return hooks
     },
   })
+  try {
+    const job = jobs.get?.(jobId, parent)
+    await lifecycle.onJobCreated?.({
+      jobId: String(jobId),
+      ownerSessionId: parent.id,
+      jobStartedAt: Number.isFinite(job?.startedAt) ? job.startedAt : null,
+    })
+    releaseStart()
+  } catch (error) {
+    rejectStart(error)
+    try { hooks?.cancel?.(error) } catch { /* local cleanup below remains authoritative */ }
+    try { await hooks?.done } catch { /* settlement has already captured the launch failure */ }
+    throw error
+  }
   return jobId
 }
 
@@ -361,6 +391,7 @@ export async function launchAnalysisSession(
   onEvent = async () => {},
   runtime,
   env = process.env,
+  lifecycle = {},
 ) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
@@ -393,6 +424,7 @@ export async function launchAnalysisSession(
       })(),
     value => ({ run_id: value.run_id, request_path: value.request_path }),
   )
+  await lifecycle.onRunReady?.(run)
   const sessionId = await launchStep(
     onEvent,
     'session_create',
@@ -414,6 +446,7 @@ export async function launchAnalysisSession(
     model: selectedModel,
     run,
   }), () => ({ session_id: sessionId }))
+  await lifecycle.onOwnerReady?.({ ownerSessionId: sessionId })
   const prompt = [
     requestedResumeRunId
       ? `继续已有的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，从最近检查点恢复执行，不要创建第二个 Run。`
@@ -430,7 +463,7 @@ export async function launchAnalysisSession(
   ].filter(Boolean).join('\n')
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
-    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent), value => ({ job_id: value, provider: selectedProvider }))
+    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, lifecycle), value => ({ job_id: value, provider: selectedProvider }))
     await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
     return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
   }

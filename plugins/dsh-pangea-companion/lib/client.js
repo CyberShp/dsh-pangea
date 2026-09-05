@@ -48,6 +48,27 @@ window.__ModuleLoader__.load({
       return value?.current?.terminal === false ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
     }
 
+    function deriveRunPresentation(task, current, health) {
+      const taskStatus = task?.status ?? ''
+      const executionStatus = task?.execution_status ?? ''
+      const failed = ['failed', 'interrupted'].includes(executionStatus)
+        || ['failed', 'needs_attention'].includes(taskStatus)
+        || current?.lifecycle_status === 'failed'
+      const stopped = executionStatus === 'stopped' || taskStatus === 'stopped'
+      const running = !failed && !stopped && (executionStatus === 'starting' || executionStatus === 'running' || taskStatus === 'preparing' || taskStatus === 'running')
+      const publicationState = current?.publication?.state ?? 'pending'
+      const healthStatus = health?.status ?? 'pending'
+      const reliabilityLabel = failed ? '分析失败' : stopped ? '已停止' : healthStatus === 'warning' ? '不可用于决策' : healthStatus === 'pending' ? (running ? '阶段结果待发布' : '待验证') : HEALTH[healthStatus] ?? healthStatus
+      const publicationLabel = failed && publicationState === 'pending' ? '未发布（运行失败）' : publicationState === 'pending' && running ? '阶段结果待发布' : publicationState
+      const executionLabel = failed ? '分析失败' : stopped ? '已停止' : running ? '分析中' : executionStatus === 'completed' ? '已完成' : '等待启动'
+      const dataTone = healthStatus === 'error' ? 'error' : publicationState === 'final' && healthStatus === 'ok' ? 'ok' : publicationState === 'draft' ? 'notice' : 'neutral'
+      const countsAvailability = publicationState === 'pending' || failed || stopped ? 'unpublished' : publicationState === 'draft' ? 'draft' : 'verified'
+      const qualityLabel = current?.quality_status ?? current?.verdict ?? 'PENDING'
+      const canResume = Boolean(task?.run_id) && !running && !['stopping'].includes(executionStatus) && (failed || stopped || taskStatus === 'needs_attention')
+      const resumeBlockedReason = canResume ? null : !task?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件'
+      return { executionStatus, executionLabel, failed, stopped, running, healthStatus, reliabilityLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason }
+    }
+
     async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
       if (runId !== undefined) query.set('run_id', runId ?? '')
@@ -1107,6 +1128,8 @@ window.__ModuleLoader__.load({
         const contextTotal = current?.analysis?.total ?? 0
         const contextCompleted = current?.analysis?.completed ?? 0
         const assistantVisible = pageMode === 'analysis' && selectedTask && !['tasks', 'create'].includes(screen.type)
+        const activeConversation = selectedTask?.conversations?.find(item => item.conversation_id === selectedTask.active_conversation_id)
+        const presentation = deriveRunPresentation(selectedTask, current, health)
         const launchEvents = Array.isArray(workbench?.launch_log?.events) ? workbench.launch_log.events : []
         const outputEvent = [...launchEvents].reverse().find(event => typeof event?.output === 'string' && event.output.trim() !== '')
         const processStatus = selectedTask?.execution_status
@@ -1114,15 +1137,24 @@ window.__ModuleLoader__.load({
           ?? 'preparing'
         window.dispatchEvent(new CustomEvent('pangea:run-context', { detail: assistantVisible ? {
           taskId: selectedTask.task_id,
+          workspaceKey: selectedTask.workspace ?? cwd,
           runId: current?.run_id,
+          attemptId: selectedTask.attempt_id,
+          ownerSessionId: selectedTask.owner_session_id,
+          jobId: selectedTask.job_id,
           title: selectedTask.title,
           phase: current ? (PHASE[String(current.phase ?? '').toUpperCase()] ?? PHASE[current.phase] ?? current.phase) : '正在准备',
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
           conversations: selectedTask.conversations ?? [],
           activeConversationId: selectedTask.active_conversation_id,
+          activeConversationSessionId: activeConversation?.session_id ?? null,
+          activeConversationKind: activeConversation?.kind ?? null,
+          presentation,
+          processOutput: selectedTask.last_output || outputEvent?.output || '',
           process: {
             status: processStatus,
             output: selectedTask.last_output || outputEvent?.output || '',
+            attemptId: selectedTask.attempt_id,
             error: selectedTask.terminal_error || selectedTask.launch_error || outputEvent?.error || '',
             events: launchEvents.slice(-12).map(event => ({
               at: event?.at, stage: event?.stage,
@@ -1795,9 +1827,12 @@ window.__ModuleLoader__.load({
 
       function countCheck(key) { return health?.count_checks?.[key] }
       function displayCount(key, number) {
+        const presentation = deriveRunPresentation(selectedTask, current, health)
+        if (presentation.countsAvailability === 'unpublished') return '尚未发布'
         const check = countCheck(key)
         if (check?.status === 'mismatch') return `${number} / 报告 ${check.report}`
         if (number === null || number === undefined) return '暂不可读取'
+        if (presentation.countsAvailability === 'draft') return `${number}（草稿）`
         return String(number)
       }
       function metric(number, name, target, countKey) {
@@ -1805,27 +1840,31 @@ window.__ModuleLoader__.load({
         return h(target ? 'button' : 'div', props, h('div', { style: styles.metricNumber }, countKey ? displayCount(countKey, number) : String(number ?? 0)), h('div', { style: styles.metricName }, name))
       }
       function collectionEmpty(key, normal) {
+        if (deriveRunPresentation(selectedTask, current, health).countsAvailability === 'unpublished') return '结果尚未发布，暂不显示空列表结论。'
         return countCheck(key)?.status === 'mismatch' || health?.status === 'warning' ? '数据读取异常：不能把空列表解释为“没有数据”。' : normal
       }
-      function healthStyle() {
-        if (health?.status === 'error') return { ...styles.card, ...styles.healthError }
-        if (health?.status === 'warning') return { ...styles.card, ...styles.healthWarning }
+      function healthStyle(status = deriveRunPresentation(selectedTask, current, health).healthStatus) {
+        if (status === 'error') return { ...styles.card, ...styles.healthError }
+        if (status === 'warning') return { ...styles.card, ...styles.healthWarning }
+        if (status === 'pending') return { ...styles.card, ...styles.notice }
         return { ...styles.card, ...styles.healthOk }
       }
       function renderHealthCard(compact = false) {
         if (!health) return null
+        const presentation = deriveRunPresentation(selectedTask, current, health)
+        const healthStatus = presentation.healthStatus
         const checks = ['risks', 'test_cases', 'business_flows']
           .map(key => [key, health.count_checks?.[key]])
           .filter(([, check]) => check?.report !== null && check?.report !== undefined)
         const names = { risks: '风险', test_cases: '测试用例', business_flows: '业务流程' }
-        const warning = health.status === 'warning'
-        return h('div', { style: healthStyle(), role: warning ? 'alert' : 'status' },
+        const warning = healthStatus === 'warning' || healthStatus === 'error'
+        return h('div', { style: healthStyle(healthStatus), role: warning ? 'alert' : 'status' },
           h('div', { style: styles.row },
-            h('div', { style: styles.itemTitle }, compact && warning ? '数据读取异常' : '数据状态'),
-            h('span', { style: styles.badge }, HEALTH[health.status] ?? health.status ?? '未知')),
+            h('div', { style: styles.itemTitle }, compact && warning ? (presentation.failed ? '分析运行失败' : '数据读取异常') : '数据状态'),
+            h('span', { style: styles.badge }, presentation.failed ? '失败' : HEALTH[healthStatus] ?? (healthStatus === 'pending' ? '待发布' : healthStatus) ?? '未知')),
           h('div', { style: styles.itemMeta }, `数据源：${SOURCE[current?.data_source] ?? current?.data_source ?? '未知'}`),
           checks.length ? h('div', { style: { ...styles.itemMeta, marginTop: 5 } }, checks.map(([key, check]) => `${names[key]} ${check.structured}${check.status === 'match' ? ' = ' : ' ≠ '}报告 ${check.report}`).join(' · ')) : null,
-          warning ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前结构化结果不可信。尤其当风险/用例显示 0 时，不能解释为“没有风险/用例”。') : null,
+          presentation.failed ? h('div', { style: { ...styles.error, marginTop: 7 } }, selectedTask?.terminal_error || selectedTask?.launch_error || '分析运行失败，当前结果不能用于决策。') : warning && healthStatus === 'warning' ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前结构化结果不可信。尤其当风险/用例显示 0 时，不能解释为“没有风险/用例”。') : null,
           !compact && health.issues?.length ? h('ul', { style: styles.list }, health.issues.map((item, index) => h('li', { key: `${index}:${item}` }, item))) : null)
       }
 
@@ -2027,6 +2066,8 @@ window.__ModuleLoader__.load({
         const statusLabel = { pending: '等待', running: '执行中', completed: '已完成', failed: '失败' }
         const publication = current.publication ?? { state: 'pending', revision: 0, step_id: null }
         const publicationLabel = { pending: '阶段结果生成中', draft: '草稿已发布', final: '正式结果已发布', broken: '正式结果不可用' }
+        const presentation = deriveRunPresentation(selectedTask, current, health)
+        const publicationText = publicationLabel[presentation.publicationLabel] ?? (presentation.publicationLabel === 'pending' ? publicationLabel.pending : presentation.publicationLabel)
         const stepTimings = Object.values(current.performance?.steps ?? {}).filter(item => Number.isInteger(item?.duration_ms))
         const measuredDuration = stepTimings.reduce((total, item) => total + item.duration_ms, 0)
         const formatDuration = value => value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)} s`
@@ -2046,7 +2087,7 @@ window.__ModuleLoader__.load({
               field('独立 Judge', judgeStatus),
               field('运行状态', PHASE[current.phase] ?? current.phase),
               field('源码快照', ['verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已冻结` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'),
-              field('结果发布', `${publicationLabel[publication.state] ?? publication.state} · revision ${publication.revision ?? 0}${publication.step_id ? ` · Step ${publication.step_id}` : ''}`)),
+              field('结果发布', `${publicationText} · revision ${publication.revision ?? 0}${publication.step_id ? ` · Step ${publication.step_id}` : ''}`)),
             h('div', { style: styles.chips },
               current.artifacts?.request ? chip('打开任务请求', () => openSidebarFile(current.artifacts.request, 'Codetalks request.md')) : null,
               current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null,
@@ -2295,10 +2336,11 @@ window.__ModuleLoader__.load({
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
-        const runNeedsAttention = current.attention_required || ['needs_attention', 'failed'].includes(selectedTask.status)
+        const presentation = deriveRunPresentation(selectedTask, current, health)
+        const runNeedsAttention = current.attention_required || presentation.failed
         const nextAction = runNeedsAttention
           ? { label: '分析需要处理', hint: '当前 Run 未正常完成，请先查看下方错误，再决定是否重新启动。', target: 'workflow' }
-          : health?.status === 'warning'
+          : presentation.healthStatus === 'warning'
           ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
           : !current.terminal
             ? { label: '等待分析完成', hint: `Codetalks Skill 已完成 ${completed}/${total} 个步骤，可查看完整流程。`, target: 'workflow' }
@@ -2315,7 +2357,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.decisionHint }, nextAction.hint),
             h('button', { type: 'button', style: { ...styles.button, marginTop: 9 }, onClick: () => jump(nextAction.target) }, nextAction.target === 'workflow' ? '查看运行细节' : '进入处理'),
             h('div', { style: styles.decisionBand },
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析可信度'), h('div', { style: styles.decisionValue }, health?.status === 'warning' ? '不可用于决策' : health?.status === 'pending' ? '阶段结果生成中' : HEALTH[health?.status] ?? health?.status ?? '未知')),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析可信度'), h('div', { style: styles.decisionValue }, presentation.reliabilityLabel)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, `${testCases.length} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, `${evidence.length} 条证据`)))),
           renderHealthCard(false),
@@ -2734,6 +2776,7 @@ window.__ModuleLoader__.load({
     exports.evidenceIdentity = evidenceIdentity
     exports.evidenceTabLabel = evidenceTabLabel
     exports.runLabel = runLabel
+    exports.deriveRunPresentation = deriveRunPresentation
     exports.absoluteWorkspacePath = absoluteWorkspacePath
     exports.evidenceFilePath = evidenceFilePath
     exports.appendConversationDraft = appendConversationDraft

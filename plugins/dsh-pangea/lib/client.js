@@ -8,6 +8,7 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
     const React = require('react')
+    const ReactDOM = require('react-dom')
     const h = React.createElement
     const inject = ['betterSidebar', 'workspaces', 'sessions']
     const PAGE_PREFIX = 'dsh-pangea:'
@@ -272,7 +273,7 @@ window.__ModuleLoader__.load({
           }
           body[data-pangea-product-shell] #root [data-pane="conversation"] {
             grid-column: 3; grid-row: 1; min-width: 0; margin: 0 !important;
-            box-sizing: border-box; padding-top: 204px;
+            box-sizing: border-box; padding-top: 0;
             border-left: 1px solid #dfe3e8; background: #fbfcfd;
             display: none !important;
           }
@@ -283,6 +284,8 @@ window.__ModuleLoader__.load({
             display: flex !important;
           }
           body[data-pangea-product-shell] #root [data-pane="conversation"] > * { min-height: 0; flex: 1; }
+          body[data-pangea-product-shell] #root [data-pane="conversation"] > [data-pangea-assistant-portal="header"] { flex: 0 0 auto; }
+          body[data-pangea-product-shell] #root [data-pangea-assistant-portal="process"] { display: flex; flex: 0 0 auto; min-height: 0; }
           body[data-pangea-product-shell] #root [data-pane="conversation"] .pXSMma_stack { display: none !important; }
           body[data-pangea-product-shell] #root [data-pane="conversation"] .wSkVaW_root[data-phase="hero"] .wSkVaW_scrollBody {
             justify-content: flex-end !important;
@@ -305,9 +308,8 @@ window.__ModuleLoader__.load({
           }
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelBody { height: 100%; }
           body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-head] {
-            display: block; position: fixed; z-index: 35; top: var(--pangea-topbar-height);
-            left: calc(100vw - var(--pangea-ai-width)); right: auto;
-            box-sizing: border-box; width: var(--pangea-ai-width); height: 204px;
+            display: block; position: static; z-index: auto;
+            box-sizing: border-box; width: 100%; height: 204px;
             padding: 0 24px 16px; border-left: 1px solid #dfe3e8; border-bottom: 1px solid #e5e8ec;
             color: var(--pangea-ink); background: rgba(251,252,253,.98);
           }
@@ -351,9 +353,8 @@ window.__ModuleLoader__.load({
         [data-pangea-assistant-process] { display: none; }
         @media (min-width: 1180px) {
           body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-process] {
-            position: fixed; z-index: 34; top: calc(var(--pangea-topbar-height) + 204px); right: 0; bottom: 72px;
-            display: flex; flex-direction: column; box-sizing: border-box; width: var(--pangea-ai-width);
-            min-height: 0; overflow: hidden; padding: 14px 18px 12px; border-left: 1px solid #dfe3e8;
+            position: static; z-index: auto; display: flex; flex-direction: column; box-sizing: border-box; width: 100%;
+            min-height: 0; max-height: 42%; overflow: hidden; padding: 14px 18px 12px; border-top: 1px solid #dfe3e8;
             color: var(--pangea-ink); background: rgba(251,252,253,.98);
           }
           [data-pangea-assistant-process-head] { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: none; font-size: 13px; }
@@ -599,6 +600,60 @@ window.__ModuleLoader__.load({
           : null)
     }
 
+    function AssistantPortals({ context, enabled }) {
+      const [hosts, setHosts] = React.useState(null)
+      const hostsRef = React.useRef(null)
+      React.useLayoutEffect(() => {
+        let disposed = false
+        let observer
+        const removeHosts = () => {
+          const current = hostsRef.current
+          if (current) {
+            current.headerHost.remove()
+            current.processHost.remove()
+            hostsRef.current = null
+          }
+          if (!disposed) setHosts(null)
+        }
+        if (!enabled || !context?.taskId) {
+          removeHosts()
+          return undefined
+        }
+        const root = document.querySelector('#root') || document.body
+        const mount = () => {
+          if (disposed || hostsRef.current) return
+          const pane = root.querySelector('[data-pane="conversation"]')
+          const scroll = pane?.querySelector('[data-conversation-scroll]')
+          if (!pane || !scroll) return
+          const headerHost = document.createElement('div')
+          headerHost.dataset.pangeaAssistantPortal = 'header'
+          const processHost = document.createElement('div')
+          processHost.dataset.pangeaAssistantPortal = 'process'
+          pane.insertBefore(headerHost, pane.firstChild)
+          const composer = scroll.querySelector('[data-composer-seat]')
+          scroll.insertBefore(processHost, composer || null)
+          hostsRef.current = { headerHost, processHost }
+          setHosts(hostsRef.current)
+        }
+        observer = new MutationObserver(() => {
+          const current = hostsRef.current
+          if (current && (!current.headerHost.isConnected || !current.processHost.isConnected)) removeHosts()
+          mount()
+        })
+        observer.observe(root, { childList: true, subtree: true })
+        mount()
+        return () => {
+          disposed = true
+          observer?.disconnect()
+          removeHosts()
+        }
+      }, [context?.taskId, enabled])
+      if (!hosts || !ReactDOM?.createPortal) return null
+      return h(React.Fragment, null,
+        ReactDOM.createPortal(h(AssistantHeader, { context }), hosts.headerHost),
+        ReactDOM.createPortal(h(AssistantProcess, { context }), hosts.processHost))
+    }
+
     function ProductShell({ service, betterSidebar, page, scope, tab, visible, tabProps, children }) {
       const snapshot = React.useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
       const sidebarSnapshot = React.useSyncExternalStore(
@@ -727,8 +782,7 @@ window.__ModuleLoader__.load({
       }
       return h('div', { 'data-pangea-shell': true },
         h(ProductHeader, { scope, systemState }),
-        h(AssistantHeader, { context: assistantContext }),
-        h(AssistantProcess, { context: assistantContext }),
+        h(AssistantPortals, { context: assistantContext, enabled: productVisible && page.id === 'analysis' }),
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
           h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => item.id !== 'settings' && pageIsAvailable(item, scope)).map(item => h('button', {
             key: item.id, type: 'button', 'data-pangea-nav-button': true, 'data-active': item.id === page.id ? 'true' : 'false',

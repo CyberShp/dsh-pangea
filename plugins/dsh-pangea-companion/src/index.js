@@ -386,17 +386,11 @@ async function exportRouteHandler(req, res) {
   }
 }
 
-function runtimeInstanceId(runtime) {
-  const id = runtime?.runtime_instance_id ?? runtime?.instance_id
-  return typeof id === 'string' && id.trim() ? id.trim() : null
-}
-
 function jobReference(runtime, task, jobId = task?.job_id) {
   return {
     jobId: String(jobId ?? ''),
     ...(task?.attempt_id ? { attemptId: task.attempt_id } : {}),
     ...(task?.owner_session_id ? { ownerSessionId: task.owner_session_id } : {}),
-    ...(runtimeInstanceId(runtime) ? { runtimeInstanceId: runtimeInstanceId(runtime) } : {}),
   }
 }
 
@@ -410,10 +404,8 @@ function readJobSnapshot(runtime, task) {
 async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea) {
   if (snapshot?.kind !== 'subagent') return null
   const ownerSessionId = typeof owner?.id === 'string' ? owner.id : typeof owner?.session_id === 'string' ? owner.session_id : null
-  const runtimeId = runtimeInstanceId(runtime)
   const lookup = {
     ...(ownerSessionId ? { ownerSessionId } : {}),
-    ...(runtimeId ? { runtimeInstanceId: runtimeId } : {}),
   }
   const task = await tasks.getByJob(String(snapshot.id), lookup)
   if (!task) return null
@@ -580,19 +572,20 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       try {
         const selectedProvider = body.provider_id ?? task.provider
         let selectedModel = null
+        let preparedTask = task
         if (selectedProvider) {
           assertRegisteredAcpProvider(runtime, selectedProvider)
           await appendLaunchSafe(launchLogs, task.task_id, {
             stage: 'acp_provider_resolve', status: 'ok', provider: selectedProvider,
           })
-          await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
+          preparedTask = await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
         } else {
           await appendLaunchSafe(launchLogs, task.task_id, { stage: 'model_route_resolve', status: 'start' })
           selectedModel = await resolveTaskModel(api, body.model_route ?? task.model_route)
           await appendLaunchSafe(launchLogs, task.task_id, {
             stage: 'model_route_resolve', status: 'ok', provider: selectedModel.provider, model: selectedModel.model,
           })
-          await tasks.prepareLaunch(task.task_id, selectedModel)
+          preparedTask = await tasks.prepareLaunch(task.task_id, selectedModel)
         }
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_prepare', status: 'ok' })
         const launched = await launchAnalysisSession(api, {
@@ -607,22 +600,24 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           kind: 'analysis',
         }), async event => {
           await launchLogs.append(task.task_id, event)
-          if (['skill_run_create', 'skill_run_resume'].includes(event.stage) && event.run_id) {
-            await tasks.bindRun(task.task_id, event.run_id)
-          }
-          if (event.stage === 'acp_session_created') {
-            await tasks.bindAgentRuntime(task.task_id, {
-              agentSessionId: event.agent_session_id,
-              processId: event.pid,
-            })
-          }
-        }, runtime)
-        await tasks.bindRunBySession(launched.session_id, launched.run)
-        if (launched.job_id) await tasks.bindJob(task.task_id, {
-          jobId: launched.job_id,
-          provider: launched.provider,
-          ownerSessionId: launched.session_id,
-          runtimeInstanceId: runtimeInstanceId(runtime),
+        }, runtime, process.env, {
+          onRunReady: run => tasks.bindRun(task.task_id, run.run_id),
+          onOwnerReady: ({ ownerSessionId }) => tasks.bindOwnerSession(task.task_id, {
+            attemptId: preparedTask.attempt_id,
+            ownerSessionId,
+          }),
+          onJobCreated: ({ jobId, ownerSessionId, jobStartedAt }) => tasks.bindJob(task.task_id, {
+            jobId,
+            provider: selectedProvider,
+            ownerSessionId,
+            attemptId: preparedTask.attempt_id,
+            jobStartedAt,
+          }),
+          onAgentStarted: ({ agent_session_id, pid }) => tasks.bindAgentRuntime(task.task_id, {
+            attemptId: preparedTask.attempt_id,
+            agentSessionId: agent_session_id,
+            processId: pid,
+          }),
         })
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id })
         return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })

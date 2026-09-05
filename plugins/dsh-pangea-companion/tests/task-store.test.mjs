@@ -171,6 +171,33 @@ test('keeps an external ACP provider authoritative without freezing its model', 
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('allocates a durable attempt before a Job exists and records Job start time', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-attempt-start-'))
+  let now = 5000
+  try {
+    const store = createTaskStore({
+      storePath: path.join(root, 'tasks-v1.json'),
+      now: () => ++now,
+      idFactory: () => 'task-attempt-start',
+      attemptIdFactory: () => 'attempt-start',
+    })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '启动身份' } })
+    const prepared = await store.prepareProviderLaunch('task-attempt-start', 'pangea-opencode')
+    assert.equal(prepared.attempt_id, 'attempt-start')
+    assert.equal(prepared.attempts[0].execution_status, 'starting')
+    assert.equal(prepared.job_id, null)
+    const ownerBound = await store.bindOwnerSession('task-attempt-start', { ownerSessionId: 'owner-1' })
+    assert.equal(ownerBound.owner_session_id, 'owner-1')
+    assert.equal(ownerBound.attempts[0].owner_session_id, 'owner-1')
+    const bound = await store.bindJob('task-attempt-start', {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-1', jobStartedAt: 5010,
+    })
+    assert.equal(bound.attempt_id, 'attempt-start')
+    assert.equal(bound.job_started_at, 5010)
+    assert.equal(bound.attempts[0].job_started_at, 5010)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('binds a created Run before its DSH session exists so launch failures can resume it', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-created-'))
   try {
@@ -232,5 +259,40 @@ test('isolates identical Job ids by owner and settles the matching attempt', asy
     assert.equal(secondAfter.last_output, '第二条输出')
     assert.equal(secondAfter.attempts[0].attempt_id, 'attempt-b')
     assert.equal(secondAfter.attempts[0].execution_status, 'failed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('ignores late output from an older attempt at the task level', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-late-attempt-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-late-attempt' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '迟到输出' } })
+    await store.bindJob('task-late-attempt', {
+      jobId: 'job-old', provider: 'pangea-opencode', ownerSessionId: 'owner',
+      attemptId: 'attempt-old',
+    })
+    await store.bindJob('task-late-attempt', {
+      jobId: 'job-new', provider: 'pangea-opencode', ownerSessionId: 'owner',
+      attemptId: 'attempt-new',
+    })
+    await store.recordJobActivity({ jobId: 'job-old', ownerSessionId: 'owner', attemptId: 'attempt-old' }, '旧输出')
+    const task = await store.get('task-late-attempt')
+    assert.equal(task.attempt_id, 'attempt-new')
+    assert.equal(task.last_output, null)
+    assert.equal(task.attempts.find(item => item.attempt_id === 'attempt-old').last_output, '旧输出')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('keeps the first terminal settlement for an attempt', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-terminal-idempotent-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-terminal-idempotent' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '终态幂等' } })
+    await store.bindJob('task-terminal-idempotent', { jobId: 'job-1', provider: 'pangea-opencode', ownerSessionId: 'owner', attemptId: 'attempt-1' })
+    const completed = await store.settleJob({ jobId: 'job-1', ownerSessionId: 'owner', attemptId: 'attempt-1' }, { status: 'completed' })
+    const lateFailure = await store.settleJob({ jobId: 'job-1', ownerSessionId: 'owner', attemptId: 'attempt-1' }, { status: 'failed', detail: '迟到失败' })
+    assert.equal(completed.status, 'completed')
+    assert.equal(lateFailure.status, 'completed')
+    assert.equal(lateFailure.attempts[0].execution_status, 'completed')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

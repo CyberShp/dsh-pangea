@@ -65,6 +65,7 @@ function normalizeAttempt(value) {
     provider: text(value?.provider) || null,
     owner_session_id: text(value?.owner_session_id) || null,
     runtime_instance_id: text(value?.runtime_instance_id) || null,
+    job_started_at: Number.isFinite(value?.job_started_at) ? value.job_started_at : null,
     agent_session_id: text(value?.agent_session_id) || null,
     execution_status: executionStatus,
     terminal_error: text(value?.terminal_error) || null,
@@ -89,6 +90,7 @@ function normalizeTask(taskId, value) {
       provider: value.provider,
       owner_session_id: value.owner_session_id,
       runtime_instance_id: value.runtime_instance_id,
+      job_started_at: value.job_started_at,
       agent_session_id: value.agent_session_id,
       execution_status: value.execution_status,
       terminal_error: value.terminal_error,
@@ -116,6 +118,7 @@ function normalizeTask(taskId, value) {
     attempt_id: text(value?.attempt_id) || attempts.at(-1)?.attempt_id || null,
     owner_session_id: text(value?.owner_session_id) || null,
     runtime_instance_id: text(value?.runtime_instance_id) || null,
+    job_started_at: Number.isFinite(value?.job_started_at) ? value.job_started_at : null,
     agent_session_id: text(value?.agent_session_id) || null,
     process_id: Number.isInteger(value?.process_id) && value.process_id > 0 ? value.process_id : null,
     execution_status: ['queued', 'starting', 'running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'].includes(value?.execution_status)
@@ -199,13 +202,14 @@ function taskStatusFromRun(run) {
 }
 
 export class TaskStore {
-  constructor({ storePath = defaultStorePath(), now = () => Date.now(), idFactory } = {}) {
+  constructor({ storePath = defaultStorePath(), now = () => Date.now(), idFactory, attemptIdFactory } = {}) {
     this.storePath = storePath
     this.now = now
     this.idFactory = idFactory ?? (() => {
       const stamp = new Date(this.now()).toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)
       return `task-${stamp}-${randomUUID().slice(0, 6)}`
     })
+    this.attemptIdFactory = attemptIdFactory ?? (() => `attempt-${randomUUID()}`)
     this.store = emptyStore()
     this.saveQueue = Promise.resolve()
     this.ready = this.load()
@@ -321,7 +325,9 @@ export class TaskStore {
     const task = this.requireTask(taskId)
     const selected = normalizeModelRoute(modelRoute)
     if (!selected) throw new Error('请选择一个已配置的内部模型')
+    this.prepareAttempt(task, selected.provider)
     task.model_route = selected
+    task.provider = null
     task.status = 'preparing'
     task.launch_error = null
     task.launch_error_code = null
@@ -337,6 +343,7 @@ export class TaskStore {
     const task = this.requireTask(taskId)
     const selected = text(provider)
     if (!selected) throw new Error('请选择一个 ACP 执行 Agent')
+    this.prepareAttempt(task, selected)
     task.provider = selected
     task.model_route = null
     task.status = 'preparing'
@@ -351,23 +358,51 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async bindJob(taskId, { jobId, provider, ownerSessionId, runtimeInstanceId, attemptId, agentSessionId }) {
+  prepareAttempt(task, provider) {
+    const now = this.now()
+    const attemptId = text(this.attemptIdFactory()) || `attempt-${randomUUID()}`
+    const attempt = normalizeAttempt({
+      attempt_id: attemptId,
+      provider,
+      execution_status: 'starting',
+      started_at: now,
+      last_activity_at: now,
+    })
+    task.attempts.push(attempt)
+    task.attempt_id = attemptId
+    task.job_id = null
+    task.owner_session_id = null
+    task.runtime_instance_id = null
+    task.job_started_at = null
+    task.agent_session_id = null
+    task.process_id = null
+    task.execution_status = 'starting'
+    task.terminal_error = null
+    task.last_output = null
+    task.last_activity_at = now
+    task.status = 'preparing'
+    return attempt
+  }
+
+  async bindJob(taskId, { jobId, provider, ownerSessionId, runtimeInstanceId, attemptId, agentSessionId, jobStartedAt }) {
     await this.ready
     const task = this.requireTask(taskId)
     const job = text(jobId)
     if (!job) throw new Error('job_id is required')
     const now = this.now()
-    const id = text(attemptId) || `attempt-${randomUUID()}`
+    const id = text(attemptId) || task.attempt_id || this.attemptIdFactory()
+    const previousAttempt = task.attempts.find(item => item.attempt_id === id)
     const attempt = normalizeAttempt({
       attempt_id: id,
       job_id: job,
       provider,
       owner_session_id: ownerSessionId,
       runtime_instance_id: runtimeInstanceId,
+      job_started_at: jobStartedAt,
       agent_session_id: agentSessionId,
       execution_status: 'running',
       last_activity_at: now,
-      started_at: now,
+      started_at: previousAttempt?.started_at ?? now,
     })
     task.attempts = task.attempts.filter(item => item.attempt_id !== id)
     task.attempts.push(attempt)
@@ -376,10 +411,24 @@ export class TaskStore {
     task.provider = text(provider) || task.provider
     task.owner_session_id = text(ownerSessionId) || task.owner_session_id
     task.runtime_instance_id = text(runtimeInstanceId) || task.runtime_instance_id
+    task.job_started_at = Number.isFinite(jobStartedAt) ? jobStartedAt : task.job_started_at
     task.agent_session_id = text(agentSessionId) || task.agent_session_id
     task.execution_status = 'running'
     task.status = 'running'
     task.last_activity_at = now
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
+  async bindOwnerSession(taskId, { ownerSessionId, attemptId }) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    const id = text(attemptId) || task.attempt_id
+    const attempt = id ? task.attempts.find(item => item.attempt_id === id) : null
+    if (!attempt || !text(ownerSessionId)) return structuredClone(task)
+    attempt.owner_session_id = text(ownerSessionId)
+    if (attempt.attempt_id === task.attempt_id) task.owner_session_id = attempt.owner_session_id
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
@@ -393,17 +442,22 @@ export class TaskStore {
     return task ? structuredClone(task) : null
   }
 
-  async bindAgentRuntime(taskId, { agentSessionId, processId }) {
+  async bindAgentRuntime(taskId, { agentSessionId, processId, attemptId }) {
     await this.ready
     const task = this.requireTask(taskId)
-    task.agent_session_id = text(agentSessionId) || task.agent_session_id
-    task.process_id = Number.isInteger(processId) && processId > 0 ? processId : task.process_id
-    task.last_activity_at = this.now()
-    const attempt = task.attempts.at(-1)
+    const id = text(attemptId) || task.attempt_id
+    const attempt = id ? task.attempts.find(item => item.attempt_id === id) : null
+    const now = this.now()
     if (attempt) {
       attempt.agent_session_id = text(agentSessionId) || attempt.agent_session_id
-      attempt.last_activity_at = task.last_activity_at
+      attempt.last_activity_at = now
+      if (attempt.attempt_id === task.attempt_id) {
+        task.agent_session_id = text(agentSessionId) || task.agent_session_id
+        task.process_id = Number.isInteger(processId) && processId > 0 ? processId : task.process_id
+        task.last_activity_at = now
+      }
     }
+    if (!attempt) return structuredClone(task)
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
@@ -416,10 +470,12 @@ export class TaskStore {
     if (!task) return null
     const attempt = findAttempt(task, ref)
     const chunk = typeof output === 'string' ? output : ''
-    if (chunk) task.last_output = `${task.last_output ?? ''}${chunk}`.slice(-8192)
     if (attempt && chunk) attempt.last_output = `${attempt.last_output ?? ''}${chunk}`.slice(-8192)
     if (attempt) attempt.last_activity_at = this.now()
-    task.last_activity_at = this.now()
+    if (attempt?.attempt_id === task.attempt_id) {
+      if (chunk) task.last_output = `${task.last_output ?? ''}${chunk}`.slice(-8192)
+      task.last_activity_at = this.now()
+    }
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
@@ -431,6 +487,7 @@ export class TaskStore {
     const task = Object.values(this.store.tasks).find(item => taskMatchesJob(item, ref))
     if (!task) return null
     const attempt = findAttempt(task, ref)
+    if (attempt && ['completed', 'failed', 'stopped', 'interrupted'].includes(attempt.execution_status)) return structuredClone(task)
     const status = snapshot?.status === 'completed' ? 'completed' : snapshot?.status === 'killed' ? 'stopped' : 'failed'
     const ended = this.now()
     if (attempt) {
@@ -439,14 +496,15 @@ export class TaskStore {
       attempt.ended_at = ended
       attempt.last_activity_at = ended
     }
-    task.execution_status = status
-    task.attempt_id = attempt?.attempt_id ?? task.attempt_id
-    if (status === 'completed') task.status = 'completed'
-    else task.status = status
-    task.terminal_error = status === 'failed' ? text(snapshot?.detail, 'ACP Agent 执行失败') : null
-    task.launch_error = task.terminal_error
-    task.launch_error_code = status === 'failed' ? 'ACP_AGENT_FAILED' : null
-    task.last_activity_at = ended
+    if (attempt?.attempt_id === task.attempt_id) {
+      task.execution_status = status
+      if (status === 'completed') task.status = 'completed'
+      else task.status = status
+      task.terminal_error = status === 'failed' ? text(snapshot?.detail, 'ACP Agent 执行失败') : null
+      task.launch_error = task.terminal_error
+      task.launch_error_code = status === 'failed' ? 'ACP_AGENT_FAILED' : null
+      task.last_activity_at = ended
+    }
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
@@ -459,6 +517,13 @@ export class TaskStore {
     task.execution_status = 'failed'
     task.launch_error = text(error, '无法启动分析')
     task.launch_error_code = text(code) || null
+    const attempt = task.attempts.find(item => item.attempt_id === task.attempt_id)
+    if (attempt) {
+      attempt.execution_status = 'failed'
+      attempt.terminal_error = task.launch_error
+      attempt.ended_at = this.now()
+      attempt.last_activity_at = attempt.ended_at
+    }
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
@@ -471,6 +536,13 @@ export class TaskStore {
     task.execution_status = 'stopped'
     task.launch_error = text(error) || null
     task.launch_error_code = text(error) ? 'STOP_FAILED' : null
+    const attempt = task.attempts.find(item => item.attempt_id === task.attempt_id)
+    if (attempt) {
+      attempt.execution_status = 'stopped'
+      attempt.terminal_error = text(error) || null
+      attempt.ended_at = this.now()
+      attempt.last_activity_at = attempt.ended_at
+    }
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)
@@ -485,6 +557,13 @@ export class TaskStore {
     task.launch_error = task.terminal_error
     task.launch_error_code = 'ACP_JOB_LOST'
     task.last_activity_at = this.now()
+    const attempt = task.attempts.find(item => item.attempt_id === task.attempt_id)
+    if (attempt) {
+      attempt.execution_status = 'interrupted'
+      attempt.terminal_error = task.terminal_error
+      attempt.ended_at = task.last_activity_at
+      attempt.last_activity_at = task.last_activity_at
+    }
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)

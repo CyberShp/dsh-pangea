@@ -356,6 +356,94 @@ test('starts an ACP provider with the Agent native session configuration', async
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('records the local Job identity before releasing the ACP provider start', async () => {
+  const root = await workspace()
+  try {
+    const order = []
+    let jobHooks
+    let created
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        async create() { return ok({ sessionId: 'owner-session' }) },
+        async rename() { return ok({}) },
+      },
+    }
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get(id) { return id === owner.id ? owner : undefined } },
+      subagents: {
+        getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+        async start() {
+          order.push('provider-start')
+          return { id: 'agent-session', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => {} }
+        },
+      },
+      jobs: {
+        start(spec) { jobHooks = spec.run(); return 'subagent-1' },
+        get() { return { startedAt: 1234, status: 'running' } },
+      },
+    }
+    const runner = async call => call.args[0] === 'system'
+      ? capabilities
+      : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    const result = await launchAnalysisSession(api, {
+      cwd: root,
+      input: { repository: 'repo-one', target: 'ACP barrier', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime, process.env, {
+      onJobCreated(info) {
+        created = info
+        order.push('job-created')
+      },
+    })
+    assert.equal(result.job_id, 'subagent-1')
+    assert.deepEqual(created, { jobId: 'subagent-1', ownerSessionId: 'owner-session', jobStartedAt: 1234 })
+    assert.deepEqual(order.slice(0, 2), ['job-created', 'provider-start'])
+    await jobHooks.done
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('disposes a started ACP session when durable runtime binding fails', async () => {
+  const root = await workspace()
+  try {
+    let jobHooks
+    let disposed = false
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        async create() { return ok({ sessionId: 'owner-session' }) },
+        async rename() { return ok({}) },
+      },
+    }
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get(id) { return id === owner.id ? owner : undefined } },
+      subagents: {
+        getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+        async start() {
+          return { id: 'agent-session', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => { disposed = true } }
+        },
+      },
+      jobs: {
+        start(spec) { jobHooks = spec.run(); return 'subagent-1' },
+        get() { return { startedAt: 1234, status: 'running' } },
+      },
+    }
+    const runner = async call => call.args[0] === 'system'
+      ? capabilities
+      : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    const result = await launchAnalysisSession(api, {
+      cwd: root,
+      input: { repository: 'repo-one', target: 'ACP callback failure', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime, process.env, {
+      onAgentStarted: async () => { throw new Error('task binding failed') },
+    })
+    assert.equal(result.job_id, 'subagent-1')
+    await jobHooks.done
+    assert.equal(disposed, true)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('does not silently fall back to the internal model when an ACP runtime is missing', async () => {
   const root = await workspace()
   try {
