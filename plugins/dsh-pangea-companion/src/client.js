@@ -77,7 +77,7 @@ window.__ModuleLoader__.load({
       }
       return {
         blob: await response.blob(),
-        filename: response.headers?.get?.('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? `pangea-${runId}-test-cases.csv`,
+        filename: response.headers?.get?.('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? `pangea-${runId}-test-cases.${format}`,
       }
     }
 
@@ -1595,10 +1595,10 @@ window.__ModuleLoader__.load({
           setLaunching(false)
         }
       }
-      async function exportCurrentCases() {
+      async function exportCurrentCases(format = 'csv') {
         if (!current?.run_id || !snapshot?.data_root) return
         try {
-          const result = await requestRunExport({ cwd, dataRoot: snapshot.data_root, runId: current.run_id })
+          const result = await requestRunExport({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, format })
           const objectUrl = URL.createObjectURL(result.blob)
           const anchor = document.createElement('a')
           anchor.href = objectUrl
@@ -1608,7 +1608,7 @@ window.__ModuleLoader__.load({
           anchor.click()
           anchor.remove()
           window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
-          showActionNotice('测试用例 CSV 已导出。')
+          showActionNotice(`测试用例 ${format.toUpperCase()} 已导出。`)
         } catch (reason) {
           showActionNotice(`导出失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
         }
@@ -2471,7 +2471,9 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...styles.card, ...styles.actionCard } },
             h('div', { style: styles.itemTitle }, '测试用例出口'),
             h('div', { style: styles.itemMeta }, '当前版本提供可归档的 CSV 和复制出口；自动化执行环境尚未接入，不显示不可用的执行按钮。'),
-            h('button', { type: 'button', disabled: !current?.run_id, style: { ...styles.button, marginTop: 8, width: '100%', ...(!current?.run_id ? styles.buttonDisabled : {}) }, onClick: () => { void exportCurrentCases() } }, '导出测试用例 CSV'),
+            h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+              h('button', { type: 'button', disabled: !current?.run_id, style: { ...styles.button, flex: 1, ...(!current?.run_id ? styles.buttonDisabled : {}) }, onClick: () => { void exportCurrentCases('csv') } }, '导出 CSV'),
+              h('button', { type: 'button', disabled: !current?.run_id, style: { ...styles.button, flex: 1, ...(!current?.run_id ? styles.buttonDisabled : {}) }, onClick: () => { void exportCurrentCases('xlsx') } }, '导出 XLSX')),
             h('div', { style: styles.row },
               h('div', { style: styles.itemMeta }, `已选 ${selectedCaseIds.length} 条`),
               h('div', { style: styles.chips },

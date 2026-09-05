@@ -1,6 +1,6 @@
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
-import { buildTestCaseCsv } from './export.js'
+import { buildTestCaseCsv, buildTestCaseXlsx } from './export.js'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createRuntimeMonitor } from './monitor.js'
@@ -367,14 +367,18 @@ async function exportRouteHandler(req, res) {
   const format = url.searchParams.get('format') ?? 'csv'
   try {
     if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error('run_id is required')
-    if (format !== 'csv') throw new Error('仅支持 CSV 用例导出')
+    if (!['csv', 'xlsx'].includes(format)) throw new Error('仅支持 CSV 或 XLSX 用例导出')
     const dataRoot = await discoverPangeaDataRoot({
       cwd: url.searchParams.get('cwd') ?? undefined,
       dataRoot: url.searchParams.get('data_root') ?? undefined,
     })
     const run = await summarizeRun(dataRoot, runId, { includeDetails: true })
-    const filename = `pangea-${runId}-test-cases.csv`
-    return textResponse(res, 200, 'text/csv; charset=utf-8', buildTestCaseCsv(run), {
+    const filename = `pangea-${runId}-test-cases.${format}`
+    const body = format === 'xlsx' ? buildTestCaseXlsx(run) : buildTestCaseCsv(run)
+    const contentType = format === 'xlsx'
+      ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      : 'text/csv; charset=utf-8'
+    return textResponse(res, 200, contentType, body, {
       'content-disposition': `attachment; filename="${filename}"`,
     })
   } catch (error) {
