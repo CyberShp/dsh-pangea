@@ -607,6 +607,9 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           kind: 'analysis',
         }), async event => {
           await launchLogs.append(task.task_id, event)
+          if (['skill_run_create', 'skill_run_resume'].includes(event.stage) && event.run_id) {
+            await tasks.bindRun(task.task_id, event.run_id)
+          }
           if (event.stage === 'acp_session_created') {
             await tasks.bindAgentRuntime(task.task_id, {
               agentSessionId: event.agent_session_id,

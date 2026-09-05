@@ -534,6 +534,20 @@ export class TaskStore {
     return structuredClone(task)
   }
 
+  async bindRun(taskId, runId) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    const id = text(runId)
+    if (!id) throw new Error('run_id is required')
+    task.run_id = id
+    task.status = 'preparing'
+    task.launch_error = null
+    task.launch_error_code = null
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
   async reconcileRuns(runs, { dataRoot } = {}) {
     await this.ready
     const root = text(dataRoot)

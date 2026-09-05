@@ -24,6 +24,10 @@ test('terminal tasks can resume the existing Run from its checkpoint', () => {
   assert.match(source, /只有失败、停止或需要处理的任务可以继续/)
 })
 
+test('persists the Run identity as soon as creation succeeds', () => {
+  assert.match(source, /tasks\.bindRun\(task\.task_id, event\.run_id\)/)
+})
+
 test('stops the local Run before attempting DSH session cancellation', () => {
   const stop = source.indexOf("const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })")
   const cancel = source.indexOf('api.sessions.cancel', stop)

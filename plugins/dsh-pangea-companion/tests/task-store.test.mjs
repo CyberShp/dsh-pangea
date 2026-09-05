@@ -171,6 +171,20 @@ test('keeps an external ACP provider authoritative without freezing its model', 
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('binds a created Run before its DSH session exists so launch failures can resume it', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-created-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-created-run' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '会话创建失败' } })
+    const bound = await store.bindRun('task-created-run', 'run-created-before-session')
+    assert.equal(bound.run_id, 'run-created-before-session')
+    assert.equal(bound.status, 'preparing')
+    const failed = await store.markLaunchFailed('task-created-run', '会话创建失败')
+    assert.equal(failed.run_id, 'run-created-before-session')
+    assert.equal(failed.status, 'failed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('does not resurrect a stopped ACP attempt from a stale running Run snapshot', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-stale-stop-'))
   try {
