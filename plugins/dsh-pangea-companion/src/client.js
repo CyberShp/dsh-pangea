@@ -2355,11 +2355,11 @@ window.__ModuleLoader__.load({
           current.terminal && ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '继续分析'), h('div', { style: styles.itemMeta }, '保留已有快照、产物和检查点，从当前步骤继续。')),
               h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在继续…' : '继续分析'))) : null,
-          current.errors?.length || (runNeedsAttention && selectedTask.launch_error)
-            ? h(React.Fragment, null,
-                h('div', { style: styles.sectionTitle }, '当前错误'),
-                h('div', { style: { ...styles.card, ...styles.error } }, current.errors?.length ? JSON.stringify(current.errors, null, 2) : selectedTask.launch_error))
-            : null,
+          current.errors?.length
+            ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), renderIssueCard('当前错误', current.errors, 'error'))
+            : runNeedsAttention && selectedTask.launch_error
+              ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), renderIssueCard('当前错误', [{ code: selectedTask.launch_error_code ?? 'RUN_ERROR', message: selectedTask.launch_error }], 'error'))
+              : null,
           runItems.length ? h('details', { style: styles.technical },
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `历史 Run · ${workbench?.runs?.total ?? runItems.length}`),
             h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, runItems.map(run => {
