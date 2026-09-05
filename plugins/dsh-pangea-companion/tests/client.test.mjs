@@ -119,6 +119,26 @@ test('shows a health alert only for an actual reader warning', async () => {
   assert.doesNotMatch(source, /const healthAlert = .*health\?\.trusted === false/s)
 })
 
+test('returns from a run detail to its selected Run overview', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+  assert.equal(exported.analysisBackTarget('workflow', {
+    pageMode: 'analysis', selectedTaskId: 'task-1', hasHistory: false, initialScreen: 'tasks',
+  }), 'overview')
+  assert.equal(exported.analysisBackTarget('workflow', {
+    pageMode: 'analysis', selectedTaskId: undefined, hasHistory: false, initialScreen: 'tasks',
+  }), 'tasks')
+})
+
+test('continues background reconciliation while the window is unfocused', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  assert.doesNotMatch(source, /document\.hasFocus\(\)/)
+  assert.match(source, /WORKBENCH_BACKGROUND_POLL_INTERVAL_MS/)
+})
+
 test('workbench API lists runs and starts or stops through explicit actions', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported

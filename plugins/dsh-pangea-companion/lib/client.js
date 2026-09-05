@@ -21,6 +21,7 @@ window.__ModuleLoader__.load({
     const ACTIVE_POLL_INTERVAL_MS = 2_000
     const IDLE_POLL_INTERVAL_MS = 45_000
     const WORKBENCH_ACTIVE_POLL_INTERVAL_MS = 2_000
+    const WORKBENCH_BACKGROUND_POLL_INTERVAL_MS = 45_000
     const ACP_PROVIDER_STORAGE_KEY = 'pangea.acp-provider.v1'
     const MODEL_ROUTE_STORAGE_KEY = 'pangea.model-route.v1'
 
@@ -596,6 +597,12 @@ window.__ModuleLoader__.load({
       return screen.type
     }
 
+    function analysisBackTarget(screenType, { pageMode = 'analysis', selectedTaskId, hasHistory = false, initialScreen = 'tasks' } = {}) {
+      if (hasHistory) return 'history'
+      if (pageMode === 'analysis' && selectedTaskId && !['tasks', 'create', 'overview'].includes(screenType)) return 'overview'
+      return initialScreen
+    }
+
     function emptyEnvironmentForm() {
       return {
         id: '', name: '', advanced: false,
@@ -968,43 +975,31 @@ window.__ModuleLoader__.load({
         }
         let stopped = false
         let timer
-        const canPoll = () => document.visibilityState !== 'hidden' && document.hasFocus()
         const clearTimer = () => {
           if (timer !== undefined) window.clearTimeout(timer)
           timer = undefined
         }
         const schedule = value => {
           clearTimer()
-          if (!stopped && canPoll()) timer = window.setTimeout(() => { timer = undefined; void poll() }, snapshotPollInterval(value))
+          const delay = document.visibilityState === 'hidden' ? IDLE_POLL_INTERVAL_MS : snapshotPollInterval(value)
+          if (!stopped) timer = window.setTimeout(() => { timer = undefined; void poll() }, delay)
         }
         const poll = async () => {
-          if (stopped || !canPoll()) return
+          if (stopped) return
           const value = await load()
           if (!stopped) schedule(value ?? snapshotRef.current)
         }
-        const pause = () => {
-          clearTimer()
-          requestRef.current.controller?.abort()
-        }
-        const resume = () => {
-          if (stopped || !canPoll()) return
+        const onVisibilityChange = () => {
+          if (stopped || document.visibilityState === 'hidden') return
           clearTimer()
           timer = window.setTimeout(() => { timer = undefined; void poll() }, 0)
         }
-        const onVisibilityChange = () => {
-          if (canPoll()) resume()
-          else pause()
-        }
-        window.addEventListener('focus', resume)
-        window.addEventListener('blur', pause)
         document.addEventListener('visibilitychange', onVisibilityChange)
-        resume()
+        timer = window.setTimeout(() => { timer = undefined; void poll() }, 0)
         return () => {
           stopped = true
           clearTimer()
           requestRef.current.controller?.abort()
-          window.removeEventListener('focus', resume)
-          window.removeEventListener('blur', pause)
           document.removeEventListener('visibilitychange', onVisibilityChange)
         }
       }, [load, pageMode, visible])
@@ -1022,10 +1017,15 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!visible || pageMode === 'execution' || !taskItems.some(task => ['preparing', 'running'].includes(task.status))) return undefined
         let stopped = false
-        const timer = window.setInterval(() => {
-          if (!stopped && document.visibilityState !== 'hidden' && document.hasFocus()) void loadWorkbench({ background: true })
-        }, WORKBENCH_ACTIVE_POLL_INTERVAL_MS)
-        return () => { stopped = true; window.clearInterval(timer) }
+        let timer
+        const poll = () => {
+          if (stopped) return
+          void loadWorkbench({ background: true })
+          timer = window.setTimeout(poll, document.visibilityState === 'hidden'
+            ? WORKBENCH_BACKGROUND_POLL_INTERVAL_MS : WORKBENCH_ACTIVE_POLL_INTERVAL_MS)
+        }
+        timer = window.setTimeout(poll, 0)
+        return () => { stopped = true; window.clearTimeout(timer) }
       }, [loadWorkbench, pageMode, taskItems.some(task => ['preparing', 'running'].includes(task.status)), visible])
       const monitor = snapshot?.monitor
       const monitoredSession = monitor?.session
@@ -1113,9 +1113,10 @@ window.__ModuleLoader__.load({
       const navigate = React.useCallback((next) => { setHistory(previous => [...previous, screen]); setScreen(next) }, [screen])
       const jump = React.useCallback((type) => { setScreen({ type }); setHistory([]) }, [])
       const goBack = React.useCallback(() => {
-        if (history.length === 0) { setScreen({ type: initialScreen }); return }
+        const target = analysisBackTarget(screen.type, { pageMode, selectedTaskId, hasHistory: history.length > 0, initialScreen })
+        if (target !== 'history') { setScreen({ type: target }); return }
         setScreen(history[history.length - 1]); setHistory(history.slice(0, -1))
-      }, [history, initialScreen])
+      }, [history, initialScreen, pageMode, screen.type, selectedTaskId])
       function chooseRun(runId) {
         const task = workbench?.tasks?.items?.find(item => item.run_id === runId)
         // Clear a stale task selection when a historical Run has no matching
@@ -2578,6 +2579,7 @@ window.__ModuleLoader__.load({
     exports.appendConversationDraft = appendConversationDraft
     exports.splitRiskClaims = splitRiskClaims
     exports.buildDiscussionDraft = buildDiscussionDraft
+    exports.analysisBackTarget = analysisBackTarget
     exports.apply = apply
     return module.exports
   },
