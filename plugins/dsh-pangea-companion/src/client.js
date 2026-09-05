@@ -1065,7 +1065,7 @@ window.__ModuleLoader__.load({
         void loadWorkbench()
         return () => workbenchRequestRef.current.controller?.abort()
       }, [loadWorkbench, pageMode, visible])
-      React.useEffect(() => { if (visible) void loadEnvironments() }, [visible, loadEnvironments])
+      React.useEffect(() => { if (visible && pageMode === 'execution') void loadEnvironments() }, [visible, pageMode, loadEnvironments])
       React.useEffect(() => { if (visible && pageMode === 'home') void loadRepositories() }, [visible, pageMode, loadRepositories])
 
       const current = snapshot?.current
@@ -1610,6 +1610,26 @@ window.__ModuleLoader__.load({
           showActionNotice('测试用例 CSV 已导出。')
         } catch (reason) {
           showActionNotice(`导出失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
+      }
+      async function copySelectedCases() {
+        const selected = testCases.filter(item => selectedCaseIds.includes(item.test_case_id))
+        if (selected.length === 0) {
+          showActionNotice('请先选择至少一条已编号用例。', true)
+          return
+        }
+        const content = selected.map(item => [
+          `${item.test_case_id} · ${text(item.title, '未命名用例')}`,
+          `前置条件：${Array.isArray(item.preconditions) ? item.preconditions.join('；') : text(item.preconditions, '未记录')}`,
+          `步骤：${Array.isArray(item.steps) ? item.steps.join('；') : text(item.steps, '未记录')}`,
+          `预期：${Array.isArray(item.expected_results) ? item.expected_results.join('；') : text(item.expected_results, '未记录')}`,
+        ].join('\n')).join('\n\n')
+        try {
+          if (!globalThis.navigator?.clipboard?.writeText) throw new Error('当前环境不支持剪贴板写入')
+          await globalThis.navigator.clipboard.writeText(content)
+          showActionNotice(`已复制 ${selected.length} 条测试用例。`)
+        } catch (reason) {
+          showActionNotice(`复制失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
         }
       }
       function openSidebarFile(value, title) {
@@ -2428,7 +2448,6 @@ window.__ModuleLoader__.load({
       function renderCases() {
         const query = caseQuery.trim().toLowerCase()
         const filtered = testCases.filter(item => !query || [item.test_case_id, item.title, item.case_type, ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
-        const canLaunch = selectedCaseIds.length > 0 && selectedEnvironment && !launching && health?.trusted !== false
         const selectableFilteredIds = filtered.map(item => item.test_case_id).filter(hasText)
         const groups = new Map()
         for (const item of filtered) {
@@ -2444,20 +2463,17 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '可选用例'), h('div', { style: styles.decisionValue }, testCases.length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已选择'), h('div', { style: styles.decisionValue }, selectedCaseIds.length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '执行环境'), h('div', { style: styles.decisionValue }, selectedEnvironment ? environments.find(item => item.id === selectedEnvironment)?.name ?? selectedEnvironment : '未选择')))),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '当前出口'), h('div', { style: styles.decisionValue }, 'CSV / 剪贴板')))),
           h('div', { style: { ...styles.card, ...styles.actionCard } },
-            h('div', { style: styles.itemTitle }, '执行这份计划'),
-            h('div', { style: styles.itemMeta }, '系统会创建独立执行记录，并保留本次选择、环境和结果。'),
+            h('div', { style: styles.itemTitle }, '测试用例出口'),
+            h('div', { style: styles.itemMeta }, '当前版本提供可归档的 CSV 和复制出口；自动化执行环境尚未接入，不显示不可用的执行按钮。'),
             h('button', { type: 'button', disabled: !current?.run_id, style: { ...styles.button, marginTop: 8, width: '100%', ...(!current?.run_id ? styles.buttonDisabled : {}) }, onClick: () => { void exportCurrentCases() } }, '导出测试用例 CSV'),
-            h('select', { style: { ...styles.search, marginTop: 8 }, value: selectedEnvironment, onChange: event => setSelectedEnvironment(event.target.value) },
-              h('option', { value: '' }, environments.length ? '选择执行环境' : '请先在“环境配置”中新增环境'),
-              environments.map(environment => h('option', { key: environment.id, value: environment.id }, `${environment.name} · ${environment.host?.ip || '未配置主机'} + ${environment.array?.ip || '未配置阵列'}`))),
             h('div', { style: styles.row },
               h('div', { style: styles.itemMeta }, `已选 ${selectedCaseIds.length} 条`),
               h('div', { style: styles.chips },
                 chip('选择当前列表', () => setSelectedCaseIds([...new Set([...selectedCaseIds, ...selectableFilteredIds])])),
-                chip('清空', () => setSelectedCaseIds([])))),
-            h('button', { type: 'button', disabled: !canLaunch, style: { ...styles.primaryButton, marginTop: 9, ...(!canLaunch ? styles.buttonDisabled : {}) }, onClick: () => { void startSelectedCases() } }, launching ? '正在创建执行会话…' : '开始执行计划')),
+                chip('复制选中用例', () => { void copySelectedCases() }),
+                chip('清空', () => setSelectedCaseIds([]))))),
           h('input', { style: styles.search, value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例编号、标题、类型、关联风险…', onChange: event => setCaseQuery(event.target.value) }),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${testCases.length} 条`),
           h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
