@@ -362,7 +362,7 @@ test('client export request returns a downloadable CSV response and filename', a
   const result = await exported.requestRunExport({
     cwd: '/tmp/pangea', dataRoot: '/tmp/pangea/pangea-data', runId: 'run-1',
     async fetcher(url, options) {
-      assert.match(url, /^\/api\/pangea-companion\/export\?/) 
+      assert.match(url, /^\/api\/pangea-companion\/export\?/)
       assert.match(url, /format=csv/)
       assert.equal(options.cache, 'no-store')
       return {

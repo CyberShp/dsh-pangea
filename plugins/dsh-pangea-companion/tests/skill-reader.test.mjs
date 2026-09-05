@@ -53,6 +53,31 @@ test('reads Codetalks state and maps Step 01–09 Markdown lifecycle', async () 
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('exposes step timing evidence without treating it as a quality verdict', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-performance-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'performance-run'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'performance' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'running', current_step: '04', completed_steps: ['01', '02', '03'],
+      performance: {
+        version: 1, progress_updates: 7,
+        steps: { '03': { duration_ms: 8123, artifact_bytes_delta: 4096, progress_updates: 3 } },
+      },
+    })
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.performance.progress_updates, 7)
+    assert.equal(current.performance.steps['03'].duration_ms, 8123)
+    assert.equal(current.reader_health.status, 'pending')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('marks a completed Run without its final projection as broken', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-missing-final-'))
   const dataRoot = path.join(root, 'pangea-data')

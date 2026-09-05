@@ -176,6 +176,13 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const recordedSourceSnapshot = metadata.source_snapshot ?? { status: 'legacy_unavailable', snapshot_digest: null, file_count: null }
   const sourceSnapshot = { ...recordedSourceSnapshot, ...(await verifySourceSnapshot(runDirectory, runId, recordedSourceSnapshot)) }
   const validation = state?.validation ?? { status: 'not_checked', error_count: 0, errors: [] }
+  const performance = state?.performance && typeof state.performance === 'object'
+    ? {
+        version: 1,
+        progress_updates: Number.isInteger(state.performance.progress_updates) ? state.performance.progress_updates : 0,
+        steps: state.performance.steps && typeof state.performance.steps === 'object' ? state.performance.steps : {},
+      }
+    : { version: 1, progress_updates: 0, steps: {} }
   const completed = state?.completed_steps?.length ?? 0
   const finalExpected = life.lifecycle_status === 'complete'
     || state?.status === 'complete'
@@ -238,6 +245,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       submitted: completed,
       max_parallel: 1,
     },
+    performance,
     counts: {
       risks: projection.status === 'verified' ? projectionValue.risks.length : null,
       test_cases: projection.status === 'verified' ? projectionValue.test_cases.length : null,
