@@ -133,6 +133,25 @@ test('returns from a run detail to its selected Run overview', async () => {
   }), 'tasks')
 })
 
+test('builds analysis requests with explicit scenario and mode', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+
+  assert.deepEqual(JSON.parse(JSON.stringify(exported.buildAnalysisRequest({
+    repository: 'open-iscsi', target: '认证恢复', source_scope_text: 'src/auth\n src/session', asset_ids: ['asset-1'],
+    scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route_key: 'ignored',
+  }))), {
+    request_version: '2.0', repository: 'open-iscsi', target: '认证恢复',
+    source_scope: ['src/auth', 'src/session'], asset_ids: ['asset-1'],
+    scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route: null,
+  })
+  assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).scenario, 'module-analysis')
+  assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).mode, 'depth')
+})
+
 test('continues background reconciliation while the window is unfocused', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.doesNotMatch(source, /document\.hasFocus\(\)/)

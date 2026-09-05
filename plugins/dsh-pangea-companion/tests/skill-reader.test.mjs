@@ -77,6 +77,33 @@ test('marks a completed Run without its final projection as broken', async () =>
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('preserves a published draft revision and step before final delivery', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-draft-publication-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'draft-publication'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'draft' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'running', current_step: '06', completed_steps: ['01', '02', '03', '04', '05'],
+      publication: { state: 'draft', revision: 3, step_id: '05' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '工作台投影.json'), {
+      schema_version: '1.0', run_id: runId,
+      publication: { state: 'draft', revision: 3, step_id: '05' },
+      business_flows: [], risks: [{ risk_id: 'R-1' }], test_cases: [], evidence: [], review_issues: [],
+    })
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.deepEqual(current.publication, { state: 'draft', revision: 3, step_id: '05' })
+    assert.equal(current.reader_health.status, 'ok')
+    assert.equal(current.counts.risks, 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('marks only a validated complete Skill state as terminal complete', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-complete-'))
   const dataRoot = path.join(root, 'pangea-data')

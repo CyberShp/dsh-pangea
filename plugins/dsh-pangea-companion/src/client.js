@@ -603,6 +603,20 @@ window.__ModuleLoader__.load({
       return initialScreen
     }
 
+    function buildAnalysisRequest(form) {
+      return {
+        request_version: '2.0',
+        repository: form.repository,
+        target: form.target,
+        source_scope: String(form.source_scope_text ?? '').split(/[\n,]/).map(value => value.trim()).filter(Boolean),
+        asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
+        scenario: form.scenario || 'module-analysis',
+        mode: form.mode || 'depth',
+        provider_id: form.provider_id || null,
+        model_route: form.provider_id ? null : modelRouteFromKey(form.model_route_key),
+      }
+    }
+
     function emptyEnvironmentForm() {
       return {
         id: '', name: '', advanced: false,
@@ -769,7 +783,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', asset_ids: [], provider_id: '', model_route_key: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '' })
       const [assetCatalog, setAssetCatalog] = React.useState(null)
       const [assetCatalogLoading, setAssetCatalogLoading] = React.useState(false)
       const [assetCatalogError, setAssetCatalogError] = React.useState('')
@@ -1359,15 +1373,7 @@ window.__ModuleLoader__.load({
             cwd,
             action: 'task-create',
             payload: {
-              input: {
-                request_version: '2.0',
-                repository: createForm.repository,
-                target: createForm.target,
-                source_scope: createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean),
-                asset_ids: createForm.asset_ids,
-                provider_id: createForm.provider_id || null,
-                model_route: createForm.provider_id ? null : modelRouteFromKey(createForm.model_route_key),
-              },
+              input: buildAnalysisRequest(createForm),
             },
           })
           createdTask = created.task
@@ -1853,6 +1859,19 @@ window.__ModuleLoader__.load({
               }, h('option', { value: '' }, '内置 API Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: item.registered !== true }, `${item.label}${item.registered === true ? '' : ' · 未加载'}`))))),
               internalModelFields,
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
+              h('label', null, h('div', { style: styles.label }, '分析场景'), h('select', {
+                style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.scenario,
+                onChange: event => setCreateForm(value => ({ ...value, scenario: event.target.value })),
+              },
+              h('option', { value: 'module-analysis' }, '模块分析'),
+              h('option', { value: 'issue-regression' }, '问题回归'),
+              h('option', { value: 'root-cause' }, '根因定位'),
+              h('option', { value: 'special-risk' }, '专项风险'),
+              h('option', { value: 'custom' }, '自定义'))),
+              h('label', null, h('div', { style: styles.label }, '分析模式'), h('select', {
+                style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.mode,
+                onChange: event => setCreateForm(value => ({ ...value, mode: event.target.value })),
+              }, h('option', { value: 'depth' }, '深度型（含独立复核）'), h('option', { value: 'speed' }, '速度型（快速交付）'))),
               h('label', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '源码冻结范围'),
                 h('textarea', { 'aria-label': '源码冻结范围', style: { ...styles.textarea, marginTop: 5, minHeight: 72 }, value: createForm.source_scope_text, placeholder: '. 或填写相对仓库根目录的文件/目录，每行一个', onChange: event => setCreateForm(value => ({ ...value, source_scope_text: event.target.value })) }),
@@ -2580,6 +2599,7 @@ window.__ModuleLoader__.load({
     exports.splitRiskClaims = splitRiskClaims
     exports.buildDiscussionDraft = buildDiscussionDraft
     exports.analysisBackTarget = analysisBackTarget
+    exports.buildAnalysisRequest = buildAnalysisRequest
     exports.apply = apply
     return module.exports
   },

@@ -38,7 +38,7 @@ test('creates a frozen 2.0 Skill request and removes it after Run creation', asy
     const calls = []
     const result = await createRun(nested, {
       repository: 'repo-one', target: 'session and retry', source_scope: ['src/session.c'],
-      asset_ids: ['asset-1'],
+      asset_ids: ['asset-1'], scenario: 'root-cause', mode: 'speed',
     }, async call => {
       calls.push(call)
       if (call.args[0] === 'system') {
@@ -55,13 +55,36 @@ test('creates a frozen 2.0 Skill request and removes it after Run creation', asy
     assert.equal(observed.contract.target, 'session and retry')
     assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
     assert.equal(observed.contract.run_id, undefined)
-    assert.equal(observed.contract.mode, undefined)
+    assert.equal(observed.contract.scenario, 'root-cause')
+    assert.equal(observed.contract.mode, 'speed')
     assert.equal(observed.contract.request_version, '2.0')
     assert.equal(observed.contract.data_root, path.join(root, 'pangea-data'))
     assert.deepEqual(observed.contract.asset_ids, ['asset-1'])
     assert.equal(observed.contract.focus, undefined)
     assert.equal(observed.contract.test_case_examples, undefined)
     assert.equal(existsSync(pending), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('uses the depth module-analysis defaults and rejects unsupported modes', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-analysis-mode-'))
+  try {
+    await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
+    await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
+    let contract
+    await createRun(root, { repository: 'repo-one', target: 'default', source_scope: ['src/a.c'] }, async call => {
+      if (call.args[0] === 'system') return { analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
+      contract = JSON.parse(await readFile(path.join(root, 'pangea-data', '.pangea', 'pending-skill-request.json'), 'utf8'))
+      return { run_id: 'run-02' }
+    })
+    assert.equal(contract.scenario, 'module-analysis')
+    assert.equal(contract.mode, 'depth')
+    await assert.rejects(
+      () => createRun(root, { repository: 'repo-one', target: 'invalid', source_scope: ['src/a.c'], mode: 'preview' }, async () => ({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } })),
+      /分析模式/,
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

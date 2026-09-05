@@ -181,10 +181,29 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     || state?.status === 'complete'
     || (state?.completed_steps ?? []).includes('09')
     || reportAvailable
+  const recordedPublication = state?.publication && typeof state.publication === 'object'
+    ? state.publication
+    : projection.value?.publication && typeof projection.value.publication === 'object'
+      ? projection.value.publication
+      : null
+  const recordedState = ['pending', 'draft', 'final', 'broken'].includes(recordedPublication?.state)
+    ? recordedPublication.state
+    : null
   const publicationState = projection.status === 'verified'
-    ? (finalExpected ? 'final' : 'draft')
+    ? (recordedState === 'broken' ? 'broken' : recordedState === 'final' && finalExpected ? 'final' : finalExpected ? 'final' : 'draft')
     : (finalExpected ? 'broken' : 'pending')
-  const projectionIssues = projection.status === 'verified' || publicationState === 'pending' ? [] : projection.issues
+  const publicationRevision = Number.isInteger(recordedPublication?.revision) && recordedPublication.revision >= 0
+    ? recordedPublication.revision
+    : projection.status === 'verified' ? 1 : 0
+  const publicationStep = typeof recordedPublication?.step_id === 'string'
+    ? recordedPublication.step_id
+    : projection.status === 'verified' ? (finalExpected ? '09' : null) : null
+  const publicationIssues = publicationState === 'broken' ? ['工作台结构化投影已标记为 broken'] : []
+  const projectionIssues = publicationState === 'pending'
+    ? []
+    : projection.status === 'verified' && publicationState !== 'broken'
+      ? []
+      : [...projection.issues, ...publicationIssues]
   const workflow = {
     steps: await stepRows(state, liveDocuments, formalOutputs, metadata.skill_root),
     completed_steps: state?.completed_steps ?? [],
@@ -236,12 +255,12 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     },
     publication: {
       state: publicationState,
-      revision: projection.status === 'verified' ? 1 : 0,
-      step_id: projection.status === 'verified' ? '09' : null,
+      revision: publicationRevision,
+      step_id: publicationStep,
     },
     data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
     reader_health: {
-      status: projection.status === 'verified' && sourceSnapshot.status !== 'corrupt'
+      status: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'corrupt'
         ? 'ok'
         : publicationState === 'pending' && sourceSnapshot.status !== 'corrupt' ? 'pending' : 'warning',
       trusted: projection.status === 'verified' && sourceSnapshot.status !== 'corrupt',

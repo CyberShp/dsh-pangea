@@ -6,6 +6,8 @@ import path from 'node:path'
 const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
 const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.3.0' })
+const ANALYSIS_SCENARIOS = new Set(['module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
+const ANALYSIS_MODES = new Set(['speed', 'depth'])
 
 export function normalizeSourceScope(values, repository) {
   const items = Array.isArray(values) ? values : []
@@ -114,6 +116,10 @@ export async function createRun(cwd, input, runner = runPangea) {
   const dataRoot = typeof input.data_root === 'string' && input.data_root.trim() !== ''
     ? path.resolve(root, input.data_root)
     : path.join(root, 'pangea-data')
+  const scenario = input.scenario ?? 'module-analysis'
+  const mode = input.mode ?? 'depth'
+  if (!ANALYSIS_SCENARIOS.has(scenario)) throw new Error(`不支持的分析场景：${scenario}`)
+  if (!ANALYSIS_MODES.has(mode)) throw new Error(`不支持的分析模式：${mode}`)
   const request = {
     request_version: '2.0',
     data_root: dataRoot,
@@ -121,6 +127,8 @@ export async function createRun(cwd, input, runner = runPangea) {
     target: input.target,
     source_scope: normalizeSourceScope(input.source_scope, input.repository),
     asset_ids: input.asset_ids ?? [],
+    scenario,
+    mode,
   }
   const capabilities = await runner({
     cwd: root,
