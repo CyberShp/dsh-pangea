@@ -311,3 +311,11 @@ test('keeps the product page mounted while a file or browser utility is open', a
   assert.match(source, /data-pangea-product-content/)
   assert.match(source, /display: utility \? 'none' : undefined/)
 })
+
+test('routes ACP process output to the right assistant panel', async () => {
+  const { source } = await loadClient()
+  assert.match(source, /data-pangea-assistant-process/)
+  assert.match(source, /AssistantProcess/)
+  assert.match(source, /process\.output\.slice\(-12000\)/)
+  assert.match(source, /h\(AssistantProcess, \{ context: assistantContext \}\)/)
+})

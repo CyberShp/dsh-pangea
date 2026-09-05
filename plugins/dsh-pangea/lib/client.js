@@ -348,6 +348,23 @@ window.__ModuleLoader__.load({
           [data-pangea-assistant-head] { padding-inline: 20px; }
         }
 
+        [data-pangea-assistant-process] { display: none; }
+        @media (min-width: 1180px) {
+          body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-process] {
+            position: fixed; z-index: 34; top: calc(var(--pangea-topbar-height) + 204px); right: 0; bottom: 72px;
+            display: flex; flex-direction: column; box-sizing: border-box; width: var(--pangea-ai-width);
+            min-height: 0; overflow: hidden; padding: 14px 18px 12px; border-left: 1px solid #dfe3e8;
+            color: var(--pangea-ink); background: rgba(251,252,253,.98);
+          }
+          [data-pangea-assistant-process-head] { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: none; font-size: 13px; }
+          [data-pangea-assistant-process-status] { color: #68707c; font-size: 11px; }
+          [data-pangea-assistant-process-status="failed"], [data-pangea-assistant-process-status="interrupted"] { color: var(--pangea-red); }
+          [data-pangea-assistant-process-error] { flex: none; margin-top: 8px; color: var(--pangea-red); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+          [data-pangea-assistant-process-output] { flex: 1; min-height: 48px; overflow: auto; margin: 8px 0 0; padding: 10px; border: 1px solid #e1e4e8; border-radius: 7px; color: #34383f; background: #fff; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+          [data-pangea-assistant-process-events] { flex: none; max-height: 150px; overflow: auto; margin-top: 8px; color: #68707c; font-size: 11px; line-height: 18px; }
+          [data-pangea-assistant-process-events] summary { cursor: pointer; color: #4d5560; }
+        }
+
         @media (max-width: 1179px) {
           [data-pangea-shell] { grid-template-columns: 74px minmax(0, 1fr); }
           [data-pangea-product-nav] { padding-inline: 9px; }
@@ -559,6 +576,29 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', 'data-pangea-assistant-new': true, onClick: () => context?.onCreateConversation?.() }, '新建会话')))
     }
 
+    function AssistantProcess({ context }) {
+      if (!context?.taskId) return null
+      const process = context.process ?? {}
+      const output = typeof process.output === 'string' && process.output.trim() !== ''
+        ? process.output.slice(-12000)
+        : '等待 Agent 产生可显示的过程输出…'
+      const status = process.status ?? 'preparing'
+      const statusLabel = {
+        starting: '正在启动', queued: '排队中', running: '分析中', stopping: '正在停止',
+        completed: '已完成', failed: '失败', killed: '已停止', stopped: '已停止', interrupted: '已中断',
+      }[status] ?? status
+      return h('section', { 'data-pangea-assistant-process': true, 'aria-label': '当前 Run 分析过程' },
+        h('div', { 'data-pangea-assistant-process-head': true },
+          h('strong', null, '分析过程'), h('span', { 'data-pangea-assistant-process-status': status }, statusLabel)),
+        process.error ? h('div', { 'data-pangea-assistant-process-error': true, role: 'alert' }, process.error) : null,
+        h('pre', { 'data-pangea-assistant-process-output': true }, output),
+        Array.isArray(process.events) && process.events.length
+          ? h('details', { 'data-pangea-assistant-process-events': true },
+            h('summary', null, `生命周期 · ${process.events.length} 条`),
+            process.events.map((event, index) => h('div', { key: `${event.at ?? index}:${event.stage ?? index}` }, event.label ?? event.stage ?? '事件')))
+          : null)
+    }
+
     function ProductShell({ service, betterSidebar, page, scope, tab, visible, tabProps, children }) {
       const snapshot = React.useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
       const sidebarSnapshot = React.useSyncExternalStore(
@@ -688,6 +728,7 @@ window.__ModuleLoader__.load({
       return h('div', { 'data-pangea-shell': true },
         h(ProductHeader, { scope, systemState }),
         h(AssistantHeader, { context: assistantContext }),
+        h(AssistantProcess, { context: assistantContext }),
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
           h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => item.id !== 'settings' && pageIsAvailable(item, scope)).map(item => h('button', {
             key: item.id, type: 'button', 'data-pangea-nav-button': true, 'data-active': item.id === page.id ? 'true' : 'false',
