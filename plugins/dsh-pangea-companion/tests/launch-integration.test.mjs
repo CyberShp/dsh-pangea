@@ -17,6 +17,13 @@ test('task launch diagnostics are wired through direct Skill startup', () => {
   assert.match(source, /launchLogRouteHandler/)
 })
 
+test('terminal tasks can resume the existing Run from its checkpoint', () => {
+  assert.match(source, /const resume = body\.resume === true/)
+  assert.match(source, /if \(task\.run_id && !resume\)/)
+  assert.match(source, /resumeRunId: resume \? task\.run_id : null/)
+  assert.match(source, /只有失败、停止或需要处理的任务可以继续/)
+})
+
 test('stops the local Run before attempting DSH session cancellation', () => {
   const stop = source.indexOf("const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })")
   const cancel = source.indexOf('api.sessions.cancel', stop)

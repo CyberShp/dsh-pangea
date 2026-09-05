@@ -1,6 +1,6 @@
 import path from 'node:path'
 
-import { assertCodetalksSkill, createRun, runPangea, workspaceRoot } from './pangea-api.js'
+import { assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
@@ -355,7 +355,7 @@ function startAcpJob(runtime, parent, providerId, prompt, label, onEvent) {
 
 export async function launchAnalysisSession(
   api,
-  { cwd, dataRoot, input, model },
+  { cwd, dataRoot, input, model, resumeRunId },
   runner = runPangea,
   onSession = async () => {},
   onEvent = async () => {},
@@ -381,13 +381,16 @@ export async function launchAnalysisSession(
       () => requireInternalModel(api, model),
       value => ({ provider: value.provider, model: value.model }),
     )
+  const requestedResumeRunId = typeof resumeRunId === 'string' ? resumeRunId.trim() : ''
   const run = await launchStep(
     onEvent,
-    'skill_run_create',
-    () => {
-      const { provider_id: _providerId, ...skillRequest } = request
-      return createRun(root, { ...skillRequest, data_root: resolvedDataRoot }, runner)
-    },
+    requestedResumeRunId ? 'skill_run_resume' : 'skill_run_create',
+    () => requestedResumeRunId
+      ? resumeRun(root, { dataRoot: resolvedDataRoot, runId: requestedResumeRunId }, runner)
+      : (() => {
+        const { provider_id: _providerId, ...skillRequest } = request
+        return createRun(root, { ...skillRequest, data_root: resolvedDataRoot }, runner)
+      })(),
     value => ({ run_id: value.run_id, request_path: value.request_path }),
   )
   const sessionId = await launchStep(
@@ -412,16 +415,19 @@ export async function launchAnalysisSession(
     run,
   }), () => ({ session_id: sessionId }))
   const prompt = [
-    `立即开始已经创建好的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，完整执行 Step 01–09，不需要再次确认，也不要创建第二个 Run。`,
+    requestedResumeRunId
+      ? `继续已有的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，从最近检查点恢复执行，不要创建第二个 Run。`
+      : `立即开始已经创建好的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，完整执行 Step 01–09，不需要再次确认，也不要创建第二个 Run。`,
     '必须先读取 `.agents/pangea/dsh.md`，再读取下面的 Skill 运行请求并严格执行。',
     `运行请求：${run.request_path}`,
     `Run ID：${run.run_id}`,
     `运行根目录：${run.run_root}`,
+    requestedResumeRunId ? '这是一次续跑：先读取内部索引/运行状态.json，调用 run_guard.py init --resume 保留已完成步骤，再从当前步骤继续。' : null,
     '旧 PANGEA Graph、Planning、Worker action、Review、Closure、Reporting、bind、validate 和 settle 均不存在。',
     '生命周期只以运行根目录中的 `内部索引/运行状态.json` 为准。',
     '',
     '现在读取运行请求并执行。',
-  ].join('\n')
+  ].filter(Boolean).join('\n')
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
     const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent), value => ({ job_id: value, provider: selectedProvider }))
@@ -454,6 +460,14 @@ export async function stopAnalysisRun({ cwd, dataRoot, runId, runner = runPangea
     cwd: root,
     args: ['runs', 'stop', '--data-root', resolvedDataRoot, '--run-id', runId.trim()],
   })
+  return { status: 'ok', data_root: resolvedDataRoot, run }
+}
+
+export async function resumeAnalysisRun({ cwd, dataRoot, runId, runner = runPangea }) {
+  const root = workspaceRoot(cwd)
+  const resolvedDataRoot = dataRootFor(root, dataRoot)
+  if (typeof runId !== 'string' || runId.trim() === '') throw new Error('run_id is required')
+  const run = await resumeRun(root, { dataRoot: resolvedDataRoot, runId: runId.trim() }, runner)
   return { status: 'ok', data_root: resolvedDataRoot, run }
 }
 

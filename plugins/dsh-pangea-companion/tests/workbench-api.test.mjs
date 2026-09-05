@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
 const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
 const acpRuntimeConfig = {
@@ -260,6 +260,52 @@ test('stops one explicit Run through the public runs API', async () => {
     assert.deepEqual(call.args.slice(0, 2), ['runs', 'stop'])
     assert.deepEqual(call.args.slice(-2), ['--run-id', 'run-17'])
     assert.equal(result.run.lifecycle_status, 'stopped')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('resumes an existing Run without creating a second Run', async () => {
+  const root = await workspace()
+  try {
+    const events = []
+    const api = {
+      ...internalModelApi(events),
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        ...internalModelApi(events).sessions,
+        async create() { return ok({ sessionId: 'session-resume' }) },
+        async rename() { return ok({}) },
+        async prompt(value) { events.push(['prompt', value.payload]); return ok({}) },
+      },
+    }
+    const launchEvents = []
+    const runner = async call => {
+      if (call.args[0] === 'system') return capabilities
+      assert.deepEqual(call.args.slice(0, 2), ['runs', 'resume'])
+      assert.deepEqual(call.args.slice(-2), ['--run-id', 'skill-run-1'])
+      return { run_id: 'skill-run-1', request_path: '/runtime/request.md', run_root: '/runtime/run', current_step: '04' }
+    }
+    const result = await launchAnalysisSession(api, {
+      cwd: root,
+      input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] },
+      model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
+      resumeRunId: 'skill-run-1',
+    }, runner, async () => {}, async event => launchEvents.push(event))
+    assert.equal(result.run.run_id, 'skill-run-1')
+    assert.equal(events.at(-1)[0], 'prompt')
+    assert.match(events.at(-1)[1].content[0].text, /run_guard\.py init --resume/)
+    assert.equal(launchEvents.some(event => event.stage === 'skill_run_resume' && event.status === 'ok'), true)
+    assert.equal(launchEvents.some(event => event.stage === 'skill_run_create'), false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('resumes one explicit Run through the public runs API', async () => {
+  const root = await workspace()
+  try {
+    let call
+    const result = await resumeAnalysisRun({ cwd: root, dataRoot: 'pangea-data', runId: 'run-17', runner: async value => { call = value; return { run_id: 'run-17', lifecycle_status: 'running' } } })
+    assert.deepEqual(call.args.slice(0, 2), ['runs', 'resume'])
+    assert.deepEqual(call.args.slice(-2), ['--run-id', 'run-17'])
+    assert.equal(result.run.lifecycle_status, 'running')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

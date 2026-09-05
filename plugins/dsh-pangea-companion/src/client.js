@@ -1227,9 +1227,10 @@ window.__ModuleLoader__.load({
         if (!task || creatingRun) return
         setCreatingRun(true)
         try {
-          const launched = await requestWorkbenchAction({ cwd, action: 'task-start', payload: { task_id: task.task_id, data_root: task.data_root } })
+          const resume = Boolean(task.run_id)
+          const launched = await requestWorkbenchAction({ cwd, action: 'task-start', payload: { task_id: task.task_id, data_root: task.data_root, resume } })
           ctx?.pangea?.registerProductSession?.(launched.session_id)
-          showActionNotice('分析任务已启动。')
+          showActionNotice(resume ? '分析任务已从检查点继续。' : '分析任务已启动。')
           ctx?.sessions?.open?.(launched.session_id)
           await loadWorkbench()
         } catch (reason) {
@@ -2289,7 +2290,7 @@ window.__ModuleLoader__.load({
             launchFailure.error_code ? h('div', { style: styles.itemMeta }, `错误码：${launchFailure.error_code}`) : null,
             h('div', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, launchFailure.error ?? launchFailure.message ?? selectedTask.launch_error)) : null,
           /* ACP process output is rendered in the product shell's right assistant panel. */
-          selectedTask.status === 'failed' ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在重试…' : '重试启动') : null))
+          ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? (selectedTask.run_id ? '正在继续…' : '正在重试…') : (selectedTask.run_id ? '继续分析' : '重试启动')) : null))
         }
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
@@ -2351,6 +2352,9 @@ window.__ModuleLoader__.load({
               pendingStopRun === current.run_id
                 ? h('div', { style: styles.chips }, chip('取消', () => setPendingStopRun('')), h('button', { type: 'button', style: { ...styles.button, color: 'var(--dsw-alias-state-error-primary, #e66767)' }, onClick: () => { void stopCurrentRun() } }, '确认停止'))
                 : h('button', { type: 'button', style: styles.button, onClick: () => setPendingStopRun(current.run_id) }, '停止 Run'))) : null,
+          current.terminal && ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
+            h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '继续分析'), h('div', { style: styles.itemMeta }, '保留已有快照、产物和检查点，从当前步骤继续。')),
+              h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在继续…' : '继续分析'))) : null,
           current.errors?.length || (runNeedsAttention && selectedTask.launch_error)
             ? h(React.Fragment, null,
                 h('div', { style: styles.sectionTitle }, '当前错误'),

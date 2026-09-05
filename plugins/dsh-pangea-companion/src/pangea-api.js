@@ -144,3 +144,15 @@ export async function createRun(cwd, input, runner = runPangea) {
     await rm(pendingPath, { force: true })
   }
 }
+
+export async function resumeRun(cwd, { dataRoot, runId }, runner = runPangea) {
+  const root = workspaceRoot(cwd)
+  const resolvedDataRoot = typeof dataRoot === 'string' && dataRoot.trim() !== ''
+    ? path.resolve(root, dataRoot)
+    : path.join(root, 'pangea-data')
+  if (typeof runId !== 'string' || runId.trim() === '') throw new Error('run_id is required')
+  return runner({
+    cwd: root,
+    args: ['runs', 'resume', '--data-root', resolvedDataRoot, '--run-id', runId.trim()],
+  })
+}

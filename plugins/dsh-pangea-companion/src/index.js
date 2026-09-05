@@ -564,10 +564,15 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
     }
     if (body.action === 'task-start') {
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
-      if (task.run_id) throw new Error('task already has a Run')
+      const resume = body.resume === true
+      const terminalTask = ['failed', 'needs_attention', 'stopped'].includes(task.status)
+        || ['failed', 'interrupted', 'stopped'].includes(task.execution_status)
+      if (task.run_id && !resume) throw new Error('task already has a Run; use resume to continue it')
+      if (resume && !task.run_id) throw new Error('没有可继续的 Run')
+      if (resume && !terminalTask) throw new Error('只有失败、停止或需要处理的任务可以继续')
       if (launchLocks.has(task.task_id)) throw new Error('task launch is already in progress')
       launchLocks.add(task.task_id)
-      await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `启动尝试 ${task.launch_attempts + 1}` })
+      await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `${resume ? '继续分析' : '启动'}尝试 ${task.launch_attempts + 1}` })
       try {
         const selectedProvider = body.provider_id ?? task.provider
         let selectedModel = null
@@ -591,6 +596,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           dataRoot: actionDataRoot ?? task.data_root,
           input: { ...task, provider_id: selectedProvider || null },
           model: selectedModel,
+          resumeRunId: resume ? task.run_id : null,
         }, undefined, session => tasks.addConversation(task.task_id, {
           sessionId: session.session_id,
           title: `${task.title} · 分析`,
@@ -892,7 +898,7 @@ export { createLaunchLogStore, LaunchLogStore } from './launch-log.js'
 export { AcpSettingsStore, createAcpSettingsStore } from './acp-settings.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
-export { createRun, runPangea, workspaceRoot } from './pangea-api.js'
-export { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+export { createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
+export { launchAnalysisSession, normalizeRunInput, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'
 export { reconcileAcpJobs, sessionFailure, settleAcpTask }
