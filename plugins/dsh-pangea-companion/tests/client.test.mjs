@@ -340,6 +340,41 @@ test('client source request encodes the evidence location and returns a line-awa
   assert.equal(calls[0].options.cache, 'no-store')
 })
 
+test('client export request returns a downloadable CSV response and filename', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console, fetch: async () => { throw new Error('default fetch must not run') }, setTimeout, clearTimeout }
+  sandbox.window = {
+    setTimeout,
+    clearTimeout,
+    __ModuleLoader__: {
+      load(spec) {
+        exported = spec.factory(name => {
+          if (name === 'react') return fakeReact()
+          throw new Error(`unexpected client require: ${name}`)
+        })
+      },
+    },
+  }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+
+  const blob = { marker: 'csv' }
+  const result = await exported.requestRunExport({
+    cwd: '/tmp/pangea', dataRoot: '/tmp/pangea/pangea-data', runId: 'run-1',
+    async fetcher(url, options) {
+      assert.match(url, /^\/api\/pangea-companion\/export\?/) 
+      assert.match(url, /format=csv/)
+      assert.equal(options.cache, 'no-store')
+      return {
+        ok: true, status: 200, async blob() { return blob },
+        headers: { get(name) { return name === 'content-disposition' ? 'attachment; filename="pangea-run-1-test-cases.csv"' : null } },
+      }
+    },
+  })
+  assert.equal(result.blob, blob)
+  assert.equal(result.filename, 'pangea-run-1-test-cases.csv')
+})
+
 test('client state request encodes workspace and run, passes cancellation, and returns only ok snapshots', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported

@@ -12,6 +12,7 @@ window.__ModuleLoader__.load({
     const inject = ['pangea', 'sessions']
     const API_PATH = '/api/pangea-companion/state'
     const SOURCE_API_PATH = '/api/pangea-companion/source'
+    const EXPORT_API_PATH = '/api/pangea-companion/export'
     const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
     const EXECUTION_API_PATH = '/api/pangea-companion/executions'
     const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
@@ -64,6 +65,20 @@ window.__ModuleLoader__.load({
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
+    }
+
+    async function requestRunExport({ cwd, dataRoot, runId, format = 'csv', signal, fetcher = fetch }) {
+      const query = new URLSearchParams({ cwd, data_root: dataRoot, run_id: runId, format })
+      const response = await fetcher(`${EXPORT_API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`
+        try { message = (await response.json()).error ?? message } catch { /* preserve HTTP status */ }
+        throw new Error(message)
+      }
+      return {
+        blob: await response.blob(),
+        filename: response.headers?.get?.('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? `pangea-${runId}-test-cases.csv`,
+      }
     }
 
     async function requestEnvironments(fetcher = fetch) {
@@ -1525,6 +1540,24 @@ window.__ModuleLoader__.load({
           setLaunching(false)
         }
       }
+      async function exportCurrentCases() {
+        if (!current?.run_id || !snapshot?.data_root) return
+        try {
+          const result = await requestRunExport({ cwd, dataRoot: snapshot.data_root, runId: current.run_id })
+          const objectUrl = URL.createObjectURL(result.blob)
+          const anchor = document.createElement('a')
+          anchor.href = objectUrl
+          anchor.download = result.filename
+          anchor.style.display = 'none'
+          document.body.appendChild(anchor)
+          anchor.click()
+          anchor.remove()
+          window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+          showActionNotice('测试用例 CSV 已导出。')
+        } catch (reason) {
+          showActionNotice(`导出失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
+      }
       function openSidebarFile(value, title) {
         const path = absoluteWorkspacePath(cwd, value)
         if (!path || !ctx?.pangea?.openFile || !scope?.sessionId) {
@@ -1919,6 +1952,9 @@ window.__ModuleLoader__.load({
         const statusLabel = { pending: '等待', running: '执行中', completed: '已完成', failed: '失败' }
         const publication = current.publication ?? { state: 'pending', revision: 0, step_id: null }
         const publicationLabel = { pending: '阶段结果生成中', draft: '草稿已发布', final: '正式结果已发布', broken: '正式结果不可用' }
+        const stepTimings = Object.values(current.performance?.steps ?? {}).filter(item => Number.isInteger(item?.duration_ms))
+        const measuredDuration = stepTimings.reduce((total, item) => total + item.duration_ms, 0)
+        const formatDuration = value => value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)} s`
         const statusColor = status => status === 'failed'
           ? 'var(--dsw-alias-state-error-primary, #e66767)'
           : status === 'completed'
@@ -1940,6 +1976,14 @@ window.__ModuleLoader__.load({
               current.artifacts?.request ? chip('打开任务请求', () => openSidebarFile(current.artifacts.request, 'Codetalks request.md')) : null,
               current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null,
               current.artifacts?.source_snapshot_manifest ? chip('打开源码快照清单', () => openSidebarFile(current.artifacts.source_snapshot_manifest, 'source manifest.json')) : null)),
+          h('div', { style: { ...styles.card, ...styles.notice } },
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '性能观测'), h('span', { style: styles.badge }, '仅用于比较')),
+            h('div', { style: styles.grid },
+              field('已测步骤', `${stepTimings.length} / 9`),
+              field('已记录耗时', stepTimings.length ? formatDuration(measuredDuration) : '等待步骤完成'),
+              field('进度更新', current.performance?.progress_updates ?? 0),
+              field('产物增量', stepTimings.length ? `${stepTimings.reduce((total, item) => total + (item.artifact_bytes_delta ?? 0), 0)} bytes` : '等待步骤完成')),
+            h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '这些指标用于识别重复写作、上下文压缩和步骤热点，不直接代表分析质量，也不预设并行方案。')),
           workflow.step_progress?.step ? h('div', { style: { ...styles.card, ...styles.notice } },
             h('div', { style: styles.row },
               h('div', { style: styles.itemTitle }, `Step ${workflow.step_progress.step} 当前业务进度`),
@@ -2350,6 +2394,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...styles.card, ...styles.actionCard } },
             h('div', { style: styles.itemTitle }, '执行这份计划'),
             h('div', { style: styles.itemMeta }, '系统会创建独立执行记录，并保留本次选择、环境和结果。'),
+            h('button', { type: 'button', disabled: !current?.run_id, style: { ...styles.button, marginTop: 8, width: '100%', ...(!current?.run_id ? styles.buttonDisabled : {}) }, onClick: () => { void exportCurrentCases() } }, '导出测试用例 CSV'),
             h('select', { style: { ...styles.search, marginTop: 8 }, value: selectedEnvironment, onChange: event => setSelectedEnvironment(event.target.value) },
               h('option', { value: '' }, environments.length ? '选择执行环境' : '请先在“环境配置”中新增环境'),
               environments.map(environment => h('option', { key: environment.id, value: environment.id }, `${environment.name} · ${environment.host?.ip || '未配置主机'} + ${environment.array?.ip || '未配置阵列'}`))),
@@ -2596,6 +2641,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     exports.requestSnapshot = requestSnapshot
     exports.requestSourceSnippet = requestSourceSnippet
+    exports.requestRunExport = requestRunExport
     exports.requestEnvironments = requestEnvironments
     exports.saveEnvironment = saveEnvironment
     exports.removeEnvironment = removeEnvironment

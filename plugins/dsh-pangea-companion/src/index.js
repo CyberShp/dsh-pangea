@@ -1,5 +1,6 @@
-import { companionSnapshot } from './reader.js'
+import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
+import { buildTestCaseCsv } from './export.js'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createRuntimeMonitor } from './monitor.js'
@@ -18,6 +19,7 @@ export const inject = ['tools', 'webServer', 'agents', 'apiProxy', 'subagents', 
 
 const API_PATH = '/api/pangea-companion/state'
 const SOURCE_API_PATH = '/api/pangea-companion/source'
+const EXPORT_API_PATH = '/api/pangea-companion/export'
 const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
 const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
@@ -131,6 +133,11 @@ async function requestJson(req) {
   const value = JSON.parse(body || '{}')
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('request body must be an object')
   return value
+}
+
+function textResponse(res, status, contentType, body, headers = {}) {
+  res.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store', ...headers })
+  res.end(body)
 }
 
 // The ACP job is an execution boundary around a Skill Run.  If that boundary
@@ -350,6 +357,29 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Da
 
 function jobOwner(runtime, task) {
   return runtimeService(runtime, 'agents')?.get?.(task.owner_session_id)
+}
+
+async function exportRouteHandler(req, res) {
+  if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  const url = new URL(req.url ?? EXPORT_API_PATH, 'http://localhost')
+  const runId = url.searchParams.get('run_id') ?? ''
+  const format = url.searchParams.get('format') ?? 'csv'
+  try {
+    if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error('run_id is required')
+    if (format !== 'csv') throw new Error('仅支持 CSV 用例导出')
+    const dataRoot = await discoverPangeaDataRoot({
+      cwd: url.searchParams.get('cwd') ?? undefined,
+      dataRoot: url.searchParams.get('data_root') ?? undefined,
+    })
+    const run = await summarizeRun(dataRoot, runId, { includeDetails: true })
+    const filename = `pangea-${runId}-test-cases.csv`
+    return textResponse(res, 200, 'text/csv; charset=utf-8', buildTestCaseCsv(run), {
+      'content-disposition': `attachment; filename="${filename}"`,
+    })
+  } catch (error) {
+    return json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
 }
 
 function runtimeInstanceId(runtime) {
@@ -825,6 +855,7 @@ export function apply(ctx) {
 
   const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
+  const disposeExportRoute = ctx.webServer.register({ kind: 'exact', path: EXPORT_API_PATH, handler: exportRouteHandler })
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
@@ -842,6 +873,7 @@ export function apply(ctx) {
     disposeEnvironmentRoute()
     disposeLaunchLogRoute()
     disposeSourceRoute()
+    disposeExportRoute()
     disposeStateRoute()
     disposeJobDone?.()
     disposeJobController?.()
