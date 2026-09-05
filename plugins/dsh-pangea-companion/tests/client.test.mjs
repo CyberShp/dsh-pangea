@@ -65,6 +65,8 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /← 返回/)
   assert.match(source, /数据状态/)
   assert.match(source, /数据读取异常/)
+  assert.match(source, /renderIssueCard\('未解决事项'/)
+  assert.doesNotMatch(source, /JSON\.stringify\(workflow\.unresolved/)
   assert.match(source, /当前结构化结果不可信/)
   assert.match(source, /不能把空列表解释为/)
   assert.match(source, /AbortController/)

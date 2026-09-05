@@ -1267,6 +1267,18 @@ window.__ModuleLoader__.load({
         const context = [event?.provider, event?.model, event?.reasoning_effort, event?.job_id, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
         return [time, status, stage, context, detail].filter(Boolean).join(' · ')
       }
+      function issueLabel(issue) {
+        if (typeof issue === 'string') return issue
+        if (!issue || typeof issue !== 'object') return String(issue ?? '未提供详情')
+        return [issue.code, issue.step ? `Step ${issue.step}` : '', issue.message ?? issue.detail ?? issue.error].filter(Boolean).join(' · ')
+      }
+      function renderIssueCard(title, issues, tone = 'warning') {
+        if (!Array.isArray(issues) || issues.length === 0) return null
+        const cardStyle = tone === 'error' ? styles.error : styles.healthWarning
+        return h('div', { style: { ...styles.card, ...cardStyle } },
+          h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, title), h('span', { style: styles.badge }, `${issues.length} 条`)),
+          h('div', { style: styles.resultGrid }, issues.map((issue, index) => h('div', { key: `${issue?.code ?? 'issue'}:${index}`, style: styles.resultItem }, issueLabel(issue)))))
+      }
       function renderAcpRuntime() {
         if (!selectedTask?.provider) return null
         const job = workbench?.acp_job
@@ -2029,13 +2041,13 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.chips }, current.artifacts.formal_outputs.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file))))) : null,
           h('div', { style: styles.sectionTitle }, '业务流程与入口'),
           renderFlows(),
-          workflow.unresolved?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '未解决事项'), h('pre', { style: styles.text }, JSON.stringify(workflow.unresolved, null, 2))) : null,
+          renderIssueCard('未解决事项', workflow.unresolved),
           current.validation?.status === 'failed' ? h('div', { style: { ...styles.card, ...styles.error } },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '校验失败详情'), h('span', { style: styles.badge }, `${current.validation.error_count ?? current.validation.errors?.length ?? 0} 条`)),
             h('div', { style: styles.resultGrid }, (current.validation.errors ?? []).map((item, index) => h('div', { key: `${item.code}:${index}`, style: styles.resultItem },
               h('div', { style: styles.itemTitle }, `${item.code ?? 'validation_error'}${item.step ? ` · Step ${item.step}` : ''}`),
               h('div', { style: styles.text }, item.message ?? String(item)))))) : null,
-          workflow.error_history?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '错误历史'), h('pre', { style: styles.text }, JSON.stringify(workflow.error_history, null, 2))) : null)
+          renderIssueCard('错误历史', workflow.error_history, 'error'))
       }
 
       function renderFlows() {
