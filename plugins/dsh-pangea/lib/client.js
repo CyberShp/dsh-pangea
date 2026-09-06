@@ -371,6 +371,25 @@ window.__ModuleLoader__.load({
         }
 
         @media (max-width: 1179px) {
+          body[data-pangea-product-shell] #root {
+            width: 100% !important; margin-right: 0 !important;
+          }
+          body[data-pangea-product-shell] #root .pI_x6G_frame {
+            box-sizing: border-box;
+          }
+          body[data-pangea-product-shell] #root .pI_x6G_sidebarCol { display: none !important; }
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panel {
+            left: 0 !important; right: 0 !important; width: auto !important;
+            border-left: 0 !important; border-right: 1px solid var(--dsw-alias-border-l2);
+            padding-top: var(--pangea-topbar-height) !important;
+            visibility: visible !important; transform: none !important; pointer-events: auto !important;
+          }
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelResize,
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_tabBar,
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_toggleCluster {
+            display: none !important;
+          }
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelBody { height: 100%; }
           [data-pangea-shell] { grid-template-columns: 74px minmax(0, 1fr); }
           [data-pangea-product-nav] { padding-inline: 9px; }
           [data-pangea-nav-label] { display: none; }
@@ -384,6 +403,12 @@ window.__ModuleLoader__.load({
           body[data-pangea-product-shell][data-pangea-task-assistant] #root .pI_x6G_frame {
             grid-template-columns: 0 minmax(0, 1fr) 0 !important;
           }
+          body[data-pangea-product-shell][data-pangea-task-assistant]:not([data-pangea-task-assistant-open]) #root [data-pane="conversation"] {
+            display: none !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant]:not([data-pangea-task-assistant-open]) #root [data-pane="details"] {
+            grid-column: 2; grid-row: 1; display: block !important;
+          }
           body[data-pangea-product-shell][data-pangea-task-assistant-open] #root .pI_x6G_frame {
             grid-template-columns: 0 0 minmax(0, 1fr) !important;
           }
@@ -391,6 +416,20 @@ window.__ModuleLoader__.load({
           body[data-pangea-product-shell][data-pangea-task-assistant-open] #root [data-pane="conversation"] {
             grid-column: 3; grid-row: 1; display: flex !important; min-width: 0; padding-top: var(--pangea-topbar-height);
           }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_panel {
+            border: 0 !important; background: transparent !important; pointer-events: none !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_panelBody,
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_workbench,
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_pane,
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_paneContent,
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_paneTab {
+            background: transparent !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-shell] { background: transparent; pointer-events: none; }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-topbar] { pointer-events: auto; }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-product-nav],
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-page] { display: none !important; }
           body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-assistant-head] {
             display: block; height: auto; padding: 12px 16px; border-bottom: 1px solid #e5e8ec;
           }

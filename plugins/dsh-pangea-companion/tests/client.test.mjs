@@ -26,7 +26,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /需要处理/)
   assert.match(source, /已有报告/)
   assert.match(source, /data-pangea-product-mode/)
-  assert.match(source, /ctx\?\.pangea\?\.openPage\?\.\(scope, pageId\)/)
+  assert.match(source, /ctx\?\.pangea\?\.openPage\?\.\(\{ \.\.\.scope, sessionId \}, pageId\)/)
   assert.match(source, /Codetalks Skill 完整流程/)
   assert.match(source, /Step 01–09 生命周期/)
   assert.match(source, /核心规则 ACK/)
@@ -129,6 +129,15 @@ test('keeps concrete Run errors in the AI assistant instead of the overview', as
   assert.doesNotMatch(source, /renderIssueCard\('当前错误', \[\{ code: selectedTask\.launch_error_code/)
   const healthCard = source.slice(source.indexOf('function renderHealthCard'), source.indexOf('function renderMonitor'))
   assert.doesNotMatch(healthCard, /terminal_error|launch_error/)
+})
+
+test('keeps the analysis page active when selecting a Task opens its conversation', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const chooseTask = source.slice(source.indexOf('function chooseTask'), source.indexOf('function openTaskFromWorkbench'))
+  assert.match(chooseTask, /ctx\?\.sessions\?\.open\?\.\(activeConversation\.session_id\)[\s\S]*openProductPage\('analysis', '分析任务', activeConversation\?\.session_id\)/)
+  const workbenchTask = source.slice(source.indexOf('function openTaskFromWorkbench'), source.indexOf('async function startTask'))
+  assert.match(workbenchTask, /openProductPage\('analysis', '分析任务', activeConversation\?\.session_id\)/)
+  assert.match(source, /function openProductPage\(pageId, label, sessionId = scope\?\.sessionId\)/)
 })
 
 test('does not present a failed task as pending publication', async () => {

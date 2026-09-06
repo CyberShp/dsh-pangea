@@ -1250,6 +1250,7 @@ window.__ModuleLoader__.load({
           ctx?.pangea?.registerProductSession?.(activeConversation.session_id)
           ctx?.sessions?.open?.(activeConversation.session_id)
         }
+        openProductPage('analysis', '分析任务', activeConversation?.session_id)
       }
 
       function openTaskFromWorkbench(task) {
@@ -1263,7 +1264,7 @@ window.__ModuleLoader__.load({
           ctx?.pangea?.registerProductSession?.(activeConversation.session_id)
           ctx?.sessions?.open?.(activeConversation.session_id)
         }
-        openProductPage('analysis', '分析任务')
+        openProductPage('analysis', '分析任务', activeConversation?.session_id)
       }
 
       async function startTask(task) {
@@ -1375,8 +1376,8 @@ window.__ModuleLoader__.load({
           style: { ...styles.itemMeta, color: event.status === 'error' ? 'var(--dsw-alias-state-error-primary, #e66767)' : undefined, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
         }, launchEventLabel(event)))))
       }
-      function openProductPage(pageId, label) {
-        const opened = ctx?.pangea?.openPage?.(scope, pageId) === true
+      function openProductPage(pageId, label, sessionId = scope?.sessionId) {
+        const opened = ctx?.pangea?.openPage?.({ ...scope, sessionId }, pageId) === true
         if (!opened) showActionNotice(`${label}当前不可用，请检查对应插件是否已加载。`, true)
       }
       function openAnalysisCreate() {
