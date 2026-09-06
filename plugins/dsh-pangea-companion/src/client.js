@@ -2391,12 +2391,6 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, presentation.countsAvailability === 'unpublished' ? '测试结果尚未发布' : presentation.countsAvailability === 'unavailable' ? '测试结果不可读取' : `${displayCount('test_cases', testCases.length)} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, displayCount('evidence', evidence.length))))),
           renderHealthCard(false),
-          h('div', { style: styles.card },
-            h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前任务'), h('div', { style: styles.itemTitle }, runLabel(current)), h('div', { style: styles.itemMeta }, current.run_id)), h('span', { style: styles.badge }, PHASE[current.phase] ?? current.phase)),
-            h('div', { style: { marginTop: 10 } },
-              h('div', { style: styles.row }, h('span', { style: styles.label }, '分析进度'), h('span', { style: styles.label }, `${completed}/${total}`)),
-              h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } }))),
-            h('div', { style: styles.grid }, field('质量结论', QUALITY[current.quality_status] ?? current.quality_status ?? '待定'), field('独立复核', REVIEW[current.review?.status] ?? current.review?.status ?? '待定'))),
           h('div', { style: styles.sectionTitle }, '优先失败场景'),
           priorityScenarios.length ? h('div', { style: styles.card }, priorityScenarios.map((risk, index) => h('button', {
             key: riskKeyByItem.get(risk), type: 'button', style: { ...styles.runButton, display: 'flex', gap: 7, alignItems: 'flex-start' }, onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }),

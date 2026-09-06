@@ -236,6 +236,20 @@ test('continues background reconciliation while the window is unfocused', async 
   assert.doesNotMatch(source, /void loadWorkbench\(\{ background: true \}\)[\s\S]*window\.setTimeout\(poll,/)
 })
 
+test('keeps Run lifecycle details in the workflow tab instead of repeating them in overview', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const overview = source.slice(source.indexOf('function renderOverview()'), source.indexOf('function renderRisks()'))
+  const workflow = source.slice(source.indexOf('function renderWorkflow()'), source.indexOf('function renderFlows()'))
+
+  assert.doesNotMatch(overview, /'当前任务'/)
+  assert.doesNotMatch(overview, /'分析进度'/)
+  assert.doesNotMatch(overview, /field\('质量结论'/)
+  assert.doesNotMatch(overview, /field\('独立复核'/)
+  assert.match(workflow, /'Codetalks Skill 完整流程'/)
+  assert.match(workflow, /field\('当前步骤'/)
+  assert.match(workflow, /field\('运行状态'/)
+})
+
 test('workbench API lists runs and starts or stops through explicit actions', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported
