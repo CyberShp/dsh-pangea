@@ -629,6 +629,7 @@ export class TaskStore {
     if (!id || !runId) return null
     const task = Object.values(this.store.tasks).find(item => item.conversations.some(conversation => conversation.session_id === id))
     if (!task) return null
+    if (task.run_id && task.run_id !== runId) return structuredClone(task)
     task.run_id = runId
     task.status = taskStatusFromRun(run)
     task.launch_error = task.status === 'needs_attention' ? text(run?.error, 'Run 需要处理，分析未正常完成') : null

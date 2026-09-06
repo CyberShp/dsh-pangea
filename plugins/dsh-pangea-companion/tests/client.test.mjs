@@ -123,6 +123,14 @@ test('shows a health alert only for an actual reader warning', async () => {
   assert.doesNotMatch(source, /health\?\.trusted === false/)
 })
 
+test('keeps concrete Run errors in the AI assistant instead of the overview', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  assert.doesNotMatch(source, /renderIssueCard\('当前错误', current\.errors, 'error'\)/)
+  assert.doesNotMatch(source, /renderIssueCard\('当前错误', \[\{ code: selectedTask\.launch_error_code/)
+  const healthCard = source.slice(source.indexOf('function renderHealthCard'), source.indexOf('function renderMonitor'))
+  assert.doesNotMatch(healthCard, /terminal_error|launch_error/)
+})
+
 test('does not present a failed task as pending publication', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported

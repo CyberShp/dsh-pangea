@@ -1865,8 +1865,7 @@ window.__ModuleLoader__.load({
       }
       function renderHealthCard(compact = false) {
         if (!health) return null
-        const presentation = deriveRunPresentation(selectedTask, current, health)
-        const healthStatus = presentation.healthStatus
+        const healthStatus = health.status ?? 'pending'
         const checks = ['risks', 'test_cases', 'business_flows']
           .map(key => [key, health.count_checks?.[key]])
           .filter(([, check]) => check?.report !== null && check?.report !== undefined)
@@ -1874,11 +1873,11 @@ window.__ModuleLoader__.load({
         const warning = healthStatus === 'warning' || healthStatus === 'error'
         return h('div', { style: healthStyle(healthStatus), role: warning ? 'alert' : 'status' },
           h('div', { style: styles.row },
-            h('div', { style: styles.itemTitle }, compact && warning ? (presentation.failed ? '分析运行失败' : '数据读取异常') : '数据状态'),
-            h('span', { style: styles.badge }, presentation.failed ? '失败' : HEALTH[healthStatus] ?? (healthStatus === 'pending' ? '待发布' : healthStatus) ?? '未知')),
+            h('div', { style: styles.itemTitle }, compact && warning ? '数据读取异常' : '数据状态'),
+            h('span', { style: styles.badge }, HEALTH[healthStatus] ?? (healthStatus === 'pending' ? '待发布' : healthStatus) ?? '未知')),
           h('div', { style: styles.itemMeta }, `数据源：${SOURCE[current?.data_source] ?? current?.data_source ?? '未知'}`),
           checks.length ? h('div', { style: { ...styles.itemMeta, marginTop: 5 } }, checks.map(([key, check]) => `${names[key]} ${check.structured}${check.status === 'match' ? ' = ' : ' ≠ '}报告 ${check.report}`).join(' · ')) : null,
-          presentation.failed ? h('div', { style: { ...styles.error, marginTop: 7 } }, selectedTask?.terminal_error || selectedTask?.launch_error || '分析运行失败，当前结果不能用于决策。') : warning && healthStatus === 'warning' ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前结构化结果不可信。尤其当风险/用例显示 0 时，不能解释为“没有风险/用例”。') : null,
+          warning && healthStatus === 'warning' ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前结构化结果不可信。尤其当风险/用例显示 0 时，不能解释为“没有风险/用例”。') : null,
           !compact && health.issues?.length ? h('ul', { style: styles.list }, health.issues.map((item, index) => h('li', { key: `${index}:${item}` }, item))) : null)
       }
 
@@ -2421,11 +2420,6 @@ window.__ModuleLoader__.load({
               presentation.canResume
                 ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在继续…' : '继续分析')
                 : h('span', { style: styles.itemMeta }, `暂不能继续：${presentation.resumeBlockedReason}`))) : null,
-          current.errors?.length
-            ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), renderIssueCard('当前错误', current.errors, 'error'))
-            : runNeedsAttention && selectedTask.launch_error
-              ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), renderIssueCard('当前错误', [{ code: selectedTask.launch_error_code ?? 'RUN_ERROR', message: selectedTask.launch_error }], 'error'))
-              : null,
           runItems.length ? h('details', { style: styles.technical },
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `历史 Run · ${workbench?.runs?.total ?? runItems.length}`),
             h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, runItems.map(run => {

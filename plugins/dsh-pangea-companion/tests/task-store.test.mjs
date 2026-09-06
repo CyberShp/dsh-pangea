@@ -52,6 +52,23 @@ test('binds multiple conversations to one Task and later associates its Run', as
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('does not rebind an established Task to an unrelated selected Run', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-identity-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-run-identity' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '身份隔离' } })
+    await store.addConversation('task-run-identity', { sessionId: 'session-owned', title: '分析会话', kind: 'analysis' })
+    await store.bindRun('task-run-identity', 'run-owned')
+
+    const task = await store.bindRunBySession('session-owned', {
+      run_id: 'run-selected-elsewhere', lifecycle_status: 'failed',
+    })
+
+    assert.equal(task.run_id, 'run-owned')
+    assert.equal(task.status, 'preparing')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('keeps launch failures visible for retry', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-failure-'))
   try {
