@@ -81,7 +81,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.doesNotMatch(source, /\}, task\.task_id\),/)
   assert.match(source, /刷新中…/)
   assert.match(source, /和 DSH 讨论/)
-  assert.match(source, /加入当前会话/)
+  assert.match(source, /在讨论会话中继续/)
   assert.match(source, /打开完整文件/)
   assert.match(source, /源码片段/)
   assert.match(source, /检查这段源码/)
@@ -422,6 +422,42 @@ test('client builds focused discussion drafts, appends them to the active DSH co
   assert.equal(exported.evidenceTabLabel({ location: 'docs/spec.md#L12-L16' }, 1), '2 · spec.md:12–16')
   assert.equal(exported.runLabel({ run_id: 'analysis-20260905-01', target: 'DHCP 模块' }), 'DHCP 模块')
   assert.equal(exported.runLabel({ run_id: 'analysis-20260905-01' }), 'analysis-20260905-01')
+})
+
+test('risk and test case pages use result-focused copy and only show recorded metadata', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  assert.doesNotMatch(source, /行动清单|风险需要判断|这里不自动改写结论|选择只影响本次执行|不修改分析产物/)
+  assert.match(source, /风险概览/)
+  assert.match(source, /严重度来自 SFMEA/)
+  assert.match(source, /测试用例/)
+  assert.match(source, /查看用例内容、优先级、关联风险和执行步骤/)
+  assert.doesNotMatch(source, /置信度.*\?\? '—'/)
+  assert.doesNotMatch(source, /TRANSLATION\[risk\.translation_status\].*未标注/)
+  assert.doesNotMatch(source, /RISK_STATUS\[risk\.status\].*未标注/)
+  assert.match(source, /section\('风险说明', risk\.narrative\)/)
+})
+
+test('selects a writable discussion conversation instead of the read-only analysis session', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+
+  const task = {
+    active_conversation_id: 'analysis',
+    conversations: [
+      { conversation_id: 'analysis', kind: 'analysis', session_id: 'session-analysis' },
+      { conversation_id: 'discussion', kind: 'assistant', session_id: 'session-discussion' },
+    ],
+  }
+  assert.equal(exported.writableConversation(task).session_id, 'session-discussion')
+  task.active_conversation_id = 'discussion'
+  assert.equal(exported.writableConversation(task).session_id, 'session-discussion')
+  assert.equal(exported.writableConversation({ conversations: task.conversations.slice(0, 1) }), null)
+  assert.match(source, /task-conversation-create/)
+  assert.match(source, /task-conversation-activate/)
+  assert.match(source, /在讨论会话中继续/)
 })
 
 test('client source request encodes the evidence location and returns a line-aware snippet', async () => {

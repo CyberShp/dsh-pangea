@@ -128,6 +128,29 @@ test('keeps an active Step 09 publication pending while the report and projectio
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('does not carry a previous broken publication into a resumed active Step 09 attempt', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-resumed-step09-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'resumed-step09'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'resumed publishing' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'running', current_step: '09', completed_steps: ['01', '02', '03', '04', '05', '06', '07', '08'],
+      publication: { state: 'broken', revision: 1, step_id: '09' },
+    })
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.lifecycle_status, 'running')
+    assert.equal(current.publication.state, 'pending')
+    assert.equal(current.reader_health.status, 'pending')
+    assert.deepEqual(current.workflow.unresolved, [])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('reads Step 05 risks and Step 07 test cases as an unpublished Markdown draft', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-live-draft-'))
   const dataRoot = path.join(root, 'pangea-data')
@@ -162,6 +185,62 @@ test('reads Step 05 risks and Step 07 test cases as an unpublished Markdown draf
     assert.equal(current.details.test_cases[0].test_case_id, 'TC-NET-01')
     assert.deepEqual(current.details.test_cases[0].linked_risk_ids, ['RP-01'])
     assert.deepEqual(current.details.test_cases[0].steps, ['占用服务端口。', '启动被测程序。'])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('enriches a final workbench projection with live risk, evidence, and test case details', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-final-details-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'final-details'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'final details' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'complete', current_step: '09', completed_steps: ['01', '02', '03', '04', '05', '06', '07', '08', '09'],
+      verdict: 'PASS', judge: { required: true, status: 'complete' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '工作台投影.json'), {
+      schema_version: '1.0', run_id: runId,
+      publication: { state: 'final', revision: 1, step_id: '09' },
+      business_flows: [], review_issues: [],
+      risks: [{
+        risk_id: 'RP-01', title: '连接创建失败', severity: 'P1',
+        narrative: '连接为空但继续执行，外部表现为没有报文。',
+        evidence_ids: ['EVID-NET'], linked_test_case_ids: ['TC-NET-01'],
+      }],
+      test_cases: [{ test_case_id: 'TC-NET-01', title: '端口占用时启动', priority: 'P1', linked_risk_ids: ['RP-01'] }],
+      evidence: [{ evidence_id: 'EVID-NET', location: 'repo:src/net.c:41-48', type: 'source_c', narrative: '失败路径保留空连接。' }],
+    })
+    const liveRoot = path.join(runRoot, '活文档')
+    await mkdir(path.join(liveRoot, '测试设计'), { recursive: true })
+    await writeFile(path.join(liveRoot, '14-风险点清单与因果说明.md'), `# 风险点清单\n\n### RP-01：连接创建失败\n\`\`\`text\n条件：端口被占用\n→ 代码失效：连接为空但继续执行\n→ 暴露：没有发送报文\n→ 黑盒证明：占用端口后抓包\n\`\`\`\n`, 'utf8')
+    await writeFile(path.join(liveRoot, '15-SFMEA分析.md'), `# SFMEA\n\n| 风险 | 机制 | 触发 | 用户影响 | S | O | D | RPN | 等级 | 黑盒验证方法 |\n|---|---|---|---|---|---|---|---|---|---|\n| RP-01 连接创建失败 | 连接为空 | 端口占用 | 无报文 | 4 | 2 | 2 | 16 | P1 | 抓包 |\n`, 'utf8')
+    await writeFile(path.join(liveRoot, '测试设计', '用例-TC-NET-01.md'), `# TC-NET-01 端口占用时启动\n\n## 用例定位\n\n- Case ID：TC-NET-01\n- 优先级：P1\n- 测试类型：异常路径\n\n## 前置条件\n\n- 抓包已启动。\n\n## 操作步骤\n\n1. 占用服务端口。\n2. 启动被测程序。\n\n## 预期结果和 Oracle\n\n- 没有发送报文，并报告启动失败。\n\n## 清理和复原\n\n- 释放端口。\n`, 'utf8')
+    await writeFile(path.join(liveRoot, '18-测试追溯矩阵.md'), `# 追溯矩阵\n\n| CASE ID | 关联场景 | 流程 | 风险 | 等级 | 覆盖点 | 优先级 |\n|---|---|---|---|---|---|---|\n| TC-NET-01 端口占用时启动 | SC-NET | FLOW-NET | RP-01 | P1 | 启动失败 | P1 |\n`, 'utf8')
+    await mkdir(path.join(runRoot, '正式输出'), { recursive: true })
+    await writeFile(path.join(runRoot, '正式输出', '完整分析报告.md'), '# 完整分析报告\n', 'utf8')
+
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.publication.state, 'final')
+    assert.equal(current.reader_health.trusted, true)
+    assert.equal(current.details.risks[0].severity, 'High')
+    assert.equal(current.details.risks[0].trigger, '端口被占用')
+    assert.equal(current.details.risks[0].system_result, '连接为空但继续执行')
+    assert.equal(current.details.risks[0].evidence.length, 1)
+    assert.equal(current.details.risks[0].evidence[0].chunk_id, 'EVID-NET')
+    assert.equal(current.details.risks[0].evidence[0].observation, '失败路径保留空连接。')
+    assert.deepEqual(current.details.risks[0].evidence[0].risk_ids, ['RP-01'])
+    assert.equal(current.details.risks[0].confidence, undefined)
+    assert.deepEqual(current.details.test_cases[0].linked_risk_ids, ['RP-01'])
+    assert.equal(current.details.test_cases[0].case_type, '异常路径')
+    assert.deepEqual(current.details.test_cases[0].preconditions, ['抓包已启动。'])
+    assert.deepEqual(current.details.test_cases[0].steps, ['占用服务端口。', '启动被测程序。'])
+    assert.deepEqual(current.details.test_cases[0].expected_results, ['没有发送报文，并报告启动失败。'])
+    assert.equal(current.details.test_cases[0].status, undefined)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

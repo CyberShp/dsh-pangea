@@ -668,6 +668,11 @@ window.__ModuleLoader__.load({
         model_route: form.provider_id ? null : modelRouteFromKey(form.model_route_key),
       }
     }
+    function writableConversation(task) {
+      const conversations = Array.isArray(task?.conversations) ? task.conversations : []
+      const writable = conversations.filter(item => item?.kind !== 'analysis' && hasText(item?.session_id))
+      return writable.find(item => item.conversation_id === task?.active_conversation_id) ?? writable[0] ?? null
+    }
 
     function emptyEnvironmentForm() {
       return {
@@ -1340,6 +1345,33 @@ window.__ModuleLoader__.load({
         const context = [event?.provider, event?.model, event?.reasoning_effort, event?.job_id, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
         return [time, status, stage, context, detail].filter(Boolean).join(' · ')
       }
+
+      async function appendToDiscussionConversation(draft) {
+        if (!selectedTask || !hasText(draft)) return false
+        let task = selectedTask
+        let conversation = writableConversation(task)
+        if (!conversation) {
+          const created = await requestWorkbenchAction({
+            cwd,
+            action: 'task-conversation-create',
+            payload: { task_id: task.task_id, title: `${task.title} · 讨论` },
+          })
+          task = created.task ?? task
+          conversation = writableConversation(task) ?? { session_id: created.session_id, conversation_id: created.session_id, kind: 'assistant' }
+        } else if (conversation.conversation_id !== task.active_conversation_id) {
+          const activated = await requestWorkbenchAction({
+            cwd,
+            action: 'task-conversation-activate',
+            payload: { task_id: task.task_id, conversation_id: conversation.conversation_id },
+          })
+          task = activated.task ?? task
+        }
+        ctx?.pangea?.registerProductSession?.(conversation.session_id)
+        ctx?.sessions?.open?.(conversation.session_id)
+        const inserted = appendConversationDraft(ctx, { ...scope, sessionId: conversation.session_id }, draft)
+        await loadWorkbench()
+        return inserted
+      }
       function issueLabel(issue) {
         if (typeof issue === 'string') return issue
         if (!issue || typeof issue !== 'object') return String(issue ?? '未提供详情')
@@ -1406,7 +1438,7 @@ window.__ModuleLoader__.load({
         const selected = ctx?.pangea?.requestRunSelection?.(scope, run?.run_id)
         if (!selected) showActionNotice('无法打开该历史 Run，请检查对应插件是否已加载。', true)
       }
-      function discussCurrentRun() {
+      async function discussCurrentRun() {
         if (!current) {
           showActionNotice('当前没有可加入会话的 PANGEA Run。', true)
           return
@@ -1421,10 +1453,14 @@ window.__ModuleLoader__.load({
           `测试用例：${testCases.length} 条`,
           `执行记录：${snapshot?.executor_runs?.length ?? 0} 个`,
           '',
-          '请先指出当前最需要处理的一件事，并说明依据；不要修改 PANGEA Run。',
+          '请先指出当前最需要处理的一件事，并说明依据。',
         ].join('\n')
-        const inserted = appendConversationDraft(ctx, scope, draft)
-        showActionNotice(inserted ? '当前运行上下文已加入 DSH 会话输入框。' : '无法访问当前 DSH 会话输入框。', !inserted)
+        try {
+          const inserted = await appendToDiscussionConversation(draft)
+          showActionNotice(inserted ? '当前运行上下文已加入讨论会话，可以直接发送。' : '无法访问讨论会话输入框。', !inserted)
+        } catch (reason) {
+          showActionNotice(`无法打开讨论会话：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
       }
       function multilineValues(value) {
         return [...new Set(String(value ?? '').split(/\r?\n/).map(item => item.trim()).filter(Boolean))]
@@ -1699,10 +1735,14 @@ window.__ModuleLoader__.load({
         ctx.pangea.openFile(scope, path, title)
         showActionNotice(`已在侧栏打开 ${title ?? text(value, '文件')}`)
       }
-      function addToConversation(kind, item, intent = 'review', sourceSnippet) {
+      async function addToConversation(kind, item, intent = 'review', sourceSnippet) {
         const draft = buildDiscussionDraft({ kind, item, intent, runId: current?.run_id, risks, testCases, sourceSnippet })
-        const inserted = appendConversationDraft(ctx, scope, draft)
-        showActionNotice(inserted ? '已加入当前 DSH 会话输入框。' : '无法访问当前 DSH 会话输入框。', !inserted)
+        try {
+          const inserted = await appendToDiscussionConversation(draft)
+          showActionNotice(inserted ? '已加入讨论会话，可以直接发送。' : '无法访问讨论会话输入框。', !inserted)
+        } catch (reason) {
+          showActionNotice(`无法打开讨论会话：${reason instanceof Error ? reason.message : String(reason)}`, true)
+        }
       }
       function toggleRiskEvidence(key) {
         const evidenceKeys = selectedRiskEvidenceKeys.includes(key)
@@ -1726,8 +1766,8 @@ window.__ModuleLoader__.load({
             kind: 'risk', item: risk, intent, runId: current?.run_id, risks, testCases,
             selectedClaim: selectedRiskClaim, sourceSnippets,
           })
-          const inserted = appendConversationDraft(ctx, scope, draft)
-          showActionNotice(inserted ? `已加入当前 DSH 会话输入框（${selectedEvidence.length} 条证据）。` : '无法访问当前 DSH 会话输入框。', !inserted)
+          const inserted = await appendToDiscussionConversation(draft)
+          showActionNotice(inserted ? `已加入讨论会话（${selectedEvidence.length} 条证据），可以直接发送。` : '无法访问讨论会话输入框。', !inserted)
         } catch (reason) {
           showActionNotice(`无法读取选中证据：${reason instanceof Error ? reason.message : String(reason)}`, true)
         }
@@ -1738,8 +1778,8 @@ window.__ModuleLoader__.load({
           : [evidenceSnippet ? chip('检查证据', () => addToConversation(kind, item, 'evidence', evidenceSnippet)) : null, chip('转成测试语言', () => addToConversation(kind, item, 'executable')), chip('查找覆盖缺口', () => addToConversation(kind, item, 'coverage'))]
         return h('div', { style: { ...styles.card, ...styles.actionCard } },
           h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '和 DSH 讨论'), h('span', { style: styles.badge }, '局部上下文')),
-          h('div', { style: styles.itemMeta }, '只加入当前对象、直接证据和关联项，不会修改 PANGEA Run。'),
-          h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => addToConversation(kind, item, 'review') }, '加入当前会话'),
+          h('div', { style: styles.itemMeta }, '带上当前对象、直接证据和关联项，在独立讨论会话中继续。'),
+          h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 9 }, onClick: () => { void addToConversation(kind, item, 'review') } }, '在讨论会话中继续'),
           h('div', { style: styles.chips }, secondaryActions))
       }
       function renderRiskSelectionWorkbench(risk) {
@@ -2464,34 +2504,34 @@ window.__ModuleLoader__.load({
         }
         return h(React.Fragment, null,
           h('div', { style: styles.decisionHero },
-            h('div', { style: styles.eyebrow }, '行动清单'),
-            h('div', { style: styles.decisionTitle }, `${filtered.length} 条风险需要判断`),
-            h('div', { style: styles.decisionHint }, '按现有分析单元和业务流程组织。这里不自动改写结论，也不替测试工程师做语义取舍。'),
+            h('div', { style: styles.eyebrow }, '风险概览'),
+            h('div', { style: styles.decisionTitle }, `${risks.length} 条风险`),
+            h('div', { style: styles.decisionHint }, '严重度来自 SFMEA：P0 为严重、P1 为高、P2 为中、P3 为低；用例关联按测试追溯矩阵统计。'),
             h('div', { style: styles.decisionBand },
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '高优先级'), h('div', { style: styles.decisionValue }, risks.filter(item => ['Critical', 'High'].includes(item.severity)).length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '尚未覆盖'), h('div', { style: styles.decisionValue }, risks.filter(isUncoveredRisk).length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '入口不可达'), h('div', { style: styles.decisionValue }, risks.filter(isUnreachableRisk).length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已有用例'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.linked_test_case_ids?.length ?? 0) > 0).length)))),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '严重（P0）'), h('div', { style: styles.decisionValue }, risks.filter(item => item.severity === 'Critical').length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '高（P1）'), h('div', { style: styles.decisionValue }, risks.filter(item => item.severity === 'High').length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已关联用例'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.linked_test_case_ids?.length ?? 0) > 0).length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '有直接证据'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.evidence?.length ?? 0) > 0).length)))),
           h('input', { style: styles.search, value: riskQuery, 'aria-label': '搜索风险', placeholder: '搜索风险编号、标题、触发条件…', onChange: event => setRiskQuery(event.target.value) }),
           h('div', { style: styles.filters }, ['全部', 'Critical', 'High', 'Medium', 'Low'].map(level => h('button', { key: level, type: 'button', style: { ...styles.filter, ...(riskSeverity === level ? styles.filterActive : {}) }, onClick: () => setRiskSeverity(level) }, level === '全部' ? '全部' : SEVERITY[level] ?? level))),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${risks.length} 条`),
           h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
             const unit = unitById.get(unitId)
             const unitFlows = flowsByUnit.get(unitId) ?? []
-            const uncovered = items.filter(isUncoveredRisk).length
             return h('section', { key: unitId, style: styles.group },
               h('div', { style: styles.groupHeader },
                 h('div', null,
                   h('div', { style: styles.groupTitle }, unit ? `${unit.unit_id} · ${text(unit.title, '未命名单元')}` : '未归入分析单元'),
                   h('div', { style: styles.groupMeta }, unitFlows.length ? `业务流程：${unitFlows.map(flow => text(flow.title, flow.flow_id)).join('、')}` : '当前没有可直接关联的业务流程')),
-                h('span', { style: styles.badge }, `${uncovered} 条未覆盖`)),
+                h('span', { style: styles.badge }, `${items.length} 条风险`)),
               items.map(risk => h('button', { key: `${risk.unit_id}:${riskKeyByItem.get(risk)}`, type: 'button', style: { ...styles.compactCard, ...styles.clickableCard }, onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }) },
                 h('div', { style: styles.row }, h('div', { style: { ...styles.itemTitle, minWidth: 0 } }, `${risk.risk_id || '未编号'} · ${text(risk.title, '未命名风险')}`), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
                 h('div', { style: styles.itemMeta }, text(risk.trigger, '未记录触发条件')),
                 h('div', { style: styles.chips },
-                  h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '待确认'),
                   h('span', { style: styles.badge }, `${risk.linked_test_case_ids?.length ?? 0} 条关联用例`),
-                  h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'))))
+                  h('span', { style: styles.badge }, `${risk.evidence?.length ?? 0} 条证据`),
+                  hasText(risk.status) ? h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status) : null,
+                  hasText(risk.translation_status) ? h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status) : null)))
             )
           }) : h('div', { style: health?.status === 'warning' ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.status === 'warning' ? styles.error : styles.empty }, collectionEmpty('risks', '没有符合条件的风险。')))))
       }
@@ -2503,12 +2543,15 @@ window.__ModuleLoader__.load({
         return h(React.Fragment, null,
           h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, text(risk.title, '未命名风险')), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
-            h('div', { style: styles.chips }, h('span', { style: styles.badge }, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '—'}`), h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'), h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '未标注')),
+            h('div', { style: styles.chips },
+              hasText(risk.confidence) ? h('span', { style: styles.badge }, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence}`) : null,
+              hasText(risk.translation_status) ? h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status) : null,
+              hasText(risk.status) ? h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status) : null),
             Array.isArray(risk.dfx) && risk.dfx.length ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `DFX：${risk.dfx.join('、')}`) : null),
           renderDiscussionCard('risk', risk, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
           renderRiskSelectionWorkbench(risk),
           renderSourcePreview('risk', risk, previewEvidence, riskEvidenceOptions),
-          section('触发条件', risk.trigger), section('系统结果', risk.system_result), section('外部可观察现象', risk.external_observation), section('排除条件', risk.exclusion_condition),
+          section('风险说明', risk.narrative), section('触发条件', risk.trigger), section('系统结果', risk.system_result), section('外部可观察现象', risk.external_observation), section('排除条件', risk.exclusion_condition),
           isUnreachableRisk(risk) ? h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, '不可达处置'),
             h('div', { style: { ...styles.label, marginTop: 8 } }, '原因'),
@@ -2532,6 +2575,7 @@ window.__ModuleLoader__.load({
         const filtered = testCases.filter(item => !query || [item.test_case_id, item.title, item.case_type, ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
         const selectableFilteredIds = filtered.map(item => item.test_case_id).filter(hasText)
         const groups = new Map()
+        const linkedCases = testCases.filter(item => (item.linked_risk_ids?.length ?? 0) > 0).length
         for (const item of filtered) {
           const key = hasText(item.unit_id) ? item.unit_id : '__unassigned__'
           if (!groups.has(key)) groups.set(key, [])
@@ -2539,16 +2583,17 @@ window.__ModuleLoader__.load({
         }
         return h(React.Fragment, null,
           h('div', { style: styles.decisionHero },
-            h('div', { style: styles.eyebrow }, '测试计划'),
-            h('div', { style: styles.decisionTitle }, selectedCaseIds.length ? `已选择 ${selectedCaseIds.length} 条测试` : '从风险结论形成执行清单'),
-            h('div', { style: styles.decisionHint }, '用例按现有分析单元和业务流程分组；选择只影响本次执行，不修改分析产物。'),
+            h('div', { style: styles.eyebrow }, '测试用例'),
+            h('div', { style: styles.decisionTitle }, `${testCases.length} 条测试用例`),
+            h('div', { style: styles.decisionHint }, '查看用例内容、优先级、关联风险和执行步骤。'),
             h('div', { style: styles.decisionBand },
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '可选用例'), h('div', { style: styles.decisionValue }, testCases.length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '用例总数'), h('div', { style: styles.decisionValue }, testCases.length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已选择'), h('div', { style: styles.decisionValue }, selectedCaseIds.length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '当前出口'), h('div', { style: styles.decisionValue }, 'CSV / 剪贴板')))),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '关联风险'), h('div', { style: styles.decisionValue }, linkedCases)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '导出格式'), h('div', { style: styles.decisionValue }, 'CSV / XLSX')))),
           h('div', { style: { ...styles.card, ...styles.actionCard } },
             h('div', { style: styles.itemTitle }, '测试用例出口'),
-            h('div', { style: styles.itemMeta }, '当前版本提供可归档的 CSV 和复制出口；自动化执行环境尚未接入，不显示不可用的执行按钮。'),
+            h('div', { style: styles.itemMeta }, '导出完整用例，或复制当前选择的用例。'),
             h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
               h('button', { type: 'button', disabled: !current?.run_id, style: { ...styles.button, flex: 1, ...(!current?.run_id ? styles.buttonDisabled : {}) }, onClick: () => { void exportCurrentCases('csv') } }, '导出 CSV'),
               h('button', { type: 'button', disabled: !current?.run_id, style: { ...styles.button, flex: 1, ...(!current?.run_id ? styles.buttonDisabled : {}) }, onClick: () => { void exportCurrentCases('xlsx') } }, '导出 XLSX')),
@@ -2578,7 +2623,7 @@ window.__ModuleLoader__.load({
                   h('input', { type: 'checkbox', disabled: !selectable, checked: selectable && selectedCaseIds.includes(item.test_case_id), 'aria-label': selectable ? `选择 ${item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(item.test_case_id) }),
                   h('button', { type: 'button', style: styles.caseDetailButton, onClick: () => navigate({ type: 'case', id: itemKey }) },
                     h('div', { style: styles.itemTitle }, `${item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`),
-                    h('div', { style: styles.itemMeta }, `${text(item.case_type, '未标注类型')} · ${item.linked_risk_ids?.length ?? 0} 条关联风险 · ${text(item.status, 'draft')}${selectable ? '' : ' · 分析完成后可加入计划'}`))))
+                    h('div', { style: styles.itemMeta }, [text(item.case_type, '类型待补充'), `${item.linked_risk_ids?.length ?? 0} 条关联风险`, hasText(item.priority) ? `优先级 ${item.priority}` : '', hasText(item.status) ? item.status : ''].filter(Boolean).join(' · ')))))
               })
             )
           }) : h('div', { style: health?.status === 'warning' ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.status === 'warning' ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
@@ -2670,9 +2715,9 @@ window.__ModuleLoader__.load({
         const item = caseById.get(screen.id)
         if (!item) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条测试用例，可能是 Run 已刷新或切换。'))
         return h(React.Fragment, null,
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, text(item.title, '未命名用例')), h('div', { style: styles.chips }, h('span', { style: styles.badge }, text(item.case_type, '未标注类型')), h('span', { style: styles.badge }, text(item.status, 'draft')))),
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, text(item.title, '未命名用例')), h('div', { style: styles.chips }, hasText(item.case_type) ? h('span', { style: styles.badge }, item.case_type) : null, hasText(item.priority) ? h('span', { style: styles.badge }, `优先级 ${item.priority}`) : null, hasText(item.status) ? h('span', { style: styles.badge }, item.status) : null)),
           renderDiscussionCard('case', item),
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '暂无关联风险。')),
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '该用例用于基础行为验证。')),
           stringList('前置条件', item.preconditions), stringList('执行步骤', item.steps, true), stringList('预期结果', item.expected_results, true), stringList('观察点', item.observability), stringList('清理动作', item.cleanup))
       }
 
@@ -2817,6 +2862,7 @@ window.__ModuleLoader__.load({
     exports.absoluteWorkspacePath = absoluteWorkspacePath
     exports.evidenceFilePath = evidenceFilePath
     exports.appendConversationDraft = appendConversationDraft
+    exports.writableConversation = writableConversation
     exports.splitRiskClaims = splitRiskClaims
     exports.buildDiscussionDraft = buildDiscussionDraft
     exports.analysisBackTarget = analysisBackTarget

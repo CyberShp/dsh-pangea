@@ -74,6 +74,14 @@ function riskSeverityById(markdown) {
   return result
 }
 
+function canonicalSeverity(value) {
+  return ({ P0: 'Critical', P1: 'High', P2: 'Medium', P3: 'Low' })[value] ?? value
+}
+
+function uniqueStrings(...values) {
+  return [...new Set(values.flat().filter(value => typeof value === 'string' && value.trim() !== '').map(value => value.trim()))]
+}
+
 function traceabilityByCase(markdown) {
   const result = new Map()
   for (const cells of tableRows(markdown)) {
@@ -99,8 +107,6 @@ function parseRisks(markdown, severityById, riskCases) {
       risk_id: riskId,
       title: heading[2].replace(/（.*$/, '').trim(),
       severity: severityById.get(riskId) ?? 'Medium',
-      status: 'pending',
-      confidence: 'Medium',
       translation_status: linkedTestCaseIds.length ? 'Test-ready' : 'Uncovered',
       trigger: causal['条件'] ?? '',
       system_result: causal['代码失效'] ?? causal['残留'] ?? '',
@@ -122,7 +128,6 @@ function parseTestCase(markdown, linkedRiskIds) {
     title: heading[2].trim(),
     case_type: value('测试类型'),
     priority: value('优先级'),
-    status: 'draft',
     linked_risk_ids: linkedRiskIds,
     preconditions: bulletItems(markdownSection(markdown, '前置条件')),
     steps: bulletItems(markdownSection(markdown, '操作步骤'), /^\d+[.)、]\s*(.+)$/),
@@ -164,6 +169,77 @@ async function readLiveDocumentDraft(runDirectory, state) {
     }
   }
   return { step_id: stepId, details }
+}
+
+function normalizeProjectionDetails(projection, liveDetails) {
+  const projectedRisks = Array.isArray(projection?.risks) ? projection.risks : []
+  const projectedCases = Array.isArray(projection?.test_cases) ? projection.test_cases : []
+  const projectedEvidence = Array.isArray(projection?.evidence) ? projection.evidence : []
+  const liveRiskById = new Map((liveDetails?.risks ?? []).map(item => [item.risk_id, item]))
+  const liveCaseById = new Map((liveDetails?.test_cases ?? []).map(item => [item.test_case_id, item]))
+  const evidenceRiskIds = new Map()
+  for (const risk of projectedRisks) {
+    for (const evidenceId of uniqueStrings(risk?.evidence_ids ?? [])) {
+      evidenceRiskIds.set(evidenceId, uniqueStrings(evidenceRiskIds.get(evidenceId) ?? [], risk.risk_id))
+    }
+  }
+  const evidence = projectedEvidence.map(item => {
+    const chunkId = item?.chunk_id ?? item?.evidence_id
+    return {
+      ...item,
+      ...(chunkId ? { chunk_id: chunkId } : {}),
+      observation: item?.observation ?? item?.narrative ?? '',
+      risk_ids: uniqueStrings(item?.risk_ids ?? [], chunkId ? evidenceRiskIds.get(chunkId) ?? [] : []),
+    }
+  })
+  const evidenceById = new Map()
+  for (const item of evidence) {
+    if (item.chunk_id) evidenceById.set(item.chunk_id, item)
+    if (item.evidence_id) evidenceById.set(item.evidence_id, item)
+  }
+  const risks = projectedRisks.map(projected => {
+    const live = liveRiskById.get(projected.risk_id) ?? {}
+    const linkedTestCaseIds = uniqueStrings(projected.linked_test_case_ids ?? [], live.linked_test_case_ids ?? [])
+    const evidenceIds = uniqueStrings(projected.evidence_ids ?? [])
+    const directEvidence = Array.isArray(projected.evidence) ? projected.evidence : []
+    const resolvedEvidence = [...directEvidence, ...evidenceIds.map(id => evidenceById.get(id)).filter(Boolean)]
+    const deduplicatedEvidence = [...new Map(resolvedEvidence.map(item => [item?.chunk_id ?? item?.evidence_id ?? `${item?.location ?? ''}\u0000${item?.observation ?? item?.narrative ?? ''}`, item])).values()]
+    return {
+      ...live,
+      ...projected,
+      severity: canonicalSeverity(projected.severity ?? live.severity),
+      trigger: projected.trigger ?? live.trigger ?? '',
+      system_result: projected.system_result ?? live.system_result ?? projected.narrative ?? '',
+      external_observation: projected.external_observation ?? live.external_observation ?? '',
+      blackbox_proof: projected.blackbox_proof ?? live.blackbox_proof ?? '',
+      linked_test_case_ids: linkedTestCaseIds,
+      evidence: deduplicatedEvidence,
+      translation_status: projected.translation_status ?? (linkedTestCaseIds.length ? 'Test-ready' : 'Uncovered'),
+    }
+  })
+  const testCases = projectedCases.map(projected => {
+    const live = liveCaseById.get(projected.test_case_id) ?? {}
+    const merged = { ...live, ...projected }
+    delete merged.status
+    if (projected.status !== undefined) merged.status = projected.status
+    return {
+      ...merged,
+      case_type: projected.case_type ?? live.case_type ?? '',
+      priority: projected.priority ?? live.priority ?? '',
+      linked_risk_ids: uniqueStrings(projected.linked_risk_ids ?? [], live.linked_risk_ids ?? []),
+      preconditions: Array.isArray(projected.preconditions) && projected.preconditions.length ? projected.preconditions : live.preconditions ?? [],
+      steps: Array.isArray(projected.steps) && projected.steps.length ? projected.steps : live.steps ?? [],
+      expected_results: Array.isArray(projected.expected_results) && projected.expected_results.length ? projected.expected_results : live.expected_results ?? [],
+      observability: Array.isArray(projected.observability) && projected.observability.length ? projected.observability : live.observability ?? [],
+      cleanup: Array.isArray(projected.cleanup) && projected.cleanup.length ? projected.cleanup : live.cleanup ?? [],
+    }
+  })
+  return {
+    ...projection,
+    risks,
+    test_cases: testCases,
+    evidence,
+  }
 }
 
 async function readWorkbenchProjection(runDirectory, runId) {
@@ -309,9 +385,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const reportAvailable = await pathKind(reportMd) === 'file'
   const life = lifecycle(metadata, state)
   const projection = await readWorkbenchProjection(runDirectory, runId)
-  const liveDraft = projection.status === 'legacy_unavailable'
-    ? await readLiveDocumentDraft(runDirectory, state)
-    : { step_id: null, details: { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] } }
+  const liveDraft = await readLiveDocumentDraft(runDirectory, state)
   const recordedSourceSnapshot = metadata.source_snapshot ?? { status: 'legacy_unavailable', snapshot_digest: null, file_count: null }
   const sourceSnapshot = { ...recordedSourceSnapshot, ...(await verifySourceSnapshot(runDirectory, runId, recordedSourceSnapshot)) }
   const validation = state?.validation ?? { status: 'not_checked', error_count: 0, errors: [] }
@@ -336,14 +410,16 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     : null
   const publicationState = projection.status === 'verified'
     ? (recordedState === 'broken' ? 'broken' : recordedState === 'final' && finalExpected ? 'final' : finalExpected ? 'final' : 'draft')
-    : (projection.status === 'invalid' || finalExpected || recordedState === 'broken' ? 'broken' : liveDraft.step_id ? 'draft' : 'pending')
+    : (projection.status === 'invalid' || finalExpected ? 'broken' : liveDraft.step_id ? 'draft' : 'pending')
   const publicationRevision = Number.isInteger(recordedPublication?.revision) && recordedPublication.revision >= 0
     ? recordedPublication.revision
     : projection.status === 'verified' ? 1 : 0
   const publicationStep = typeof recordedPublication?.step_id === 'string'
     ? recordedPublication.step_id
     : projection.status === 'verified' ? (finalExpected ? '09' : null) : liveDraft.step_id
-  const publicationIssues = publicationState === 'broken' ? ['工作台结构化投影已标记为 broken'] : []
+  const publicationIssues = publicationState === 'broken' && recordedState === 'broken'
+    ? ['工作台结构化投影已标记为 broken']
+    : []
   const projectionIssues = projection.status === 'legacy_unavailable' && ['pending', 'draft'].includes(publicationState)
     ? []
     : projection.status === 'verified' && publicationState !== 'broken'
@@ -366,7 +442,9 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     workflow.unresolved = projectionIssues.map(message => ({ code: 'PROJECTION_UNAVAILABLE', message }))
   }
   const projectionValue = projection.value ?? {}
-  const resultDetails = projection.status === 'verified' ? projectionValue : liveDraft.details
+  const resultDetails = projection.status === 'verified'
+    ? normalizeProjectionDetails(projectionValue, liveDraft.details)
+    : liveDraft.details
   const summary = {
     run_id: runId,
     ...life,
@@ -386,9 +464,9 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     },
     performance,
     counts: {
-      risks: publicationState === 'draft' ? resultDetails.risks.length : projection.status === 'verified' ? projectionValue.risks.length : null,
-      test_cases: publicationState === 'draft' ? resultDetails.test_cases.length : projection.status === 'verified' ? projectionValue.test_cases.length : null,
-      evidence: projection.status === 'verified' ? projectionValue.evidence.length : liveDocuments.length,
+      risks: ['draft', 'final'].includes(publicationState) ? resultDetails.risks.length : null,
+      test_cases: ['draft', 'final'].includes(publicationState) ? resultDetails.test_cases.length : null,
+      evidence: projection.status === 'verified' ? resultDetails.evidence.length : liveDocuments.length,
       business_flows: projection.status === 'verified' ? projectionValue.business_flows.length : null,
       review_issues: projection.status === 'verified' ? projectionValue.review_issues.length : null,
     },
