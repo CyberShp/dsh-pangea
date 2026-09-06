@@ -495,6 +495,7 @@ export class TaskStore {
     const attempt = findAttempt(task, ref)
     if (attempt && ['completed', 'failed', 'stopped', 'interrupted'].includes(attempt.execution_status)) return structuredClone(task)
     const status = snapshot?.status === 'completed' ? 'completed' : snapshot?.status === 'killed' ? 'stopped' : 'failed'
+    const attentionRequired = status === 'failed' && snapshot?.attention_required === true
     const ended = this.now()
     if (attempt) {
       attempt.execution_status = status
@@ -505,10 +506,12 @@ export class TaskStore {
     if (attempt?.attempt_id === task.attempt_id) {
       task.execution_status = status
       if (status === 'completed') task.status = 'completed'
-      else task.status = status
+      else task.status = attentionRequired ? 'needs_attention' : status
       task.terminal_error = status === 'failed' ? text(snapshot?.detail, 'ACP Agent 执行失败') : null
       task.launch_error = task.terminal_error
-      task.launch_error_code = status === 'failed' ? 'ACP_AGENT_FAILED' : null
+      task.launch_error_code = attentionRequired
+        ? text(snapshot?.attention_code, 'RUN_ATTENTION_REQUIRED')
+        : status === 'failed' ? 'ACP_AGENT_FAILED' : null
       task.last_activity_at = ended
     }
     task.updated_at = this.now()

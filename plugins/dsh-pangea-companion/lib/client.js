@@ -237,6 +237,27 @@ window.__ModuleLoader__.load({
     const QUALITY = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决' }
     const REVIEW = { PASS: '通过', REWORK: '需要返工', UNRESOLVED: '未解决', UNREADABLE: '结果不可读' }
     const SEVERITY = { Critical: '严重', High: '高', Medium: '中', Low: '低' }
+    const RISK_SEVERITY_LEVELS = ['Critical', 'High', 'Medium', 'Low']
+    function riskSeverityCounts(risks) {
+      const counts = { Critical: 0, High: 0, Medium: 0, Low: 0, Ungraded: 0 }
+      for (const risk of risks ?? []) {
+        if (RISK_SEVERITY_LEVELS.includes(risk?.severity)) counts[risk.severity] += 1
+        else counts.Ungraded += 1
+      }
+      return counts
+    }
+    function filterRisks(risks, severity, queryValue) {
+      const query = String(queryValue ?? '').trim().toLowerCase()
+      return (risks ?? []).filter(risk => {
+        if (severity === 'Ungraded' && RISK_SEVERITY_LEVELS.includes(risk?.severity)) return false
+        if (!['全部', 'Ungraded'].includes(severity) && risk.severity !== severity) return false
+        return !query || [
+          risk.risk_id, risk.title, risk.narrative, risk.trigger, risk.system_result,
+          risk.residual_effect, risk.apparent_normality, risk.external_observation,
+          risk.blackbox_proof, ...(risk.dfx ?? []),
+        ].join(' ').toLowerCase().includes(query)
+      })
+    }
     const CONFIDENCE = { high: '高', medium: '中', low: '低' }
     const TRANSLATION = {
       'Blackbox-ready': '黑盒可执行', 'Graybox-ready': '灰盒可执行', 'Developer-confirm': '需开发确认',
@@ -565,9 +586,13 @@ window.__ModuleLoader__.load({
           }
         } else {
           discussionLine(lines, '严重度', SEVERITY[item?.severity] ?? item?.severity)
+          discussionLine(lines, '风险说明', item?.narrative)
           discussionLine(lines, '触发条件', item?.trigger)
-          discussionLine(lines, '系统结果', item?.system_result)
-          discussionLine(lines, '外部观察', item?.external_observation)
+          discussionLine(lines, '代码失效', item?.system_result)
+          discussionLine(lines, '残留状态', item?.residual_effect)
+          discussionLine(lines, '表面正常现象', item?.apparent_normality)
+          discussionLine(lines, '对外暴露', item?.external_observation)
+          discussionLine(lines, '黑盒证明', item?.blackbox_proof)
           discussionLine(lines, '排除条件', item?.exclusion_condition)
           discussionLine(lines, '上游语义结论', item?.upstream_semantics?.conclusion)
           discussionList(lines, '直接证据', (item?.evidence ?? []).map(evidenceLine))
@@ -2491,11 +2516,8 @@ window.__ModuleLoader__.load({
       }
 
       function renderRisks() {
-        const query = riskQuery.trim().toLowerCase()
-        const filtered = risks.filter(risk => {
-          if (riskSeverity !== '全部' && risk.severity !== riskSeverity) return false
-          return !query || [risk.risk_id, risk.title, risk.trigger, risk.system_result, ...(risk.dfx ?? [])].join(' ').toLowerCase().includes(query)
-        })
+        const filtered = filterRisks(risks, riskSeverity, riskQuery)
+        const severityCounts = riskSeverityCounts(risks)
         const groups = new Map()
         for (const risk of filtered) {
           const key = hasText(risk.unit_id) ? risk.unit_id : '__unassigned__'
@@ -2506,14 +2528,14 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.decisionHero },
             h('div', { style: styles.eyebrow }, '风险概览'),
             h('div', { style: styles.decisionTitle }, `${risks.length} 条风险`),
-            h('div', { style: styles.decisionHint }, '严重度来自 SFMEA：P0 为严重、P1 为高、P2 为中、P3 为低；用例关联按测试追溯矩阵统计。'),
+            h('div', { style: styles.decisionHint }, '查看风险等级、触发条件和关联测试用例。'),
             h('div', { style: styles.decisionBand },
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '严重（P0）'), h('div', { style: styles.decisionValue }, risks.filter(item => item.severity === 'Critical').length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '高（P1）'), h('div', { style: styles.decisionValue }, risks.filter(item => item.severity === 'High').length)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '严重'), h('div', { style: styles.decisionValue }, severityCounts.Critical)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '高'), h('div', { style: styles.decisionValue }, severityCounts.High)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已关联用例'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.linked_test_case_ids?.length ?? 0) > 0).length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '有直接证据'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.evidence?.length ?? 0) > 0).length)))),
           h('input', { style: styles.search, value: riskQuery, 'aria-label': '搜索风险', placeholder: '搜索风险编号、标题、触发条件…', onChange: event => setRiskQuery(event.target.value) }),
-          h('div', { style: styles.filters }, ['全部', 'Critical', 'High', 'Medium', 'Low'].map(level => h('button', { key: level, type: 'button', style: { ...styles.filter, ...(riskSeverity === level ? styles.filterActive : {}) }, onClick: () => setRiskSeverity(level) }, level === '全部' ? '全部' : SEVERITY[level] ?? level))),
+          h('div', { style: styles.filters }, ['全部', ...RISK_SEVERITY_LEVELS, ...(severityCounts.Ungraded ? ['Ungraded'] : [])].map(level => h('button', { key: level, type: 'button', style: { ...styles.filter, ...(riskSeverity === level ? styles.filterActive : {}) }, onClick: () => setRiskSeverity(level) }, level === '全部' ? `全部 ${risks.length}` : level === 'Ungraded' ? `未分级 ${severityCounts.Ungraded}` : `${SEVERITY[level]} ${severityCounts[level]}`))),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${risks.length} 条`),
           h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
             const unit = unitById.get(unitId)
@@ -2540,6 +2562,10 @@ window.__ModuleLoader__.load({
         const risk = riskById.get(screen.id)
         if (!risk) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条风险，可能是 Run 已刷新或切换。'))
         const semantics = risk.upstream_semantics
+        const severitySource = risk.severity_source === 'sfmea' ? 'SFMEA' : risk.severity_source === 'workbench_projection' ? '工作台投影' : null
+        const causalSection = (title, value) => section(title, hasText(value)
+          ? value
+          : hasText(risk.source_section) ? '该项内容尚未完整读取，请核对下方原始风险章节。' : '该项尚未记录。')
         return h(React.Fragment, null,
           h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, text(risk.title, '未命名风险')), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
@@ -2547,11 +2573,20 @@ window.__ModuleLoader__.load({
               hasText(risk.confidence) ? h('span', { style: styles.badge }, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence}`) : null,
               hasText(risk.translation_status) ? h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status) : null,
               hasText(risk.status) ? h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status) : null),
+            severitySource ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `等级来源：${severitySource}`) : null,
             Array.isArray(risk.dfx) && risk.dfx.length ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `DFX：${risk.dfx.join('、')}`) : null),
+          causalSection('风险说明', risk.narrative),
+          causalSection('触发条件', risk.trigger),
+          causalSection('代码失效', risk.system_result),
+          causalSection('残留状态', risk.residual_effect),
+          causalSection('表面正常现象', risk.apparent_normality),
+          causalSection('对外暴露', risk.external_observation),
+          causalSection('黑盒证明', risk.blackbox_proof),
+          hasText(risk.source_section) ? section('原始风险章节', risk.source_section) : null,
           renderDiscussionCard('risk', risk, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
           renderRiskSelectionWorkbench(risk),
           renderSourcePreview('risk', risk, previewEvidence, riskEvidenceOptions),
-          section('风险说明', risk.narrative), section('触发条件', risk.trigger), section('系统结果', risk.system_result), section('外部可观察现象', risk.external_observation), section('排除条件', risk.exclusion_condition),
+          section('排除条件', risk.exclusion_condition),
           isUnreachableRisk(risk) ? h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, '不可达处置'),
             h('div', { style: { ...styles.label, marginTop: 8 } }, '原因'),
@@ -2865,6 +2900,8 @@ window.__ModuleLoader__.load({
     exports.writableConversation = writableConversation
     exports.splitRiskClaims = splitRiskClaims
     exports.buildDiscussionDraft = buildDiscussionDraft
+    exports.riskSeverityCounts = riskSeverityCounts
+    exports.filterRisks = filterRisks
     exports.analysisBackTarget = analysisBackTarget
     exports.buildAnalysisRequest = buildAnalysisRequest
     exports.apply = apply

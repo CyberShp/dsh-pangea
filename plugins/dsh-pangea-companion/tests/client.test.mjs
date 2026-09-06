@@ -19,6 +19,42 @@ function fakeReact() {
   }
 }
 
+async function loadClientExports() {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console, fetch: async () => { throw new Error('fetch must not run during registration') }, setInterval, clearInterval }
+  sandbox.window = { setInterval, clearInterval, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+  return exported
+}
+
+test('filters canonical risk severities and includes the complete causal chain in discussion context', async () => {
+  const client = await loadClientExports()
+  const risks = [
+    { risk_id: 'R-001', severity: 'High' },
+    { risk_id: 'R-002', severity: 'High' },
+    { risk_id: 'R-003', severity: 'Medium' },
+    { risk_id: 'R-004', severity: 'Low' },
+    { risk_id: 'R-005', severity: null },
+  ]
+  assert.deepEqual({ ...client.riskSeverityCounts(risks) }, { Critical: 0, High: 2, Medium: 1, Low: 1, Ungraded: 1 })
+  assert.deepEqual(Array.from(client.filterRisks(risks, 'High', '')).map(item => item.risk_id), ['R-001', 'R-002'])
+  assert.deepEqual(Array.from(client.filterRisks(risks, 'Ungraded', '')).map(item => item.risk_id), ['R-005'])
+
+  const draft = client.buildDiscussionDraft({
+    kind: 'risk', runId: 'run-1', risks, testCases: [],
+    item: {
+      risk_id: 'R-001', title: '父资源误判', severity: 'High', narrative: '风险说明',
+      trigger: '父键缺失', system_result: '读取路径失效', residual_effect: '状态残留',
+      apparent_normality: '当前请求仍可能成功', external_observation: '后续查询返回 404', blackbox_proof: '删除父键后查询',
+      evidence: [], linked_test_case_ids: [],
+    },
+  })
+  for (const value of ['风险说明', '父键缺失', '读取路径失效', '状态残留', '当前请求仍可能成功', '后续查询返回 404', '删除父键后查询']) {
+    assert.match(draft, new RegExp(value))
+  }
+})
+
 test('PANGEA client registers the workbench and task-oriented product pages', async () => {
   const source = await readFile(clientPath, 'utf8')
   assert.match(source, /测试工作台/)
@@ -428,13 +464,15 @@ test('risk and test case pages use result-focused copy and only show recorded me
   const source = await readFile(clientPath, 'utf8')
   assert.doesNotMatch(source, /行动清单|风险需要判断|这里不自动改写结论|选择只影响本次执行|不修改分析产物/)
   assert.match(source, /风险概览/)
-  assert.match(source, /严重度来自 SFMEA/)
+  assert.match(source, /查看风险等级、触发条件和关联测试用例/)
+  assert.doesNotMatch(source, /严重度来自 SFMEA/)
   assert.match(source, /测试用例/)
   assert.match(source, /查看用例内容、优先级、关联风险和执行步骤/)
   assert.doesNotMatch(source, /置信度.*\?\? '—'/)
   assert.doesNotMatch(source, /TRANSLATION\[risk\.translation_status\].*未标注/)
   assert.doesNotMatch(source, /RISK_STATUS\[risk\.status\].*未标注/)
-  assert.match(source, /section\('风险说明', risk\.narrative\)/)
+  assert.match(source, /causalSection\('风险说明', risk\.narrative\)/)
+  assert.match(source, /causalSection\('黑盒证明', risk\.blackbox_proof\)/)
 })
 
 test('selects a writable discussion conversation instead of the read-only analysis session', async () => {

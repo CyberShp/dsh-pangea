@@ -279,6 +279,30 @@ test('isolates identical Job ids by owner and settles the matching attempt', asy
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('records an ACP continuation stall as needing attention without losing the execution error', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-attention-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-attention' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '续接停滞' } })
+    await store.bindJob('task-attention', {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-a', attemptId: 'attempt-a',
+    })
+    await store.settleJob({ jobId: 'subagent-1', ownerSessionId: 'owner-a' }, {
+      status: 'failed',
+      detail: '两轮续接没有推进 STEP_05',
+      attention_required: true,
+      attention_code: 'PANGEA_CONTINUATION_STALLED',
+    })
+
+    const task = await store.get('task-attention')
+    assert.equal(task.status, 'needs_attention')
+    assert.equal(task.execution_status, 'failed')
+    assert.equal(task.launch_error_code, 'PANGEA_CONTINUATION_STALLED')
+    assert.equal(task.terminal_error, '两轮续接没有推进 STEP_05')
+    assert.equal(task.attempts[0].execution_status, 'failed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('uses Job startedAt as part of the durable execution identity', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-job-start-'))
   try {

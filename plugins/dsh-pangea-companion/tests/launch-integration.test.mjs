@@ -145,6 +145,29 @@ test('settles an ACP Job with its owner identity', async () => {
   })
 })
 
+test('maps an ACP continuation stall to a task attention state', async () => {
+  let settled
+  const task = {
+    task_id: 'task-attention', workspace: '/workspace', data_root: '/workspace/pangea-data', run_id: 'run-attention',
+    provider: 'pangea-opencode', model_route: null,
+  }
+  const tasks = {
+    async getByJob() { return task },
+    async recordJobActivity() {},
+    async settleJob(_ref, value) { settled = value; return value },
+  }
+  await settleAcpTask({ jobs: { read() { return { text: '' } } } }, tasks, { async append() {} }, {
+    id: 'job-attention', kind: 'subagent', status: 'failed',
+    detail: JSON.stringify({ code: 'PANGEA_CONTINUATION_STALLED', message: '两轮续接没有推进 STEP_05' }),
+  })
+  assert.deepEqual(settled, {
+    id: 'job-attention', kind: 'subagent', status: 'failed',
+    detail: '两轮续接没有推进 STEP_05',
+    attention_required: true,
+    attention_code: 'PANGEA_CONTINUATION_STALLED',
+  })
+})
+
 test('does not describe an expected pending projection as an untrusted result', async () => {
   const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
   assert.match(source, /if \(health\?\.status === 'warning'\)/)

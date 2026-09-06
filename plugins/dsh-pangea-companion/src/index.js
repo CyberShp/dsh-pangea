@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createRuntimeMonitor } from './monitor.js'
 import { createTaskStore } from './task-store.js'
+import { ATTENTION_REQUIRED_CODE, decodeAcpOutcomeDetail } from './acp-outcome.js'
 import { createLaunchLogStore } from './launch-log.js'
 import { createAcpSettingsStore } from './acp-settings.js'
 import { EnvironmentStore } from './execution/environment.js'
@@ -469,6 +470,15 @@ async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner
   } catch { /* terminal state remains authoritative even if final output cannot be read */ }
   if (output) await tasks.recordJobActivity(reference, output)
   let outcome = snapshot
+  const attention = decodeAcpOutcomeDetail(snapshot.detail)
+  if (attention) {
+    outcome = {
+      ...snapshot,
+      detail: attention.message,
+      attention_required: true,
+      attention_code: ATTENTION_REQUIRED_CODE,
+    }
+  }
   if (snapshot.status === 'completed') {
     try {
       const run = await runner({

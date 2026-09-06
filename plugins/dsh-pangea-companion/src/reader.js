@@ -67,7 +67,7 @@ function riskSeverityById(markdown) {
   const result = new Map()
   const severity = { P0: 'Critical', P1: 'High', P2: 'Medium', P3: 'Low' }
   for (const cells of tableRows(markdown)) {
-    const id = cells[0]?.match(/\b(RP-\d+)\b/)?.[1]
+    const id = cells[0]?.match(/\b((?:RP|R)(?:-[A-Z0-9]+)+)\b/i)?.[1]
     const level = cells.find(cell => /^P[0-3]$/.test(cell))
     if (id && level) result.set(id, severity[level])
   }
@@ -75,7 +75,14 @@ function riskSeverityById(markdown) {
 }
 
 function canonicalSeverity(value) {
-  return ({ P0: 'Critical', P1: 'High', P2: 'Medium', P3: 'Low' })[value] ?? value
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  return ({
+    p0: 'Critical', critical: 'Critical', '严重': 'Critical',
+    p1: 'High', high: 'High', '高': 'High',
+    p2: 'Medium', medium: 'Medium', '中': 'Medium',
+    p3: 'Low', low: 'Low', '低': 'Low',
+  })[normalized] ?? null
 }
 
 function uniqueStrings(...values) {
@@ -87,31 +94,59 @@ function traceabilityByCase(markdown) {
   for (const cells of tableRows(markdown)) {
     const caseId = cells[0]?.match(/\b(TC-[A-Z0-9-]+)\b/)?.[1]
     if (!caseId) continue
-    result.set(caseId, prefixedIds(cells.join(' | '), 'RP'))
+    const row = cells.join(' | ')
+    const exact = [...row.matchAll(/\b((?:RP|R)(?:-[A-Z0-9]+)+)\b/gi)].map(match => match[1])
+    result.set(caseId, uniqueStrings(exact, prefixedIds(row, 'RP'), prefixedIds(row, 'R')))
   }
   return result
 }
 
 function parseRisks(markdown, severityById, riskCases) {
-  const headings = [...markdown.matchAll(/^###\s+(RP-\d+)[：:]\s*(.+)$/gm)]
-  return headings.map((heading, index) => {
+  const headings = [...markdown.matchAll(/^###\s+((?:RP|R)(?:-[A-Z0-9]+)+)\s*(?:[：:]|[—–]|\s-\s)\s*(.+)$/gmi)]
+  const labels = new Map([
+    ['条件', 'trigger'], ['什么条件发生', 'trigger'],
+    ['代码失效', 'system_result'], ['代码内部哪里失效', 'system_result'],
+    ['残留', 'residual_effect'], ['状态/数据留下什么', 'residual_effect'], ['状态/资源/数据留下什么问题', 'residual_effect'],
+    ['看似正常', 'apparent_normality'], ['为什么看似正常', 'apparent_normality'], ['为什么当前操作可能仍看似正常', 'apparent_normality'],
+    ['暴露', 'external_observation'], ['何时对外暴露', 'external_observation'], ['什么时候对外暴露', 'external_observation'],
+    ['黑盒证明', 'blackbox_proof'], ['黑盒如何证明', 'blackbox_proof'],
+  ])
+  return headings.map(heading => {
     const riskId = heading[1]
-    const section = markdown.slice(heading.index + heading[0].length, headings[index + 1]?.index ?? markdown.length)
+    const tail = markdown.slice(heading.index + heading[0].length)
+    const nextHeading = tail.search(/^#{1,3}\s+/m)
+    const section = (nextHeading === -1 ? tail : tail.slice(0, nextHeading)).trim()
     const causal = {}
+    let activeField = null
     for (const line of section.split(/\r?\n/)) {
-      const match = line.trim().replace(/^→\s*/, '').match(/^(条件|代码失效|残留|看似正常|暴露|黑盒证明)[：:]\s*(.+)$/)
-      if (match) causal[match[1]] = match[2].trim()
+      const trimmed = line.trim()
+      if (!trimmed || /^```/.test(trimmed)) continue
+      const match = trimmed.replace(/^[-*]\s*/, '').replace(/^→\s*/, '').match(/^(?:\*\*)?(.+?)(?:\*\*)?[：:]\s*(.*)$/)
+      const field = match ? labels.get(match[1].trim()) : null
+      if (field) {
+        activeField = field
+        causal[field] = match[2].trim()
+      } else if (match || /^[-*]\s+\*\*/.test(trimmed)) {
+        activeField = null
+      } else if (activeField) {
+        causal[activeField] = [causal[activeField], trimmed].filter(Boolean).join('\n')
+      }
     }
     const linkedTestCaseIds = riskCases.get(riskId) ?? []
+    const severity = canonicalSeverity(severityById.get(riskId))
     return {
       risk_id: riskId,
       title: heading[2].replace(/（.*$/, '').trim(),
-      severity: severityById.get(riskId) ?? 'Medium',
+      severity,
+      severity_source: severity ? 'sfmea' : null,
       translation_status: linkedTestCaseIds.length ? 'Test-ready' : 'Uncovered',
-      trigger: causal['条件'] ?? '',
-      system_result: causal['代码失效'] ?? causal['残留'] ?? '',
-      external_observation: causal['暴露'] ?? '',
-      blackbox_proof: causal['黑盒证明'] ?? '',
+      trigger: causal.trigger ?? '',
+      system_result: causal.system_result ?? '',
+      residual_effect: causal.residual_effect ?? '',
+      apparent_normality: causal.apparent_normality ?? '',
+      external_observation: causal.external_observation ?? '',
+      blackbox_proof: causal.blackbox_proof ?? '',
+      source_section: section,
       linked_test_case_ids: linkedTestCaseIds,
       evidence: [],
     }
@@ -204,14 +239,23 @@ function normalizeProjectionDetails(projection, liveDetails) {
     const directEvidence = Array.isArray(projected.evidence) ? projected.evidence : []
     const resolvedEvidence = [...directEvidence, ...evidenceIds.map(id => evidenceById.get(id)).filter(Boolean)]
     const deduplicatedEvidence = [...new Map(resolvedEvidence.map(item => [item?.chunk_id ?? item?.evidence_id ?? `${item?.location ?? ''}\u0000${item?.observation ?? item?.narrative ?? ''}`, item])).values()]
+    const severityInput = projected.severity ?? live.severity
+    const severity = canonicalSeverity(severityInput)
+    const nonEmpty = (...values) => values.find(value => typeof value === 'string' && value.trim() !== '') ?? ''
     return {
       ...live,
       ...projected,
-      severity: canonicalSeverity(projected.severity ?? live.severity),
-      trigger: projected.trigger ?? live.trigger ?? '',
-      system_result: projected.system_result ?? live.system_result ?? projected.narrative ?? '',
-      external_observation: projected.external_observation ?? live.external_observation ?? '',
-      blackbox_proof: projected.blackbox_proof ?? live.blackbox_proof ?? '',
+      severity,
+      severity_raw: severity ? undefined : severityInput ?? null,
+      severity_source: projected.severity !== undefined ? 'workbench_projection' : live.severity_source ?? null,
+      narrative: nonEmpty(projected.narrative, projected.description, live.narrative, live.description),
+      trigger: nonEmpty(projected.trigger, live.trigger),
+      system_result: nonEmpty(projected.system_result, live.system_result),
+      residual_effect: nonEmpty(projected.residual_effect, live.residual_effect),
+      apparent_normality: nonEmpty(projected.apparent_normality, live.apparent_normality),
+      external_observation: nonEmpty(projected.external_observation, live.external_observation),
+      blackbox_proof: nonEmpty(projected.blackbox_proof, live.blackbox_proof),
+      source_section: nonEmpty(projected.source_section, live.source_section),
       linked_test_case_ids: linkedTestCaseIds,
       evidence: deduplicatedEvidence,
       translation_status: projected.translation_status ?? (linkedTestCaseIds.length ? 'Test-ready' : 'Uncovered'),

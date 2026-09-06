@@ -404,6 +404,155 @@ test('records the local Job identity before releasing the ACP provider start', a
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('continues an incomplete Codetalks Run in the same ACP session before disposing it', async () => {
+  const root = await workspace()
+  try {
+    let jobHooks
+    let continued = 0
+    let disposed = 0
+    let runChecks = 0
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        async create() { return ok({ sessionId: 'owner-session' }) },
+        async rename() { return ok({}) },
+      },
+    }
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get(id) { return id === owner.id ? owner : undefined } },
+      subagents: {
+        getProvider() { return {} },
+        async start() {
+          return {
+            id: 'agent-session',
+            result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'Step 05 response ended' }] }),
+            async continuePrompt(prompt) {
+              continued += 1
+              assert.match(prompt[0].text, /运行状态\.json/)
+              return { stopReason: 'completed', output: [{ type: 'text', text: 'Step 09 complete' }] }
+            },
+            async dispose() { disposed += 1 },
+          }
+        },
+      },
+      jobs: {
+        start(spec) { jobHooks = spec.run(); return 'subagent-1' },
+        get() { return { startedAt: 1234, status: 'running' } },
+      },
+    }
+    const runner = async call => {
+      if (call.args[0] === 'system') return capabilities
+      if (call.args[0] === 'runs' && call.args[1] === 'get') {
+        runChecks += 1
+        return runChecks === 1
+          ? { run_id: 'skill-run-acp', lifecycle_status: 'running', phase: 'STEP_05', report_available: false, analysis: { completed: 4 } }
+          : { run_id: 'skill-run-acp', lifecycle_status: 'complete', phase: 'COMPLETE', report_available: true, analysis: { completed: 9 } }
+      }
+      return { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    }
+    await launchAnalysisSession(api, {
+      cwd: root,
+      input: { repository: 'repo-one', target: 'ACP continuation', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime)
+
+    const result = await jobHooks.done
+    assert.equal(result.status, 'completed')
+    assert.equal(continued, 1)
+    assert.equal(runChecks, 2)
+    assert.equal(disposed, 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('stops automatic ACP continuation after two turns without Run progress', async () => {
+  const root = await workspace()
+  try {
+    let jobHooks
+    let continued = 0
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get() { return owner } },
+      subagents: {
+        getProvider() { return {} },
+        async start() {
+          return {
+            id: 'agent-session',
+            result: Promise.resolve({ stopReason: 'completed', output: [] }),
+            async continuePrompt() { continued += 1; return { stopReason: 'completed', output: [] } },
+            async dispose() {},
+          }
+        },
+      },
+      jobs: { start(spec) { jobHooks = spec.run(); return 'subagent-1' }, get() { return { startedAt: 1234, status: 'running' } } },
+    }
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: { async create() { return ok({ sessionId: owner.id }) }, async rename() { return ok({}) } },
+    }
+    const runner = async call => call.args[0] === 'system'
+      ? capabilities
+      : call.args[0] === 'runs' && call.args[1] === 'get'
+        ? { lifecycle_status: 'running', phase: 'STEP_05', report_available: false, analysis: { completed: 4 } }
+        : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    await launchAnalysisSession(api, {
+      cwd: root, input: { repository: 'repo-one', target: 'ACP no progress', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime)
+    const result = await jobHooks.done
+    assert.equal(result.status, 'failed')
+    assert.deepEqual(JSON.parse(result.detail), {
+      code: 'PANGEA_CONTINUATION_STALLED',
+      message: 'ACP 连续续接未推进当前 Run（STEP_05）',
+    })
+    assert.equal(continued, 2)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('does not submit another ACP turn after cancellation during continuation', async () => {
+  const root = await workspace()
+  try {
+    let jobHooks
+    let releaseTurn
+    let markTurnStarted
+    const turnStarted = new Promise(resolve => { markTurnStarted = resolve })
+    const turnRelease = new Promise(resolve => { releaseTurn = resolve })
+    let continued = 0
+    let disposed = 0
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get() { return owner } },
+      subagents: {
+        getProvider() { return {} },
+        async start() {
+          return {
+            id: 'agent-session', result: Promise.resolve({ stopReason: 'completed', output: [] }),
+            async continuePrompt() { continued += 1; markTurnStarted(); await turnRelease; return { stopReason: 'completed', output: [] } },
+            async dispose() { disposed += 1 },
+          }
+        },
+      },
+      jobs: { start(spec) { jobHooks = spec.run(); return 'subagent-1' }, get() { return { startedAt: 1234, status: 'running' } } },
+    }
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: { async create() { return ok({ sessionId: owner.id }) }, async rename() { return ok({}) } },
+    }
+    const runner = async call => call.args[0] === 'system'
+      ? capabilities
+      : call.args[0] === 'runs' && call.args[1] === 'get'
+        ? { lifecycle_status: 'running', phase: 'STEP_05', report_available: false, analysis: { completed: 4 } }
+        : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    await launchAnalysisSession(api, {
+      cwd: root, input: { repository: 'repo-one', target: 'ACP cancellation', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime)
+    await turnStarted
+    jobHooks.cancel('test cancellation')
+    releaseTurn()
+    assert.deepEqual(await jobHooks.done, { status: 'killed' })
+    assert.equal(continued, 1)
+    assert.equal(disposed, 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('blocks ACP start when the durable lifecycle says the attempt is stopping', async () => {
   const root = await workspace()
   try {

@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { attentionRequiredOutcome } from './acp-outcome.js'
 
 import { assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 
@@ -296,18 +297,66 @@ function runtimeService(runtime, name) {
   return runtime?.[name] ?? runtime?.get?.(name)
 }
 
-async function settleAcpRun(start, signal, wasCancelled) {
+function runProgressFingerprint(run) {
+  return JSON.stringify([
+    run?.lifecycle_status ?? null,
+    run?.phase ?? null,
+    run?.analysis?.completed ?? null,
+    run?.publication?.revision ?? null,
+    run?.report_available === true,
+  ])
+}
+
+function continuationPrompt(run) {
+  return [
+    '上一轮回答已经结束，但当前 Codetalks Run 尚未完成。',
+    '请读取运行根目录中的 `内部索引/运行状态.json` 以及当前步骤交接文件，以落盘状态为准继续执行。',
+    `当前阶段：${run?.phase ?? '未知'}；已完成步骤：${run?.analysis?.completed ?? '未知'}/9。`,
+    '继续当前 Run，不要创建新的 Run。',
+  ].join('\n')
+}
+
+async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
   let run
   try {
     run = await start
-    const result = await run.result
-    const text = (result.output ?? [])
-      .filter(item => item?.type === 'text')
-      .map(item => item.text)
-      .join('')
-    if (result.stopReason === 'completed') return { status: 'completed', output: text }
-    if (result.stopReason === 'aborted' && result.diagnostic === undefined && wasCancelled()) return { status: 'killed' }
-    return { status: 'failed', detail: result.diagnostic ? `${result.stopReason}; diagnostic: ${result.diagnostic}` : result.stopReason }
+    let result = await run.result
+    let output = ''
+    let previousProgress = null
+    let unchangedTurns = 0
+    let turn = 1
+    while (true) {
+      output += (result.output ?? [])
+        .filter(item => item?.type === 'text')
+        .map(item => item.text)
+        .join('')
+      if (result.stopReason === 'aborted' && result.diagnostic === undefined && wasCancelled()) return { status: 'killed' }
+      if (result.stopReason !== 'completed') {
+        return { status: 'failed', detail: result.diagnostic ? `${result.stopReason}; diagnostic: ${result.diagnostic}` : result.stopReason, output }
+      }
+      if (typeof lifecycle.inspectRun !== 'function') return { status: 'completed', output }
+      const state = await lifecycle.inspectRun()
+      if (state?.lifecycle_status === 'complete' && state?.report_available === true) return { status: 'completed', output }
+      if (signal.aborted || wasCancelled()) return { status: 'killed' }
+      if (typeof run.continuePrompt !== 'function') {
+        return {
+          ...attentionRequiredOutcome(`ACP 本轮已结束，但当前 Run 尚未完成（${state?.phase ?? state?.lifecycle_status ?? 'unknown'}）`),
+          output,
+        }
+      }
+      const fingerprint = runProgressFingerprint(state)
+      unchangedTurns = fingerprint === previousProgress ? unchangedTurns + 1 : 0
+      previousProgress = fingerprint
+      if (unchangedTurns >= 2) {
+        return {
+          ...attentionRequiredOutcome(`ACP 连续续接未推进当前 Run（${state?.phase ?? 'unknown'}）`),
+          output,
+        }
+      }
+      turn += 1
+      await lifecycle.onTurnEvent?.({ turn, stage: 'acp_turn_continued', phase: state?.phase, completed: state?.analysis?.completed })
+      result = await run.continuePrompt([{ type: 'text', text: continuationPrompt(state) }])
+    }
   } catch (error) {
     return wasCancelled()
       ? { status: 'killed' }
@@ -367,7 +416,7 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
           controller.abort(reason ?? 'PANGEA analysis stopped')
         },
         abort: reason => controller.abort(reason),
-        done: settleAcpRun(observed, controller.signal, () => cancelled),
+        done: settleAcpRun(observed, controller.signal, () => cancelled, lifecycle),
         readOutput: () => typeof activeRun?.readOutput === 'function' ? activeRun.readOutput() : '',
       }
       return hooks
@@ -474,7 +523,15 @@ export async function launchAnalysisSession(
   ].filter(Boolean).join('\n')
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
-    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, lifecycle), value => ({ job_id: value, provider: selectedProvider }))
+    const acpLifecycle = {
+      ...lifecycle,
+      inspectRun: () => runner({
+        cwd: root,
+        args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', run.run_id],
+      }),
+      onTurnEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
+    }
+    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, acpLifecycle), value => ({ job_id: value, provider: selectedProvider }))
     await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
     return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
   }

@@ -188,6 +188,86 @@ test('reads Step 05 risks and Step 07 test cases as an unpublished Markdown draf
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('normalizes Lua projection severities and enriches R risks with the complete causal chain', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-lua-risks-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'lua-risk-details'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  const severities = ['medium', 'high', 'high', ...Array(7).fill('medium'), 'low']
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'morf-rest-server', target: 'network interface collection' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'in_progress', current_step: '08', completed_steps: ['01', '02', '03', '04', '05', '06', '07'],
+      publication: { state: 'draft', revision: 3, step_id: '07' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '工作台投影.json'), {
+      schema_version: '1.0', run_id: runId,
+      publication: { state: 'draft', revision: 3, step_id: '07' },
+      business_flows: [], review_issues: [], test_cases: [], evidence: [],
+      risks: severities.map((severity, index) => ({
+        risk_id: `R-${String(index + 1).padStart(3, '0')}`,
+        title: `风险 ${index + 1}`,
+        severity,
+        description: index === 0 ? '父键缺失时正常集合被误判不存在' : `风险概要 ${index + 1}`,
+        trigger: '', system_result: '', external_observation: '', blackbox_proof: '',
+      })),
+    })
+    const liveRoot = path.join(runRoot, '活文档')
+    await mkdir(liveRoot, { recursive: true })
+    const sections = severities.map((_, index) => {
+      const id = `R-${String(index + 1).padStart(3, '0')}`
+      return `### ${id} — 风险 ${index + 1}\n\n- **什么条件发生**：触发 ${id}\n- **代码内部哪里失效**：失效 ${id}\n- **状态/数据留下什么**：残留 ${id}\n- **为什么看似正常**：表面正常 ${id}\n- **何时对外暴露**：暴露 ${id}\n- **黑盒如何证明**：证明 ${id}\n`
+    }).join('\n')
+    await writeFile(path.join(liveRoot, '14-风险点清单与因果说明.md'), `# 风险点清单\n\n${sections}\n## 三、风险-场景-源码映射汇总\n\n| 风险 | 场景 |\n|---|---|\n| R-011 | SC-011 |\n`, 'utf8')
+
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.counts.risks, 11)
+    assert.deepEqual(
+      Object.fromEntries(['Critical', 'High', 'Medium', 'Low'].map(level => [level, current.details.risks.filter(item => item.severity === level).length])),
+      { Critical: 0, High: 2, Medium: 8, Low: 1 },
+    )
+    const risk = current.details.risks.find(item => item.risk_id === 'R-001')
+    assert.equal(risk.narrative, '父键缺失时正常集合被误判不存在')
+    assert.equal(risk.trigger, '触发 R-001')
+    assert.equal(risk.system_result, '失效 R-001')
+    assert.equal(risk.residual_effect, '残留 R-001')
+    assert.equal(risk.apparent_normality, '表面正常 R-001')
+    assert.equal(risk.external_observation, '暴露 R-001')
+    assert.equal(risk.blackbox_proof, '证明 R-001')
+    assert.doesNotMatch(current.details.risks.at(-1).blackbox_proof, /风险-场景-源码映射汇总/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('keeps live R risks ungraded when no explicit severity is associated with the risk id', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-ungraded-risks-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'ungraded-risks'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'ungraded risks' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'in_progress', current_step: '06', completed_steps: ['01', '02', '03', '04', '05'],
+    })
+    const liveRoot = path.join(runRoot, '活文档')
+    await mkdir(liveRoot, { recursive: true })
+    await writeFile(path.join(liveRoot, '14-风险点清单与因果说明.md'), '# 风险\n\n### R-001 — 未分级风险\n\n- **什么条件发生**：输入缺失\n- **代码内部哪里失效**：读取失败\n', 'utf8')
+    await writeFile(path.join(liveRoot, '15-SFMEA分析.md'), '# SFMEA\n\n| 失效模式 | 等级 |\n|---|---|\n| FM-001 | S4 |\n', 'utf8')
+
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.counts.risks, 1)
+    assert.equal(current.details.risks[0].severity, null)
+    assert.equal(current.details.risks[0].severity_source, null)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('enriches a final workbench projection with live risk, evidence, and test case details', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-final-details-'))
   const dataRoot = path.join(root, 'pangea-data')
@@ -210,6 +290,7 @@ test('enriches a final workbench projection with live risk, evidence, and test c
       risks: [{
         risk_id: 'RP-01', title: '连接创建失败', severity: 'P1',
         narrative: '连接为空但继续执行，外部表现为没有报文。',
+        source_section: '',
         evidence_ids: ['EVID-NET'], linked_test_case_ids: ['TC-NET-01'],
       }],
       test_cases: [{ test_case_id: 'TC-NET-01', title: '端口占用时启动', priority: 'P1', linked_risk_ids: ['RP-01'] }],
@@ -230,6 +311,7 @@ test('enriches a final workbench projection with live risk, evidence, and test c
     assert.equal(current.details.risks[0].severity, 'High')
     assert.equal(current.details.risks[0].trigger, '端口被占用')
     assert.equal(current.details.risks[0].system_result, '连接为空但继续执行')
+    assert.match(current.details.risks[0].source_section, /端口被占用/)
     assert.equal(current.details.risks[0].evidence.length, 1)
     assert.equal(current.details.risks[0].evidence[0].chunk_id, 'EVID-NET')
     assert.equal(current.details.risks[0].evidence[0].observation, '失败路径保留空连接。')
