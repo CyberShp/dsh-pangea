@@ -63,9 +63,18 @@ test('uses real Cordis and Jobs to persist one exact ACP attempt through settlem
         async rename() { return ok({}) },
       },
     }
-    const runner = async call => call.args[0] === 'system'
-      ? { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
-      : { run_id: 'run-integration', request_path: path.join(root, 'request.md'), run_root: path.join(root, 'run') }
+    const runner = async call => {
+      if (call.args[0] === 'system') {
+        return { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
+      }
+      if (call.args[0] === 'runs' && call.args[1] === 'get') {
+        return {
+          run_id: 'run-integration', lifecycle_status: 'complete', phase: 'COMPLETE',
+          report_available: true, analysis: { completed: 9 },
+        }
+      }
+      return { run_id: 'run-integration', request_path: path.join(root, 'request.md'), run_root: path.join(root, 'run') }
+    }
     const created = await tasks.create({
       workspace: root,
       dataRoot: path.join(root, 'data'),
