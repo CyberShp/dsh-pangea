@@ -915,7 +915,7 @@ window.__ModuleLoader__.load({
             setWorkbenchError(reason instanceof Error ? reason.message : String(reason))
           }
         } finally {
-          if (!background && sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
+          if (sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
         }
       }, [cwd, pageMode, runCursor, scope?.sessionId, selectedRun, selectedTaskId, snapshot?.current?.run_id])
 
@@ -1097,11 +1097,13 @@ window.__ModuleLoader__.load({
         if (!visible || pageMode === 'execution' || !taskItems.some(task => ['preparing', 'running'].includes(task.status))) return undefined
         let stopped = false
         let timer
-        const poll = () => {
+        const poll = async () => {
           if (stopped) return
-          void loadWorkbench({ background: true })
-          timer = window.setTimeout(poll, document.visibilityState === 'hidden'
-            ? WORKBENCH_BACKGROUND_POLL_INTERVAL_MS : WORKBENCH_ACTIVE_POLL_INTERVAL_MS)
+          await loadWorkbench({ background: true })
+          if (!stopped) {
+            timer = window.setTimeout(poll, document.visibilityState === 'hidden'
+              ? WORKBENCH_BACKGROUND_POLL_INTERVAL_MS : WORKBENCH_ACTIVE_POLL_INTERVAL_MS)
+          }
         }
         timer = window.setTimeout(poll, 0)
         return () => { stopped = true; window.clearTimeout(timer) }
@@ -1816,6 +1818,17 @@ window.__ModuleLoader__.load({
         onClick: () => jump(type),
       }, label))) : null
 
+      const refreshBusy = loading || workbenchLoading
+      function renderRefreshButton() {
+        return h('button', {
+          type: 'button',
+          disabled: refreshBusy,
+          'aria-busy': refreshBusy,
+          style: { ...styles.button, ...(refreshBusy ? styles.buttonDisabled : {}) },
+          onClick: () => { void (pageMode === 'execution' ? loadEnvironments() : Promise.all([load({ foreground: true }), loadWorkbench()])) },
+        }, refreshBusy ? '刷新中…' : '刷新')
+      }
+
       const header = h('div', { style: styles.sticky },
         h('div', { style: styles.header },
           h('div', { style: styles.headerLeft },
@@ -1826,17 +1839,11 @@ window.__ModuleLoader__.load({
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
               h('div', { style: styles.subline }, selectedTask
-                ? `${selectedTask.title} · ${selectedTask.task_id}`
+                ? selectedTask.title
                 : 'PANGEA 测试平台'))),
           h('div', { style: styles.chips },
             pageMode === 'analysis' && screen.type !== 'create' ? h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => jump('create') }, '新建分析') : null,
-            h('button', {
-              type: 'button',
-              disabled: loading || workbenchLoading,
-              'aria-busy': loading || workbenchLoading,
-              style: { ...styles.button, ...(loading || workbenchLoading ? styles.buttonDisabled : {}) },
-              onClick: () => { void (pageMode === 'execution' ? loadEnvironments() : Promise.all([load({ foreground: true }), loadWorkbench()])) },
-            }, loading || workbenchLoading ? '同步中…' : '刷新'))),
+            renderRefreshButton())),
         navigation)
 
       function countCheck(key) { return health?.count_checks?.[key] }
@@ -2298,21 +2305,23 @@ window.__ModuleLoader__.load({
           ['全部', '全部'], ['preparing', '正在准备'], ['running', '分析中'],
           ['needs_attention', '需要处理'], ['completed', '已完成'], ['stopped', '已停止'], ['failed', '失败'],
         ]
-        const columns = 'minmax(220px, 1.7fr) minmax(130px, .8fr) minmax(100px, .62fr) minmax(140px, .9fr) minmax(120px, .7fr)'
+        const columns = 'minmax(260px, 1.8fr) minmax(150px, .9fr) minmax(110px, .7fr) minmax(130px, .8fr)'
         return h(React.Fragment, null,
           renderCompatibility(),
           h('section', { style: styles.homeHero },
             h('div', null,
               h('div', { style: { ...styles.homeTitle, fontSize: 28 } }, '分析任务'),
               h('div', { style: styles.homeLead }, '创建、跟踪并进入一个明确的 PANGEA 分析任务。Run 和 DSH Session 收纳在任务详情中。')),
-            h('button', { type: 'button', style: styles.redButton, onClick: () => jump('create') }, '新建分析任务')),
-          h('input', { style: styles.search, value: taskQuery, 'aria-label': '搜索分析任务', placeholder: '搜索任务名称、仓库或任务编号…', onChange: event => setTaskQuery(event.target.value) }),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+              renderRefreshButton(),
+              h('button', { type: 'button', style: styles.redButton, onClick: () => jump('create') }, '新建分析任务'))),
+          h('input', { style: styles.search, value: taskQuery, 'aria-label': '搜索分析任务', placeholder: '搜索任务名称或仓库…', onChange: event => setTaskQuery(event.target.value) }),
           h('div', { style: styles.filters }, statusFilters.map(([value, label]) => h('button', {
             key: value, type: 'button', style: { ...styles.filter, ...(taskStatus === value ? styles.filterActive : {}) }, onClick: () => setTaskStatus(value),
           }, label))),
           h('section', { style: { ...styles.homeSection, marginTop: 8 } },
             h('div', { style: { ...styles.homeTableHeader, gridTemplateColumns: columns } },
-              h('span', null, '任务名称'), h('span', null, '仓库'), h('span', null, '状态'), h('span', null, '任务编号'), h('span', null, '更新时间')),
+              h('span', null, '任务名称'), h('span', null, '仓库'), h('span', null, '状态'), h('span', null, '更新时间')),
             filtered.length ? filtered.map(task => h('button', {
               key: task.task_id,
               type: 'button',
@@ -2322,7 +2331,6 @@ window.__ModuleLoader__.load({
             h('span', { style: { fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.title),
             h('span', { style: { color: '#59616c', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.repository),
             h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.execution_status === 'stopping' ? 'stopping' : task.status) } }, taskStatusLabel(task.execution_status === 'stopping' ? 'stopping' : task.status)),
-            h('span', { style: { color: '#59616c', fontSize: 12, fontFamily: 'ui-monospace, monospace' } }, task.task_id),
             h('span', { style: { color: '#59616c', fontSize: 13, fontVariantNumeric: 'tabular-nums' } }, formatDate(task.updated_at))))
               : h('div', { style: { ...styles.empty, padding: 24 } }, query || taskStatus !== '全部' ? '没有符合条件的任务。' : '还没有分析任务。')))
       }
@@ -2340,7 +2348,7 @@ window.__ModuleLoader__.load({
           const mayRetryLaunch = !selectedTask.run_id || launchPresentation.canResume
           return h(React.Fragment, null, renderCompatibility(), h('div', { style: { ...styles.card, padding: 20 } },
           h('div', { style: styles.row },
-            h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, `${selectedTask.task_id} · 执行 Agent：${selectedTask.provider ?? '未选择'}`)),
+            h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, `执行 Agent：${selectedTask.provider ?? '未选择'}`)),
             h('span', { style: { ...styles.homeStatus, color: taskStatusColor(selectedTask.status) } }, taskStatusLabel(selectedTask.status))),
           h('div', { style: { ...styles.text, marginTop: 14 } }, ['failed', 'needs_attention'].includes(selectedTask.status)
             ? selectedTask.launch_error ?? '分析启动失败。'
@@ -2744,7 +2752,7 @@ window.__ModuleLoader__.load({
         : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body))
       const actionFeedback = actionNotice ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 测试工作台' },
-        screen.type === 'home' ? null : header,
+        ['home', 'tasks'].includes(screen.type) ? null : header,
         h('div', { style: screen.type === 'home' && repositoryState?.onboarding_required ? { padding: 0 }
           : screen.type === 'home' ? styles.homeContent
             : ['environment', 'repository-import'].includes(screen.type) ? { padding: 0 } : styles.content }, actionFeedback, errorNotice, contentBody))

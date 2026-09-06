@@ -358,7 +358,7 @@ window.__ModuleLoader__.load({
         @media (min-width: 1180px) {
           body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-process] {
             position: static; z-index: auto; display: flex; flex-direction: column; box-sizing: border-box; width: 100%;
-            min-height: 0; max-height: 42%; overflow: hidden; padding: 14px 18px 12px; border-top: 1px solid #dfe3e8;
+            height: 100%; min-height: 0; max-height: none; overflow: hidden; padding: 14px 18px 12px; border-top: 1px solid #dfe3e8;
             color: var(--pangea-ink); background: rgba(251,252,253,.98);
           }
           [data-pangea-assistant-process-head] { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: none; font-size: 13px; }
@@ -434,8 +434,21 @@ window.__ModuleLoader__.load({
             display: block; height: auto; padding: 12px 16px; border-bottom: 1px solid #e5e8ec;
           }
           body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-assistant-process] {
-            display: flex; flex-direction: column; min-height: 0; max-height: 48%; padding: 12px 16px;
+            display: flex; flex-direction: column; height: 100%; min-height: 0; max-height: none; padding: 12px 16px;
           }
+        }
+
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] {
+          overflow: hidden;
+        }
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] > [data-slot="conversation.session"] {
+          display: none !important;
+        }
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] > [data-pangea-assistant-portal="process"] {
+          display: flex; flex: 1 1 0; min-height: 0; overflow: hidden;
+        }
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] > [data-composer-seat] {
+          z-index: 7; flex: 0 0 auto; position: sticky; bottom: 0;
         }
 
         body.dsh-desktop-windows-titlebar-layout [data-pangea-topbar] {
@@ -660,6 +673,14 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function setAnalysisProcessLayout(scroll, composer, active) {
+      if (scroll) {
+        if (active) scroll.dataset.pangeaAnalysisProcess = 'true'
+        else delete scroll.dataset.pangeaAnalysisProcess
+      }
+      setComposerReadonly(composer, active)
+    }
+
     function AssistantProcess({ context }) {
       if (!shouldShowAssistantProcess(context)) return null
       const process = context.process ?? {}
@@ -695,7 +716,7 @@ window.__ModuleLoader__.load({
           if (current) {
             current.headerHost.remove()
             current.processHost.remove()
-            setComposerReadonly(current.composer, false)
+            setAnalysisProcessLayout(current.scroll, current.composer, false)
             hostsRef.current = null
           }
           if (!disposed) setHosts(null)
@@ -717,7 +738,8 @@ window.__ModuleLoader__.load({
               setComposerReadonly(current.composer, false)
               current.composer = composer
             }
-            setComposerReadonly(composer, shouldShowAssistantProcess(context))
+            current.scroll = scroll
+            setAnalysisProcessLayout(scroll, composer, shouldShowAssistantProcess(context))
             return
           }
           const headerHost = document.createElement('div')
@@ -726,8 +748,8 @@ window.__ModuleLoader__.load({
           processHost.dataset.pangeaAssistantPortal = 'process'
           pane.insertBefore(headerHost, pane.firstChild)
           scroll.insertBefore(processHost, composer || null)
-          setComposerReadonly(composer, shouldShowAssistantProcess(context))
-          hostsRef.current = { headerHost, processHost, composer }
+          setAnalysisProcessLayout(scroll, composer, shouldShowAssistantProcess(context))
+          hostsRef.current = { headerHost, processHost, scroll, composer }
           setHosts(hostsRef.current)
         }
         observer = new MutationObserver(() => {
@@ -742,7 +764,7 @@ window.__ModuleLoader__.load({
           observer?.disconnect()
           removeHosts()
         }
-      }, [context?.activeConversationKind, context?.taskId, enabled])
+      }, [context?.activeConversationKind, context?.activeConversationSessionId, context?.ownerSessionId, context?.taskId, enabled])
       if (!hosts || !ReactDOM?.createPortal) return null
       return h(React.Fragment, null,
         ReactDOM.createPortal(h(AssistantHeader, { context }), hosts.headerHost),
@@ -1254,6 +1276,7 @@ window.__ModuleLoader__.load({
     exports.closeDisallowedTabs = closeDisallowedTabs
     exports.createPangeaService = createPangeaService
     exports.setComposerReadonly = setComposerReadonly
+    exports.setAnalysisProcessLayout = setAnalysisProcessLayout
     exports.shouldShowAssistantProcess = shouldShowAssistantProcess
     exports.apply = apply
     return module.exports

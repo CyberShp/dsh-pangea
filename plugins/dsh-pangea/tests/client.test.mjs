@@ -348,6 +348,10 @@ test('routes ACP process output to the right assistant panel', async () => {
   assert.match(source, /data-pangea-task-assistant-open\] \[data-pangea-shell\] \{ background: transparent; pointer-events: none; \}/)
   assert.match(source, /data-pangea-task-assistant-open\] \[data-pangea-topbar\] \{ pointer-events: auto; \}/)
   assert.match(source, /data-pangea-task-assistant-open\] \[data-pangea-product-nav\],[\s\S]*data-pangea-task-assistant-open\] \[data-pangea-page\] \{ display: none !important; \}/s)
+  assert.match(source, /\[data-conversation-scroll\]\[data-pangea-analysis-process="true"\] > \[data-slot="conversation\.session"\][\s\S]*display: none !important/s)
+  assert.match(source, /\[data-conversation-scroll\]\[data-pangea-analysis-process="true"\] > \[data-pangea-assistant-portal="process"\][\s\S]*flex: 1 1 0/s)
+  assert.match(source, /\[data-conversation-scroll\]\[data-pangea-analysis-process="true"\] > \[data-composer-seat\][\s\S]*position: sticky[\s\S]*bottom: 0/s)
+  assert.match(source, /\[data-pangea-assistant-process\][\s\S]*height: 100%[\s\S]*max-height: none/s)
   assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', activeConversationKind: 'analysis' }), true)
   assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', ownerSessionId: 'owner-1', activeConversationSessionId: 'owner-1' }), true)
   assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', activeConversationKind: 'discussion' }), false)
@@ -370,4 +374,29 @@ test('routes ACP process output to the right assistant panel', async () => {
   assert.equal('pangeaAnalysisReadonly' in composer.dataset, false)
   assert.equal(card.inert, false)
   assert.equal(card.attributes.has('aria-disabled'), false)
+})
+
+test('reserves the assistant body for analysis output while keeping the composer docked', async () => {
+  const { exported } = await loadClient()
+  const scroll = { dataset: {} }
+  const card = {
+    inert: false,
+    attributes: new Map(),
+    setAttribute(name, value) { this.attributes.set(name, value) },
+    removeAttribute(name) { this.attributes.delete(name) },
+  }
+  const composer = {
+    dataset: {},
+    querySelectorAll(selector) { return selector === '[data-composer-card]' ? [card] : [] },
+  }
+
+  exported.setAnalysisProcessLayout(scroll, composer, true)
+  assert.equal(scroll.dataset.pangeaAnalysisProcess, 'true')
+  assert.equal(composer.dataset.pangeaAnalysisReadonly, 'true')
+  assert.equal(card.inert, true)
+
+  exported.setAnalysisProcessLayout(scroll, composer, false)
+  assert.equal('pangeaAnalysisProcess' in scroll.dataset, false)
+  assert.equal('pangeaAnalysisReadonly' in composer.dataset, false)
+  assert.equal(card.inert, false)
 })

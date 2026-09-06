@@ -74,6 +74,12 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /const IDLE_POLL_INTERVAL_MS = 45_000/)
   assert.match(source, /snapshotPollInterval\(value\)/)
   assert.match(source, /同步失败，继续显示上次结果/)
+  assert.match(source, /finally \{[\s\S]*sequence === workbenchRequestRef\.current\.sequence\) setWorkbenchLoading\(false\)/)
+  assert.match(source, /\['home', 'tasks'\]\.includes\(screen\.type\) \? null : header/)
+  assert.doesNotMatch(source, /\$\{selectedTask\.title\} · \$\{selectedTask\.task_id\}/)
+  assert.doesNotMatch(source, /任务编号/)
+  assert.doesNotMatch(source, /\}, task\.task_id\),/)
+  assert.match(source, /刷新中…/)
   assert.match(source, /和 DSH 讨论/)
   assert.match(source, /加入当前会话/)
   assert.match(source, /打开完整文件/)
@@ -226,6 +232,8 @@ test('continues background reconciliation while the window is unfocused', async 
   const source = await readFile(clientPath, 'utf8')
   assert.doesNotMatch(source, /document\.hasFocus\(\)/)
   assert.match(source, /WORKBENCH_BACKGROUND_POLL_INTERVAL_MS/)
+  assert.match(source, /const poll = async \(\) => \{[\s\S]*await loadWorkbench\(\{ background: true \}\)[\s\S]*window\.setTimeout\(poll,/)
+  assert.doesNotMatch(source, /void loadWorkbench\(\{ background: true \}\)[\s\S]*window\.setTimeout\(poll,/)
 })
 
 test('workbench API lists runs and starts or stops through explicit actions', async () => {
