@@ -70,6 +70,15 @@ window.__ModuleLoader__.load({
       return { executionStatus, executionLabel, failed, stopped, stopping, running, healthStatus, reliabilityLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason }
     }
 
+    function previousAttemptFailures(task) {
+      return (Array.isArray(task?.attempts) ? task.attempts : [])
+        .filter(attempt => attempt?.attempt_id !== task?.attempt_id
+          && ['failed', 'interrupted'].includes(attempt?.execution_status)
+          && typeof attempt?.terminal_error === 'string'
+          && attempt.terminal_error.trim() !== '')
+        .sort((left, right) => (right.ended_at ?? right.last_activity_at ?? 0) - (left.ended_at ?? left.last_activity_at ?? 0))
+    }
+
     async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
       if (runId !== undefined) query.set('run_id', runId ?? '')
@@ -2364,6 +2373,7 @@ window.__ModuleLoader__.load({
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
+        const previousFailures = previousAttemptFailures(selectedTask)
         const presentation = deriveRunPresentation(selectedTask, current, health)
         const runNeedsAttention = current.attention_required || presentation.failed
         const nextAction = runNeedsAttention
@@ -2391,6 +2401,11 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, presentation.countsAvailability === 'unpublished' ? '测试结果尚未发布' : presentation.countsAvailability === 'unavailable' ? '测试结果不可读取' : `${displayCount('test_cases', testCases.length)} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, displayCount('evidence', evidence.length))))),
           renderHealthCard(false),
+          previousFailures.length ? h('details', { style: styles.card },
+            h('summary', { style: { cursor: 'pointer', fontWeight: 700 } }, '上一次尝试失败'),
+            h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, '当前已开始新的分析尝试；下面保留的是历史失败记录。'),
+            h('div', { style: { ...styles.error, marginTop: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, previousFailures[0].terminal_error),
+            previousFailures[0].ended_at ? h('div', { style: { ...styles.itemMeta, marginTop: 6 } }, `结束时间：${formatDate(previousFailures[0].ended_at)}`) : null) : null,
           h('div', { style: styles.sectionTitle }, '优先失败场景'),
           priorityScenarios.length ? h('div', { style: styles.card }, priorityScenarios.map((risk, index) => h('button', {
             key: riskKeyByItem.get(risk), type: 'button', style: { ...styles.runButton, display: 'flex', gap: 7, alignItems: 'flex-start' }, onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }),
@@ -2798,6 +2813,7 @@ window.__ModuleLoader__.load({
     exports.evidenceTabLabel = evidenceTabLabel
     exports.runLabel = runLabel
     exports.deriveRunPresentation = deriveRunPresentation
+    exports.previousAttemptFailures = previousAttemptFailures
     exports.absoluteWorkspacePath = absoluteWorkspacePath
     exports.evidenceFilePath = evidenceFilePath
     exports.appendConversationDraft = appendConversationDraft

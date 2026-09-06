@@ -30,6 +30,142 @@ async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'))
 }
 
+async function readTextIfFile(filePath) {
+  return await pathKind(filePath) === 'file' ? readFile(filePath, 'utf8') : ''
+}
+
+function markdownSection(markdown, title) {
+  const start = markdown.match(new RegExp(`^##\\s+${title}\\s*$`, 'm'))
+  if (!start || start.index === undefined) return ''
+  const bodyStart = start.index + start[0].length
+  const remaining = markdown.slice(bodyStart)
+  const end = remaining.search(/^##\s+/m)
+  return (end === -1 ? remaining : remaining.slice(0, end)).trim()
+}
+
+function bulletItems(markdown, pattern = /^[-*]\s+(.+)$/) {
+  return markdown.split(/\r?\n/).map(line => line.trim().match(pattern)?.[1]?.trim()).filter(Boolean)
+}
+
+function prefixedIds(value, prefix) {
+  const result = []
+  const expression = new RegExp(`${prefix}-(\\d+)((?:[,/]\\d+)*)`, 'g')
+  for (const match of value.matchAll(expression)) {
+    result.push(`${prefix}-${match[1]}`)
+    for (const suffix of match[2].matchAll(/[,/](\d+)/g)) result.push(`${prefix}-${suffix[1]}`)
+  }
+  return [...new Set(result)]
+}
+
+function tableRows(markdown) {
+  return markdown.split(/\r?\n/)
+    .filter(line => /^\s*\|/.test(line) && !/^\s*\|[\s:-]+\|/.test(line))
+    .map(line => line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim()))
+}
+
+function riskSeverityById(markdown) {
+  const result = new Map()
+  const severity = { P0: 'Critical', P1: 'High', P2: 'Medium', P3: 'Low' }
+  for (const cells of tableRows(markdown)) {
+    const id = cells[0]?.match(/\b(RP-\d+)\b/)?.[1]
+    const level = cells.find(cell => /^P[0-3]$/.test(cell))
+    if (id && level) result.set(id, severity[level])
+  }
+  return result
+}
+
+function traceabilityByCase(markdown) {
+  const result = new Map()
+  for (const cells of tableRows(markdown)) {
+    const caseId = cells[0]?.match(/\b(TC-[A-Z0-9-]+)\b/)?.[1]
+    if (!caseId) continue
+    result.set(caseId, prefixedIds(cells.join(' | '), 'RP'))
+  }
+  return result
+}
+
+function parseRisks(markdown, severityById, riskCases) {
+  const headings = [...markdown.matchAll(/^###\s+(RP-\d+)[：:]\s*(.+)$/gm)]
+  return headings.map((heading, index) => {
+    const riskId = heading[1]
+    const section = markdown.slice(heading.index + heading[0].length, headings[index + 1]?.index ?? markdown.length)
+    const causal = {}
+    for (const line of section.split(/\r?\n/)) {
+      const match = line.trim().replace(/^→\s*/, '').match(/^(条件|代码失效|残留|看似正常|暴露|黑盒证明)[：:]\s*(.+)$/)
+      if (match) causal[match[1]] = match[2].trim()
+    }
+    const linkedTestCaseIds = riskCases.get(riskId) ?? []
+    return {
+      risk_id: riskId,
+      title: heading[2].replace(/（.*$/, '').trim(),
+      severity: severityById.get(riskId) ?? 'Medium',
+      status: 'pending',
+      confidence: 'Medium',
+      translation_status: linkedTestCaseIds.length ? 'Test-ready' : 'Uncovered',
+      trigger: causal['条件'] ?? '',
+      system_result: causal['代码失效'] ?? causal['残留'] ?? '',
+      external_observation: causal['暴露'] ?? '',
+      blackbox_proof: causal['黑盒证明'] ?? '',
+      linked_test_case_ids: linkedTestCaseIds,
+      evidence: [],
+    }
+  })
+}
+
+function parseTestCase(markdown, linkedRiskIds) {
+  const heading = markdown.match(/^#\s+(TC-[A-Z0-9-]+)\s+(.+)$/m)
+  if (!heading) return null
+  const metadata = markdownSection(markdown, '用例定位')
+  const value = label => metadata.match(new RegExp(`^-\\s+${label}[：:]\\s*(.+)$`, 'm'))?.[1]?.trim() ?? ''
+  return {
+    test_case_id: heading[1],
+    title: heading[2].trim(),
+    case_type: value('测试类型'),
+    priority: value('优先级'),
+    status: 'draft',
+    linked_risk_ids: linkedRiskIds,
+    preconditions: bulletItems(markdownSection(markdown, '前置条件')),
+    steps: bulletItems(markdownSection(markdown, '操作步骤'), /^\d+[.)、]\s*(.+)$/),
+    expected_results: bulletItems(markdownSection(markdown, '预期结果和 Oracle')),
+    observability: [],
+    cleanup: bulletItems(markdownSection(markdown, '清理和复原')),
+  }
+}
+
+async function readLiveDocumentDraft(runDirectory, state) {
+  const completed = new Set(state?.completed_steps ?? [])
+  const liveRoot = path.join(runDirectory, '活文档')
+  const details = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
+  let stepId = null
+  if (completed.has('05')) {
+    const risksMarkdown = await readTextIfFile(path.join(liveRoot, '14-风险点清单与因果说明.md'))
+    const sfmeaMarkdown = await readTextIfFile(path.join(liveRoot, '15-SFMEA分析.md'))
+    const traceabilityMarkdown = completed.has('07')
+      ? await readTextIfFile(path.join(liveRoot, '18-测试追溯矩阵.md')) : ''
+    const traceability = traceabilityByCase(traceabilityMarkdown)
+    const riskCases = new Map()
+    for (const [caseId, riskIds] of traceability) {
+      for (const riskId of riskIds) riskCases.set(riskId, [...(riskCases.get(riskId) ?? []), caseId])
+    }
+    details.risks = parseRisks(risksMarkdown, riskSeverityById(sfmeaMarkdown), riskCases)
+    if (details.risks.length > 0) stepId = '05'
+    if (completed.has('07')) {
+      const caseRoot = path.join(liveRoot, '测试设计')
+      if (await pathKind(caseRoot) === 'directory') {
+        for (const entry of (await readdir(caseRoot, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
+          if (!entry.isFile() || !entry.name.endsWith('.md')) continue
+          const markdown = await readFile(path.join(caseRoot, entry.name), 'utf8')
+          const caseId = markdown.match(/^#\s+(TC-[A-Z0-9-]+)/m)?.[1]
+          const parsed = parseTestCase(markdown, caseId ? traceability.get(caseId) ?? [] : [])
+          if (parsed) details.test_cases.push(parsed)
+        }
+      }
+      if (details.test_cases.length > 0) stepId = '07'
+    }
+  }
+  return { step_id: stepId, details }
+}
+
 async function readWorkbenchProjection(runDirectory, runId) {
   const projectionPath = path.join(runDirectory, '内部索引', '工作台投影.json')
   if (await pathKind(projectionPath) !== 'file') {
@@ -173,6 +309,9 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const reportAvailable = await pathKind(reportMd) === 'file'
   const life = lifecycle(metadata, state)
   const projection = await readWorkbenchProjection(runDirectory, runId)
+  const liveDraft = projection.status === 'legacy_unavailable'
+    ? await readLiveDocumentDraft(runDirectory, state)
+    : { step_id: null, details: { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] } }
   const recordedSourceSnapshot = metadata.source_snapshot ?? { status: 'legacy_unavailable', snapshot_digest: null, file_count: null }
   const sourceSnapshot = { ...recordedSourceSnapshot, ...(await verifySourceSnapshot(runDirectory, runId, recordedSourceSnapshot)) }
   const validation = state?.validation ?? { status: 'not_checked', error_count: 0, errors: [] }
@@ -187,7 +326,6 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const finalExpected = life.lifecycle_status === 'complete'
     || state?.status === 'complete'
     || (state?.completed_steps ?? []).includes('09')
-    || reportAvailable
   const recordedPublication = state?.publication && typeof state.publication === 'object'
     ? state.publication
     : projection.value?.publication && typeof projection.value.publication === 'object'
@@ -198,15 +336,15 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     : null
   const publicationState = projection.status === 'verified'
     ? (recordedState === 'broken' ? 'broken' : recordedState === 'final' && finalExpected ? 'final' : finalExpected ? 'final' : 'draft')
-    : (projection.status === 'invalid' || finalExpected ? 'broken' : 'pending')
+    : (projection.status === 'invalid' || finalExpected || recordedState === 'broken' ? 'broken' : liveDraft.step_id ? 'draft' : 'pending')
   const publicationRevision = Number.isInteger(recordedPublication?.revision) && recordedPublication.revision >= 0
     ? recordedPublication.revision
     : projection.status === 'verified' ? 1 : 0
   const publicationStep = typeof recordedPublication?.step_id === 'string'
     ? recordedPublication.step_id
-    : projection.status === 'verified' ? (finalExpected ? '09' : null) : null
+    : projection.status === 'verified' ? (finalExpected ? '09' : null) : liveDraft.step_id
   const publicationIssues = publicationState === 'broken' ? ['工作台结构化投影已标记为 broken'] : []
-  const projectionIssues = projection.status === 'legacy_unavailable' && publicationState === 'pending'
+  const projectionIssues = projection.status === 'legacy_unavailable' && ['pending', 'draft'].includes(publicationState)
     ? []
     : projection.status === 'verified' && publicationState !== 'broken'
       ? []
@@ -228,6 +366,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     workflow.unresolved = projectionIssues.map(message => ({ code: 'PROJECTION_UNAVAILABLE', message }))
   }
   const projectionValue = projection.value ?? {}
+  const resultDetails = projection.status === 'verified' ? projectionValue : liveDraft.details
   const summary = {
     run_id: runId,
     ...life,
@@ -247,8 +386,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     },
     performance,
     counts: {
-      risks: projection.status === 'verified' ? projectionValue.risks.length : null,
-      test_cases: projection.status === 'verified' ? projectionValue.test_cases.length : null,
+      risks: publicationState === 'draft' ? resultDetails.risks.length : projection.status === 'verified' ? projectionValue.risks.length : null,
+      test_cases: publicationState === 'draft' ? resultDetails.test_cases.length : projection.status === 'verified' ? projectionValue.test_cases.length : null,
       evidence: projection.status === 'verified' ? projectionValue.evidence.length : liveDocuments.length,
       business_flows: projection.status === 'verified' ? projectionValue.business_flows.length : null,
       review_issues: projection.status === 'verified' ? projectionValue.review_issues.length : null,
@@ -270,7 +409,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     reader_health: {
       status: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'corrupt'
         ? 'ok'
-        : publicationState === 'pending' && sourceSnapshot.status !== 'corrupt' ? 'pending' : 'warning',
+        : ['pending', 'draft'].includes(publicationState) && sourceSnapshot.status !== 'corrupt' ? 'pending' : 'warning',
       trusted: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'corrupt',
       data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
       issues: [...projectionIssues, ...(sourceSnapshot.status === 'corrupt' ? ['源码快照完整性校验失败'] : [])],
@@ -294,14 +433,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     modified_at: (await stat(runDirectory)).mtimeMs,
   }
   if (includeDetails) {
-    summary.details = projection.status === 'verified'
-      ? {
-          risks: projectionValue.risks,
-          test_cases: projectionValue.test_cases,
-          evidence: projectionValue.evidence,
-          business_flows: projectionValue.business_flows,
-          review_issues: projectionValue.review_issues,
-        }
+    summary.details = publicationState === 'draft' || projection.status === 'verified'
+      ? resultDetails
       : { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
     summary.workflow = workflow
   }

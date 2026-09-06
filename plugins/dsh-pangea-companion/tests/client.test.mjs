@@ -195,6 +195,26 @@ test('does not present a failed task as pending publication', async () => {
   assert.equal(failedDraft.resumeBlockedReason, '旧执行停止尚未确认')
 })
 
+test('keeps a previous failed attempt visible while a resumed attempt is running', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  let exported
+  const sandbox = { URLSearchParams, console }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
+  vm.runInNewContext(source, sandbox, { filename: clientPath })
+
+  const failures = exported.previousAttemptFailures({
+    attempt_id: 'attempt-2',
+    attempts: [
+      { attempt_id: 'attempt-1', execution_status: 'failed', terminal_error: 'STEP_09 未形成正式交付', ended_at: 200 },
+      { attempt_id: 'attempt-2', execution_status: 'running', terminal_error: null, started_at: 300 },
+    ],
+  })
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].attempt_id, 'attempt-1')
+  assert.equal(failures[0].terminal_error, 'STEP_09 未形成正式交付')
+  assert.match(source, /上一次尝试失败/)
+})
+
 test('returns from a run detail to its selected Run overview', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported
