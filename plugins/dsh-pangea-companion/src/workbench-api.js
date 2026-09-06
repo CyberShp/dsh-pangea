@@ -296,7 +296,7 @@ function runtimeService(runtime, name) {
   return runtime?.[name] ?? runtime?.get?.(name)
 }
 
-async function settleAcpRun(start, signal) {
+async function settleAcpRun(start, signal, wasCancelled) {
   let run
   try {
     run = await start
@@ -306,10 +306,12 @@ async function settleAcpRun(start, signal) {
       .map(item => item.text)
       .join('')
     if (result.stopReason === 'completed') return { status: 'completed', output: text }
-    if (result.stopReason === 'aborted' && result.diagnostic === undefined && signal.aborted) return { status: 'killed' }
+    if (result.stopReason === 'aborted' && result.diagnostic === undefined && wasCancelled()) return { status: 'killed' }
     return { status: 'failed', detail: result.diagnostic ? `${result.stopReason}; diagnostic: ${result.diagnostic}` : result.stopReason }
   } catch (error) {
-    return { status: signal.aborted ? 'killed' : 'failed', ...(signal.aborted ? {} : { detail: error instanceof Error ? error.message : String(error) }) }
+    return wasCancelled()
+      ? { status: 'killed' }
+      : { status: 'failed', detail: error instanceof Error ? error.message : String(error) }
   } finally {
     try { await run?.dispose?.() } catch { /* job settlement retains the failure */ }
   }
@@ -336,6 +338,7 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
     run: () => {
       const controller = new AbortController()
       let activeRun
+      let cancelled = false
       const observed = startGate.then(() => subagents.start(providerId, {
         label,
         prompt: [{ type: 'text', text: prompt }],
@@ -359,8 +362,12 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
         throw error
       })
       hooks = {
-        cancel: reason => controller.abort(reason ?? 'PANGEA analysis stopped'),
-        done: settleAcpRun(observed, controller.signal),
+        cancel: reason => {
+          cancelled = true
+          controller.abort(reason ?? 'PANGEA analysis stopped')
+        },
+        abort: reason => controller.abort(reason),
+        done: settleAcpRun(observed, controller.signal, () => cancelled),
         readOutput: () => typeof activeRun?.readOutput === 'function' ? activeRun.readOutput() : '',
       }
       return hooks
@@ -368,15 +375,19 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
   })
   try {
     const job = jobs.get?.(jobId, parent)
+    if (!Number.isFinite(job?.startedAt)) throw new Error(`ACP Job snapshot 缺少 startedAt：${jobId}`)
     await lifecycle.onJobCreated?.({
       jobId: String(jobId),
       ownerSessionId: parent.id,
-      jobStartedAt: Number.isFinite(job?.startedAt) ? job.startedAt : null,
+      jobStartedAt: job.startedAt,
     })
     releaseStart()
   } catch (error) {
     rejectStart(error)
-    try { hooks?.cancel?.(error) } catch { /* local cleanup below remains authoritative */ }
+    try {
+      if (error?.code === 'PANGEA_STOP_REQUESTED') hooks?.cancel?.(error)
+      else hooks?.abort?.(error)
+    } catch { /* local cleanup below remains authoritative */ }
     try { await hooks?.done } catch { /* settlement has already captured the launch failure */ }
     throw error
   }

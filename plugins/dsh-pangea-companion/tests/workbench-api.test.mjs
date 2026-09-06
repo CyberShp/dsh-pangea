@@ -337,6 +337,7 @@ test('starts an ACP provider with the Agent native session configuration', async
       },
       jobs: {
         start(spec) { const hooks = spec.run(); void hooks.done; return 'subagent-1' },
+        get() { return { startedAt: 1234, status: 'running' } },
       },
     }
     const runner = async call => call.args[0] === 'system'
@@ -446,7 +447,7 @@ test('blocks ACP start when the durable lifecycle says the attempt is stopping',
       }),
       /PANGEA 分析已请求停止/,
     )
-    await jobHooks.done
+    assert.deepEqual(await jobHooks.done, { status: 'killed' })
     assert.equal(providerStarted, false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
@@ -487,8 +488,79 @@ test('disposes a started ACP session when durable runtime binding fails', async 
       onAgentStarted: async () => { throw new Error('task binding failed') },
     })
     assert.equal(result.job_id, 'subagent-1')
-    await jobHooks.done
+    const settled = await jobHooks.done
+    assert.deepEqual(settled, { status: 'failed', detail: 'task binding failed' })
     assert.equal(disposed, true)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('reports an ACP provider start failure as failed instead of user cancellation', async () => {
+  const root = await workspace()
+  try {
+    let jobHooks
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get(id) { return id === owner.id ? owner : undefined } },
+      subagents: {
+        getProvider() { return {} },
+        async start() { throw new Error('provider process failed') },
+      },
+      jobs: {
+        start(spec) { jobHooks = spec.run(); return 'subagent-1' },
+        get() { return { startedAt: 1234, status: 'running' } },
+      },
+    }
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        async create() { return ok({ sessionId: owner.id }) },
+        async rename() { return ok({}) },
+      },
+    }
+    const runner = async call => call.args[0] === 'system'
+      ? capabilities
+      : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    await launchAnalysisSession(api, {
+      cwd: root,
+      input: { repository: 'repo-one', target: 'ACP provider failure', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime)
+    assert.deepEqual(await jobHooks.done, { status: 'failed', detail: 'provider process failed' })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('does not release ACP when the real Job snapshot identity is unavailable', async () => {
+  const root = await workspace()
+  try {
+    let providerStarted = false
+    let jobHooks
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get(id) { return id === owner.id ? owner : undefined } },
+      subagents: {
+        getProvider() { return {} },
+        async start() { providerStarted = true; throw new Error('must not start') },
+      },
+      jobs: {
+        start(spec) { jobHooks = spec.run(); return 'subagent-1' },
+        get() { return null },
+      },
+    }
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: {
+        async create() { return ok({ sessionId: owner.id }) },
+        async rename() { return ok({}) },
+      },
+    }
+    const runner = async call => call.args[0] === 'system'
+      ? capabilities
+      : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    await assert.rejects(launchAnalysisSession(api, {
+      cwd: root,
+      input: { repository: 'repo-one', target: 'Missing Job identity', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime), /Job snapshot.*startedAt/)
+    assert.deepEqual(await jobHooks.done, { status: 'failed', detail: 'ACP Job snapshot 缺少 startedAt：subagent-1' })
+    assert.equal(providerStarted, false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

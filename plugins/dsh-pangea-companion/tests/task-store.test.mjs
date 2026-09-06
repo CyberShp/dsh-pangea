@@ -262,6 +262,22 @@ test('isolates identical Job ids by owner and settles the matching attempt', asy
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('uses Job startedAt as part of the durable execution identity', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-job-start-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-job-start' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: 'Job identity' } })
+    await store.bindJob('task-job-start', {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-a',
+      attemptId: 'attempt-a', jobStartedAt: 100,
+    })
+    assert.equal(await store.getByJob('subagent-1', { ownerSessionId: 'owner-a', jobStartedAt: 200 }), null)
+    assert.equal(await store.recordJobActivity({ jobId: 'subagent-1', ownerSessionId: 'owner-a', jobStartedAt: 200 }, 'wrong job'), null)
+    assert.equal((await store.get('task-job-start')).last_output, null)
+    assert.equal((await store.getByJob('subagent-1', { ownerSessionId: 'owner-a', jobStartedAt: 100 })).task_id, 'task-job-start')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('ignores late output from an older attempt at the task level', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-late-attempt-'))
   try {

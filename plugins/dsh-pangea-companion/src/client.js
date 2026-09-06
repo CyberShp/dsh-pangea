@@ -63,10 +63,10 @@ window.__ModuleLoader__.load({
       const publicationLabel = failed && publicationState === 'pending' ? '未发布（运行失败）' : stopped && publicationState === 'pending' ? '未发布（已停止）' : stopping && publicationState === 'pending' ? '未发布（停止中）' : publicationState === 'pending' && running ? '阶段结果待发布' : publicationState
       const executionLabel = failed ? '分析失败' : stopped ? '已停止' : stopping ? '正在停止' : running ? '分析中' : executionStatus === 'completed' ? '已完成' : '等待启动'
       const dataTone = healthStatus === 'error' ? 'error' : publicationState === 'final' && healthStatus === 'ok' ? 'ok' : publicationState === 'draft' ? 'notice' : 'neutral'
-      const countsAvailability = publicationState === 'pending' || failed || stopped ? 'unpublished' : publicationState === 'draft' ? 'draft' : 'verified'
+      const countsAvailability = publicationState === 'pending' ? 'unpublished' : publicationState === 'draft' ? 'draft' : publicationState === 'final' ? 'verified' : 'unavailable'
       const qualityLabel = current?.quality_status ?? current?.verdict ?? 'PENDING'
-      const canResume = Boolean(task?.run_id) && !running && !['stopping'].includes(executionStatus) && (failed || stopped || taskStatus === 'needs_attention')
-      const resumeBlockedReason = canResume ? null : !task?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件'
+      const canResume = task?.can_resume === true
+      const resumeBlockedReason = canResume ? null : task?.resume_blocked_reason ?? (!task?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件')
       return { executionStatus, executionLabel, failed, stopped, stopping, running, healthStatus, reliabilityLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason }
     }
 
@@ -1126,12 +1126,16 @@ window.__ModuleLoader__.load({
               ? { state: 'ok', label: '系统正常' }
               : { state: 'checking', label: '系统检查中' }
         window.dispatchEvent(new CustomEvent('pangea:system-state', { detail: systemState }))
-        const contextTotal = current?.analysis?.total ?? 0
-        const contextCompleted = current?.analysis?.completed ?? 0
+        const selectedCurrent = selectedTask?.run_id && current?.run_id === selectedTask.run_id ? current : null
+        const selectedWorkbench = workbench?.selected_task_id === selectedTask?.task_id ? workbench : null
+        const contextTotal = selectedCurrent?.analysis?.total ?? 0
+        const contextCompleted = selectedCurrent?.analysis?.completed ?? 0
         const assistantVisible = pageMode === 'analysis' && selectedTask && !['tasks', 'create'].includes(screen.type)
         const activeConversation = selectedTask?.conversations?.find(item => item.conversation_id === selectedTask.active_conversation_id)
-        const presentation = deriveRunPresentation(selectedTask, current, health)
-        const launchEvents = Array.isArray(workbench?.launch_log?.events) ? workbench.launch_log.events : []
+        const presentation = deriveRunPresentation(selectedTask, selectedCurrent, selectedCurrent?.reader_health)
+        const launchEvents = Array.isArray(selectedWorkbench?.launch_log?.events)
+          ? selectedWorkbench.launch_log.events.filter(event => !selectedTask?.attempt_id || event?.attempt_id === selectedTask.attempt_id)
+          : []
         const outputEvent = [...launchEvents].reverse().find(event => typeof event?.output === 'string' && event.output.trim() !== '')
         const processStatus = selectedTask?.execution_status
           ?? (selectedTask?.status === 'failed' ? 'failed' : selectedTask?.status === 'completed' ? 'completed' : selectedTask?.status)
@@ -1139,12 +1143,12 @@ window.__ModuleLoader__.load({
         window.dispatchEvent(new CustomEvent('pangea:run-context', { detail: assistantVisible ? {
           taskId: selectedTask.task_id,
           workspaceKey: selectedTask.workspace ?? cwd,
-          runId: current?.run_id,
+          runId: selectedCurrent?.run_id ?? selectedTask.run_id,
           attemptId: selectedTask.attempt_id,
           ownerSessionId: selectedTask.owner_session_id,
           jobId: selectedTask.job_id,
           title: selectedTask.title,
-          phase: current ? (PHASE[String(current.phase ?? '').toUpperCase()] ?? PHASE[current.phase] ?? current.phase) : '正在准备',
+          phase: selectedCurrent ? (PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
           conversations: selectedTask.conversations ?? [],
           activeConversationId: selectedTask.active_conversation_id,
@@ -1240,6 +1244,12 @@ window.__ModuleLoader__.load({
         setSelectedRun(task.run_id ?? null)
         setScreen({ type: targetScreen })
         setHistory([])
+        const activeConversation = task.conversations?.find(item => item.conversation_id === task.active_conversation_id)
+          ?? task.conversations?.[0]
+        if (activeConversation?.session_id) {
+          ctx?.pangea?.registerProductSession?.(activeConversation.session_id)
+          ctx?.sessions?.open?.(activeConversation.session_id)
+        }
       }
 
       function openTaskFromWorkbench(task) {
@@ -1832,6 +1842,7 @@ window.__ModuleLoader__.load({
       function displayCount(key, number) {
         const presentation = deriveRunPresentation(selectedTask, current, health)
         if (presentation.countsAvailability === 'unpublished') return '尚未发布'
+        if (presentation.countsAvailability === 'unavailable') return '不可读取'
         const check = countCheck(key)
         if (check?.status === 'mismatch') return `${number} / 报告 ${check.report}`
         if (number === null || number === undefined) return '暂不可读取'
@@ -1843,14 +1854,14 @@ window.__ModuleLoader__.load({
         return h(target ? 'button' : 'div', props, h('div', { style: styles.metricNumber }, countKey ? displayCount(countKey, number) : String(number ?? 0)), h('div', { style: styles.metricName }, name))
       }
       function collectionEmpty(key, normal) {
-        if (deriveRunPresentation(selectedTask, current, health).countsAvailability === 'unpublished') return '结果尚未发布，暂不显示空列表结论。'
+        if (['unpublished', 'unavailable'].includes(deriveRunPresentation(selectedTask, current, health).countsAvailability)) return '结果尚不可用，暂不显示空列表结论。'
         return countCheck(key)?.status === 'mismatch' || health?.status === 'warning' ? '数据读取异常：不能把空列表解释为“没有数据”。' : normal
       }
       function healthStyle(status = deriveRunPresentation(selectedTask, current, health).healthStatus) {
         if (status === 'error') return { ...styles.card, ...styles.healthError }
         if (status === 'warning') return { ...styles.card, ...styles.healthWarning }
-        if (status === 'pending') return { ...styles.card, ...styles.notice }
-        return { ...styles.card, ...styles.healthOk }
+        if (status === 'ok') return { ...styles.card, ...styles.healthOk }
+        return { ...styles.card, ...styles.notice }
       }
       function renderHealthCard(compact = false) {
         if (!health) return null
@@ -2325,6 +2336,8 @@ window.__ModuleLoader__.load({
           const launchEvents = workbench?.launch_log?.events ?? []
           const launchFailure = [...launchEvents].reverse().find(event => event.status === 'error' && event.stage !== 'launch_failed')
             ?? [...launchEvents].reverse().find(event => event.status === 'error')
+          const launchPresentation = deriveRunPresentation(selectedTask, null, null)
+          const mayRetryLaunch = !selectedTask.run_id || launchPresentation.canResume
           return h(React.Fragment, null, renderCompatibility(), h('div', { style: { ...styles.card, padding: 20 } },
           h('div', { style: styles.row },
             h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, `${selectedTask.task_id} · 执行 Agent：${selectedTask.provider ?? '未选择'}`)),
@@ -2337,7 +2350,8 @@ window.__ModuleLoader__.load({
             launchFailure.error_code ? h('div', { style: styles.itemMeta }, `错误码：${launchFailure.error_code}`) : null,
             h('div', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, launchFailure.error ?? launchFailure.message ?? selectedTask.launch_error)) : null,
           /* ACP process output is rendered in the product shell's right assistant panel. */
-          ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? (selectedTask.run_id ? '正在继续…' : '正在重试…') : (selectedTask.run_id ? '继续分析' : '重试启动')) : null))
+          ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) && mayRetryLaunch ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? (selectedTask.run_id ? '正在继续…' : '正在重试…') : (selectedTask.run_id ? '继续分析' : '重试启动')) : null,
+          selectedTask.run_id && !launchPresentation.canResume ? h('div', { style: { ...styles.itemMeta, marginTop: 14 } }, `暂不能继续：${launchPresentation.resumeBlockedReason}`) : null))
         }
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
@@ -2366,8 +2380,8 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: { ...styles.button, marginTop: 9 }, onClick: () => jump(nextAction.target) }, nextAction.target === 'workflow' ? '查看运行细节' : '进入处理'),
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析可信度'), h('div', { style: styles.decisionValue }, presentation.reliabilityLabel)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, `${testCases.length} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, `${evidence.length} 条证据`)))),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, presentation.countsAvailability === 'unpublished' ? '测试结果尚未发布' : presentation.countsAvailability === 'unavailable' ? '测试结果不可读取' : `${displayCount('test_cases', testCases.length)} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, displayCount('evidence', evidence.length))))),
           renderHealthCard(false),
           h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前任务'), h('div', { style: styles.itemTitle }, runLabel(current)), h('div', { style: styles.itemMeta }, current.run_id)), h('span', { style: styles.badge }, PHASE[current.phase] ?? current.phase)),
@@ -2404,7 +2418,9 @@ window.__ModuleLoader__.load({
                 : h('button', { type: 'button', style: styles.button, onClick: () => setPendingStopRun(current.run_id) }, '停止 Run'))) : null,
           current.terminal && ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '继续分析'), h('div', { style: styles.itemMeta }, '保留已有快照、产物和检查点，从当前步骤继续。')),
-              h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在继续…' : '继续分析'))) : null,
+              presentation.canResume
+                ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在继续…' : '继续分析')
+                : h('span', { style: styles.itemMeta }, `暂不能继续：${presentation.resumeBlockedReason}`))) : null,
           current.errors?.length
             ? h(React.Fragment, null, h('div', { style: styles.sectionTitle }, '当前错误'), renderIssueCard('当前错误', current.errors, 'error'))
             : runNeedsAttention && selectedTask.launch_error

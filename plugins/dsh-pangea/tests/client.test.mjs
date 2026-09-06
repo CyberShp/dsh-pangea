@@ -330,7 +330,7 @@ test('keeps the product page mounted while a file or browser utility is open', a
 })
 
 test('routes ACP process output to the right assistant panel', async () => {
-  const { source } = await loadClient()
+  const { exported, source } = await loadClient()
   assert.match(source, /data-pangea-assistant-process/)
   assert.match(source, /AssistantProcess/)
   assert.match(source, /process\.output\.slice\(-12000\)/)
@@ -339,4 +339,29 @@ test('routes ACP process output to the right assistant panel', async () => {
   assert.match(source, /data-conversation-scroll/)
   assert.match(source, /ReactDOM\.createPortal/)
   assert.doesNotMatch(source, /\[data-pangea-assistant-process\][\s\S]*position: fixed/)
+  assert.match(source, /activeConversationKind === 'analysis'/)
+  assert.match(source, /data-pangea-assistant-narrow-toggle/)
+  assert.match(source, /@media \(max-width: 1179px\)[\s\S]*data-pangea-task-assistant-open/s)
+  assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', activeConversationKind: 'analysis' }), true)
+  assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', ownerSessionId: 'owner-1', activeConversationSessionId: 'owner-1' }), true)
+  assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', activeConversationKind: 'discussion' }), false)
+
+  const card = {
+    inert: false,
+    attributes: new Map(),
+    setAttribute(name, value) { this.attributes.set(name, value) },
+    removeAttribute(name) { this.attributes.delete(name) },
+  }
+  const composer = {
+    dataset: {},
+    querySelectorAll(selector) { return selector === '[data-composer-card]' ? [card] : [] },
+  }
+  exported.setComposerReadonly(composer, true)
+  assert.equal(composer.dataset.pangeaAnalysisReadonly, 'true')
+  assert.equal(card.inert, true)
+  assert.equal(card.attributes.get('aria-disabled'), 'true')
+  exported.setComposerReadonly(composer, false)
+  assert.equal('pangeaAnalysisReadonly' in composer.dataset, false)
+  assert.equal(card.inert, false)
+  assert.equal(card.attributes.has('aria-disabled'), false)
 })

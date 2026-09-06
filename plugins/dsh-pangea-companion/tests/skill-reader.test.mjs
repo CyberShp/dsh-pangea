@@ -129,6 +129,56 @@ test('preserves a published draft revision and step before final delivery', asyn
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('reports a malformed projection during an active Run instead of hiding it as pending', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-malformed-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'malformed-projection'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'malformed' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'running', current_step: '06', completed_steps: ['01', '02', '03', '04', '05'],
+    })
+    await mkdir(path.join(runRoot, '内部索引'), { recursive: true })
+    await writeFile(path.join(runRoot, '内部索引', '工作台投影.json'), '{invalid json', 'utf8')
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.publication.state, 'broken')
+    assert.equal(current.reader_health.status, 'warning')
+    assert.equal(current.reader_health.trusted, false)
+    assert.match(current.workflow.unresolved[0].message, /解析失败/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('never marks an explicitly broken projection as trusted', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-broken-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'broken-projection'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: runRoot,
+      request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'broken' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'running', current_step: '06', completed_steps: ['01', '02', '03', '04', '05'],
+    })
+    await writeJson(path.join(runRoot, '内部索引', '工作台投影.json'), {
+      schema_version: '1.0', run_id: runId,
+      publication: { state: 'broken', revision: 1, step_id: '05' },
+      business_flows: [], risks: [], test_cases: [], evidence: [], review_issues: [],
+    })
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.publication.state, 'broken')
+    assert.equal(current.reader_health.status, 'warning')
+    assert.equal(current.reader_health.trusted, false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('marks only a validated complete Skill state as terminal complete', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-complete-'))
   const dataRoot = path.join(root, 'pangea-data')

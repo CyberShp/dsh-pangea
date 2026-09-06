@@ -46,7 +46,7 @@ async function readWorkbenchProjection(runDirectory, runId) {
     }
     return { status: issues.length ? 'invalid' : 'verified', path: projectionPath, value, issues }
   } catch (error) {
-    return { status: 'invalid', path: projectionPath, value: null, issues: [error instanceof Error ? error.message : String(error)] }
+    return { status: 'invalid', path: projectionPath, value: null, issues: [`工作台投影解析失败：${error instanceof Error ? error.message : String(error)}`] }
   }
 }
 
@@ -198,7 +198,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     : null
   const publicationState = projection.status === 'verified'
     ? (recordedState === 'broken' ? 'broken' : recordedState === 'final' && finalExpected ? 'final' : finalExpected ? 'final' : 'draft')
-    : (finalExpected ? 'broken' : 'pending')
+    : (projection.status === 'invalid' || finalExpected ? 'broken' : 'pending')
   const publicationRevision = Number.isInteger(recordedPublication?.revision) && recordedPublication.revision >= 0
     ? recordedPublication.revision
     : projection.status === 'verified' ? 1 : 0
@@ -206,7 +206,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     ? recordedPublication.step_id
     : projection.status === 'verified' ? (finalExpected ? '09' : null) : null
   const publicationIssues = publicationState === 'broken' ? ['工作台结构化投影已标记为 broken'] : []
-  const projectionIssues = publicationState === 'pending'
+  const projectionIssues = projection.status === 'legacy_unavailable' && publicationState === 'pending'
     ? []
     : projection.status === 'verified' && publicationState !== 'broken'
       ? []
@@ -271,7 +271,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       status: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'corrupt'
         ? 'ok'
         : publicationState === 'pending' && sourceSnapshot.status !== 'corrupt' ? 'pending' : 'warning',
-      trusted: projection.status === 'verified' && sourceSnapshot.status !== 'corrupt',
+      trusted: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'corrupt',
       data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
       issues: [...projectionIssues, ...(sourceSnapshot.status === 'corrupt' ? ['源码快照完整性校验失败'] : [])],
       count_checks: {},

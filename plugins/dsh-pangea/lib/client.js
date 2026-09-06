@@ -351,6 +351,10 @@ window.__ModuleLoader__.load({
         }
 
         [data-pangea-assistant-process] { display: none; }
+        [data-pangea-assistant-narrow-toggle] { display: none; }
+        [data-composer-seat][data-pangea-analysis-readonly="true"] [data-composer-card] {
+          pointer-events: none; opacity: .55;
+        }
         @media (min-width: 1180px) {
           body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-process] {
             position: static; z-index: auto; display: flex; flex-direction: column; box-sizing: border-box; width: 100%;
@@ -373,6 +377,26 @@ window.__ModuleLoader__.load({
           [data-pangea-nav-button], [data-pangea-tool-button] { grid-template-columns: 1fr; padding: 0; place-items: center; }
           [data-pangea-topbar-title] { margin-left: 18px; padding-left: 18px; font-size: 18px; }
           [data-pangea-project] { display: none; }
+          [data-pangea-assistant-narrow-toggle] {
+            display: inline-flex; align-items: center; height: 34px; margin-right: 10px; padding: 0 12px;
+            border: 1px solid #c7000b; border-radius: 6px; color: #c7000b; background: #fff; font: inherit; cursor: pointer;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant] #root .pI_x6G_frame {
+            grid-template-columns: 0 minmax(0, 1fr) 0 !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] #root .pI_x6G_frame {
+            grid-template-columns: 0 0 minmax(0, 1fr) !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] #root [data-pane="details"] { display: none !important; }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] #root [data-pane="conversation"] {
+            grid-column: 3; grid-row: 1; display: flex !important; min-width: 0; padding-top: var(--pangea-topbar-height);
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-assistant-head] {
+            display: block; height: auto; padding: 12px 16px; border-bottom: 1px solid #e5e8ec;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-assistant-process] {
+            display: flex; flex-direction: column; min-height: 0; max-height: 48%; padding: 12px 16px;
+          }
         }
 
         body.dsh-desktop-windows-titlebar-layout [data-pangea-topbar] {
@@ -435,7 +459,7 @@ window.__ModuleLoader__.load({
       ], 28, 1.8)
     }
 
-    function ProductHeader({ scope, systemState }) {
+    function ProductHeader({ scope, systemState, assistantVisible, assistantOpen, onToggleAssistant }) {
       return h('header', { 'data-pangea-topbar': true },
         h('div', { 'data-pangea-topbar-brand': true }, h(HuaweiLogo)),
         h('div', { 'data-pangea-topbar-title': true }, 'PANGEA 测试工作台'),
@@ -443,6 +467,10 @@ window.__ModuleLoader__.load({
           h('span', null, workspaceLabel(scope)),
           lineIcon([h('path', { key: 'a', d: 'm7 9 5 5 5-5' })], 18, 1.7)),
         h('span', { 'data-pangea-topbar-spacer': true }),
+        assistantVisible ? h('button', {
+          type: 'button', 'data-pangea-assistant-narrow-toggle': true,
+          'aria-expanded': assistantOpen ? 'true' : 'false', onClick: onToggleAssistant,
+        }, assistantOpen ? '返回分析' : 'AI 助手') : null,
         h('div', { 'data-pangea-system-state': true, 'data-state': systemState.state, role: 'status' },
           h('span', { 'data-pangea-system-dot': true }, systemState.state === 'ok' ? '✓' : '!'),
           h('span', null, systemState.label)))
@@ -577,8 +605,24 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', 'data-pangea-assistant-new': true, onClick: () => context?.onCreateConversation?.() }, '新建会话')))
     }
 
+    function shouldShowAssistantProcess(context) {
+      return Boolean(context?.taskId) && (context.activeConversationKind === 'analysis'
+        || (!context.activeConversationKind && context.activeConversationSessionId === context.ownerSessionId))
+    }
+
+    function setComposerReadonly(composer, readonly) {
+      if (!composer) return
+      if (readonly) composer.dataset.pangeaAnalysisReadonly = 'true'
+      else delete composer.dataset.pangeaAnalysisReadonly
+      for (const card of composer.querySelectorAll('[data-composer-card]')) {
+        card.inert = readonly
+        if (readonly) card.setAttribute('aria-disabled', 'true')
+        else card.removeAttribute('aria-disabled')
+      }
+    }
+
     function AssistantProcess({ context }) {
-      if (!context?.taskId) return null
+      if (!shouldShowAssistantProcess(context)) return null
       const process = context.process ?? {}
       const output = typeof process.output === 'string' && process.output.trim() !== ''
         ? process.output.slice(-12000)
@@ -591,6 +635,7 @@ window.__ModuleLoader__.load({
       return h('section', { 'data-pangea-assistant-process': true, 'aria-label': '当前 Run 分析过程' },
         h('div', { 'data-pangea-assistant-process-head': true },
           h('strong', null, '分析过程'), h('span', { 'data-pangea-assistant-process-status': status }, statusLabel)),
+        h('div', { 'data-pangea-assistant-process-mode': true }, '分析过程只读；需要交流时请切换或新建讨论会话。'),
         process.error ? h('div', { 'data-pangea-assistant-process-error': true, role: 'alert' }, process.error) : null,
         h('pre', { 'data-pangea-assistant-process-output': true }, output),
         Array.isArray(process.events) && process.events.length
@@ -611,6 +656,7 @@ window.__ModuleLoader__.load({
           if (current) {
             current.headerHost.remove()
             current.processHost.remove()
+            setComposerReadonly(current.composer, false)
             hostsRef.current = null
           }
           if (!disposed) setHosts(null)
@@ -621,18 +667,28 @@ window.__ModuleLoader__.load({
         }
         const root = document.querySelector('#root') || document.body
         const mount = () => {
-          if (disposed || hostsRef.current) return
+          if (disposed) return
           const pane = root.querySelector('[data-pane="conversation"]')
           const scroll = pane?.querySelector('[data-conversation-scroll]')
           if (!pane || !scroll) return
+          const composer = scroll.querySelector('[data-composer-seat]')
+          const current = hostsRef.current
+          if (current) {
+            if (current.composer !== composer) {
+              setComposerReadonly(current.composer, false)
+              current.composer = composer
+            }
+            setComposerReadonly(composer, shouldShowAssistantProcess(context))
+            return
+          }
           const headerHost = document.createElement('div')
           headerHost.dataset.pangeaAssistantPortal = 'header'
           const processHost = document.createElement('div')
           processHost.dataset.pangeaAssistantPortal = 'process'
           pane.insertBefore(headerHost, pane.firstChild)
-          const composer = scroll.querySelector('[data-composer-seat]')
           scroll.insertBefore(processHost, composer || null)
-          hostsRef.current = { headerHost, processHost }
+          setComposerReadonly(composer, shouldShowAssistantProcess(context))
+          hostsRef.current = { headerHost, processHost, composer }
           setHosts(hostsRef.current)
         }
         observer = new MutationObserver(() => {
@@ -647,7 +703,7 @@ window.__ModuleLoader__.load({
           observer?.disconnect()
           removeHosts()
         }
-      }, [context?.taskId, enabled])
+      }, [context?.activeConversationKind, context?.taskId, enabled])
       if (!hosts || !ReactDOM?.createPortal) return null
       return h(React.Fragment, null,
         ReactDOM.createPortal(h(AssistantHeader, { context }), hosts.headerHost),
@@ -665,6 +721,7 @@ window.__ModuleLoader__.load({
       const initialProductState = productStateByWorkspace.get(productStateKey) ?? DEFAULT_PRODUCT_STATE
       const [systemState, setSystemState] = React.useState(initialProductState.systemState)
       const [assistantContext, setAssistantContext] = React.useState(initialProductState.assistantContext)
+      const [assistantOpen, setAssistantOpen] = React.useState(false)
       const sidebarState = sidebarSnapshot?.state
       const productVisible = visible
         || tabIsActive(sidebarState?.splits, tab?.id)
@@ -686,6 +743,13 @@ window.__ModuleLoader__.load({
           }
         }
       }, [assistantContext?.taskId, page.id, productVisible])
+      React.useEffect(() => {
+        const showNarrowAssistant = assistantOpen && productVisible && page.id === 'analysis' && Boolean(assistantContext?.taskId)
+        if (showNarrowAssistant) document.body.setAttribute('data-pangea-task-assistant-open', assistantContext.taskId)
+        else document.body.removeAttribute('data-pangea-task-assistant-open')
+        return () => document.body.removeAttribute('data-pangea-task-assistant-open')
+      }, [assistantContext?.taskId, assistantOpen, page.id, productVisible])
+      React.useEffect(() => { setAssistantOpen(false) }, [assistantContext?.taskId])
       React.useLayoutEffect(() => {
         if (!productVisible) return undefined
         const body = document.body
@@ -781,7 +845,12 @@ window.__ModuleLoader__.load({
           })))
       }
       return h('div', { 'data-pangea-shell': true },
-        h(ProductHeader, { scope, systemState }),
+        h(ProductHeader, {
+          scope, systemState,
+          assistantVisible: page.id === 'analysis' && Boolean(assistantContext?.taskId),
+          assistantOpen,
+          onToggleAssistant: () => setAssistantOpen(value => !value),
+        }),
         h(AssistantPortals, { context: assistantContext, enabled: productVisible && page.id === 'analysis' }),
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
           h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => item.id !== 'settings' && pageIsAvailable(item, scope)).map(item => h('button', {
@@ -1145,6 +1214,8 @@ window.__ModuleLoader__.load({
     exports.applyBuiltinPolicy = applyBuiltinPolicy
     exports.closeDisallowedTabs = closeDisallowedTabs
     exports.createPangeaService = createPangeaService
+    exports.setComposerReadonly = setComposerReadonly
+    exports.shouldShowAssistantProcess = shouldShowAssistantProcess
     exports.apply = apply
     return module.exports
   },

@@ -392,7 +392,17 @@ function jobReference(runtime, task, jobId = task?.job_id) {
     jobId: String(jobId ?? ''),
     ...(task?.attempt_id ? { attemptId: task.attempt_id } : {}),
     ...(task?.owner_session_id ? { ownerSessionId: task.owner_session_id } : {}),
+    ...(Number.isFinite(task?.job_started_at) ? { jobStartedAt: task.job_started_at } : {}),
   }
+}
+
+function jobIdentityIssue(task, snapshot) {
+  if (!snapshot) return `ACP Job ${task?.job_id ?? ''} 不存在，旧执行停止尚未确认`
+  if (!Number.isFinite(task?.job_started_at)) return `ACP Job ${task?.job_id ?? ''} 缺少持久化 startedAt，旧执行身份无法确认`
+  if (!Number.isFinite(snapshot.startedAt) || snapshot.startedAt !== task.job_started_at) {
+    return `ACP Job ${task?.job_id ?? ''} 身份不匹配，旧执行停止尚未确认`
+  }
+  return null
 }
 
 function readJobSnapshot(runtime, task) {
@@ -402,17 +412,56 @@ function readJobSnapshot(runtime, task) {
   return jobs.get(task.job_id, jobOwner(runtime, task))
 }
 
+function deriveTaskResumeEligibility(runtime, task) {
+  if (!task?.run_id) return { can_resume: false, resume_blocked_reason: '没有可继续的 Run' }
+  if (task.execution_status === 'interrupted') return { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' }
+  if (['preparing', 'starting', 'running', 'stopping'].includes(task.execution_status)) {
+    return { can_resume: false, resume_blocked_reason: task.execution_status === 'stopping' ? '正在等待停止确认' : '当前执行仍在进行' }
+  }
+  const terminal = ['failed', 'stopped'].includes(task.execution_status)
+    || ['failed', 'needs_attention', 'stopped'].includes(task.status)
+  if (!terminal) return { can_resume: false, resume_blocked_reason: '当前 Run 不满足续跑条件' }
+  if (!task.provider) return { can_resume: true, resume_blocked_reason: null }
+  if (!task.job_id) {
+    return task.agent_session_id || task.process_id
+      ? { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' }
+      : { can_resume: true, resume_blocked_reason: null }
+  }
+  const persistedAttempt = task.attempts?.find(attempt => attempt.attempt_id === task.attempt_id)
+  const persistedTerminal = persistedAttempt
+    && persistedAttempt.job_id === task.job_id
+    && persistedAttempt.owner_session_id === task.owner_session_id
+    && Number.isFinite(task.job_started_at)
+    && persistedAttempt.job_started_at === task.job_started_at
+    && ['completed', 'failed', 'stopped'].includes(persistedAttempt.execution_status)
+    && Number.isFinite(persistedAttempt.ended_at)
+  if (persistedTerminal) return { can_resume: true, resume_blocked_reason: null }
+  let snapshot
+  try { snapshot = readJobSnapshot(runtime, task) } catch { return { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' } }
+  const identityIssue = jobIdentityIssue(task, snapshot)
+  if (identityIssue) return { can_resume: false, resume_blocked_reason: identityIssue }
+  if (!['completed', 'failed', 'killed'].includes(snapshot.status)) {
+    return { can_resume: false, resume_blocked_reason: '旧执行仍未结束' }
+  }
+  return { can_resume: true, resume_blocked_reason: null }
+}
+
 async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea) {
   if (snapshot?.kind !== 'subagent') return null
   const ownerSessionId = typeof owner?.id === 'string' ? owner.id : typeof owner?.session_id === 'string' ? owner.session_id : null
   const lookup = {
     ...(ownerSessionId ? { ownerSessionId } : {}),
+    ...(Number.isFinite(snapshot?.startedAt) ? { jobStartedAt: snapshot.startedAt } : {}),
   }
   const task = await tasks.getByJob(String(snapshot.id), lookup)
   if (!task) return null
-  const reference = jobReference(runtime, {
+  const attempt = task.attempts?.find(item => item.job_id === String(snapshot.id)
+    && (!ownerSessionId || item.owner_session_id === ownerSessionId)
+    && (!Number.isFinite(snapshot?.startedAt) || item.job_started_at === snapshot.startedAt))
+  const reference = jobReference(runtime, attempt ?? {
     ...task,
     owner_session_id: task.owner_session_id ?? ownerSessionId,
+    job_started_at: Number.isFinite(snapshot?.startedAt) ? snapshot.startedAt : task.job_started_at,
   }, snapshot.id)
   let output = ''
   try {
@@ -448,6 +497,7 @@ async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner
     provider: task.provider,
     model: task.model_route?.model,
     reasoning_effort: task.model_route?.reasoning_effort,
+    attempt_id: reference.attemptId,
     exit_status: outcome.status,
     detail: outcome.detail,
     output,
@@ -462,19 +512,26 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
     try {
       const owner = jobOwner(runtime, task)
       const jobs = runtimeService(runtime, 'jobs')
+      snapshot = readJobSnapshot(runtime, task)
+      const identityIssue = jobIdentityIssue(task, snapshot)
+      if (identityIssue) throw new Error(identityIssue)
       const update = jobs?.read?.(task.job_id, owner)
-      snapshot = update?.snapshot ?? readJobSnapshot(runtime, task)
+      if (update?.snapshot) {
+        const updateIdentityIssue = jobIdentityIssue(task, update.snapshot)
+        if (updateIdentityIssue) throw new Error(updateIdentityIssue)
+        snapshot = update.snapshot
+      }
       if (update?.text) {
         await tasks.recordJobActivity(jobReference(runtime, task), update.text)
         await appendLaunchSafe(launchLogs, task.task_id, {
-          stage: 'acp_output', status: 'info', job_id: task.job_id, output: update.text,
+          stage: 'acp_output', status: 'info', job_id: task.job_id, attempt_id: task.attempt_id, output: update.text,
         })
       }
     } catch (error) {
       const message = `无法恢复 ACP Job ${task.job_id}：${error instanceof Error ? error.message : String(error)}`
       await appendLaunchSafe(launchLogs, task.task_id, {
         stage: 'acp_job_reconcile', status: 'error', job_id: task.job_id,
-        error_code: 'ACP_JOB_LOST', error: message,
+        attempt_id: task.attempt_id, error_code: 'ACP_JOB_LOST', error: message,
       })
       await tasks.markInterrupted(task.task_id, message)
       continue
@@ -483,7 +540,7 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
       const message = `ACP Job ${task.job_id} 不存在，无法证明外部 Agent 仍在运行`
       await appendLaunchSafe(launchLogs, task.task_id, {
         stage: 'acp_job_reconcile', status: 'error', job_id: task.job_id,
-        error_code: 'ACP_JOB_LOST', error: message,
+        attempt_id: task.attempt_id, error_code: 'ACP_JOB_LOST', error: message,
       })
       await tasks.markInterrupted(task.task_id, message)
       continue
@@ -517,13 +574,16 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       await reconcileTaskLaunches(api, tasks, taskItems, launchLogs)
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+      taskItems = taskItems.map(task => ({ ...task, ...deriveTaskResumeEligibility(runtime, task) }))
       let modelRouting
       try {
         modelRouting = { status: 'ok', ...await internalModelOptions(api) }
       } catch (error) {
         modelRouting = { status: 'error', models: [], failures: [], error: error instanceof Error ? error.message : String(error) }
       }
-      const selectedCandidate = taskId ? await tasks.get(taskId) : sessionId ? await tasks.getBySession(sessionId) : null
+      const selectedCandidate = taskId
+        ? taskItems.find(item => item.task_id === taskId)
+        : sessionId ? taskItems.find(item => item.conversations?.some(conversation => conversation.session_id === sessionId)) : null
       const selectedTask = selectedCandidate?.workspace === workspaceRoot(cwd) ? selectedCandidate : null
       const launchLog = selectedTask ? await launchLogs.read(selectedTask.task_id, { limit: 100 }) : null
       let acpJob = null
@@ -562,11 +622,10 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
     if (body.action === 'task-start') {
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
       const resume = body.resume === true
-      const terminalTask = ['failed', 'needs_attention', 'stopped'].includes(task.status)
-        || ['failed', 'interrupted', 'stopped'].includes(task.execution_status)
+      const resumeEligibility = deriveTaskResumeEligibility(runtime, task)
       if (task.run_id && !resume) throw new Error('task already has a Run; use resume to continue it')
       if (resume && !task.run_id) throw new Error('没有可继续的 Run')
-      if (resume && !terminalTask) throw new Error('只有失败、停止或需要处理的任务可以继续')
+      if (resume && !resumeEligibility.can_resume) throw new Error(resumeEligibility.resume_blocked_reason)
       if (launchLocks.has(task.task_id)) throw new Error('task launch is already in progress')
       launchLocks.add(task.task_id)
       await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `${resume ? '继续分析' : '启动'}尝试 ${task.launch_attempts + 1}` })
@@ -600,7 +659,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           title: `${task.title} · 分析`,
           kind: 'analysis',
         }), async event => {
-          await launchLogs.append(task.task_id, event)
+          await launchLogs.append(task.task_id, { ...event, attempt_id: preparedTask.attempt_id })
         }, runtime, process.env, {
           onRunReady: run => tasks.bindRun(task.task_id, run.run_id),
           onOwnerReady: ({ ownerSessionId }) => tasks.bindOwnerSession(task.task_id, {
@@ -628,12 +687,14 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
             processId: pid,
           }),
         })
-        await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id })
-        return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })
+        await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id, attempt_id: preparedTask.attempt_id })
+        const updatedTask = await tasks.get(task.task_id)
+        return json(res, 200, { ...launched, task: { ...updatedTask, ...deriveTaskResumeEligibility(runtime, updatedTask) } })
       } catch (error) {
         await appendLaunchSafe(launchLogs, task.task_id, {
           stage: 'launch_failed', status: 'error', error,
           error_code: typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
+          attempt_id: preparedTask.attempt_id,
         })
         const latest = await tasks.get(task.task_id)
         if (latest?.execution_status === 'stopping' || error?.code === 'PANGEA_STOP_REQUESTED') {
@@ -691,6 +752,8 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       if (requestedTask?.job_id && stopJobs?.kill) {
         const owner = runtimeService(runtime, 'agents')?.get?.(requestedTask.owner_session_id)
         try {
+          const identityIssue = jobIdentityIssue(requestedTask, stopJobs.get?.(requestedTask.job_id, owner))
+          if (identityIssue) throw new Error(identityIssue)
           const result = await stopJobs.kill(requestedTask.job_id, owner, '用户请求停止 PANGEA 分析')
           jobStop = { status: 'ok', job_id: requestedTask.job_id, result, error: null }
           await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'ok', job_id: requestedTask.job_id, result })
@@ -750,12 +813,13 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       } else if (task && stopError) {
         await tasks.markStopping(task.task_id, stopError)
       }
+      const updatedTask = task ? await tasks.get(task.task_id) : null
       return json(res, 200, {
         ...stopped,
         job_stop: jobStop,
         run_stop: runStopError ? { status: 'error', error: runStopError } : { status: 'ok', error: null },
         session_cancel: sessionCancel,
-        task: task ? await tasks.get(task.task_id) : null,
+        task: updatedTask ? { ...updatedTask, ...deriveTaskResumeEligibility(runtime, updatedTask) } : null,
       })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
@@ -934,4 +998,4 @@ export { PangeaSshRuntime } from './execution/ssh.js'
 export { createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 export { launchAnalysisSession, normalizeRunInput, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'
-export { reconcileAcpJobs, sessionFailure, settleAcpTask }
+export { deriveTaskResumeEligibility, reconcileAcpJobs, sessionFailure, settleAcpTask }

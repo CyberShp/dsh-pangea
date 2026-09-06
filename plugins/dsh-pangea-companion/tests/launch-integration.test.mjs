@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import { applyTaskExecutionState, settleAcpTask } from '../src/index.js'
+import { applyTaskExecutionState, deriveTaskResumeEligibility, reconcileAcpJobs, settleAcpTask } from '../src/index.js'
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
 
@@ -21,7 +21,55 @@ test('terminal tasks can resume the existing Run from its checkpoint', () => {
   assert.match(source, /const resume = body\.resume === true/)
   assert.match(source, /if \(task\.run_id && !resume\)/)
   assert.match(source, /resumeRunId: resume \? task\.run_id : null/)
-  assert.match(source, /只有失败、停止或需要处理的任务可以继续/)
+  assert.match(source, /resumeEligibility\.can_resume/)
+})
+
+test('derives resume eligibility from the persisted execution identity and real Job terminal state', () => {
+  const runtime = { jobs: { get() { return { id: 'job-1', startedAt: 100, status: 'failed' } } }, agents: { get() { return { id: 'owner-1' } } } }
+  assert.deepEqual(deriveTaskResumeEligibility(runtime, {
+    run_id: 'run-1', provider: 'pangea-opencode', status: 'failed', execution_status: 'failed',
+    job_id: 'job-1', job_started_at: 100, owner_session_id: 'owner-1',
+  }), { can_resume: true, resume_blocked_reason: null })
+  assert.deepEqual(deriveTaskResumeEligibility(runtime, {
+    run_id: 'run-1', provider: 'pangea-opencode', status: 'failed', execution_status: 'interrupted',
+    job_id: 'job-1', job_started_at: 100, owner_session_id: 'owner-1',
+  }), { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' })
+  assert.equal(deriveTaskResumeEligibility(runtime, {
+    run_id: 'run-1', provider: 'pangea-opencode', status: 'failed', execution_status: 'failed',
+    job_id: 'job-1', job_started_at: 99, owner_session_id: 'owner-1',
+  }).can_resume, false)
+
+  assert.deepEqual(deriveTaskResumeEligibility({ jobs: { get() { return undefined } } }, {
+    run_id: 'run-1', provider: 'pangea-opencode', status: 'failed', execution_status: 'failed',
+    attempt_id: 'attempt-1', job_id: 'job-1', job_started_at: 100, owner_session_id: 'owner-1',
+    attempts: [{
+      attempt_id: 'attempt-1', job_id: 'job-1', job_started_at: 100, owner_session_id: 'owner-1',
+      execution_status: 'failed', ended_at: 200,
+    }],
+  }), { can_resume: true, resume_blocked_reason: null })
+})
+
+test('does not read output from a reused Job id with a different startedAt', async () => {
+  let interrupted
+  let recorded = false
+  const task = {
+    task_id: 'task-1', execution_status: 'running', job_id: 'subagent-1', job_started_at: 100,
+    owner_session_id: 'owner-1', attempts: [],
+  }
+  const runtime = {
+    agents: { get() { return { id: 'owner-1' } } },
+    jobs: {
+      get() { return { id: 'subagent-1', kind: 'subagent', startedAt: 200, status: 'running' } },
+      read() { throw new Error('must not read reused Job') },
+    },
+  }
+  const tasks = {
+    async recordJobActivity() { recorded = true },
+    async markInterrupted(_taskId, message) { interrupted = message },
+  }
+  await reconcileAcpJobs(runtime, tasks, [task], { async append() {} })
+  assert.equal(recorded, false)
+  assert.match(interrupted, /身份不匹配/)
 })
 
 test('persists the Run identity as soon as creation succeeds', () => {
@@ -66,7 +114,8 @@ test('settles an ACP Job with its owner identity', async () => {
   let settled
   const task = {
     task_id: 'task-identity', workspace: '/workspace', data_root: '/workspace/pangea-data', run_id: 'run-identity',
-    provider: 'pangea-opencode', model_route: null,
+    provider: 'pangea-opencode', model_route: null, attempt_id: 'attempt-new', owner_session_id: 'owner-new',
+    attempts: [{ attempt_id: 'attempt-old', job_id: 'job-identity', job_started_at: 100, owner_session_id: 'owner-1' }],
   }
   const tasks = {
     async getByJob(id, ref) { lookup = { id, ref }; return task },
@@ -81,18 +130,18 @@ test('settles an ACP Job with its owner identity', async () => {
   })
   const owner = { id: 'owner-1' }
   await settleAcpTask(runtime, tasks, { async append() {} }, {
-    id: 'job-identity', kind: 'subagent', status: 'failed', detail: 'failed',
+    id: 'job-identity', kind: 'subagent', status: 'failed', detail: 'failed', startedAt: 100,
   }, owner)
   assert.deepEqual(lookup, {
     id: 'job-identity',
-    ref: { ownerSessionId: 'owner-1' },
+    ref: { ownerSessionId: 'owner-1', jobStartedAt: 100 },
   })
   assert.deepEqual(activity, {
-    ref: { jobId: 'job-identity', ownerSessionId: 'owner-1' },
+    ref: { jobId: 'job-identity', attemptId: 'attempt-old', ownerSessionId: 'owner-1', jobStartedAt: 100 },
     output: 'agent output',
   })
   assert.deepEqual(settled.ref, {
-    jobId: 'job-identity', ownerSessionId: 'owner-1',
+    jobId: 'job-identity', attemptId: 'attempt-old', ownerSessionId: 'owner-1', jobStartedAt: 100,
   })
 })
 

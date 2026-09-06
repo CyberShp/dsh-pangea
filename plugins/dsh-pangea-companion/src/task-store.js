@@ -144,13 +144,14 @@ function normalizeTask(taskId, value) {
 }
 
 function normalizeJobRef(value, options = {}) {
-  if (typeof value === 'string') return { jobId: text(value), ...options }
+  const source = typeof value === 'string' ? { jobId: value, ...options } : value
   return {
-    jobId: text(value?.jobId ?? value?.job_id),
-    attemptId: text(value?.attemptId ?? value?.attempt_id) || null,
-    ownerSessionId: text(value?.ownerSessionId ?? value?.owner_session_id) || null,
-    runtimeInstanceId: text(value?.runtimeInstanceId ?? value?.runtime_instance_id) || null,
-    agentSessionId: text(value?.agentSessionId ?? value?.agent_session_id) || null,
+    jobId: text(source?.jobId ?? source?.job_id),
+    attemptId: text(source?.attemptId ?? source?.attempt_id) || null,
+    ownerSessionId: text(source?.ownerSessionId ?? source?.owner_session_id) || null,
+    jobStartedAt: Number.isFinite(source?.jobStartedAt ?? source?.job_started_at) ? (source.jobStartedAt ?? source.job_started_at) : null,
+    runtimeInstanceId: text(source?.runtimeInstanceId ?? source?.runtime_instance_id) || null,
+    agentSessionId: text(source?.agentSessionId ?? source?.agent_session_id) || null,
   }
 }
 
@@ -158,6 +159,7 @@ function attemptMatches(attempt, ref) {
   if (!attempt || (ref.jobId && attempt.job_id !== ref.jobId)) return false
   if (ref.attemptId && attempt.attempt_id !== ref.attemptId) return false
   if (ref.ownerSessionId && attempt.owner_session_id !== ref.ownerSessionId) return false
+  if (Number.isFinite(ref.jobStartedAt) && attempt.job_started_at !== ref.jobStartedAt) return false
   if (ref.runtimeInstanceId && attempt.runtime_instance_id !== ref.runtimeInstanceId) return false
   if (ref.agentSessionId && attempt.agent_session_id !== ref.agentSessionId) return false
   return true

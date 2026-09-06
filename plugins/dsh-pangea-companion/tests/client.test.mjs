@@ -130,7 +130,7 @@ test('does not present a failed task as pending publication', async () => {
   sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   const failed = exported.deriveRunPresentation(
-    { status: 'failed', execution_status: 'failed', run_id: 'run-1', terminal_error: 'ACP Agent 启动失败' },
+    { status: 'failed', execution_status: 'failed', run_id: 'run-1', terminal_error: 'ACP Agent 启动失败', can_resume: true },
     { publication: { state: 'pending' } },
     { status: 'pending' },
   )
@@ -161,6 +161,15 @@ test('does not present a failed task as pending publication', async () => {
   assert.equal(stopping.publicationLabel, '未发布（停止中）')
   assert.equal(stopping.isAnimating, false)
   assert.equal(stopping.canResume, false)
+
+  const failedDraft = exported.deriveRunPresentation(
+    { status: 'failed', execution_status: 'failed', run_id: 'run-draft', can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' },
+    { publication: { state: 'draft' } },
+    { status: 'ok' },
+  )
+  assert.equal(failedDraft.countsAvailability, 'draft')
+  assert.equal(failedDraft.canResume, false)
+  assert.equal(failedDraft.resumeBlockedReason, '旧执行停止尚未确认')
 })
 
 test('returns from a run detail to its selected Run overview', async () => {

@@ -34,7 +34,7 @@ function compactEvent(value = {}) {
     status: ['start', 'ok', 'error', 'info'].includes(value.status) ? value.status : 'info',
   }
   for (const key of [
-    'message', 'session_id', 'agent_session_id', 'run_id', 'job_id', 'provider', 'model',
+    'message', 'session_id', 'agent_session_id', 'run_id', 'attempt_id', 'job_id', 'provider', 'model',
     'reasoning_effort', 'error_code', 'exit_status', 'detail', 'output',
   ]) {
     if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = value[key].trim().slice(0, MAX_EVENT_TEXT)
