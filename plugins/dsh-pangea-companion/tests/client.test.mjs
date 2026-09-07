@@ -20,6 +20,29 @@ function fakeReact() {
   }
 }
 
+test('create form shows and can remove selected assets absent from its repository catalog', async () => {
+  const form = { repository: 'repo', target: 'clamp', source_scope_text: 'src/clamp.c', asset_ids: ['tagged', 'untagged'], scenario: 'module-analysis', mode: 'speed', provider_id: 'pangea-opencode', model_route_key: '' }
+  const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create' }, 33: form, 34: { assets: [{ asset_id: 'tagged', title: '仓库需求', asset_type: 'requirement' }] } }
+  let index = 0, changed
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }]
+  } })
+  const pages = []
+  const ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = [], strings = []
+  const walk = node => { if (typeof node === 'string') strings.push(node); else if (Array.isArray(node)) node.forEach(walk); else if (node?.children) { nodes.push(node); node.children.forEach(walk) } }
+  walk(panel.type(panel.props))
+  assert.ok(strings.join('\n').includes('untagged'))
+  assert.ok(strings.join('\n').includes('仓库需求'))
+  const remove = nodes.find(node => node.props['aria-label'] === '移除资产 untagged')
+  assert.ok(remove)
+  remove.props.onClick()
+  assert.deepEqual(Array.from(changed.asset_ids), ['tagged'])
+})
+
 async function loadClientExports(react = fakeReact()) {
   const source = await readFile(clientPath, 'utf8')
   let exported
@@ -85,7 +108,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /停止 Run/)
   assert.match(source, /失败阶段：/)
   assert.match(source, /Agent 尚未产生可显示的消息输出/)
-  assert.match(source, /模型与推理配置由 Agent 当前会话决定/)
+  assert.match(source, /使用 Agent 新建 ACP 会话的默认模型与推理配置/)
   assert.doesNotMatch(source, /const externalModelFields =/)
   assert.doesNotMatch(source, /模型未知.*effort.*不支持/)
   assert.match(source, /field\('PID'/)
@@ -313,7 +336,7 @@ test('overview does not show another Task or an old attempt error while its Run 
     const states = {
       0: undefined,
       1: { tasks: { items: [task] }, selected_task_id: selectedTaskId, compatibility: { compatible: true },
-        launch_log: { events: [{ task_id: selectedTaskId, attempt_id: eventAttempt, status: 'error', stage: 'acp_job_settled', error: 'fixture spawn EINVAL' }] } },
+        launch_log: { events: [{ task_id: selectedTaskId, attempt_id: eventAttempt, status: 'error', stage: 'acp_job_settled', error: 'fixture spawn EINVAL', error_summary: 'fixture request rejected', tool_calls: 0, exit_code: 0, process_exited: true }] } },
       4: task.run_id, 5: task.task_id, 16: { type: 'overview' },
     }
     let stateIndex = 0
@@ -334,6 +357,9 @@ test('overview does not show another Task or an old attempt error while its Run 
     walk(panel.type(panel.props))
     assert.ok(strings.includes(task.title))
     assert.equal(strings.includes('fixture spawn EINVAL'), shouldShow)
+    assert.equal(strings.join('\n').includes('错误摘要: fixture request rejected'), shouldShow)
+    assert.equal(strings.join('\n').includes('工具事件: 0'), shouldShow)
+    assert.equal(strings.join('\n').includes('退出码: 0'), shouldShow)
   }
 })
 

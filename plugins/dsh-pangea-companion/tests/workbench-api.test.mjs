@@ -432,6 +432,7 @@ test('continues an incomplete Codetalks Run in the same ACP session before dispo
             async continuePrompt(prompt) {
               continued += 1
               assert.match(prompt[0].text, /运行状态\.json/)
+              assert.match(prompt[0].text, /已完成步骤：4\/9/)
               return { stopReason: 'completed', output: [{ type: 'text', text: 'Step 09 complete' }] }
             },
             async dispose() { disposed += 1 },
@@ -448,8 +449,8 @@ test('continues an incomplete Codetalks Run in the same ACP session before dispo
       if (call.args[0] === 'runs' && call.args[1] === 'get') {
         runChecks += 1
         return runChecks === 1
-          ? { run_id: 'skill-run-acp', lifecycle_status: 'running', phase: 'STEP_05', report_available: false, analysis: { completed: 4 } }
-          : { run_id: 'skill-run-acp', lifecycle_status: 'complete', phase: 'COMPLETE', report_available: true, analysis: { completed: 9 } }
+          ? { run_id: 'skill-run-acp', lifecycle_status: 'running', phase: 'STEP_05', report_available: false, completed_steps: ['01', '02', '03', '04'] }
+          : { run_id: 'skill-run-acp', lifecycle_status: 'complete', phase: 'COMPLETE', report_available: true, completed_steps: ['01', '02', '03', '04', '05', '06', '07', '08', '09'] }
       }
       return { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     }

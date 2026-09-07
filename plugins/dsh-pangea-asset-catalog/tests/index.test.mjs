@@ -14,11 +14,13 @@ test('normalizes asset pagination filters for the public API', () => {
   )
 })
 
-test('host registers the asset catalog tool and same-origin page route without agent listeners', async () => {
+test('host registers asset APIs and methodology lifecycle listeners', async () => {
   const tools = []
   const routes = []
+  const events = []
   let effectDescription = ''
   await apply({
+    on(name) { events.push(name); return () => {} },
     tools: { register(tool) { tools.push(tool); return () => {} } },
     apiProxy: {},
     webServer: { register(route) { routes.push(route); return () => {} } },
@@ -28,5 +30,6 @@ test('host registers the asset catalog tool and same-origin page route without a
   assert.match(tools[0].description, /已导入资产/)
   assert.equal(routes.length, 1)
   assert.equal(routes[0].path, '/api/pangea-asset-catalog/state')
+  assert.deepEqual(events, ['agent/status', 'agent/error'])
   assert.match(effectDescription, /PANGEA Asset Management 2\.0 API/)
 })

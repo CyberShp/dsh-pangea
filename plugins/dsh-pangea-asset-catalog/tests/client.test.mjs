@@ -18,14 +18,15 @@ function fakeReact() {
   }
 }
 
-async function loadClient() {
+async function loadClient(react = fakeReact(), globals = {}) {
   const source = await readFile(clientPath, 'utf8')
   let exported
   const sandbox = {
     URLSearchParams, AbortController, console, setTimeout, clearTimeout, setInterval, clearInterval,
     fetch: async () => { throw new Error('default fetch must not run') },
+    ...globals,
   }
-  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(() => fakeReact()) } } }
+  sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(() => react) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   return { source, exported }
 }
@@ -104,4 +105,49 @@ test('opens a real extraction session once DSH lists it', async () => {
   }
   await exported.openAnalysisSession(sessions, 'session-1')
   assert.deepEqual(opened, ['session-1'])
+})
+
+test('keeps polling during methodology finalization and stops at either terminal result', async () => {
+  for (const terminal of ['completed', 'failed']) {
+    let state = { assets: [], methodologies: { items: [], generation_job: { status: 'finalizing' } } }
+    let responseState = state, stateIndex = 0, requests = 0
+    const effects = [], timers = new Map()
+    const react = { ...fakeReact(),
+      useState(initial) { const index = stateIndex++; return [index === 0 ? state : initial, value => { if (index === 0) state = value }] },
+      useEffect(effect) { effects.push(effect) },
+    }
+    const { exported } = await loadClient(react, {
+      document: { body: { setAttribute() {}, getAttribute() {}, removeAttribute() {} } },
+      setInterval(callback) { const id = Symbol('timer'); timers.set(id, callback); return id },
+      clearInterval(id) { timers.delete(id) },
+      async fetch() { requests++; return { ok: true, async json() { return { status: 'ok', ...responseState } } } },
+    })
+    const pages = []
+    const ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(effect) { return effect() } }
+    exported.apply(ctx)
+    let cleanups = []
+    function render(visible = true) {
+      cleanups.forEach(cleanup => cleanup?.())
+      stateIndex = 0; effects.length = 0
+      const page = pages[0].component({ scope: { cwd: '/workspace' }, visible })
+      page.type(page.props)
+      cleanups = effects.map(effect => effect())
+    }
+    render()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(timers.size, 1, 'finalizing must keep the refresh timer')
+    responseState = { ...state, methodologies: { items: [], generation_job: { status: terminal } } }
+    const before = requests
+    for (const tick of timers.values()) tick()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(requests, before + 1)
+    assert.equal(state.methodologies.generation_job.status, terminal)
+    render()
+    assert.equal(timers.size, 0, `${terminal} must stop polling`)
+    await new Promise(resolve => setImmediate(resolve))
+    state = { ...state, methodologies: { items: [], generation_job: { status: 'finalizing' } } }
+    render(false)
+    assert.equal(timers.size, 0, 'hidden pages must not poll')
+    cleanups.forEach(cleanup => cleanup?.())
+  }
 })

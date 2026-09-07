@@ -50,7 +50,7 @@ function bulletItems(markdown, pattern = /^[-*]\s+(.+)$/) {
 
 function prefixedIds(value, prefix) {
   const result = []
-  const expression = new RegExp(`${prefix}-(\\d+)((?:[,/]\\d+)*)`, 'g')
+  const expression = new RegExp(`\\b${prefix}-(\\d+)((?:[,/]\\d+)*)`, 'g')
   for (const match of value.matchAll(expression)) {
     result.push(`${prefix}-${match[1]}`)
     for (const suffix of match[2].matchAll(/[,/](\d+)/g)) result.push(`${prefix}-${suffix[1]}`)
@@ -93,7 +93,7 @@ function uniqueStrings(...values) {
 function traceabilityByCase(markdown) {
   const result = new Map()
   for (const cells of tableRows(markdown)) {
-    const caseId = cells[0]?.match(/\b(TC-[A-Z0-9-]+)\b/)?.[1]
+    const caseId = cells[0]?.match(/\b([A-Z0-9]+(?:-[A-Z0-9]+)+)\b/i)?.[1]
     if (!caseId) continue
     const row = cells.join(' | ')
     const exact = [...row.matchAll(/\b((?:RP|R)(?:-[A-Z0-9]+)+)\b/gi)].map(match => match[1])
@@ -155,22 +155,72 @@ function parseRisks(markdown, severityById, riskCases) {
 }
 
 function parseTestCase(markdown, linkedRiskIds) {
-  const heading = markdown.match(/^#\s+(TC-[A-Z0-9-]+)\s+(.+)$/m)
+  const heading = markdown.match(/^#{1,6}\s+(TC-[A-Z0-9-]+)(?:[：:]\s*|\s+)(.+)$/mi)
   if (!heading) return null
   const metadata = markdownSection(markdown, '用例定位')
   const value = label => metadata.match(new RegExp(`^-\\s+${label}[：:]\\s*(.+)$`, 'm'))?.[1]?.trim() ?? ''
+  const labels = '前置条件|前置|操作步骤|执行步骤|步骤|操作|输入|预期结果和 Oracle|预期接口结果|预期结果|预期|观察点|观测|后续业务验证|后续|故障注入|注入|清理和复原|清理步骤|清理动作|清理'
+  const fields = new Map()
+  let activeLabel = null
+  for (const line of markdown.split(/\r?\n/)) {
+    const expression = new RegExp(`(?:^|\\s)(?:[-*]\\s+)?(${labels})(（[^）]*）|\\([^)]*\\))?[：:]\\s*(.*?)(?=\\s+(?:${labels})(?:（[^）]*）|\\([^)]*\\))?[：:]|$)`, 'g')
+    const matches = [...line.replaceAll('**', '').matchAll(expression)]
+    for (const match of matches) {
+      const value = match[3].trim()
+      fields.set(match[1], [...(fields.get(match[1]) ?? []), ...(value ? [(match[2] ?? '') + value] : [])])
+      activeLabel = match[1]
+    }
+    if (!matches.length) {
+      const numbered = line.trim().match(/^\d+[.)、]\s*(.+)$/)
+      if (activeLabel && numbered) fields.set(activeLabel, [...(fields.get(activeLabel) ?? []), numbered[1]])
+      else if (line.trim()) activeLabel = null
+    }
+  }
+  const items = (title, aliases, pattern) => {
+    const section = bulletItems(markdownSection(markdown, title), pattern)
+    return section.length ? section : aliases.map(label => fields.get(label) ?? []).find(values => values.length) ?? []
+  }
   return {
     test_case_id: heading[1],
     title: heading[2].trim(),
     case_type: value('测试类型'),
     priority: value('优先级'),
     linked_risk_ids: linkedRiskIds,
-    preconditions: bulletItems(markdownSection(markdown, '前置条件')),
-    steps: bulletItems(markdownSection(markdown, '操作步骤'), /^\d+[.)、]\s*(.+)$/),
-    expected_results: bulletItems(markdownSection(markdown, '预期结果和 Oracle')),
-    observability: [],
-    cleanup: bulletItems(markdownSection(markdown, '清理和复原')),
+    preconditions: items('前置条件', ['前置条件', '前置']),
+    steps: items('操作步骤', ['操作步骤', '执行步骤', '步骤', '操作', '输入'], /^\d+[.)、]\s*(.+)$/),
+    expected_results: items('预期结果和 Oracle', ['预期结果和 Oracle', '预期接口结果', '预期结果', '预期']),
+    observability: items('观察点', ['观察点', '观测']),
+    cleanup: items('清理和复原', ['清理和复原', '清理步骤', '清理动作', '清理']),
   }
+}
+
+function parseTestCases(markdown, traceability) {
+  const headings = [...markdown.matchAll(/^(#{1,6})\s+(.+)$/gm)]
+  const cases = headings.flatMap((heading, index) => {
+    const caseId = heading[2].match(/^(TC-[A-Z0-9-]+)(?=[：:\s])/i)?.[1]
+    if (!caseId) return []
+    const end = headings.slice(index + 1).find(next => next[1].length <= heading[1].length)?.index ?? markdown.length
+    const parsed = parseTestCase(markdown.slice(heading.index, end), traceability.get(caseId) ?? traceability.get(caseId.slice(3)) ?? [])
+    return parsed ? [parsed] : []
+  })
+  const byId = new Map(cases.map(item => [item.test_case_id, item]))
+  let columns = []
+  for (const row of tableRows(markdown)) {
+    if (row.some(cell => /^(?:用例 ID|用例ID|Case ID)$/i.test(cell))) { columns = row; continue }
+    const field = (...names) => row[columns.findIndex(column => names.includes(column))] ?? ''
+    const id = field('用例 ID', '用例ID', 'Case ID')
+    if (!/^TC-[A-Z0-9-]+$/i.test(id) || byId.has(id)) continue
+    const values = (...names) => { const text = field(...names); return text ? [text] : [] }
+    byId.set(id, {
+      test_case_id: id, title: field('名称', '标题', '用例名称'),
+      case_type: field('类型', '测试类型'), priority: field('优先级'),
+      linked_risk_ids: uniqueStrings(traceability.get(id) ?? [], prefixedIds(field('关联风险'), 'R'), prefixedIds(field('关联风险'), 'RP')),
+      preconditions: values('前置条件'), steps: values('操作步骤', '执行步骤', '步骤', '输入'),
+      expected_results: values('期望结果（Oracle）', '预期结果（Oracle）', '预期结果', '期望结果', '预期'),
+      observability: values('观察点', '观测'), cleanup: values('清理动作', '清理步骤', '清理'),
+    })
+  }
+  return [...byId.values()]
 }
 
 async function readLiveDocumentDraft(runDirectory, state) {
@@ -196,10 +246,12 @@ async function readLiveDocumentDraft(runDirectory, state) {
         for (const entry of (await readdir(caseRoot, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
           if (!entry.isFile() || !entry.name.endsWith('.md')) continue
           const markdown = await readFile(path.join(caseRoot, entry.name), 'utf8')
-          const caseId = markdown.match(/^#\s+(TC-[A-Z0-9-]+)/m)?.[1]
-          const parsed = parseTestCase(markdown, caseId ? traceability.get(caseId) ?? [] : [])
-          if (parsed) details.test_cases.push(parsed)
+          details.test_cases.push(...parseTestCases(markdown, traceability))
         }
+      }
+      if (completed.has('09')) {
+        const formalCases = await readTextIfFile(path.join(runDirectory, '正式输出/黑盒测试用例.md'))
+        details.test_cases.push(...parseTestCases(formalCases, traceability))
       }
       if (details.test_cases.length > 0) stepId = '07'
     }
@@ -263,13 +315,13 @@ function normalizeProjectionDetails(projection, liveDetails) {
     }
   })
   const testCases = projectedCases.map(projected => {
-    const live = liveCaseById.get(projected.test_case_id) ?? {}
+    const live = liveCaseById.get(projected.test_case_id) ?? liveCaseById.get(`TC-${projected.test_case_id}`) ?? {}
     const merged = { ...live, ...projected }
     delete merged.status
     if (projected.status !== undefined) merged.status = projected.status
     return {
       ...merged,
-      case_type: projected.case_type ?? live.case_type ?? '',
+      case_type: projected.case_type ?? projected.type ?? live.case_type ?? '',
       priority: projected.priority ?? live.priority ?? '',
       linked_risk_ids: uniqueStrings(projected.linked_risk_ids ?? [], live.linked_risk_ids ?? []),
       preconditions: Array.isArray(projected.preconditions) && projected.preconditions.length ? projected.preconditions : live.preconditions ?? [],

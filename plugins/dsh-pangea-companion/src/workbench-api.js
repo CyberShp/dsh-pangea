@@ -295,8 +295,9 @@ function launchDetails(value, fallback = {}) {
     launcher_kind: text('launcherKind', 'launcher_kind', fallback.launcher_kind),
     launcher_command: text('launcherCommand', 'launcher_command', fallback.launcher_command),
     cwd: text('cwd', 'cwd', fallback.cwd),
-    error_code: text('code', 'error_code', fallback.error_code),
+    error_code: Number.isInteger(error.code) ? String(error.code) : text('code', 'error_code', fallback.error_code),
     syscall: text('syscall', 'syscall', fallback.syscall),
+    ...(text('stderrSummary', 'stderr_summary', fallback.stderr_summary) ? { stderr_summary: text('stderrSummary', 'stderr_summary', fallback.stderr_summary) } : {}),
     errno: Number.isInteger(error.errno) ? error.errno : fallback.errno,
   }
 }
@@ -321,7 +322,7 @@ function runProgressFingerprint(run) {
   return JSON.stringify([
     run?.lifecycle_status ?? null,
     run?.phase ?? null,
-    run?.analysis?.completed ?? null,
+    run?.completed_steps?.length ?? null,
     run?.publication?.revision ?? null,
     run?.report_available === true,
   ])
@@ -330,10 +331,36 @@ function runProgressFingerprint(run) {
 function continuationPrompt(run) {
   return [
     '上一轮回答已经结束，但当前 Codetalks Run 尚未完成。',
+    run?.phase === 'PREPARING' ? '当前 Run 尚未写出初始化状态。先使用首轮提供的 Python 路径执行请求中的 run_guard.py init；若执行失败，报告具体命令、退出码和受限错误摘要并结束。' : null,
     '请读取运行根目录中的 `内部索引/运行状态.json` 以及当前步骤交接文件，以落盘状态为准继续执行。',
-    `当前阶段：${run?.phase ?? '未知'}；已完成步骤：${run?.analysis?.completed ?? '未知'}/9。`,
+    `当前阶段：${run?.phase ?? '未知'}；已完成步骤：${run?.completed_steps?.length ?? '未知'}/9。`,
     '继续当前 Run，不要创建新的 Run。',
-  ].join('\n')
+  ].filter(Boolean).join('\n')
+}
+
+function acpRunDiagnostics(run) {
+  const value = run.readDiagnostics?.() ?? {}
+  return {
+    remote_session_id: run.remoteSessionId,
+    model: value.model || 'unavailable',
+    message_chunks: value.messageChunks,
+    tool_calls: value.toolCalls,
+    tool_failures: value.toolFailures,
+    error_code: value.errorCode,
+    error_summary: value.errorSummary,
+    stderr_summary: value.stderrSummary,
+    agent_version: value.agentVersion,
+    last_tool_id: value.lastToolId,
+    last_tool_status: value.lastToolStatus,
+    turn_duration_ms: value.turnDurationMs,
+    first_event_ms: value.firstEventMs,
+    stderr_bytes: value.stderrBytes,
+    stderr_truncated: value.stderrTruncated,
+    output_truncated: value.outputTruncated,
+    process_exited: value.processExited,
+    exit_code: value.exitCode,
+    exit_signal: value.exitSignal,
+  }
 }
 
 async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
@@ -346,6 +373,11 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
     let unchangedTurns = 0
     let turn = 1
     while (true) {
+      await lifecycle.onTurnEvent?.({
+        stage: 'acp_turn_finished', status: result.stopReason === 'error' ? 'error' : 'info', turn,
+        stop_reason: result.stopReason, protocol_stop_reason: result.protocolStopReason,
+        ...acpRunDiagnostics(run),
+      })
       output += (result.output ?? [])
         .filter(item => item?.type === 'text')
         .map(item => item.text)
@@ -356,6 +388,10 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
       }
       if (typeof lifecycle.inspectRun !== 'function') return { status: 'completed', output }
       const state = await lifecycle.inspectRun()
+      await lifecycle.onTurnEvent?.({ stage: 'acp_run_inspected', status: 'info', turn, phase: state?.phase,
+        completed: state?.completed_steps?.length,
+        state_path: state?.run_root ? path.join(state.run_root, '内部索引', '运行状态.json') : undefined,
+      })
       if (state?.lifecycle_status === 'complete' && state?.report_available === true) return { status: 'completed', output }
       if (signal.aborted || wasCancelled()) return { status: 'killed' }
       if (typeof run.continuePrompt !== 'function') {
@@ -374,7 +410,7 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
         }
       }
       turn += 1
-      await lifecycle.onTurnEvent?.({ turn, stage: 'acp_turn_continued', phase: state?.phase, completed: state?.analysis?.completed })
+      await lifecycle.onTurnEvent?.({ turn, stage: 'acp_turn_continued', phase: state?.phase, completed: state?.completed_steps?.length })
       result = await run.continuePrompt([{ type: 'text', text: continuationPrompt(state) }])
     }
   } catch (error) {
@@ -382,7 +418,10 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
       ? { status: 'killed' }
       : { status: 'failed', detail: error instanceof Error ? error.message : String(error) }
   } finally {
-    try { await run?.dispose?.() } catch { /* job settlement retains the failure */ }
+    try {
+      await run?.dispose?.()
+      if (run) await lifecycle.onTurnEvent?.({ stage: 'acp_process_cleanup', status: 'info', ...acpRunDiagnostics(run) })
+    } catch { /* job settlement retains the failure */ }
   }
 }
 
@@ -430,6 +469,7 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
         void emitLaunch(onEvent, {
           stage: 'acp_session_created', status: 'ok', provider: providerId,
           agent_session_id: String(run.id), pid: Number.isInteger(run.processId) ? run.processId : undefined,
+          ...acpRunDiagnostics(run),
           ...details,
         })
         return run
@@ -547,6 +587,8 @@ export async function launchAnalysisSession(
     `运行请求：${run.request_path}`,
     `Run ID：${run.run_id}`,
     `运行根目录：${run.run_root}`,
+    env.PANGEA_PYTHON ? `Desktop Python 可执行文件：${env.PANGEA_PYTHON}。执行 run_guard.py 时使用此路径；PowerShell 用 & 调用并单引号引用路径（路径内单引号写成两个）。` : null,
+    '遇到宿主环境阻塞时，报告失败步骤、命令退出码和必要错误摘要，然后结束；不要搜索安装目录、凭据配置或历史日志。',
     requestedResumeRunId ? '这是一次续跑：先读取内部索引/运行状态.json，调用 run_guard.py init --resume 保留已完成步骤，再从当前步骤继续。' : null,
     '旧 PANGEA Graph、Planning、Worker action、Review、Closure、Reporting、bind、validate 和 settle 均不存在。',
     '生命周期只以运行根目录中的 `内部索引/运行状态.json` 为准。',

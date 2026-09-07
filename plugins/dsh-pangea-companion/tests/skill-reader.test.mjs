@@ -6,6 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { companionSnapshot } from '../src/reader.js'
+import { buildTestCaseCsv } from '../src/export.js'
 
 async function writeJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true })
@@ -17,6 +18,65 @@ function canonicalJson(value) {
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
   return JSON.stringify(value)
 }
+
+test('exports multiple cases from a combined Skill draft with inline and labelled fields', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-combined-cases-'))
+  const dataRoot = path.join(root, 'data'), runId = 'combined'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  try {
+    await writeJson(path.join(dataRoot, '.pangea/skill-runs', runId, 'metadata.json'), { run_id: runId, run_root: runRoot, status: 'active' })
+    await writeJson(path.join(runRoot, '内部索引/运行状态.json'), { status: 'in_progress', completed_steps: ['01','02','03','04','05','06','07'] })
+    await mkdir(path.join(runRoot, '活文档/测试设计'), { recursive: true })
+    await writeFile(path.join(runRoot, '活文档/18-测试追溯矩阵.md'), '| 用例 ID | 分支 | 风险 |\n| --- | --- | --- |\n| TC-001 | BR-01 | - |\n')
+    await writeFile(path.join(runRoot, '活文档/测试设计/工作草稿.md'), '# 工作草稿\n\n## 用例\n\n### TC-001：偶数返回1\n- 前置：测试入口可用。 步骤：传 2。 注入：无。 预期：返回 1。 后续：无。 清理：无。\n\n### TC-002: 限幅\n- **前置条件**：区间 [0,10]。\n- **输入**：`clamp(15,0,10)`。\n- **预期**：返回 `10`。\n- **观测**：函数返回值。\n- **清理**：无。\n\n## 无关章节\n- 步骤：不得串入任何用例。\n\n## 表格用例\n| 用例 ID | 名称 | 操作步骤 | 期望结果（Oracle） | 关联风险 |\n| --- | --- | --- | --- | --- |\n| TC-003 | 符号为零 | 调用 signum(0) | 返回 0 且无异常 | R-001、R-002 |\n| TC-001 | 摘要重复 | 不覆盖详细步骤 | 不覆盖详细预期 | |\n')
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.deepEqual(current.details.test_cases.map(item => item.test_case_id), ['TC-001','TC-002','TC-003'])
+    assert.deepEqual(current.details.test_cases[0].steps, ['传 2。'])
+    assert.deepEqual(current.details.test_cases[0].expected_results, ['返回 1。'])
+    assert.deepEqual(current.details.test_cases[0].linked_risk_ids, [])
+    assert.deepEqual(current.details.test_cases[1].steps, ['`clamp(15,0,10)`。'])
+    assert.deepEqual(current.details.test_cases[1].observability, ['函数返回值。'])
+    assert.deepEqual(current.details.test_cases[2].steps, ['调用 signum(0)'])
+    assert.deepEqual(current.details.test_cases[2].expected_results, ['返回 0 且无异常'])
+    assert.deepEqual(current.details.test_cases[2].linked_risk_ids, ['R-001','R-002'])
+    const csv = buildTestCaseCsv(current)
+    assert.match(csv, /传 2。/)
+    assert.match(csv, /返回 `10`。/)
+    assert.doesNotMatch(csv, /不得串入/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('exports final mixed-case IDs and bold labelled blocks while preserving projection IDs', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-final-labelled-cases-'))
+  const dataRoot = path.join(root, 'data'), runId = 'final-labelled'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  try {
+    await writeJson(path.join(dataRoot, '.pangea/skill-runs', runId, 'metadata.json'), { run_id: runId, run_root: runRoot, status: 'active' })
+    await writeJson(path.join(runRoot, '内部索引/运行状态.json'), { status: 'complete', completed_steps: ['01','02','03','04','05','06','07','08','09'] })
+    await writeJson(path.join(runRoot, '内部索引/工作台投影.json'), {
+      schema_version: '1.0', run_id: runId, publication: { state: 'final', revision: 1, step_id: '09' },
+      test_cases: [{ test_case_id: 'init-01', title: '初始化', type: 'negative' }, { test_case_id: 'peek-04', title: '查询边界' }],
+      risks: [], evidence: [], business_flows: [], review_issues: [],
+    })
+    await mkdir(path.join(runRoot, '活文档/测试设计'), { recursive: true })
+    await writeFile(path.join(runRoot, '活文档/测试设计/草稿.md'), '# TC-init-01 初始化\n- 步骤：旧草稿步骤\n- 预期：旧草稿结果\n')
+    await writeFile(path.join(runRoot, '活文档/18-测试追溯矩阵.md'), '| 用例 ID | 风险 |\n| --- | --- |\n| init-01 | — |\n| peek-04 | R-01 |\n')
+    await mkdir(path.join(runRoot, '正式输出'), { recursive: true })
+    await writeFile(path.join(runRoot, '正式输出/黑盒测试用例.md'), '# 黑盒测试用例\n\n## TC-init-01：初始化\n**前置条件**：零初始化对象\n**输入**：capacity=4\n**操作步骤**：\n1. 调用 mq_init(&q, 4)\n2. 调用 mq_size(&q)\n**预期结果**：返回 MQ_OK，size=0\n\n---\n\n## TC-peek-04 ⚠：查询边界\n**操作步骤**：\n1. 调用 mq_peek(&q, 0, &out)\n**预期结果（设计）**：MQ_INVALID\n**预期结果（源码实际）**：MQ_OK\n\n## 无关章节\n1. 不得串入用例\n')
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.deepEqual(current.details.test_cases.map(item => item.test_case_id), ['init-01', 'peek-04'])
+    assert.deepEqual(current.details.test_cases[0].steps, ['调用 mq_init(&q, 4)', '调用 mq_size(&q)'])
+    assert.deepEqual(current.details.test_cases[0].preconditions, ['零初始化对象'])
+    assert.deepEqual(current.details.test_cases[0].expected_results, ['返回 MQ_OK，size=0'])
+    assert.equal(current.details.test_cases[0].case_type, 'negative')
+    assert.deepEqual(current.details.test_cases[1].linked_risk_ids, ['R-01'])
+    assert.deepEqual(current.details.test_cases[1].expected_results, ['（设计）MQ_INVALID', '（源码实际）MQ_OK'])
+    const csv = buildTestCaseCsv(current)
+    assert.match(csv, /调用 mq_init/)
+    assert.match(csv, /（设计）MQ_INVALID/)
+    assert.doesNotMatch(csv, /旧草稿|不得串入/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('reads Codetalks state and maps Step 01–09 Markdown lifecycle', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-'))

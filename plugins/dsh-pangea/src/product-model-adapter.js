@@ -100,7 +100,7 @@
     title.textContent = '配置模型与 API'
     title.style.cssText = 'margin:0;font-size:22px;line-height:30px'
     const description = document.createElement('p')
-    description.textContent = 'PANGEA 使用 DSH 管理的官方或自定义模型。请先完成模型与 API 接入。'
+    description.textContent = '请配置模型提供方或自定义 API，并选择默认模型。'
     description.style.cssText = 'margin:10px 0 22px;color:#68707c;font-size:14px;line-height:22px'
 
     const action = document.createElement('button')

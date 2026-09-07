@@ -1,10 +1,24 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
 import { LaunchLogStore } from '../src/launch-log.js'
+
+test('reads a bounded tail of large logs and skips partial records', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-log-tail-'))
+  try {
+    const store = new LaunchLogStore({ root })
+    await writeFile(store.filePath('large'), 'x'.repeat(1024 * 1024) + '\n')
+    await store.append('large', { stage: 'acp_turn_finished', status: 'error', error_code: '-32001' })
+    const result = await store.read('large')
+    assert.equal(result.events.length, 1)
+    assert.equal(result.events[0].error_code, '-32001')
+    assert.equal(result.truncated, true)
+    assert.ok(result.bytes_read <= 256 * 1024)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('persists task launch diagnostics independently from the task store', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-launch-log-'))

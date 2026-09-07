@@ -214,7 +214,7 @@ window.__ModuleLoader__.load({
 
       const active = Boolean(
         state?.assets?.some(asset => asset.status === 'extracting' || asset.extraction_job?.status === 'running')
-        || ['queued', 'running'].includes(state?.methodologies?.generation_job?.status)
+        || ['queued', 'running', 'finalizing'].includes(state?.methodologies?.generation_job?.status)
       )
       React.useEffect(() => {
         if (!active || visible === false) return undefined

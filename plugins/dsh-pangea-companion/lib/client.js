@@ -843,7 +843,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'Agent Runtime 设置' },
         h('div', { style: styles.sticky }, h('div', { style: styles.header },
-          h('div', null, h('div', { style: styles.title }, 'Agent Runtime'), h('div', { style: styles.subline }, 'PANGEA External Agent Runtime 2.0 · 模型与推理配置由 Agent 当前会话决定。')),
+          h('div', null, h('div', { style: styles.title }, 'Agent Runtime'), h('div', { style: styles.subline }, 'PANGEA External Agent Runtime 2.0 · 使用 Agent 新建 ACP 会话的默认模型与推理配置。')),
           h('button', { type: 'button', disabled: loading, style: styles.button, onClick: () => { void loadSettings() } }, loading ? '读取中…' : '刷新'))),
         h('div', { style: styles.environmentContent },
           notice ? h('div', { style: { ...styles.card, ...(notice.error ? styles.healthError : styles.healthOk) }, role: notice.error ? 'alert' : 'status' }, notice.message) : null,
@@ -852,7 +852,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', style: styles.button, onClick: () => { void window.dshDesktop.restartHarness() } }, '立即重启 Harness'))) : null,
           h('div', { style: { ...styles.card, ...styles.compatibility } },
             h('div', { style: styles.itemTitle }, '配置原则'),
-            h('div', { style: styles.itemMeta }, '命令由 Desktop 在 Windows 上通过 PowerShell 解析为绝对路径；DSH 持有子进程、输出和取消。模型与推理配置由 Agent 当前会话决定。')),
+            h('div', { style: styles.itemMeta }, '命令由 Desktop 在 Windows 上通过 PowerShell 解析为绝对路径；DSH 持有子进程、输出和取消。使用 Agent 新建 ACP 会话的默认模型与推理配置。')),
           (snapshot?.providers ?? []).map(provider => {
             const value = draft[provider.id] ?? {}
             return h('section', { key: provider.id, style: styles.environmentSection },
@@ -1433,7 +1433,19 @@ window.__ModuleLoader__.load({
         const time = event?.at ? formatTime(event.at) : ''
         const detail = event?.error ?? event?.detail ?? event?.message ?? event?.output ?? ''
         const context = [event?.provider, event?.model, event?.reasoning_effort, event?.job_id, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
-        return [time, status, stage, context, detail].filter(Boolean).join(' · ')
+        const evidence = [
+          ['远端会话', event?.remote_session_id], ['Agent 版本', event?.agent_version],
+          ['回合', event?.turn], ['停止原因', event?.stop_reason], ['ACP 停止原因', event?.protocol_stop_reason],
+          ['消息事件', event?.message_chunks], ['工具事件', event?.tool_calls], ['工具失败事件', event?.tool_failures],
+          ['最近工具', event?.last_tool_id], ['工具状态', event?.last_tool_status],
+          ['回合耗时(ms)', event?.turn_duration_ms], ['首个事件(ms)', event?.first_event_ms],
+          ['Run 阶段', event?.phase], ['完成步骤', event?.completed], ['状态文件', event?.state_path],
+          ['错误码', event?.error_code], ['错误摘要', event?.error_summary], ['stderr 摘要', event?.stderr_summary],
+          ['进程已退出', event?.process_exited], ['退出码', event?.exit_code], ['退出信号', event?.exit_signal],
+          ['stderr 已截断', event?.stderr_truncated], ['输出已截断', event?.output_truncated],
+        ].filter(([, value]) => value !== undefined && value !== null && value !== '')
+          .map(([label, value]) => `${label}: ${value}`).join('\n')
+        return [[time, status, stage, context, detail].filter(Boolean).join(' · '), evidence].filter(Boolean).join('\n')
       }
 
       async function appendToDiscussionConversation(draft) {
@@ -1503,7 +1515,7 @@ window.__ModuleLoader__.load({
           open: launchDiagnosticsOpen,
           onToggle: event => setLaunchDiagnosticsOpen(event.currentTarget.open),
         },
-        h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `启动诊断 · ${events.length} 条`),
+        h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `启动诊断 · ${events.length} 条${workbench?.launch_log?.truncated ? ' · 仅显示最近记录' : ''}`),
         h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, events.map((event, index) => h('div', {
           key: `${event.at ?? index}:${event.stage ?? 'unknown'}:${index}`,
           style: { ...styles.itemMeta, color: event.status === 'error' ? 'var(--dsw-alias-state-error-primary, #e66767)' : undefined, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
@@ -2133,7 +2145,8 @@ window.__ModuleLoader__.load({
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
         const canSubmit = compatible && createForm.repository && createForm.target.trim() && sourceScope.length > 0 && executionReady && !creatingRun
         const assetItems = assetCatalog?.assets ?? []
-        const selectedAssets = assetItems.filter(item => createForm.asset_ids.includes(item.asset_id))
+        const selectedAssets = createForm.asset_ids.map(assetId => assetItems.find(item => item.asset_id === assetId)
+          ?? { asset_id: assetId, title: assetId })
         const assetTypeLabels = { requirement: '需求', design: '设计', historical_defect: '历史缺陷', reference: '参考资料', coverage: 'Coverage', test_case_example: '用例示例' }
         const formField = (label, key, placeholder) => h('label', null,
           h('div', { style: styles.label }, label),
@@ -2203,7 +2216,9 @@ window.__ModuleLoader__.load({
                 h('div', { style: styles.label }, '分析资产'),
                 h('div', { style: styles.itemMeta }, '分析重点由 Codetalks Skill 固定；这里仅选择资产库中已通过完整性校验的输入。用例示例只能在 Step 07 作为格式/粒度参考。'),
                 h('div', { style: { ...styles.chips, marginTop: 7 } }, selectedAssets.length
-                  ? selectedAssets.map(item => h('span', { key: item.asset_id, style: styles.badge }, `${assetTypeLabels[item.asset_type] ?? item.asset_type} · ${item.title}`))
+                  ? selectedAssets.map(item => h('button', { key: item.asset_id, type: 'button', style: styles.badge,
+                    'aria-label': `移除资产 ${item.title}`, onClick: () => toggleCreateAsset(item.asset_id),
+                  }, `${assetTypeLabels[item.asset_type] ?? '资产'} · ${item.title} ×`))
                   : h('span', { style: styles.itemMeta }, '未选择资产（可直接分析源码）')),
                 h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void openAssetSelector() } }, assetSelectorOpen ? '收起资产库' : '从资产库选择'),
                 assetSelectorOpen ? h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } },
@@ -2216,7 +2231,7 @@ window.__ModuleLoader__.load({
               ),
             modelRouting.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 }, role: 'alert' }, `模型目录读取失败：${modelRouting.error ?? '未知错误'}`) : null,
             modelRouting.status === 'ok' && modelOptions.length === 0 && !createForm.provider_id ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, '没有可用的内置 API 模型，请先到“设置”配置模型与 API。', h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })) }, '打开模型设置')) : null,
-            createForm.provider_id && selectedProvider?.registered === true ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `${selectedProvider.label} 将使用 Agent 当前会话的模型与推理配置。`) : null,
+            createForm.provider_id && selectedProvider?.registered === true ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `${selectedProvider.label} 将使用 Agent 新建 ACP 会话的默认模型与推理配置。`) : null,
             createForm.provider_id && selectedProvider?.registered !== true ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, `${selectedProvider?.label ?? createForm.provider_id} 尚未在当前 Desktop 加载，请检查插件配置。`) : null,
             h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务'))
       }
@@ -2503,6 +2518,7 @@ window.__ModuleLoader__.load({
             launchFailure.error_code ? h('div', { style: styles.itemMeta }, `错误码：${launchFailure.error_code}`) : null,
             h('div', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, launchFailure.error ?? launchFailure.message ?? selectedTask.launch_error)) : null,
           /* ACP process output is rendered in the product shell's right assistant panel. */
+          renderLaunchDiagnostics(launchEvents),
           ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) && mayRetryLaunch ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? (selectedTask.run_id ? '正在继续…' : '正在重试…') : (selectedTask.run_id ? '继续分析' : '重试启动')) : null,
           selectedTask.run_id && !launchPresentation.canResume ? h('div', { style: { ...styles.itemMeta, marginTop: 14 } }, `暂不能继续：${launchPresentation.resumeBlockedReason}`) : null))
         }
@@ -2537,6 +2553,7 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, presentation.countsAvailability === 'unpublished' ? '测试结果尚未发布' : presentation.countsAvailability === 'unavailable' ? '测试结果不可读取' : `${displayCount('test_cases', testCases.length)} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, displayCount('evidence', evidence.length))))),
           renderHealthCard(false),
+          renderLaunchDiagnostics(taskLaunchEvents(selectedTask, workbench)),
           previousFailures.length ? h('details', { style: styles.card },
             h('summary', { style: { cursor: 'pointer', fontWeight: 700 } }, '上一次尝试失败'),
             h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, '当前已开始新的分析尝试；下面保留的是历史失败记录。'),
@@ -2695,7 +2712,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '用例总数'), h('div', { style: styles.decisionValue }, testCases.length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已选择'), h('div', { style: styles.decisionValue }, selectedCaseIds.length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '关联风险'), h('div', { style: styles.decisionValue }, linkedCases)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '关联风险的用例'), h('div', { style: styles.decisionValue }, linkedCases)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '导出格式'), h('div', { style: styles.decisionValue }, 'CSV / XLSX')))),
           h('div', { style: { ...styles.card, ...styles.actionCard } },
             h('div', { style: styles.itemTitle }, '测试用例出口'),
