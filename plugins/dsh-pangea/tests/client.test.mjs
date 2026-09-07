@@ -8,13 +8,15 @@ import { fileURLToPath } from 'node:url'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const clientPath = path.resolve(here, '..', 'lib', 'client.js')
 
-async function loadClient() {
+async function loadClient(react = { name: 'react' }, extraSandbox = {}) {
   const source = await readFile(clientPath, 'utf8')
   let exported
-  const modules = new Map([['react', { name: 'react' }]])
+  const modules = new Map([['react', react], ['react-dom', { createPortal: (child, host) => ({ child, host }) }]])
   const requireModule = specifier => modules.get(specifier) ?? { name: specifier }
-  const sandbox = { console, window: { __ModuleLoader__: { load(spec) { exported = spec.factory(requireModule) } } } }
+  const { document, ...extras } = extraSandbox
+  const sandbox = { console, ...extras, window: { ...extras.window, __ModuleLoader__: { load(spec) { exported = spec.factory(requireModule) } } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
+  if (document) sandbox.document = document
   return { exported, source, sandbox, requireModule }
 }
 
@@ -399,4 +401,114 @@ test('reserves the assistant body for analysis output while keeping the composer
   assert.equal('pangeaAnalysisProcess' in scroll.dataset, false)
   assert.equal('pangeaAnalysisReadonly' in composer.dataset, false)
   assert.equal(card.inert, false)
+})
+
+test('uses only the selected conversation and current attempt as the assistant session', async () => {
+  const { exported } = await loadClient()
+  const context = {
+    taskId: 'task-06', attemptId: 'attempt-06', ownerSessionId: 'session-06',
+    activeConversationId: 'analysis-06', activeConversationSessionId: 'session-06',
+    conversations: [{ conversation_id: 'analysis-06', session_id: 'session-06', kind: 'analysis' }],
+  }
+  assert.equal(exported.assistantSessionId(context), 'session-06')
+  assert.equal(exported.assistantSessionId({ ...context, activeConversationId: 'analysis-05' }), null)
+  assert.equal(exported.assistantSessionId({ ...context, activeConversationSessionId: 'session-05' }), null)
+  assert.equal(exported.assistantSessionId({ ...context, ownerSessionId: null }), null)
+  assert.equal(exported.assistantSessionId({ ...context, ownerSessionId: 'session-retry' }), null)
+  assert.equal(exported.assistantSessionId({ ...context, ownerSessionId: null, conversations: [
+    { conversation_id: 'analysis-06', session_id: 'session-06', kind: 'assistant' },
+  ] }), 'session-06')
+  assert.equal(exported.shouldShowAssistantProcess({ taskId: 'failed-before-session', process: { error: 'snapshot denied' } }), true)
+})
+
+test('task assistant fences old todos until the selected task session is available', async () => {
+  const oldTodos = [{ id: 'old-todo', content: 'Run 05 analysis', status: 'in_progress' }]
+  const oldSession = { id: 'session-05', projectionValues: { todos: oldTodos } }
+  const newSession = { id: 'session-06', projectionValues: { todos: [{ id: 'new-todo', content: 'Run 06 analysis' }] } }
+  const discussionSession = { id: 'session-06-discussion', projectionValues: { todos: [] } }
+  const context = {
+    taskId: 'task-06', runId: 'run-06', workspaceKey: '/workspace', attemptId: 'attempt-06',
+    activeConversationId: null, activeConversationSessionId: null, ownerSessionId: null, conversations: [],
+    process: { status: 'failed', error: 'snapshot denied' },
+  }
+  for (const scenario of ['unbound', 'switching', 'analysis-ready', 'discussion-ready', 'discussion-remount', 'old-task-cache', 'other-workspace-cache']) {
+    let currentSessionId = scenario === 'discussion-remount' ? discussionSession.id
+      : ['analysis-ready', 'discussion-ready'].includes(scenario) ? newSession.id : oldSession.id
+    const bound = ['switching', 'analysis-ready', 'discussion-ready', 'discussion-remount'].includes(scenario)
+    const cached = bound ? {
+      ...context, ownerSessionId: newSession.id, activeConversationId: 'conversation-06',
+      activeConversationSessionId: newSession.id,
+      activeConversationKind: scenario === 'discussion-ready' ? 'assistant' : 'analysis',
+      conversations: [
+        { conversation_id: 'conversation-06', session_id: newSession.id, kind: scenario === 'discussion-ready' ? 'assistant' : 'analysis' },
+        { conversation_id: 'discussion-06', session_id: discussionSession.id, kind: 'assistant' },
+      ],
+    } : { ...context,
+      taskId: scenario === 'old-task-cache' ? 'task-05' : context.taskId,
+      workspaceKey: scenario === 'other-workspace-cache' ? '/other-workspace' : context.workspaceKey,
+    }
+    const effects = []
+    const layouts = []
+    let stateIndex = 0
+    let renderingShell = true
+    const react = {
+      Fragment: Symbol('Fragment'),
+      createElement(type, props, ...children) { return { type, props: { ...props, children: children.length === 1 ? children[0] : children }, children } },
+      cloneElement(node, props) { return { ...node, props: { ...node.props, ...props } } },
+      useState(initial) { return [renderingShell && stateIndex++ === 1 ? cached : initial, () => {}] },
+      useRef(initial) { return { current: initial } },
+      useCallback(fn) { return fn }, useMemo(fn) { return fn() },
+      useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
+      useEffect(fn) { effects.push(fn) }, useLayoutEffect(fn) { layouts.push(fn) },
+    }
+    const card = { inert: false, setAttribute() {}, removeAttribute() {} }
+    const composer = { dataset: {}, querySelectorAll: () => [card] }
+    const scroll = { dataset: {}, querySelector: () => composer, insertBefore() {} }
+    const pane = { querySelector: () => scroll, insertBefore() {} }
+    const root = { querySelector: () => pane }
+    const { exported, source } = await loadClient(react, {
+      document: {
+        body: { setAttribute() {}, getAttribute() {}, removeAttribute() {} },
+        querySelector: () => root, createElement: () => ({ dataset: {}, remove() {}, isConnected: true }),
+      },
+      window: { addEventListener() {}, removeEventListener() {} },
+      MutationObserver: class { observe() {} disconnect() {} },
+    })
+    const opened = []
+    const sessions = {
+      list: { subscribe() { return () => {} }, getSnapshot() { return { current: currentSessionId, byId: { [oldSession.id]: oldSession, [newSession.id]: newSession, [discussionSession.id]: discussionSession } } } },
+      open(id) { opened.push(id); currentSessionId = id },
+    }
+    const sidebar = fakeSidebar()
+    const service = exported.createPangeaService(sidebar, sessions)
+    service.selectTask('task-06')
+    service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+    const shell = sidebar.getTab('dsh-pangea:analysis').component({ scope: { cwd: '/workspace' }, visible: true })
+    const rendered = shell.type(shell.props)
+    const portal = rendered.children.find(node => node?.type?.name === 'AssistantPortals')
+    if (scenario.endsWith('cache')) {
+      assert.equal(portal.props.context, null, scenario)
+      effects.forEach(effect => effect())
+      assert.deepEqual(opened, [])
+      continue
+    }
+    assert.equal(portal.props.context.taskId, 'task-06')
+    // Render the real portal/layout against a composer holding the old todos.
+    renderingShell = false
+    layouts.length = 0
+    portal.type(portal.props)
+    const cleanup = layouts[0]()
+    assert.equal(scroll.dataset.pangeaSessionMismatch, ['unbound', 'switching', 'discussion-remount'].includes(scenario) ? 'true' : undefined, scenario)
+    assert.equal(card.inert, scenario !== 'discussion-ready', scenario)
+    assert.match(source, /\[data-pangea-session-mismatch="true"\] > \[data-composer-seat\] \{\s*display: none !important/)
+    // A shell can remount after the user's explicit discussion switch while
+    // its workspace cache still points to analysis. It must not switch back.
+    effects.forEach(effect => effect())
+    assert.deepEqual(opened, [], scenario)
+    if (scenario === 'discussion-remount') assert.equal(currentSessionId, discussionSession.id)
+    assert.equal(oldSession.projectionValues.todos, oldTodos)
+    cleanup()
+    assert.equal(scroll.dataset.pangeaSessionMismatch, undefined)
+    assert.equal(card.inert, false)
+  }
 })

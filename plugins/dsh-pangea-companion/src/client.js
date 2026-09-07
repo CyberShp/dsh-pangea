@@ -1413,6 +1413,7 @@ window.__ModuleLoader__.load({
           await requestWorkbenchAction({ cwd, action: 'task-conversation-activate', payload: { task_id: selectedTask.task_id, conversation_id: conversationId } })
           ctx?.pangea?.registerProductSession?.(conversation.session_id)
           ctx?.sessions?.open?.(conversation.session_id)
+          await loadWorkbench()
         } catch (reason) {
           showActionNotice(`无法切换会话：${reason instanceof Error ? reason.message : String(reason)}`, true)
         }

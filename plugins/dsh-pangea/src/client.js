@@ -444,6 +444,10 @@ window.__ModuleLoader__.load({
         body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] > [data-slot="conversation.session"] {
           display: none !important;
         }
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-session-mismatch="true"] > [data-slot="conversation.session"],
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-session-mismatch="true"] > [data-composer-seat] {
+          display: none !important;
+        }
         body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] > [data-pangea-assistant-portal="process"] {
           display: flex; flex: 1 1 0; min-height: 0; overflow: hidden;
         }
@@ -658,8 +662,19 @@ window.__ModuleLoader__.load({
     }
 
     function shouldShowAssistantProcess(context) {
-      return Boolean(context?.taskId) && (context.activeConversationKind === 'analysis'
+      return Boolean(context?.taskId) && (!context.activeConversationKind && !context.activeConversationId && !context.activeConversationSessionId
+        || context.activeConversationKind === 'analysis'
         || (!context.activeConversationKind && context.activeConversationSessionId === context.ownerSessionId))
+    }
+
+    function assistantSessionId(context) {
+      if (!context?.taskId || !context.activeConversationSessionId) return null
+      const conversation = context.conversations?.find(item => item.conversation_id === context.activeConversationId)
+      if (!conversation || conversation.session_id !== context.activeConversationSessionId) return null
+      // A retry can still list the previous analysis conversation before its
+      // new owner session has been bound. Do not reopen that old attempt.
+      if (conversation.kind === 'analysis' && context.attemptId && conversation.session_id !== context.ownerSessionId) return null
+      return conversation.session_id
     }
 
     function setComposerReadonly(composer, readonly) {
@@ -673,12 +688,14 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function setAnalysisProcessLayout(scroll, composer, active) {
+    function setAnalysisProcessLayout(scroll, composer, active, sessionMatches = true) {
       if (scroll) {
         if (active) scroll.dataset.pangeaAnalysisProcess = 'true'
         else delete scroll.dataset.pangeaAnalysisProcess
+        if (!sessionMatches) scroll.dataset.pangeaSessionMismatch = 'true'
+        else delete scroll.dataset.pangeaSessionMismatch
       }
-      setComposerReadonly(composer, active)
+      setComposerReadonly(composer, active || !sessionMatches)
     }
 
     function AssistantProcess({ context }) {
@@ -705,9 +722,11 @@ window.__ModuleLoader__.load({
           : null)
     }
 
-    function AssistantPortals({ context, enabled }) {
+    function AssistantPortals({ context, enabled, currentSessionId }) {
       const [hosts, setHosts] = React.useState(null)
       const hostsRef = React.useRef(null)
+      const expectedSessionId = assistantSessionId(context)
+      const sessionMatches = Boolean(expectedSessionId && expectedSessionId === currentSessionId)
       React.useLayoutEffect(() => {
         let disposed = false
         let observer
@@ -739,7 +758,7 @@ window.__ModuleLoader__.load({
               current.composer = composer
             }
             current.scroll = scroll
-            setAnalysisProcessLayout(scroll, composer, shouldShowAssistantProcess(context))
+            setAnalysisProcessLayout(scroll, composer, shouldShowAssistantProcess(context), sessionMatches)
             return
           }
           const headerHost = document.createElement('div')
@@ -748,7 +767,7 @@ window.__ModuleLoader__.load({
           processHost.dataset.pangeaAssistantPortal = 'process'
           pane.insertBefore(headerHost, pane.firstChild)
           scroll.insertBefore(processHost, composer || null)
-          setAnalysisProcessLayout(scroll, composer, shouldShowAssistantProcess(context))
+          setAnalysisProcessLayout(scroll, composer, shouldShowAssistantProcess(context), sessionMatches)
           hostsRef.current = { headerHost, processHost, scroll, composer }
           setHosts(hostsRef.current)
         }
@@ -764,15 +783,22 @@ window.__ModuleLoader__.load({
           observer?.disconnect()
           removeHosts()
         }
-      }, [context?.activeConversationKind, context?.activeConversationSessionId, context?.ownerSessionId, context?.taskId, enabled])
+      }, [context?.activeConversationKind, context?.activeConversationSessionId, context?.ownerSessionId, context?.taskId, enabled, sessionMatches])
       if (!hosts || !ReactDOM?.createPortal) return null
       return h(React.Fragment, null,
         ReactDOM.createPortal(h(AssistantHeader, { context }), hosts.headerHost),
-        ReactDOM.createPortal(h(AssistantProcess, { context }), hosts.processHost))
+        ReactDOM.createPortal(shouldShowAssistantProcess(context)
+          ? h(AssistantProcess, { context })
+          : !sessionMatches ? h('p', { role: 'status' }, '正在切换任务会话…') : null, hosts.processHost))
     }
 
-    function ProductShell({ service, betterSidebar, page, scope, tab, visible, tabProps, children }) {
+    function ProductShell({ service, betterSidebar, sessions, page, scope, tab, visible, tabProps, children }) {
       const snapshot = React.useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
+      const selectedTaskId = React.useSyncExternalStore(service.subscribeTaskSelection, service.getSelectedTaskId, service.getSelectedTaskId)
+      const sessionList = React.useSyncExternalStore(
+        React.useCallback(listener => sessions?.list?.subscribe(listener) ?? (() => {}), [sessions]),
+        React.useCallback(() => sessions?.list?.getSnapshot() ?? null, [sessions]),
+      )
       const sidebarSnapshot = React.useSyncExternalStore(
         betterSidebar.subscribeState,
         betterSidebar.getSnapshot,
@@ -781,7 +807,11 @@ window.__ModuleLoader__.load({
       const productStateKey = scope?.cwd ?? scope?.sessionId ?? '__default__'
       const initialProductState = productStateByWorkspace.get(productStateKey) ?? DEFAULT_PRODUCT_STATE
       const [systemState, setSystemState] = React.useState(initialProductState.systemState)
-      const [assistantContext, setAssistantContext] = React.useState(initialProductState.assistantContext)
+      const [cachedAssistantContext, setAssistantContext] = React.useState(initialProductState.assistantContext)
+      const assistantContext = cachedAssistantContext
+        && (!selectedTaskId || cachedAssistantContext.taskId === selectedTaskId)
+        && (!scope?.cwd || cachedAssistantContext.workspaceKey === scope.cwd)
+        ? cachedAssistantContext : null
       const [assistantOpen, setAssistantOpen] = React.useState(false)
       const sidebarState = sidebarSnapshot?.state
       const productVisible = visible
@@ -912,7 +942,7 @@ window.__ModuleLoader__.load({
           assistantOpen,
           onToggleAssistant: () => setAssistantOpen(value => !value),
         }),
-        h(AssistantPortals, { context: assistantContext, enabled: productVisible && page.id === 'analysis' }),
+        h(AssistantPortals, { context: assistantContext, enabled: productVisible && page.id === 'analysis', currentSessionId: sessionList?.current }),
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
           h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => item.id !== 'settings' && pageIsAvailable(item, scope)).map(item => h('button', {
             key: item.id, type: 'button', 'data-pangea-nav-button': true, 'data-active': item.id === page.id ? 'true' : 'false',
@@ -991,7 +1021,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function createPangeaService(betterSidebar) {
+    function createPangeaService(betterSidebar, sessions) {
       const pages = new Map()
       const nativeDisposers = new Map()
       const listeners = new Set()
@@ -1095,7 +1125,7 @@ window.__ModuleLoader__.load({
           available: descriptor.available,
           badge: descriptor.badge,
           component: props => h(ProductShell, {
-            service: publicService, betterSidebar, page, scope: props.scope, tab: props.tab, visible: props.visible,
+            service: publicService, betterSidebar, sessions, page, scope: props.scope, tab: props.tab, visible: props.visible,
             tabProps: props,
           }, h(descriptor.component, props)),
         })
@@ -1260,7 +1290,7 @@ window.__ModuleLoader__.load({
       const betterSidebar = ctx.betterSidebar
       if (!betterSidebar) return
       ctx.effect(installProductStyles, 'dsh-pangea: product shell styles')
-      const service = createPangeaService(betterSidebar)
+      const service = createPangeaService(betterSidebar, ctx.sessions)
       ctx.effect(() => service.registerPage({ id: 'settings', title: '设置', order: 1000, component: SettingsPage }), 'dsh-pangea: product settings page')
       ctx.provide('pangea', service)
       ctx.effect(() => installProductWorkspaceBootstrap(ctx, service), 'dsh-pangea: product workspace bootstrap')
@@ -1278,6 +1308,7 @@ window.__ModuleLoader__.load({
     exports.setComposerReadonly = setComposerReadonly
     exports.setAnalysisProcessLayout = setAnalysisProcessLayout
     exports.shouldShowAssistantProcess = shouldShowAssistantProcess
+    exports.assistantSessionId = assistantSessionId
     exports.apply = apply
     return module.exports
   },
