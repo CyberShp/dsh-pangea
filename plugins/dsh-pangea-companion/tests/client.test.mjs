@@ -4,6 +4,7 @@ import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
+import { applyTaskExecutionState } from '../src/index.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const clientPath = path.resolve(here, '..', 'lib', 'client.js')
@@ -19,11 +20,11 @@ function fakeReact() {
   }
 }
 
-async function loadClientExports() {
+async function loadClientExports(react = fakeReact()) {
   const source = await readFile(clientPath, 'utf8')
   let exported
   const sandbox = { URLSearchParams, console, fetch: async () => { throw new Error('fetch must not run during registration') }, setInterval, clearInterval }
-  sandbox.window = { setInterval, clearInterval, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
+  sandbox.window = { setInterval, clearInterval, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? react : {}) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   return exported
 }
@@ -190,7 +191,7 @@ test('does not present a failed task as pending publication', async () => {
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   const failed = exported.deriveRunPresentation(
     { status: 'failed', execution_status: 'failed', run_id: 'run-1', terminal_error: 'ACP Agent 启动失败', can_resume: true },
-    { publication: { state: 'pending' } },
+    { run_id: 'run-1', publication: { state: 'pending' } },
     { status: 'pending' },
   )
   assert.equal(failed.failed, true)
@@ -202,8 +203,8 @@ test('does not present a failed task as pending publication', async () => {
   assert.equal(failed.countsAvailability, 'unpublished')
   assert.equal(failed.canResume, true)
   const running = exported.deriveRunPresentation(
-    { status: 'running', execution_status: 'running' },
-    { publication: { state: 'pending' } },
+    { status: 'running', execution_status: 'running', run_id: 'run-2' },
+    { run_id: 'run-2', publication: { state: 'pending' } },
     { status: 'pending' },
   )
   assert.equal(running.reliabilityLabel, '阶段结果待发布')
@@ -212,7 +213,7 @@ test('does not present a failed task as pending publication', async () => {
   assert.equal(running.canResume, false)
   const stopping = exported.deriveRunPresentation(
     { status: 'running', execution_status: 'stopping', run_id: 'run-1' },
-    { publication: { state: 'pending' } },
+    { run_id: 'run-1', publication: { state: 'pending' } },
     { status: 'pending' },
   )
   assert.equal(stopping.stopping, true)
@@ -223,12 +224,117 @@ test('does not present a failed task as pending publication', async () => {
 
   const failedDraft = exported.deriveRunPresentation(
     { status: 'failed', execution_status: 'failed', run_id: 'run-draft', can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' },
-    { publication: { state: 'draft' } },
+    { run_id: 'run-draft', publication: { state: 'draft' } },
     { status: 'ok' },
   )
   assert.equal(failedDraft.countsAvailability, 'draft')
   assert.equal(failedDraft.canResume, false)
   assert.equal(failedDraft.resumeBlockedReason, '旧执行停止尚未确认')
+
+  const unrelatedFailure = exported.deriveRunPresentation(
+    { status: 'failed', execution_status: 'failed', run_id: 'run-05' },
+    { run_id: 'run-06', publication: { state: 'pending' } },
+    { status: 'pending' },
+  )
+  assert.equal(unrelatedFailure.identityMatched, false)
+  assert.equal(unrelatedFailure.failed, false)
+  assert.equal(unrelatedFailure.publicationLabel, 'pending')
+
+  const needsAttention = exported.deriveRunPresentation(
+    { status: 'needs_attention', execution_status: 'completed', run_id: 'run-attention' },
+    { run_id: 'run-attention', lifecycle_status: 'attention_required', publication: { state: 'pending' } },
+    { status: 'pending' },
+  )
+  assert.equal(needsAttention.failed, false)
+  assert.equal(needsAttention.needsAttention, true)
+  assert.equal(needsAttention.executionLabel, '需要处理')
+  assert.equal(needsAttention.publicationLabel, '尚未发布（需要处理）')
+})
+
+test('presents the run-06 file snapshot as 2 of 9 running with 3 acknowledged rules', async () => {
+  const exported = await loadClientExports()
+  const workflow = {
+    completed_steps: ['01', '02'], current_step: '03',
+    core_rules_ack: {
+      'path-fidelity': { ack_at: '2026-09-07T03:22:02Z' },
+      'evidence-consumption': { ack_at: '2026-09-07T03:22:03Z' },
+      'narrative-first': { ack_at: '2026-09-07T03:22:03Z' },
+    },
+  }
+  const current = {
+    run_id: 'run-06', data_root: 'C:\\work\\pangea-data', lifecycle_status: 'running', phase: 'STEP_03', terminal: false,
+    publication: { state: 'pending', revision: 0 }, workflow, state_read: { status: 'ok', updated_at: '2026-09-07T03:38:18Z' },
+  }
+  const task = { task_id: 'task-06', run_id: 'run-06', data_root: 'c:/work/pangea-data', status: 'running', execution_status: 'running' }
+  assert.equal(exported.snapshotMatchesSelection({ data_root: current.data_root, current }, { runId: 'run-06', dataRoot: task.data_root, task }), true)
+  assert.deepEqual({ ...exported.workflowAckPresentation(workflow, 'ok') }, { completed: 3, total: 3, label: '3 / 3' })
+  const presentation = exported.deriveRunPresentation(task, current, { status: 'pending' })
+  assert.equal(presentation.failed, false)
+  assert.equal(presentation.running, true)
+  assert.equal(presentation.publicationLabel, '阶段结果待发布')
+})
+
+test('renders the backend Run verdict without reapplying an older failed Task', async () => {
+  const client = await loadClientExports()
+  const task = {
+    task_id: 'task-06', run_id: 'run-06', data_root: '/workspace/pangea-data', attempt_id: 'attempt-06',
+    status: 'failed', execution_status: 'interrupted', can_resume: true,
+    terminal_error: 'old connection failure',
+    attempts: [{ attempt_id: 'attempt-06', ended_at: Date.parse('2026-09-07T03:22:11Z') }],
+  }
+  const snapshot = { current: {
+    run_id: 'run-06', data_root: task.data_root, lifecycle_status: 'running', phase: 'STEP_03', terminal: false,
+    state_read: { updated_at: '2026-09-07T03:38:18Z' }, publication: { state: 'pending', revision: 0 }, errors: [],
+  } }
+  const active = client.deriveRunPresentation(task, applyTaskExecutionState(snapshot, task).current, { status: 'pending' })
+  assert.equal(active.failed, false)
+  assert.equal(active.running, true)
+  assert.equal(active.canResume, false)
+  assert.equal(active.publicationLabel, '阶段结果待发布')
+  assert.equal(task.terminal_error, 'old connection failure')
+
+  const stale = { current: { ...snapshot.current, state_read: { updated_at: '2026-09-07T03:20:00Z' } } }
+  const failed = client.deriveRunPresentation(task, applyTaskExecutionState(stale, task).current, { status: 'pending' })
+  assert.equal(failed.failed, true)
+  assert.equal(failed.publicationLabel, '未发布（运行失败）')
+  const complete = client.deriveRunPresentation(task, { ...snapshot.current, lifecycle_status: 'complete', terminal: true }, { status: 'ok' })
+  assert.equal(complete.failed, false)
+  assert.equal(complete.executionLabel, '已完成')
+  assert.equal(complete.canResume, false)
+})
+
+test('overview does not show another Task or an old attempt error while its Run is loading', async () => {
+  for (const [selectedTaskId, eventAttempt, shouldShow] of [
+    ['task-05', 'attempt-05', false],
+    ['task-06', 'attempt-05', false],
+    ['task-06', 'attempt-06', true],
+  ]) {
+    const task = { task_id: 'task-06', run_id: 'run-06', attempt_id: 'attempt-06', status: 'running', execution_status: 'running', title: 'ACTIVE RUN 06' }
+    const states = {
+      0: undefined,
+      1: { tasks: { items: [task] }, selected_task_id: selectedTaskId, compatibility: { compatible: true },
+        launch_log: { events: [{ task_id: selectedTaskId, attempt_id: eventAttempt, status: 'error', stage: 'acp_job_settled', error: 'fixture spawn EINVAL' }] } },
+      4: task.run_id, 5: task.task_id, 16: { type: 'overview' },
+    }
+    let stateIndex = 0
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+      const index = stateIndex++
+      return [Object.hasOwn(states, index) ? states[index] : initial, () => {}]
+    } })
+    const pages = []
+    const ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const strings = []
+    const walk = node => {
+      if (typeof node === 'string') strings.push(node)
+      else if (Array.isArray(node)) node.forEach(walk)
+      else if (node?.children) node.children.forEach(walk)
+    }
+    walk(panel.type(panel.props))
+    assert.ok(strings.includes(task.title))
+    assert.equal(strings.includes('fixture spawn EINVAL'), shouldShow)
+  }
 })
 
 test('keeps a previous failed attempt visible while a resumed attempt is running', async () => {
@@ -589,6 +695,7 @@ test('client state request encodes workspace and run, passes cancellation, and r
   const signal = { marker: 'cancel-signal' }
   const result = await exported.requestSnapshot({
     cwd: '/Volumes/Media/pangea agent',
+    dataRoot: '/Volumes/Media/pangea agent/pangea-data',
     runId: 'run 01',
     sessionId: 'session 17',
     signal,
@@ -601,6 +708,7 @@ test('client state request encodes workspace and run, passes cancellation, and r
   assert.equal(result.current.run_id, 'run 01')
   assert.match(calls[0].url, /^\/api\/pangea-companion\/state\?/)
   assert.match(calls[0].url, /cwd=%2FVolumes%2FMedia%2Fpangea\+agent/)
+  assert.match(calls[0].url, /data_root=%2FVolumes%2FMedia%2Fpangea\+agent%2Fpangea-data/)
   assert.match(calls[0].url, /run_id=run\+01/)
   assert.match(calls[0].url, /session_id=session\+17/)
   assert.equal(calls[0].options.cache, 'no-store')
@@ -619,4 +727,9 @@ test('client state request encodes workspace and run, passes cancellation, and r
     cwd: '/tmp/pangea',
     async fetcher() { return { ok: false, status: 404, async json() { return { status: 'error', error: 'not-found' } } } },
   }), /not-found/)
+
+  await assert.rejects(() => exported.requestSnapshot({
+    cwd: '/tmp/pangea', runId: 'run-06',
+    async fetcher() { return { ok: true, status: 200, async json() { return { status: 'ok', current: { run_id: 'run-05' } } } } },
+  }), /Run 身份不一致/)
 })

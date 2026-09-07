@@ -29,8 +29,12 @@ test('reads Codetalks state and maps Step 01–09 Markdown lifecycle', async () 
       request_path: path.join(metadataRoot, 'request.md'), request: { repository: 'repo', target: 'auth' },
     })
     await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
-      status: 'running', current_step: '04', completed_steps: ['01', '02', '03'],
-      core_rules_ack: { markdown_first: true, jit_steps: true, independent_judge: true },
+      status: 'running', current_step: '04', completed_steps: ['01', '02', '03'], updated_at: '2026-09-07T03:38:18Z',
+      core_rules_ack: {
+        'path-fidelity': { file: 'core-rules/path-fidelity.md', sha256: 'a', ack_at: '2026-09-07T03:22:02Z' },
+        'evidence-consumption': { file: 'core-rules/evidence-consumption.md', sha256: 'b', ack_at: '2026-09-07T03:22:03Z' },
+        'narrative-first': { file: 'core-rules/narrative-first.md', sha256: 'c', ack_at: '2026-09-07T03:22:03Z' },
+      },
       judge: { required: true, status: 'pending' },
     })
     const live = path.join(runRoot, '活文档', '03-模块地图.md')
@@ -44,12 +48,68 @@ test('reads Codetalks state and maps Step 01–09 Markdown lifecycle', async () 
     assert.equal(snapshot.current.workflow.steps[2].status, 'completed')
     assert.deepEqual(snapshot.current.workflow.steps[2].artifacts, [live])
     assert.equal(snapshot.current.workflow.steps[3].status, 'running')
+    assert.equal(Object.keys(snapshot.current.workflow.core_rules_ack).length, 3)
+    assert.equal(snapshot.current.state_read.status, 'ok')
+    assert.equal(snapshot.current.state_read.updated_at, '2026-09-07T03:38:18Z')
+    assert.equal(snapshot.current.data_root, dataRoot)
     assert.equal(snapshot.current.workflow.actions.length, 0)
     assert.equal(snapshot.current.workflow.units.length, 0)
     assert.equal(snapshot.current.publication.state, 'pending')
     assert.equal(snapshot.current.reader_health.status, 'pending')
     assert.deepEqual(snapshot.current.workflow.unresolved, [])
     assert.deepEqual(snapshot.current.reader_warnings, [])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('uses the canonical Run directory after a portable workspace move', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-portable-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'portable-run'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), {
+      run_id: runId, status: 'active', run_root: path.join(root, 'old-install', 'pangea-data', 'runs', runId),
+      request: { repository: 'repo', target: 'portable' },
+    })
+    await writeJson(path.join(runRoot, '内部索引', '运行状态.json'), {
+      status: 'in_progress', current_step: '03', completed_steps: ['01', '02'], updated_at: '2026-09-07T03:38:18Z',
+    })
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.artifacts.run_directory, runRoot)
+    assert.equal(current.phase, 'STEP_03')
+    assert.equal(current.analysis.completed, 2)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('reports an explicitly selected unreadable Run instead of falling back to another Run', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-corrupt-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'corrupt-run'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), { run_id: runId, status: 'active', run_root: runRoot })
+    await mkdir(path.join(runRoot, '内部索引'), { recursive: true })
+    await writeFile(path.join(runRoot, '内部索引', '运行状态.json'), '{broken', 'utf8')
+    await assert.rejects(() => companionSnapshot({ dataRoot, runId }), /JSON/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('accepts a UTF-8 BOM in a state file without losing progress', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-reader-bom-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'bom-run'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
+  try {
+    await writeJson(path.join(metadataRoot, 'metadata.json'), { run_id: runId, status: 'active', run_root: runRoot })
+    const statePath = path.join(runRoot, '内部索引', '运行状态.json')
+    await mkdir(path.dirname(statePath), { recursive: true })
+    await writeFile(statePath, `\uFEFF${JSON.stringify({ status: 'in_progress', current_step: '03', completed_steps: ['01', '02'] })}`, 'utf8')
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.phase, 'STEP_03')
+    assert.equal(current.analysis.completed, 2)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -448,6 +508,7 @@ test('opens an explicitly selected historical Run outside the first page', async
     await create('latest-run', '当前最新任务')
     const oldTime = new Date(Date.now() - 60_000)
     await utimes(path.join(dataRoot, 'runs', 'historical-run'), oldTime, oldTime)
+    await utimes(path.join(dataRoot, 'runs', 'historical-run', '内部索引', '运行状态.json'), oldTime, oldTime)
     const snapshot = await companionSnapshot({ dataRoot, runId: 'historical-run', limit: 1 })
     assert.equal(snapshot.runs.length, 1)
     assert.equal(snapshot.runs[0].run_id, 'latest-run')

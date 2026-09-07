@@ -27,7 +27,8 @@ async function pathKind(filePath) {
 }
 
 async function readJson(filePath) {
-  return JSON.parse(await readFile(filePath, 'utf8'))
+  const source = await readFile(filePath, 'utf8')
+  return JSON.parse(source.charCodeAt(0) === 0xFEFF ? source.slice(1) : source)
 }
 
 async function readTextIfFile(filePath) {
@@ -391,6 +392,20 @@ function lifecycle(metadata, state) {
   return { lifecycle_status: 'running', phase: `STEP_${state.current_step || 'BOOTSTRAP'}`, terminal: false }
 }
 
+async function resolveRunDirectory(dataRoot, runId, metadata) {
+  const runsRoot = path.resolve(dataRoot, 'runs')
+  const canonical = path.resolve(runsRoot, runId)
+  if (await pathKind(canonical) === 'directory') return canonical
+
+  if (typeof metadata?.run_root === 'string' && path.isAbsolute(metadata.run_root)) {
+    const recorded = path.resolve(metadata.run_root)
+    const relative = path.relative(runsRoot, recorded)
+    const withinDataRoot = relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)
+    if (withinDataRoot && path.basename(recorded) === runId && await pathKind(recorded) === 'directory') return recorded
+  }
+  throw new Error(`Codetalks Skill run directory does not exist in data_root: ${runId}`)
+}
+
 async function stepRows(state, liveDocuments, formalOutputs, skillRoot) {
   const completed = new Set(state?.completed_steps ?? [])
   const current = state?.current_step ?? null
@@ -417,12 +432,25 @@ async function stepRows(state, liveDocuments, formalOutputs, skillRoot) {
 }
 
 export async function summarizeRun(dataRoot, runId, { includeDetails = false } = {}) {
+  if (typeof runId !== 'string' || runId.trim() === '' || path.basename(runId) !== runId || ['.', '..'].includes(runId)) {
+    throw new Error('Codetalks Skill run_id must be one path segment')
+  }
   const metadataPath = path.join(dataRoot, '.pangea', 'skill-runs', runId, 'metadata.json')
   if (await pathKind(metadataPath) !== 'file') throw new Error(`Codetalks Skill run does not exist: ${runId}`)
   const metadata = await readJson(metadataPath)
-  const runDirectory = metadata.run_root
+  if (metadata?.run_id && metadata.run_id !== runId) throw new Error(`Codetalks Skill metadata run_id mismatch: expected ${runId}, received ${metadata.run_id}`)
+  const runDirectory = await resolveRunDirectory(dataRoot, runId, metadata)
   const statePath = path.join(runDirectory, '内部索引', '运行状态.json')
-  const state = await pathKind(statePath) === 'file' ? await readJson(statePath) : null
+  const stateKind = await pathKind(statePath)
+  const state = stateKind === 'file' ? await readJson(statePath) : null
+  const stateDetails = stateKind === 'file' ? await stat(statePath) : null
+  const stateRead = {
+    status: stateKind === 'file' ? 'ok' : 'not_initialized',
+    updated_at: typeof state?.updated_at === 'string' ? state.updated_at : null,
+    observed_at: Date.now(),
+    mtime_ms: stateDetails?.mtimeMs ?? null,
+    path: statePath,
+  }
   const liveDocuments = await markdownFiles(path.join(runDirectory, '活文档'))
   const formalOutputs = await markdownFiles(path.join(runDirectory, '正式输出'))
   const reportMd = path.join(runDirectory, '正式输出', '完整分析报告.md')
@@ -491,6 +519,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     : liveDraft.details
   const summary = {
     run_id: runId,
+    data_root: path.resolve(dataRoot),
     ...life,
     target: metadata.request?.target ?? runId,
     repository: metadata.request?.repository ?? null,
@@ -507,6 +536,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       max_parallel: 1,
     },
     performance,
+    state_read: stateRead,
     counts: {
       risks: ['draft', 'final'].includes(publicationState) ? resultDetails.risks.length : null,
       test_cases: ['draft', 'final'].includes(publicationState) ? resultDetails.test_cases.length : null,
@@ -541,7 +571,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     artifacts: {
       run_directory: runDirectory,
       request: metadata.request_path,
-      state: await pathKind(statePath) === 'file' ? statePath : null,
+      state: stateKind === 'file' ? statePath : null,
       live_documents: liveDocuments,
       formal_outputs: formalOutputs,
       report_md: reportAvailable ? reportMd : null,
@@ -552,7 +582,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     source_snapshot: sourceSnapshot,
     validation,
     report_available: reportAvailable && life.lifecycle_status === 'complete',
-    modified_at: (await stat(runDirectory)).mtimeMs,
+    modified_at: Math.max(stateDetails?.mtimeMs ?? 0, (await stat(runDirectory)).mtimeMs),
   }
   if (includeDetails) {
     summary.details = publicationState === 'draft' || projection.status === 'verified'
@@ -587,12 +617,13 @@ export async function companionSnapshot({ cwd, dataRoot, runId, limit = 20 } = {
   const resolvedDataRoot = await discoverPangeaDataRoot({ cwd, dataRoot })
   const runs = await listRuns(resolvedDataRoot, { limit })
   // A requested historical Run must not fall back to the newest Run merely
-  // because it is older than the first page. Read that exact id directly and
-  // leave the result empty if it no longer exists.
-  let selected = runId !== undefined ? runs.find(run => run.run_id === runId) : chooseCurrentRun(runs)
-  if (runId !== undefined && !selected && typeof runId === 'string' && runId.trim() !== '') {
-    try { selected = await summarizeRun(resolvedDataRoot, runId, { includeDetails: false }) } catch { selected = null }
-  }
+  // because it is older than the first page. Read that exact id directly.
+  const requestedRunId = typeof runId === 'string' ? runId.trim() : ''
+  const selected = runId === undefined
+    ? chooseCurrentRun(runs)
+    : requestedRunId ? { run_id: requestedRunId } : null
+  // Explicit selection is an identity contract: a damaged or missing Run must
+  // fail as that Run instead of disappearing or falling back to another one.
   const current = selected ? await summarizeRun(resolvedDataRoot, selected.run_id, { includeDetails: true }) : null
   return { status: 'ok', data_root: resolvedDataRoot, current, runs, executor_runs: [] }
 }

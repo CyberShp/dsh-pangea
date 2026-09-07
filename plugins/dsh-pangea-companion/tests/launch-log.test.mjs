@@ -12,13 +12,27 @@ test('persists task launch diagnostics independently from the task store', async
     const store = new LaunchLogStore({ root })
     const file = await store.append('task-001', { stage: 'session_create', status: 'ok', session_id: 'session-1' })
     await store.append('task-001', { stage: 'prompt_submit', status: 'error', error: new Error('prompt failed') })
+    await store.append('task-001', {
+      stage: 'acp_process_spawn', status: 'error', configured_command: 'opencode',
+      resolved_command: 'C:\\Users\\测试 User\\opencode.cmd', launcher_kind: 'windows-batch',
+      launcher_command: 'C:\\Windows\\System32\\cmd.exe', launch_stage: 'spawn_process',
+      error_code: 'EINVAL', errno: -4071, syscall: 'spawn', cwd: 'C:\\work tree',
+      args: ['--api-key', 'secret'], env: { API_KEY: 'secret' },
+    })
     const value = await store.read('task-001')
     assert.equal(value.path, file)
-    assert.equal(value.events.length, 2)
+    assert.equal(value.events.length, 3)
     assert.equal(value.events[0].stage, 'session_create')
     assert.equal(value.events[0].session_id, 'session-1')
     assert.equal(value.events[1].status, 'error')
     assert.equal(value.events[1].error, 'prompt failed')
+    assert.deepEqual(value.events[2], {
+      task_id: 'task-001', schema_version: 1, at: value.events[2].at,
+      stage: 'acp_process_spawn', status: 'error', configured_command: 'opencode',
+      resolved_command: 'C:\\Users\\测试 User\\opencode.cmd', launcher_kind: 'windows-batch',
+      launcher_command: 'C:\\Windows\\System32\\cmd.exe', launch_stage: 'spawn_process',
+      error_code: 'EINVAL', syscall: 'spawn', cwd: 'C:\\work tree', errno: -4071,
+    })
     assert.match(await readFile(file, 'utf8'), /prompt failed/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })

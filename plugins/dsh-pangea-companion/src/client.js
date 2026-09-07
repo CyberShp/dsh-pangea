@@ -44,30 +44,79 @@ window.__ModuleLoader__.load({
       try { return JSON.stringify(value) } catch { return null }
     }
 
+    function normalizedPathIdentity(value) {
+      if (typeof value !== 'string' || value.trim() === '') return ''
+      const normalized = value.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+      return /^[a-z]:\//i.test(normalized) ? normalized.toLowerCase() : normalized
+    }
+
+    function taskMatchesRun(task, current) {
+      if (!task || !current) return !current
+      if (typeof task.run_id !== 'string' || typeof current.run_id !== 'string' || task.run_id !== current.run_id) return false
+      const taskRoot = normalizedPathIdentity(task.data_root)
+      const currentRoot = normalizedPathIdentity(current.data_root)
+      return !taskRoot || !currentRoot || taskRoot === currentRoot
+    }
+
+    function snapshotMatchesSelection(snapshot, { runId, dataRoot, task } = {}) {
+      const current = snapshot?.current
+      if (!current) return true
+      if (runId === null) return false
+      if (typeof runId === 'string' && runId !== current.run_id) return false
+      if (task && !taskMatchesRun(task, current)) return false
+      const expectedRoot = normalizedPathIdentity(dataRoot)
+      const actualRoot = normalizedPathIdentity(snapshot?.data_root ?? current.data_root)
+      return !expectedRoot || !actualRoot || expectedRoot === actualRoot
+    }
+
+    function workflowAckPresentation(workflow, stateReadStatus) {
+      const required = ['path-fidelity', 'evidence-consumption', 'narrative-first']
+      const completed = required.filter(id => {
+        const value = workflow?.core_rules_ack?.[id]
+        return value && typeof value === 'object' && typeof value.ack_at === 'string' && value.ack_at.trim() !== ''
+      }).length
+      const label = stateReadStatus === 'ok'
+        ? `${completed} / ${required.length}`
+        : stateReadStatus === 'stale' ? '最近快照（刷新失败）' : '等待状态初始化'
+      return { completed, total: required.length, label }
+    }
+
     function snapshotPollInterval(value) {
       return value?.current?.terminal === false ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
     }
 
     function deriveRunPresentation(task, current, health) {
-      const taskStatus = task?.status ?? ''
-      const executionStatus = task?.execution_status ?? ''
-      const failed = ['failed', 'interrupted'].includes(executionStatus)
-        || ['failed', 'needs_attention'].includes(taskStatus)
-        || current?.lifecycle_status === 'failed'
-      const stopped = executionStatus === 'stopped' || taskStatus === 'stopped'
-      const stopping = !failed && !stopped && executionStatus === 'stopping'
-      const running = !failed && !stopped && !stopping && (executionStatus === 'starting' || executionStatus === 'running' || taskStatus === 'preparing' || taskStatus === 'running')
+      const executionTask = current && !taskMatchesRun(task, current) ? null : task
+      const taskStatus = executionTask?.status ?? ''
+      const executionStatus = executionTask?.execution_status ?? ''
+      // The state endpoint already reconciles Run progress with its execution.
+      // Do not undo that verdict with an older Task response from another poll.
+      const runStatus = current?.lifecycle_status
+      const failed = runStatus ? runStatus === 'failed' : ['failed', 'interrupted'].includes(executionStatus) || taskStatus === 'failed'
+      const needsAttention = !failed && (runStatus ? runStatus === 'attention_required' : taskStatus === 'needs_attention')
+      const stopped = runStatus ? ['stopped', 'cancelled'].includes(runStatus) : executionStatus === 'stopped' || taskStatus === 'stopped'
+      const stopping = !failed && !needsAttention && !stopped && current?.terminal !== true && executionStatus === 'stopping'
+      const running = !failed && !needsAttention && !stopped && !stopping && (runStatus
+        ? ['preparing', 'running'].includes(runStatus)
+        : executionStatus === 'starting' || executionStatus === 'running' || taskStatus === 'preparing' || taskStatus === 'running')
       const publicationState = current?.publication?.state ?? 'pending'
       const healthStatus = health?.status ?? 'pending'
-      const reliabilityLabel = failed ? '分析失败' : stopped ? '已停止' : stopping ? '等待停止确认' : healthStatus === 'warning' ? '不可用于决策' : healthStatus === 'pending' ? (running ? '阶段结果待发布' : '待验证') : HEALTH[healthStatus] ?? healthStatus
-      const publicationLabel = failed && publicationState === 'pending' ? '未发布（运行失败）' : stopped && publicationState === 'pending' ? '未发布（已停止）' : stopping && publicationState === 'pending' ? '未发布（停止中）' : publicationState === 'pending' && running ? '阶段结果待发布' : publicationState
-      const executionLabel = failed ? '分析失败' : stopped ? '已停止' : stopping ? '正在停止' : running ? '分析中' : executionStatus === 'completed' ? '已完成' : '等待启动'
+      const reliabilityLabel = failed ? '分析失败' : needsAttention ? '需要处理' : stopped ? '已停止' : stopping ? '等待停止确认' : healthStatus === 'warning' ? '不可用于决策' : healthStatus === 'pending' ? (running ? '阶段结果待发布' : '待验证') : HEALTH[healthStatus] ?? healthStatus
+      const publicationLabel = failed && publicationState === 'pending' ? '未发布（运行失败）' : needsAttention && publicationState === 'pending' ? '尚未发布（需要处理）' : stopped && publicationState === 'pending' ? '未发布（已停止）' : stopping && publicationState === 'pending' ? '未发布（停止中）' : publicationState === 'pending' && running ? '阶段结果待发布' : publicationState
+      const executionLabel = failed ? '分析失败' : needsAttention ? '需要处理' : stopped ? '已停止' : stopping ? '正在停止' : running ? '分析中' : runStatus === 'complete' || executionStatus === 'completed' ? '已完成' : '等待启动'
       const dataTone = healthStatus === 'error' ? 'error' : publicationState === 'final' && healthStatus === 'ok' ? 'ok' : publicationState === 'draft' ? 'notice' : 'neutral'
       const countsAvailability = publicationState === 'pending' ? 'unpublished' : publicationState === 'draft' ? 'draft' : publicationState === 'final' ? 'verified' : 'unavailable'
       const qualityLabel = current?.quality_status ?? current?.verdict ?? 'PENDING'
-      const canResume = task?.can_resume === true
-      const resumeBlockedReason = canResume ? null : task?.resume_blocked_reason ?? (!task?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件')
-      return { executionStatus, executionLabel, failed, stopped, stopping, running, healthStatus, reliabilityLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason }
+      const canResume = !running && !stopping && runStatus !== 'complete' && executionTask?.can_resume === true
+      const resumeBlockedReason = canResume ? null : executionTask?.resume_blocked_reason ?? (!executionTask?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件')
+      return { executionStatus, executionLabel, failed, needsAttention, stopped, stopping, running, healthStatus, reliabilityLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason, identityMatched: !current || taskMatchesRun(task, current) }
+    }
+
+    function taskLaunchEvents(task, workbench) {
+      if (!task || workbench?.selected_task_id !== task.task_id) return []
+      return (Array.isArray(workbench.launch_log?.events) ? workbench.launch_log.events : [])
+        .filter(event => (!event.task_id || event.task_id === task.task_id)
+          && (!task.attempt_id || event.attempt_id === task.attempt_id))
     }
 
     function previousAttemptFailures(task) {
@@ -79,13 +128,15 @@ window.__ModuleLoader__.load({
         .sort((left, right) => (right.ended_at ?? right.last_activity_at ?? 0) - (left.ended_at ?? left.last_activity_at ?? 0))
     }
 
-    async function requestSnapshot({ cwd, runId, sessionId, signal, fetcher = fetch }) {
+    async function requestSnapshot({ cwd, dataRoot, runId, sessionId, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd })
+      if (dataRoot) query.set('data_root', dataRoot)
       if (runId !== undefined) query.set('run_id', runId ?? '')
       if (sessionId) query.set('session_id', sessionId)
       const response = await fetcher(`${API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      if (!snapshotMatchesSelection(body, { runId, dataRoot })) throw new Error('状态响应与请求的 Run 身份不一致')
       return body
     }
 
@@ -882,6 +933,10 @@ window.__ModuleLoader__.load({
       const handledRunDraftRequest = React.useRef(0)
       const noticeTimerRef = React.useRef(undefined)
       const assetRepositoryRef = React.useRef('')
+      const taskItems = workbench?.tasks?.items ?? []
+      const selectedTask = taskItems.find(item => item.task_id === selectedTaskId)
+      const selectedDataRoot = selectedTask?.data_root
+      const snapshotSelectionKey = JSON.stringify([cwd ?? '', selectedTaskId ?? '', selectedRun === undefined ? '__auto__' : selectedRun ?? '__none__', normalizedPathIdentity(selectedDataRoot)])
 
       React.useEffect(() => {
         if (!visible) return undefined
@@ -909,8 +964,9 @@ window.__ModuleLoader__.load({
         const showLoading = foreground || snapshotRef.current === undefined
         if (showLoading) setLoading(true)
         try {
-          const body = await requestSnapshot({ cwd, runId: selectedRun, sessionId: scope?.sessionId, signal: controller.signal })
+          const body = await requestSnapshot({ cwd, dataRoot: selectedDataRoot, runId: selectedRun, sessionId: scope?.sessionId, signal: controller.signal })
           if (sequence !== requestRef.current.sequence) return undefined
+          if (!snapshotMatchesSelection(body, { runId: selectedRun, dataRoot: selectedDataRoot, task: selectedTask })) throw new Error('状态响应不属于当前选择的分析任务')
           const fingerprint = snapshotFingerprint(body)
           if (fingerprint === null || fingerprint !== snapshotFingerprintRef.current) {
             snapshotRef.current = body
@@ -927,7 +983,7 @@ window.__ModuleLoader__.load({
         } finally {
           if (showLoading && sequence === requestRef.current.sequence) setLoading(false)
         }
-      }, [cwd, selectedRun, scope?.sessionId])
+      }, [cwd, selectedDataRoot, selectedRun, selectedTask?.run_id, scope?.sessionId])
 
       const loadWorkbench = React.useCallback(async ({ background = false } = {}) => {
         if (!cwd || pageMode === 'execution') return
@@ -995,6 +1051,14 @@ window.__ModuleLoader__.load({
         setHistory([])
         setSelectedCaseIds([])
       }, [cwd, initialScreen])
+      React.useEffect(() => {
+        requestRef.current.sequence += 1
+        requestRef.current.controller?.abort()
+        snapshotRef.current = undefined
+        snapshotFingerprintRef.current = ''
+        setSnapshot(undefined)
+        setError(undefined)
+      }, [snapshotSelectionKey])
       React.useEffect(() => {
         setLaunchDiagnosticsOpen(false)
       }, [selectedTaskId])
@@ -1129,9 +1193,12 @@ window.__ModuleLoader__.load({
       React.useEffect(() => { if (visible && pageMode === 'execution') void loadEnvironments() }, [visible, pageMode, loadEnvironments])
       React.useEffect(() => { if (visible && pageMode === 'home') void loadRepositories() }, [visible, pageMode, loadRepositories])
 
-      const current = snapshot?.current
-      const taskItems = workbench?.tasks?.items ?? []
-      const selectedTask = taskItems.find(item => item.task_id === selectedTaskId)
+      const snapshotCurrent = snapshot?.current
+      const current = snapshotCurrent && snapshotMatchesSelection(snapshot, {
+        runId: selectedRun,
+        dataRoot: selectedDataRoot,
+        task: selectedTask,
+      }) ? snapshotCurrent : null
       React.useEffect(() => {
         if (!visible || pageMode === 'execution' || !taskItems.some(task => ['preparing', 'running'].includes(task.status))) return undefined
         let stopped = false
@@ -1168,15 +1235,12 @@ window.__ModuleLoader__.load({
               : { state: 'checking', label: '系统检查中' }
         window.dispatchEvent(new CustomEvent('pangea:system-state', { detail: systemState }))
         const selectedCurrent = selectedTask?.run_id && current?.run_id === selectedTask.run_id ? current : null
-        const selectedWorkbench = workbench?.selected_task_id === selectedTask?.task_id ? workbench : null
         const contextTotal = selectedCurrent?.analysis?.total ?? 0
         const contextCompleted = selectedCurrent?.analysis?.completed ?? 0
         const assistantVisible = pageMode === 'analysis' && selectedTask && !['tasks', 'create'].includes(screen.type)
         const activeConversation = selectedTask?.conversations?.find(item => item.conversation_id === selectedTask.active_conversation_id)
         const presentation = deriveRunPresentation(selectedTask, selectedCurrent, selectedCurrent?.reader_health)
-        const launchEvents = Array.isArray(selectedWorkbench?.launch_log?.events)
-          ? selectedWorkbench.launch_log.events.filter(event => !selectedTask?.attempt_id || event?.attempt_id === selectedTask.attempt_id)
-          : []
+        const launchEvents = taskLaunchEvents(selectedTask, workbench)
         const outputEvent = [...launchEvents].reverse().find(event => typeof event?.output === 'string' && event.output.trim() !== '')
         const processStatus = selectedTask?.execution_status
           ?? (selectedTask?.status === 'failed' ? 'failed' : selectedTask?.status === 'completed' ? 'completed' : selectedTask?.status)
@@ -1999,7 +2063,8 @@ window.__ModuleLoader__.load({
                 field('PANGEA Run', `${runLabel(current)} · ${current.run_id}`),
                 field('Agent 状态', liveForRun ? monitoredSession.status === 'running' ? '运行中' : '空闲' : monitoredRun ? '会话已结束或已删除' : '原会话未记录'),
                 field('PANGEA 阶段', PHASE[current.phase] ?? current.phase)),
-              h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `最近活动：${formatTime(liveForRun ? monitoredSession?.last_activity : monitoredRun?.last_seen ?? current.modified_at)}`))),
+              h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `状态更新：${current.state_read?.updated_at ?? formatTime(current.state_read?.mtime_ms ?? current.modified_at)}`),
+              h('div', { style: styles.itemMeta }, `本次读取：${formatTime(current.state_read?.observed_at)}${error ? '（刷新失败，显示最近成功快照）' : ''}`))),
 
           h('div', { style: styles.sectionTitle }, '当前执行'),
           h('div', { style: styles.card },
@@ -2171,18 +2236,21 @@ window.__ModuleLoader__.load({
           : status === 'completed'
             ? 'var(--dsw-alias-state-success-primary, #38a892)'
             : status === 'running' ? 'var(--dsw-alias-state-business-primary, #4d9ad6)' : '#c7cdd4'
-        const ackCount = Object.keys(workflow.core_rules_ack ?? {}).length
+        const stateReadStatus = error ? 'stale' : current.state_read?.status ?? 'unavailable'
+        const ack = workflowAckPresentation(workflow, stateReadStatus)
+        const publicationRevision = Number.isInteger(publication.revision) && publication.revision > 0 ? ` · revision ${publication.revision}` : ''
         const judgeStatus = workflow.judge?.status ?? 'pending'
         return h(React.Fragment, null,
           h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Codetalks Skill 完整流程'), h('span', { style: styles.badge }, `${workflow.completed_steps?.length ?? 0} / 9`)),
             h('div', { style: styles.grid },
-              field('核心规则 ACK', `${ackCount} / 3`),
+              field('核心规则 ACK', ack.label),
               field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : '等待初始化'),
               field('独立 Judge', judgeStatus),
               field('运行状态', PHASE[current.phase] ?? current.phase),
               field('源码快照', ['verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已冻结` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'),
-              field('结果发布', `${publicationText} · revision ${publication.revision ?? 0}${publication.step_id ? ` · Step ${publication.step_id}` : ''}`)),
+              field('状态快照', stateReadStatus === 'ok' ? (current.state_read?.updated_at ?? formatTime(current.state_read?.mtime_ms)) : ack.label),
+              field('结果发布', `${publicationText}${publicationRevision}${publication.step_id ? ` · Step ${publication.step_id}` : ''}`)),
             h('div', { style: styles.chips },
               current.artifacts?.request ? chip('打开任务请求', () => openSidebarFile(current.artifacts.request, 'Codetalks request.md')) : null,
               current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null,
@@ -2415,7 +2483,7 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.empty }, '请先从任务列表选择一个分析任务。'),
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 10 }, onClick: () => jump('tasks') }, '返回任务列表')))
         if (!current) {
-          const launchEvents = workbench?.launch_log?.events ?? []
+          const launchEvents = taskLaunchEvents(selectedTask, workbench)
           const launchFailure = [...launchEvents].reverse().find(event => event.status === 'error' && event.stage !== 'launch_failed')
             ?? [...launchEvents].reverse().find(event => event.status === 'error')
           const launchPresentation = deriveRunPresentation(selectedTask, null, null)
@@ -2424,8 +2492,10 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.row },
             h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, `执行 Agent：${selectedTask.provider ?? '未选择'}`)),
             h('span', { style: { ...styles.homeStatus, color: taskStatusColor(selectedTask.status) } }, taskStatusLabel(selectedTask.status))),
-          h('div', { style: { ...styles.text, marginTop: 14 } }, ['failed', 'needs_attention'].includes(selectedTask.status)
+          h('div', { style: { ...styles.text, marginTop: 14 } }, selectedTask.status === 'failed'
             ? selectedTask.launch_error ?? '分析启动失败。'
+            : selectedTask.status === 'needs_attention'
+              ? selectedTask.launch_error ?? '分析需要处理，请查看运行细节。'
             : '任务已经保存，正在准备分析会话和 PANGEA Run。'),
           launchFailure ? h('div', { style: { ...styles.error, marginTop: 14 }, role: 'alert' },
             h('div', { style: styles.itemTitle }, `失败阶段：${launchFailure.stage}`),
@@ -2440,7 +2510,7 @@ window.__ModuleLoader__.load({
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
         const previousFailures = previousAttemptFailures(selectedTask)
         const presentation = deriveRunPresentation(selectedTask, current, health)
-        const runNeedsAttention = current.attention_required || presentation.failed
+        const runNeedsAttention = current.attention_required || presentation.failed || presentation.needsAttention
         const nextAction = runNeedsAttention
           ? { label: '分析需要处理', hint: '当前 Run 未正常完成，请先查看下方错误，再决定是否重新启动。', target: 'workflow' }
           : presentation.stopping
@@ -2892,6 +2962,9 @@ window.__ModuleLoader__.load({
     exports.evidenceIdentity = evidenceIdentity
     exports.evidenceTabLabel = evidenceTabLabel
     exports.runLabel = runLabel
+    exports.taskMatchesRun = taskMatchesRun
+    exports.snapshotMatchesSelection = snapshotMatchesSelection
+    exports.workflowAckPresentation = workflowAckPresentation
     exports.deriveRunPresentation = deriveRunPresentation
     exports.previousAttemptFailures = previousAttemptFailures
     exports.absoluteWorkspacePath = absoluteWorkspacePath

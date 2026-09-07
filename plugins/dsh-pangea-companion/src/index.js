@@ -148,11 +148,24 @@ function textResponse(res, status, contentType, body, headers = {}) {
 // of showing a red ACP error next to an apparently active analysis forever.
 export function applyTaskExecutionState(snapshot, task) {
   if (!snapshot?.current || !task) return snapshot
+  const current = snapshot.current
+  const sameRun = typeof task.run_id === 'string' && task.run_id === current.run_id
+  const sameDataRoot = !task.data_root || !current.data_root
+    || path.resolve(task.data_root) === path.resolve(current.data_root)
+  const currentAttempt = Array.isArray(task.attempts)
+    ? task.attempts.find(attempt => attempt?.attempt_id === task.attempt_id)
+    : null
+  if (!sameRun || !sameDataRoot || !task.attempt_id || (currentAttempt && currentAttempt.attempt_id !== task.attempt_id)) return snapshot
   const executionStatus = task.execution_status
   const failed = task.status === 'failed' || ['failed', 'interrupted'].includes(executionStatus)
   const stopped = task.status === 'stopped' || executionStatus === 'stopped'
   if (!failed && !stopped) return snapshot
-  const current = snapshot.current
+  const stateUpdatedAt = Date.parse(current.state_read?.updated_at ?? '')
+  const executionEndedAt = currentAttempt?.ended_at ?? task.ended_at
+  // The Skill may keep advancing after a runtime connection was classified as
+  // interrupted. A newer state file is direct evidence that this terminal
+  // execution observation no longer describes the active workflow.
+  if (Number.isFinite(stateUpdatedAt) && Number.isFinite(executionEndedAt) && stateUpdatedAt > executionEndedAt) return snapshot
   const message = task.terminal_error || task.launch_error || (failed ? '外部 Agent 执行失败' : 'Run 已停止')
   const error = failed && !(current.errors ?? []).some(item => item?.code === 'ACP_AGENT_FAILED')
     ? { code: 'ACP_AGENT_FAILED', message }
@@ -170,6 +183,7 @@ export function applyTaskExecutionState(snapshot, task) {
         status: executionStatus || task.status,
         provider: task.provider ?? null,
         task_id: task.task_id,
+        attempt_id: task.attempt_id,
         message,
       },
     },
@@ -188,11 +202,8 @@ async function stateRouteHandler(req, res, monitor, tasks) {
     const snapshot = await companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
     const task = snapshot.current?.run_id ? await tasks.getByRun(snapshot.current.run_id, { dataRoot: snapshot.data_root }) : null
     const effectiveSnapshot = applyTaskExecutionState(snapshot, task)
-    if (runId === undefined && sessionId && snapshot.current) {
-      await monitor.bindRun(sessionId, effectiveSnapshot.current)
-      await tasks.bindRunBySession(sessionId, effectiveSnapshot.current)
-    }
-    effectiveSnapshot.monitor = await monitor.snapshot({ sessionId, runId: effectiveSnapshot.current?.run_id })
+    if (effectiveSnapshot.current) await monitor.observeRunSnapshot(snapshot.data_root, effectiveSnapshot.current)
+    effectiveSnapshot.monitor = await monitor.snapshot({ sessionId, dataRoot: snapshot.data_root, runId: effectiveSnapshot.current?.run_id })
     json(res, 200, effectiveSnapshot)
   } catch (error) {
     json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })
@@ -561,7 +572,7 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
   }
 }
 
-async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLogs, runtime) {
+export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLogs, runtime, monitor, runner = runPangea) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
@@ -639,14 +650,20 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       if (launchLocks.has(task.task_id)) throw new Error('task launch is already in progress')
       launchLocks.add(task.task_id)
       await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `${resume ? '继续分析' : '启动'}尝试 ${task.launch_attempts + 1}` })
+      let preparedTask = task
       try {
         const selectedProvider = body.provider_id ?? task.provider
         let selectedModel = null
-        let preparedTask = task
         if (selectedProvider) {
-          assertRegisteredAcpProvider(runtime, selectedProvider)
+          const providerOption = assertRegisteredAcpProvider(runtime, selectedProvider)
           await appendLaunchSafe(launchLogs, task.task_id, {
             stage: 'acp_provider_resolve', status: 'ok', provider: selectedProvider,
+            configured_command: providerOption.command,
+            resolved_command: providerOption.resolved_command ?? providerOption.command,
+            launcher_kind: providerOption.launcher_kind
+              ?? (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(providerOption.resolved_command ?? providerOption.command)
+                ? 'windows-batch'
+                : 'direct'),
           })
           preparedTask = await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
         } else {
@@ -658,24 +675,48 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           preparedTask = await tasks.prepareLaunch(task.task_id, selectedModel)
         }
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_prepare', status: 'ok' })
+        let launchedRun = null
         const launched = await launchAnalysisSession(api, {
           cwd,
           dataRoot: actionDataRoot ?? task.data_root,
           input: { ...task, provider_id: selectedProvider || null },
           model: selectedModel,
           resumeRunId: resume ? task.run_id : null,
-        }, undefined, session => tasks.addConversation(task.task_id, {
+        }, runner, session => tasks.addConversation(task.task_id, {
           sessionId: session.session_id,
           title: `${task.title} · 分析`,
           kind: 'analysis',
         }), async event => {
           await launchLogs.append(task.task_id, { ...event, attempt_id: preparedTask.attempt_id })
         }, runtime, process.env, {
-          onRunReady: run => tasks.bindRun(task.task_id, run.run_id),
-          onOwnerReady: ({ ownerSessionId }) => tasks.bindOwnerSession(task.task_id, {
-            attemptId: preparedTask.attempt_id,
-            ownerSessionId,
-          }),
+          onRunReady: async run => {
+            launchedRun = run
+            return tasks.bindRun(task.task_id, run.run_id)
+          },
+          onOwnerReady: async ({ ownerSessionId }) => {
+            const bound = await tasks.bindOwnerSession(task.task_id, {
+              attemptId: preparedTask.attempt_id,
+              ownerSessionId,
+            })
+            try {
+              await monitor.bindExecution(ownerSessionId, {
+                run_id: launchedRun?.run_id ?? bound.run_id,
+                data_root: bound.data_root,
+                phase: 'PREPARING',
+                analysis: { completed: 0, total: 9, reworked: 0 },
+              }, {
+                dataRoot: bound.data_root,
+                taskId: bound.task_id,
+                attemptId: preparedTask.attempt_id,
+              })
+            } catch (error) {
+              await appendLaunchSafe(launchLogs, task.task_id, {
+                stage: 'monitor_bind', status: 'error', error,
+                error_code: 'MONITOR_IDENTITY_CONFLICT', attempt_id: preparedTask.attempt_id,
+              })
+            }
+            return bound
+          },
           onJobCreated: async ({ jobId, ownerSessionId, jobStartedAt }) => {
             const bound = await tasks.bindJob(task.task_id, {
               jobId,
@@ -976,7 +1017,7 @@ export function apply(ctx) {
   const jobs = ctx.jobs ?? ctx.get?.('jobs')
   const disposeJobController = jobs?.attachController?.('pangea-companion')
   const disposeJobDone = jobs?.onJobDone?.((snapshot, owner) => settleAcpTask(ctx, tasks, launchLogs, snapshot, owner).catch(() => undefined))
-  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs, ctx) })
+  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs, ctx, monitor) })
   const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
   ctx.effect?.(() => async () => {
     disposeRepositoryRoute()

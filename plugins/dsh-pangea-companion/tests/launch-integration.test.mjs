@@ -73,7 +73,9 @@ test('does not read output from a reused Job id with a different startedAt', asy
 })
 
 test('persists the Run identity as soon as creation succeeds', () => {
-  assert.match(source, /onRunReady: run => tasks\.bindRun\(task\.task_id, run\.run_id\)/)
+  assert.match(source, /onRunReady: async run => \{[\s\S]*launchedRun = run[\s\S]*tasks\.bindRun\(task\.task_id, run\.run_id\)/)
+  assert.match(source, /monitor\.bindExecution\(ownerSessionId/)
+  assert.doesNotMatch(source, /tasks\.bindRunBySession\(sessionId, effectiveSnapshot\.current\)/)
 })
 
 test('stops the local Run before attempting DSH session cancellation', () => {
@@ -183,7 +185,8 @@ test('projects a terminal ACP failure over a stale running Run', () => {
     runs: { items: [{ run_id: 'run-1', lifecycle_status: 'running' }] },
   }
   const result = applyTaskExecutionState(snapshot, {
-    task_id: 'task-1', status: 'failed', execution_status: 'failed', provider: 'pangea-opencode',
+    task_id: 'task-1', run_id: 'run-1', attempt_id: 'attempt-1', status: 'failed', execution_status: 'failed', provider: 'pangea-opencode',
+    attempts: [{ attempt_id: 'attempt-1', execution_status: 'failed', ended_at: 1000 }],
     terminal_error: 'child does not support requested model',
   })
   assert.equal(result.current.lifecycle_status, 'failed')
@@ -192,4 +195,23 @@ test('projects a terminal ACP failure over a stale running Run', () => {
   assert.equal(result.current.attention_required, true)
   assert.deepEqual(result.current.errors, [{ code: 'ACP_AGENT_FAILED', message: 'child does not support requested model' }])
   assert.equal(snapshot.current.lifecycle_status, 'running')
+})
+
+test('does not apply an old Run failure or an older terminal observation to a newer state file', () => {
+  const snapshot = { current: {
+    run_id: 'run-06', data_root: '/workspace/pangea-data', lifecycle_status: 'running', phase: 'STEP_03', terminal: false,
+    state_read: { updated_at: '2026-09-07T03:38:18Z' }, errors: [],
+  } }
+  const wrongRun = applyTaskExecutionState(snapshot, {
+    task_id: 'task-05', run_id: 'run-05', data_root: '/workspace/pangea-data', attempt_id: 'attempt-05',
+    status: 'failed', execution_status: 'failed',
+  })
+  assert.strictEqual(wrongRun, snapshot)
+
+  const olderExecution = applyTaskExecutionState(snapshot, {
+    task_id: 'task-06', run_id: 'run-06', data_root: '/workspace/pangea-data', attempt_id: 'attempt-06',
+    status: 'failed', execution_status: 'interrupted',
+    attempts: [{ attempt_id: 'attempt-06', execution_status: 'interrupted', ended_at: Date.parse('2026-09-07T03:22:11Z') }],
+  })
+  assert.strictEqual(olderExecution, snapshot)
 })

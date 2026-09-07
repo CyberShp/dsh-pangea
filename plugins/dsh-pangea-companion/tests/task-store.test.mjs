@@ -125,6 +125,21 @@ test('scopes duplicate Run ids by data root', async () => {
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('rejects ambiguous or conflicting explicit Run bindings', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-conflict-'))
+  let id = 0
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => `task-conflict-${++id}` })
+    for (const sessionId of ['session-a', 'session-b']) {
+      const task = await store.create({ workspace: '/workspace', dataRoot: '/workspace/pangea-data', input: { repository: 'repo', target: sessionId } })
+      await store.addConversation(task.task_id, { sessionId, title: sessionId, kind: 'analysis' })
+      await store.bindRunBySession(sessionId, { run_id: 'duplicate-run', lifecycle_status: 'running' })
+    }
+    await assert.rejects(() => store.getByRun('duplicate-run', { dataRoot: '/workspace/pangea-data' }), /ambiguous Task binding/)
+    await assert.rejects(() => store.bindRun('task-conflict-1', 'different-run'), /already bound to another Run/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('keeps an observed session failure visible while its Run metadata still says running', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-session-failure-'))
   try {

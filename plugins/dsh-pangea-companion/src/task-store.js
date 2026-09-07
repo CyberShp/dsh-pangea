@@ -290,11 +290,12 @@ export class TaskStore {
     const id = text(runId)
     const root = text(dataRoot)
     if (!id) return null
-    const task = Object.values(this.store.tasks).find(item => (
+    const matches = Object.values(this.store.tasks).filter(item => (
       item.run_id === id
       && (!root || (item.data_root && path.resolve(item.data_root) === path.resolve(root)))
     ))
-    return task ? structuredClone(task) : null
+    if (matches.length > 1) throw new Error(`ambiguous Task binding for Run: ${id}`)
+    return matches[0] ? structuredClone(matches[0]) : null
   }
 
   async addConversation(taskId, { sessionId, title, kind = 'assistant' }) {
@@ -647,6 +648,7 @@ export class TaskStore {
     const task = this.requireTask(taskId)
     const id = text(runId)
     if (!id) throw new Error('run_id is required')
+    if (task.run_id && task.run_id !== id) throw new Error(`Task is already bound to another Run: ${task.run_id}`)
     task.run_id = id
     task.status = 'preparing'
     task.launch_error = null

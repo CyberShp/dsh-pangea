@@ -35,12 +35,15 @@ function compactEvent(value = {}) {
   }
   for (const key of [
     'message', 'session_id', 'agent_session_id', 'run_id', 'attempt_id', 'job_id', 'provider', 'model',
-    'reasoning_effort', 'error_code', 'exit_status', 'detail', 'output',
+    'reasoning_effort', 'error_code', 'exit_status', 'detail', 'output', 'configured_command',
+    'resolved_command', 'launcher_kind', 'launcher_command', 'cwd', 'launch_stage', 'syscall',
   ]) {
     if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = value[key].trim().slice(0, MAX_EVENT_TEXT)
   }
   if (Number.isInteger(value.repository_count) && value.repository_count >= 0) event.repository_count = value.repository_count
   if (Number.isInteger(value.pid) && value.pid > 0) event.pid = value.pid
+  if (Number.isInteger(value.errno)) event.errno = value.errno
+  if (Number.isInteger(value.exit_code)) event.exit_code = value.exit_code
   const error = errorMessage(value.error)
   if (error) event.error = error
   return event

@@ -55,6 +55,7 @@ export function acpProviderOptions(env = process.env) {
       version_status: typeof value?.version_status === 'string' ? value.version_status : null,
       version_error: typeof value?.version_error === 'string' ? value.version_error : null,
       login_status: typeof value?.login_status === 'string' ? value.login_status : null,
+      launcher_kind: typeof value?.launcher_kind === 'string' ? value.launcher_kind : null,
     }
   })
 }
@@ -281,6 +282,25 @@ async function emitLaunch(onEvent, event) {
   try { await onEvent(event) } catch { /* logging must never change launch behavior */ }
 }
 
+function launchDetails(value, fallback = {}) {
+  const error = value && typeof value === 'object' ? value : {}
+  const text = (camel, snake, defaultValue) => {
+    const candidate = error[camel] ?? error[snake] ?? defaultValue
+    return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : undefined
+  }
+  return {
+    launch_stage: text('launchStage', 'launch_stage', fallback.launch_stage),
+    configured_command: text('configuredCommand', 'configured_command', fallback.configured_command),
+    resolved_command: text('resolvedCommand', 'resolved_command', fallback.resolved_command),
+    launcher_kind: text('launcherKind', 'launcher_kind', fallback.launcher_kind),
+    launcher_command: text('launcherCommand', 'launcher_command', fallback.launcher_command),
+    cwd: text('cwd', 'cwd', fallback.cwd),
+    error_code: text('code', 'error_code', fallback.error_code),
+    syscall: text('syscall', 'syscall', fallback.syscall),
+    errno: Number.isInteger(error.errno) ? error.errno : fallback.errno,
+  }
+}
+
 async function launchStep(onEvent, stage, action, successDetails = () => ({})) {
   await emitLaunch(onEvent, { stage, status: 'start' })
   try {
@@ -388,13 +408,20 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
       const controller = new AbortController()
       let activeRun
       let cancelled = false
-      const observed = startGate.then(() => subagents.start(providerId, {
-        label,
-        prompt: [{ type: 'text', text: prompt }],
-        parent,
-        signal: controller.signal,
-      })).then(async run => {
+      const observed = startGate.then(async () => {
+        await emitLaunch(onEvent, {
+          stage: 'acp_process_spawn', status: 'start', provider: providerId,
+          ...lifecycle.launchContext,
+        })
+        return subagents.start(providerId, {
+          label,
+          prompt: [{ type: 'text', text: prompt }],
+          parent,
+          signal: controller.signal,
+        })
+      }).then(async run => {
         activeRun = run
+        const details = launchDetails(run.launch, lifecycle.launchContext)
         await lifecycle.onAgentStarted?.({
           provider: providerId,
           agent_session_id: String(run.id),
@@ -403,9 +430,14 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
         void emitLaunch(onEvent, {
           stage: 'acp_session_created', status: 'ok', provider: providerId,
           agent_session_id: String(run.id), pid: Number.isInteger(run.processId) ? run.processId : undefined,
+          ...details,
         })
         return run
       }).catch(async error => {
+        await emitLaunch(onEvent, {
+          stage: 'acp_process_spawn', status: 'error', provider: providerId, error,
+          ...launchDetails(error, { ...lifecycle.launchContext, launch_stage: 'spawn_process' }),
+        })
         controller.abort(error)
         try { await activeRun?.dispose?.() } catch { /* the failed launch remains observable through the Job */ }
         throw error
@@ -523,8 +555,20 @@ export async function launchAnalysisSession(
   ].filter(Boolean).join('\n')
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
+    const providerOption = acpProviderOption(selectedProvider, env)
+    const resolvedCommand = providerOption?.resolved_command ?? providerOption?.command
+    const launcherKind = providerOption?.launcher_kind
+      ?? (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(resolvedCommand ?? '') ? 'windows-batch' : 'direct')
+    const launchContext = {
+      configured_command: providerOption?.command,
+      resolved_command: resolvedCommand,
+      launcher_kind: launcherKind,
+      launcher_command: launcherKind === 'windows-batch' ? env.ComSpec ?? 'cmd.exe' : resolvedCommand,
+      cwd: root,
+    }
     const acpLifecycle = {
       ...lifecycle,
+      launchContext,
       inspectRun: () => runner({
         cwd: root,
         args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', run.run_id],

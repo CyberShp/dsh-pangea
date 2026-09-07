@@ -71,6 +71,7 @@ test('preserves structured command and version probe status for the runtime UI',
         models: [],
         available: true,
         resolved_command: 'C:\\Tools\\nga.cmd',
+        launcher_kind: 'windows-batch',
         resolution_status: 'resolved',
         version_status: 'unavailable',
         version_error: '--version exited with code 2',
@@ -80,6 +81,7 @@ test('preserves structured command and version probe status for the runtime UI',
   assert.equal(provider.resolution_status, 'resolved')
   assert.equal(provider.version_status, 'unavailable')
   assert.equal(provider.version_error, '--version exited with code 2')
+  assert.equal(provider.launcher_kind, 'windows-batch')
 })
 
 test('keeps legacy ACP model catalogs out of the provider launch contract', () => {
@@ -647,12 +649,21 @@ test('reports an ACP provider start failure as failed instead of user cancellati
   const root = await workspace()
   try {
     let jobHooks
+    const launchEvents = []
     const owner = { id: 'owner-session' }
     const runtime = {
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
         getProvider() { return {} },
-        async start() { throw new Error('provider process failed') },
+        async start() {
+          const error = new Error('spawn EINVAL')
+          Object.assign(error, {
+            code: 'EINVAL', errno: -4071, syscall: 'spawn', launchStage: 'spawn_process',
+            configuredCommand: 'nga', resolvedCommand: 'C:\\Users\\测试 User\\nga.cmd',
+            launcherKind: 'windows-batch', launcherCommand: 'C:\\Windows\\System32\\cmd.exe', cwd: root,
+          })
+          throw error
+        },
       },
       jobs: {
         start(spec) { jobHooks = spec.run(); return 'subagent-1' },
@@ -672,8 +683,19 @@ test('reports an ACP provider start failure as failed instead of user cancellati
     await launchAnalysisSession(api, {
       cwd: root,
       input: { repository: 'repo-one', target: 'ACP provider failure', source_scope: [], provider_id: 'pangea-nga' },
-    }, runner, async () => {}, async () => {}, runtime)
-    assert.deepEqual(await jobHooks.done, { status: 'failed', detail: 'provider process failed' })
+    }, runner, async () => {}, event => { launchEvents.push(event) }, runtime)
+    assert.deepEqual(await jobHooks.done, { status: 'failed', detail: 'spawn EINVAL' })
+    assert.deepEqual(
+      launchEvents.find(event => event.stage === 'acp_process_spawn' && event.status === 'error'),
+      {
+        stage: 'acp_process_spawn', status: 'error', provider: 'pangea-nga',
+        error: launchEvents.find(event => event.stage === 'acp_process_spawn' && event.status === 'error').error,
+        launch_stage: 'spawn_process', configured_command: 'nga',
+        resolved_command: 'C:\\Users\\测试 User\\nga.cmd', launcher_kind: 'windows-batch',
+        launcher_command: 'C:\\Windows\\System32\\cmd.exe', cwd: root,
+        error_code: 'EINVAL', syscall: 'spawn', errno: -4071,
+      },
+    )
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
