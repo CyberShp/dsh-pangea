@@ -363,7 +363,7 @@ window.__ModuleLoader__.load({
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '7px 10px', cursor: 'pointer', fontSize: 13 },
       primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '9px 12px', cursor: 'pointer', fontSize: 14, fontWeight: 600 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
-      nav: { display: 'grid', gridTemplateColumns: 'repeat(5, minmax(72px, 1fr))', gap: 0, marginTop: 12, overflowX: 'auto' },
+      nav: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(72px, 1fr)', gap: 0, marginTop: 12, overflowX: 'auto' },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '11px 4px 10px', cursor: 'pointer', fontSize: 13 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '20px 22px 30px' },
@@ -1013,6 +1013,7 @@ window.__ModuleLoader__.load({
       const [gapSource, setGapSource] = React.useState('')
       const [gapStatus, setGapStatus] = React.useState('')
       const [gapDisposition, setGapDisposition] = React.useState('')
+      const [flowReader, setFlowReader] = React.useState({ scope: '', view: 'reader', step: '', query: '', page: 1 })
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const workbenchRequestRef = React.useRef({ sequence: 0, controller: null })
       const snapshotRef = React.useRef(undefined)
@@ -2454,7 +2455,7 @@ window.__ModuleLoader__.load({
         setDiagramBusy(true)
         try {
           const result = await requestWorkbenchAction({ cwd, action, payload: { task_id: selectedTask.task_id, ...extra } })
-          if (result.session_id) { ctx?.pangea?.registerProductSession?.(result.session_id); ctx?.sessions?.open?.(result.session_id) }
+          if (result.session_id) ctx?.pangea?.registerProductSession?.(result.session_id)
           const listed = await requestWorkbenchAction({ cwd, action: 'architecture-list', payload: { task_id: selectedTask.task_id } })
           setDiagramViews(listed.views ?? [])
           if (result.view) setDiagramSelection(result.view.view_id)
@@ -2463,21 +2464,22 @@ window.__ModuleLoader__.load({
       }
 
       function renderDiagrams(flow) {
-        const views = diagramViews.filter(v => v.run_id === current?.run_id && v.task_id === selectedTask?.task_id)
+        const views = diagramViews.filter(v => v.run_id === current?.run_id && v.task_id === selectedTask?.task_id && (!v.flow_id || v.flow_id === flow?.flow_id))
         const selected = views.find(v => v.view_id === diagramSelection) ?? views[0]
         const artifactUrl = (format, download = false) => '/api/pangea-companion/architecture-artifact?' + new URLSearchParams({ cwd: cwd || '', task_id: selectedTask.task_id, view_id: selected.view_id, format, ...(download ? { download: '1' } : {}) })
         return h('div', { style: styles.card },
-          h('div', { style: styles.itemTitle }, '架构视图'),
+          h('div', { style: styles.itemTitle }, '流程图'),
           h('div', { style: styles.chips },
             h('select', { 'aria-label': '架构图类型', style: styles.button, value: diagramType, onChange: e => setDiagramType(e.target.value) }, [['workflow', '业务流程图'], ['architecture', '模块架构图'], ['sequence', '时序图'], ['lifecycle', '生命周期图'], ['dataflow', '数据流图']].map(([v, label]) => h('option', { key: v, value: v }, label))),
-            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !flow, onClick: () => diagramAction('architecture-create', { type: diagramType, flow_id: flow.flow_id }) }, '生成当前流程图'),
+            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !flow, onClick: () => diagramAction('architecture-create', { type: diagramType, flow_id: flow.flow_id, instruction: '先表达主干步骤和回接关系；分支较多时按挂接步骤及类型分组，组上保留分支数量与编号。仅使用已发布关系，不要把所有分支说明塞进一个节点。' }) }, '生成流程总览'),
             h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !current, onClick: () => diagramAction('architecture-create', { type: 'architecture' }) }, '生成模块架构图'),
             h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-list') }, '刷新架构视图')),
-          views.length ? h('select', { 'aria-label': '选择架构视图', style: styles.search, value: selected?.view_id || '', onChange: e => setDiagramSelection(e.target.value) }, views.map(v => h('option', { key: v.view_id, value: v.view_id }, `${v.flow_id || '模块'} · ${v.type} · ${{ generating: '生成中', ready: '可查看', failed: '失败', stopped: '已停止' }[v.status] || v.status}`))) : h('div', { style: styles.itemMeta }, '按需创建独立画图会话，完成后点击刷新查看。'),
+          views.length ? h('select', { 'aria-label': '选择架构视图', style: styles.search, value: selected?.view_id || '', onChange: e => setDiagramSelection(e.target.value) }, views.map(v => h('option', { key: v.view_id, value: v.view_id }, `${businessFlows.find(f => f.flow_id === v.flow_id)?.title || v.flow_id || '模块全景'} · ${{ workflow: '业务流程图', architecture: '模块架构图', sequence: '时序图', lifecycle: '生命周期图', dataflow: '数据流图' }[v.type] || v.type} · ${{ generating: '生成中', ready: '可查看', failed: '失败', stopped: '已停止' }[v.status] || v.status} · ${v.view_id.slice(0, 8)}`))) : h('div', { style: styles.itemMeta }, '选择一个流程按需生成图表。多分支的条件、回接与证据可在“流程阅读”中逐步查看。'),
           selected ? h(React.Fragment, null,
+            selected.branch_ids?.length ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `局部分支图 · 仅包含 ${selected.branch_ids.length} 条分支：${selected.branch_ids.join('、')}`) : null,
             selected.source_revision !== current?.publication?.revision ? h('div', { style: styles.itemMeta }, '此图基于其他分析版本，可按需重新生成。') : null,
             selected.error ? h('div', { style: styles.error }, selected.error) : null,
-            selected.available ? h('iframe', { title: 'Archify 架构图', src: artifactUrl('html'), sandbox: 'allow-scripts allow-downloads', style: { width: '100%', height: 650, border: 0 } }) : null,
+            selected.available ? h('iframe', { title: 'Archify 架构图', src: artifactUrl('html'), sandbox: 'allow-scripts allow-downloads', style: { width: '100%', height: '72vh', minHeight: 480, border: '1px solid #e5e8ec', borderRadius: 8, marginTop: 12 } }) : null,
             h('div', { style: styles.chips },
               selected.session_id ? h('button', { type: 'button', style: styles.button, onClick: () => ctx?.sessions?.open?.(selected.session_id) }, '打开画图会话') : null,
               selected.status === 'generating' ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止本次画图') : null,
@@ -2490,32 +2492,77 @@ window.__ModuleLoader__.load({
         const query = flowQuery.trim().toLowerCase()
         const filtered = businessFlows.filter(flow => !query || [flow.flow_id, flow.title, flow.description, flow.entry].join(' ').toLowerCase().includes(query))
         const flow = filtered.find(item => item.flow_id === flowSelection) ?? filtered[0]
-        const allBranches = businessFlows.flatMap(item => Array.isArray(item.branches) ? item.branches : [])
-        const highRisk = item => (item.linked_risk_ids ?? []).some(id => { const risk = riskById.get(id); return ['P0', 'P1'].includes(risk?.priority) || ['critical', 'high', '严重', '高'].includes(risk?.severity) })
-        const branches = (Array.isArray(flow?.branches) ? flow.branches : []).filter(item => !branchFilter
-          || (branchFilter === 'high_risk' ? highRisk(item) : branchFilter === 'no_case' ? !(item.linked_test_case_ids?.length) : branchFilter === 'unresolved' ? item.status === 'unresolved' : item.kind === branchFilter))
-        const branch = branches.find(item => item.branch_id === branchSelection) ?? branches[0]
+        const scope = `${current?.run_id}:${flow?.flow_id}`
+        const reader = flowReader.scope === scope ? flowReader : { scope, view: 'reader', step: '', query: '', page: 1 }
+        const updateReader = changes => { setFlowReader({ ...reader, ...changes }); setBranchSelection('') }
+        const steps = flow?.mainline_steps ?? []
         const structured = Array.isArray(flow?.mainline_steps)
-        const selectBranch = item => h('button', { key: item.branch_id, type: 'button', style: styles.chip, onClick: () => setBranchSelection(item.branch_id) }, `${item.branch_id} · ${item.condition ?? item.kind ?? '分支'}`)
+        const allBranches = Array.isArray(flow?.branches) ? flow.branches : []
+        const unbound = item => !steps.some(step => step.step_id === item.from_step_id)
+        const step = steps.find(item => item.step_id === reader.step)
+        const kindLabels = { normal: '正常', exception: '异常', timeout: '超时', retry: '重试', recovery: '恢复', concurrency: '并发' }
+        const stepTitle = id => { const item = steps.find(s => s.step_id === id); return item ? `${id} · ${item.title || '未命名步骤'}` : id || '未挂接' }
+        const destination = item => item.to_step_id ? stepTitle(item.to_step_id) : item.terminal_result || '回接 / 结束待确认'
+        const highRisk = item => (item.linked_risk_ids ?? []).some(id => { const risk = riskById.get(id); return ['P0', 'P1'].includes(risk?.priority) || ['critical', 'high', '严重', '高'].includes(risk?.severity) })
+        const branches = allBranches.filter(item => (!reader.step || (reader.step === '__unbound' ? unbound(item) : item.from_step_id === reader.step))
+          && (!reader.query.trim() || [item.branch_id, item.condition, item.processing, item.result, destination(item)].join(' ').toLowerCase().includes(reader.query.trim().toLowerCase()))
+          && (!branchFilter || (branchFilter === 'high_risk' ? highRisk(item) : branchFilter === 'no_case' ? !(item.linked_test_case_ids?.length) : branchFilter === 'unresolved' ? item.status === 'unresolved' : item.kind === branchFilter)))
+        const pages = Math.max(1, Math.ceil(branches.length / 12))
+        const page = Math.min(reader.page, pages)
+        const pageBranches = branches.slice((page - 1) * 12, page * 12)
+        const branch = pageBranches.find(item => item.branch_id === branchSelection) ?? pageBranches[0]
+        const selectedStyle = { background: '#fff3f3', borderColor: '#d88d92', color: '#9e0710' }
+        const toolbar = { display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }
+        const columns = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 210px), 1fr))', gap: '0 18px' }
+        const stepButton = (id, label, count, aria) => h('button', { key: id, type: 'button', 'aria-label': aria, 'aria-pressed': reader.step === id,
+          style: { ...styles.runButton, display: 'flex', justifyContent: 'space-between', gap: 10, width: '100%', marginBottom: 6, ...(reader.step === id ? selectedStyle : {}) },
+          onClick: () => updateReader({ step: id, page: 1 }) }, h('span', null, label), h('span', { style: styles.badge }, `${count} 分支`))
         return h(React.Fragment, null,
-          renderDiagrams(flow),
-          h('div', { style: styles.itemMeta }, `流程 ${businessFlows.length} · 分支 ${allBranches.length} · 待确认 ${allBranches.filter(b => b.status === 'unresolved').length} · 未关联用例 ${allBranches.filter(b => !b.linked_test_case_ids?.length).length}`),
-          h('input', { style: styles.search, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称或入口…', onChange: event => setFlowQuery(event.target.value) }),
-          h('select', { style: styles.search, value: branchFilter, 'aria-label': '筛选分支', onChange: event => setBranchFilter(event.target.value) },
-            [['', '全部分支'], ['high_risk', '关联高风险'], ['exception', '异常'], ['timeout', '超时'], ['retry', '重试'], ['recovery', '恢复'], ['concurrency', '并发'], ['unresolved', '待确认'], ['no_case', '未关联用例']].map(([id, label]) => h('option', { key: id, value: id }, label))),
-          !flow ? h('div', { style: styles.empty }, collectionEmpty('business_flows', '当前 Run 没有业务流程。')) : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 260px), 1fr))', gap: 12, alignItems: 'start' } },
-            h('div', { style: styles.card }, filtered.map(item => h('button', { type: 'button', key: item.flow_id, style: { ...styles.runButton, ...(item === flow ? styles.runActive : {}) }, onClick: () => { setFlowSelection(item.flow_id); setBranchSelection('') } }, `${item.flow_id} · ${item.title ?? '未命名流程'}`))),
-            h('div', null, section(flow.title ?? '流程', flow.description || flow.entry),
-              structured ? flow.mainline_steps.map(step => h('div', { key: step.step_id, style: styles.card },
-                h('div', { style: styles.itemTitle }, `${step.step_id} · ${step.title ?? ''}`),
-                field('外部动作', step.external_action), field('内部处理', step.processing), field('状态变化', step.state_change), field('外部表现', step.external_observation), linkedItems(step),
-                h('div', { style: styles.chips }, branches.filter(b => b.from_step_id === step.step_id).map(selectBranch))))
-                : h('div', { style: styles.card }, h('div', { style: styles.itemMeta }, '本 Run 没有结构化主干/分支，以下保留原流程内容。'), stringList('步骤', flow.steps, true), flow.mermaid ? h('pre', { style: styles.source }, flow.mermaid) : null),
-              (flow.evidence ?? []).map((item, index) => chip(item.location ?? `证据 ${index + 1}`, () => navigate({ type: 'evidence-detail', key: evidenceIdentity(item) }))),
-              h('div', { style: styles.chips }, branches.filter(b => !flow.mainline_steps?.some(step => step.step_id === b.from_step_id)).map(selectBranch))),
-            branch ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, branch.branch_id),
-              field('进入条件', branch.condition), field('处理', branch.processing), field('结果', branch.result), field('残留状态', branch.residual_state), field('外部表现', branch.external_observation), field('回接 / 结束', branch.to_step_id ?? branch.terminal_result), field('分析状态', branch.status), linkedItems(branch))
-              : h('div', { style: styles.card }, structured ? '当前筛选没有分支记录。' : '旧格式未提供分支结构。')))
+          h('div', { style: { ...styles.card, marginBottom: 12 } },
+            h('div', { style: toolbar },
+              h('input', { style: { ...styles.search, flex: '1 1 180px', minWidth: 0, width: 'auto', margin: 0 }, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称或入口…', onChange: event => setFlowQuery(event.target.value) }),
+              h('select', { style: { ...styles.search, flex: '2 1 230px', minWidth: 0, maxWidth: '100%', width: 'auto', margin: 0 }, 'aria-label': '选择业务流程', value: flow?.flow_id || '', onChange: event => { setFlowSelection(event.target.value); setBranchSelection('') } }, filtered.map(item => h('option', { key: item.flow_id, value: item.flow_id }, `${item.flow_id} · ${item.title || '未命名流程'}`))),
+              h('div', { role: 'group', 'aria-label': '流程展示方式', style: toolbar }, ['reader', 'diagram'].map(view => h('button', { key: view, type: 'button', 'aria-label': view === 'reader' ? '流程阅读视图' : '流程图视图', 'aria-pressed': reader.view === view, style: { ...styles.button, ...(reader.view === view ? selectedStyle : {}) }, onClick: () => { setFlowReader({ ...reader, view }); if (view === 'diagram') void diagramAction('architecture-list') } }, view === 'reader' ? '流程阅读' : '流程图')))),
+            flow ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `${structured ? `${steps.length} 个主干步骤` : '旧版流程'} · ${allBranches.length} 条分支 · ${allBranches.filter(b => b.status === 'unresolved').length} 条待确认 · ${allBranches.filter(b => !b.linked_test_case_ids?.length).length} 条未关联用例`) : null),
+          !flow ? h('div', { style: styles.empty }, query ? '没有匹配的业务流程，请调整搜索。' : collectionEmpty('business_flows', '当前 Run 没有业务流程。'))
+            : reader.view === 'diagram' ? renderDiagrams(flow)
+              : h(React.Fragment, null,
+                h('div', { style: { marginBottom: 14 } }, h('div', { style: styles.itemTitle }, flow.title || '流程'), h('div', { style: styles.itemMeta }, flow.description || flow.entry)),
+                h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'start' } },
+                  h('aside', { 'aria-label': '主干步骤', style: { ...styles.card, flex: '1 1 210px', minWidth: 0, maxHeight: '65vh', overflowY: 'auto' } },
+                    h('div', { style: { ...styles.itemTitle, marginBottom: 12 } }, '主干步骤'),
+                    stepButton('', '全部步骤', allBranches.length, '查看全部分支'),
+                    steps.map((item, index) => stepButton(item.step_id, `${String(index + 1).padStart(2, '0')}  ${item.title || item.step_id}`, allBranches.filter(b => b.from_step_id === item.step_id).length, `查看步骤 ${item.step_id} 的分支`)),
+                    allBranches.some(unbound) ? stepButton('__unbound', '未挂接步骤', allBranches.filter(unbound).length, '查看未挂接分支') : null,
+                    !structured ? h('div', null, h('div', { style: styles.itemMeta }, '旧格式流程内容'), stringList('步骤', flow.steps, true), flow.mermaid ? h('pre', { style: styles.source }, flow.mermaid) : null) : null,
+                    (flow.evidence ?? []).map((item, index) => chip(item.location ?? `证据 ${index + 1}`, () => navigate({ type: 'evidence-detail', key: evidenceIdentity(item) })))),
+                  h('section', { 'aria-label': '分支阅读区', style: { flex: '3 1 460px', minWidth: 0 } },
+                    step ? h('details', { key: step.step_id, style: { ...styles.card, marginBottom: 12 } }, h('summary', { style: { ...styles.itemTitle, cursor: 'pointer' } }, `${stepTitle(step.step_id)} · 步骤详情`),
+                      h('div', { style: columns }, field('外部动作', step.external_action), field('内部处理', step.processing), field('状态变化', step.state_change), field('外部表现', step.external_observation)), linkedItems(step)) : null,
+                    h('div', { style: styles.card },
+                      h('div', { style: { ...styles.row, marginBottom: 12 } }, h('div', { style: styles.itemTitle }, reader.step === '__unbound' ? '未挂接的分支' : step ? `${step.title || step.step_id}的分支` : '全部分支'), h('span', { style: styles.badge }, `${branches.length} 条`)),
+                      h('div', { style: toolbar },
+                        h('input', { style: { ...styles.search, flex: '1 1 170px', width: 'auto', margin: 0 }, value: reader.query, 'aria-label': '搜索分支', placeholder: '搜索条件、处理或回接…', onChange: event => updateReader({ query: event.target.value, page: 1 }) }),
+                        h('select', { style: { ...styles.search, width: 'auto', margin: 0 }, value: branchFilter, 'aria-label': '筛选分支', onChange: event => { setBranchFilter(event.target.value); updateReader({ page: 1 }) } },
+                          [['', '全部分支'], ['high_risk', '关联高风险'], ...Object.entries(kindLabels), ['unresolved', '待确认'], ['no_case', '未关联用例']].map(([id, label]) => h('option', { key: id, value: id }, label)))),
+                      h('div', { key: JSON.stringify([scope, reader.step, reader.query, branchFilter, page]), style: { marginTop: 12, maxHeight: '42vh', overflowY: 'auto' }, 'aria-label': '分支列表' }, pageBranches.map(item => h('button', { key: item.branch_id, type: 'button', 'aria-label': `查看分支 ${item.branch_id}`, 'aria-pressed': item === branch,
+                        style: { ...styles.runButton, width: '100%', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, marginBottom: 6, ...(item === branch ? selectedStyle : {}) }, onClick: () => setBranchSelection(item.branch_id) },
+                        h('div', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, h('div', { style: styles.itemTitle }, `${item.branch_id} · ${item.condition || '条件待确认'}`), h('div', { style: styles.itemMeta }, `${stepTitle(item.from_step_id)} → ${destination(item)}`)),
+                        h('span', { style: styles.badge }, kindLabels[item.kind] || item.kind || '分支')))),
+                      !branches.length ? h('div', { style: styles.empty }, allBranches.length ? '当前步骤与筛选条件下没有分支。' : '本流程未提供分支记录。') : null,
+                      h('div', { style: { ...toolbar, justifyContent: 'space-between', marginTop: 10 } }, h('span', { style: styles.itemMeta, role: 'status' }, `第 ${page} / ${pages} 页 · 共 ${branches.length} 条`), h('div', { style: toolbar },
+                        h('button', { type: 'button', 'aria-label': '绘制本页分支', disabled: diagramBusy || !pageBranches.length || !selectedTask, style: styles.button, onClick: async () => {
+                          setFlowReader({ ...reader, view: 'diagram' })
+                          await diagramAction('architecture-create', { type: 'workflow', flow_id: flow.flow_id, branch_ids: pageBranches.map(item => item.branch_id),
+                            instruction: `绘制局部分支图：${flow.title || flow.flow_id}，${step ? stepTitle(step.step_id) : reader.step === '__unbound' ? '未挂接步骤' : '全部步骤'}。本页 ${pageBranches.length} 条，筛选结果 ${branches.length} 条，第 ${page}/${pages} 页。分支编号：${pageBranches.map(item => item.branch_id).join('、')}。按来源步骤排列分支，清楚标出回接或终止。标题注明“局部分支”；未提供的关系标记待确认。` })
+                        } }, '绘制本页分支'),
+                        h('button', { type: 'button', 'aria-label': '上一页分支', disabled: page === 1, style: styles.button, onClick: () => updateReader({ page: page - 1 }) }, '上一页'),
+                        h('button', { type: 'button', 'aria-label': '下一页分支', disabled: page === pages, style: styles.button, onClick: () => updateReader({ page: page + 1 }) }, '下一页')))),
+                    branch ? h('details', { key: branch.branch_id, open: true, style: { ...styles.card, marginTop: 12 }, 'aria-label': '分支详情' },
+                      h('summary', { style: { ...styles.itemTitle, cursor: 'pointer' } }, `${branch.branch_id} · 分支详情`),
+                      h('div', { style: columns }, field('进入条件', branch.condition), field('处理', branch.processing), field('结果', branch.result), field('残留状态', branch.residual_state), field('外部表现', branch.external_observation), field('回接 / 结束', destination(branch)), field('分析状态', branch.status)),
+                      branch.to_step_id && steps.some(item => item.step_id === branch.to_step_id) ? h('button', { type: 'button', style: styles.chip, onClick: () => updateReader({ step: branch.to_step_id, page: 1 }) }, `定位回接步骤 ${branch.to_step_id}`) : null,
+                      linkedItems(branch)) : null))))
       }
 
       function renderCoverage() {

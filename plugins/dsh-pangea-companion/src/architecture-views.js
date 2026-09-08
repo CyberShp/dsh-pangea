@@ -38,7 +38,7 @@ export async function updateView(task, viewId, changes) {
   return updated
 }
 
-export async function createView(task, { type = 'workflow', flow_id = null, previous_view_id = null } = {}, env = process.env) {
+export async function createView(task, { type = 'workflow', flow_id = null, previous_view_id = null, branch_ids } = {}, env = process.env) {
   if (!DIAGRAM_TYPES.includes(type)) throw new Error('Unsupported diagram type')
   const archify = env.PANGEA_ARCHIFY_ROOT
   if (!archify) throw new Error('Archify runtime unavailable')
@@ -50,11 +50,15 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   const flow = flow_id ? projection.business_flows?.find(item => item.flow_id === flow_id) : null
   if (flow_id && !flow) throw new Error('Selected flow is not in the published projection')
   const previous = previous_view_id ? await loadView(task, previous_view_id) : null
+  const branchIds = branch_ids ?? previous?.branch_ids ?? null
+  if (branchIds !== null && (!flow || !Array.isArray(branchIds) || !branchIds.length || new Set(branchIds).size !== branchIds.length
+    || branchIds.some(id => !(flow.branches ?? []).some(branch => branch.branch_id === id)))) throw new Error('Invalid architecture branch scope')
+  const scopedFlow = branchIds ? { ...flow, branches: flow.branches.filter(branch => branchIds.includes(branch.branch_id)) } : flow
   const viewId = randomUUID()
   const folder = path.join(root, viewId)
   await mkdir(folder)
   const context = flow ? {
-    business_flows: [flow],
+    business_flows: [scopedFlow],
     risks: (projection.risks ?? []).filter(r => r.flow_id === flow_id || (flow.branches ?? []).some(b => b.linked_risk_ids?.includes(r.risk_id))),
     test_cases: (projection.test_cases ?? []).filter(c => c.flow_id === flow_id || (flow.branches ?? []).some(b => b.linked_test_case_ids?.includes(c.test_case_id))),
     evidence: projection.evidence ?? [],
@@ -64,13 +68,14 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     const candidate = await readFile(path.join(await viewRoot(task, previous.view_id), 'candidate.json'))
     await writeFile(path.join(folder, 'candidate.json'), candidate)
   }
-  const view = { view_id: viewId, task_id: task.task_id, run_id: task.run_id, flow_id, type,
+  const view = { view_id: viewId, task_id: task.task_id, run_id: task.run_id, flow_id, type, branch_ids: branchIds,
     source_revision: projection.publication?.revision ?? null, status: 'generating',
     previous_view_id, session_id: null, job_id: null, created_at: stamp(), updated_at: stamp() }
   await writeFile(path.join(folder, 'manifest.json'), JSON.stringify(view, null, 2))
   const renderer = fileURLToPath(new URL('./architecture-render.mjs', import.meta.url))
   return { view, prompt: [
     `为 ${task.target} 创建 ${type} 架构视图。${previous ? '这是关联的新画图会话，从 candidate.json 继续修改。' : ''}`,
+    ...(branchIds ? [`本图是局部分支图，仅包含 ${branchIds.join('、')}。主干仅作定位和回接上下文；图题须注明“局部分支”，不得把本图表述为完整流程。`] : []),
     `先读取 ${path.join(archify, 'SKILL.md')}，按需读对应 schema/example；PANGEA 集成约定优先：不运行更新检查，不访问外网，不要求公开仓库，不读取秘密配置。`,
     `已发布上下文：${path.join(folder, 'context.json')}。冻结源码：${path.join(run, 'inputs/source/repository')}。`,
     '只核对本图相关实现；语义疑点在会话报告，不能改主 Run 的报告、投影、风险、用例、状态。',

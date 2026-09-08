@@ -667,7 +667,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         return json(res, 200, { status: 'ok', views })
       }
       if (body.action === 'architecture-create') {
-        const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id })
+        const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id, branch_ids: body.branch_ids })
         try {
           const launched = await launchArchitectureSession(api, { cwd, task, prompt: prepared.prompt + (body.instruction ? `\n用户修改要求：${body.instruction}` : ''),
             onSession: async sessionId => {

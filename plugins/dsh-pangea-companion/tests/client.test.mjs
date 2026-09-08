@@ -43,10 +43,10 @@ test('create form shows and can remove selected assets absent from its repositor
   assert.deepEqual(Array.from(changed.asset_ids), ['tagged'])
 })
 
-async function loadClientExports(react = fakeReact()) {
+async function loadClientExports(react = fakeReact(), fetcher = async () => { throw new Error('fetch must not run during registration') }) {
   const source = await readFile(clientPath, 'utf8')
   let exported
-  const sandbox = { URLSearchParams, console, fetch: async () => { throw new Error('fetch must not run during registration') }, setInterval, clearInterval }
+  const sandbox = { URLSearchParams, console, fetch: fetcher, setInterval, clearInterval }
   sandbox.window = { setInterval, clearInterval, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? react : {}) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   return exported
@@ -169,7 +169,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /独立 Judge/)
   assert.match(source, /分析任务/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
-  assert.match(source, /repeat\(5, minmax\(72px, 1fr\)\)/)
+  assert.match(source, /gridAutoFlow: 'column', gridAutoColumns: 'minmax\(72px, 1fr\)'/)
   assert.match(source, /\['flows', '业务流程'\]/)
   assert.match(source, /\['workflow', '运行过程'\]/)
   assert.doesNotMatch(source, /\['monitor', '监控'\]/)
@@ -887,3 +887,63 @@ for (const screenType of ['flows', 'coverage']) {
     assert.ok(nodes.some(node => node.type === 'button' && node.children[0] === 'E1'))
   })
 }
+
+test('dense flow reader pages branches, focuses a step and keeps search, destinations and case links usable', async () => {
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', target: 'dense', status: 'complete' }
+  const flow = { flow_id: 'F1', title: '请求生命周期', mainline_steps: [{ step_id: 'S1', title: '请求校验' }, { step_id: 'S2', title: '持久化' }], branches: [
+    ...Array.from({ length: 30 }, (_, i) => ({ branch_id: `B${i + 1}`, from_step_id: 'S1', to_step_id: 'S2', kind: i % 2 ? 'retry' : 'timeout', condition: `条件 ${i + 1}`, processing: `处理 ${i + 1}`, linked_test_case_ids: ['TC1'] })),
+    { branch_id: 'B31', from_step_id: 'S2', kind: 'exception', condition: '写入失败', terminal_result: '返回失败' },
+    { branch_id: 'B32', from_step_id: 'missing', condition: '来源待确认' },
+  ] }
+  const current = { run_id: 'run', data_root: '/data', details: { business_flows: [flow], test_cases: [{ test_case_id: 'TC1', title: '验收' }] } }
+  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
+  let index = 0
+  const requests = []
+  const openedSessions = []
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } }, async (_url, options) => {
+    requests.push(JSON.parse(options.body))
+    return { ok: true, async json() { return { status: 'ok', views: [], session_id: requests.at(-1).action === 'architecture-create' ? 'diagram-session' : undefined } } }
+  })
+  const pages = [], ctx = { sessions: { open(id) { openedSessions.push(id) } }, pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const render = () => { index = 0; return descendants(panel.type(panel.props)) }
+  const find = label => render().find(node => node.props['aria-label'] === label)
+  const rows = () => render().filter(node => node.props['aria-label']?.startsWith('查看分支 '))
+  assert.equal(rows().length, 12)
+  assert.equal(rows()[0].props['aria-label'], '查看分支 B1')
+  find('下一页分支').props.onClick()
+  assert.equal(rows()[0].props['aria-label'], '查看分支 B13')
+  find('搜索分支').props.onChange({ target: { value: '条件 30' } })
+  assert.equal(rows().length, 1)
+  assert.equal(rows()[0].props['aria-label'], '查看分支 B30')
+  assert.ok(render().some(node => node.type === 'button' && node.children[0] === 'TC1'))
+  find('搜索分支').props.onChange({ target: { value: '' } })
+  find('查看步骤 S2 的分支').props.onClick()
+  assert.equal(rows().length, 1)
+  assert.equal(rows()[0].props['aria-label'], '查看分支 B31')
+  find('查看未挂接分支').props.onClick()
+  assert.equal(rows()[0].props['aria-label'], '查看分支 B32')
+  find('查看全部分支').props.onClick()
+  find('筛选分支').props.onChange({ target: { value: 'timeout' } })
+  assert.equal(rows().length, 12)
+  find('下一页分支').props.onClick()
+  assert.equal(rows().length, 3)
+  assert.ok(rows().every(node => Number(node.props['aria-label'].match(/B(\d+)/)[1]) % 2 === 1))
+  await find('绘制本页分支').props.onClick()
+  const drawing = requests.find(request => request.action === 'architecture-create')
+  assert.ok(drawing)
+  assert.equal(drawing.flow_id, 'F1')
+  assert.match(drawing.instruction, /B25、B27、B29/)
+  assert.match(drawing.instruction, /本页 3 条.*筛选结果 15 条/)
+  assert.doesNotMatch(drawing.instruction, /B1、/)
+  assert.equal(openedSessions.length, 0, 'background drawing must keep the user in the flow page')
+  assert.equal(rows().length, 0)
+  assert.ok(find('架构图类型'))
+  find('流程阅读视图').props.onClick()
+  assert.equal(rows().length, 3)
+})
