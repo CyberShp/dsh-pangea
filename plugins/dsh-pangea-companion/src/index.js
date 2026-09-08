@@ -1,3 +1,4 @@
+import { createView, listViews, loadView, updateView, viewArtifact } from './architecture-views.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
 import { buildTestCaseCsv, buildTestCaseXlsx } from './export.js'
@@ -13,7 +14,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { runPangea, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, launchArchitectureSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -573,6 +574,22 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
   }
 }
 
+export async function architectureArtifactRoute(req, res, tasks) {
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  try {
+    if (req.method !== 'GET') return json(res, 405, { status: 'error' })
+    const url = new URL(req.url, 'http://localhost')
+    const task = requireWorkspaceTask(await tasks.get(url.searchParams.get('task_id')), url.searchParams.get('cwd'), url.searchParams.get('task_id'))
+    const format = url.searchParams.get('format') || 'html'
+    const data = await viewArtifact(task, url.searchParams.get('view_id'), format)
+    res.setHeader('Content-Type', format === 'svg' ? 'image/svg+xml' : 'text/html; charset=utf-8')
+    res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-downloads; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'")
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    if (url.searchParams.get('download') === '1') res.setHeader('Content-Disposition', `attachment; filename="diagram.${format}"`)
+    res.end(data)
+  } catch (error) { return json(res, 400, { status: 'error', error: error.message }) }
+}
+
 export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLogs, runtime, monitor, runner = runPangea) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
@@ -628,6 +645,58 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
+    if (body.action.startsWith('architecture-')) {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (!task.run_id) throw new Error('任务尚未关联 Run')
+      if (body.action === 'architecture-list') {
+        const views = await listViews(task)
+        for (const view of views.filter(v => v.status === 'generating')) {
+          if (view.job_id) {
+            const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)
+            const job = owner ? runtimeService(runtime, 'jobs')?.get?.(view.job_id, owner) : null
+            if (!job || job.startedAt !== view.job_started_at || ['failed', 'killed', 'completed'].includes(job.status)) {
+              Object.assign(view, await updateView(task, view.view_id, { status: job?.status === 'killed' ? 'stopped' : 'failed', error: '画图执行已结束或不可确认，尚无验证通过的产物。可打开会话查看原因。' }))
+            }
+          } else if (view.session_id) {
+            const history = apiValue(await api.sessions.history(rpc({ sessionId: view.session_id, maxMessages: 12 })))
+            const failure = sessionFailure(history)
+            const lastTurnEvent = [...(history?.events ?? [])].reverse().map(item => item.event ?? item).find(event => ['turn/start', 'turn/end'].includes(event.type ?? event.name))
+            if (failure || (lastTurnEvent?.type ?? lastTurnEvent?.name) === 'turn/end') Object.assign(view, await updateView(task, view.view_id, { status: 'failed', error: failure?.message ?? '画图回合已结束，尚无验证通过的产物。可打开会话继续处理。' }))
+          }
+        }
+        return json(res, 200, { status: 'ok', views })
+      }
+      if (body.action === 'architecture-create') {
+        const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id })
+        try {
+          const launched = await launchArchitectureSession(api, { cwd, task, prompt: prepared.prompt + (body.instruction ? `\n用户修改要求：${body.instruction}` : ''),
+            onSession: async sessionId => {
+              await updateView(task, prepared.view.view_id, { session_id: sessionId })
+              await tasks.addConversation(task.task_id, { sessionId, title: `架构视图 · ${task.target}`, kind: 'architecture' })
+            },
+            onJob: details => updateView(task, prepared.view.view_id, { job_id: details.jobId, job_started_at: details.jobStartedAt, owner_session_id: details.ownerSessionId }),
+          }, runtime)
+          return json(res, 200, { status: 'ok', ...launched, view: await loadView(task, prepared.view.view_id) })
+        } catch (error) {
+          await updateView(task, prepared.view.view_id, { status: 'failed', error: error.message })
+          throw error
+        }
+      }
+      if (body.action === 'architecture-stop') {
+        const view = await loadView(task, body.view_id)
+        if (view.job_id) {
+          const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)
+          if (!owner) throw new Error('图会话所有者不可用，未确认停止')
+          const jobs = runtimeService(runtime, 'jobs')
+          const job = jobs?.get?.(view.job_id, owner)
+          if (!job || job.startedAt !== view.job_started_at) throw new Error('图任务绑定不可验证')
+          await jobs.kill(view.job_id, owner)
+        }
+        if (view.session_id) apiValue(await api.sessions.cancel(rpc({ sessionId: view.session_id })))
+        return json(res, 200, { status: 'ok', view: await updateView(task, body.view_id, { status: 'stopped' }) })
+      }
+      throw new Error('Unknown architecture action')
+    }
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
@@ -1027,10 +1096,12 @@ export function apply(ctx) {
   const jobs = ctx.jobs ?? ctx.get?.('jobs')
   const disposeJobController = jobs?.attachController?.('pangea-companion')
   const disposeJobDone = jobs?.onJobDone?.((snapshot, owner) => settleAcpTask(ctx, tasks, launchLogs, snapshot, owner).catch(() => undefined))
+  const disposeArchitectureRoute = ctx.webServer.register({ kind: 'exact', path: '/api/pangea-companion/architecture-artifact', handler: (req, res) => architectureArtifactRoute(req, res, tasks) })
   const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs, ctx, monitor) })
   const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
   ctx.effect?.(() => async () => {
     disposeRepositoryRoute()
+    disposeArchitectureRoute()
     disposeWorkbenchRoute()
     disposeExecutionRoute()
     disposeAcpSettingsRoute()

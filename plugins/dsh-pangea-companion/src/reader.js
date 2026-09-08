@@ -264,7 +264,7 @@ async function readLiveDocumentDraft(runDirectory, state, manifest) {
   const liveRoot = path.join(runDirectory, '活文档')
   const details = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
   let stepId = null
-  if (manifest.workflow_id === 'module-five-stage') {
+  if (['module-five-stage', 'coverage-five-stage'].includes(manifest.workflow_id)) {
     details.risks = parseRisks(await readTextIfFile(path.join(liveRoot, '风险点与SFMEA.md')), new Map(), new Map())
     details.test_cases = parseTestCases(await readTextIfFile(path.join(liveRoot, '黑盒测试用例.md')), new Map())
     // New workflows publish explicitly; Markdown enriches details but never
@@ -559,7 +559,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const completed = state?.completed_steps?.length ?? 0
   const finalExpected = life.lifecycle_status === 'complete'
     || state?.status === 'complete'
-    || (manifest.workflow_id !== 'module-five-stage' && (state?.completed_steps ?? []).includes(finalStep))
+    || (!['module-five-stage', 'coverage-five-stage'].includes(manifest.workflow_id) && (state?.completed_steps ?? []).includes(finalStep))
   const recordedPublication = state?.publication && typeof state.publication === 'object'
     ? state.publication
     : projection.value?.publication && typeof projection.value.publication === 'object'
@@ -630,6 +630,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     data_root: path.resolve(dataRoot),
     ...life,
     phase_title: workflow.steps.find(step => step.step === state?.current_step)?.title ?? null,
+    scenario: metadata.request?.scenario ?? 'module-analysis',
+    coverage_input: metadata.coverage_input ?? null,
     target: metadata.request?.target ?? runId,
     repository: metadata.request?.repository ?? null,
     verdict: state?.verdict ?? null,

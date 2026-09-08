@@ -745,7 +745,7 @@ window.__ModuleLoader__.load({
       if (screen.type === 'risk') return 'risks'
       if (screen.type === 'case') return 'cases'
       if (screen.type === 'evidence-detail') return 'evidence'
-      if (screen.type === 'flows') return 'workflow'
+      if (screen.type === 'flows') return 'flows'
       if (screen.type === 'review') return 'review'
       return screen.type
     }
@@ -764,6 +764,9 @@ window.__ModuleLoader__.load({
         source_scope: String(form.source_scope_text ?? '').split(/[\n,]/).map(value => value.trim()).filter(Boolean),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'module-analysis',
+        ...(form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
+          ? { kind: 'file', path: form.coverage_path }
+          : { kind: 'query', query: { product: form.coverage_product, c_version: form.coverage_version, b_version: form.coverage_b_version || '', module: form.coverage_module } } } : {}),
         mode: form.mode || 'depth',
         provider_id: form.provider_id || null,
         model_route: form.provider_id ? null : modelRouteFromKey(form.model_route_key),
@@ -980,7 +983,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
       const [assetCatalog, setAssetCatalog] = React.useState(null)
       const [assetCatalogLoading, setAssetCatalogLoading] = React.useState(false)
       const [assetCatalogError, setAssetCatalogError] = React.useState('')
@@ -997,6 +1000,19 @@ window.__ModuleLoader__.load({
       const [assetRepositoryOnly, setAssetRepositoryOnly] = React.useState(false)
       const [assetRefresh, setAssetRefresh] = React.useState(0)
       const [assetLabels, setAssetLabels] = React.useState({})
+      const [flowSelection, setFlowSelection] = React.useState('')
+      const [branchSelection, setBranchSelection] = React.useState('')
+      const [branchFilter, setBranchFilter] = React.useState('')
+      const [diagramType, setDiagramType] = React.useState('workflow')
+      const [diagramViews, setDiagramViews] = React.useState([])
+      const [diagramSelection, setDiagramSelection] = React.useState('')
+      const [diagramBusy, setDiagramBusy] = React.useState(false)
+      const [diagramInstruction, setDiagramInstruction] = React.useState('')
+      const [gapQuery, setGapQuery] = React.useState('')
+      const [gapKind, setGapKind] = React.useState('')
+      const [gapSource, setGapSource] = React.useState('')
+      const [gapStatus, setGapStatus] = React.useState('')
+      const [gapDisposition, setGapDisposition] = React.useState('')
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const workbenchRequestRef = React.useRef({ sequence: 0, controller: null })
       const snapshotRef = React.useRef(undefined)
@@ -2026,7 +2042,8 @@ window.__ModuleLoader__.load({
         : screen.type === 'tasks' ? '分析任务'
         : screen.type === 'overview' ? 'PANGEA 总览'
         : screen.type === 'create' ? '新建分析'
-          : screen.type === 'workflow' ? '运行流程'
+          : screen.type === 'workflow' ? '运行过程'
+          : screen.type === 'coverage' ? '覆盖缺口'
             : screen.type === 'flows' ? '业务流程'
           : screen.type === 'risks' ? '风险'
           : screen.type === 'risk' ? (riskById.get(screen.id)?.risk_id || '风险详情')
@@ -2039,7 +2056,7 @@ window.__ModuleLoader__.load({
                         : screen.type === 'repository-import' ? '添加源码仓库' : '复核'
 
       const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? [] : [
-        ['overview', '概览'], ['risks', '风险'], ['cases', '测试用例'], ['workflow', '流程'], ['review', '复核'],
+        ['overview', '概览'], ['flows', '业务流程'], ...(current?.scenario === 'coverage-analysis' ? [['coverage', '覆盖缺口']] : [['risks', '风险']]), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['workflow', '运行过程'], ['review', '复核'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -2228,7 +2245,7 @@ window.__ModuleLoader__.load({
           ? selectedProvider?.registered === true
           : selectedModelOption?.credential_configured === true
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
-        const canSubmit = compatible && createForm.repository && createForm.target.trim() && sourceScope.length > 0 && executionReady && !creatingRun
+        const canSubmit = compatible && createForm.repository && createForm.target.trim() && (sourceScope.length > 0 || createForm.scenario === 'coverage-analysis') && (createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())) && executionReady && !creatingRun
         const assetItems = assetCatalog?.assets ?? []
         const selectedAssets = createForm.asset_ids.map(assetId => assetLabels[assetId] ?? assetItems.find(item => item.asset_id === assetId)
           ?? { asset_id: assetId, title: assetId })
@@ -2285,13 +2302,28 @@ window.__ModuleLoader__.load({
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               h('label', null, h('div', { style: styles.label }, '分析场景'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.scenario,
-                onChange: event => setCreateForm(value => ({ ...value, scenario: event.target.value })),
+                onChange: event => setCreateForm(value => ({ ...value, scenario: event.target.value, source_scope_text: event.target.value === 'coverage-analysis' && value.source_scope_text === '.' ? '' : value.source_scope_text })),
               },
               h('option', { value: 'module-analysis' }, '模块分析'),
+              h('option', { value: 'coverage-analysis' }, '覆盖率分析'),
               h('option', { value: 'issue-regression' }, '问题回归'),
               h('option', { value: 'root-cause' }, '根因定位'),
               h('option', { value: 'special-risk' }, '专项风险'),
               h('option', { value: 'custom' }, '自定义'))),
+              createForm.scenario === 'coverage-analysis' ? h('div', { style: { gridColumn: '1 / -1' } },
+                h('select', { 'aria-label': '覆盖率输入方式', style: styles.search, value: createForm.coverage_kind, onChange: event => setCreateForm(value => ({ ...value, coverage_kind: event.target.value })) },
+                  h('option', { value: 'query' }, '按产品 / 版本 / 模块查询'), h('option', { value: 'file' }, '本地覆盖率文件')),
+                createForm.coverage_kind === 'file' ? h(React.Fragment, null,
+                  formField('覆盖率文件完整路径', 'coverage_path', 'combined JSON 或契约列 CSV / XLSX'),
+                  window.dshDesktopDirectoryPicker?.pick ? h('button', { type: 'button', style: styles.button, onClick: async () => {
+                    try { const selected = await window.dshDesktopDirectoryPicker.pick({ purpose: 'coverage' }); if (selected) setCreateForm(value => ({ ...value, coverage_path: selected })) }
+                    catch (error) { showActionNotice(error.message, true) }
+                  } }, '选择覆盖率文件') : null,
+                  h('div', { style: styles.itemMeta }, '表格列：source,file_path,kind,count,function,line,block,branch；count 为命中整数或 -。'))
+                : h(React.Fragment, null,
+                  h('div', { style: styles.formGrid }, formField('产品', 'coverage_product', '产品名'), formField('C 版本', 'coverage_version', '精确版本，保留空格'), formField('模块', 'coverage_module', '模块名'), formField('B 版本（可选）', 'coverage_b_version', '可不填')),
+                  h('div', { style: styles.itemMeta }, workbench?.capabilities?.coverage_query_skill?.available ? '本地覆盖率查询 Skill 已就绪' : '请放入 <PANGEA 解压目录>/local-skills/coverage-query，然后刷新重新检测。')),
+                h('div', { style: styles.itemMeta }, '代码范围可留空，由 Agent 从覆盖输入定位所需源码。')) : null,
               h('label', null, h('div', { style: styles.label }, '分析模式'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.mode,
                 onChange: event => setCreateForm(value => ({ ...value, mode: event.target.value })),
@@ -2398,8 +2430,6 @@ window.__ModuleLoader__.load({
           current.artifacts?.formal_outputs?.length ? h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, `正式输出（${current.artifacts.formal_outputs.length}）`),
             h('div', { style: styles.chips }, current.artifacts.formal_outputs.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file))))) : null,
-          h('div', { style: styles.sectionTitle }, '业务流程与入口'),
-          renderFlows(),
           renderIssueCard('未解决事项', workflow.unresolved),
           current.validation?.status === 'failed' ? h('div', { style: { ...styles.card, ...styles.error } },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '校验失败详情'), h('span', { style: styles.badge }, `${current.validation.error_count ?? current.validation.errors?.length ?? 0} 条`)),
@@ -2409,19 +2439,106 @@ window.__ModuleLoader__.load({
           renderIssueCard('错误历史', workflow.error_history, 'error'))
       }
 
+      function linkedItems(item) {
+        return h('div', { style: styles.chips },
+          (item.linked_risk_ids ?? []).map(id => chip(id, () => navigate({ type: 'risk', id }))),
+          (item.linked_test_case_ids ?? []).map(id => chip(id, () => navigate({ type: 'case', id }))),
+          (item.evidence_ids ?? []).map(id => {
+            const entry = evidence.find(value => value.evidence_id === id)
+            return entry ? chip(id, () => navigate({ type: 'evidence-detail', key: evidenceIdentity(entry) })) : h('span', { key: id, style: styles.badge }, `${id} · 引用待确认`)
+          }))
+      }
+
+      async function diagramAction(action, extra = {}) {
+        if (!selectedTask) return
+        setDiagramBusy(true)
+        try {
+          const result = await requestWorkbenchAction({ cwd, action, payload: { task_id: selectedTask.task_id, ...extra } })
+          if (result.session_id) { ctx?.pangea?.registerProductSession?.(result.session_id); ctx?.sessions?.open?.(result.session_id) }
+          const listed = await requestWorkbenchAction({ cwd, action: 'architecture-list', payload: { task_id: selectedTask.task_id } })
+          setDiagramViews(listed.views ?? [])
+          if (result.view) setDiagramSelection(result.view.view_id)
+        } catch (error) { showActionNotice(`架构视图：${error.message}`, true) }
+        finally { setDiagramBusy(false) }
+      }
+
+      function renderDiagrams(flow) {
+        const views = diagramViews.filter(v => v.run_id === current?.run_id && v.task_id === selectedTask?.task_id)
+        const selected = views.find(v => v.view_id === diagramSelection) ?? views[0]
+        const artifactUrl = (format, download = false) => '/api/pangea-companion/architecture-artifact?' + new URLSearchParams({ cwd: cwd || '', task_id: selectedTask.task_id, view_id: selected.view_id, format, ...(download ? { download: '1' } : {}) })
+        return h('div', { style: styles.card },
+          h('div', { style: styles.itemTitle }, '架构视图'),
+          h('div', { style: styles.chips },
+            h('select', { 'aria-label': '架构图类型', style: styles.button, value: diagramType, onChange: e => setDiagramType(e.target.value) }, [['workflow', '业务流程图'], ['architecture', '模块架构图'], ['sequence', '时序图'], ['lifecycle', '生命周期图'], ['dataflow', '数据流图']].map(([v, label]) => h('option', { key: v, value: v }, label))),
+            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !flow, onClick: () => diagramAction('architecture-create', { type: diagramType, flow_id: flow.flow_id }) }, '生成当前流程图'),
+            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !current, onClick: () => diagramAction('architecture-create', { type: 'architecture' }) }, '生成模块架构图'),
+            h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-list') }, '刷新架构视图')),
+          views.length ? h('select', { 'aria-label': '选择架构视图', style: styles.search, value: selected?.view_id || '', onChange: e => setDiagramSelection(e.target.value) }, views.map(v => h('option', { key: v.view_id, value: v.view_id }, `${v.flow_id || '模块'} · ${v.type} · ${{ generating: '生成中', ready: '可查看', failed: '失败', stopped: '已停止' }[v.status] || v.status}`))) : h('div', { style: styles.itemMeta }, '按需创建独立画图会话，完成后点击刷新查看。'),
+          selected ? h(React.Fragment, null,
+            selected.source_revision !== current?.publication?.revision ? h('div', { style: styles.itemMeta }, '此图基于其他分析版本，可按需重新生成。') : null,
+            selected.error ? h('div', { style: styles.error }, selected.error) : null,
+            selected.available ? h('iframe', { title: 'Archify 架构图', src: artifactUrl('html'), sandbox: 'allow-scripts allow-downloads', style: { width: '100%', height: 650, border: 0 } }) : null,
+            h('div', { style: styles.chips },
+              selected.session_id ? h('button', { type: 'button', style: styles.button, onClick: () => ctx?.sessions?.open?.(selected.session_id) }, '打开画图会话') : null,
+              selected.status === 'generating' ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止本次画图') : null,
+              selected.available ? ['html', 'svg'].map(format => h('a', { key: format, style: styles.chip, href: artifactUrl(format, true), download: `diagram.${format}` }, `导出 ${format.toUpperCase()}`)) : null),
+            h('input', { 'aria-label': '架构图修改要求', style: styles.search, value: diagramInstruction, placeholder: '例如：展开超时分支', onChange: e => setDiagramInstruction(e.target.value) }),
+            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || selected.status === 'generating', onClick: () => diagramAction('architecture-create', { type: selected.type, flow_id: selected.flow_id, previous_view_id: selected.view_id, instruction: diagramInstruction }) }, '从当前图创建修改会话')) : null)
+      }
+
       function renderFlows() {
         const query = flowQuery.trim().toLowerCase()
-        const filtered = businessFlows.filter(flow => !query || [flow.flow_id, flow.title, flow.description, flow.entry, ...(flow.steps ?? [])].join(' ').toLowerCase().includes(query))
+        const filtered = businessFlows.filter(flow => !query || [flow.flow_id, flow.title, flow.description, flow.entry].join(' ').toLowerCase().includes(query))
+        const flow = filtered.find(item => item.flow_id === flowSelection) ?? filtered[0]
+        const allBranches = businessFlows.flatMap(item => Array.isArray(item.branches) ? item.branches : [])
+        const highRisk = item => (item.linked_risk_ids ?? []).some(id => { const risk = riskById.get(id); return ['P0', 'P1'].includes(risk?.priority) || ['critical', 'high', '严重', '高'].includes(risk?.severity) })
+        const branches = (Array.isArray(flow?.branches) ? flow.branches : []).filter(item => !branchFilter
+          || (branchFilter === 'high_risk' ? highRisk(item) : branchFilter === 'no_case' ? !(item.linked_test_case_ids?.length) : branchFilter === 'unresolved' ? item.status === 'unresolved' : item.kind === branchFilter))
+        const branch = branches.find(item => item.branch_id === branchSelection) ?? branches[0]
+        const structured = Array.isArray(flow?.mainline_steps)
+        const selectBranch = item => h('button', { key: item.branch_id, type: 'button', style: styles.chip, onClick: () => setBranchSelection(item.branch_id) }, `${item.branch_id} · ${item.condition ?? item.kind ?? '分支'}`)
         return h(React.Fragment, null,
-          h('input', { style: styles.search, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称、入口或步骤…', onChange: event => setFlowQuery(event.target.value) }),
-          h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${businessFlows.length} 条`),
-          filtered.length ? filtered.map(flow => h('details', { key: flow.flow_id ?? flow.title, style: styles.card },
-            h('summary', { style: { cursor: 'pointer' } }, `${flow.flow_id ?? 'FLOW'} · ${flow.title ?? '未命名流程'}`),
-            flow.description ? h('div', { style: { ...styles.text, marginTop: 8 } }, flow.description) : null,
-            flow.entry ? h('div', { style: styles.itemMeta }, `入口：${flow.entry}`) : null,
-            stringList('步骤', flow.steps, true),
-            Array.isArray(flow.evidence) && flow.evidence.length ? h('div', { style: styles.chips }, flow.evidence.map((item, index) => chip(text(item.location, `证据 ${index + 1}`), () => navigate({ type: 'evidence-detail', key: evidenceIdentity(item) })))) : null,
-            flow.mermaid ? h('pre', { style: { ...styles.source, marginTop: 9 } }, flow.mermaid) : null)) : h('div', { style: styles.card }, h('div', { style: styles.empty }, collectionEmpty('business_flows', '当前 Run 没有业务流程。'))))
+          renderDiagrams(flow),
+          h('div', { style: styles.itemMeta }, `流程 ${businessFlows.length} · 分支 ${allBranches.length} · 待确认 ${allBranches.filter(b => b.status === 'unresolved').length} · 未关联用例 ${allBranches.filter(b => !b.linked_test_case_ids?.length).length}`),
+          h('input', { style: styles.search, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称或入口…', onChange: event => setFlowQuery(event.target.value) }),
+          h('select', { style: styles.search, value: branchFilter, 'aria-label': '筛选分支', onChange: event => setBranchFilter(event.target.value) },
+            [['', '全部分支'], ['high_risk', '关联高风险'], ['exception', '异常'], ['timeout', '超时'], ['retry', '重试'], ['recovery', '恢复'], ['concurrency', '并发'], ['unresolved', '待确认'], ['no_case', '未关联用例']].map(([id, label]) => h('option', { key: id, value: id }, label))),
+          !flow ? h('div', { style: styles.empty }, collectionEmpty('business_flows', '当前 Run 没有业务流程。')) : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 260px), 1fr))', gap: 12, alignItems: 'start' } },
+            h('div', { style: styles.card }, filtered.map(item => h('button', { type: 'button', key: item.flow_id, style: { ...styles.runButton, ...(item === flow ? styles.runActive : {}) }, onClick: () => { setFlowSelection(item.flow_id); setBranchSelection('') } }, `${item.flow_id} · ${item.title ?? '未命名流程'}`))),
+            h('div', null, section(flow.title ?? '流程', flow.description || flow.entry),
+              structured ? flow.mainline_steps.map(step => h('div', { key: step.step_id, style: styles.card },
+                h('div', { style: styles.itemTitle }, `${step.step_id} · ${step.title ?? ''}`),
+                field('外部动作', step.external_action), field('内部处理', step.processing), field('状态变化', step.state_change), field('外部表现', step.external_observation), linkedItems(step),
+                h('div', { style: styles.chips }, branches.filter(b => b.from_step_id === step.step_id).map(selectBranch))))
+                : h('div', { style: styles.card }, h('div', { style: styles.itemMeta }, '本 Run 没有结构化主干/分支，以下保留原流程内容。'), stringList('步骤', flow.steps, true), flow.mermaid ? h('pre', { style: styles.source }, flow.mermaid) : null),
+              (flow.evidence ?? []).map((item, index) => chip(item.location ?? `证据 ${index + 1}`, () => navigate({ type: 'evidence-detail', key: evidenceIdentity(item) }))),
+              h('div', { style: styles.chips }, branches.filter(b => !flow.mainline_steps?.some(step => step.step_id === b.from_step_id)).map(selectBranch))),
+            branch ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, branch.branch_id),
+              field('进入条件', branch.condition), field('处理', branch.processing), field('结果', branch.result), field('残留状态', branch.residual_state), field('外部表现', branch.external_observation), field('回接 / 结束', branch.to_step_id ?? branch.terminal_result), field('分析状态', branch.status), linkedItems(branch))
+              : h('div', { style: styles.card }, structured ? '当前筛选没有分支记录。' : '旧格式未提供分支结构。')))
+      }
+
+      function renderCoverage() {
+        const acquisition = workbench?.run?.run_id === current?.run_id ? workbench.run.coverage : null
+        const gaps = details.coverage_gaps ?? []
+        const query = gapQuery.trim().toLowerCase()
+        const filtered = gaps.filter(item => (!query || [item.gap_id, item.file_path, JSON.stringify(item.raw)].join(' ').toLowerCase().includes(query)) && (!gapKind || item.kind === gapKind) && (!gapSource || item.source === gapSource) && (!gapStatus || item.analysis_status === gapStatus) && (!gapDisposition || item.disposition === gapDisposition))
+        const select = (label, value, setter, choices) => h('select', { 'aria-label': label, style: styles.search, value, onChange: event => setter(event.target.value) }, h('option', { value: '' }, label), choices.map(v => h('option', { key: v, value: v }, v)))
+        return h(React.Fragment, null,
+          h('div', { style: styles.card }, '覆盖事实来自本次输入；分析完成或已设计补测不会改变实测覆盖状态。'),
+          acquisition ? h('div', { style: styles.card },
+            field('输入获取状态', acquisition.status), field('输入缺口数', acquisition.total), field('输入说明', acquisition.message),
+            stringList('缺失来源', acquisition.missing), stringList('输入限制', acquisition.warnings),
+            h('table', { style: { width: '100%', textAlign: 'left' } },
+              h('thead', null, h('tr', null, ['来源', '指标', '已覆盖 / 总数', '覆盖率'].map(label => h('th', { key: label }, label)))),
+              h('tbody', null, (acquisition.sources ?? []).flatMap((source, index) => ['functions', 'lines', 'branches'].filter(kind => source[kind]).map(kind => h('tr', { key: `${index}:${kind}` },
+                h('td', null, source.source), h('td', null, kind), h('td', null, `${source[kind].covered} / ${source[kind].total}`), h('td', null, typeof source[kind].rate === 'number' ? `${(source[kind].rate * 100).toFixed(2)}%` : '未提供'))))))) : null,
+          h('input', { 'aria-label': '搜索覆盖缺口', style: styles.search, value: gapQuery, placeholder: '搜索文件、函数或缺口编号', onChange: event => setGapQuery(event.target.value) }),
+          h('div', { style: styles.formGrid }, select('全部类型', gapKind, setGapKind, ['function', 'line', 'branch']), select('全部来源', gapSource, setGapSource, [...new Set(gaps.map(g => g.source))]), select('全部分析状态', gapStatus, setGapStatus, [...new Set(gaps.map(g => g.analysis_status).filter(Boolean))]), select('全部补测处置', gapDisposition, setGapDisposition, [...new Set(gaps.map(g => g.disposition).filter(Boolean))])),
+          h('div', { style: styles.itemMeta }, `已发布缺口 ${gaps.length} · 筛选 ${filtered.length}；没有范围统计分母时不计算覆盖百分比。`),
+          !gaps.length ? h('div', { style: styles.empty }, '等待 Agent 发布缺口台账；没有记录不表示全部覆盖。') : filtered.map(item => h('details', { key: item.gap_id, style: styles.card },
+            h('summary', null, `${item.gap_id} · ${item.source} · ${item.file_path} · ${item.kind}`),
+            field('实测状态', item.coverage_status), field('原始记录', JSON.stringify(item.raw)), field('源码位置', item.source_location), field('分析状态', item.analysis_status), field('补测处置', item.disposition), field('触发路径', item.trigger_path), field('保护条件', item.guard_conditions), field('外部结果', item.external_result), field('未决项', Array.isArray(item.uncertainties) ? item.uncertainties.join('；') : item.uncertainties), linkedItems(item))))
       }
 
       function renderRepositoryImport(firstUse = false) {
@@ -3007,6 +3124,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'execution') body = renderExecutionResults()
       else if (screen.type === 'environment') body = renderEnvironmentPage()
       else if (screen.type === 'flows') body = renderFlows()
+      else if (screen.type === 'coverage') body = renderCoverage()
       else if (screen.type === 'evidence') body = renderEvidence()
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()

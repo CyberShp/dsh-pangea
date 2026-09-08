@@ -170,7 +170,8 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /分析任务/)
   assert.match(source, /React\.useState\(\{ type: initialScreen \}\)/)
   assert.match(source, /repeat\(5, minmax\(72px, 1fr\)\)/)
-  assert.match(source, /\['overview', '概览'\], \['risks', '风险'\], \['cases', '测试用例'\], \['workflow', '流程'\], \['review', '复核'\]/)
+  assert.match(source, /\['flows', '业务流程'\]/)
+  assert.match(source, /\['workflow', '运行过程'\]/)
   assert.doesNotMatch(source, /\['monitor', '监控'\]/)
   assert.doesNotMatch(source, /if \(screen\.type === 'monitor'\) body = renderMonitor/)
   assert.match(source, /风险/)
@@ -856,3 +857,33 @@ test('client state request encodes workspace and run, passes cancellation, and r
     async fetcher() { return { ok: true, status: 200, async json() { return { status: 'ok', current: { run_id: 'run-05' } } } } },
   }), /Run 身份不一致/)
 })
+
+for (const screenType of ['flows', 'coverage']) {
+  test(`renders ${screenType} as its own reader with explicit evidence and case links`, async () => {
+    const task = { task_id: 'task', run_id: 'run', data_root: '/data', target: 'synthetic', status: 'complete' }
+    const current = { run_id: 'run', data_root: '/data', lifecycle_status: 'complete', scenario: 'coverage-analysis', publication: { state: 'final', revision: 1 }, details: {
+      business_flows: [{ flow_id: 'FLOW-1', title: '连接请求', mainline_steps: [{ step_id: 'S1', title: '接收请求', external_action: '请求连接' }], branches: [{ branch_id: 'B1', from_step_id: 'S1', kind: 'timeout', condition: '响应超时', linked_test_case_ids: ['TC-1'], evidence_ids: ['E1'] }] }],
+      coverage_gaps: [{ gap_id: 'GAP-1', source: 'auto', file_path: 'a.c', kind: 'branch', raw: { line: 1, branch: '0' }, coverage_status: 'uncovered', analysis_status: 'analyzed', linked_test_case_ids: ['TC-1'], evidence_ids: ['E1'] }],
+      risks: [], test_cases: [{ test_case_id: 'TC-1', title: '超时恢复' }], evidence: [{ evidence_id: 'E1', location: 'repo:a.c:1' }], review_issues: [],
+    } }
+    const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: screenType } }
+    let index = 0, nextScreen
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+      const key = index++
+      return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 16) nextScreen = value }]
+    } })
+    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const nodes = descendants(panel.type(panel.props))
+    const nav = nodes.find(node => node.type === 'nav' && node.props['aria-label'] === 'PANGEA 分析页面')
+    const active = descendants(nav).find(node => node.props['aria-current'] === 'page')
+    assert.equal(active.children[0], screenType === 'flows' ? '业务流程' : '覆盖缺口')
+    const linked = nodes.find(node => node.type === 'button' && node.children[0] === 'TC-1')
+    assert.ok(linked)
+    linked.props.onClick()
+    assert.equal(nextScreen.type, 'case')
+    assert.equal(nextScreen.id, 'TC-1')
+    assert.ok(nodes.some(node => node.type === 'button' && node.children[0] === 'E1'))
+  })
+}

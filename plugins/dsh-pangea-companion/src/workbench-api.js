@@ -12,7 +12,7 @@ const ACP_PROVIDER_DEFAULTS = [
   { id: 'pangea-opencode', label: 'OpenCode', command: 'opencode', args: ['acp'] },
   { id: 'pangea-claude-code', label: 'Claude Code', kind: 'claude-code', command: 'DSH Claude Code Provider', args: [] },
 ]
-const ANALYSIS_SCENARIOS = new Set(['module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
+const ANALYSIS_SCENARIOS = new Set(['coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
 const ANALYSIS_MODES = new Set(['speed', 'depth'])
 
 function configuredProviders(env) {
@@ -187,7 +187,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   if (!target) throw new Error('target is required')
   if (!ANALYSIS_SCENARIOS.has(scenario)) throw new Error(`不支持的分析场景：${scenario}`)
   if (!ANALYSIS_MODES.has(mode)) throw new Error(`不支持的分析模式：${mode}`)
-  if (sourceScope.length === 0 && !allowEmptySourceScope) {
+  if (sourceScope.length === 0 && !allowEmptySourceScope && scenario !== 'coverage-analysis') {
     throw new Error('source_scope must contain at least one path')
   }
   if (Array.isArray(capabilities?.repositories) && !capabilities.repositories.includes(repository)) {
@@ -200,6 +200,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     scenario,
     mode,
     source_scope: sourceScope,
+    ...(scenario === 'coverage-analysis' ? { coverage_input: value.coverage_input } : {}),
     asset_ids: stringList(value?.asset_ids),
     provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,
     agent_model: value?.provider_id && typeof value?.agent_model === 'string' ? value.agent_model.trim() || null : null,
@@ -671,3 +672,22 @@ export async function resumeAnalysisRun({ cwd, dataRoot, runId, runner = runPang
 }
 
 export { dataRootFor }
+
+// Derived sessions have no dependency on the main Run's completion state.
+export async function launchArchitectureSession(api, { cwd, task, prompt, onSession, onJob }, runtime, env = process.env) {
+  const provider = task.provider
+  const model = provider ? null : await requireInternalModel(api, task.model_route)
+  const sessionId = await createDshSession(api, workspaceRoot(cwd), `架构视图 · ${task.target}`)
+  if (!provider) apiValue(await api.sessions.selectModel(rpc({ sessionId, provider: model.provider, model: model.model,
+    ...(model.reasoning_effort ? { reasoningEffort: model.reasoning_effort } : {}) })))
+  await onSession(sessionId)
+  if (provider) {
+    const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
+    const jobId = await startAcpJob(runtime, parent, provider, prompt, `架构视图 · ${task.target}`, async () => {}, {
+      onJobCreated: onJob,
+    }, task.agent_model)
+    return { session_id: sessionId, job_id: jobId }
+  }
+  apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
+  return { session_id: sessionId, job_id: null }
+}

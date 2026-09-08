@@ -1,6 +1,6 @@
 {
   "name": "dsh-pangea-companion",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "PANGEA companion for DeepSeek Harness with analysis browsing, executor environments, host-plus-array SSH execution, and workspace-scoped report wake control",
   "type": "module",
   "main": "./src/index.js",

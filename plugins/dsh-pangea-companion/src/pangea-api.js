@@ -6,7 +6,7 @@ import path from 'node:path'
 const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
 const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.4.0' })
-const ANALYSIS_SCENARIOS = new Set(['module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
+const ANALYSIS_SCENARIOS = new Set(['coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
 const ANALYSIS_MODES = new Set(['speed', 'depth'])
 
 export function normalizeSourceScope(values, repository) {
@@ -128,6 +128,7 @@ export async function createRun(cwd, input, runner = runPangea) {
     source_scope: normalizeSourceScope(input.source_scope, input.repository),
     asset_ids: input.asset_ids ?? [],
     scenario,
+    ...(scenario === 'coverage-analysis' ? { coverage_input: input.coverage_input } : {}),
     mode,
   }
   const capabilities = await runner({

@@ -92,7 +92,7 @@ function normalizeConversation(value) {
     conversation_id: text(value?.conversation_id, sessionId),
     session_id: sessionId,
     title: text(value?.title, '任务会话'),
-    kind: value?.kind === 'analysis' ? 'analysis' : 'assistant',
+    kind: ['analysis', 'architecture'].includes(value?.kind) ? value.kind : 'assistant',
     created_at: Number.isFinite(value?.created_at) ? value.created_at : null,
   }
 }
@@ -169,6 +169,7 @@ function normalizeTask(taskId, value) {
     scenario: text(value?.scenario, 'module-analysis'),
     mode: value?.mode === 'speed' ? 'speed' : 'depth',
     source_scope: strings(value?.source_scope),
+    coverage_input: value?.scenario === 'coverage-analysis' ? value?.coverage_input ?? null : null,
     asset_ids: strings(value?.asset_ids),
     model_route: normalizeModelRoute(value?.model_route),
     agent_model: text(value?.agent_model) || null,
@@ -310,6 +311,7 @@ export class TaskStore {
       scenario: input?.scenario,
       mode: input?.mode,
       source_scope: input?.source_scope,
+      coverage_input: input?.coverage_input,
       asset_ids: input?.asset_ids,
       model_route: input?.model_route,
       provider: input?.provider_id ?? input?.provider,
