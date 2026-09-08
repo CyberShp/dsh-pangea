@@ -269,7 +269,7 @@ test('rebinds an explicitly stopped task after a portable workspace move', async
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('keeps an external ACP provider authoritative without freezing its model', async () => {
+for (const agentModel of [null, 'native/selected']) test(`persists external selection ${agentModel ?? 'default'} across restart and resume`, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-acp-'))
   let now = 2000
   try {
@@ -277,7 +277,7 @@ test('keeps an external ACP provider authoritative without freezing its model', 
     const legacyRoute = { provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high', route_class: 'external-acp' }
     await store.create({
       workspace: '/workspace', dataRoot: '/workspace/pangea-data',
-      input: { repository: 'repo-one', target: '外部分析', provider_id: 'pangea-nga', model_route: legacyRoute },
+      input: { repository: 'repo-one', target: '外部分析', provider_id: 'pangea-nga', model_route: legacyRoute, agent_model: agentModel },
     })
     assert.deepEqual((await store.get('task-acp')).model_route, legacyRoute)
     await store.prepareProviderLaunch('task-acp', 'pangea-nga')
@@ -300,6 +300,10 @@ test('keeps an external ACP provider authoritative without freezing its model', 
     const settled = await store.settleJob('job-1', { status: 'completed' })
     assert.equal(settled.status, 'completed')
     assert.equal(settled.execution_status, 'completed')
+    const reopened = createTaskStore({ storePath: path.join(root, 'tasks-v1.json') })
+    assert.equal((await reopened.get('task-acp')).agent_model, agentModel)
+    assert.equal((await reopened.prepareProviderLaunch('task-acp', 'pangea-nga')).agent_model, agentModel)
+    assert.equal((await reopened.prepareProviderLaunch('task-acp', 'pangea-codeagent')).agent_model, null)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

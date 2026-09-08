@@ -52,6 +52,71 @@ async function loadClientExports(react = fakeReact()) {
   return exported
 }
 
+function descendants(node) {
+  if (Array.isArray(node)) return node.flatMap(descendants)
+  if (!node?.children) return []
+  return [node, ...node.children.flatMap(descendants)]
+}
+
+for (const providerId of ['pangea-nga', 'pangea-opencode', 'pangea-codeagent', 'pangea-claude-code']) {
+  test(`new analysis selects advertised ${providerId} models and clears selection when changing Agent`, async () => {
+    let index = 0, phase = 'form', changed
+    const form = { repository: 'repo', target: 'analysis', source_scope_text: '.', asset_ids: [], provider_id: providerId, agent_model: '' }
+    const states = { 1: { compatibility: { compatible: true }, acp_providers: [{ id: providerId, registered: true }] },
+      16: { type: 'create' }, 33: form }
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+      const key = index++
+      if (phase === 'model') return [key === 0 ? { provider_id: providerId, models: [{ id: 'wire/selected', label: 'Selected' }] } : key === 2 ? false : initial, () => {}]
+      return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }]
+    } })
+    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const nodes = descendants(panel.type(panel.props))
+    const model = nodes.find(node => node.type?.name === 'AgentModelSelect')
+    assert.ok(model)
+    phase = 'model'; index = 0
+    const modelNodes = descendants(model.type(model.props))
+    const select = modelNodes.find(node => node.props['aria-label'] === 'Agent 模型')
+    assert.deepEqual(descendants(select).filter(node => node.type === 'option').map(node => node.props.value), ['', 'wire/selected'])
+    select.props.onChange({ target: { value: 'wire/selected' } })
+    assert.equal(changed.agent_model, 'wire/selected')
+    const request = client.buildAnalysisRequest(changed)
+    assert.equal(request.agent_model, 'wire/selected')
+    assert.equal(request.provider_id, providerId)
+    form.agent_model = 'wire/selected'
+    nodes.find(node => node.type === 'select' && node.props.value === providerId).props.onChange({ target: { value: '' } })
+    assert.equal(changed.agent_model, '')
+  })
+}
+
+test('Agent Runtime keeps all editable commands inside a closed advanced section', async () => {
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    return [index++ === 0 ? { providers: [{ id: 'pangea-nga', label: 'NGA', command: 'nga', args: ['acp'], available: true, registered: true }] } : initial, () => {}]
+  } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'agent-runtime').component({ visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  const advanced = nodes.find(node => node.type === 'details')
+  assert.ok(advanced)
+  assert.notEqual(advanced.props.open, true)
+  const editable = nodes.filter(node => ['input', 'textarea'].includes(node.type))
+  assert.ok(editable.length)
+  assert.ok(editable.every(node => descendants(advanced).includes(node)))
+})
+
+test('model discovery sends the current provider, workspace and cancellation signal', async () => {
+  const client = await loadClientExports()
+  const signal = new AbortController().signal
+  await client.requestAgentModels({ providerId: 'pangea-nga', cwd: '/workspace', signal, fetcher: async (_url, options) => {
+    assert.equal(options.signal, signal)
+    assert.deepEqual(JSON.parse(options.body), { action: 'models', provider_id: 'pangea-nga', cwd: '/workspace' })
+    return { ok: true, json: async () => ({ status: 'ok', models: [] }) }
+  } })
+})
+
 test('READY does not imply complete delivery, independent review, or semantic approval', async () => {
   const client = await loadClientExports()
   const labels = client.outcomePresentation({ lifecycle_status: 'complete', quality_status: 'READY', delivery_integrity: { status: 'incomplete' }, semantic_review: { method: 'self_review', verdict: 'UNRESOLVED' } })
@@ -119,7 +184,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /停止 Run/)
   assert.match(source, /失败阶段：/)
   assert.match(source, /Agent 尚未产生可显示的消息输出/)
-  assert.match(source, /使用 Agent 新建 ACP 会话的默认模型与推理配置/)
+  assert.match(source, /直接在“新建分析”选择 Agent 和模型/)
   assert.doesNotMatch(source, /const externalModelFields =/)
   assert.doesNotMatch(source, /模型未知.*effort.*不支持/)
   assert.match(source, /field\('PID'/)
@@ -417,11 +482,11 @@ test('builds analysis requests with explicit scenario and mode', async () => {
 
   assert.deepEqual(JSON.parse(JSON.stringify(exported.buildAnalysisRequest({
     repository: 'open-iscsi', target: '认证恢复', source_scope_text: 'src/auth\n src/session', asset_ids: ['asset-1'],
-    scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route_key: 'ignored',
+    scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route_key: 'ignored', agent_model: 'native/selected',
   }))), {
     request_version: '2.0', repository: 'open-iscsi', target: '认证恢复',
     source_scope: ['src/auth', 'src/session'], asset_ids: ['asset-1'],
-    scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route: null,
+    scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route: null, agent_model: 'native/selected',
   })
   assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).scenario, 'module-analysis')
   assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).mode, 'depth')

@@ -171,6 +171,7 @@ function normalizeTask(taskId, value) {
     source_scope: strings(value?.source_scope),
     asset_ids: strings(value?.asset_ids),
     model_route: normalizeModelRoute(value?.model_route),
+    agent_model: text(value?.agent_model) || null,
     provider: text(value?.provider) || null,
     job_id: text(value?.job_id) || null,
     attempt_id: text(value?.attempt_id) || attempts.at(-1)?.attempt_id || null,
@@ -312,6 +313,7 @@ export class TaskStore {
       asset_ids: input?.asset_ids,
       model_route: input?.model_route,
       provider: input?.provider_id ?? input?.provider,
+      agent_model: input?.provider_id ? input?.agent_model : null,
       status: 'preparing',
       created_at: time,
       updated_at: time,
@@ -411,6 +413,7 @@ export class TaskStore {
     const selected = text(provider)
     if (!selected) throw new Error('请选择一个 ACP 执行 Agent')
     this.prepareAttempt(task, selected)
+    if (task.provider !== selected) task.agent_model = null
     task.provider = selected
     task.model_route = null
     task.status = 'preparing'

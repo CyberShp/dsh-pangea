@@ -23,7 +23,7 @@ async function fixture() {
   const launchLocks = new Set()
   const task = await tasks.create({
     workspace: root, dataRoot,
-    input: { repository: 'repo-one', target: 'ACP route regression', source_scope: ['src/session.c'], provider_id: 'pangea-nga' },
+    input: { repository: 'repo-one', target: 'ACP route regression', source_scope: ['src/session.c'], provider_id: 'pangea-nga', agent_model: 'native/selected' },
   })
   const owner = { id: 'session-06' }
   let jobHooks
@@ -32,7 +32,8 @@ async function fixture() {
     agents: { get(id) { return id === owner.id ? owner : undefined } },
     subagents: {
       getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
-      async start() {
+      async start(_provider, request) {
+        assert.deepEqual(request.agentOptions, { model: 'native/selected' })
         providerStarts += 1
         return { id: 'agent-session-06', result: Promise.resolve({ stopReason: 'completed', output: [] }), async dispose() {} }
       },

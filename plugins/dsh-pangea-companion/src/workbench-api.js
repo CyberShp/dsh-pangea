@@ -202,6 +202,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     source_scope: sourceScope,
     asset_ids: stringList(value?.asset_ids),
     provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,
+    agent_model: value?.provider_id && typeof value?.agent_model === 'string' ? value.agent_model.trim() || null : null,
   }
 }
 
@@ -315,7 +316,7 @@ async function launchStep(onEvent, stage, action, successDetails = () => ({})) {
   }
 }
 
-function runtimeService(runtime, name) {
+export function runtimeService(runtime, name) {
   return runtime?.[name] ?? runtime?.get?.(name)
 }
 
@@ -429,7 +430,7 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
   }
 }
 
-async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, lifecycle = {}) {
+async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, lifecycle = {}, agentModel = null) {
   const subagents = runtimeService(runtime, 'subagents')
   const jobs = runtimeService(runtime, 'jobs')
   if (!subagents?.start) throw new Error('DSH subagent runtime unavailable: load dsh-subagent')
@@ -461,6 +462,7 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
           prompt: [{ type: 'text', text: prompt }],
           parent,
           signal: controller.signal,
+          ...(agentModel ? { agentOptions: { model: agentModel } } : {}),
         })
       }).then(async run => {
         activeRun = run
@@ -555,7 +557,7 @@ export async function launchAnalysisSession(
     () => requestedResumeRunId
       ? resumeRun(root, { dataRoot: resolvedDataRoot, runId: requestedResumeRunId }, runner)
       : (() => {
-        const { provider_id: _providerId, ...skillRequest } = request
+        const { provider_id: _providerId, agent_model: _agentModel, ...skillRequest } = request
         return createRun(root, { ...skillRequest, data_root: resolvedDataRoot }, runner)
       })(),
     value => ({
@@ -627,7 +629,7 @@ export async function launchAnalysisSession(
       }),
       onTurnEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
     }
-    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, acpLifecycle), value => ({ job_id: value, provider: selectedProvider }))
+    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, acpLifecycle, request.agent_model), value => ({ job_id: value, provider: selectedProvider, requested_model: request.agent_model }))
     await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
     return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
   }

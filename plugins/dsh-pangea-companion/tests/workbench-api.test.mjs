@@ -323,7 +323,7 @@ test('resumes one explicit Run through the public runs API', async () => {
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('starts an ACP provider with the Agent native session configuration', async () => {
+for (const agentModel of [null, 'native/selected']) test(`starts an ACP provider with ${agentModel ?? 'default'} model configuration`, async () => {
   const root = await workspace()
   try {
     let promptCalled = false
@@ -354,17 +354,19 @@ test('starts an ACP provider with the Agent native session configuration', async
         get() { return { startedAt: 1234, status: 'running' } },
       },
     }
-    const runner = async call => call.args[0] === 'system'
-      ? capabilities
-      : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    const runner = async call => {
+      if (call.args[0] === 'system') return capabilities
+      assert.equal(JSON.stringify(call).includes('agent_model'), false)
+      return { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    }
     const result = await launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga', scenario: 'root-cause', mode: 'speed' },
+      input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga', scenario: 'root-cause', mode: 'speed', agent_model: agentModel },
     }, runner, async () => {}, async () => {}, runtime, { PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify(acpRuntimeConfig) })
     assert.equal(result.job_id, 'subagent-1')
     assert.equal(result.provider, 'pangea-nga')
     assert.equal(providerStarted, true)
-    assert.equal(Object.hasOwn(providerRequest, 'agentOptions'), false)
+    assert.deepEqual(providerRequest.agentOptions, agentModel ? { model: agentModel } : undefined)
     assert.match(providerRequest.prompt[0].text, /速度型 root-cause 分析/)
     assert.equal(result.model, null)
     assert.equal(promptCalled, false)

@@ -50,7 +50,7 @@ function compactEvent(value = {}) {
   }
   for (const key of [
     'message', 'session_id', 'agent_session_id', 'run_id', 'attempt_id', 'job_id', 'provider', 'model',
-    'reasoning_effort', 'error_code', 'exit_status', 'detail', 'output', 'configured_command',
+    'reasoning_effort', 'requested_model', 'error_code', 'exit_status', 'detail', 'output', 'configured_command',
     'resolved_command', 'launcher_kind', 'launcher_command', 'cwd', 'launch_stage', 'syscall',
     'remote_session_id', 'stop_reason', 'protocol_stop_reason', 'phase', 'error_summary', 'stderr_summary',
     'state_path', 'agent_version', 'last_tool_id', 'last_tool_status', 'exit_signal',

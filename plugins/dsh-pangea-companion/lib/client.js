@@ -281,6 +281,16 @@ window.__ModuleLoader__.load({
       return body
     }
 
+    async function requestAgentModels({ providerId, cwd, signal, fetcher = fetch }) {
+      const response = await fetcher(ACP_SETTINGS_API_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, signal,
+        body: JSON.stringify({ action: 'models', provider_id: providerId, cwd }),
+      })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body
+    }
+
     async function testAcpSettings(fetcher = fetch) {
       const response = await fetcher(ACP_SETTINGS_API_PATH, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'test' }),
@@ -757,6 +767,7 @@ window.__ModuleLoader__.load({
         mode: form.mode || 'depth',
         provider_id: form.provider_id || null,
         model_route: form.provider_id ? null : modelRouteFromKey(form.model_route_key),
+        agent_model: form.provider_id ? form.agent_model || null : null,
       }
     }
     function writableConversation(task) {
@@ -795,6 +806,38 @@ window.__ModuleLoader__.load({
       if (provider.version_status === 'unavailable') return '命令可用，未返回版本'
       if (provider.version_status === 'not_checked') return '尚未检查'
       return '未读取'
+    }
+
+    function AgentModelSelect({ providerId, cwd, visible, value, onChange }) {
+      const [catalog, setCatalog] = React.useState(null)
+      const [error, setError] = React.useState('')
+      const [loading, setLoading] = React.useState(true)
+      const [refresh, setRefresh] = React.useState(0)
+      React.useEffect(() => {
+        if (!visible) return undefined
+        const controller = new AbortController()
+        setLoading(true)
+        setError('')
+        setCatalog(null)
+        requestAgentModels({ providerId, cwd, signal: controller.signal }).then(result => {
+          if (!controller.signal.aborted) setCatalog(result)
+        }).catch(failure => {
+          if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
+        }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
+        return () => controller.abort()
+      }, [providerId, cwd, visible, refresh])
+      const current = catalog?.provider_id === providerId ? catalog : null
+      const models = current?.models ?? []
+      return h('div', null,
+        h('label', null, h('div', { style: styles.label }, 'Agent 模型'),
+          h('select', { 'aria-label': 'Agent 模型', style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: value || '', onChange: event => onChange(event.target.value) },
+            h('option', { value: '' }, `使用 Agent 默认${current?.current_model ? `（${current.current_model}）` : ''}`),
+            value && !models.some(model => model.id === value) ? h('option', { value, disabled: true }, `${value}（${loading ? '读取中' : '当前列表不可用'}）`) : null,
+            models.map(model => h('option', { key: model.id, value: model.id }, `${model.label}${model.label === model.id ? '' : ` · ${model.id}`}`)))),
+        h('div', { style: { ...styles.row, marginTop: 6 } },
+          h('span', { style: error ? styles.error : styles.itemMeta, role: error ? 'alert' : 'status' },
+            loading ? '正在读取 Agent 可用模型…' : error || (models.length ? '模型由 Agent 提供，本次选择用于启动和续跑。' : 'Agent 未提供可选模型，将使用其默认配置。')),
+          h('button', { type: 'button', style: styles.button, disabled: loading, onClick: () => setRefresh(count => count + 1) }, '刷新模型')))
     }
 
     function AcpSettingsPanel({ visible }) {
@@ -858,16 +901,21 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'Agent Runtime 设置' },
         h('div', { style: styles.sticky }, h('div', { style: styles.header },
-          h('div', null, h('div', { style: styles.title }, 'Agent Runtime'), h('div', { style: styles.subline }, 'PANGEA External Agent Runtime 2.0 · 使用 Agent 新建 ACP 会话的默认模型与推理配置。')),
+          h('div', null, h('div', { style: styles.title }, 'Agent Runtime'), h('div', { style: styles.subline }, '查看本机 Agent 状态。日常直接在“新建分析”选择 Agent 和模型，无需到这里配置。')),
           h('button', { type: 'button', disabled: loading, style: styles.button, onClick: () => { void loadSettings() } }, loading ? '读取中…' : '刷新'))),
         h('div', { style: styles.environmentContent },
           notice ? h('div', { style: { ...styles.card, ...(notice.error ? styles.healthError : styles.healthOk) }, role: notice.error ? 'alert' : 'status' }, notice.message) : null,
           restartRequired && typeof window.dshDesktop?.restartHarness === 'function' ? h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', { style: styles.itemMeta }, '重启后 Desktop 会重新通过 PowerShell 解析命令并注册 Provider。'),
               h('button', { type: 'button', style: styles.button, onClick: () => { void window.dshDesktop.restartHarness() } }, '立即重启 Harness'))) : null,
-          h('div', { style: { ...styles.card, ...styles.compatibility } },
-            h('div', { style: styles.itemTitle }, '配置原则'),
-            h('div', { style: styles.itemMeta }, '命令由 Desktop 在 Windows 上通过 PowerShell 解析为绝对路径；DSH 持有子进程、输出和取消。使用 Agent 新建 ACP 会话的默认模型与推理配置。')),
+          (snapshot?.providers ?? []).map(provider => h('section', { key: provider.id, style: styles.card },
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, provider.label),
+              h('span', { style: styles.badge }, provider.registered && provider.available ? '已加载' : '未就绪')),
+            h('div', { style: styles.itemMeta }, `${acpResolutionLabel(provider.resolution_status)} · ${acpVersionLabel(provider)}`),
+            provider.resolution_error ? h('div', { style: styles.error }, provider.resolution_error) : null)),
+          h('details', { style: styles.card },
+            h('summary', { style: styles.itemTitle }, '高级启动设置与诊断'),
+            h('div', { style: { ...styles.itemMeta, margin: '12px 0' } }, '仅命令未找到或使用自定义安装时需要修改。模型列表会从 Agent 自动读取，无需填写。'),
           (snapshot?.providers ?? []).map(provider => {
             const value = draft[provider.id] ?? {}
             return h('section', { key: provider.id, style: styles.environmentSection },
@@ -882,18 +930,19 @@ window.__ModuleLoader__.load({
                   h('div', { style: styles.metric }, h('div', { style: styles.label }, '绝对路径'), h('div', { style: styles.value }, provider.resolved_command ?? '待解析'))),
                 provider.resolution_error ? h('div', { style: { ...styles.error, margin: '10px 0' } }, provider.resolution_error) : null,
                 provider.version_error ? h('div', { style: { ...styles.healthWarning, margin: '10px 0' } }, `版本检查：${provider.version_error}`) : null,
+                provider.kind !== 'claude-code' ? h(React.Fragment, null,
                 h('div', { style: styles.environmentField }, h('label', { style: styles.environmentLabel }, '启动命令'), h('input', {
                   style: styles.environmentInput, value: value.command ?? '', onChange: event => setField(provider.id, 'command', event.target.value),
                 })),
                 h('div', { style: { ...styles.environmentField, marginTop: 13 } }, h('label', { style: styles.environmentLabel }, '启动参数（每行一个）'), h('textarea', {
                   style: styles.textarea, value: value.args ?? '', placeholder: 'acp', onChange: event => setField(provider.id, 'args', event.target.value),
-                })))
+                }))) : null)
             )
           }),
           h('div', { style: styles.environmentActions },
             h('button', { type: 'button', disabled: loading || saving || testing, style: styles.environmentSecondaryButton, onClick: () => { void testRuntime() } }, testing ? '检查中…' : '检查运行时'),
             h('button', { type: 'button', disabled: loading || saving, style: styles.environmentSecondaryButton, onClick: () => { void loadSettings() } }, '放弃修改'),
-            h('button', { type: 'button', disabled: loading || saving || !snapshot, style: styles.environmentPrimaryButton, onClick: () => { void save() } }, saving ? '保存中…' : '保存配置'))))
+            h('button', { type: 'button', disabled: loading || saving || !snapshot, style: styles.environmentPrimaryButton, onClick: () => { void save() } }, saving ? '保存中…' : '保存配置')))))
     }
 
     function PangeaPanel({ ctx, scope, visible, initialScreen = 'overview', pageMode = 'analysis' }) {
@@ -931,7 +980,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
       const [assetCatalog, setAssetCatalog] = React.useState(null)
       const [assetCatalogLoading, setAssetCatalogLoading] = React.useState(false)
       const [assetCatalogError, setAssetCatalogError] = React.useState('')
@@ -1472,7 +1521,7 @@ window.__ModuleLoader__.load({
         const stage = event?.stage ?? 'unknown'
         const time = event?.at ? formatTime(event.at) : ''
         const detail = event?.error ?? event?.detail ?? event?.message ?? event?.output ?? ''
-        const context = [event?.provider, event?.model, event?.reasoning_effort, event?.job_id, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
+        const context = [event?.provider, event?.requested_model ? `指定：${event.requested_model}` : null, event?.model, event?.reasoning_effort, event?.job_id, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
         const evidence = [
           ['远端会话', event?.remote_session_id], ['Agent 版本', event?.agent_version],
           ['回合', event?.turn], ['停止原因', event?.stop_reason], ['ACP 停止原因', event?.protocol_stop_reason],
@@ -2225,12 +2274,14 @@ window.__ModuleLoader__.load({
                   setCreateForm(value => ({
                     ...value,
                     provider_id: providerId,
+                    agent_model: '',
                     model_route_key: providerId ? '' : value.model_route_key,
                   }))
                   try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ }
                 },
               }, h('option', { value: '' }, '内置 API Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: item.registered !== true }, `${item.label}${item.registered === true ? '' : ' · 未加载'}`))))),
               internalModelFields,
+              createForm.provider_id ? h(AgentModelSelect, { key: `${cwd}/${createForm.provider_id}`, providerId: createForm.provider_id, cwd, visible, value: createForm.agent_model, onChange: agentModel => setCreateForm(form => ({ ...form, agent_model: agentModel })) }) : null,
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               h('label', null, h('div', { style: styles.label }, '分析场景'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.scenario,
@@ -2279,9 +2330,9 @@ window.__ModuleLoader__.load({
                     h('button', { type: 'button', style: styles.button, disabled: assetCatalogLoading || assetPage <= 1, onClick: () => setAssetPage(value => value - 1) }, '上一页'),
                     h('button', { type: 'button', style: styles.button, disabled: assetCatalogLoading || assetPage >= assetPagination.total_pages, onClick: () => setAssetPage(value => value + 1) }, '下一页')) : null) : null),
               ),
-            modelRouting.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 }, role: 'alert' }, `模型目录读取失败：${modelRouting.error ?? '未知错误'}`) : null,
+            !createForm.provider_id && modelRouting.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 }, role: 'alert' }, `模型目录读取失败：${modelRouting.error ?? '未知错误'}`) : null,
             modelRouting.status === 'ok' && modelOptions.length === 0 && !createForm.provider_id ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, '没有可用的内置 API 模型，请先到“设置”配置模型与 API。', h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })) }, '打开模型设置')) : null,
-            createForm.provider_id && selectedProvider?.registered === true ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `${selectedProvider.label} 将使用 Agent 新建 ACP 会话的默认模型与推理配置。`) : null,
+            createForm.provider_id && selectedProvider?.registered === true ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `${selectedProvider.label} · ${createForm.agent_model ? `指定模型：${createForm.agent_model}` : '使用 Agent 默认模型'} · 推理配置沿用 Agent 默认。`) : null,
             createForm.provider_id && selectedProvider?.registered !== true ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, `${selectedProvider?.label ?? createForm.provider_id} 尚未在当前 Desktop 加载，请检查插件配置。`) : null,
             h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务'))
       }
@@ -2556,7 +2607,7 @@ window.__ModuleLoader__.load({
           const mayRetryLaunch = !selectedTask.run_id || launchPresentation.canResume
           return h(React.Fragment, null, renderCompatibility(), h('div', { style: { ...styles.card, padding: 20 } },
           h('div', { style: styles.row },
-            h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, `执行 Agent：${selectedTask.provider ?? '未选择'}`)),
+            h('div', null, h('div', { style: styles.itemTitle }, selectedTask.title), h('div', { style: styles.itemMeta }, `执行 Agent：${selectedTask.provider ?? '未选择'}${selectedTask.provider ? ` · ${selectedTask.agent_model ? `指定模型：${selectedTask.agent_model}` : '使用 Agent 默认模型'}` : ''}`)),
             h('span', { style: { ...styles.homeStatus, color: taskStatusColor(selectedTask.status) } }, taskStatusLabel(selectedTask.status))),
           h('div', { style: { ...styles.text, marginTop: 14 } }, selectedTask.status === 'failed'
             ? selectedTask.launch_error ?? '分析启动失败。'
@@ -3024,6 +3075,7 @@ window.__ModuleLoader__.load({
     exports.requestRepositoryStatus = requestRepositoryStatus
     exports.requestRepositoryImport = requestRepositoryImport
     exports.requestAcpSettings = requestAcpSettings
+    exports.requestAgentModels = requestAgentModels
     exports.saveAcpSettings = saveAcpSettings
     exports.testAcpSettings = testAcpSettings
     exports.filePathFromLocation = filePathFromLocation

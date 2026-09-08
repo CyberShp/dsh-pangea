@@ -8,6 +8,7 @@ import { createTaskStore } from './task-store.js'
 import { ATTENTION_REQUIRED_CODE, decodeAcpOutcomeDetail } from './acp-outcome.js'
 import { createLaunchLogStore } from './launch-log.js'
 import { createAcpSettingsStore } from './acp-settings.js'
+import { discoverAgentModels } from './agent-models.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
@@ -679,7 +680,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         const launched = await launchAnalysisSession(api, {
           cwd,
           dataRoot: actionDataRoot ?? task.data_root,
-          input: { ...task, provider_id: selectedProvider || null },
+          input: { ...task, provider_id: selectedProvider || null, agent_model: preparedTask.agent_model },
           model: selectedModel,
           resumeRunId: resume ? task.run_id : null,
         }, runner, session => tasks.addConversation(task.task_id, {
@@ -900,7 +901,7 @@ async function repositoryRouteHandler(req, res) {
   }
 }
 
-async function acpSettingsRouteHandler(req, res, settings, runtime) {
+export async function acpSettingsRouteHandler(req, res, settings, runtime) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   try {
     if (req.method === 'GET') {
@@ -916,6 +917,15 @@ async function acpSettingsRouteHandler(req, res, settings, runtime) {
     }
     if (req.method === 'POST') {
       const body = await requestJson(req)
+      if (body.action === 'models') {
+        const controller = new AbortController()
+        const disconnect = () => { if (!res.writableEnded) controller.abort(new Error('模型列表请求已取消')) }
+        res.on('close', disconnect)
+        try {
+          const catalog = await discoverAgentModels(runtime, { providerId: body.provider_id, cwd: body.cwd, signal: controller.signal })
+          return json(res, 200, { status: 'ok', ...catalog })
+        } finally { res.removeListener('close', disconnect) }
+      }
       if (body.action === 'test') {
         const checks = acpProviderOptions().map(provider => {
           const registered = Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id))

@@ -612,7 +612,7 @@ window.__ModuleLoader__.load({
           h('article', { 'data-pangea-settings-card': true },
             h('div', null,
               h('h2', { 'data-pangea-settings-card-title': true }, '模型与 API'),
-              h('p', { 'data-pangea-settings-card-description': true }, '配置 DSH 对话使用的模型提供方及 API 凭据。外部 Agent 使用其新建 ACP 会话的默认模型与推理配置。')),
+              h('p', { 'data-pangea-settings-card-description': true }, '配置 DSH 对话使用的模型提供方及 API 凭据。外部 Agent 的可用模型可在“新建分析”中直接选择。')),
             h('div', { 'data-pangea-settings-actions': true },
               h('button', { type: 'button', 'data-pangea-settings-action': true, onClick: openModels }, '打开模型设置'))),
           h('article', { 'data-pangea-settings-card': true },
