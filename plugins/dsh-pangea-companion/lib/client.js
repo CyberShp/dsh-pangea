@@ -85,6 +85,17 @@ window.__ModuleLoader__.load({
       return value?.current?.terminal === false ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS
     }
 
+    function outcomePresentation(current) {
+      const delivery = current?.delivery_integrity
+      const review = current?.semantic_review
+      return {
+        workflow: current?.lifecycle_status === 'complete' ? '流程完成' : '流程未完成',
+        delivery: ({ complete: '交付完整', incomplete: '交付不完整', unavailable: '交付不可读取' })[delivery?.status] ?? '交付尚未检查',
+        review: ({ independent_declared: '独立审查（Agent 声明，宿主未核验）', self_review: '自审', unavailable: '审查记录不可读取' })[review?.method] ?? '审查方式未记录',
+        semantic: review?.verdict === 'PASS' ? 'PASS（审查者结论）' : review?.verdict === 'UNRESOLVED' ? 'UNRESOLVED（审查者结论）' : '未给出语义结论',
+      }
+    }
+
     function deriveRunPresentation(task, current, health) {
       const executionTask = current && !taskMatchesRun(task, current) ? null : task
       const taskStatus = executionTask?.status ?? ''
@@ -106,7 +117,7 @@ window.__ModuleLoader__.load({
       const executionLabel = failed ? '分析失败' : needsAttention ? '需要处理' : stopped ? '已停止' : stopping ? '正在停止' : running ? '分析中' : runStatus === 'complete' || executionStatus === 'completed' ? '已完成' : '等待启动'
       const dataTone = healthStatus === 'error' ? 'error' : publicationState === 'final' && healthStatus === 'ok' ? 'ok' : publicationState === 'draft' ? 'notice' : 'neutral'
       const countsAvailability = publicationState === 'pending' ? 'unpublished' : publicationState === 'draft' ? 'draft' : publicationState === 'final' ? 'verified' : 'unavailable'
-      const qualityLabel = current?.quality_status ?? current?.verdict ?? 'PENDING'
+      const qualityLabel = outcomePresentation(current).semantic
       const canResume = !running && !stopping && runStatus !== 'complete' && executionTask?.can_resume === true
       const resumeBlockedReason = canResume ? null : executionTask?.resume_blocked_reason ?? (!executionTask?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件')
       return { executionStatus, executionLabel, failed, needsAttention, stopped, stopping, running, healthStatus, reliabilityLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason, identityMatched: !current || taskMatchesRun(task, current) }
@@ -1550,7 +1561,10 @@ window.__ModuleLoader__.load({
           '',
           `Run：${current.run_id}`,
           `阶段：${PHASE[current.phase] ?? current.phase ?? '未知'}`,
-          `质量结论：${QUALITY[current.quality_status] ?? current.quality_status ?? '待定'}`,
+          `流程：${outcomePresentation(current).workflow}`,
+          `交付完整性：${outcomePresentation(current).delivery}`,
+          `审查方式：${outcomePresentation(current).review}`,
+          `最终语义结论：${outcomePresentation(current).semantic}`,
           `风险：${risks.length} 条（其中 ${risks.filter(isUncoveredRisk).length} 条尚未覆盖，${risks.filter(isUnreachableRisk).length} 条从受支持入口不可达）`,
           `测试用例：${testCases.length} 条`,
           `执行记录：${snapshot?.executor_runs?.length ?? 0} 个`,
@@ -2098,9 +2112,14 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } })),
             h('div', { style: styles.grid },
               field('已完成分析', `${completed} / ${total}`),
-              field('定向补齐单元', current.analysis?.reworked ?? 0),
-              field('质量状态', QUALITY[current.quality_status] ?? current.quality_status ?? '待定'),
-              field('读取状态', HEALTH[health?.status] ?? health?.status ?? '未知'))),
+              field('流程状态', outcomePresentation(current).workflow),
+              field('交付完整性', outcomePresentation(current).delivery),
+              field('审查方式', outcomePresentation(current).review),
+              field('最终语义结论', outcomePresentation(current).semantic),
+              field('读取状态', HEALTH[health?.status] ?? health?.status ?? '未知')),
+            current.delivery_integrity?.issues?.length ? h('div', { style: styles.boundary, role: 'status' },
+              current.delivery_integrity.issues.map((item, index) => h('div', { key: index, style: styles.itemMeta },
+                item.test_case_id ? `${item.test_case_id}：缺少 ${(item.missing_fields ?? []).map(key => ({ preconditions: '前置条件', steps: '操作步骤', expected_results: '预期结果', observability: '观测方式', cleanup: '清理或恢复' })[key] ?? key).join('、')}` : item.message ?? '正式用例文档缺失'))) : null),
 
           h('div', { style: styles.sectionTitle }, `运行时间线（${timeline.length}）`),
           timeline.length ? h('div', { style: { ...styles.card, ...styles.timeline } }, timeline.map((item, index) => {
@@ -2595,7 +2614,7 @@ window.__ModuleLoader__.load({
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `历史 Run · ${workbench?.runs?.total ?? runItems.length}`),
             h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, runItems.map(run => {
               const active = current.run_id === run.run_id
-              return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, runLabel(run)), h('span', { style: styles.badge }, QUALITY[run.quality_status] ?? PHASE[run.phase] ?? run.quality_status ?? run.phase)))
+              return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, runLabel(run)), h('span', { style: styles.badge }, PHASE[run.phase] ?? run.phase)))
             })),
             h('div', { style: styles.toolbar },
               h('button', { type: 'button', disabled: runCursor <= 0, style: { ...styles.button, ...(runCursor <= 0 ? styles.buttonDisabled : {}) }, onClick: () => setRunCursor(Math.max(0, runCursor - 20)) }, '上一页'),
@@ -2984,6 +3003,7 @@ window.__ModuleLoader__.load({
     exports.snapshotMatchesSelection = snapshotMatchesSelection
     exports.workflowAckPresentation = workflowAckPresentation
     exports.deriveRunPresentation = deriveRunPresentation
+    exports.outcomePresentation = outcomePresentation
     exports.previousAttemptFailures = previousAttemptFailures
     exports.absoluteWorkspacePath = absoluteWorkspacePath
     exports.evidenceFilePath = evidenceFilePath

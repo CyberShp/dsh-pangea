@@ -154,12 +154,21 @@ function parseRisks(markdown, severityById, riskCases) {
   })
 }
 
+const CASE_FIELDS = {
+  preconditions: ['前置条件', '前置'],
+  steps: ['操作步骤', '执行步骤', '步骤', '操作', '输入'],
+  expected_results: ['预期结果和 Oracle', '预期接口结果', '预期结果', '期望结果（Oracle）', '预期结果（Oracle）', '期望结果', '预期'],
+  observability: ['观测方式', '观察点', '观测', '观测点'],
+  cleanup: ['清理或恢复', '清理/恢复', '清理和复原', '清理步骤', '清理动作', '清理', '恢复'],
+}
+
 function parseTestCase(markdown, linkedRiskIds) {
-  const heading = markdown.match(/^#{1,6}\s+(TC-[A-Z0-9-]+)(?:[：:]\s*|\s+)(.+)$/mi)
+  const heading = markdown.match(/^#{1,6}\s+([A-Z0-9]+(?:-[A-Z0-9]+)+)(?:[：:]\s*|\s+)(.+)$/mi)
   if (!heading) return null
   const metadata = markdownSection(markdown, '用例定位')
   const value = label => metadata.match(new RegExp(`^-\\s+${label}[：:]\\s*(.+)$`, 'm'))?.[1]?.trim() ?? ''
-  const labels = '前置条件|前置|操作步骤|执行步骤|步骤|操作|输入|预期结果和 Oracle|预期接口结果|预期结果|预期|观察点|观测|后续业务验证|后续|故障注入|注入|清理和复原|清理步骤|清理动作|清理'
+  const aliases = Object.values(CASE_FIELDS).flat()
+  const labels = [...aliases, '后续业务验证', '后续', '故障注入', '注入'].sort((a, b) => b.length - a.length).map(label => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
   const fields = new Map()
   let activeLabel = null
   for (const line of markdown.split(/\r?\n/)) {
@@ -171,9 +180,11 @@ function parseTestCase(markdown, linkedRiskIds) {
       activeLabel = match[1]
     }
     if (!matches.length) {
-      const numbered = line.trim().match(/^\d+[.)、]\s*(.+)$/)
-      if (activeLabel && numbered) fields.set(activeLabel, [...(fields.get(activeLabel) ?? []), numbered[1]])
-      else if (line.trim()) activeLabel = null
+      const trimmed = line.replaceAll('**', '').trim()
+      const subheading = trimmed.match(/^#{1,6}\s+(.+)$/)
+      if (subheading) activeLabel = aliases.includes(subheading[1]) ? subheading[1] : null
+      else if (activeLabel && trimmed && !/^[-*_]{3,}$/.test(trimmed)) fields.set(activeLabel, [...(fields.get(activeLabel) ?? []), trimmed.replace(/^(?:[-*]|\d+[.)、])\s*/, '')])
+      else if (trimmed) activeLabel = null
     }
   }
   const items = (title, aliases, pattern) => {
@@ -186,19 +197,20 @@ function parseTestCase(markdown, linkedRiskIds) {
     case_type: value('测试类型'),
     priority: value('优先级'),
     linked_risk_ids: linkedRiskIds,
-    preconditions: items('前置条件', ['前置条件', '前置']),
-    steps: items('操作步骤', ['操作步骤', '执行步骤', '步骤', '操作', '输入'], /^\d+[.)、]\s*(.+)$/),
-    expected_results: items('预期结果和 Oracle', ['预期结果和 Oracle', '预期接口结果', '预期结果', '预期']),
-    observability: items('观察点', ['观察点', '观测']),
-    cleanup: items('清理和复原', ['清理和复原', '清理步骤', '清理动作', '清理']),
+    preconditions: items('前置条件', CASE_FIELDS.preconditions),
+    steps: items('操作步骤', CASE_FIELDS.steps, /^\d+[.)、]\s*(.+)$/),
+    expected_results: items('预期结果和 Oracle', CASE_FIELDS.expected_results),
+    observability: items('观察点', CASE_FIELDS.observability),
+    cleanup: items('清理和复原', CASE_FIELDS.cleanup),
   }
 }
 
-function parseTestCases(markdown, traceability) {
+export function parseTestCases(markdown, traceability = new Map(), knownIds = []) {
+  markdown = markdown.replace(/^\s*(`{3,}|~{3,}).*?^\s*\1\s*$/gms, '')
   const headings = [...markdown.matchAll(/^(#{1,6})\s+(.+)$/gm)]
   const cases = headings.flatMap((heading, index) => {
-    const caseId = heading[2].match(/^(TC-[A-Z0-9-]+)(?=[：:\s])/i)?.[1]
-    if (!caseId) return []
+    const caseId = heading[2].match(/^([A-Z0-9]+(?:-[A-Z0-9]+)+)(?=[：:\s])/i)?.[1]
+    if (!caseId || (!/^TC-/i.test(caseId) && !knownIds.includes(caseId))) return []
     const end = headings.slice(index + 1).find(next => next[1].length <= heading[1].length)?.index ?? markdown.length
     const parsed = parseTestCase(markdown.slice(heading.index, end), traceability.get(caseId) ?? traceability.get(caseId.slice(3)) ?? [])
     return parsed ? [parsed] : []
@@ -209,18 +221,43 @@ function parseTestCases(markdown, traceability) {
     if (row.some(cell => /^(?:用例 ID|用例ID|Case ID)$/i.test(cell))) { columns = row; continue }
     const field = (...names) => row[columns.findIndex(column => names.includes(column))] ?? ''
     const id = field('用例 ID', '用例ID', 'Case ID')
-    if (!/^TC-[A-Z0-9-]+$/i.test(id) || byId.has(id)) continue
+    if ((!/^TC-[A-Z0-9-]+$/i.test(id) && !knownIds.includes(id)) || byId.has(id)) continue
     const values = (...names) => { const text = field(...names); return text ? [text] : [] }
     byId.set(id, {
       test_case_id: id, title: field('名称', '标题', '用例名称'),
       case_type: field('类型', '测试类型'), priority: field('优先级'),
       linked_risk_ids: uniqueStrings(traceability.get(id) ?? [], prefixedIds(field('关联风险'), 'R'), prefixedIds(field('关联风险'), 'RP')),
-      preconditions: values('前置条件'), steps: values('操作步骤', '执行步骤', '步骤', '输入'),
-      expected_results: values('期望结果（Oracle）', '预期结果（Oracle）', '预期结果', '期望结果', '预期'),
-      observability: values('观察点', '观测'), cleanup: values('清理动作', '清理步骤', '清理'),
+      ...Object.fromEntries(Object.entries(CASE_FIELDS).map(([key, names]) => [key, values(...names)])),
     })
   }
   return [...byId.values()]
+}
+
+function deliveryIntegrity(projected, formalCases, formalPath) {
+  const byId = new Map(formalCases.map(item => [item.test_case_id, item]))
+  const issues = []
+  for (const item of projected) {
+    const detail = byId.get(item.test_case_id) ?? byId.get(`TC-${item.test_case_id}`)
+    const missing = Object.keys(CASE_FIELDS).filter(field => !detail?.[field]?.some(value => typeof value === 'string' && value.trim()))
+    if (missing.length) issues.push({ test_case_id: item.test_case_id, missing_fields: missing })
+  }
+  return { status: issues.length ? 'incomplete' : 'complete', expected_count: projected.length, complete_count: projected.length - issues.length, issues, repair_path: formalPath }
+}
+
+async function semanticReview(runDirectory) {
+  const file = path.join(runDirectory, '内部索引/独立审查状态.json')
+  if (await pathKind(file) !== 'file') return { method: 'not_recorded', verdict: null, summary: '' }
+  try {
+    const value = await readJson(file)
+    return {
+      method: value.independent === true ? 'independent_declared' : value.independent === false ? 'self_review' : 'not_recorded',
+      verdict: ['PASS', 'UNRESOLVED'].includes(value.semantic_verdict) ? value.semantic_verdict : null,
+      summary: typeof value.summary === 'string' ? value.summary : '',
+      producer_session_id: value.producer_session_id ?? null,
+      reviewer_session_id: value.reviewer_session_id ?? null,
+      evidence_status: 'agent_declared',
+    }
+  } catch { return { method: 'unavailable', verdict: null, summary: '审查记录不可读取' } }
 }
 
 async function readLiveDocumentDraft(runDirectory, state) {
@@ -569,6 +606,25 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const resultDetails = projection.status === 'verified'
     ? normalizeProjectionDetails(projectionValue, liveDraft.details)
     : liveDraft.details
+  const formalPath = path.join(runDirectory, '正式输出/黑盒测试用例.md')
+  let delivery = { status: 'not_checked', issues: [] }
+  if (finalExpected && projection.status === 'verified') {
+    const projected = projectionValue.test_cases
+    const formalCases = parseTestCases(await readTextIfFile(formalPath), new Map(), projected.map(item => item.test_case_id))
+    delivery = deliveryIntegrity(projected, formalCases, formalPath)
+    if (await pathKind(formalPath) !== 'file') {
+      delivery.status = 'incomplete'
+      delivery.issues.push({ code: 'formal_cases_missing', path: formalPath })
+    }
+    // Formal delivery/export consumes only formal fields. A complete draft or
+    // projection must never conceal missing content in the final document.
+    const byId = new Map(formalCases.map(item => [item.test_case_id, item]))
+    resultDetails.test_cases = resultDetails.test_cases.map(item => {
+      const detail = byId.get(item.test_case_id) ?? byId.get(`TC-${item.test_case_id}`)
+      return { ...item, ...Object.fromEntries(Object.keys(CASE_FIELDS).map(key => [key, detail?.[key] ?? []])) }
+    })
+  }
+  const semantic = await semanticReview(runDirectory)
   const summary = {
     run_id: runId,
     data_root: path.resolve(dataRoot),
@@ -577,6 +633,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     repository: metadata.request?.repository ?? null,
     verdict: state?.verdict ?? null,
     quality_status: state?.verdict ?? null,
+    delivery_integrity: delivery,
+    semantic_review: semantic,
     attention_required: life.lifecycle_status === 'attention_required',
     analysis: {
       total: 9,

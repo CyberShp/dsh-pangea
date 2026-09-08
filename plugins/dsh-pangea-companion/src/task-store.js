@@ -1,9 +1,67 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 const STORE_VERSION = 1
+const WINDOWS_RENAME_RETRY_DELAYS = Object.freeze([50, 100, 200, 400, 800])
+const DEFAULT_FILE_OPERATIONS = Object.freeze({ mkdir, rename, rm, writeFile })
+
+function wait(delay) {
+  return new Promise(resolve => setTimeout(resolve, delay))
+}
+
+function errorCode(error) {
+  return typeof error?.code === 'string' && error.code ? error.code : 'UNKNOWN'
+}
+
+function taskStoreWriteError(stage, storePath, temporary, error, attempts = 1) {
+  const code = errorCode(error)
+  return Object.assign(new Error(
+    `任务存储发布失败：stage=${stage}，code=${code}，attempts=${attempts}，target=${storePath}，temporary=${temporary}：${error instanceof Error ? error.message : String(error)}`,
+    { cause: error }
+  ), { code })
+}
+
+export async function writeTaskStoreFile(storePath, content, options = {}) {
+  const operations = options.operations ?? DEFAULT_FILE_OPERATIONS
+  const platform = options.platform ?? process.platform
+  const retryDelays = options.retryDelays ?? WINDOWS_RENAME_RETRY_DELAYS
+  const pause = options.wait ?? wait
+  const temporary = `${storePath}.${process.pid}.${randomUUID()}.tmp`
+  let stage = 'mkdir'
+  let attempts = 0
+  try {
+    await operations.mkdir(path.dirname(storePath), { recursive: true })
+    stage = 'write'
+    await operations.writeFile(temporary, content, 'utf8')
+    stage = 'rename'
+    while (true) {
+      attempts += 1
+      try {
+        await operations.rename(temporary, storePath)
+        return
+      } catch (error) {
+        const retryable = platform === 'win32'
+          && ['EPERM', 'EBUSY', 'EACCES'].includes(errorCode(error))
+          && attempts <= retryDelays.length
+        if (!retryable) throw taskStoreWriteError(stage, storePath, temporary, error, attempts)
+        await pause(retryDelays[attempts - 1])
+      }
+    }
+  } catch (error) {
+    let failure = error
+    if (!(error instanceof Error) || !error.message.startsWith('任务存储发布失败：')) {
+      failure = taskStoreWriteError(stage, storePath, temporary, error, Math.max(attempts, 1))
+    }
+    try {
+      await operations.rm(temporary, { force: true })
+    } catch (cleanupError) {
+      failure.message += `；临时文件清理失败：code=${errorCode(cleanupError)}：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
+    }
+    throw failure
+  }
+}
 
 function defaultStorePath() {
   const configured = process.env.DSH_HOME
@@ -204,7 +262,7 @@ function taskStatusFromRun(run) {
 }
 
 export class TaskStore {
-  constructor({ storePath = defaultStorePath(), now = () => Date.now(), idFactory, attemptIdFactory } = {}) {
+  constructor({ storePath = defaultStorePath(), now = () => Date.now(), idFactory, attemptIdFactory, writeStore = writeTaskStoreFile } = {}) {
     this.storePath = storePath
     this.now = now
     this.idFactory = idFactory ?? (() => {
@@ -212,6 +270,7 @@ export class TaskStore {
       return `task-${stamp}-${randomUUID().slice(0, 6)}`
     })
     this.attemptIdFactory = attemptIdFactory ?? (() => `attempt-${randomUUID()}`)
+    this.writeStore = writeStore
     this.store = emptyStore()
     this.saveQueue = Promise.resolve()
     this.ready = this.load()
@@ -258,7 +317,12 @@ export class TaskStore {
       updated_at: time,
     })
     this.store.tasks[taskId] = task
-    await this.persistQueued()
+    try {
+      await this.persistQueued()
+    } catch (error) {
+      if (this.store.tasks[taskId] === task) delete this.store.tasks[taskId]
+      throw error
+    }
     return structuredClone(task)
   }
 
@@ -704,10 +768,7 @@ export class TaskStore {
   }
 
   async persist() {
-    await mkdir(path.dirname(this.storePath), { recursive: true })
-    const temporary = `${this.storePath}.tmp`
-    await writeFile(temporary, `${JSON.stringify(this.store, null, 2)}\n`, 'utf8')
-    await rename(temporary, this.storePath)
+    await this.writeStore(this.storePath, `${JSON.stringify(this.store, null, 2)}\n`)
   }
 
   async flush() {

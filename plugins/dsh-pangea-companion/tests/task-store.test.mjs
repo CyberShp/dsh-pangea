@@ -1,10 +1,110 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createTaskStore } from '../src/task-store.js'
+import { createTaskStore, writeTaskStoreFile } from '../src/task-store.js'
+
+test('publishes through a unique temporary file and retries transient Windows rename failures', async () => {
+  const calls = []
+  let attempts = 0
+  const operations = {
+    async mkdir(...args) { calls.push(['mkdir', ...args]) },
+    async writeFile(...args) { calls.push(['writeFile', ...args]) },
+    async rename(...args) {
+      calls.push(['rename', ...args])
+      attempts += 1
+      if (attempts === 1) throw Object.assign(new Error('file is busy'), { code: 'EPERM' })
+    },
+    async rm(...args) { calls.push(['rm', ...args]) },
+  }
+  const waits = []
+
+  await writeTaskStoreFile('/profile/tasks-v1.json', '{"version":1}\n', {
+    operations,
+    platform: 'win32',
+    retryDelays: [25],
+    wait: async delay => { waits.push(delay) },
+  })
+
+  const temporary = calls.find(([name]) => name === 'writeFile')[1]
+  assert.notEqual(temporary, '/profile/tasks-v1.json.tmp')
+  assert.match(temporary, /tasks-v1\.json\.[^.]+\.[0-9a-f-]+\.tmp$/)
+  assert.deepEqual(calls.filter(([name]) => name === 'rename').map(([, source, target]) => [source, target]), [
+    [temporary, '/profile/tasks-v1.json'],
+    [temporary, '/profile/tasks-v1.json'],
+  ])
+  assert.deepEqual(waits, [25])
+  assert.equal(calls.some(([name]) => name === 'rm'), false)
+})
+
+test('does not share a temporary file between concurrent task store writes', async () => {
+  const temporaryPaths = []
+  const operations = {
+    async mkdir() {},
+    async writeFile(temporary) { temporaryPaths.push(temporary) },
+    async rename() {},
+    async rm() {},
+  }
+
+  await Promise.all([
+    writeTaskStoreFile('/profile/tasks-v1.json', 'first\n', { operations }),
+    writeTaskStoreFile('/profile/tasks-v1.json', 'second\n', { operations }),
+  ])
+
+  assert.equal(temporaryPaths.length, 2)
+  assert.notEqual(temporaryPaths[0], temporaryPaths[1])
+})
+
+test('keeps the previous task store and removes its temporary file after retries are exhausted', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-persist-failure-'))
+  const storePath = path.join(root, 'tasks-v1.json')
+  await writeFile(storePath, 'previous\n', 'utf8')
+  try {
+    await assert.rejects(
+      writeTaskStoreFile(storePath, 'replacement\n', {
+        operations: {
+          mkdir,
+          writeFile,
+          async rename() { throw Object.assign(new Error('file is busy'), { code: 'EPERM' }) },
+          rm,
+        },
+        platform: 'win32',
+        retryDelays: [0, 0],
+        wait: async () => {},
+      }),
+      /任务存储发布失败.*code=EPERM.*attempts=3/
+    )
+    assert.equal(await readFile(storePath, 'utf8'), 'previous\n')
+    assert.deepEqual((await readdir(root)).sort(), ['tasks-v1.json'])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('does not retain an unreported Task in memory when its first save fails', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-first-save-'))
+  let fail = true
+  const store = createTaskStore({
+    storePath: path.join(root, 'tasks-v1.json'),
+    idFactory: () => 'task-retry',
+    writeStore: async () => {
+      if (fail) throw new Error('persist failed')
+    },
+  })
+
+  try {
+    await assert.rejects(
+      store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '首次失败' } }),
+      /persist failed/
+    )
+    assert.deepEqual(await store.list(), [])
+
+    fail = false
+    const retry = await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '再次创建' } })
+    assert.equal(retry.task_id, 'task-retry')
+    assert.deepEqual((await store.list()).map(task => task.task_id), ['task-retry'])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('persists a Task before any DSH session or Run exists', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-tasks-'))

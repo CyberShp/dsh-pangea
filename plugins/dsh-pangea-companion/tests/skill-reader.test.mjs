@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -18,6 +18,39 @@ function canonicalJson(value) {
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
   return JSON.stringify(value)
 }
+
+test('completed workflow with 26 projected cases and 22 formal details reports exact omissions without inventing content', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-delivery-'))
+  const runId = 'delivery', runRoot = path.join(root, 'runs', runId)
+  const ids = [...Array.from({ length: 22 }, (_, n) => `case-${n}`), 'cap-01', 'cap-02', 'wrap-01', 'cycle-01']
+  const detail = id => `## TC-${id}：用例\n**前置条件**：空队列\n**操作步骤**：\n1. 入队\n**预期结果**：成功\n**观测方式**：返回码\n**清理或恢复**：销毁队列\n\n`
+  try {
+    await writeJson(path.join(root, '.pangea/skill-runs', runId, 'metadata.json'), { run_id: runId, request: { mode: 'depth' } })
+    await writeJson(path.join(runRoot, '内部索引/运行状态.json'), { status: 'complete', verdict: 'READY', completed_steps: ['01','02','03','04','05','06','07','08','09'] })
+    await writeJson(path.join(runRoot, '内部索引/工作台投影.json'), {
+      schema_version: '1.0', run_id: runId, test_cases: ids.map(test_case_id => ({ test_case_id, steps: ['索引中的内容不可填补正式缺项'] })),
+      risks: [], evidence: [], business_flows: [], review_issues: [],
+    })
+    await mkdir(path.join(runRoot, '正式输出'), { recursive: true })
+    const formal = path.join(runRoot, '正式输出/黑盒测试用例.md')
+    await writeFile(formal, ids.slice(0, 22).map(detail).join(''))
+    const current = (await companionSnapshot({ dataRoot: root, runId })).current
+    assert.equal(current.lifecycle_status, 'complete')
+    assert.equal(current.delivery_integrity.status, 'incomplete')
+    assert.equal(current.delivery_integrity.complete_count, 22)
+    assert.deepEqual(current.delivery_integrity.issues.map(i => i.test_case_id), ids.slice(22))
+    assert.equal(current.semantic_review.verdict, null)
+    assert.equal(current.semantic_review.method, 'not_recorded')
+    assert.deepEqual(current.details.test_cases.at(-1).steps, [])
+    assert.doesNotMatch(buildTestCaseCsv(current), /索引中的内容/)
+    await writeFile(formal, ids.map(detail).join(''))
+    await writeJson(path.join(runRoot, '内部索引/独立审查状态.json'), { independent: false, semantic_verdict: 'UNRESOLVED', summary: '争议保留' })
+    const repaired = (await companionSnapshot({ dataRoot: root, runId })).current
+    assert.equal(repaired.delivery_integrity.status, 'complete')
+    assert.equal(repaired.semantic_review.verdict, 'UNRESOLVED')
+    assert.equal(repaired.semantic_review.method, 'self_review')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('exports multiple cases from a combined Skill draft with inline and labelled fields', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-combined-cases-'))
@@ -425,6 +458,7 @@ test('enriches a final workbench projection with live risk, evidence, and test c
     await mkdir(path.join(runRoot, '正式输出'), { recursive: true })
     await writeFile(path.join(runRoot, '正式输出', '完整分析报告.md'), '# 完整分析报告\n', 'utf8')
 
+    await writeFile(path.join(runRoot, '正式输出/黑盒测试用例.md'), await readFile(path.join(liveRoot, '测试设计/用例-TC-NET-01.md'), 'utf8'))
     const current = (await companionSnapshot({ dataRoot, runId })).current
     assert.equal(current.publication.state, 'final')
     assert.equal(current.reader_health.trusted, true)

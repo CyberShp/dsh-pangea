@@ -52,6 +52,16 @@ async function loadClientExports(react = fakeReact()) {
   return exported
 }
 
+test('READY does not imply complete delivery, independent review, or semantic approval', async () => {
+  const client = await loadClientExports()
+  const labels = client.outcomePresentation({ lifecycle_status: 'complete', quality_status: 'READY', delivery_integrity: { status: 'incomplete' }, semantic_review: { method: 'self_review', verdict: 'UNRESOLVED' } })
+  assert.equal(labels.workflow, '流程完成')
+  assert.equal(labels.delivery, '交付不完整')
+  assert.equal(labels.review, '自审')
+  assert.equal(labels.semantic, 'UNRESOLVED（审查者结论）')
+  assert.equal(client.outcomePresentation({ quality_status: 'READY' }).semantic, '未给出语义结论')
+})
+
 test('filters canonical risk severities and includes the complete causal chain in discussion context', async () => {
   const client = await loadClientExports()
   const risks = [

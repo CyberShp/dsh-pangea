@@ -29,6 +29,6 @@ test('builds a readable XLSX package with frozen header and wrapped test fields'
     }] },
   })
   assert.equal(Buffer.from(xlsx).subarray(0, 2).toString('ascii'), 'PK')
-  assert.ok(Buffer.from(xlsx).includes(Buffer.from('ySplit="6"')))
+  assert.ok(Buffer.from(xlsx).includes(Buffer.from('ySplit="12"')))
   assert.ok(Buffer.from(xlsx).includes(Buffer.from('TC-1')))
 })

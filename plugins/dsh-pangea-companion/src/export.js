@@ -11,9 +11,12 @@ function testCaseRows(run) {
     ['结果状态', run?.publication?.state ?? 'pending'],
     ['结果 revision', run?.publication?.revision ?? 0],
     ['发布步骤', run?.publication?.step_id],
-    ['复核结论', run?.review?.summary ?? run?.review?.status],
+    ['复核结论', run?.semantic_review?.verdict ?? '未给出语义结论'],
     ['源码快照', run?.source_snapshot?.snapshot_digest ?? run?.source_snapshot?.status],
     ['目标', run?.target],
+    ['流程状态', run?.lifecycle_status],
+    ['交付完整性', run?.delivery_integrity?.status ?? 'not_checked'],
+    ['审查方式', run?.semantic_review?.method ?? 'not_recorded'],
     [],
     ['用例 ID', '标题', '类型', '状态', '关联风险', '前置条件', '执行步骤', '预期结果', '观察点', '清理动作'],
   ]
@@ -63,7 +66,7 @@ function worksheetXml(rows) {
   const sheetRows = rows.map((row, rowIndex) => {
     const cells = row.map((value, columnIndex) => {
       const reference = `${columnName(columnIndex)}${rowIndex + 1}`
-      const style = rowIndex === 5 ? ' s="1"' : ''
+      const style = row[0] === '用例 ID' ? ' s="1"' : ''
       const content = cell(value)
       if (!content) return `<c r="${reference}"${style}/>`
       return `<c r="${reference}" t="inlineStr"${style}><is><t xml:space="preserve">${xml(content)}</t></is></c>`
@@ -72,7 +75,7 @@ function worksheetXml(rows) {
   }).join('')
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
     `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+
-    `<sheetViews><sheetView workbookViewId="0"><pane ySplit="6" topLeftCell="A7" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`+
+    `<sheetViews><sheetView workbookViewId="0"><pane ySplit="${rows.findIndex(row => row[0] === '用例 ID') + 1}" topLeftCell="A${rows.findIndex(row => row[0] === '用例 ID') + 2}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`+
     `<sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="14" customWidth="1"/><col min="2" max="10" width="28" customWidth="1"/></cols>`+
     `<sheetData>${sheetRows}</sheetData></worksheet>`
 }
