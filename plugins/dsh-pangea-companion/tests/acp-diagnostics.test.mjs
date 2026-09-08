@@ -36,7 +36,7 @@ test('logs remote identity and completed turns and supplies Python for initializ
       sessions: { create: async () => ok({ sessionId: owner.id }), rename: async () => ok({}) },
     }
     const runner = async ({ args }) => args[0] === 'system'
-      ? { repositories: ['repo'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
+      ? { repositories: ['repo'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.0' } }
       : { run_id: 'run', request_path: path.join(root, 'request.md'), run_root: path.join(root, 'run') }
     await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo', target: 'diagnosis', source_scope: [], provider_id: 'pangea-nga' } },
       runner, async () => {}, event => events.push(event), runtime, { PANGEA_PYTHON: 'C:\\Python Path\\python.exe' })

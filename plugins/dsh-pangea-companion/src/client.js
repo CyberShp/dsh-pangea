@@ -1268,7 +1268,7 @@ window.__ModuleLoader__.load({
           jobId: selectedTask.job_id,
           title: selectedTask.title,
           processMode: selectedTask.provider ? 'acp' : 'internal',
-          phase: selectedCurrent ? (PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
+          phase: selectedCurrent ? (selectedCurrent.phase_title ?? PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
           conversations: selectedTask.conversations ?? [],
           activeConversationId: selectedTask.active_conversation_id,
@@ -1566,7 +1566,7 @@ window.__ModuleLoader__.load({
           '我正在 PANGEA 测试工作台查看当前运行，请基于下面的工作台上下文协助我判断下一步。',
           '',
           `Run：${current.run_id}`,
-          `阶段：${PHASE[current.phase] ?? current.phase ?? '未知'}`,
+          `阶段：${current.phase_title ?? PHASE[current.phase] ?? current.phase ?? '未知'}`,
           `流程：${outcomePresentation(current).workflow}`,
           `交付完整性：${outcomePresentation(current).delivery}`,
           `审查方式：${outcomePresentation(current).review}`,
@@ -2095,7 +2095,7 @@ window.__ModuleLoader__.load({
                 field('DSH 会话', shortId(monitoredRun?.session_id ?? (historicalRun ? null : monitoredSession?.session_id))),
                 field('PANGEA Run', `${runLabel(current)} · ${current.run_id}`),
                 field('Agent 状态', liveForRun ? monitoredSession.status === 'running' ? '运行中' : '空闲' : monitoredRun ? '会话已结束或已删除' : '原会话未记录'),
-                field('PANGEA 阶段', PHASE[current.phase] ?? current.phase)),
+                field('PANGEA 阶段', current.phase_title ?? PHASE[current.phase] ?? current.phase)),
               h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `状态更新：${current.state_read?.updated_at ?? formatTime(current.state_read?.mtime_ms ?? current.modified_at)}`),
               h('div', { style: styles.itemMeta }, `本次读取：${formatTime(current.state_read?.observed_at)}${error ? '（刷新失败，显示最近成功快照）' : ''}`))),
 
@@ -2114,7 +2114,7 @@ window.__ModuleLoader__.load({
 
           h('div', { style: styles.sectionTitle }, 'PANGEA 进度'),
           h('div', { style: styles.card },
-            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, PHASE[current.phase] ?? current.phase), h('span', { style: styles.badge }, `${completed}/${total}`)),
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, current.phase_title ?? PHASE[current.phase] ?? current.phase), h('span', { style: styles.badge }, `${completed}/${total}`)),
             h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } })),
             h('div', { style: styles.grid },
               field('已完成分析', `${completed} / ${total}`),
@@ -2283,12 +2283,12 @@ window.__ModuleLoader__.load({
         const judgeStatus = workflow.judge?.status ?? 'pending'
         return h(React.Fragment, null,
           h('div', { style: styles.card },
-            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Codetalks Skill 完整流程'), h('span', { style: styles.badge }, `${workflow.completed_steps?.length ?? 0} / 9`)),
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Codetalks Skill 完整流程'), h('span', { style: styles.badge }, `${workflow.completed_steps?.length ?? 0} / ${workflow.steps?.length ?? 0}`)),
             h('div', { style: styles.grid },
               field('核心规则 ACK', ack.label),
               field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : '等待初始化'),
               field('独立 Judge', judgeStatus),
-              field('运行状态', PHASE[current.phase] ?? current.phase),
+              field('运行状态', current.phase_title ?? PHASE[current.phase] ?? current.phase),
               field('源码快照', ['frozen', 'verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已复制到 Run` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'),
               field('状态快照', stateReadStatus === 'ok' ? (current.state_read?.updated_at ?? formatTime(current.state_read?.mtime_ms)) : ack.label),
               field('结果发布', `${publicationText}${publicationRevision}${publication.step_id ? ` · Step ${publication.step_id}` : ''}`)),
@@ -2299,7 +2299,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...styles.card, ...styles.notice } },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '性能观测'), h('span', { style: styles.badge }, '仅用于比较')),
             h('div', { style: styles.grid },
-              field('已测步骤', `${stepTimings.length} / 9`),
+              field('已测步骤', `${stepTimings.length} / ${workflow.steps?.length ?? 0}`),
               field('已记录耗时', stepTimings.length ? formatDuration(measuredDuration) : '等待步骤完成'),
               field('进度更新', current.performance?.progress_updates ?? 0),
               field('产物增量', stepTimings.length ? `${stepTimings.reduce((total, item) => total + (item.artifact_bytes_delta ?? 0), 0)} bytes` : '等待步骤完成')),
@@ -2312,7 +2312,7 @@ window.__ModuleLoader__.load({
                 : h('span', { style: styles.badge }, `${workflow.step_progress.completed ?? 0} / ${workflow.step_progress.total}`)),
             workflow.step_progress.current ? h('div', { style: styles.itemMeta }, `当前处理：${workflow.step_progress.current.id} · ${workflow.step_progress.current.title}`) : null,
             workflow.step_progress.updated_at ? h('div', { style: styles.itemMeta }, `最近更新：${workflow.step_progress.updated_at}`) : null) : null,
-          h('div', { style: styles.sectionTitle }, 'Step 01–09 生命周期'),
+          h('div', { style: styles.sectionTitle }, `阶段流程（${workflow.steps?.length ?? 0} 阶段）`),
           h('div', { style: styles.card }, h('div', { style: styles.stageRail }, steps.map(step => h('div', { key: step.step, style: styles.stageItem },
             h('span', { style: { ...styles.stageDot, background: statusColor(step.status) } }),
             h('div', { style: { flex: 1, minWidth: 0 } },
@@ -2620,7 +2620,7 @@ window.__ModuleLoader__.load({
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, `历史 Run · ${workbench?.runs?.total ?? runItems.length}`),
             h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, runItems.map(run => {
               const active = current.run_id === run.run_id
-              return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, runLabel(run)), h('span', { style: styles.badge }, PHASE[run.phase] ?? run.phase)))
+              return h('button', { type: 'button', key: run.run_id, style: { ...styles.runButton, ...(active ? styles.runActive : {}) }, onClick: () => chooseRun(run.run_id) }, h('div', { style: styles.row }, h('span', { style: { ...styles.itemTitle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, runLabel(run)), h('span', { style: styles.badge }, run.phase_title ?? PHASE[run.phase] ?? run.phase)))
             })),
             h('div', { style: styles.toolbar },
               h('button', { type: 'button', disabled: runCursor <= 0, style: { ...styles.button, ...(runCursor <= 0 ? styles.buttonDisabled : {}) }, onClick: () => setRunCursor(Math.max(0, runCursor - 20)) }, '上一页'),

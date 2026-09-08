@@ -65,7 +65,7 @@ test('uses real Cordis and Jobs to persist one exact ACP attempt through settlem
     }
     const runner = async call => {
       if (call.args[0] === 'system') {
-        return { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
+        return { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.0' } }
       }
       if (call.args[0] === 'runs' && call.args[1] === 'get') {
         return {

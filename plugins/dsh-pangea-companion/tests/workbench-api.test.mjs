@@ -6,7 +6,7 @@ import test from 'node:test'
 
 import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
-const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
+const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.0' } }
 const acpRuntimeConfig = {
   version: 1,
   providers: {
@@ -130,7 +130,7 @@ test('normalizes Run input and rejects legacy fields and unregistered repositori
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], test_case_examples: ['TC-1'] }, capabilities), /不支持字段.*test_case_examples/)
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'], mode: 'preview' }, capabilities), /分析模式/)
   assert.throws(() => normalizeRunInput({ repository: 'other', target: 'x', source_scope: ['x.c'] }, capabilities), /not registered/)
-  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.3\.0/)
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.4\.0/)
 })
 
 test('returns paginated Run metadata and reports incompatible backends explicitly', async () => {
@@ -229,7 +229,8 @@ test('creates a Skill Run before launching its dedicated DSH session', async () 
     assert.equal(events[3][0], 'prompt')
     assert.match(events[3][1].content[0].text, /\/runtime\/request\.md/)
     assert.match(events[3][1].content[0].text, /skill-run-1/)
-    assert.match(events[3][1].content[0].text, /Step 01–09/)
+    assert.match(events[3][1].content[0].text, /workflow-manifest\.json/)
+    assert.doesNotMatch(events[3][1].content[0].text, /Step 01–09/)
     assert.doesNotMatch(events[3][1].content[0].text, /pangea_run_create/)
     assert.equal(result.run.run_id, 'skill-run-1')
     for (const stage of ['capabilities_check', 'model_validate', 'skill_run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'skill_started']) {
@@ -443,8 +444,8 @@ test('continues an incomplete Codetalks Run in the same ACP session before dispo
             async continuePrompt(prompt) {
               continued += 1
               assert.match(prompt[0].text, /运行状态\.json/)
-              assert.match(prompt[0].text, /已完成步骤：4\/9/)
-              return { stopReason: 'completed', output: [{ type: 'text', text: 'Step 09 complete' }] }
+              assert.match(prompt[0].text, /已完成步骤：4\/5/)
+              return { stopReason: 'completed', output: [{ type: 'text', text: 'Step 05 complete' }] }
             },
             async dispose() { disposed += 1 },
           }
@@ -460,8 +461,8 @@ test('continues an incomplete Codetalks Run in the same ACP session before dispo
       if (call.args[0] === 'runs' && call.args[1] === 'get') {
         runChecks += 1
         return runChecks === 1
-          ? { run_id: 'skill-run-acp', lifecycle_status: 'running', phase: 'STEP_05', report_available: false, completed_steps: ['01', '02', '03', '04'] }
-          : { run_id: 'skill-run-acp', lifecycle_status: 'complete', phase: 'COMPLETE', report_available: true, completed_steps: ['01', '02', '03', '04', '05', '06', '07', '08', '09'] }
+          ? { run_id: 'skill-run-acp', lifecycle_status: 'running', phase: 'STEP_05', report_available: false, workflow: { steps: ['01', '02', '03', '04', '05'] }, completed_steps: ['01', '02', '03', '04'] }
+          : { run_id: 'skill-run-acp', lifecycle_status: 'complete', phase: 'COMPLETE', report_available: true, completed_steps: ['01', '02', '03', '04', '05'] }
       }
       return { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     }
@@ -475,6 +476,57 @@ test('continues an incomplete Codetalks Run in the same ACP session before dispo
     assert.equal(continued, 1)
     assert.equal(runChecks, 2)
     assert.equal(disposed, 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('continues within one long module phase while flow progress advances', async () => {
+  const root = await workspace()
+  try {
+    let jobHooks
+    let continued = 0
+    let inspected = 0
+    const owner = { id: 'owner-session' }
+    const runtime = {
+      agents: { get() { return owner } },
+      subagents: {
+        getProvider() { return {} },
+        async start() {
+          return {
+            id: 'agent-session',
+            result: Promise.resolve({ stopReason: 'completed', output: [] }),
+            async continuePrompt(prompt) {
+              continued += 1
+              assert.match(prompt[0].text, /已完成步骤：2\/5/)
+              return { stopReason: 'completed', output: [] }
+            },
+            async dispose() {},
+          }
+        },
+      },
+      jobs: { start(spec) { jobHooks = spec.run(); return 'subagent-1' }, get() { return { startedAt: 1234, status: 'running' } } },
+    }
+    const api = {
+      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
+      sessions: { async create() { return ok({ sessionId: owner.id }) }, async rename() { return ok({}) } },
+    }
+    const runner = async call => {
+      if (call.args[0] === 'system') return capabilities
+      if (call.args[0] === 'runs' && call.args[1] === 'get') {
+        inspected += 1
+        if (inspected === 5) return { lifecycle_status: 'complete', report_available: true }
+        return {
+          lifecycle_status: 'running', phase: 'STEP_03', report_available: false,
+          workflow: { steps: ['01', '02', '03', '04', '05'] }, completed_steps: ['01', '02'],
+          publication: { revision: 1 }, step_progress: { completed: inspected, total: 4, current: { id: `FLOW-${inspected}` } },
+        }
+      }
+      return { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+    }
+    await launchAnalysisSession(api, {
+      cwd: root, input: { repository: 'repo-one', target: 'Long module phase', source_scope: [], provider_id: 'pangea-nga' },
+    }, runner, async () => {}, async () => {}, runtime)
+    assert.equal((await jobHooks.done).status, 'completed')
+    assert.equal(continued, 4)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

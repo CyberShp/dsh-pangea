@@ -325,6 +325,9 @@ function runProgressFingerprint(run) {
     run?.phase ?? null,
     run?.completed_steps?.length ?? null,
     run?.publication?.revision ?? null,
+    run?.step_progress?.completed ?? null,
+    run?.step_progress?.total ?? null,
+    run?.step_progress?.current?.id ?? null,
     run?.report_available === true,
   ])
 }
@@ -334,7 +337,7 @@ function continuationPrompt(run) {
     '上一轮回答已经结束，但当前 Codetalks Run 尚未完成。',
     run?.phase === 'PREPARING' ? '当前 Run 尚未写出初始化状态。先使用首轮提供的 Python 路径执行请求中的 run_guard.py init；若执行失败，报告具体命令、退出码和受限错误摘要并结束。' : null,
     '请读取运行根目录中的 `内部索引/运行状态.json` 以及当前步骤交接文件，以落盘状态为准继续执行。',
-    `当前阶段：${run?.phase ?? '未知'}；已完成步骤：${run?.completed_steps?.length ?? '未知'}/9。`,
+    `当前阶段：${run?.phase ?? '未知'}；已完成步骤：${run?.completed_steps?.length ?? '未知'}/${run?.workflow?.steps?.length ?? '按当前冻结 manifest'}。`,
     '继续当前 Run，不要创建新的 Run。',
   ].filter(Boolean).join('\n')
 }
@@ -589,7 +592,7 @@ export async function launchAnalysisSession(
   const prompt = [
     requestedResumeRunId
       ? `继续已有的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，从最近检查点恢复执行，不要创建第二个 Run。`
-      : `立即开始已经创建好的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，完整执行 Step 01–09，不需要再次确认，也不要创建第二个 Run。`,
+      : `立即开始已经创建好的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，按当前 Run 冻结 workflow-manifest.json 完整执行各阶段，不需要再次确认，也不要创建第二个 Run。`,
     '必须先读取 `.agents/pangea/dsh.md`，再读取下面的 Skill 运行请求并严格执行。',
     `运行请求：${run.request_path}`,
     `Run ID：${run.run_id}`,

@@ -259,11 +259,18 @@ async function semanticReview(runDirectory) {
   } catch { return { method: 'unavailable', verdict: null, summary: '审查记录不可读取' } }
 }
 
-async function readLiveDocumentDraft(runDirectory, state) {
+async function readLiveDocumentDraft(runDirectory, state, manifest) {
   const completed = new Set(state?.completed_steps ?? [])
   const liveRoot = path.join(runDirectory, '活文档')
   const details = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
   let stepId = null
+  if (manifest.workflow_id === 'module-five-stage') {
+    details.risks = parseRisks(await readTextIfFile(path.join(liveRoot, '风险点与SFMEA.md')), new Map(), new Map())
+    details.test_cases = parseTestCases(await readTextIfFile(path.join(liveRoot, '黑盒测试用例.md')), new Map())
+    // New workflows publish explicitly; Markdown enriches details but never
+    // guesses a publication state from text or a completed stage number.
+    return { step_id: null, details }
+  }
   if (completed.has('05')) {
     const risksMarkdown = await readTextIfFile(path.join(liveRoot, '14-风险点清单与因果说明.md'))
     const sfmeaMarkdown = await readTextIfFile(path.join(liveRoot, '15-SFMEA分析.md'))
@@ -480,26 +487,27 @@ async function resolveRunDirectory(dataRoot, runId, metadata) {
   throw new Error(`Codetalks Skill run directory does not exist in data_root: ${runId}`)
 }
 
-async function stepRows(state, liveDocuments, formalOutputs, skillRoot) {
+function stepRows(state, liveDocuments, formalOutputs, manifest) {
   const completed = new Set(state?.completed_steps ?? [])
   const current = state?.current_step ?? null
   let ownership = new Map()
-  try {
-    const manifest = await readJson(path.join(skillRoot, 'workflow-manifest.json'))
+  {
     for (const step of manifest.steps ?? []) {
       for (const artifact of step.required ?? []) {
         const name = path.basename(artifact)
         ownership.set(name, String(step.id ?? '').padStart(2, '0'))
       }
     }
-  } catch { /* older runs may not contain a manifest */ }
-  return STEP_TITLES.map((title, index) => {
-    const step = String(index + 1).padStart(2, '0')
+  }
+  const definitions = manifest.steps?.length ? manifest.steps : STEP_TITLES.map((title, index) => ({ id: String(index + 1).padStart(2, '0'), title }))
+  return definitions.map((definition, index) => {
+    const step = definition.id
+    const title = definition.title ?? STEP_TITLES[index] ?? step
     const status = completed.has(step) ? 'completed' : current === step ? 'running' : 'pending'
-    const artifacts = step === '09'
+    const artifacts = step === definitions.at(-1).id
       ? formalOutputs
       : liveDocuments.filter(file => ownership.size > 0
-        ? ownership.get(path.basename(file)) === step
+        ? ownership.get(path.basename(file)) === step || (definition.requires_glob ?? []).some(pattern => pattern === '活文档/流程讲解/流程-*.md' && path.basename(file).startsWith('流程-'))
         : path.basename(file).startsWith(step + '-'))
     return { step, title, status, artifacts }
   })
@@ -512,6 +520,12 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const metadataPath = path.join(dataRoot, '.pangea', 'skill-runs', runId, 'metadata.json')
   if (await pathKind(metadataPath) !== 'file') throw new Error(`Codetalks Skill run does not exist: ${runId}`)
   const metadata = await readJson(metadataPath)
+  let manifest = {}
+  if (metadata.skill_root && await pathKind(path.join(metadata.skill_root, 'workflow-manifest.json')) === 'file') {
+    manifest = await readJson(path.join(metadata.skill_root, 'workflow-manifest.json'))
+  }
+  const finalStep = manifest.steps?.at(-1)?.id ?? '09'
+  const reviewStep = manifest.review_step ?? '08'
   if (metadata?.run_id && metadata.run_id !== runId) throw new Error(`Codetalks Skill metadata run_id mismatch: expected ${runId}, received ${metadata.run_id}`)
   const runDirectory = await resolveRunDirectory(dataRoot, runId, metadata)
   const statePath = path.join(runDirectory, '内部索引', '运行状态.json')
@@ -531,7 +545,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const reportAvailable = await pathKind(reportMd) === 'file'
   const life = lifecycle(metadata, state)
   const projection = await readWorkbenchProjection(runDirectory, runId)
-  const liveDraft = await readLiveDocumentDraft(runDirectory, state)
+  const liveDraft = await readLiveDocumentDraft(runDirectory, state, manifest)
   const recordedSourceSnapshot = metadata.source_snapshot ?? { status: 'legacy_unavailable', file_count: null }
   const sourceSnapshot = { ...recordedSourceSnapshot, ...(await readSourceSnapshotManifest(runDirectory, runId, recordedSourceSnapshot)) }
   const validation = state?.validation ?? { status: 'not_checked', error_count: 0, errors: [] }
@@ -545,7 +559,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const completed = state?.completed_steps?.length ?? 0
   const finalExpected = life.lifecycle_status === 'complete'
     || state?.status === 'complete'
-    || (state?.completed_steps ?? []).includes('09')
+    || (manifest.workflow_id !== 'module-five-stage' && (state?.completed_steps ?? []).includes(finalStep))
   const recordedPublication = state?.publication && typeof state.publication === 'object'
     ? state.publication
     : projection.value?.publication && typeof projection.value.publication === 'object'
@@ -562,7 +576,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     : projection.status === 'verified' ? 1 : 0
   const publicationStep = typeof recordedPublication?.step_id === 'string'
     ? recordedPublication.step_id
-    : projection.status === 'verified' ? (finalExpected ? '09' : null) : liveDraft.step_id
+    : projection.status === 'verified' ? (finalExpected ? finalStep : null) : liveDraft.step_id
   const publicationIssues = publicationState === 'broken' && recordedState === 'broken'
     ? ['工作台结构化投影已标记为 broken']
     : []
@@ -572,7 +586,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       ? []
       : [...projection.issues, ...publicationIssues]
   const workflow = {
-    steps: await stepRows(state, liveDocuments, formalOutputs, metadata.skill_root),
+    steps: stepRows(state, liveDocuments, formalOutputs, manifest),
+    workflow_id: manifest.workflow_id ?? 'legacy-nine-step',
     completed_steps: state?.completed_steps ?? [],
     current_step: state?.current_step ?? null,
     core_rules_ack: state?.core_rules_ack ?? {},
@@ -614,6 +629,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     run_id: runId,
     data_root: path.resolve(dataRoot),
     ...life,
+    phase_title: workflow.steps.find(step => step.step === state?.current_step)?.title ?? null,
     target: metadata.request?.target ?? runId,
     repository: metadata.request?.repository ?? null,
     verdict: state?.verdict ?? null,
@@ -622,11 +638,11 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     semantic_review: semantic,
     attention_required: life.lifecycle_status === 'attention_required',
     analysis: {
-      total: 9,
+      total: workflow.steps.length,
       completed,
       reworked: 0,
       running: life.terminal ? 0 : 1,
-      pending: Math.max(0, 9 - completed - (state?.current_step ? 1 : 0)),
+      pending: Math.max(0, workflow.steps.length - completed - (state?.current_step ? 1 : 0)),
       submitted: completed,
       max_parallel: 1,
     },
@@ -642,7 +658,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     errors: validation.status === 'failed' ? validation.errors : [],
     error_history: [],
     review: {
-      status: (state?.completed_steps ?? []).includes('08') ? 'COMPLETE' : 'PENDING',
+      status: (state?.completed_steps ?? []).includes(reviewStep) ? 'COMPLETE' : 'PENDING',
       summary: state?.judge?.status ?? 'pending',
       issues: [],
       counts: { effective: 0 },

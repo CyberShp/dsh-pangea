@@ -87,7 +87,7 @@ function renderStatus(value) {
   const health = run.reader_health
   const lines = [
     `PANGEA Run：${run.run_id}`,
-    `阶段：${PHASE_LABELS[run.phase] ?? run.phase}`,
+    `阶段：${run.phase_title ?? PHASE_LABELS[run.phase] ?? run.phase}`,
     `质量状态：${QUALITY_LABELS[run.quality_status] ?? run.quality_status ?? '待定'}`,
     `Skill 步骤：${run.analysis.completed}/${run.analysis.total}`,
     `执行：当前 ${run.analysis.running ?? 0} / 等待 ${run.analysis.pending ?? 0} / 已完成 ${run.analysis.submitted ?? 0}`,
@@ -703,7 +703,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
                 run_id: launchedRun?.run_id ?? bound.run_id,
                 data_root: bound.data_root,
                 phase: 'PREPARING',
-                analysis: { completed: 0, total: 9, reworked: 0 },
+                analysis: { completed: 0, total: launchedRun?.workflow?.steps?.length ?? null, reworked: 0 },
               }, {
                 dataRoot: bound.data_root,
                 taskId: bound.task_id,
