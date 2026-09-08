@@ -19,6 +19,7 @@ if (receipt.ok) {
   const svg = html.match(/<svg\b[^>]*>[\s\S]*?<\/svg>/i)?.[0]
   if (svg) {
     const styles = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)].map(match => match[1]).join('\n')
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
     const standalone = svg.replace(/<svg\b/, '<svg xmlns="http://www.w3.org/2000/svg"').replace(/(<svg[^>]*>)/, `$1<style>${styles}</style>`)
     await writeFile(path.join(folder, 'diagram.svg'), standalone)
   }
