@@ -477,6 +477,27 @@ test('workbench API lists runs and starts or stops through explicit actions', as
   assert.deepEqual(JSON.parse(calls[3].options.body), { action: 'test' })
 })
 
+test('asset picker defaults to all usable assets and sends explicit search and pagination', async () => {
+  const client = await loadClientExports()
+  const urls = []
+  const controller = new AbortController()
+  const fetcher = async (url, options) => {
+    urls.push(new URL(url, 'http://localhost'))
+    assert.equal(options.signal, controller.signal)
+    return { ok: true, async json() { return { status: 'ok', assets: [{ asset_id: 'shared', repository_ids: [] }] } } }
+  }
+  const shared = await client.requestAssetCatalog({ cwd: '/workspace', signal: controller.signal, fetcher })
+  assert.equal(shared.assets[0].asset_id, 'shared')
+  assert.equal(urls[0].searchParams.has('repository_id'), false)
+  assert.equal(urls[0].searchParams.get('status'), 'available')
+  await client.requestAssetCatalog({ cwd: '/workspace', page: 2, query: 'TLS', type: 'design', repositoryId: 'repo-one', signal: controller.signal, fetcher })
+  assert.equal(urls[1].searchParams.get('page'), '2')
+  assert.equal(urls[1].searchParams.get('page_size'), '20')
+  assert.equal(urls[1].searchParams.get('q'), 'TLS')
+  assert.equal(urls[1].searchParams.get('type'), 'design')
+  assert.equal(urls[1].searchParams.get('repository_id'), 'repo-one')
+})
+
 test('client builds focused discussion drafts, appends them to the active DSH composer, and resolves evidence paths', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported

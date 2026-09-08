@@ -235,12 +235,13 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestAssetCatalog({ cwd, repositoryId = '', moduleTag = '', fetcher = fetch }) {
+    async function requestAssetCatalog({ cwd, repositoryId = '', moduleTag = '', page = 1, query = '', type = '', signal, fetcher = fetch }) {
       const response = await fetcher(`${ASSET_CATALOG_API_PATH}?${new URLSearchParams({
-        cwd, page: '1', page_size: '100', status: 'available',
+        cwd, page: String(page), page_size: '20', status: 'available',
+        ...(query ? { q: query } : {}), ...(type ? { type } : {}),
         ...(repositoryId ? { repository_id: repositoryId } : {}),
         ...(moduleTag ? { module_tag: moduleTag } : {}),
-      })}`, { cache: 'no-store' })
+      })}`, { cache: 'no-store', signal })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
@@ -940,13 +941,20 @@ window.__ModuleLoader__.load({
       const [launchDiagnosticsOpen, setLaunchDiagnosticsOpen] = React.useState(false)
       const [flowQuery, setFlowQuery] = React.useState('')
       const [runDraft, setRunDraft] = React.useState(ctx?.pangea?.getRunDraft?.() ?? { requestId: 0, assetIds: [] })
+      const [assetPage, setAssetPage] = React.useState(1)
+      const [assetQuery, setAssetQuery] = React.useState('')
+      const [assetQueryDraft, setAssetQueryDraft] = React.useState('')
+      const [assetType, setAssetType] = React.useState('')
+      const [assetRepositoryOnly, setAssetRepositoryOnly] = React.useState(false)
+      const [assetRefresh, setAssetRefresh] = React.useState(0)
+      const [assetLabels, setAssetLabels] = React.useState({})
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const workbenchRequestRef = React.useRef({ sequence: 0, controller: null })
       const snapshotRef = React.useRef(undefined)
       const snapshotFingerprintRef = React.useRef('')
       const handledRunDraftRequest = React.useRef(0)
       const noticeTimerRef = React.useRef(undefined)
-      const assetRepositoryRef = React.useRef('')
+      const assetWorkspaceRef = React.useRef(cwd)
       const taskItems = workbench?.tasks?.items ?? []
       const selectedTask = taskItems.find(item => item.task_id === selectedTaskId)
       const selectedDataRoot = selectedTask?.data_root
@@ -1153,17 +1161,34 @@ window.__ModuleLoader__.load({
         })
       }, [workbench?.model_routing?.models])
       React.useEffect(() => {
-        // Asset metadata is scoped to the selected repository. Do not leave
-        // an old repository's checked/visible assets in the create form.
-        const repository = createForm.repository
-        if (!repository) return
-        if (assetRepositoryRef.current && assetRepositoryRef.current !== repository) {
+        if (assetWorkspaceRef.current !== cwd) {
           setAssetCatalog(null)
+          setAssetLabels({})
+          setAssetPage(1)
           setAssetSelectorOpen(false)
           setCreateForm(value => value.asset_ids.length ? { ...value, asset_ids: [] } : value)
         }
-        assetRepositoryRef.current = repository
-      }, [createForm.repository])
+        assetWorkspaceRef.current = cwd
+      }, [cwd])
+      const assetRepositoryFilter = assetRepositoryOnly ? createForm.repository : ''
+      React.useEffect(() => {
+        if (!assetSelectorOpen || screen.type !== 'create' || !visible || !cwd) return undefined
+        const controller = new AbortController()
+        setAssetCatalogLoading(true)
+        setAssetCatalogError('')
+        setAssetCatalog(null)
+        void requestAssetCatalog({ cwd, repositoryId: assetRepositoryFilter, page: assetPage,
+          query: assetQuery, type: assetType, signal: controller.signal }).then(value => {
+          if (controller.signal.aborted) return
+          setAssetCatalog(value)
+          setAssetLabels(previous => ({ ...previous, ...Object.fromEntries((value.assets ?? []).map(item => [item.asset_id, item])) }))
+        }).catch(reason => {
+          if (!controller.signal.aborted) setAssetCatalogError(reason instanceof Error ? reason.message : String(reason))
+        }).finally(() => {
+          if (!controller.signal.aborted) setAssetCatalogLoading(false)
+        })
+        return () => controller.abort()
+      }, [cwd, visible, screen.type, assetSelectorOpen, assetRepositoryFilter, assetPage, assetQuery, assetType, assetRefresh])
       React.useEffect(() => {
         if (!visible || pageMode === 'execution') {
           requestRef.current.controller?.abort()
@@ -1586,20 +1611,6 @@ window.__ModuleLoader__.load({
       }
       function multilineValues(value) {
         return [...new Set(String(value ?? '').split(/\r?\n/).map(item => item.trim()).filter(Boolean))]
-      }
-      async function openAssetSelector() {
-        if (assetSelectorOpen) { setAssetSelectorOpen(false); return }
-        setAssetSelectorOpen(true)
-        if (assetCatalog || assetCatalogLoading) return
-        setAssetCatalogLoading(true)
-        setAssetCatalogError('')
-        try {
-          setAssetCatalog(await requestAssetCatalog({ cwd, repositoryId: createForm.repository }))
-        } catch (reason) {
-          setAssetCatalogError(reason instanceof Error ? reason.message : String(reason))
-        } finally {
-          setAssetCatalogLoading(false)
-        }
       }
       function toggleCreateAsset(assetId) {
         if (!assetId) return
@@ -2170,8 +2181,9 @@ window.__ModuleLoader__.load({
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
         const canSubmit = compatible && createForm.repository && createForm.target.trim() && sourceScope.length > 0 && executionReady && !creatingRun
         const assetItems = assetCatalog?.assets ?? []
-        const selectedAssets = createForm.asset_ids.map(assetId => assetItems.find(item => item.asset_id === assetId)
+        const selectedAssets = createForm.asset_ids.map(assetId => assetLabels[assetId] ?? assetItems.find(item => item.asset_id === assetId)
           ?? { asset_id: assetId, title: assetId })
+        const assetPagination = assetCatalog?.pagination
         const assetTypeLabels = { requirement: '需求', design: '设计', historical_defect: '历史缺陷', reference: '参考资料', coverage: 'Coverage', test_case_example: '用例示例' }
         const formField = (label, key, placeholder) => h('label', null,
           h('div', { style: styles.label }, label),
@@ -2239,20 +2251,33 @@ window.__ModuleLoader__.load({
                 h('div', { style: styles.itemMeta }, '使用 . 表示整个仓库；创建后原始仓库的后续修改不会影响本次 Run。')),
               h('div', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '分析资产'),
-                h('div', { style: styles.itemMeta }, '分析重点由 Codetalks Skill 固定；这里仅选择资产库中已通过完整性校验的输入。用例示例只能在 Step 07 作为格式/粒度参考。'),
+                h('div', { style: styles.itemMeta }, '选择本次需要的需求、设计、历史缺陷或参考资料。用例示例仅作为格式与粒度参考。'),
                 h('div', { style: { ...styles.chips, marginTop: 7 } }, selectedAssets.length
                   ? selectedAssets.map(item => h('button', { key: item.asset_id, type: 'button', style: styles.badge,
                     'aria-label': `移除资产 ${item.title}`, onClick: () => toggleCreateAsset(item.asset_id),
                   }, `${assetTypeLabels[item.asset_type] ?? '资产'} · ${item.title} ×`))
                   : h('span', { style: styles.itemMeta }, '未选择资产（可直接分析源码）')),
-                h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void openAssetSelector() } }, assetSelectorOpen ? '收起资产库' : '从资产库选择'),
+                h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => setAssetSelectorOpen(value => !value) }, assetSelectorOpen ? '收起资产库' : '从资产库选择'),
                 assetSelectorOpen ? h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } },
+                  h('form', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 }, onSubmit: event => { event.preventDefault(); setAssetPage(1); setAssetQuery(assetQueryDraft.trim()) } },
+                    h('input', { 'aria-label': '搜索可用资产', placeholder: '搜索标题或文件名', style: styles.search, value: assetQueryDraft, onChange: event => setAssetQueryDraft(event.target.value) }),
+                    h('select', { 'aria-label': '筛选资产类型', style: styles.button, value: assetType, onChange: event => { setAssetPage(1); setAssetType(event.target.value) } },
+                      h('option', { value: '' }, '全部类型'), Object.entries(assetTypeLabels).map(([value, label]) => h('option', { key: value, value }, label))),
+                    h('select', { 'aria-label': '资产仓库范围', style: styles.button, value: assetRepositoryOnly ? 'repository' : 'all', onChange: event => { setAssetPage(1); setAssetRepositoryOnly(event.target.value === 'repository') } },
+                      h('option', { value: 'all' }, '全部可用资产'), h('option', { value: 'repository', disabled: !createForm.repository }, '仅关联当前仓库')),
+                    h('button', { type: 'submit', style: styles.button }, '搜索'),
+                    h('button', { type: 'button', style: styles.button, onClick: () => setAssetRefresh(value => value + 1) }, '刷新资产')),
                   assetCatalogLoading ? h('div', { style: styles.itemMeta }, '正在读取可用资产…') : null,
                   assetCatalogError ? h('div', { style: styles.error, role: 'alert' }, assetCatalogError) : null,
-                  !assetCatalogLoading && !assetCatalogError && assetItems.length === 0 ? h('div', { style: styles.itemMeta }, '暂无可用资产，请先在“资产管理”页导入并完成审核。') : null,
+                  !assetCatalogLoading && !assetCatalogError && assetCatalog && assetItems.length === 0 ? h('div', { style: styles.itemMeta },
+                    assetQuery || assetType || assetRepositoryOnly ? '当前筛选没有结果，可切换为全部可用资产或清除搜索条件。' : `暂无可用资产；待审核 ${assetCatalog.summary?.review ?? 0} 个。可在资产管理中导入或审核，然后返回刷新。`) : null,
                   assetItems.map(item => h('label', { key: item.asset_id, style: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12))' } },
                     h('input', { type: 'checkbox', checked: createForm.asset_ids.includes(item.asset_id), onChange: () => toggleCreateAsset(item.asset_id) }),
-                    h('span', { style: { minWidth: 0 } }, h('span', { style: styles.itemTitle }, item.title), h('span', { style: { ...styles.itemMeta, display: 'block' } }, `${assetTypeLabels[item.asset_type] ?? item.asset_type} · revision ${item.revision ?? 1} · ${item.source_name ?? item.source_path}`))))) : null),
+                    h('span', { style: { minWidth: 0 } }, h('span', { style: styles.itemTitle }, item.title), h('span', { style: { ...styles.itemMeta, display: 'block' } }, `${assetTypeLabels[item.asset_type] ?? item.asset_type} · 修订 ${item.revision ?? 1} · ${(item.repository_ids ?? []).join('、') || '未限定仓库'} · ${item.source_name ?? item.source_path}`)))),
+                  assetPagination ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
+                    h('span', { style: styles.itemMeta }, `第 ${assetPagination.page} / ${assetPagination.total_pages} 页 · 共 ${assetPagination.total} 个 · 已选 ${createForm.asset_ids.length} 个`),
+                    h('button', { type: 'button', style: styles.button, disabled: assetCatalogLoading || assetPage <= 1, onClick: () => setAssetPage(value => value - 1) }, '上一页'),
+                    h('button', { type: 'button', style: styles.button, disabled: assetCatalogLoading || assetPage >= assetPagination.total_pages, onClick: () => setAssetPage(value => value + 1) }, '下一页')) : null) : null),
               ),
             modelRouting.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 }, role: 'alert' }, `模型目录读取失败：${modelRouting.error ?? '未知错误'}`) : null,
             modelRouting.status === 'ok' && modelOptions.length === 0 && !createForm.provider_id ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, '没有可用的内置 API 模型，请先到“设置”配置模型与 API。', h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })) }, '打开模型设置')) : null,
