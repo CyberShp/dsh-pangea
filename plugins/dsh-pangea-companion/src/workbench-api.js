@@ -684,7 +684,13 @@ export async function launchArchitectureSession(api, { cwd, task, prompt, onSess
   if (provider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
     const jobId = await startAcpJob(runtime, parent, provider, prompt, `架构视图 · ${task.target}`, async () => {}, {
-      onJobCreated: onJob,
+      onJobCreated: async details => {
+        await onJob(details)
+        // The view consumes completion. Register before releasing ACP startup so
+        // tool-jobs cannot wake this owner as an unconfigured internal API Agent.
+        // Jobs requires a finite timeout; its waiter releases on actual settlement.
+        void runtimeService(runtime, 'jobs').wait(details.jobId, 2_147_483_647, parent)
+      },
     }, task.agent_model)
     return { session_id: sessionId, job_id: jobId }
   }

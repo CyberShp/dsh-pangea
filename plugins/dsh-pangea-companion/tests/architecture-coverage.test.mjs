@@ -44,7 +44,7 @@ test('external diagram execution inherits selected model and never inspects main
       agentOptions = input.agentOptions
       return { id: 'external-session', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose() {} }
     } },
-    jobs: { start: options => { hooks = options.run(); return 'diagram-job' }, get: () => ({ startedAt: 42 }) },
+    jobs: { start: options => { hooks = options.run(); return 'diagram-job' }, get: () => ({ startedAt: 42 }), wait: async () => ({ status: 'completed' }) },
   }
   const result = await launchArchitectureSession(api, { cwd: root, task: { target: 'synthetic', provider: 'pangea-opencode', agent_model: 'selected-model' }, prompt: 'Draw synthetic workflow',
     onSession: id => { session = id }, onJob: value => { bound = value } }, runtime)

@@ -6,7 +6,7 @@ import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 
 import { createTaskStore } from '../src/task-store.js'
-import { launchAnalysisSession } from '../src/workbench-api.js'
+import { launchAnalysisSession, launchArchitectureSession } from '../src/workbench-api.js'
 
 const appRoot = process.env.PANGEA_TEST_APP_ROOT
 if (!appRoot) throw new Error('PANGEA_TEST_APP_ROOT must point to a built PANGEA Desktop app root')
@@ -16,6 +16,51 @@ async function importFromAppRoot(relativePath) {
 }
 
 function ok(value) { return { result: { ok: true, value } } }
+
+test('external diagram completion reaches Jobs observers without waking an unconfigured API owner', async () => {
+  const { Context } = await importFromAppRoot('@deepseek-ai/cordis/lib/index.js')
+  const { LocalJobRegistry } = await importFromAppRoot('@deepseek-ai/dsh-jobs-local/lib/index.js')
+  const { apply: applyJobTools } = await importFromAppRoot('@deepseek-ai/dsh-tool-jobs/lib/index.js')
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-diagram-jobs-'))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# synthetic')
+  const context = new Context()
+  let wakes = 0
+  const owner = { id: 'diagram-owner', ctx: context, status: 'idle', followup() { wakes++ }, inject() {} }
+  context.provide('agents', { get: () => owner })
+  const jobs = new LocalJobRegistry(context, { maxConcurrentJobsPerOwner: 10 })
+  let finish
+  const completion = new Promise(resolve => { finish = resolve })
+  const runtime = {
+    jobs,
+    agents: { get: () => owner },
+    subagents: { getProvider: () => ({}), start: async () => ({ id: 'diagram-agent', result: completion, readOutput: () => 'diagram ready', dispose() {} }) },
+  }
+  const toolContext = {
+    jobs, on: (...args) => context.on(...args),
+    systemPrompt: { section() {} }, tools: { register() {} },
+  }
+  applyJobTools(toolContext, {})
+  const observed = new Promise(resolve => jobs.onJobDone(resolve))
+  try {
+    const result = await launchArchitectureSession({ sessions: {
+      create: async () => ok({ sessionId: owner.id }), rename: async () => ok({}),
+    } }, {
+      cwd: root, task: { provider: 'pangea-opencode', target: 'synthetic', agent_model: 'selected-model' },
+      prompt: 'Synthetic diagram', onSession() {}, onJob() {},
+    }, runtime)
+    finish({ stopReason: 'completed', output: [{ type: 'text', text: 'diagram ready' }] })
+    const snapshot = await observed
+    assert.equal(snapshot.id, result.job_id)
+    assert.equal(snapshot.status, 'completed')
+    assert.equal(wakes, 0, 'tool-jobs must not start an internal API model for an external diagram')
+    assert.equal(snapshot.reported, true)
+    assert.equal(jobs.read(result.job_id, owner).text, 'diagram ready')
+  } finally {
+    await jobs.disposeAll()
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('uses real Cordis and Jobs to persist one exact ACP attempt through settlement', async () => {
   const { Context } = await importFromAppRoot('@deepseek-ai/cordis/lib/index.js')
