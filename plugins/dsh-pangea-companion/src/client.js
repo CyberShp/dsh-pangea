@@ -542,8 +542,11 @@ window.__ModuleLoader__.load({
     function runLabel(run) { return text(run?.target, text(run?.run_id, '未命名 Run')) }
     function shortId(value) { return hasText(value) ? value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value : '—' }
     function formatTime(value) {
-      if (!Number.isFinite(value)) return '时间未知'
-      return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+      const date = Number.isFinite(value) || typeof value === 'string' ? new Date(value) : null
+      if (!date || Number.isNaN(date.getTime())) return '时间未知'
+      return date.toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      })
     }
     function formatDate(value) {
       if (value === null || value === undefined || value === '') return '—'
@@ -1264,6 +1267,7 @@ window.__ModuleLoader__.load({
           ownerSessionId: selectedTask.owner_session_id,
           jobId: selectedTask.job_id,
           title: selectedTask.title,
+          processMode: selectedTask.provider ? 'acp' : 'internal',
           phase: selectedCurrent ? (PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
           conversations: selectedTask.conversations ?? [],
@@ -1450,6 +1454,8 @@ window.__ModuleLoader__.load({
           ['消息事件', event?.message_chunks], ['工具事件', event?.tool_calls], ['工具失败事件', event?.tool_failures],
           ['最近工具', event?.last_tool_id], ['工具状态', event?.last_tool_status],
           ['回合耗时(ms)', event?.turn_duration_ms], ['首个事件(ms)', event?.first_event_ms],
+          ['阶段耗时(ms)', event?.duration_ms], ['冻结文件', event?.file_count], ['冻结字节', event?.total_bytes],
+          ['源码复制耗时(ms)', event?.snapshot_duration_ms],
           ['Run 阶段', event?.phase], ['完成步骤', event?.completed], ['状态文件', event?.state_path],
           ['错误码', event?.error_code], ['错误摘要', event?.error_summary], ['stderr 摘要', event?.stderr_summary],
           ['进程已退出', event?.process_exited], ['退出码', event?.exit_code], ['退出信号', event?.exit_signal],
@@ -2283,7 +2289,7 @@ window.__ModuleLoader__.load({
               field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : '等待初始化'),
               field('独立 Judge', judgeStatus),
               field('运行状态', PHASE[current.phase] ?? current.phase),
-              field('源码快照', ['verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已冻结` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'),
+              field('源码快照', ['frozen', 'verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已复制到 Run` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'),
               field('状态快照', stateReadStatus === 'ok' ? (current.state_read?.updated_at ?? formatTime(current.state_read?.mtime_ms)) : ack.label),
               field('结果发布', `${publicationText}${publicationRevision}${publication.step_id ? ` · Step ${publication.step_id}` : ''}`)),
             h('div', { style: styles.chips },

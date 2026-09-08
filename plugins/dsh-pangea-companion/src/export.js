@@ -12,7 +12,7 @@ function testCaseRows(run) {
     ['结果 revision', run?.publication?.revision ?? 0],
     ['发布步骤', run?.publication?.step_id],
     ['复核结论', run?.semantic_review?.verdict ?? '未给出语义结论'],
-    ['源码快照', run?.source_snapshot?.snapshot_digest ?? run?.source_snapshot?.status],
+    ['源码快照', Number.isInteger(run?.source_snapshot?.file_count) ? `${run.source_snapshot.file_count} 个文件，已复制到 Run` : run?.source_snapshot?.status],
     ['目标', run?.target],
     ['流程状态', run?.lifecycle_status],
     ['交付完整性', run?.delivery_integrity?.status ?? 'not_checked'],

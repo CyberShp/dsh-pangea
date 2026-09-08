@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -11,12 +10,6 @@ import { buildTestCaseCsv } from '../src/export.js'
 async function writeJson(filePath, value) {
   await mkdir(path.dirname(filePath), { recursive: true })
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-}
-
-function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
-  return JSON.stringify(value)
 }
 
 test('completed workflow with 26 projected cases and 22 formal details reports exact omissions without inventing content', async () => {
@@ -617,9 +610,8 @@ test('reads snapshot metadata without rehashing every frozen source file', async
   const runId = 'large-source-run'
   const runRoot = path.join(dataRoot, 'runs', runId)
   const metadataRoot = path.join(dataRoot, '.pangea', 'skill-runs', runId)
-  const files = [{ path: 'src/large.c', size: 1024, sha256: 'a'.repeat(64) }]
-  const snapshotDigest = `sha256:${createHash('sha256').update(canonicalJson(files)).digest('hex')}`
-  const sourceSnapshot = { run_id: runId, repo_id: 'repo', files, file_count: 1, snapshot_digest: snapshotDigest }
+  const files = [{ path: 'src/large.c', size: 1024 }]
+  const sourceSnapshot = { schema_version: '2.0', run_id: runId, repo_id: 'repo', files, file_count: 1, total_bytes: 1024 }
   try {
     await writeJson(path.join(metadataRoot, 'metadata.json'), {
       run_id: runId, status: 'active', run_root: runRoot, source_snapshot: sourceSnapshot,
@@ -627,7 +619,7 @@ test('reads snapshot metadata without rehashing every frozen source file', async
     })
     await writeJson(path.join(runRoot, 'inputs', 'source', 'manifest.json'), sourceSnapshot)
     const current = (await companionSnapshot({ dataRoot, runId })).current
-    assert.equal(current.source_snapshot.status, 'manifest_verified')
+    assert.equal(current.source_snapshot.status, 'frozen')
     assert.equal(current.source_snapshot.file_count, 1)
   } finally { await rm(root, { recursive: true, force: true }) }
 })

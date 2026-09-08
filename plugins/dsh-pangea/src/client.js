@@ -688,14 +688,14 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function setAnalysisProcessLayout(scroll, composer, active, sessionMatches = true) {
+    function setAnalysisProcessLayout(scroll, composer, active, sessionMatches = true, readonly = active) {
       if (scroll) {
         if (active) scroll.dataset.pangeaAnalysisProcess = 'true'
         else delete scroll.dataset.pangeaAnalysisProcess
         if (!sessionMatches) scroll.dataset.pangeaSessionMismatch = 'true'
         else delete scroll.dataset.pangeaSessionMismatch
       }
-      setComposerReadonly(composer, active || !sessionMatches)
+      setComposerReadonly(composer, readonly || !sessionMatches)
     }
 
     function AssistantProcess({ context }) {
@@ -727,6 +727,8 @@ window.__ModuleLoader__.load({
       const hostsRef = React.useRef(null)
       const expectedSessionId = assistantSessionId(context)
       const sessionMatches = Boolean(expectedSessionId && expectedSessionId === currentSessionId)
+      const analysisActive = shouldShowAssistantProcess(context)
+      const processActive = analysisActive && context?.processMode === 'acp'
       React.useLayoutEffect(() => {
         let disposed = false
         let observer
@@ -758,7 +760,7 @@ window.__ModuleLoader__.load({
               current.composer = composer
             }
             current.scroll = scroll
-            setAnalysisProcessLayout(scroll, composer, shouldShowAssistantProcess(context), sessionMatches)
+            setAnalysisProcessLayout(scroll, composer, processActive, sessionMatches, analysisActive)
             return
           }
           const headerHost = document.createElement('div')
@@ -767,7 +769,7 @@ window.__ModuleLoader__.load({
           processHost.dataset.pangeaAssistantPortal = 'process'
           pane.insertBefore(headerHost, pane.firstChild)
           scroll.insertBefore(processHost, composer || null)
-          setAnalysisProcessLayout(scroll, composer, shouldShowAssistantProcess(context), sessionMatches)
+          setAnalysisProcessLayout(scroll, composer, processActive, sessionMatches, analysisActive)
           hostsRef.current = { headerHost, processHost, scroll, composer }
           setHosts(hostsRef.current)
         }
@@ -783,11 +785,11 @@ window.__ModuleLoader__.load({
           observer?.disconnect()
           removeHosts()
         }
-      }, [context?.activeConversationKind, context?.activeConversationSessionId, context?.ownerSessionId, context?.taskId, enabled, sessionMatches])
+      }, [analysisActive, context?.activeConversationKind, context?.activeConversationSessionId, context?.ownerSessionId, context?.processMode, context?.taskId, enabled, processActive, sessionMatches])
       if (!hosts || !ReactDOM?.createPortal) return null
       return h(React.Fragment, null,
         ReactDOM.createPortal(h(AssistantHeader, { context }), hosts.headerHost),
-        ReactDOM.createPortal(shouldShowAssistantProcess(context)
+        ReactDOM.createPortal(processActive
           ? h(AssistantProcess, { context })
           : !sessionMatches ? h('p', { role: 'status' }, '正在切换任务会话…') : null, hosts.processHost))
     }

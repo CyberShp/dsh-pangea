@@ -1,5 +1,4 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 const STEP_TITLES = [
@@ -396,15 +395,7 @@ async function readWorkbenchProjection(runDirectory, runId) {
   }
 }
 
-function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
-  }
-  return JSON.stringify(value)
-}
-
-async function verifySourceSnapshot(runDirectory, runId, recordedSnapshot) {
+async function readSourceSnapshotManifest(runDirectory, runId, recordedSnapshot) {
   const manifestPath = path.join(runDirectory, 'inputs', 'source', 'manifest.json')
   if (await pathKind(manifestPath) !== 'file') return { status: 'legacy_unavailable', issues: [] }
   try {
@@ -414,21 +405,15 @@ async function verifySourceSnapshot(runDirectory, runId, recordedSnapshot) {
     const files = manifest.files
     if (!Array.isArray(files) || files.length === 0) issues.push('源码快照清单没有文件')
     if (manifest.file_count !== files?.length) issues.push('源码快照 file_count 与清单不一致')
-    if (typeof manifest.snapshot_digest !== 'string') {
-      issues.push('源码快照缺少 snapshot_digest')
-    } else if (manifest.snapshot_digest !== `sha256:${createHash('sha256').update(canonicalJson(files ?? [])).digest('hex')}`) {
-      issues.push('源码快照清单 digest 不匹配')
-    }
     for (const item of files ?? []) {
-      if (!item?.path || typeof item.sha256 !== 'string') { issues.push('源码快照清单包含非法文件项'); continue }
+      if (!item?.path || !Number.isInteger(item.size) || item.size < 0) { issues.push('源码快照清单包含非法文件项'); continue }
       const relative = path.normalize(item.path)
       if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) issues.push(`源码快照路径越界：${item.path}`)
     }
-    if (recordedSnapshot?.snapshot_digest && recordedSnapshot.snapshot_digest !== manifest.snapshot_digest) issues.push('源码快照清单与 Run 元数据不一致')
     if (Number.isInteger(recordedSnapshot?.file_count) && recordedSnapshot.file_count !== manifest.file_count) issues.push('源码快照文件数与 Run 元数据不一致')
-    return { status: issues.length ? 'corrupt' : 'manifest_verified', issues, manifest }
+    return { status: issues.length ? 'invalid' : 'frozen', issues, manifest }
   } catch (error) {
-    return { status: 'corrupt', issues: [error instanceof Error ? error.message : String(error)] }
+    return { status: 'invalid', issues: [error instanceof Error ? error.message : String(error)] }
   }
 }
 
@@ -547,8 +532,8 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
   const life = lifecycle(metadata, state)
   const projection = await readWorkbenchProjection(runDirectory, runId)
   const liveDraft = await readLiveDocumentDraft(runDirectory, state)
-  const recordedSourceSnapshot = metadata.source_snapshot ?? { status: 'legacy_unavailable', snapshot_digest: null, file_count: null }
-  const sourceSnapshot = { ...recordedSourceSnapshot, ...(await verifySourceSnapshot(runDirectory, runId, recordedSourceSnapshot)) }
+  const recordedSourceSnapshot = metadata.source_snapshot ?? { status: 'legacy_unavailable', file_count: null }
+  const sourceSnapshot = { ...recordedSourceSnapshot, ...(await readSourceSnapshotManifest(runDirectory, runId, recordedSourceSnapshot)) }
   const validation = state?.validation ?? { status: 'not_checked', error_count: 0, errors: [] }
   const performance = state?.performance && typeof state.performance === 'object'
     ? {
@@ -669,12 +654,12 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     },
     data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
     reader_health: {
-      status: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'corrupt'
+      status: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'invalid'
         ? 'ok'
-        : ['pending', 'draft'].includes(publicationState) && sourceSnapshot.status !== 'corrupt' ? 'pending' : 'warning',
-      trusted: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'corrupt',
+        : ['pending', 'draft'].includes(publicationState) && sourceSnapshot.status !== 'invalid' ? 'pending' : 'warning',
+      trusted: projection.status === 'verified' && publicationState !== 'broken' && sourceSnapshot.status !== 'invalid',
       data_source: projection.status === 'verified' ? 'codetalks-workbench-projection' : 'codetalks-markdown',
-      issues: [...projectionIssues, ...(sourceSnapshot.status === 'corrupt' ? ['源码快照完整性校验失败'] : [])],
+      issues: [...projectionIssues, ...(sourceSnapshot.status === 'invalid' ? ['源码清单不可读取'] : [])],
       count_checks: {},
     },
     reader_warnings: projectionIssues,

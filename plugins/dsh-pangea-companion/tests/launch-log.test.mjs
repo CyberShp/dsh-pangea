@@ -38,6 +38,8 @@ test('persists task launch diagnostics independently from the task store', async
     assert.equal(value.events.length, 3)
     assert.equal(value.events[0].stage, 'session_create')
     assert.equal(value.events[0].session_id, 'session-1')
+    assert.match(value.events[0].at, /\+08:00$/)
+    assert.equal(new Date(value.events[0].at).getTime() <= Date.now(), true)
     assert.equal(value.events[1].status, 'error')
     assert.equal(value.events[1].error, 'prompt failed')
     assert.deepEqual(value.events[2], {
@@ -48,6 +50,22 @@ test('persists task launch diagnostics independently from the task store', async
       error_code: 'EINVAL', syscall: 'spawn', cwd: 'C:\\work tree', errno: -4071,
     })
     assert.match(await readFile(file, 'utf8'), /prompt failed/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('keeps launch duration and source copy metrics', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-launch-metrics-'))
+  try {
+    const store = new LaunchLogStore({ root })
+    await store.append('task-metrics', {
+      stage: 'skill_run_create', status: 'ok', duration_ms: 31,
+      file_count: 7, total_bytes: 8192, snapshot_duration_ms: 29,
+    })
+    const event = (await store.read('task-metrics')).events[0]
+    assert.equal(event.duration_ms, 31)
+    assert.equal(event.file_count, 7)
+    assert.equal(event.total_bytes, 8192)
+    assert.equal(event.snapshot_duration_ms, 29)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

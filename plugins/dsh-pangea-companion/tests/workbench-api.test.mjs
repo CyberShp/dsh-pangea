@@ -209,7 +209,10 @@ test('creates a Skill Run before launching its dedicated DSH session', async () 
     const runner = async call => {
       if (call.args[0] === 'system') return capabilities
       assert.deepEqual(call.args.slice(0, 2), ['runs', 'create'])
-      return { run_id: 'skill-run-1', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+      return {
+        run_id: 'skill-run-1', request_path: '/runtime/request.md', run_root: '/runtime/run',
+        source_snapshot: { file_count: 7, total_bytes: 8192, snapshot_duration_ms: 23 },
+      }
     }
     const result = await launchAnalysisSession(api, {
       cwd: root,
@@ -233,6 +236,14 @@ test('creates a Skill Run before launching its dedicated DSH session', async () 
       assert.equal(launchEvents.some(event => event.stage === stage), true, `missing launch stage ${stage}`)
     }
     assert.equal(launchEvents.find(event => event.stage === 'session_create' && event.status === 'ok')?.session_id, 'session-1')
+    const created = launchEvents.find(event => event.stage === 'skill_run_create' && event.status === 'ok')
+    assert.equal(Number.isInteger(created?.duration_ms), true)
+    assert.equal(created?.file_count, 7)
+    assert.equal(created?.total_bytes, 8192)
+    assert.equal(created?.snapshot_duration_ms, 23)
+    for (const stage of ['capabilities_check', 'model_validate', 'skill_run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit']) {
+      assert.equal(Number.isInteger(launchEvents.find(event => event.stage === stage && event.status === 'ok')?.duration_ms), true)
+    }
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

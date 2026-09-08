@@ -342,6 +342,7 @@ test('routes ACP process output to the right assistant panel', async () => {
   assert.match(source, /ReactDOM\.createPortal/)
   assert.doesNotMatch(source, /\[data-pangea-assistant-process\][\s\S]*position: fixed/)
   assert.match(source, /activeConversationKind === 'analysis'/)
+  assert.match(source, /context\?\.processMode === 'acp'/)
   assert.match(source, /data-pangea-assistant-narrow-toggle/)
   assert.match(source, /@media \(max-width: 1179px\)[\s\S]*data-pangea-task-assistant-open/s)
   assert.match(source, /data-pangea-task-assistant\]:not\(\[data-pangea-task-assistant-open\]\)[\s\S]*\[data-pane="conversation"\][\s\S]*display: none !important/s)
@@ -401,6 +402,11 @@ test('reserves the assistant body for analysis output while keeping the composer
   assert.equal('pangeaAnalysisProcess' in scroll.dataset, false)
   assert.equal('pangeaAnalysisReadonly' in composer.dataset, false)
   assert.equal(card.inert, false)
+
+  exported.setAnalysisProcessLayout(scroll, composer, false, true, true)
+  assert.equal('pangeaAnalysisProcess' in scroll.dataset, false)
+  assert.equal(composer.dataset.pangeaAnalysisReadonly, 'true')
+  assert.equal(card.inert, true)
 })
 
 test('uses only the selected conversation and current attempt as the assistant session', async () => {

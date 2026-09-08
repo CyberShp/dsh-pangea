@@ -303,13 +303,14 @@ function launchDetails(value, fallback = {}) {
 }
 
 async function launchStep(onEvent, stage, action, successDetails = () => ({})) {
+  const startedAt = Date.now()
   await emitLaunch(onEvent, { stage, status: 'start' })
   try {
     const value = await action()
-    await emitLaunch(onEvent, { stage, status: 'ok', ...successDetails(value) })
+    await emitLaunch(onEvent, { stage, status: 'ok', duration_ms: Date.now() - startedAt, ...successDetails(value) })
     return value
   } catch (error) {
-    await emitLaunch(onEvent, { stage, status: 'error', error })
+    await emitLaunch(onEvent, { stage, status: 'error', duration_ms: Date.now() - startedAt, error })
     throw error
   }
 }
@@ -554,7 +555,13 @@ export async function launchAnalysisSession(
         const { provider_id: _providerId, ...skillRequest } = request
         return createRun(root, { ...skillRequest, data_root: resolvedDataRoot }, runner)
       })(),
-    value => ({ run_id: value.run_id, request_path: value.request_path }),
+    value => ({
+      run_id: value.run_id,
+      request_path: value.request_path,
+      file_count: value.source_snapshot?.file_count,
+      total_bytes: value.source_snapshot?.total_bytes,
+      snapshot_duration_ms: value.source_snapshot?.snapshot_duration_ms,
+    }),
   )
   await lifecycle.onRunReady?.(run)
   const sessionId = await launchStep(

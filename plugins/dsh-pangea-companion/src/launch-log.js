@@ -36,10 +36,15 @@ function errorMessage(value) {
   return value == null ? null : String(value)
 }
 
+function utc8IsoString(value = Date.now()) {
+  const shifted = new Date(value + 8 * 60 * 60 * 1000)
+  return `${shifted.toISOString().slice(0, -1)}+08:00`
+}
+
 function compactEvent(value = {}) {
   const event = {
     schema_version: 1,
-    at: new Date().toISOString(),
+    at: utc8IsoString(),
     stage: typeof value.stage === 'string' ? value.stage : 'unknown',
     status: ['start', 'ok', 'error', 'info'].includes(value.status) ? value.status : 'info',
   }
@@ -52,7 +57,10 @@ function compactEvent(value = {}) {
   ]) {
     if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = diagnosticText(value[key].trim())
   }
-  for (const key of ['turn', 'completed', 'message_chunks', 'tool_calls', 'tool_failures', 'turn_duration_ms', 'first_event_ms', 'stderr_bytes']) {
+  for (const key of [
+    'turn', 'completed', 'message_chunks', 'tool_calls', 'tool_failures', 'turn_duration_ms',
+    'first_event_ms', 'stderr_bytes', 'duration_ms', 'file_count', 'total_bytes', 'snapshot_duration_ms',
+  ]) {
     if (Number.isInteger(value[key]) && value[key] >= 0) event[key] = value[key]
   }
   for (const key of ['process_exited', 'stderr_truncated', 'output_truncated']) {
