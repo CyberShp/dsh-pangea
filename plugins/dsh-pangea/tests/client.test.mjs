@@ -275,6 +275,31 @@ test('restores the last PANGEA page only for registered Desktop product sessions
   assert.equal(sidebar.activated.length, activationCount)
 })
 
+test('new analysis sessions restore their requested page on the first sidebar snapshot', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'home', title: '工作台', default: true, component: () => null })
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  service.registerProductSession('new-analysis', 'analysis')
+  sidebar.opened.length = 0
+  sidebar.setSession('new-analysis')
+  assert.equal(sidebar.opened.length, 1)
+  assert.equal(sidebar.opened[0].seed.type, 'dsh-pangea:analysis')
+  assert.equal(sidebar.opened[0].scope.sessionId, 'new-analysis')
+})
+
+test('opening a page in another session never activates a tab belonging to the current session', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  sidebar.setState({ splits: { active: 'analysis:old', tabs: [{ id: 'analysis:old', type: 'dsh-pangea:analysis' }] }, bottomSplits: { tabs: [] } })
+  service.openPage({ sessionId: 'new-analysis' }, 'analysis')
+  assert.equal(sidebar.activated.length, 0)
+  assert.equal(sidebar.opened[0].scope.sessionId, 'new-analysis')
+})
+
 test('shares a deduplicated asset selection with the analysis page', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()

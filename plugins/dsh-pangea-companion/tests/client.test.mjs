@@ -46,8 +46,8 @@ test('create form shows and can remove selected assets absent from its repositor
 async function loadClientExports(react = fakeReact(), fetcher = async () => { throw new Error('fetch must not run during registration') }) {
   const source = await readFile(clientPath, 'utf8')
   let exported
-  const sandbox = { URLSearchParams, console, fetch: fetcher, setInterval, clearInterval }
-  sandbox.window = { setInterval, clearInterval, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? react : {}) } } }
+  const sandbox = { URLSearchParams, AbortController, console, fetch: fetcher, setInterval, clearInterval }
+  sandbox.window = { setInterval, clearInterval, setTimeout: (...args) => setTimeout(...args).unref(), clearTimeout, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? react : {}) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   return exported
 }
@@ -946,4 +946,55 @@ test('dense flow reader pages branches, focuses a step and keeps search, destina
   assert.ok(find('架构图类型'))
   find('流程阅读视图').props.onClick()
   assert.equal(rows().length, 3)
+})
+
+test('selected task overview shows loading until its workbench request settles and preserves real errors', async () => {
+  for (const [workbench, pending, failure, loadingExpected] of [[undefined, false, undefined, true], [{ tasks: { items: [] } }, true, undefined, true], [undefined, false, 'fixture backend unavailable', false]]) {
+    const states = { 1: workbench, 3: failure, 5: 'selected-task', 9: pending, 16: { type: 'overview' } }
+    let index = 0
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const nodes = descendants(panel.type(panel.props))
+    assert.equal(nodes.some(node => node.props.role === 'status' && node.children.flat().includes('正在读取分析任务…')), loadingExpected)
+    assert.equal(nodes.some(node => node.type === 'button' && node.children.includes('返回任务列表')), !loadingExpected)
+    if (failure) assert.ok(nodes.some(node => node.props.role === 'alert'))
+  }
+})
+
+test('new analysis binds no Run while preparing and registers the analysis destination before opening its session', { timeout: 2000 }, async () => {
+  const task = { task_id: 'new-task', title: 'New analysis', run_id: null, data_root: '/data', status: 'preparing' }
+  const workbench = { compatibility: { compatible: true }, tasks: { items: [] }, acp_providers: [{ id: 'external', registered: true }] }
+  const states = { 1: workbench, 4: 'previous-run', 16: { type: 'create' }, 33: { repository: 'repo', target: 'synthetic', source_scope_text: 'request.c', asset_ids: [], scenario: 'module-analysis', mode: 'speed', provider_id: 'external', model_route_key: '', agent_model: 'selected' } }
+  let index = 0, releaseStart, enteredStart, refreshed
+  const preparing = new Promise(resolve => { enteredStart = resolve })
+  const started = new Promise(resolve => { releaseStart = resolve })
+  const complete = new Promise(resolve => { refreshed = resolve })
+  const actions = []
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } }, async (_url, options) => {
+    const action = options.body ? JSON.parse(options.body).action : 'get'
+    if (action === 'task-create') return { ok: true, async json() { return { status: 'ok', task } } }
+    if (action === 'task-start') { enteredStart(); await started; return { ok: true, async json() { return { status: 'ok', session_id: 'new-session' } } } }
+    refreshed()
+    return { ok: true, async json() { return { status: 'ok', ...workbench, tasks: { items: [task] } } } }
+  })
+  const pages = [], ctx = { sessions: { open(id) { actions.push(['open', id]) } }, pangea: {
+    registerPage(page) { pages.push(page) }, registerProductSession(id, page) { actions.push(['register', id, page]) }, selectTask() {},
+  }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace', sessionId: 'old-session' }, visible: true })
+  descendants(panel.type(panel.props)).find(node => node.type === 'button' && node.children.includes('创建分析任务')).props.onClick()
+  await preparing
+  const preparingRun = states[4]
+  releaseStart()
+  await complete
+  assert.equal(preparingRun, null)
+  assert.deepEqual(actions.slice(0, 2), [['register', 'new-session', 'analysis'], ['open', 'new-session']])
+  assert.equal(states[5], 'new-task')
+  assert.equal(states[16].type, 'overview')
 })

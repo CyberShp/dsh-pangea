@@ -1458,7 +1458,7 @@ window.__ModuleLoader__.load({
         const activeConversation = task.conversations?.find(item => item.conversation_id === task.active_conversation_id)
           ?? task.conversations?.[0]
         if (activeConversation?.session_id) {
-          ctx?.pangea?.registerProductSession?.(activeConversation.session_id)
+          ctx?.pangea?.registerProductSession?.(activeConversation.session_id, 'analysis')
           ctx?.sessions?.open?.(activeConversation.session_id)
         }
         openProductPage('analysis', '分析任务', activeConversation?.session_id)
@@ -1472,7 +1472,7 @@ window.__ModuleLoader__.load({
         const activeConversation = task.conversations?.find(item => item.conversation_id === task.active_conversation_id)
           ?? task.conversations?.[0]
         if (activeConversation?.session_id) {
-          ctx?.pangea?.registerProductSession?.(activeConversation.session_id)
+          ctx?.pangea?.registerProductSession?.(activeConversation.session_id, 'analysis')
           ctx?.sessions?.open?.(activeConversation.session_id)
         }
         openProductPage('analysis', '分析任务', activeConversation?.session_id)
@@ -1484,7 +1484,7 @@ window.__ModuleLoader__.load({
         try {
           const resume = Boolean(task.run_id)
           const launched = await requestWorkbenchAction({ cwd, action: 'task-start', payload: { task_id: task.task_id, data_root: task.data_root, resume } })
-          ctx?.pangea?.registerProductSession?.(launched.session_id)
+          ctx?.pangea?.registerProductSession?.(launched.session_id, 'analysis')
           showActionNotice(resume ? '分析任务已从检查点继续。' : '分析任务已启动。')
           ctx?.sessions?.open?.(launched.session_id)
           await loadWorkbench()
@@ -1501,7 +1501,7 @@ window.__ModuleLoader__.load({
         setCreatingRun(true)
         try {
           const created = await requestWorkbenchAction({ cwd, action: 'task-conversation-create', payload: { task_id: selectedTask.task_id } })
-          ctx?.pangea?.registerProductSession?.(created.session_id)
+          ctx?.pangea?.registerProductSession?.(created.session_id, 'analysis')
           ctx?.sessions?.open?.(created.session_id)
           await loadWorkbench()
         } catch (reason) {
@@ -1517,7 +1517,7 @@ window.__ModuleLoader__.load({
         if (!conversation) return
         try {
           await requestWorkbenchAction({ cwd, action: 'task-conversation-activate', payload: { task_id: selectedTask.task_id, conversation_id: conversationId } })
-          ctx?.pangea?.registerProductSession?.(conversation.session_id)
+          ctx?.pangea?.registerProductSession?.(conversation.session_id, 'analysis')
           ctx?.sessions?.open?.(conversation.session_id)
           await loadWorkbench()
         } catch (reason) {
@@ -1576,7 +1576,7 @@ window.__ModuleLoader__.load({
           })
           task = activated.task ?? task
         }
-        ctx?.pangea?.registerProductSession?.(conversation.session_id)
+        ctx?.pangea?.registerProductSession?.(conversation.session_id, 'analysis')
         ctx?.sessions?.open?.(conversation.session_id)
         const inserted = appendConversationDraft(ctx, { ...scope, sessionId: conversation.session_id }, draft)
         await loadWorkbench()
@@ -1763,7 +1763,7 @@ window.__ModuleLoader__.load({
           }))
           ctx?.pangea?.selectTask?.(createdTask.task_id)
           setSelectedTaskId(createdTask.task_id)
-          setSelectedRun(undefined)
+          setSelectedRun(createdTask.run_id ?? null)
           setScreen({ type: 'overview' })
           setHistory([])
           showActionNotice(`任务“${createdTask.title}”已创建，正在准备分析。`)
@@ -2455,7 +2455,7 @@ window.__ModuleLoader__.load({
         setDiagramBusy(true)
         try {
           const result = await requestWorkbenchAction({ cwd, action, payload: { task_id: selectedTask.task_id, ...extra } })
-          if (result.session_id) ctx?.pangea?.registerProductSession?.(result.session_id)
+          if (result.session_id) ctx?.pangea?.registerProductSession?.(result.session_id, 'analysis')
           const listed = await requestWorkbenchAction({ cwd, action: 'architecture-list', payload: { task_id: selectedTask.task_id } })
           setDiagramViews(listed.views ?? [])
           if (result.view) setDiagramSelection(result.view.view_id)
@@ -2760,6 +2760,7 @@ window.__ModuleLoader__.load({
 
       function renderOverview() {
         const runItems = workbench?.runs?.items ?? snapshot?.runs ?? []
+        if (!selectedTask && !workbenchError && (!workbench || workbenchLoading)) return h('div', { style: styles.card, role: 'status' }, '正在读取分析任务…')
         if (!selectedTask) return h(React.Fragment, null, renderCompatibility(), h('div', { style: styles.card },
           h('div', { style: styles.empty }, '请先从任务列表选择一个分析任务。'),
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 10 }, onClick: () => jump('tasks') }, '返回任务列表')))

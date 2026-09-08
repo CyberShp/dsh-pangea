@@ -1075,9 +1075,10 @@ window.__ModuleLoader__.load({
         else openPage({ sessionId }, page.id)
       }
 
-      function registerProductSession(sessionId) {
+      function registerProductSession(sessionId, pageId) {
         if (typeof sessionId !== 'string' || sessionId.trim() === '') return false
         productSessions.add(sessionId)
+        if (pages.has(pageId)) lastPageBySession.set(sessionId, pageId)
         ensureProductPage()
         return true
       }
@@ -1201,7 +1202,8 @@ window.__ModuleLoader__.load({
         const page = pages.get(pageId)
         if (!page) return false
         if (scope?.sessionId) lastPageBySession.set(scope.sessionId, page.id)
-        const state = betterSidebar.getSnapshot?.()?.state
+        const current = betterSidebar.getSnapshot?.()
+        const state = !scope?.sessionId || current?.sessionId === scope.sessionId ? current?.state : undefined
         const existing = state ? [...allTabs(state.splits), ...allTabs(state.bottomSplits)].find(item => item.type === page.nativeId) : undefined
         if (existing) betterSidebar.updateTab?.(existing.id, { title: typeof page.title === 'function' ? page.title() : page.title, path: '', meta: { ...(existing.meta && typeof existing.meta === 'object' ? existing.meta : {}), pangeaUtility: null } })
         if (existing) betterSidebar.activateTab?.(existing.id, scope)
