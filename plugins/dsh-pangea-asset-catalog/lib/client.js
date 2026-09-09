@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     ]
       const STATUS = {
       imported: '待规范化', extracting: '提取中', awaiting_review: '待人工审核',
-      available: '可用于分析', no_items: '已分析，无结构化条目', rejected: '已拒绝',
+      available: '可用于分析', no_items: '未提取到可用内容', rejected: '已拒绝',
       failed: '失败', archived: '已归档',
     }
     const STATUS_FILTERS = [
@@ -544,10 +544,10 @@ window.__ModuleLoader__.load({
                   h('span', { style: styles.chip }, TYPES.find(([value]) => value === asset.asset_type)?.[1] ?? asset.asset_type),
                   h('span', { style: styles.chip }, STATUS[asset.status] ?? asset.status),
                   !isExpanded ? h('button', { type: 'button', style: styles.button, onClick: () => { void toggle(asset.asset_id) } }, asset.status === 'awaiting_review' ? '查看并审核' : '查看详情') : null)),
-              h('div', { style: styles.meta }, `修订 ${asset.revision ?? 1} · 结构化条目 ${asset.structured_item_count ?? 0} · 更新于 ${assetTime(asset.updated_at)}（UTC+8）`),
+              h('div', { style: styles.meta }, `修订 ${asset.revision ?? 1} · ${asset.asset_type === 'coverage' ? `覆盖记录 ${asset.structured_item_count ?? 0}` : '文档文本与附件'} · 更新于 ${assetTime(asset.updated_at)}（UTC+8）`),
               isExpanded ? h('div', { style: { ...styles.wrap, marginTop: 8 } },
                 ['imported', 'available', 'no_items', 'rejected', 'failed'].includes(asset.status)
-                  ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('extract', { asset_id: asset.asset_id }) } }, asset.status === 'imported' ? '规范化' : '重新规范化') : null,
+                  ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('extract', { asset_id: asset.asset_id }) } }, asset.status === 'imported' ? '解析原文件' : '重新解析原文件') : null,
                 asset.status === 'awaiting_review' ? h(React.Fragment, null,
                   h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'approve' }) } }, '审核通过'),
                   h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'reject' }) } }, '拒绝')) : null,
@@ -565,12 +565,16 @@ window.__ModuleLoader__.load({
                   h('button', { type: 'button', disabled: busy || !editTitle.trim(), style: { ...styles.button, ...styles.primary }, onClick: () => { void saveEdit(asset.asset_id) } }, '保存'),
                   h('button', { type: 'button', style: styles.button, onClick: () => setEditingAssetId('') }, '取消'))) : null,
               isExpanded ? h('div', { style: { marginTop: 9, borderTop: '1px solid var(--dsw-alias-border-l2, #444)', paddingTop: 9 } },
-                asset.status === 'no_items' ? h('div', { style: styles.meta }, '已完成分析，没有可结构化条目。') : null,
+                h('div', { style: styles.meta }, asset.asset_type === 'coverage' ? '重新解析更新覆盖记录和字段映射；新分析直接使用解析结果。' : '重新解析提取正文、表格和附件；实际理解与引用在分析任务中完成。已有任务继续使用冻结版本。'),
+                asset.status === 'no_items' ? h('div', { style: styles.meta }, '未提取到可用内容，请检查文件正文或解析提示。') : null,
+                asset.last_error ? h('div', { style: styles.error }, `最近解析失败：${asset.last_error}；已有解析结果保留。`) : null,
+                asset.result_stale ? h('div', { style: styles.meta }, '原结构化成果已保留；解析内容发生变化，旧成果不作为新任务输入。') : null,
+                detail?.normalization ? h('details', null, h('summary', null, '解析信息与字段映射'), h('pre', { style: styles.pre }, JSON.stringify(detail.normalization, null, 2))) : null,
                 asset.warnings?.length ? h('div', { style: styles.meta }, `提示：${asset.warnings.join('；')}`) : null,
                 detail?.failure_record ? h('div', { style: { ...styles.error, marginTop: 8 } },
                   h('div', null, detail.failure_record.last_error ?? '资产处理失败'),
                   h('button', { type: 'button', style: { ...styles.button, marginTop: 7 }, onClick: () => downloadFailureRecord(detail) }, '下载失败记录')) : null,
-                detail?.asset?.asset_type === 'historical_defect' && detail?.result?.items?.length ? h('div', { style: { ...styles.card, marginTop: 10, marginBottom: 10 } },
+                detail?.asset?.asset_type === 'historical_defect' && !asset.result_stale && detail?.result?.items?.length ? h('div', { style: { ...styles.card, marginTop: 10, marginBottom: 10 } },
                   h('div', { style: styles.row },
                     h('div', { style: styles.itemTitle }, '逐条审核历史缺陷'),
                     detail.review ? h('span', { style: styles.chip }, `待审核 ${detail.review.counts?.pending ?? 0} · 已接受 ${detail.review.counts?.accepted ?? 0} · 已拒绝 ${detail.review.counts?.rejected ?? 0}`) : null),

@@ -674,7 +674,7 @@ export async function resumeAnalysisRun({ cwd, dataRoot, runId, runner = runPang
 export { dataRootFor }
 
 // Derived sessions have no dependency on the main Run's completion state.
-export async function launchArchitectureSession(api, { cwd, task, prompt, onSession, onJob }, runtime, env = process.env) {
+export async function launchArchitectureSession(api, { cwd, task, prompt, onSession, onJob, onEvent = async () => {} }, runtime, env = process.env) {
   const provider = task.provider
   const model = provider ? null : await requireInternalModel(api, task.model_route)
   const sessionId = await createDshSession(api, workspaceRoot(cwd), `架构视图 · ${task.target}`)
@@ -683,7 +683,8 @@ export async function launchArchitectureSession(api, { cwd, task, prompt, onSess
   await onSession(sessionId)
   if (provider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
-    const jobId = await startAcpJob(runtime, parent, provider, prompt, `架构视图 · ${task.target}`, async () => {}, {
+    const jobId = await startAcpJob(runtime, parent, provider, prompt, `架构视图 · ${task.target}`, onEvent, {
+      onTurnEvent: onEvent,
       onJobCreated: async details => {
         await onJob(details)
         // The view consumes completion. Register before releasing ACP startup so

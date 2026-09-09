@@ -647,7 +647,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { minWidth: 0 } },
             h('span', { 'data-pangea-assistant-name': true, style: { display: 'block' }, title: context?.runId }, context?.title ?? '选择一个 PANGEA Run'),
             h('span', { 'data-pangea-assistant-meta': true, style: { display: 'block' } }, context?.phase ? `阶段：${context.phase}` : '对话将使用当前工作区上下文'),
-            h('span', { 'data-pangea-assistant-progress': true, style: { display: 'block' } }, percent === undefined ? '等待任务上下文' : `进度：${percent}%`)),
+            h('span', { 'data-pangea-assistant-progress': true, style: { display: 'block' } }, context?.activeConversationKind === 'architecture' ? '画图状态与主分析独立' : percent === undefined ? '等待任务上下文' : `进度：${percent}%`)),
           lineIcon([h('path', { key: 'a', d: 'm8 10 4 4 4-4' })], 18, 1.7)),
         h('div', { 'data-pangea-assistant-actions': true },
           h('select', {
@@ -664,6 +664,7 @@ window.__ModuleLoader__.load({
     function shouldShowAssistantProcess(context) {
       return Boolean(context?.taskId) && (!context.activeConversationKind && !context.activeConversationId && !context.activeConversationSessionId
         || context.activeConversationKind === 'analysis'
+        || context.activeConversationKind === 'architecture'
         || (!context.activeConversationKind && context.activeConversationSessionId === context.ownerSessionId))
     }
 
@@ -706,13 +707,14 @@ window.__ModuleLoader__.load({
         : '等待 Agent 产生可显示的过程输出…'
       const status = process.status ?? 'preparing'
       const statusLabel = {
-        starting: '正在启动', queued: '排队中', running: '分析中', stopping: '正在停止',
+        starting: '正在启动', queued: '排队中', running: context.activeConversationKind === 'architecture' ? '生成中' : '分析中', stopping: '正在停止',
         completed: '已完成', failed: '失败', killed: '已停止', stopped: '已停止', interrupted: '已中断',
       }[status] ?? status
       return h('section', { 'data-pangea-assistant-process': true, 'aria-label': '当前 Run 分析过程' },
         h('div', { 'data-pangea-assistant-process-head': true },
-          h('strong', null, '分析过程'), h('span', { 'data-pangea-assistant-process-status': status }, statusLabel)),
-        h('div', { 'data-pangea-assistant-process-mode': true }, '分析过程只读；需要交流时请切换或新建讨论会话。'),
+          h('strong', null, context.activeConversationKind === 'architecture' ? '画图过程' : '分析过程'), h('span', { 'data-pangea-assistant-process-status': status }, statusLabel)),
+        process.last_activity_at ? h('div', null, `最近活动：${process.last_activity_at}`) : null,
+        h('div', { 'data-pangea-assistant-process-mode': true }, context.activeConversationKind === 'architecture' ? '画图过程只读；修改图表请使用“从当前图创建修改会话”。' : '分析过程只读；需要交流时请切换或新建讨论会话。'),
         process.error ? h('div', { 'data-pangea-assistant-process-error': true, role: 'alert' }, process.error) : null,
         h('pre', { 'data-pangea-assistant-process-output': true }, output),
         Array.isArray(process.events) && process.events.length
@@ -760,7 +762,7 @@ window.__ModuleLoader__.load({
               current.composer = composer
             }
             current.scroll = scroll
-            setAnalysisProcessLayout(scroll, composer, processActive, sessionMatches, analysisActive)
+            setAnalysisProcessLayout(scroll, composer, processActive, sessionMatches, analysisActive && (context?.activeConversationKind !== 'architecture' || processActive))
             return
           }
           const headerHost = document.createElement('div')
@@ -769,7 +771,7 @@ window.__ModuleLoader__.load({
           processHost.dataset.pangeaAssistantPortal = 'process'
           pane.insertBefore(headerHost, pane.firstChild)
           scroll.insertBefore(processHost, composer || null)
-          setAnalysisProcessLayout(scroll, composer, processActive, sessionMatches, analysisActive)
+          setAnalysisProcessLayout(scroll, composer, processActive, sessionMatches, analysisActive && (context?.activeConversationKind !== 'architecture' || processActive))
           hostsRef.current = { headerHost, processHost, scroll, composer }
           setHosts(hostsRef.current)
         }

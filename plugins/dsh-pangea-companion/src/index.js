@@ -2,7 +2,8 @@ import { createView, listViews, loadView, updateView, viewArtifact } from './arc
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
 import { buildTestCaseCsv, buildTestCaseXlsx } from './export.js'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { createRuntimeMonitor } from './monitor.js'
 import { createTaskStore } from './task-store.js'
@@ -645,6 +646,18 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
+    if (body.action === 'coverage-refresh') {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (!task.run_id || body.run_id !== task.run_id) throw new Error('覆盖率请求不属于当前任务的 Run')
+      if (['starting', 'running', 'stopping'].includes(task.execution_status)) throw new Error('请先停止当前分析，再修正覆盖率查询，避免输入在分析过程中变化')
+      const folder = await mkdtemp(path.join(os.tmpdir(), 'pangea-coverage-refresh-'))
+      try {
+        const file = path.join(folder, 'query.json')
+        await writeFile(file, JSON.stringify(body.query), 'utf8')
+        const page = await runner({ cwd: task.workspace, args: ['runs', 'coverage-refresh', '--data-root', task.data_root, '--run-id', task.run_id, '--query-file', file] })
+        return json(res, 200, { status: 'ok', run_id: task.run_id, page })
+      } finally { await rm(folder, { recursive: true, force: true }) }
+    }
     if (body.action === 'coverage-page') {
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
       if (!task.run_id || body.run_id !== task.run_id) throw new Error('覆盖率请求不属于当前任务的 Run')
@@ -662,18 +675,34 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       if (!task.run_id) throw new Error('任务尚未关联 Run')
       if (body.action === 'architecture-list') {
         const views = await listViews(task)
-        for (const view of views.filter(v => v.status === 'generating')) {
+        for (const view of views.filter(v => ['generating', 'ready'].includes(v.status))) {
+          if (view.available && !view.job_id) continue
           if (view.job_id) {
             const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)
-            const job = owner ? runtimeService(runtime, 'jobs')?.get?.(view.job_id, owner) : null
+            const jobs = runtimeService(runtime, 'jobs')
+            let job
+            try { job = owner ? jobs?.get?.(view.job_id, owner) : null } catch { job = null }
+            if (job?.startedAt === view.job_started_at) {
+              let output = view.output ?? ''
+              try { output = jobs.read(view.job_id, owner)?.text?.slice(-12000) || output } catch { /* Retain last captured output. */ }
+              const changed = output !== (view.output ?? '')
+              const changes = { execution_status: job.status, output,
+                ...(changed ? { last_activity_at: new Date().toISOString() } : {}) }
+              if (changed || view.execution_status !== job.status) Object.assign(view, await updateView(task, view.view_id, changes), { status: view.status })
+            }
+            if (view.available) continue
             if (!job || job.startedAt !== view.job_started_at || ['failed', 'killed', 'completed'].includes(job.status)) {
-              Object.assign(view, await updateView(task, view.view_id, { status: job?.status === 'killed' ? 'stopped' : 'failed', error: '画图执行已结束或不可确认，尚无验证通过的产物。可打开会话查看原因。' }))
+              Object.assign(view, await updateView(task, view.view_id, { status: !job || job.startedAt !== view.job_started_at ? 'interrupted' : job.status === 'killed' ? 'stopped' : 'failed', execution_status: job?.status ?? 'interrupted', error: !job ? '执行状态不可确认：画图 Job 已不可读取。已保留会话和输出。' : job.detail || '画图执行已结束，尚无验证通过的产物。' }))
             }
           } else if (view.session_id) {
+            try {
             const history = apiValue(await api.sessions.history(rpc({ sessionId: view.session_id, maxMessages: 12 })))
             const failure = sessionFailure(history)
             const lastTurnEvent = [...(history?.events ?? [])].reverse().map(item => item.event ?? item).find(event => ['turn/start', 'turn/end'].includes(event.type ?? event.name))
             if (failure || (lastTurnEvent?.type ?? lastTurnEvent?.name) === 'turn/end') Object.assign(view, await updateView(task, view.view_id, { status: 'failed', error: failure?.message ?? '画图回合已结束，尚无验证通过的产物。可打开会话继续处理。' }))
+            } catch (error) {
+              Object.assign(view, await updateView(task, view.view_id, { status: 'interrupted', error: `画图会话状态不可确认：${error.message}` }))
+            }
           }
         }
         return json(res, 200, { status: 'ok', views })
@@ -682,9 +711,11 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id, branch_ids: body.branch_ids })
         try {
           const launched = await launchArchitectureSession(api, { cwd, task, prompt: prepared.prompt + (body.instruction ? `\n用户修改要求：${body.instruction}` : ''),
+            onEvent: event => updateView(task, prepared.view.view_id, { launch_stage: event.stage, last_activity_at: new Date().toISOString(),
+              ...(event.error ? { error: event.error.message ?? String(event.error) } : {}) }),
             onSession: async sessionId => {
               await updateView(task, prepared.view.view_id, { session_id: sessionId })
-              await tasks.addConversation(task.task_id, { sessionId, title: `架构视图 · ${task.target}`, kind: 'architecture' })
+              await tasks.addConversation(task.task_id, { sessionId, title: `架构视图 · ${task.target}`, kind: 'architecture', activate: false })
             },
             onJob: details => updateView(task, prepared.view.view_id, { job_id: details.jobId, job_started_at: details.jobStartedAt, owner_session_id: details.ownerSessionId }),
           }, runtime)
@@ -711,6 +742,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     }
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)
+      if (body.input?.source_task_id) requireWorkspaceTask(await tasks.get(body.input.source_task_id), cwd, body.input.source_task_id)
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
       if (providerId && !acpProviderOption(providerId)) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
       const selectedModel = providerId ? null : await resolveTaskModel(api, body.input?.model_route)

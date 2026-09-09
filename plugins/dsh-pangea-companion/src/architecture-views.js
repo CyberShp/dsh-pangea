@@ -2,6 +2,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { writeTaskStoreFile } from './task-store.js'
 
 export const DIAGRAM_TYPES = ['architecture', 'workflow', 'sequence', 'dataflow', 'lifecycle']
 const stamp = () => new Date().toISOString()
@@ -31,10 +32,19 @@ export async function loadView(task, viewId) {
   return view
 }
 
+const viewWrites = new Map()
 export async function updateView(task, viewId, changes) {
+  const key = `${task.data_root}/${task.run_id}/${viewId}`
+  const previous = viewWrites.get(key) ?? Promise.resolve()
+  const pending = previous.catch(() => {}).then(() => writeView(task, viewId, changes))
+  viewWrites.set(key, pending)
+  try { return await pending } finally { if (viewWrites.get(key) === pending) viewWrites.delete(key) }
+}
+
+async function writeView(task, viewId, changes) {
   const view = await loadView(task, viewId)
   const updated = { ...view, ...changes, updated_at: stamp() }
-  await writeFile(path.join(await viewRoot(task, viewId), 'manifest.json'), JSON.stringify(updated, null, 2))
+  await writeTaskStoreFile(path.join(await viewRoot(task, viewId), 'manifest.json'), JSON.stringify(updated, null, 2))
   return updated
 }
 

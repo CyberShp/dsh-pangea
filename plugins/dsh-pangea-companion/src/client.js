@@ -759,6 +759,7 @@ window.__ModuleLoader__.load({
     function buildAnalysisRequest(form) {
       return {
         request_version: '2.0',
+        ...(form.source_task_id ? { source_task_id: form.source_task_id } : {}),
         repository: form.repository,
         target: form.target,
         source_scope: String(form.source_scope_text ?? '').split(/[\n,]/).map(value => value.trim()).filter(Boolean),
@@ -766,6 +767,7 @@ window.__ModuleLoader__.load({
         scenario: form.scenario || 'module-analysis',
         ...(form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
           ? { kind: 'file', path: form.coverage_path }
+          : form.coverage_kind === 'asset' ? { kind: 'asset', asset_id: form.coverage_asset_id }
           : { kind: 'query', query: { product: form.coverage_product, c_version: form.coverage_version, b_version: form.coverage_b_version || '', module: form.coverage_module } } } : {}),
         mode: form.mode || 'depth',
         provider_id: form.provider_id || null,
@@ -954,14 +956,27 @@ window.__ModuleLoader__.load({
       return Array.isArray(flow?.mainline_steps) && flow.mainline_steps.length ? '已有步骤' : '流程内容待补齐'
     }
 
-    function CoverageBrowser({ cwd, task, runId, target, revision, acquisition, gaps, flows, filters, onFilter, renderLinks }) {
+    function CoverageBrowser({ cwd, task, runId, target, revision, acquisition, gaps, flows, filters, onFilter, renderLinks, onReload, onNewQuery }) {
       const [scopeStatus, setScopeStatus] = React.useState('')
       const [flowId, setFlowId] = React.useState('')
       const [position, setPosition] = React.useState({ key: '', cursor: 0 })
       const [response, setResponse] = React.useState(null)
+      const [queryDraft, setQueryDraft] = React.useState(acquisition?.query_input ?? task?.coverage_input?.query ?? {})
+      const [refreshing, setQueryBusy] = React.useState(false)
+      const [refreshError, setRefreshError] = React.useState('')
+      const [refreshVersion, setRefreshVersion] = React.useState(0)
+      async function refreshQuery() {
+        setQueryBusy(true); setRefreshError('')
+        try {
+          await requestWorkbenchAction({ cwd, action: 'coverage-refresh', payload: { task_id: task.task_id, run_id: runId, query: queryDraft } })
+          setRefreshVersion(value => value + 1)
+          await onReload?.()
+        } catch (error) { setRefreshError(error.message) }
+        finally { setQueryBusy(false) }
+      }
       const filterKey = JSON.stringify([cwd, task?.task_id, runId, filters, scopeStatus, flowId])
       const cursor = position.key === filterKey ? position.cursor : 0
-      const requestKey = JSON.stringify([filterKey, cursor, revision, acquisition?.status])
+      const requestKey = JSON.stringify([filterKey, cursor, revision, acquisition?.status, refreshVersion])
       React.useEffect(() => {
         if (!task?.task_id || task.run_id !== runId) return undefined
         let active = true
@@ -987,9 +1002,19 @@ window.__ModuleLoader__.load({
         .map(g => g[key]).filter(value => typeof value === 'string' && value))].map(v => [v, v])
       const display = value => value && typeof value === 'object' ? JSON.stringify(value) : value
       return h(React.Fragment, null,
+        task?.coverage_input?.kind === 'query' ? h('details', { style: styles.card }, h('summary', null, '查询对象与重新获取'),
+          [['product', '产品'], ['c_version', 'C 版本'], ['module', '模块'], ['b_version', 'B 版本（可选）']].map(([key, label]) => h('label', { key }, label,
+            h('input', { style: styles.search, value: queryDraft[key] || '', onChange: event => setQueryDraft(value => ({ ...value, [key]: event.target.value })) }))),
+          h('div', { style: styles.itemMeta }, '产品与版本分别传给查询 Skill。修正原任务前请停止分析；已进入下游分析的任务请基于修正输入新建。'),
+          h('button', { type: 'button', style: styles.button, disabled: refreshing, onClick: refreshQuery }, refreshing ? '正在重新获取…' : '修正并重新获取'),
+          h('button', { type: 'button', style: styles.button, disabled: refreshing, onClick: () => onNewQuery?.(queryDraft) }, '基于修正输入新建分析'),
+          refreshError ? h('div', { role: 'alert', style: styles.error }, refreshError) : null) : null,
         h('div', { style: styles.card }, field('本次分析目标', target),
           h('div', { style: styles.itemMeta }, '报告可能覆盖更多模块；范围归属由分析依据说明。关联用例只表示已设计，不表示已执行或覆盖率提升。')),
         acquisition ? h('div', { style: styles.card }, field('输入获取状态', acquisition.status), field('输入说明', acquisition.message),
+          field('实际查询参数', JSON.stringify(acquisition.query_input)), field('平台匹配对象', acquisition.query_resolution ? JSON.stringify(acquisition.query_resolution) : '查询 Skill 未提供'),
+          field('解析记录 / 未知 / 待定位', `${acquisition.record_count ?? '—'} / ${acquisition.unknown_count ?? 0} / ${acquisition.unlocated_count ?? 0}`),
+          acquisition.tables?.length ? h('details', null, h('summary', null, '工作表与字段映射'), h('pre', { style: styles.source }, JSON.stringify(acquisition.tables, null, 2))) : null,
           stringList('缺失来源', acquisition.missing), stringList('输入限制', acquisition.warnings),
           h('table', { style: { width: '100%', textAlign: 'left' } },
             h('thead', null, h('tr', null, ['来源', '指标', '已覆盖 / 总数', '报告覆盖率'].map(label => h('th', { key: label }, label)))),
@@ -1079,6 +1104,21 @@ window.__ModuleLoader__.load({
       const [branchFilter, setBranchFilter] = React.useState('')
       const [diagramType, setDiagramType] = React.useState('workflow')
       const [diagramViews, setDiagramViews] = React.useState([])
+      React.useEffect(() => {
+        if (!visible || !selectedTaskId) return
+        let disposed = false
+        let timer
+        const poll = async () => {
+          try {
+            const result = await requestWorkbenchAction({ cwd, action: 'architecture-list', payload: { task_id: selectedTaskId } })
+            if (!disposed) setDiagramViews(result.views ?? [])
+          } catch { /* Explicit refresh displays errors; a failed poll keeps the last snapshot. */ }
+          if (!disposed) timer = window.setTimeout(poll, 3000)
+        }
+        setDiagramViews([])
+        void poll()
+        return () => { disposed = true; window.clearTimeout(timer) }
+      }, [cwd, selectedTaskId, visible])
       const [diagramSelection, setDiagramSelection] = React.useState('')
       const [diagramBusy, setDiagramBusy] = React.useState(false)
       const [diagramInstruction, setDiagramInstruction] = React.useState('')
@@ -1418,6 +1458,7 @@ window.__ModuleLoader__.load({
         const contextCompleted = selectedCurrent?.analysis?.completed ?? 0
         const assistantVisible = pageMode === 'analysis' && selectedTask && !['tasks', 'create'].includes(screen.type)
         const activeConversation = selectedTask?.conversations?.find(item => item.conversation_id === selectedTask.active_conversation_id)
+        const activeDiagram = activeConversation?.kind === 'architecture' ? diagramViews.find(view => view.session_id === activeConversation.session_id) : null
         const presentation = deriveRunPresentation(selectedTask, selectedCurrent, selectedCurrent?.reader_health)
         const launchEvents = taskLaunchEvents(selectedTask, workbench)
         const outputEvent = [...launchEvents].reverse().find(event => typeof event?.output === 'string' && event.output.trim() !== '')
@@ -1431,9 +1472,9 @@ window.__ModuleLoader__.load({
           attemptId: selectedTask.attempt_id,
           ownerSessionId: selectedTask.owner_session_id,
           jobId: selectedTask.job_id,
-          title: selectedTask.title,
+          title: activeConversation?.kind === 'architecture' ? `架构视图 · ${selectedTask.target}` : selectedTask.title,
           processMode: selectedTask.provider ? 'acp' : 'internal',
-          phase: selectedCurrent ? (selectedCurrent.phase_title ?? PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
+          phase: activeConversation?.kind === 'architecture' ? activeDiagram?.available ? '图表可查看' : activeDiagram?.error ? '需要处理' : '生成图表' : selectedCurrent ? (selectedCurrent.phase_title ?? PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
           conversations: selectedTask.conversations ?? [],
           activeConversationId: selectedTask.active_conversation_id,
@@ -1441,7 +1482,10 @@ window.__ModuleLoader__.load({
           activeConversationKind: activeConversation?.kind ?? null,
           presentation,
           processOutput: selectedTask.last_output || outputEvent?.output || '',
-          process: {
+          process: activeConversation?.kind === 'architecture' ? {
+            status: activeDiagram?.available ? 'completed' : ['failed', 'stopped', 'interrupted'].includes(activeDiagram?.status) ? activeDiagram.status : activeDiagram?.execution_status ?? activeDiagram?.status ?? 'starting',
+            output: activeDiagram?.output ?? '', error: activeDiagram?.error ?? '', last_activity_at: activeDiagram?.last_activity_at,
+          } : {
             status: processStatus,
             output: selectedTask.last_output || outputEvent?.output || '',
             attemptId: selectedTask.attempt_id,
@@ -1454,7 +1498,7 @@ window.__ModuleLoader__.load({
           onSelectConversation: conversationId => { void selectTaskConversation(conversationId) },
           onCreateConversation: () => { void createTaskConversationForCurrent() },
         } : null }))
-      }, [current, error, health?.status, pageMode, screen.type, selectedTask, visible, workbench?.compatibility?.compatible, workbench?.launch_log?.events, workbenchError])
+      }, [current, error, health?.status, pageMode, screen.type, selectedTask, visible, diagramViews, workbench?.compatibility?.compatible, workbench?.launch_log?.events, workbenchError])
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
       const methodologyDetailError = workbench?.run_detail?.run_id === current?.run_id && workbench?.run_detail?.status === 'error'
         ? workbench.run_detail.error : ''
@@ -2320,7 +2364,7 @@ window.__ModuleLoader__.load({
           ? selectedProvider?.registered === true
           : selectedModelOption?.credential_configured === true
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
-        const canSubmit = compatible && createForm.repository && createForm.target.trim() && (sourceScope.length > 0 || createForm.scenario === 'coverage-analysis') && (createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())) && executionReady && !creatingRun
+        const canSubmit = compatible && createForm.repository && createForm.target.trim() && (sourceScope.length > 0 || createForm.scenario === 'coverage-analysis') && (createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())) && executionReady && !creatingRun
         const assetItems = assetCatalog?.assets ?? []
         const selectedAssets = createForm.asset_ids.map(assetId => assetLabels[assetId] ?? assetItems.find(item => item.asset_id === assetId)
           ?? { asset_id: assetId, title: assetId })
@@ -2387,17 +2431,19 @@ window.__ModuleLoader__.load({
               h('option', { value: 'custom' }, '自定义'))),
               createForm.scenario === 'coverage-analysis' ? h('div', { style: { gridColumn: '1 / -1' } },
                 h('select', { 'aria-label': '覆盖率输入方式', style: styles.search, value: createForm.coverage_kind, onChange: event => setCreateForm(value => ({ ...value, coverage_kind: event.target.value })) },
-                  h('option', { value: 'query' }, '按产品 / 版本 / 模块查询'), h('option', { value: 'file' }, '本地覆盖率文件')),
+                  h('option', { value: 'query' }, '按产品 / 版本 / 模块查询'), h('option', { value: 'file' }, '本地覆盖率文件'), h('option', { value: 'asset' }, '已解析的覆盖率资产')),
+                createForm.coverage_kind === 'asset' ? h('select', { 'aria-label': '覆盖率资产', style: styles.search, value: createForm.coverage_asset_id || '', onChange: event => setCreateForm(value => ({ ...value, coverage_asset_id: event.target.value })) },
+                  h('option', { value: '' }, '选择覆盖率资产'), selectedAssets.filter(item => item.asset_type === 'coverage').map(item => h('option', { key: item.asset_id, value: item.asset_id }, item.title))) : null,
                 createForm.coverage_kind === 'file' ? h(React.Fragment, null,
-                  formField('覆盖率文件完整路径', 'coverage_path', 'combined JSON 或契约列 CSV / XLSX'),
+                  formField('覆盖率文件完整路径', 'coverage_path', '函数覆盖率表、契约表或 combined JSON'),
                   window.dshDesktopDirectoryPicker?.pick ? h('button', { type: 'button', style: styles.button, onClick: async () => {
                     try { const selected = await window.dshDesktopDirectoryPicker.pick({ purpose: 'coverage' }); if (selected) setCreateForm(value => ({ ...value, coverage_path: selected })) }
                     catch (error) { showActionNotice(error.message, true) }
                   } }, '选择覆盖率文件') : null,
-                  h('div', { style: styles.itemMeta }, '表格列：source,file_path,kind,count,function,line,block,branch；count 为命中整数或 -。'))
-                : h(React.Fragment, null,
+                  h('div', { style: styles.itemMeta }, '支持中文函数名、代码路径、覆盖次数等表头；直接导入会自动解析，无需先进入资产管理。'))
+                : createForm.coverage_kind === 'query' ? h(React.Fragment, null,
                   h('div', { style: styles.formGrid }, formField('产品', 'coverage_product', '产品名'), formField('C 版本', 'coverage_version', '精确版本，保留空格'), formField('模块', 'coverage_module', '模块名'), formField('B 版本（可选）', 'coverage_b_version', '可不填')),
-                  h('div', { style: styles.itemMeta }, workbench?.capabilities?.coverage_query_skill?.available ? '本地覆盖率查询 Skill 已就绪' : '请放入 <PANGEA 解压目录>/local-skills/coverage-query，然后刷新重新检测。')),
+                  h('div', { style: styles.itemMeta }, workbench?.capabilities?.coverage_query_skill?.available ? '本地覆盖率查询 Skill 已就绪；产品与版本分开传入，平台名称由查询 Skill 匹配。' : '请放入 <PANGEA 解压目录>/local-skills/coverage-query，然后刷新重新检测。')) : null,
                 h('div', { style: styles.itemMeta }, '代码范围可留空，由 Agent 从覆盖输入定位所需源码。')) : null,
               h('label', null, h('div', { style: styles.label }, '分析模式'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.mode,
@@ -2553,14 +2599,23 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !flow, onClick: () => diagramAction('architecture-create', { type: diagramType, flow_id: flow.flow_id, instruction: '先表达主干步骤和回接关系；分支较多时按挂接步骤及类型分组，组上保留分支数量与编号。仅使用已发布关系，不要把所有分支说明塞进一个节点。' }) }, '生成流程总览'),
             h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !current, onClick: () => diagramAction('architecture-create', { type: 'architecture' }) }, '生成模块架构图'),
             h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-list') }, '刷新架构视图')),
-          views.length ? h('select', { 'aria-label': '选择架构视图', style: styles.search, value: selected?.view_id || '', onChange: e => setDiagramSelection(e.target.value) }, views.map(v => h('option', { key: v.view_id, value: v.view_id }, `${businessFlows.find(f => f.flow_id === v.flow_id)?.title || v.flow_id || '模块全景'} · ${{ workflow: '业务流程图', architecture: '模块架构图', sequence: '时序图', lifecycle: '生命周期图', dataflow: '数据流图' }[v.type] || v.type} · ${{ generating: '生成中', ready: '可查看', failed: '失败', stopped: '已停止' }[v.status] || v.status} · ${v.view_id.slice(0, 8)}`))) : h('div', { style: styles.itemMeta }, '选择一个流程按需生成图表。多分支的条件、回接与证据可在“流程阅读”中逐步查看。'),
+          views.length ? h('select', { 'aria-label': '选择架构视图', style: styles.search, value: selected?.view_id || '', onChange: e => setDiagramSelection(e.target.value) }, views.map(v => h('option', { key: v.view_id, value: v.view_id }, `${businessFlows.find(f => f.flow_id === v.flow_id)?.title || v.flow_id || '模块全景'} · ${{ workflow: '业务流程图', architecture: '模块架构图', sequence: '时序图', lifecycle: '生命周期图', dataflow: '数据流图' }[v.type] || v.type} · ${{ generating: '生成中', ready: '可查看', failed: '失败', stopped: '已停止', interrupted: '状态不可确认' }[v.status] || v.status} · ${v.view_id.slice(0, 8)}`))) : h('div', { style: styles.itemMeta }, '选择一个流程按需生成图表。多分支的条件、回接与证据可在“流程阅读”中逐步查看。'),
           selected ? h(React.Fragment, null,
             selected.branch_ids?.length ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `局部分支图 · 仅包含 ${selected.branch_ids.length} 条分支：${selected.branch_ids.join('、')}`) : null,
             selected.source_revision !== current?.publication?.revision ? h('div', { style: styles.itemMeta }, '此图基于其他分析版本，可按需重新生成。') : null,
             selected.error ? h('div', { style: styles.error }, selected.error) : null,
             selected.available ? h('iframe', { title: 'Archify 架构图', src: artifactUrl('html'), sandbox: 'allow-scripts allow-downloads', style: { width: '100%', height: '72vh', minHeight: 480, border: '1px solid #e5e8ec', borderRadius: 8, marginTop: 12 } }) : null,
             h('div', { style: styles.chips },
-              selected.session_id ? h('button', { type: 'button', style: styles.button, onClick: () => ctx?.sessions?.open?.(selected.session_id) }, '打开画图会话') : null,
+              selected.session_id ? h('button', { type: 'button', style: styles.button, onClick: async () => {
+                try {
+                  await requestWorkbenchAction({ cwd, action: 'task-conversation-activate', payload: { task_id: selectedTask.task_id, conversation_id: selected.session_id } })
+                  ctx?.pangea?.registerProductSession?.(selected.session_id, 'analysis')
+                  await loadWorkbench()
+                  ctx?.sessions?.open?.(selected.session_id)
+                } catch (error) { showActionNotice(`无法打开画图会话：${error.message}`, true) }
+              } }, '打开画图会话') : null,
+              selected.output ? h('details', null, h('summary', null, '画图过程输出'), h('pre', { style: styles.source }, selected.output)) : null,
+              selected.last_activity_at ? h('div', { style: styles.itemMeta }, `最近活动：${selected.last_activity_at}`) : null,
               selected.status === 'generating' ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止本次画图') : null,
               selected.available ? ['html', 'svg'].map(format => h('a', { key: format, style: styles.chip, href: artifactUrl(format, true), download: `diagram.${format}` }, `导出 ${format.toUpperCase()}`)) : null),
             h('input', { 'aria-label': '架构图修改要求', style: styles.search, value: diagramInstruction, placeholder: '例如：展开超时分支', onChange: e => setDiagramInstruction(e.target.value) }),
@@ -2597,6 +2652,10 @@ window.__ModuleLoader__.load({
           style: { ...styles.runButton, display: 'flex', justifyContent: 'space-between', gap: 10, width: '100%', marginBottom: 6, ...(reader.step === id ? selectedStyle : {}) },
           onClick: () => updateReader({ step: id, page: 1 }) }, h('span', null, label), h('span', { style: styles.badge }, `${count} 分支`))
         return h(React.Fragment, null,
+          (details.flow_documents ?? []).length ? h('details', { style: styles.card }, h('summary', null, '流程原文与解析状态'),
+            details.flow_documents.map(document => h('div', { key: document.path },
+              chip(document.title, () => openSidebarFile(`${current.artifacts.run_directory}/${document.path}`)),
+              h('span', null, document.status === 'parsed' ? ' · 已读取步骤（活文档草稿）' : ' · 原文已生成，步骤暂未解析')))) : null,
           h('div', { style: { ...styles.card, marginBottom: 12 } },
             h('div', { style: toolbar },
               h('input', { style: { ...styles.search, flex: '1 1 180px', minWidth: 0, width: 'auto', margin: 0 }, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称或入口…', onChange: event => setFlowQuery(event.target.value) }),
@@ -2607,7 +2666,8 @@ window.__ModuleLoader__.load({
             : reader.view === 'diagram' ? renderDiagrams(flow)
               : h(React.Fragment, null,
                 h('div', { style: { marginBottom: 14 } }, h('div', { style: styles.itemTitle }, flow.title || '流程'), h('div', { style: styles.itemMeta }, flow.description || flow.entry), linkedItems(flow)),
-                !steps.length ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, '流程内容待补齐：当前仅有目录或摘要，尚未提供可阅读的主干步骤，不能据此认定路径分析完成。') : null,
+                flow.document_status === 'live_draft' ? h('div', { role: 'status', style: styles.notice }, '当前显示活文档步骤草稿；正式发布状态以阶段投影为准。') : null,
+                !steps.length ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, '尚无可解析的主干步骤。请查看上方流程原文；这不表示流程没有步骤，也不表示分析已完成。') : null,
                 h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'start' } },
                   h('aside', { 'aria-label': '主干步骤', style: { ...styles.card, flex: '1 1 210px', minWidth: 0, maxHeight: '65vh', overflowY: 'auto' } },
                     h('div', { style: { ...styles.itemTitle, marginBottom: 12 } }, '主干步骤'),
@@ -2652,6 +2712,16 @@ window.__ModuleLoader__.load({
           target: current?.target, revision: current?.publication?.revision, acquisition,
           gaps: details.coverage_gaps ?? [], flows: businessFlows,
           filters: { query: gapQuery, kind: gapKind, source: gapSource, analysis_status: gapStatus, disposition: gapDisposition },
+          onReload: loadWorkbench,
+          onNewQuery: query => {
+            setCreateForm(value => ({ ...value, source_task_id: selectedTask.task_id, repository: selectedTask.repository, target: selectedTask.target,
+              source_scope_text: selectedTask.source_scope.join('\n'), asset_ids: selectedTask.asset_ids,
+              scenario: 'coverage-analysis', mode: selectedTask.mode, provider_id: selectedTask.provider || '',
+              agent_model: selectedTask.agent_model || '', model_route_key: selectedTask.model_route ? modelSelectionKey(selectedTask.model_route) : '',
+              coverage_kind: 'query', coverage_product: query.product || '', coverage_version: query.c_version || '',
+              coverage_module: query.module || '', coverage_b_version: query.b_version || '' }))
+            setScreen({ type: 'create' })
+          },
           onFilter: (key, value) => setters[key](value), renderLinks: linkedItems })
       }
 
@@ -2876,6 +2946,16 @@ window.__ModuleLoader__.load({
                 : { label: '查看分析结论', hint: '当前没有生成测试用例。', target: 'risks' }
         return h(React.Fragment, null,
           renderCompatibility(),
+          h('details', { style: styles.card }, h('summary', null, `输入材料 · ${current.input_materials?.length ?? 0} 份`),
+            selectedTask?.source_task_id ? field('修正输入前的任务', selectedTask.source_task_id) : null,
+            (current.input_materials ?? []).map(material => h('div', { key: material.asset_id, style: styles.card },
+              h('div', { style: styles.itemTitle }, material.title), field('消费状态', material.consumption_state),
+              field('资产修订 / 解析版本', `${material.revision} / ${material.parser_version || '旧版'}`),
+              chip('查看冻结文本', () => openSidebarFile(material.frozen_normalized_text_path)),
+              (material.attachments ?? []).map(attachment => chip(attachment.location, () => openSidebarFile(attachment.attachment_path))),
+              field('读取范围', JSON.stringify(material.consumption?.consumed_ranges ?? [])),
+              field('关联分析条目', (material.linked_ids ?? []).join('、')),
+              field('未读取范围 / 限制', JSON.stringify([material.consumption?.unread_ranges, material.consumption?.limitations, material.warnings]))))),
           h('div', { style: styles.decisionHero },
             h('div', { style: styles.eyebrow }, '下一步'),
             h('div', { style: styles.decisionTitle }, nextAction.label),

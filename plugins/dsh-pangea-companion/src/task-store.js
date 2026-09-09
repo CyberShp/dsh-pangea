@@ -164,6 +164,7 @@ function normalizeTask(taskId, value) {
     workspace: text(value?.workspace),
     data_root: text(value?.data_root) || null,
     title: text(value?.title, text(value?.target, taskId)),
+    source_task_id: text(value?.source_task_id) || null,
     repository: text(value?.repository),
     target: text(value?.target),
     scenario: text(value?.scenario, 'module-analysis'),
@@ -305,6 +306,7 @@ export class TaskStore {
       workspace: root,
       data_root: text(dataRoot) || null,
       title: target,
+      source_task_id: input?.source_task_id,
       request_version: '2.0',
       repository,
       target,
@@ -366,7 +368,7 @@ export class TaskStore {
     return matches[0] ? structuredClone(matches[0]) : null
   }
 
-  async addConversation(taskId, { sessionId, title, kind = 'assistant' }) {
+  async addConversation(taskId, { sessionId, title, kind = 'assistant', activate = true }) {
     await this.ready
     const task = this.requireTask(taskId)
     const id = text(sessionId)
@@ -382,11 +384,13 @@ export class TaskStore {
       })
       task.conversations.push(conversation)
     }
-    task.active_conversation_id = conversation.conversation_id
+    if (activate) task.active_conversation_id = conversation.conversation_id
     if (kind === 'analysis') task.status = 'preparing'
     task.updated_at = this.now()
-    task.launch_error = null
-    task.launch_error_code = null
+    if (kind === 'analysis') {
+      task.launch_error = null
+      task.launch_error_code = null
+    }
     await this.persistQueued()
     return structuredClone(task)
   }

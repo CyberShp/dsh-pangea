@@ -1,4 +1,4 @@
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, readFile, stat, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 const STEP_TITLES = [
@@ -265,6 +265,8 @@ async function readLiveDocumentDraft(runDirectory, state, manifest) {
   const details = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
   let stepId = null
   if (['module-five-stage', 'coverage-five-stage'].includes(manifest.workflow_id)) {
+    details.flow_documents = await readFlowDocuments(runDirectory)
+    details.business_flows = details.flow_documents.filter(item => item.flow).map(item => ({ ...item.flow, document_path: item.path, document_status: 'live_draft' }))
     details.risks = parseRisks(await readTextIfFile(path.join(liveRoot, '风险点与SFMEA.md')), new Map(), new Map())
     details.test_cases = parseTestCases(await readTextIfFile(path.join(liveRoot, '黑盒测试用例.md')), new Map())
     // New workflows publish explicitly; Markdown enriches details but never
@@ -300,6 +302,59 @@ async function readLiveDocumentDraft(runDirectory, state, manifest) {
     }
   }
   return { step_id: stepId, details }
+}
+
+export async function readFlowDocuments(runDirectory) {
+  const folder = path.join(runDirectory, '活文档/流程讲解')
+  const documents = []
+  if (await pathKind(folder) !== 'directory') return documents
+  const root = await realpath(folder)
+  const relativeRoot = path.relative(await realpath(runDirectory), root)
+  if (relativeRoot.startsWith('..') || path.isAbsolute(relativeRoot)) return documents
+  for (const entry of await readdir(folder, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue
+    const file = path.join(folder, entry.name)
+    if (path.dirname(await realpath(file)) !== root) continue
+    const text = await readTextIfFile(file)
+    const item = { path: path.relative(runDirectory, file).split(path.sep).join('/'), title: entry.name, status: 'unparsed' }
+    try {
+      const blocks = [...text.matchAll(/^```pangea-flow\s*\n([\s\S]*?)^```\s*$/gm)]
+      if (blocks.length === 1) {
+        const flow = JSON.parse(blocks[0][1])
+        if (typeof flow.flow_id === 'string' && typeof flow.title === 'string' && Array.isArray(flow.mainline_steps) && Array.isArray(flow.branches)
+          && [...flow.mainline_steps, ...flow.branches].every(row => row && typeof row === 'object' && !Array.isArray(row))) Object.assign(item, { flow, status: 'parsed' })
+      }
+    } catch { /* Preserve the readable document while an Agent is still writing. */ }
+    documents.push(item)
+  }
+  const ids = documents.filter(d => d.flow).map(d => d.flow.flow_id)
+  for (const item of documents) if (item.flow && ids.filter(id => id === item.flow.flow_id).length > 1) {
+    delete item.flow
+    item.status = 'ambiguous'
+  }
+  return documents
+}
+
+export async function readInputMaterials(runDirectory) {
+  const read = async file => { try { return await readJson(path.join(runDirectory, file)) } catch { return null } }
+  const manifest = await read('inputs/assets/manifest.json')
+  const consumption = await read('内部索引/输入材料索引.json')
+  const assets = Array.isArray(manifest?.assets) ? manifest.assets : []
+  const items = Array.isArray(consumption?.items) ? consumption.items : []
+  const array = value => Array.isArray(value) ? value : []
+  return assets.filter(asset => asset && typeof asset === 'object').map(asset => {
+    const entries = items.filter(item => item && (item.asset_id === asset.asset_id || item.id === asset.asset_id
+      || (typeof item.verified_path === 'string' && item.verified_path === asset.frozen_normalized_text_path)
+      || (typeof item.raw_path === 'string' && item.raw_path === asset.frozen_source_path))
+    )
+    const item = entries.length === 1 ? entries[0] : null
+    const ranges = array(item?.consumed_ranges)
+    const links = [...array(item?.linked_flow_ids), ...array(item?.linked_risk_ids), ...array(item?.linked_test_case_ids)]
+    const state = !item ? '已冻结，尚无唯一消费记录' : item.status === 'out_of_scope' ? '未采用'
+      : ['blocked', 'unreadable'].includes(item.status) ? '材料读取受阻'
+      : ranges.length && links.length ? '已记录引用，待核对分析证据' : ranges.length ? '已记录读取范围' : '消费记录尚未填写读取范围'
+    return { ...asset, consumption: item, consumption_state: state, linked_ids: links }
+  })
 }
 
 function normalizeProjectionDetails(projection, liveDetails) {
@@ -376,6 +431,11 @@ function normalizeProjectionDetails(projection, liveDetails) {
   })
   return {
     ...projection,
+    flow_documents: liveDetails?.flow_documents ?? [],
+    business_flows: [...(projection.business_flows ?? []).map(flow => {
+      const live = liveDetails?.business_flows?.find(item => item.flow_id === flow.flow_id)
+      return live && !flow.mainline_steps?.length ? { ...flow, ...live } : flow
+    }), ...(liveDetails?.business_flows ?? []).filter(flow => !(projection.business_flows ?? []).some(item => item.flow_id === flow.flow_id))],
     risks,
     test_cases: testCases,
     evidence,
@@ -632,6 +692,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
     phase_title: workflow.steps.find(step => step.step === state?.current_step)?.title ?? null,
     scenario: metadata.request?.scenario ?? 'module-analysis',
     coverage_input: metadata.coverage_input ?? null,
+    input_materials: includeDetails ? await readInputMaterials(runDirectory) : [],
     target: metadata.request?.target ?? runId,
     repository: metadata.request?.repository ?? null,
     verdict: state?.verdict ?? null,
@@ -654,7 +715,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       risks: ['draft', 'final'].includes(publicationState) ? resultDetails.risks.length : null,
       test_cases: ['draft', 'final'].includes(publicationState) ? resultDetails.test_cases.length : null,
       evidence: projection.status === 'verified' ? resultDetails.evidence.length : liveDocuments.length,
-      business_flows: projection.status === 'verified' ? projectionValue.business_flows.length : null,
+      business_flows: resultDetails.business_flows.length,
       review_issues: projection.status === 'verified' ? projectionValue.review_issues.length : null,
     },
     errors: validation.status === 'failed' ? validation.errors : [],
