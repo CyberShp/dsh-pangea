@@ -948,6 +948,80 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', disabled: loading || saving || !snapshot, style: styles.environmentPrimaryButton, onClick: () => { void save() } }, saving ? '保存中…' : '保存配置')))))
     }
 
+    const COVERAGE_SCOPE_LABELS = { in_scope: '范围内', out_of_scope: '范围外', unresolved: '待确认', unclassified: '未判定' }
+    const idList = value => Array.isArray(value) ? value.filter(item => typeof item === 'string') : []
+    function flowContentState(flow) {
+      return Array.isArray(flow?.mainline_steps) && flow.mainline_steps.length ? '已有步骤' : '流程内容待补齐'
+    }
+
+    function CoverageBrowser({ cwd, task, runId, target, revision, acquisition, gaps, flows, filters, onFilter, renderLinks }) {
+      const [scopeStatus, setScopeStatus] = React.useState('')
+      const [flowId, setFlowId] = React.useState('')
+      const [position, setPosition] = React.useState({ key: '', cursor: 0 })
+      const [response, setResponse] = React.useState(null)
+      const filterKey = JSON.stringify([cwd, task?.task_id, runId, filters, scopeStatus, flowId])
+      const cursor = position.key === filterKey ? position.cursor : 0
+      const requestKey = JSON.stringify([filterKey, cursor, revision, acquisition?.status])
+      React.useEffect(() => {
+        if (!task?.task_id || task.run_id !== runId) return undefined
+        let active = true
+        requestWorkbenchAction({ cwd, action: 'coverage-page', payload: { task_id: task.task_id, run_id: runId,
+          cursor, limit: 50, ...filters, scope_status: scopeStatus, flow_id: flowId } })
+          .then(result => {
+            if (active && result.run_id === runId) setResponse({ key: requestKey, page: result.page })
+          }).catch(error => { if (active) setResponse({ key: requestKey, error: error.message }) })
+        return () => { active = false }
+      }, [requestKey])
+      const bound = task?.task_id && task.run_id === runId
+      const result = response?.key === requestKey ? response : null
+      const page = bound ? result?.page : acquisition
+      const summary = page?.scope_summary ?? acquisition?.scope_summary
+      const items = bound ? page?.items ?? [] : gaps.filter(item =>
+        (!scopeStatus || (item.scope_status || 'unclassified') === scopeStatus)
+        && (!flowId || idList(item.linked_flow_ids).includes(flowId))
+        && ['kind', 'source', 'analysis_status', 'disposition'].every(key => !filters[key] || item[key] === filters[key])
+        && (!filters.query || JSON.stringify([item.gap_id, item.file_path, item.raw]).toLowerCase().includes(filters.query.toLowerCase())))
+      const options = (label, value, change, choices) => h('select', { 'aria-label': label, style: styles.search, value,
+        onChange: e => change(e.target.value) }, h('option', { value: '' }, label), choices.map(([id, title]) => h('option', { key: id, value: id }, title)))
+      const observed = key => [...new Set([...gaps, ...(page?.items ?? []), ...(key === 'source' ? acquisition?.sources ?? [] : [])]
+        .map(g => g[key]).filter(value => typeof value === 'string' && value))].map(v => [v, v])
+      const display = value => value && typeof value === 'object' ? JSON.stringify(value) : value
+      return h(React.Fragment, null,
+        h('div', { style: styles.card }, field('本次分析目标', target),
+          h('div', { style: styles.itemMeta }, '报告可能覆盖更多模块；范围归属由分析依据说明。关联用例只表示已设计，不表示已执行或覆盖率提升。')),
+        acquisition ? h('div', { style: styles.card }, field('输入获取状态', acquisition.status), field('输入说明', acquisition.message),
+          stringList('缺失来源', acquisition.missing), stringList('输入限制', acquisition.warnings),
+          h('table', { style: { width: '100%', textAlign: 'left' } },
+            h('thead', null, h('tr', null, ['来源', '指标', '已覆盖 / 总数', '报告覆盖率'].map(label => h('th', { key: label }, label)))),
+            h('tbody', null, (acquisition.sources ?? []).flatMap((source, index) => ['functions', 'lines', 'branches'].filter(kind => source[kind]).map(kind => h('tr', { key: `${index}:${kind}` },
+              h('td', null, source.source), h('td', null, kind), h('td', null, `${source[kind].covered} / ${source[kind].total}`), h('td', null, typeof source[kind].rate === 'number' ? `${(source[kind].rate * 100).toFixed(2)}%` : '未提供'))))))) : null,
+        summary ? h('div', { style: styles.card, 'aria-label': '覆盖缺口范围统计' },
+          field('输入缺口总数', summary.total), h('div', { style: styles.grid }, Object.entries(COVERAGE_SCOPE_LABELS).map(([key, label]) => h('div', { key }, field(label, summary[key])))),
+          field('范围内已关联用例的缺口', summary.designed_in_scope)) : h('div', { style: styles.itemMeta }, '范围处置尚未记录。'),
+        stringList('追溯待核对', page?.traceability_warnings ?? acquisition?.traceability_warnings),
+        h('input', { 'aria-label': '搜索覆盖缺口', style: styles.search, value: filters.query, placeholder: '搜索全部输入的文件、函数或缺口编号', onChange: e => onFilter('query', e.target.value) }),
+        h('div', { style: styles.formGrid },
+          options('全部范围', scopeStatus, setScopeStatus, Object.entries(COVERAGE_SCOPE_LABELS)),
+          options('全部业务流程', flowId, setFlowId, flows.map(f => [f.flow_id, `${f.flow_id} · ${f.title || ''}`])),
+          options('全部类型', filters.kind, value => onFilter('kind', value), ['function', 'line', 'branch'].map(v => [v, v])),
+          options('全部来源', filters.source, value => onFilter('source', value), observed('source')),
+          options('全部分析状态', filters.analysis_status, value => onFilter('analysis_status', value), observed('analysis_status')),
+          options('全部补测处置', filters.disposition, value => onFilter('disposition', value), observed('disposition'))),
+        result?.error ? h('div', { role: 'alert', style: styles.error }, result.error) : bound && !page ? h('div', { style: styles.itemMeta }, '读取当前页覆盖缺口…') : null,
+        h('div', { style: styles.itemMeta }, bound ? `筛选 ${page?.total ?? '—'} 条 · 当前 ${items.length} 条；包含尚未发布分析的原始缺口。` : '当前显示已发布缺口，未记录不表示全部覆盖。'),
+        items.map(item => h('details', { key: item.gap_id, style: styles.card },
+          h('summary', null, `${item.gap_id} · ${COVERAGE_SCOPE_LABELS[item.scope_status] || '未判定'} · ${item.file_path} · ${item.kind}`),
+          field('范围依据', display(item.scope_reason)), stringList('范围证据', item.scope_evidence_ids),
+          field('实测状态', item.coverage_status), field('原始记录', JSON.stringify(item.raw)), field('来源', item.source),
+          field('源码位置', display(item.source_location)), field('分析状态', item.analysis_status), field('补测处置', item.disposition),
+          field('触发路径', display(item.trigger_path)), field('保护条件', display(item.guard_conditions)), field('外部结果', display(item.external_result)),
+          field('未决项', display(item.uncertainties)), renderLinks(item))),
+        bound ? h('div', { style: styles.chips },
+          h('button', { type: 'button', style: styles.button, disabled: cursor === 0, onClick: () => setPosition({ key: filterKey, cursor: Math.max(0, cursor - 50) }) }, '上一页'),
+          h('span', null, `第 ${Math.floor(cursor / 50) + 1} 页`),
+          h('button', { type: 'button', style: styles.button, disabled: !page || page.next_cursor == null, onClick: () => setPosition({ key: filterKey, cursor: page.next_cursor }) }, '下一页')) : null)
+    }
+
     function PangeaPanel({ ctx, scope, visible, initialScreen = 'overview', pageMode = 'analysis' }) {
       const cwd = scope?.cwd
       const [snapshot, setSnapshot] = React.useState(undefined)
@@ -2442,6 +2516,11 @@ window.__ModuleLoader__.load({
 
       function linkedItems(item) {
         return h('div', { style: styles.chips },
+          idList(item.linked_flow_ids).map(id => chip(id, () => { setFlowSelection(id); setFlowReader({ scope: `${current?.run_id}:${id}`, view: 'reader', step: '', query: '', page: 1 }); setBranchFilter(''); navigate({ type: 'flows' }) })),
+          idList(item.linked_branch_ids).map(id => { const owner = businessFlows.find(f => (f.branches ?? []).some(b => b.branch_id === id)); return owner ? chip(id, () => { setFlowSelection(owner.flow_id); setFlowReader({ scope: `${current?.run_id}:${owner.flow_id}`, view: 'reader', step: '', query: id, page: 1 }); setBranchFilter(''); navigate({ type: 'flows' }) }) : h('span', { key: id, style: styles.badge }, `${id} · 路径待核对`) }),
+          idList(item.linked_gap_ids).map(id => current?.scenario === 'coverage-analysis'
+            ? chip(id, () => { setGapQuery(id); setGapKind(''); setGapSource(''); setGapStatus(''); setGapDisposition(''); navigate({ type: 'coverage' }) })
+            : h('span', { key: id, style: styles.badge }, id)),
           (item.linked_risk_ids ?? []).map(id => chip(id, () => navigate({ type: 'risk', id }))),
           (item.linked_test_case_ids ?? []).map(id => chip(id, () => navigate({ type: 'case', id }))),
           (item.evidence_ids ?? []).map(id => {
@@ -2495,7 +2574,7 @@ window.__ModuleLoader__.load({
         const scope = `${current?.run_id}:${flow?.flow_id}`
         const reader = flowReader.scope === scope ? flowReader : { scope, view: 'reader', step: '', query: '', page: 1 }
         const updateReader = changes => { setFlowReader({ ...reader, ...changes }); setBranchSelection('') }
-        const steps = flow?.mainline_steps ?? []
+        const steps = Array.isArray(flow?.mainline_steps) ? flow.mainline_steps : []
         const structured = Array.isArray(flow?.mainline_steps)
         const allBranches = Array.isArray(flow?.branches) ? flow.branches : []
         const unbound = item => !steps.some(step => step.step_id === item.from_step_id)
@@ -2523,11 +2602,12 @@ window.__ModuleLoader__.load({
               h('input', { style: { ...styles.search, flex: '1 1 180px', minWidth: 0, width: 'auto', margin: 0 }, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称或入口…', onChange: event => setFlowQuery(event.target.value) }),
               h('select', { style: { ...styles.search, flex: '2 1 230px', minWidth: 0, maxWidth: '100%', width: 'auto', margin: 0 }, 'aria-label': '选择业务流程', value: flow?.flow_id || '', onChange: event => { setFlowSelection(event.target.value); setBranchSelection('') } }, filtered.map(item => h('option', { key: item.flow_id, value: item.flow_id }, `${item.flow_id} · ${item.title || '未命名流程'}`))),
               h('div', { role: 'group', 'aria-label': '流程展示方式', style: toolbar }, ['reader', 'diagram'].map(view => h('button', { key: view, type: 'button', 'aria-label': view === 'reader' ? '流程阅读视图' : '流程图视图', 'aria-pressed': reader.view === view, style: { ...styles.button, ...(reader.view === view ? selectedStyle : {}) }, onClick: () => { setFlowReader({ ...reader, view }); if (view === 'diagram') void diagramAction('architecture-list') } }, view === 'reader' ? '流程阅读' : '流程图')))),
-            flow ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `${structured ? `${steps.length} 个主干步骤` : '旧版流程'} · ${allBranches.length} 条分支 · ${allBranches.filter(b => b.status === 'unresolved').length} 条待确认 · ${allBranches.filter(b => !b.linked_test_case_ids?.length).length} 条未关联用例`) : null),
+            flow ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `${steps.length ? `${steps.length} 个主干步骤` : flowContentState(flow)} · ${allBranches.length} 条分支 · ${allBranches.filter(b => b.status === 'unresolved').length} 条待确认 · ${allBranches.filter(b => !b.linked_test_case_ids?.length).length} 条未关联用例`) : null),
           !flow ? h('div', { style: styles.empty }, query ? '没有匹配的业务流程，请调整搜索。' : collectionEmpty('business_flows', '当前 Run 没有业务流程。'))
             : reader.view === 'diagram' ? renderDiagrams(flow)
               : h(React.Fragment, null,
-                h('div', { style: { marginBottom: 14 } }, h('div', { style: styles.itemTitle }, flow.title || '流程'), h('div', { style: styles.itemMeta }, flow.description || flow.entry)),
+                h('div', { style: { marginBottom: 14 } }, h('div', { style: styles.itemTitle }, flow.title || '流程'), h('div', { style: styles.itemMeta }, flow.description || flow.entry), linkedItems(flow)),
+                !steps.length ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, '流程内容待补齐：当前仅有目录或摘要，尚未提供可阅读的主干步骤，不能据此认定路径分析完成。') : null,
                 h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'start' } },
                   h('aside', { 'aria-label': '主干步骤', style: { ...styles.card, flex: '1 1 210px', minWidth: 0, maxHeight: '65vh', overflowY: 'auto' } },
                     h('div', { style: { ...styles.itemTitle, marginBottom: 12 } }, '主干步骤'),
@@ -2567,25 +2647,12 @@ window.__ModuleLoader__.load({
 
       function renderCoverage() {
         const acquisition = workbench?.run?.run_id === current?.run_id ? workbench.run.coverage : null
-        const gaps = details.coverage_gaps ?? []
-        const query = gapQuery.trim().toLowerCase()
-        const filtered = gaps.filter(item => (!query || [item.gap_id, item.file_path, JSON.stringify(item.raw)].join(' ').toLowerCase().includes(query)) && (!gapKind || item.kind === gapKind) && (!gapSource || item.source === gapSource) && (!gapStatus || item.analysis_status === gapStatus) && (!gapDisposition || item.disposition === gapDisposition))
-        const select = (label, value, setter, choices) => h('select', { 'aria-label': label, style: styles.search, value, onChange: event => setter(event.target.value) }, h('option', { value: '' }, label), choices.map(v => h('option', { key: v, value: v }, v)))
-        return h(React.Fragment, null,
-          h('div', { style: styles.card }, '覆盖事实来自本次输入；分析完成或已设计补测不会改变实测覆盖状态。'),
-          acquisition ? h('div', { style: styles.card },
-            field('输入获取状态', acquisition.status), field('输入缺口数', acquisition.total), field('输入说明', acquisition.message),
-            stringList('缺失来源', acquisition.missing), stringList('输入限制', acquisition.warnings),
-            h('table', { style: { width: '100%', textAlign: 'left' } },
-              h('thead', null, h('tr', null, ['来源', '指标', '已覆盖 / 总数', '覆盖率'].map(label => h('th', { key: label }, label)))),
-              h('tbody', null, (acquisition.sources ?? []).flatMap((source, index) => ['functions', 'lines', 'branches'].filter(kind => source[kind]).map(kind => h('tr', { key: `${index}:${kind}` },
-                h('td', null, source.source), h('td', null, kind), h('td', null, `${source[kind].covered} / ${source[kind].total}`), h('td', null, typeof source[kind].rate === 'number' ? `${(source[kind].rate * 100).toFixed(2)}%` : '未提供'))))))) : null,
-          h('input', { 'aria-label': '搜索覆盖缺口', style: styles.search, value: gapQuery, placeholder: '搜索文件、函数或缺口编号', onChange: event => setGapQuery(event.target.value) }),
-          h('div', { style: styles.formGrid }, select('全部类型', gapKind, setGapKind, ['function', 'line', 'branch']), select('全部来源', gapSource, setGapSource, [...new Set(gaps.map(g => g.source))]), select('全部分析状态', gapStatus, setGapStatus, [...new Set(gaps.map(g => g.analysis_status).filter(Boolean))]), select('全部补测处置', gapDisposition, setGapDisposition, [...new Set(gaps.map(g => g.disposition).filter(Boolean))])),
-          h('div', { style: styles.itemMeta }, `已发布缺口 ${gaps.length} · 筛选 ${filtered.length}；没有范围统计分母时不计算覆盖百分比。`),
-          !gaps.length ? h('div', { style: styles.empty }, '等待 Agent 发布缺口台账；没有记录不表示全部覆盖。') : filtered.map(item => h('details', { key: item.gap_id, style: styles.card },
-            h('summary', null, `${item.gap_id} · ${item.source} · ${item.file_path} · ${item.kind}`),
-            field('实测状态', item.coverage_status), field('原始记录', JSON.stringify(item.raw)), field('源码位置', item.source_location), field('分析状态', item.analysis_status), field('补测处置', item.disposition), field('触发路径', item.trigger_path), field('保护条件', item.guard_conditions), field('外部结果', item.external_result), field('未决项', Array.isArray(item.uncertainties) ? item.uncertainties.join('；') : item.uncertainties), linkedItems(item))))
+        const setters = { query: setGapQuery, kind: setGapKind, source: setGapSource, analysis_status: setGapStatus, disposition: setGapDisposition }
+        return h(CoverageBrowser, { key: current?.run_id, cwd, task: selectedTask, runId: current?.run_id,
+          target: current?.target, revision: current?.publication?.revision, acquisition,
+          gaps: details.coverage_gaps ?? [], flows: businessFlows,
+          filters: { query: gapQuery, kind: gapKind, source: gapSource, analysis_status: gapStatus, disposition: gapDisposition },
+          onFilter: (key, value) => setters[key](value), renderLinks: linkedItems })
       }
 
       function renderRepositoryImport(firstUse = false) {
@@ -2961,7 +3028,7 @@ window.__ModuleLoader__.load({
 
       function renderCases() {
         const query = caseQuery.trim().toLowerCase()
-        const filtered = testCases.filter(item => !query || [item.test_case_id, item.title, item.case_type, ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
+        const filtered = testCases.filter(item => !query || [item.test_case_id, item.title, item.case_type, item.verification_goal, ...idList(item.linked_flow_ids), ...idList(item.linked_gap_ids), ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
         const selectableFilteredIds = filtered.map(item => item.test_case_id).filter(hasText)
         const groups = new Map()
         const linkedCases = testCases.filter(item => (item.linked_risk_ids?.length ?? 0) > 0).length
@@ -2974,7 +3041,7 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.decisionHero },
             h('div', { style: styles.eyebrow }, '测试用例'),
             h('div', { style: styles.decisionTitle }, `${testCases.length} 条测试用例`),
-            h('div', { style: styles.decisionHint }, '查看用例内容、优先级、关联风险和执行步骤。'),
+            h('div', { style: styles.decisionHint }, '按独立验证目标查看用例、关联路径、覆盖缺口和执行步骤。'),
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '用例总数'), h('div', { style: styles.decisionValue }, testCases.length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已选择'), h('div', { style: styles.decisionValue }, selectedCaseIds.length)),
@@ -2992,7 +3059,7 @@ window.__ModuleLoader__.load({
                 chip('选择当前列表', () => setSelectedCaseIds([...new Set([...selectedCaseIds, ...selectableFilteredIds])])),
                 chip('复制选中用例', () => { void copySelectedCases() }),
                 chip('清空', () => setSelectedCaseIds([]))))),
-          h('input', { style: styles.search, value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例编号、标题、类型、关联风险…', onChange: event => setCaseQuery(event.target.value) }),
+          h('input', { style: styles.search, value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例编号、目标、流程、缺口…', onChange: event => setCaseQuery(event.target.value) }),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${testCases.length} 条`),
           h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
             const unit = unitById.get(unitId)
@@ -3104,9 +3171,11 @@ window.__ModuleLoader__.load({
         const item = caseById.get(screen.id)
         if (!item) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条测试用例，可能是 Run 已刷新或切换。'))
         return h(React.Fragment, null,
+          section('独立验证目标', item.verification_goal || '当前记录未单独声明，请核对用例正文。'),
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '业务路径与覆盖缺口'), linkedItems(item)),
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, text(item.title, '未命名用例')), h('div', { style: styles.chips }, hasText(item.case_type) ? h('span', { style: styles.badge }, item.case_type) : null, hasText(item.priority) ? h('span', { style: styles.badge }, `优先级 ${item.priority}`) : null, hasText(item.status) ? h('span', { style: styles.badge }, item.status) : null)),
           renderDiscussionCard('case', item),
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '该用例用于基础行为验证。')),
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '未关联实现风险；本用例的测试目的以验证目标和路径依据为准。')),
           stringList('前置条件', item.preconditions), stringList('执行步骤', item.steps, true), stringList('预期结果', item.expected_results, true), stringList('观察点', item.observability), stringList('清理动作', item.cleanup))
       }
 
@@ -3264,6 +3333,8 @@ window.__ModuleLoader__.load({
     exports.filterRisks = filterRisks
     exports.analysisBackTarget = analysisBackTarget
     exports.buildAnalysisRequest = buildAnalysisRequest
+    exports.CoverageBrowser = CoverageBrowser
+    exports.flowContentState = flowContentState
     exports.apply = apply
     return module.exports
   },

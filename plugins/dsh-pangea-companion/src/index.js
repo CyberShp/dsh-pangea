@@ -645,6 +645,18 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
+    if (body.action === 'coverage-page') {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (!task.run_id || body.run_id !== task.run_id) throw new Error('覆盖率请求不属于当前任务的 Run')
+      const args = ['runs', 'coverage-page', '--data-root', task.data_root, '--run-id', task.run_id]
+      for (const [key, flag] of Object.entries({ cursor: '--cursor', limit: '--limit', source: '--source',
+        file_path: '--file-path', kind: '--kind', scope_status: '--scope-status', flow_id: '--flow-id', query: '--query',
+        analysis_status: '--analysis-status', disposition: '--disposition' })) {
+        if (body[key] !== undefined && body[key] !== null && body[key] !== '') args.push(flag, String(body[key]))
+      }
+      const page = await runner({ cwd: task.workspace, args })
+      return json(res, 200, { status: 'ok', run_id: task.run_id, page })
+    }
     if (body.action.startsWith('architecture-')) {
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
       if (!task.run_id) throw new Error('任务尚未关联 Run')

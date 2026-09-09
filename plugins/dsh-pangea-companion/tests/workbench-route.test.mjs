@@ -132,3 +132,33 @@ test('task-start route retains the original session creation failure on its prep
     assert.equal(value.launchLocks.size, 0)
   } finally { await value.close() }
 })
+
+test('coverage pages use the stored task Run and root and reject unrelated requests', async () => {
+  const value = await fixture()
+  try {
+    await value.start()
+    const calls = []
+    async function request(payload, cwd = value.root) {
+      const req = Readable.from([Buffer.from(JSON.stringify({ action: 'coverage-page', task_id: value.task.task_id, run_id: 'run-06', ...payload }))])
+      req.method = 'POST'
+      req.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd })}`
+      req.headers = { 'sec-fetch-site': 'same-origin' }
+      const response = {}
+      const res = { writeHead(status) { response.status = status }, end(body) { response.body = JSON.parse(body) } }
+      await workbenchRouteHandler(req, res, value.api, value.tasks, value.launchLocks, value.launchLogs, {}, value.monitor,
+        async options => { calls.push(options); return { total: 1, items: [{ gap_id: 'GAP-000051', scope_status: 'unclassified' }], scope_summary: { total: 70 }, next_cursor: null } })
+      return response
+    }
+    const response = await request({ data_root: '/not-the-task-root', cursor: 50, limit: 50, scope_status: 'unclassified', flow_id: 'F1', query: 'open', kind: 'function' })
+    assert.equal(response.status, 200, JSON.stringify(response.body))
+    assert.equal(response.body.run_id, 'run-06')
+    assert.equal(response.body.page.items[0].gap_id, 'GAP-000051')
+    assert.equal(calls[0].cwd, value.root)
+    const args = calls[0].args
+    assert.deepEqual(args.slice(0, 6), ['runs', 'coverage-page', '--data-root', value.dataRoot, '--run-id', 'run-06'])
+    for (const [flag, expected] of [['--cursor', '50'], ['--scope-status', 'unclassified'], ['--flow-id', 'F1'], ['--query', 'open']]) assert.equal(args[args.indexOf(flag) + 1], expected)
+    assert.notEqual((await request({ run_id: 'other-run' })).status, 200)
+    assert.notEqual((await request({}, `${value.root}-other-workspace`)).status, 200)
+    assert.equal(calls.length, 1)
+  } finally { await value.close() }
+})

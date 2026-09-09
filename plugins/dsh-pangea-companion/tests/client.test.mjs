@@ -697,7 +697,7 @@ test('risk and test case pages use result-focused copy and only show recorded me
   assert.match(source, /查看风险等级、触发条件和关联测试用例/)
   assert.doesNotMatch(source, /严重度来自 SFMEA/)
   assert.match(source, /测试用例/)
-  assert.match(source, /查看用例内容、优先级、关联风险和执行步骤/)
+  assert.match(source, /按独立验证目标查看用例、关联路径、覆盖缺口和执行步骤/)
   assert.doesNotMatch(source, /置信度.*\?\? '—'/)
   assert.doesNotMatch(source, /TRANSLATION\[risk\.translation_status\].*未标注/)
   assert.doesNotMatch(source, /RISK_STATUS\[risk\.status\].*未标注/)
@@ -876,6 +876,8 @@ for (const screenType of ['flows', 'coverage']) {
     client.apply(ctx)
     const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
     const nodes = descendants(panel.type(panel.props))
+    const coverage = nodes.find(node => node.type === client.CoverageBrowser)
+    if (coverage) nodes.push(...descendants(coverage.type({ ...coverage.props, task: null })))
     const nav = nodes.find(node => node.type === 'nav' && node.props['aria-label'] === 'PANGEA 分析页面')
     const active = descendants(nav).find(node => node.props['aria-current'] === 'page')
     assert.equal(active.children[0], screenType === 'flows' ? '业务流程' : '覆盖缺口')
@@ -997,4 +999,59 @@ test('new analysis binds no Run while preparing and registers the analysis desti
   assert.deepEqual(actions.slice(0, 2), [['register', 'new-session', 'analysis'], ['open', 'new-session']])
   assert.equal(states[5], 'new-task')
   assert.equal(states[16].type, 'overview')
+})
+
+test('coverage browser pages raw gaps, resets filters and ignores stale Run responses', async () => {
+  const states = [], effects = [], calls = []
+  let index = 0, effectKey, cleanup
+  const react = { ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!(key in states)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  }, useEffect(fn, deps) {
+    if (deps[0] !== effectKey) { cleanup?.(); effectKey = deps[0]; effects.push(() => { cleanup = fn() }) }
+  } }
+  const client = await loadClientExports(react, (_url, options) => new Promise(resolve => calls.push({ body: JSON.parse(options.body), resolve })))
+  let props = { cwd: '/workspace', task: { task_id: 'task', run_id: 'run' }, runId: 'run', revision: 1,
+    target: 'SecureLink', gaps: [], flows: [{ flow_id: 'F1' }], filters: { query: '' }, onFilter() {}, renderLinks: item => item.gap_id }
+  const render = () => { index = 0; const nodes = descendants(client.CoverageBrowser(props)); while (effects.length) effects.shift()(); return nodes }
+  const reply = async (call, runId, items, total, next_cursor) => {
+    call.resolve({ ok: true, json: async () => ({ status: 'ok', run_id: runId, page: { items, total, next_cursor,
+      scope_summary: { total: 80, in_scope: 1, out_of_scope: 1, unresolved: 0, unclassified: 78, designed_in_scope: 0 } } }) })
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  let nodes = render()
+  assert.equal(calls[0].body.cursor, 0)
+  assert.equal(calls[0].body.task_id, 'task')
+  await reply(calls[0], 'run', [{ gap_id: 'GAP-1', file_path: 'a.c', kind: 'function', raw: 'open', scope_status: 'unclassified' }], 80, 50)
+  nodes = render()
+  assert.ok(nodes.some(n => n.type === 'summary' && n.children[0].includes('GAP-1 · 未判定')))
+  assert.ok(nodes.some(n => n.props['aria-label'] === '覆盖缺口范围统计'))
+  nodes.find(n => n.type === 'button' && n.children[0] === '下一页').props.onClick()
+  nodes = render()
+  assert.equal(calls[1].body.cursor, 50)
+  nodes.find(n => n.props['aria-label'] === '全部范围').props.onChange({ target: { value: 'in_scope' } })
+  render()
+  assert.equal(calls[2].body.cursor, 0)
+  assert.equal(calls[2].body.scope_status, 'in_scope')
+  await reply(calls[1], 'run', [{ gap_id: 'STALE' }], 80, null)
+  nodes = render()
+  assert.ok(!nodes.some(n => n.type === 'summary'))
+  await reply(calls[2], 'run', [{ gap_id: 'GAP-2', file_path: 'a.c', kind: 'function', scope_status: 'in_scope' }], 1, null)
+  nodes = render()
+  assert.ok(nodes.some(n => n.type === 'summary' && n.children[0].includes('GAP-2')))
+  props = { ...props, runId: 'new-run', task: { task_id: 'new-task', run_id: 'new-run' } }
+  nodes = render()
+  assert.equal(calls[3].body.run_id, 'new-run')
+  assert.ok(!nodes.some(n => n.type === 'summary'))
+  await reply(calls[3], 'run', [{ gap_id: 'WRONG-RUN' }], 1, null)
+  assert.ok(!render().some(n => n.type === 'summary'))
+  cleanup?.()
+})
+
+test('flow names remain drafts until steps exist and straight paths need no branches', async () => {
+  const client = await loadClientExports()
+  assert.equal(client.flowContentState({ title: 'title only' }), '流程内容待补齐')
+  assert.equal(client.flowContentState({ mainline_steps: [] }), '流程内容待补齐')
+  assert.equal(client.flowContentState({ mainline_steps: [{ step_id: 'S1' }], branches: [] }), '已有步骤')
 })
