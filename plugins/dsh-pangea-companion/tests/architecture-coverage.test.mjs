@@ -8,7 +8,7 @@ import { normalizeRunInput, launchArchitectureSession } from '../src/workbench-a
 import { createRun } from '../src/pangea-api.js'
 import { TaskStore } from '../src/task-store.js'
 
-const capabilities = { repositories: ['repo'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.0' } }
+const capabilities = { repositories: ['repo'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
 test('coverage request preserves exact query version and optional scope end to end', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'coverage-input-'))
   t.after(() => rm(root, { recursive: true, force: true }))

@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import os from 'node:os'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
-const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.4.0' })
+const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.4.9' })
 const ANALYSIS_SCENARIOS = new Set(['coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
 const ANALYSIS_MODES = new Set(['speed', 'depth'])
 
@@ -31,7 +32,7 @@ export function normalizeSourceScope(values, repository) {
 export function assertCodetalksSkill(capabilities) {
   const skill = capabilities?.analysis_skill
   if (skill?.skill_id !== REQUIRED_ANALYSIS_SKILL.skill_id || skill?.version !== REQUIRED_ANALYSIS_SKILL.version) {
-    throw new Error('PANGEA backend must provide codetalks-skill 1.4.0')
+    throw new Error(`PANGEA backend must provide ${REQUIRED_ANALYSIS_SKILL.skill_id} ${REQUIRED_ANALYSIS_SKILL.version}`)
   }
   return skill
 }
@@ -71,11 +72,16 @@ function parseEnvelope(stdout) {
   throw new Error('PANGEA CLI did not return a JSON envelope')
 }
 
-export function runPangea({ cwd, args }) {
+export function runPangea({ cwd, args, signal }) {
+  if (signal?.aborted) return Promise.reject(new Error('PANGEA CLI 已取消'))
   const root = workspaceRoot(cwd)
   const executable = pythonExecutable(root)
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, ['-m', 'pangea_agent.cli.main', ...args], {
+    const cancelDirectory = signal && args[0] === 'runs' && args[1] === 'verify-cases'
+      ? mkdtempSync(path.join(os.tmpdir(), 'pangea-verification-cancel-')) : null
+    const cancelFile = cancelDirectory ? path.join(cancelDirectory, 'cancel') : null
+    const cleanup = () => { signal?.removeEventListener('abort', abort); if (cancelDirectory) rmSync(cancelDirectory, { recursive: true, force: true }) }
+    const child = spawn(executable, ['-m', 'pangea_agent.cli.main', ...args, ...(cancelFile ? ['--cancel-file', cancelFile] : [])], {
       cwd: root,
       env: {
         ...process.env,
@@ -88,12 +94,24 @@ export function runPangea({ cwd, args }) {
     })
     let stdout = ''
     let stderr = ''
+    const abort = () => {
+      // Let the Python owner terminate its probe Job and release the profile/ACLs.
+      if (cancelFile) { writeFileSync(cancelFile, 'cancelled'); return }
+      if (process.platform === 'win32' && child.pid) {
+        const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        killer.once('error', () => child.kill())
+      } else child.kill()
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
-    child.once('error', reject)
+    child.once('error', error => { cleanup(); reject(error) })
     child.once('close', code => {
+      cleanup()
+      if (signal?.aborted) { reject(new Error('PANGEA CLI 已取消')); return }
       try {
         const envelope = parseEnvelope(stdout)
         if (code !== 0 || envelope.ok !== true) {

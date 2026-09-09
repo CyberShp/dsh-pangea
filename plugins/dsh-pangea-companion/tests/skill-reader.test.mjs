@@ -12,6 +12,27 @@ async function writeJson(filePath, value) {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
 }
 
+test('stage documents keep their full path when live and formal outputs share filenames', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-stage-documents-'))
+  const runId = 'same-name', runRoot = path.join(root, 'runs', runId), skillRoot = path.join(root, 'skill')
+  const names = ['覆盖缺口分析.md', '黑盒测试用例.md']
+  try {
+    await writeJson(path.join(root, '.pangea/skill-runs', runId, 'metadata.json'), { run_id: runId, skill_root: skillRoot })
+    await writeJson(path.join(skillRoot, 'workflow-manifest.json'), { steps: [
+      { id: '03', title: '分析', required: names.map(name => `活文档/${name}`) },
+      { id: '05', title: '交付', required: names.map(name => `正式输出/${name}`) },
+    ] })
+    await writeJson(path.join(runRoot, '内部索引/运行状态.json'), { status: 'complete', completed_steps: ['03', '05'] })
+    for (const directory of ['活文档', '正式输出', '活文档/其他']) {
+      await mkdir(path.join(runRoot, directory), { recursive: true })
+      for (const name of names) await writeFile(path.join(runRoot, directory, name), '# 文档\n')
+    }
+    const current = (await companionSnapshot({ dataRoot: root, runId })).current
+    assert.deepEqual(current.workflow.steps[0].artifacts.sort(), names.map(name => path.join(runRoot, '活文档', name)).sort())
+    assert.deepEqual(current.workflow.steps[1].artifacts.sort(), names.map(name => path.join(runRoot, '正式输出', name)).sort())
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('completed workflow with 26 projected cases and 22 formal details reports exact omissions without inventing content', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codetalks-delivery-'))
   const runId = 'delivery', runRoot = path.join(root, 'runs', runId)

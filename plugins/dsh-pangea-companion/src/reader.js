@@ -35,11 +35,11 @@ async function readTextIfFile(filePath) {
 }
 
 function markdownSection(markdown, title) {
-  const start = markdown.match(new RegExp(`^##\\s+${title}\\s*$`, 'm'))
+  const start = markdown.match(new RegExp(`^(#{1,6})\\s+${title}\\s*$`, 'm'))
   if (!start || start.index === undefined) return ''
   const bodyStart = start.index + start[0].length
   const remaining = markdown.slice(bodyStart)
-  const end = remaining.search(/^##\s+/m)
+  const end = remaining.search(new RegExp(`^#{1,${start[1].length}}\\s+`, 'm'))
   return (end === -1 ? remaining : remaining.slice(0, end)).trim()
 }
 
@@ -156,7 +156,7 @@ function parseRisks(markdown, severityById, riskCases) {
 const CASE_FIELDS = {
   preconditions: ['前置条件', '前置'],
   steps: ['操作步骤', '执行步骤', '步骤', '操作', '输入'],
-  expected_results: ['预期结果和 Oracle', '预期接口结果', '预期结果', '期望结果（Oracle）', '预期结果（Oracle）', '期望结果', '预期'],
+  expected_results: ['预期结果和 Oracle', '预期结果 Oracle', '预期接口结果', '预期结果', '期望结果（Oracle）', '预期结果（Oracle）', '期望结果', '预期'],
   observability: ['观测方式', '观察点', '观测', '观测点'],
   cleanup: ['清理或恢复', '清理/恢复', '清理和复原', '清理步骤', '清理动作', '清理', '恢复'],
 }
@@ -164,13 +164,27 @@ const CASE_FIELDS = {
 function parseTestCase(markdown, linkedRiskIds) {
   const heading = markdown.match(/^#{1,6}\s+([A-Z0-9]+(?:-[A-Z0-9]+)+)(?:[：:]\s*|\s+)(.+)$/mi)
   if (!heading) return null
-  const metadata = markdownSection(markdown, '用例定位')
+  const metadata = markdownSection(markdown, '用例定位').replaceAll('**', '')
   const value = label => metadata.match(new RegExp(`^-\\s+${label}[：:]\\s*(.+)$`, 'm'))?.[1]?.trim() ?? ''
   const aliases = Object.values(CASE_FIELDS).flat()
   const labels = [...aliases, '后续业务验证', '后续', '故障注入', '注入'].sort((a, b) => b.length - a.length).map(label => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
   const fields = new Map()
   let activeLabel = null
+  let sectionLevel = null
   for (const line of markdown.split(/\r?\n/)) {
+    const trimmed = line.replaceAll('**', '').trim()
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/)
+    if (heading && (sectionLevel === null || heading[1].length <= sectionLevel)) {
+      activeLabel = aliases.includes(heading[2]) ? heading[2] : null
+      sectionLevel = activeLabel ? heading[1].length : null
+      continue
+    }
+    // Inside an explicit Markdown field, words such as “前置：” are content.
+    // Only a peer/parent heading closes that field; inline syntax is for compact cases.
+    if (sectionLevel !== null) {
+      if (trimmed && !/^[-*_]{3,}$/.test(trimmed)) fields.set(activeLabel, [...(fields.get(activeLabel) ?? []), trimmed.replace(/^(?:[-*]|\d+[.)、])\s*/, '')])
+      continue
+    }
     const expression = new RegExp(`(?:^|\\s)(?:[-*]\\s+)?(${labels})(（[^）]*）|\\([^)]*\\))?[：:]\\s*(.*?)(?=\\s+(?:${labels})(?:（[^）]*）|\\([^)]*\\))?[：:]|$)`, 'g')
     const matches = [...line.replaceAll('**', '').matchAll(expression)]
     for (const match of matches) {
@@ -187,8 +201,10 @@ function parseTestCase(markdown, linkedRiskIds) {
     }
   }
   const items = (title, aliases, pattern) => {
+    const values = aliases.map(label => fields.get(label) ?? []).find(values => values.length)
+    if (values) return values
     const section = bulletItems(markdownSection(markdown, title), pattern)
-    return section.length ? section : aliases.map(label => fields.get(label) ?? []).find(values => values.length) ?? []
+    return section
   }
   return {
     test_case_id: heading[1],
@@ -547,15 +563,15 @@ async function resolveRunDirectory(dataRoot, runId, metadata) {
   throw new Error(`Codetalks Skill run directory does not exist in data_root: ${runId}`)
 }
 
-function stepRows(state, liveDocuments, formalOutputs, manifest) {
+function stepRows(state, liveDocuments, formalOutputs, manifest, runDirectory) {
   const completed = new Set(state?.completed_steps ?? [])
   const current = state?.current_step ?? null
   let ownership = new Map()
   {
     for (const step of manifest.steps ?? []) {
       for (const artifact of step.required ?? []) {
-        const name = path.basename(artifact)
-        ownership.set(name, String(step.id ?? '').padStart(2, '0'))
+        const file = path.resolve(runDirectory, artifact.replace(/\\/g, '/'))
+        ownership.set(file, String(step.id ?? '').padStart(2, '0'))
       }
     }
   }
@@ -567,7 +583,7 @@ function stepRows(state, liveDocuments, formalOutputs, manifest) {
     const artifacts = step === definitions.at(-1).id
       ? formalOutputs
       : liveDocuments.filter(file => ownership.size > 0
-        ? ownership.get(path.basename(file)) === step || (definition.requires_glob ?? []).some(pattern => pattern === '活文档/流程讲解/流程-*.md' && path.basename(file).startsWith('流程-'))
+        ? ownership.get(path.resolve(file)) === step || (definition.requires_glob ?? []).some(pattern => pattern === '活文档/流程讲解/流程-*.md' && path.basename(file).startsWith('流程-'))
         : path.basename(file).startsWith(step + '-'))
     return { step, title, status, artifacts }
   })
@@ -646,7 +662,7 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
       ? []
       : [...projection.issues, ...publicationIssues]
   const workflow = {
-    steps: stepRows(state, liveDocuments, formalOutputs, manifest),
+    steps: stepRows(state, liveDocuments, formalOutputs, manifest, runDirectory),
     workflow_id: manifest.workflow_id ?? 'legacy-nine-step',
     completed_steps: state?.completed_steps ?? [],
     current_step: state?.current_step ?? null,

@@ -48,7 +48,7 @@ async function fixture() {
     sessions: { async create() { return ok({ sessionId: owner.id }) }, async rename() { return ok({}) } },
   }
   const runner = async ({ args }) => {
-    if (args[0] === 'system') return { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.0' } }
+    if (args[0] === 'system') return { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
     if (args[1] === 'get') return { run_id: 'run-06', lifecycle_status: 'complete', report_available: true }
     assert.deepEqual(args.slice(0, 2), ['runs', 'create'])
     return { run_id: 'run-06', request_path: path.join(dataRoot, 'runs', 'run-06', 'request.md'), run_root: path.join(dataRoot, 'runs', 'run-06') }

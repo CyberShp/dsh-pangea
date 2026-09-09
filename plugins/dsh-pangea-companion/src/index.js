@@ -1,4 +1,5 @@
 import { createView, listViews, loadView, updateView, viewArtifact } from './architecture-views.js'
+import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { readEvidenceSnippet } from './source.js'
 import { buildTestCaseCsv, buildTestCaseXlsx } from './export.js'
@@ -151,7 +152,7 @@ function textResponse(res, status, contentType, body, headers = {}) {
 // of showing a red ACP error next to an apparently active analysis forever.
 export function applyTaskExecutionState(snapshot, task) {
   if (!snapshot?.current || !task) return snapshot
-  const current = snapshot.current
+  let current = snapshot.current
   const sameRun = typeof task.run_id === 'string' && task.run_id === current.run_id
   const sameDataRoot = !task.data_root || !current.data_root
     || path.resolve(task.data_root) === path.resolve(current.data_root)
@@ -159,6 +160,22 @@ export function applyTaskExecutionState(snapshot, task) {
     ? task.attempts.find(attempt => attempt?.attempt_id === task.attempt_id)
     : null
   if (!sameRun || !sameDataRoot || !task.attempt_id || (currentAttempt && currentAttempt.attempt_id !== task.attempt_id)) return snapshot
+  const review = task.host_review
+  if (review?.task_id === task.task_id && review.run_id === task.run_id && review.attempt_id === task.attempt_id) {
+    const verified = review.status === 'complete' && review.reviewer_turn_completed_at
+      && review.producer_session_id && review.reviewer_session_id && review.producer_session_id !== review.reviewer_session_id
+    const waiting = review.status === 'waiting' || task.status === 'needs_attention'
+    current = { ...current,
+      semantic_review: { ...current.semantic_review, method: verified ? 'independent_verified' : 'independent_pending',
+        verdict: verified ? review.verdict : null, summary: review.summary ?? '', evidence_status: 'host_recorded',
+        producer_session_id: review.producer_session_id, reviewer_session_id: review.reviewer_session_id,
+        execution_verification: review.execution_verification ?? null },
+      ...(!verified ? { lifecycle_status: waiting ? 'attention_required' : 'running', terminal: waiting,
+        phase: review.status === 'pending' && current.lifecycle_status !== 'complete' ? current.phase : 'REVIEW',
+        phase_title: review.status === 'pending' && current.lifecycle_status !== 'complete' ? current.phase_title : waiting ? '独立复核需要处理' : review.status === 'verifying' ? '执行校验中' : '独立复核中', attention_required: waiting } : {}),
+    }
+    snapshot = { ...snapshot, current }
+  }
   const executionStatus = task.execution_status
   const failed = task.status === 'failed' || ['failed', 'interrupted'].includes(executionStatus)
   const stopped = task.status === 'stopped' || executionStatus === 'stopped'
@@ -179,6 +196,7 @@ export function applyTaskExecutionState(snapshot, task) {
       ...current,
       lifecycle_status: failed ? 'failed' : 'stopped',
       phase: failed ? 'FAILED' : 'STOPPED',
+      phase_title: failed ? '执行失败' : '已停止',
       terminal: true,
       attention_required: failed,
       errors: error ? [...(current.errors ?? []), error] : current.errors,
@@ -429,6 +447,9 @@ function readJobSnapshot(runtime, task) {
 
 function deriveTaskResumeEligibility(runtime, task) {
   if (!task?.run_id) return { can_resume: false, resume_blocked_reason: '没有可继续的 Run' }
+  if (task.host_review?.reviewer_session_id && task.host_review.status !== 'complete') {
+    return { can_resume: false, resume_blocked_reason: '独立复核尚未结束；需恢复原 Producer/Reviewer 会话，不能创建替代会话' }
+  }
   if (task.execution_status === 'interrupted') return { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' }
   if (['preparing', 'starting', 'running', 'stopping'].includes(task.execution_status)) {
     return { can_resume: false, resume_blocked_reason: task.execution_status === 'stopping' ? '正在等待停止确认' : '当前执行仍在进行' }
@@ -803,9 +824,19 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         }), async event => {
           await launchLogs.append(task.task_id, { ...event, attempt_id: preparedTask.attempt_id })
         }, runtime, process.env, {
+          reviewBinding: { task_id: task.task_id, attempt_id: preparedTask.attempt_id },
+          onReviewState: value => tasks.recordReview(task.task_id, value),
+          onReviewWaiting: async message => {
+            const current = await tasks.get(task.task_id)
+            if (current.host_review) await tasks.recordReview(task.task_id, { ...current.host_review, status: 'waiting', summary: message })
+          },
           onRunReady: async run => {
             launchedRun = run
-            return tasks.bindRun(task.task_id, run.run_id)
+            const bound = await tasks.bindRun(task.task_id, run.run_id)
+            if (!resume && selectedProvider && supportsHostReview(task)) await tasks.recordReview(task.task_id, {
+              task_id: task.task_id, attempt_id: preparedTask.attempt_id, run_id: run.run_id, data_root: bound.data_root, status: 'pending',
+            })
+            return bound
           },
           onOwnerReady: async ({ ownerSessionId }) => {
             const bound = await tasks.bindOwnerSession(task.task_id, {

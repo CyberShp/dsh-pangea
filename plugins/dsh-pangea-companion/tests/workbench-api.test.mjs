@@ -6,7 +6,51 @@ import test from 'node:test'
 
 import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
-const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.0' } }
+const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
+
+test('managed depth job pauses Producer, dispatches Reviewer and reuses both sessions until formal review', async () => {
+  const root = await workspace()
+  try {
+    const runRoot = path.join(root, 'run'), decisionFile = path.join(runRoot, '内部索引', '独立审查状态.json')
+    await mkdir(path.dirname(decisionFile), { recursive: true })
+    let hooks, producerTurns = 0, reviewerTurns = 0, starts = 0, disposed = 0
+    const records = [], owner = { id: 'owner' }
+    const answerReview = async prompt => {
+      if (prompt.includes('本轮先准备执行证据')) return { stopReason: 'completed', output: [] }
+      reviewerTurns++
+      const requestId = /review_request_id: ([\w-]+)/.exec(prompt)[1]
+      await writeFile(decisionFile, JSON.stringify({ run_id: 'run', review_request_id: requestId,
+        review_action: reviewerTurns === 1 ? 'revise' : 'accept', semantic_verdict: 'PASS', summary: 'reviewed' }))
+      return { stopReason: 'completed', output: [] }
+    }
+    const runtime = { agents: { get: () => owner },
+      jobs: { start(spec) { hooks = spec.run(); return 'job' }, get: () => ({ startedAt: 10 }) },
+      subagents: { getProvider: () => ({}), async start(provider, request) {
+        starts++
+        if (starts === 1) {
+          assert.match(request.prompt[0].text, /完成阶段 03 后/)
+          return { id: 'producer', result: Promise.resolve({ stopReason: 'completed' }),
+            async continuePrompt(p) { producerTurns++; assert.match(p[0].text, producerTurns === 1 ? /定向修订/ : /正式交付/); return { stopReason: 'completed' } },
+            async dispose() { disposed++ } }
+        }
+        return { id: 'reviewer', result: answerReview(request.prompt[0].text), continuePrompt: p => answerReview(p[0].text), async dispose() { disposed++; throw new Error('review cleanup failed') } }
+      } },
+    }
+    const api = { workspace: { list: async () => ok({ items: [{ workspaceId: 'w', path: root }] }) }, sessions: { create: async () => ok({ sessionId: 'owner' }), rename: async () => ok({}) } }
+    const runner = async ({ args, signal }) => args[0] === 'system' ? capabilities : args[1] === 'verify-cases'
+      ? (assert.ok(signal), { status: 'recorded', receipt_path: 'receipt.json', cases: [{ case_id: 'TC-1', status: 'executed', exit_code: 1 }] }) : args[1] === 'get'
+      ? { run_id: 'run', completed_steps: producerTurns >= 2 ? ['01','02','03','04','05'] : ['01','02','03'], lifecycle_status: producerTurns >= 2 ? 'complete' : 'running', report_available: producerTurns >= 2 }
+      : { run_id: 'run', run_root: runRoot, request_path: path.join(root, 'request.md') }
+    await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo-one', target: 'depth', mode: 'depth', provider_id: 'pangea-opencode' } }, runner,
+      async () => {}, async () => {}, runtime, process.env, { reviewBinding: { task_id: 'task', attempt_id: 'attempt' }, onReviewState: async value => records.push(value) })
+    assert.equal((await hooks.done).status, 'completed')
+    assert.equal(starts, 2)
+    assert.equal(producerTurns, 2)
+    assert.equal(reviewerTurns, 3)
+    assert.equal(disposed, 2)
+    assert.equal(records.at(-1).status, 'complete')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 const acpRuntimeConfig = {
   version: 1,
   providers: {
@@ -130,7 +174,7 @@ test('normalizes Run input and rejects legacy fields and unregistered repositori
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], test_case_examples: ['TC-1'] }, capabilities), /不支持字段.*test_case_examples/)
   assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'], mode: 'preview' }, capabilities), /分析模式/)
   assert.throws(() => normalizeRunInput({ repository: 'other', target: 'x', source_scope: ['x.c'] }, capabilities), /not registered/)
-  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.4\.0/)
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.4\.9/)
 })
 
 test('returns paginated Run metadata and reports incompatible backends explicitly', async () => {

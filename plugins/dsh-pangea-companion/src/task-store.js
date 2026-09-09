@@ -198,6 +198,7 @@ function normalizeTask(taskId, value) {
     launch_attempts: Number.isInteger(value?.launch_attempts) && value.launch_attempts >= 0 ? value.launch_attempts : 0,
     conversations,
     attempts,
+    host_review: value?.host_review && typeof value.host_review === 'object' ? structuredClone(value.host_review) : null,
     active_conversation_id: text(value?.active_conversation_id) || conversations[0]?.conversation_id || null,
     created_at: Number.isFinite(value?.created_at) ? value.created_at : null,
     updated_at: Number.isFinite(value?.updated_at) ? value.updated_at : null,
@@ -543,6 +544,20 @@ export class TaskStore {
     return structuredClone(task)
   }
 
+  async recordReview(taskId, value) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    if (value.task_id !== task.task_id || value.run_id !== task.run_id || value.attempt_id !== task.attempt_id
+      || !value.data_root || !task.data_root || path.resolve(value.data_root) !== path.resolve(task.data_root)
+      || (value.producer_session_id && value.producer_session_id !== task.agent_session_id)) {
+      throw new Error('宿主复核与当前任务/Run/Producer 绑定不成立')
+    }
+    task.host_review = { ...structuredClone(value), job_id: task.job_id, owner_session_id: task.owner_session_id }
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
   async recordJobActivity(jobId, output, options = {}) {
     await this.ready
     const ref = normalizeJobRef(jobId, options)
@@ -740,6 +755,7 @@ export class TaskStore {
       if (root && (!task.data_root || path.resolve(task.data_root) !== path.resolve(root))) continue
       const run = task.run_id ? byId.get(task.run_id) : undefined
       if (!run) continue
+      if (task.host_review && task.host_review.status !== 'complete') continue
       if (task.provider && ['starting', 'running', 'stopping'].includes(task.execution_status)) continue
       // A terminal ACP/stop observation is stronger than a stale Run
       // snapshot. The Runtime may publish its own terminal state slightly

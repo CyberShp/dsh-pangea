@@ -53,6 +53,7 @@ function compactEvent(value = {}) {
     'reasoning_effort', 'requested_model', 'error_code', 'exit_status', 'detail', 'output', 'configured_command',
     'resolved_command', 'launcher_kind', 'launcher_command', 'cwd', 'launch_stage', 'syscall',
     'remote_session_id', 'stop_reason', 'protocol_stop_reason', 'phase', 'error_summary', 'stderr_summary',
+    'review_status', 'review_request_id', 'producer_session_id', 'reviewer_session_id', 'semantic_verdict',
     'state_path', 'agent_version', 'last_tool_id', 'last_tool_status', 'exit_signal',
   ]) {
     if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = diagnosticText(value[key].trim())

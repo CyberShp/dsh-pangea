@@ -94,7 +94,12 @@ test('mixed five-stage and historical nine-stage Runs use their own manifests wi
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('current bundled analysis Skill can start a new Run', () => {
+  assert.equal(assertCodetalksSkill({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }).version, '1.4.9')
+})
+
 test('new launches require the five-stage-capable backend; historical reading is separate', () => {
-  assert.throws(() => assertCodetalksSkill({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }), /1.4.0/)
-  assert.equal(assertCodetalksSkill({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.0' } }).version, '1.4.0')
+  assert.throws(() => assertCodetalksSkill({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }), /1.4.9/)
+  assert.throws(() => assertCodetalksSkill({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.0' } }), /1.4.9/)
+  assert.equal(assertCodetalksSkill({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }).version, '1.4.9')
 })

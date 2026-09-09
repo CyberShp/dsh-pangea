@@ -6,6 +6,22 @@ import test from 'node:test'
 
 import { LaunchLogStore } from '../src/launch-log.js'
 
+test('retains host reviewer binding and routing history without model prompts', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-review-log-'))
+  try {
+    const store = new LaunchLogStore({ root })
+    await store.append('task', { stage: 'reviewer_state', status: 'ok', review_status: 'revising',
+      review_request_id: 'request', producer_session_id: 'producer', reviewer_session_id: 'reviewer', semantic_verdict: 'UNRESOLVED', prompt: 'private input' })
+    const event = (await store.read('task')).events[0]
+    assert.equal(event.review_status, 'revising')
+    assert.equal(event.review_request_id, 'request')
+    assert.equal(event.producer_session_id, 'producer')
+    assert.equal(event.reviewer_session_id, 'reviewer')
+    assert.equal(event.semantic_verdict, 'UNRESOLVED')
+    assert.equal(event.prompt, undefined)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('reads a bounded tail of large logs and skips partial records', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-log-tail-'))
   try {

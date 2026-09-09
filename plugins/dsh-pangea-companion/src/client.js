@@ -91,7 +91,7 @@ window.__ModuleLoader__.load({
       return {
         workflow: current?.lifecycle_status === 'complete' ? '流程完成' : '流程未完成',
         delivery: ({ complete: '交付完整', incomplete: '交付不完整', unavailable: '交付不可读取' })[delivery?.status] ?? '交付尚未检查',
-        review: ({ independent_declared: '独立审查（Agent 声明，宿主未核验）', self_review: '自审', unavailable: '审查记录不可读取' })[review?.method] ?? '审查方式未记录',
+        review: ({ independent_verified: '独立审查（宿主已核验执行）', independent_pending: '独立审查待完成', independent_declared: '独立审查（Agent 声明，宿主未核验）', self_review: '自审', unavailable: '审查记录不可读取' })[review?.method] ?? '审查方式未记录',
         semantic: review?.verdict === 'PASS' ? 'PASS（审查者结论）' : review?.verdict === 'UNRESOLVED' ? 'UNRESOLVED（审查者结论）' : '未给出语义结论',
       }
     }
@@ -2509,14 +2509,15 @@ window.__ModuleLoader__.load({
         const stateReadStatus = error ? 'stale' : current.state_read?.status ?? 'unavailable'
         const ack = workflowAckPresentation(workflow, stateReadStatus)
         const publicationRevision = Number.isInteger(publication.revision) && publication.revision > 0 ? ` · revision ${publication.revision}` : ''
-        const judgeStatus = workflow.judge?.status ?? 'pending'
         return h(React.Fragment, null,
           h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Codetalks Skill 完整流程'), h('span', { style: styles.badge }, `${workflow.completed_steps?.length ?? 0} / ${workflow.steps?.length ?? 0}`)),
             h('div', { style: styles.grid },
               field('核心规则 ACK', ack.label),
-              field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : '等待初始化'),
-              field('独立 Judge', judgeStatus),
+              field('当前步骤', workflow.current_step ? `Step ${workflow.current_step}` : current.terminal ? '已结束' : current.phase === 'REVIEW' ? '独立复核' : '等待下一阶段'),
+              field('审查方式', outcomePresentation(current).review),
+              field('交付完整性', outcomePresentation(current).delivery),
+              field('语义复核结论', outcomePresentation(current).semantic),
               field('运行状态', current.phase_title ?? PHASE[current.phase] ?? current.phase),
               field('源码快照', ['frozen', 'verified', 'manifest_verified'].includes(current.source_snapshot?.status) ? `${current.source_snapshot.file_count ?? 0} 个文件，已复制到 Run` : current.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'),
               field('状态快照', stateReadStatus === 'ok' ? (current.state_read?.updated_at ?? formatTime(current.state_read?.mtime_ms)) : ack.label),

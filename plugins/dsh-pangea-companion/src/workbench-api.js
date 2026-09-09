@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { attentionRequiredOutcome } from './acp-outcome.js'
+import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
 
 import { assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 
@@ -398,8 +399,18 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
         completed: state?.completed_steps?.length,
         state_path: state?.run_root ? path.join(state.run_root, '内部索引', '运行状态.json') : undefined,
       })
-      if (state?.lifecycle_status === 'complete' && state?.report_available === true) return { status: 'completed', output }
       if (signal.aborted || wasCancelled()) return { status: 'killed' }
+      let reviewTurn
+      if (lifecycle.review) {
+        try { reviewTurn = await lifecycle.review.afterProducerTurn(run, state, signal) }
+        catch (error) {
+          if (signal.aborted || wasCancelled()) return { status: 'killed' }
+          await lifecycle.onReviewWaiting?.(error.message)
+          return { ...attentionRequiredOutcome(error.message), output }
+        }
+        if (signal.aborted || wasCancelled()) return { status: 'killed' }
+        if (reviewTurn?.complete) return { status: 'completed', output }
+      } else if (state?.lifecycle_status === 'complete' && state?.report_available === true) return { status: 'completed', output }
       if (typeof run.continuePrompt !== 'function') {
         return {
           ...attentionRequiredOutcome(`ACP 本轮已结束，但当前 Run 尚未完成（${state?.phase ?? state?.lifecycle_status ?? 'unknown'}）`),
@@ -417,16 +428,19 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
       }
       turn += 1
       await lifecycle.onTurnEvent?.({ turn, stage: 'acp_turn_continued', phase: state?.phase, completed: state?.completed_steps?.length })
-      result = await run.continuePrompt([{ type: 'text', text: continuationPrompt(state) }])
+      result = await run.continuePrompt([{ type: 'text', text: reviewTurn?.prompt ?? continuationPrompt(state) }])
     }
   } catch (error) {
     return wasCancelled()
       ? { status: 'killed' }
       : { status: 'failed', detail: error instanceof Error ? error.message : String(error) }
   } finally {
+    const cleanup = await Promise.allSettled([
+      Promise.resolve().then(() => lifecycle.review?.dispose?.()),
+      Promise.resolve().then(() => run?.dispose?.()),
+    ])
     try {
-      await run?.dispose?.()
-      if (run) await lifecycle.onTurnEvent?.({ stage: 'acp_process_cleanup', status: 'info', ...acpRunDiagnostics(run) })
+      if (run) await lifecycle.onTurnEvent?.({ stage: 'acp_process_cleanup', status: cleanup.some(item => item.status === 'rejected') ? 'error' : 'info', ...acpRunDiagnostics(run) })
     } catch { /* job settlement retains the failure */ }
   }
 }
@@ -496,7 +510,7 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
         },
         abort: reason => controller.abort(reason),
         done: settleAcpRun(observed, controller.signal, () => cancelled, lifecycle),
-        readOutput: () => typeof activeRun?.readOutput === 'function' ? activeRun.readOutput() : '',
+        readOutput: () => [typeof activeRun?.readOutput === 'function' ? activeRun.readOutput() : '', lifecycle.review?.readOutput?.()].filter(Boolean).join('\n\n[独立 Reviewer]\n'),
       }
       return hooks
     },
@@ -592,6 +606,7 @@ export async function launchAnalysisSession(
     run,
   }), () => ({ session_id: sessionId }))
   await lifecycle.onOwnerReady?.({ ownerSessionId: sessionId })
+  const managedReview = Boolean(selectedProvider && supportsHostReview(request) && lifecycle.reviewBinding && !requestedResumeRunId)
   const prompt = [
     requestedResumeRunId
       ? `继续已有的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，从最近检查点恢复执行，不要创建第二个 Run。`
@@ -605,6 +620,7 @@ export async function launchAnalysisSession(
     requestedResumeRunId ? '这是一次续跑：先读取内部索引/运行状态.json，调用 run_guard.py init --resume 保留已完成步骤，再从当前步骤继续。' : null,
     '旧 PANGEA Graph、Planning、Worker action、Review、Closure、Reporting、bind、validate 和 settle 均不存在。',
     '生命周期只以运行根目录中的 `内部索引/运行状态.json` 为准。',
+    managedReview ? '本任务由宿主派发独立 Reviewer。完成阶段 03 后保存并发布分析与用例，结束本轮回复等待宿主；不要执行阶段 04/05，不自行派发或编写独立审查结论。收到宿主复核或修订消息后，只按该消息继续当前 Run。' : null,
     '',
     '现在读取运行请求并执行。',
   ].filter(Boolean).join('\n')
@@ -629,6 +645,30 @@ export async function launchAnalysisSession(
         args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', run.run_id],
       }),
       onTurnEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
+    }
+    if (managedReview) {
+      acpLifecycle.review = createAnalysisReview({
+        binding: { ...lifecycle.reviewBinding, run_id: run.run_id, run_root: run.run_root, request_path: run.request_path, data_root: resolvedDataRoot },
+        verifyCases: ({ reviewRequestId, formal, signal }) => runner({
+          cwd: root, signal,
+          args: ['runs', 'verify-cases', '--data-root', resolvedDataRoot, '--run-id', run.run_id,
+            '--review-request-id', reviewRequestId, ...(formal ? ['--formal'] : [])],
+        }),
+        startReviewer: async (reviewPrompt, signal) => {
+          await emitLaunch(onEvent, { stage: 'reviewer_spawn', status: 'start', run_id: run.run_id })
+          const reviewer = await runtimeService(runtime, 'subagents').start(selectedProvider, {
+            label: `PANGEA 独立复核 · ${request.target}`, prompt: [{ type: 'text', text: reviewPrompt }], parent, signal,
+            ...(request.agent_model ? { agentOptions: { model: request.agent_model } } : {}),
+          })
+          await emitLaunch(onEvent, { stage: 'reviewer_session_created', status: 'ok', run_id: run.run_id,
+            agent_session_id: String(reviewer.id), ...acpRunDiagnostics(reviewer) })
+          return reviewer
+        },
+        record: async value => {
+          await lifecycle.onReviewState(value)
+          await emitLaunch(onEvent, { ...value, stage: 'reviewer_state', status: 'ok', review_status: value.status, semantic_verdict: value.verdict })
+        },
+      })
     }
     const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, acpLifecycle, request.agent_model), value => ({ job_id: value, provider: selectedProvider, requested_model: request.agent_model }))
     await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
