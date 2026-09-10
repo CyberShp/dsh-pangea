@@ -375,18 +375,20 @@ function readJobSnapshot(runtime, task) {
   if (!task?.job_id) return null
   const jobs = runtimeService(runtime, 'jobs')
   if (!jobs?.get) return null
-  return jobs.get(task.job_id, jobOwner(runtime, task))
+  const snapshot = jobs.get(task.job_id, jobOwner(runtime, task))
+  if (snapshot && task.job_started_at !== snapshot.startedAt) throw new Error('ACP Job 启动身份与当前任务不一致')
+  return snapshot
 }
 
 async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea, readSnapshot = companionSnapshot) {
   if (snapshot?.kind !== 'subagent') return null
-  const task = await tasks.getByJob(String(snapshot.id))
+  const task = await tasks.getByJob(String(snapshot.id), snapshot.startedAt)
   if (!task) return null
   let output = ''
   try {
     output = runtimeService(runtime, 'jobs')?.read?.(snapshot.id, owner)?.text ?? ''
   } catch { /* terminal state remains authoritative even if final output cannot be read */ }
-  if (output) await tasks.recordJobActivity(String(snapshot.id), output)
+  if (output) await tasks.recordJobActivity(String(snapshot.id), output, snapshot.startedAt)
   let outcome = snapshot
   if (snapshot.status === 'completed') {
     try {
@@ -437,10 +439,11 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
     try {
       const owner = jobOwner(runtime, task)
       const jobs = runtimeService(runtime, 'jobs')
+      readJobSnapshot(runtime, task)
       const update = jobs?.read?.(task.job_id, owner)
       snapshot = readJobSnapshot(runtime, task) ?? update?.snapshot
       if (update?.text) {
-        await tasks.recordJobActivity(task.job_id, update.text)
+        await tasks.recordJobActivity(task.job_id, update.text, snapshot?.startedAt)
         await appendLaunchSafe(launchLogs, task.task_id, {
           stage: 'acp_output', status: 'info', job_id: task.job_id, output: update.text,
         })
@@ -581,7 +584,10 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
           }
         }, runtime)
         await tasks.bindRunBySession(launched.session_id, launched.run)
-        if (launched.job_id) await tasks.bindJob(task.task_id, { jobId: launched.job_id, provider: launched.provider, ownerSessionId: launched.session_id })
+        if (launched.job_id) {
+          const job = runtimeService(runtime, 'jobs')?.get?.(launched.job_id)
+          await tasks.bindJob(task.task_id, { jobId: launched.job_id, provider: launched.provider, ownerSessionId: launched.session_id, startedAt: job?.startedAt })
+        }
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id })
         return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })
       } catch (error) {
@@ -637,6 +643,7 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       if (requestedTask?.job_id && stopJobs?.kill) {
         const owner = runtimeService(runtime, 'agents')?.get?.(requestedTask.owner_session_id)
         try {
+          if (!readJobSnapshot(runtime, requestedTask)) throw new Error('当前任务的 ACP Job 不存在')
           const result = await stopJobs.kill(requestedTask.job_id, owner, '用户请求停止 PANGEA 分析')
           jobStop = { status: 'ok', job_id: requestedTask.job_id, result, error: null }
           await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'ok', job_id: requestedTask.job_id, result })

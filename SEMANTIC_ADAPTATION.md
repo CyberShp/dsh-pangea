@@ -11,6 +11,8 @@ OpenCode ACP 使用 `.opencode/agents/pangea-agent.md` 和自己的 dispatch 工
 工具接入包含 task-open、input-read、整文件规划、分页源码读取、结果读写和修复、
 comparison 读取、review 决定及 work-finish。任务保存保留显式上下文预算；
 已有任务的 Run 绑定不会被其他会话快照覆盖。流程完成和质量状态分别展示。
+ACP 结束时复用 source-first reader 确认当前 Run 的报告；宿主 Job 以编号和
+启动时间共同绑定，输出、结算和停止操作均核对同一次执行。
 
 配套 Desktop 分支为 `codex/pangea-semantic-adaptation`，其
 `pangea.components.json` 固定本仓库提交和上述 Agent 提交。

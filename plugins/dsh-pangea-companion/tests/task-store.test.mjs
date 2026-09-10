@@ -6,6 +6,30 @@ import test from 'node:test'
 
 import { createTaskStore } from '../src/task-store.js'
 
+test('reused host job ids keep output and settlement bound to the original start time', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-job-identity-'))
+  try {
+    const storePath = path.join(root, 'tasks.json')
+    const store = createTaskStore({ storePath })
+    const old = await store.create({ workspace: root, input: { repository: 'r', target: 'old' } })
+    const current = await store.create({ workspace: root, input: { repository: 'r', target: 'current' } })
+    await store.bindJob(old.task_id, { jobId: 'subagent-1', startedAt: 1000 })
+    await store.bindJob(current.task_id, { jobId: 'subagent-1', startedAt: 2000 })
+    const reopened = createTaskStore({ storePath })
+    assert.equal(await reopened.getByJob('subagent-1'), null)
+    assert.equal((await reopened.getByJob('subagent-1', 2000)).task_id, current.task_id)
+    assert.equal(await reopened.getByJob('subagent-1', 3000), null)
+    await reopened.recordJobActivity('subagent-1', 'current output', 2000)
+    await reopened.settleJob('subagent-1', { status: 'completed', startedAt: 2000 })
+    assert.equal((await reopened.get(current.task_id)).execution_status, 'completed')
+    assert.equal((await reopened.get(current.task_id)).last_output, 'current output')
+    assert.equal((await reopened.get(old.task_id)).execution_status, 'running')
+    assert.equal((await reopened.get(old.task_id)).last_output, null)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('persists a Task before any DSH session or Run exists', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-tasks-'))
   const storePath = path.join(root, 'tasks-v1.json')

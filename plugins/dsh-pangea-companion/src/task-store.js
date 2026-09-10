@@ -74,6 +74,7 @@ function normalizeTask(taskId, value) {
     model_route: normalizeModelRoute(value?.model_route),
     provider: text(value?.provider) || null,
     job_id: text(value?.job_id) || null,
+    job_started_at: Number.isFinite(value?.job_started_at) ? value.job_started_at : null,
     owner_session_id: text(value?.owner_session_id) || null,
     agent_session_id: text(value?.agent_session_id) || null,
     process_id: Number.isInteger(value?.process_id) && value.process_id > 0 ? value.process_id : null,
@@ -277,10 +278,11 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async bindJob(taskId, { jobId, provider, ownerSessionId }) {
+  async bindJob(taskId, { jobId, provider, ownerSessionId, startedAt }) {
     await this.ready
     const task = this.requireTask(taskId)
     task.job_id = text(jobId) || null
+    task.job_started_at = Number.isFinite(startedAt) ? startedAt : null
     task.provider = text(provider) || task.provider
     task.owner_session_id = text(ownerSessionId) || task.owner_session_id
     task.execution_status = 'running'
@@ -291,11 +293,17 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async getByJob(jobId) {
+  jobTask(jobId, startedAt) {
+    const matches = Object.values(this.store.tasks).filter(item => item.job_id === text(jobId)
+      && (startedAt === undefined || item.job_started_at === startedAt))
+    return matches.length === 1 ? matches[0] : null
+  }
+
+  async getByJob(jobId, startedAt) {
     await this.ready
     const id = text(jobId)
     if (!id) return null
-    const task = Object.values(this.store.tasks).find(item => item.job_id === id)
+    const task = this.jobTask(id, startedAt)
     return task ? structuredClone(task) : null
   }
 
@@ -310,10 +318,10 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async recordJobActivity(jobId, output) {
+  async recordJobActivity(jobId, output, startedAt) {
     await this.ready
     const id = text(jobId)
-    const task = Object.values(this.store.tasks).find(item => item.job_id === id)
+    const task = this.jobTask(id, startedAt)
     if (!task) return null
     const chunk = typeof output === 'string' ? output : ''
     if (chunk) task.last_output = `${task.last_output ?? ''}${chunk}`.slice(-8192)
@@ -326,7 +334,7 @@ export class TaskStore {
   async settleJob(jobId, snapshot) {
     await this.ready
     const id = text(jobId)
-    const task = Object.values(this.store.tasks).find(item => item.job_id === id)
+    const task = this.jobTask(id, snapshot?.startedAt)
     if (!task) return null
     const status = snapshot?.status === 'completed' ? 'completed' : snapshot?.status === 'killed' ? 'stopped' : 'failed'
     task.execution_status = status
