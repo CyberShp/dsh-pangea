@@ -123,7 +123,7 @@ test('reads snapshot metadata without rehashing every frozen source file', async
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('reads source-first progress, frozen inputs, revisions, and raw Agent records without inventing semantic counts', async () => {
+test('reads source-first progress, frozen inputs, revisions, and raw Agent records with explicit record counts', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'source-first-reader-'))
   const dataRoot = path.join(root, 'pangea-data')
   const runId = 'source-first-run'
@@ -171,8 +171,8 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     assert.equal(current.source_snapshot.status, 'manifest_verified')
     assert.equal(current.source_snapshot.file_count, 1)
     assert.equal(current.report_available, true)
-    assert.equal(current.counts.risks, null)
-    assert.equal(current.counts.test_cases, null)
+    assert.equal(current.counts.risks, 0)
+    assert.equal(current.counts.test_cases, 0)
     assert.equal(current.source_first_records[0].records[0].body.original, 'Agent prose')
     assert.deepEqual(current.source_first_records[0].records[0].evidence, ['repo:src/main.c:1-3'])
     assert.equal(current.source_first_records[0].revision, 3)
@@ -180,6 +180,14 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     assert.equal(current.accepted_revisions[`${runId}:analysis:unit-1`], 3)
     assert.equal(current.workflow.actions[0].first_finish_revision, 3)
     assert.equal(current.workflow.actions[0].accepted_revision, 3)
+    const originalResult = JSON.parse(await readFile(resultPath, 'utf8'))
+    await writeJson(resultPath, { ...originalResult, binding: { ...originalResult.binding, task_id: 'another-task' } })
+    const mismatched = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(mismatched.reader_health.trusted, false)
+    assert.equal(mismatched.source_first_records[0].records.length, 0)
+    await writeJson(resultPath, { ...originalResult, revision: 4 })
+    assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)
+    await writeJson(resultPath, originalResult)
     await rm(path.join(runRoot, 'report-complete.json'))
     assert.equal((await companionSnapshot({ dataRoot, runId })).current.report_available, false)
     const stopped = await readFile(path.join(runRoot, 'progress.json'), 'utf8').then(JSON.parse)

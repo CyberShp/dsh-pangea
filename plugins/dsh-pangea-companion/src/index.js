@@ -204,6 +204,7 @@ async function sourceRouteHandler(req, res) {
   try {
     let snapshotRoot
     let repositoryId
+    let snapshotLayout
     if (runId && dataRoot) {
       const sourceFirstManifestPath = path.join(dataRoot, 'runs', runId, 'inputs', 'source-manifest.json')
       try {
@@ -216,6 +217,7 @@ async function sourceRouteHandler(req, res) {
           const known = (sourceFirstManifest.repositories ?? []).some(item => item?.repo_id === repositoryId)
           if (!known) throw new Error(`source-first 原文仓库不在当前冻结输入：${repositoryId}`)
           snapshotRoot = path.join(dataRoot, 'runs', runId, 'inputs', 'source')
+          snapshotLayout = 'source-first'
         }
       } catch (error) {
         if (error?.code !== 'ENOENT') throw error
@@ -228,7 +230,7 @@ async function sourceRouteHandler(req, res) {
         if (metadata.source_snapshot && candidate) snapshotRoot = candidate
       }
     }
-    const snippet = await readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId })
+    const snippet = await readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout })
     json(res, 200, snippet)
   } catch (error) {
     json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })

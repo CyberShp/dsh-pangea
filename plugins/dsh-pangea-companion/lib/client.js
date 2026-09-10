@@ -558,6 +558,10 @@ window.__ModuleLoader__.load({
           }))
         }
       }
+      if (item?.source_record && !scopedRiskDraft) {
+        const record = item.source_record
+        lines.push('', `分析单元：${item.unit_id}`, `原始记录：${record.record_id} · revision ${record.revision}`, `结果文件：${record.result_path}`, 'Agent 原文：', typeof record.body === 'string' ? record.body : JSON.stringify(record.body, null, 2))
+      }
       for (const [index, snippet] of snippets.entries()) {
         const label = snippets.length > 1 ? `选中源码片段 ${index + 1}/${snippets.length}` : '选中源码片段'
         lines.push('', `${label}：${text(snippet.file_path, text(snippet.location, '未标注文件'))}:${snippet.visible_start}-${snippet.visible_end}`, '```')
@@ -1596,9 +1600,9 @@ window.__ModuleLoader__.load({
       }
       function renderSourcePreview(kind, item, evidenceItem, evidenceOptions = []) {
         if (!evidenceItem?.location) return null
-        const sourcePath = evidenceFilePath(evidenceItem.location, cwd, snapshot?.data_root, current?.artifacts?.run_directory)
         const preview = sourcePreview.key === previewKey ? sourcePreview : { status: 'loading' }
         const snippet = preview.status === 'ready' ? preview.value : undefined
+        const sourcePath = snippet?.file_path ?? (current?.workflow_version === 'source-first-v1' ? undefined : evidenceFilePath(evidenceItem.location, cwd, snapshot?.data_root, current?.artifacts?.run_directory))
         return h('div', { style: styles.card },
           h('div', { style: styles.row },
             h('div', { style: styles.itemTitle }, '源码片段'),
@@ -1636,9 +1640,9 @@ window.__ModuleLoader__.load({
           : screen.type === 'workflow' ? '运行流程'
             : screen.type === 'flows' ? '业务流程'
           : screen.type === 'risks' ? '待处理'
-          : screen.type === 'risk' ? (riskById.get(screen.id)?.risk_id || '风险详情')
+          : screen.type === 'risk' ? (riskById.get(screen.id)?.display_id || riskById.get(screen.id)?.risk_id || '风险详情')
             : screen.type === 'cases' ? '测试计划'
-              : screen.type === 'case' ? (caseById.get(screen.id)?.test_case_id || '用例详情')
+              : screen.type === 'case' ? (caseById.get(screen.id)?.display_id || caseById.get(screen.id)?.test_case_id || '用例详情')
                 : screen.type === 'evidence' ? '证据'
                   : screen.type === 'evidence-detail' ? '证据详情'
                     : screen.type === 'execution' ? '执行结果'
@@ -1646,9 +1650,7 @@ window.__ModuleLoader__.load({
                         : screen.type === 'repository-import' ? '添加源码仓库' : '复核'
 
       const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? []
-        : current?.workflow_version === 'source-first-v1'
-          ? [['overview', '概览'], ['workflow', '运行流程']]
-          : [['overview', '概览'], ['risks', '风险'], ['cases', '测试用例'], ['evidence', '分析资产']]
+        : [['overview', '概览'], ['risks', '风险'], ['cases', '测试用例'], ['evidence', '分析资产']]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
         type: 'button',
@@ -1989,6 +1991,22 @@ window.__ModuleLoader__.load({
         try { return JSON.stringify(body, null, 2) } catch { return String(body) }
       }
 
+      function renderRecordBody(item, compact = false) {
+        const record = item?.source_record
+        if (!record) return null
+        return h('details', { style: styles.card, open: !compact && typeof record.body === 'string' },
+          h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, compact ? item.title : '分析原文'),
+          h('div', { style: styles.itemMeta }, `${item.unit_id} · ${record.record_id} · revision ${record.revision ?? '—'} · ${record.status === 'accepted' ? '已接受' : '分析中'}`),
+          h('pre', { style: { ...styles.source, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(record.body)),
+          record.result_path ? chip('打开原始记录', () => openSidebarFile(record.result_path, item.title)) : null)
+      }
+
+      function renderRecordEvidence(item) {
+        return item.evidence?.length ? h('div', { style: styles.card },
+          h('div', { style: styles.itemTitle }, '源码依据'),
+          h('div', { style: styles.chips }, item.evidence.map(e => chip(text(e.location, '证据详情'), () => navigate({ type: 'evidence-detail', key: evidenceIdentity(e) }))))) : null
+      }
+
       function renderSourceFirstRecords(groups = current?.source_first_records ?? []) {
         const records = groups.flatMap(group => (group.records ?? []).map(record => ({ ...record, action_id: group.action_id, task_id: group.task_id, revision: group.revision })))
         const recordNodes = records.map((record, index) => h('details', {
@@ -2040,60 +2058,19 @@ window.__ModuleLoader__.load({
           current.reader_health?.issues?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '读取诊断'), h('pre', { style: styles.text }, JSON.stringify(current.reader_health.issues, null, 2))) : null)
       }
 
-      function renderSourceFirstOverview() {
-        const records = current.source_first_records ?? []
-        const recordCount = records.reduce((total, group) => total + (Array.isArray(group.records) ? group.records.length : 0), 0)
-        const runNeedsAttention = current.needs_user === true || ['needs_attention', 'failed'].includes(selectedTask.status)
-        const nextAction = runNeedsAttention
-          ? { label: '需要用户处理', hint: current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : '当前 source-first Run 需要查看 Graph 诊断。' }
-          : current.terminal
-            ? { label: '查看 source-first 交付', hint: current.report_available ? '报告与 Agent 原文已载入，可以展开查看 revision 和正文。' : 'Run 已结束，但报告尚未形成可读取的完整交付。' }
-            : { label: 'Agent 工作进行中', hint: `当前阶段：${current.stage ?? current.phase}；Graph 会在 action settle 后继续推进。` }
-        const reportCard = current.artifacts?.report_html || current.artifacts?.report_md
-          ? h('div', { style: styles.card },
-            h('div', { style: styles.itemTitle }, 'source-first 报告'),
-            h('div', { style: styles.itemMeta }, current.report_available ? '报告已完成；正文保留 Agent 原文与 Graph revision 事实。' : '报告文件已生成，但完整交付门标记尚未齐备。'),
-            h('div', { style: styles.chips },
-              current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA source-first report.html')) : null,
-              current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA source-first report.md')) : null))
-          : null
-        const errorCard = current.errors?.length
-          ? h('div', { style: { ...styles.card, ...styles.error } },
-            h('div', { style: styles.itemTitle }, '当前错误'),
-            h('pre', { style: styles.text }, JSON.stringify(current.errors, null, 2)))
-          : null
-        return h(React.Fragment, null,
-          renderCompatibility(),
-          h('div', { style: styles.decisionHero },
-            h('div', { style: styles.eyebrow }, '下一步'),
-            h('div', { style: styles.decisionTitle }, nextAction.label),
-            h('div', { style: styles.decisionHint }, nextAction.hint),
-            h('button', { type: 'button', style: { ...styles.button, marginTop: 9 }, onClick: () => jump('workflow') }, '查看运行细节'),
-            h('div', { style: styles.decisionBand },
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '质量状态'), h('div', { style: styles.decisionValue }, QUALITY[current.quality_status] ?? current.quality_status ?? '待定')),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '原文记录'), h('div', { style: styles.decisionValue }, `${recordCount} 条`)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '首轮/接受 revision'), h('div', { style: styles.decisionValue }, `${Object.keys(current.first_finish_revisions ?? {}).length} / ${Object.keys(current.accepted_revisions ?? {}).length}`)))),
-          h('div', { style: styles.card },
-            h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前 source-first Run'), h('div', { style: styles.itemTitle }, current.run_id)), h('span', { style: styles.badge }, current.stage ?? current.phase)),
-            h('div', { style: { marginTop: 10 } }, h('div', { style: styles.row }, h('span', { style: styles.label }, '分析进度'), h('span', { style: styles.label }, current.analysis.total > 0 ? `${current.analysis.completed}/${current.analysis.total}` : '由 Graph action 记录')),
-              current.analysis.total > 0 ? h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } })) : h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, 'Planning/Reviewing 不是按记录数量计分；请查看下方 action 状态。')),
-            h('div', { style: styles.grid }, field('工作流版本', current.workflow_version), field('目标', current.target), field('源码快照', current.source_snapshot?.status ?? '待检查'), field('读取健康', HEALTH[current.reader_health?.status] ?? current.reader_health?.status ?? '未知'))),
-          current.needs_user ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '需要用户处理'), current.blocking_reason ? h('pre', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(current.blocking_reason)) : null) : null,
-          renderSourceFirstRecords(records),
-          reportCard,
-          renderAcpRuntime(),
-          renderLaunchDiagnostics(workbench?.launch_log?.events),
-          errorCard)
-      }
-
       function renderFlows() {
         const query = flowQuery.trim().toLowerCase()
-        const filtered = businessFlows.filter(flow => !query || [flow.flow_id, flow.title, flow.description, flow.entry, ...(flow.steps ?? [])].join(' ').toLowerCase().includes(query))
+        const filtered = businessFlows.filter(flow => !query || [flow.display_id, flow.flow_id, flow.title, flow.description, flow.entry, ...(flow.steps ?? [])].join(' ').toLowerCase().includes(query))
         return h(React.Fragment, null,
           h('input', { style: styles.search, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称、入口或步骤…', onChange: event => setFlowQuery(event.target.value) }),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${businessFlows.length} 条`),
           filtered.length ? filtered.map(flow => h('details', { key: flow.flow_id ?? flow.title, style: styles.card },
-            h('summary', { style: { cursor: 'pointer' } }, `${flow.flow_id ?? 'FLOW'} · ${flow.title ?? '未命名流程'}`),
+            h('summary', { style: { cursor: 'pointer' } }, `${flow.display_id ?? flow.flow_id ?? 'FLOW'} · ${flow.title ?? '未命名流程'}`),
+            renderRecordBody(flow),
+            Array.isArray(flow.paths) ? flow.paths.map((p, i) => h('div', { key: p.path_id ?? i, style: styles.card },
+              h('div', { style: styles.itemTitle }, sourceFirstRecordBody(p.title ?? p.path_id)),
+              section('条件', sourceFirstRecordBody(p.condition)), section('行为', sourceFirstRecordBody(p.explanation)),
+              h('div', { style: styles.chips }, (p.linked_test_case_ids ?? []).map(id => chip(caseById.get(id)?.display_id ?? id, () => navigate({ type: 'case', id })))))) : null,
             flow.description ? h('div', { style: { ...styles.text, marginTop: 8 } }, flow.description) : null,
             flow.entry ? h('div', { style: styles.itemMeta }, `入口：${flow.entry}`) : null,
             stringList('步骤', flow.steps, true),
@@ -2291,7 +2268,6 @@ window.__ModuleLoader__.load({
           renderLaunchDiagnostics(launchEvents),
           selectedTask.status === 'failed' ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在重试…' : '重试启动') : null))
         }
-        if (current.workflow_version === 'source-first-v1') return renderSourceFirstOverview()
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
@@ -2319,12 +2295,16 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, `${testCases.length} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, `${evidence.length} 条证据`)))),
           renderHealthCard(false),
+          current.workflow_version === 'source-first-v1' ? h('div', { style: styles.card },
+            h('div', { style: styles.itemTitle }, '分析说明与待确认事项'),
+            (details.notes ?? []).map(item => renderRecordBody(item, true)),
+            h('div', { style: styles.chips }, chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')), chip('运行流程', () => jump('workflow')))) : null,
           h('div', { style: styles.card },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前任务'), h('div', { style: styles.itemTitle }, current.run_id)), h('span', { style: styles.badge }, PHASE[current.phase] ?? current.phase)),
             h('div', { style: { marginTop: 10 } },
               h('div', { style: styles.row }, h('span', { style: styles.label }, '分析进度'), h('span', { style: styles.label }, `${completed}/${total}`)),
               h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } }))),
-            h('div', { style: styles.grid }, field('质量结论', QUALITY[current.quality_status] ?? current.quality_status ?? '待定'), field('独立复核', REVIEW[current.review?.status] ?? current.review?.status ?? '待定'))),
+            h('div', { style: styles.grid }, field('质量结论', QUALITY[current.quality_status] ?? current.quality_status ?? '待定'), field('独立复核', REVIEW[current.review?.status] ?? (current.review?.status === 'COMPLETE' ? '已完成' : current.review?.status) ?? '待定'))),
           h('div', { style: styles.sectionTitle }, '优先失败场景'),
           priorityScenarios.length ? h('div', { style: styles.card }, priorityScenarios.map((risk, index) => h('button', {
             key: riskKeyByItem.get(risk), type: 'button', style: { ...styles.runButton, display: 'flex', gap: 7, alignItems: 'flex-start' }, onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }),
@@ -2345,7 +2325,7 @@ window.__ModuleLoader__.load({
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, '技术详情'),
             h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '这里保留流程、证据和复核原始信息，不参与日常主导航。'),
             h('div', { style: styles.chips },
-              chip(`Skill 流程 · ${workflow.steps?.length ?? 0}`, () => jump('workflow')),
+              chip(`${current.workflow_version === 'source-first-v1' ? '运行流程' : 'Skill 流程'} · ${workflow.steps?.length ?? 0}`, () => jump('workflow')),
               chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')),
               chip(`证据 · ${evidence.length}`, () => jump('evidence')),
               chip(`复核问题 · ${details.review_issues?.length ?? 0}`, () => jump('review')))),
@@ -2375,7 +2355,7 @@ window.__ModuleLoader__.load({
         const query = riskQuery.trim().toLowerCase()
         const filtered = risks.filter(risk => {
           if (riskSeverity !== '全部' && risk.severity !== riskSeverity) return false
-          return !query || [risk.risk_id, risk.title, risk.trigger, risk.system_result, ...(risk.dfx ?? [])].join(' ').toLowerCase().includes(query)
+          return !query || [risk.display_id, risk.risk_id, risk.title, risk.trigger, risk.system_result, ...(risk.dfx ?? [])].join(' ').toLowerCase().includes(query)
         })
         const groups = new Map()
         for (const risk of filtered) {
@@ -2407,7 +2387,7 @@ window.__ModuleLoader__.load({
                   h('div', { style: styles.groupMeta }, unitFlows.length ? `业务流程：${unitFlows.map(flow => text(flow.title, flow.flow_id)).join('、')}` : '当前没有可直接关联的业务流程')),
                 h('span', { style: styles.badge }, `${uncovered} 条未覆盖`)),
               items.map(risk => h('button', { key: `${risk.unit_id}:${riskKeyByItem.get(risk)}`, type: 'button', style: { ...styles.compactCard, ...styles.clickableCard }, onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }) },
-                h('div', { style: styles.row }, h('div', { style: { ...styles.itemTitle, minWidth: 0 } }, `${risk.risk_id || '未编号'} · ${text(risk.title, '未命名风险')}`), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
+                h('div', { style: styles.row }, h('div', { style: { ...styles.itemTitle, minWidth: 0 } }, `${risk.display_id || risk.risk_id || '未编号'} · ${text(risk.title, '未命名风险')}`), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
                 h('div', { style: styles.itemMeta }, text(risk.trigger, '未记录触发条件')),
                 h('div', { style: styles.chips },
                   h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '待确认'),
@@ -2426,6 +2406,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, text(risk.title, '未命名风险')), h('span', { style: styles.badge }, SEVERITY[risk.severity] ?? risk.severity ?? '—')),
             h('div', { style: styles.chips }, h('span', { style: styles.badge }, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '—'}`), h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status ?? '未标注'), h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status ?? '未标注')),
             Array.isArray(risk.dfx) && risk.dfx.length ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `DFX：${risk.dfx.join('、')}`) : null),
+          renderRecordBody(risk),
           renderDiscussionCard('risk', risk, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
           renderRiskSelectionWorkbench(risk),
           renderSourcePreview('risk', risk, previewEvidence, riskEvidenceOptions),
@@ -2445,13 +2426,14 @@ window.__ModuleLoader__.load({
             h('div', { style: { ...styles.label, marginTop: 7 } }, '已有测试'), h('div', { style: styles.text }, semantics.existing_tests),
             h('div', { style: { ...styles.label, marginTop: 7 } }, '结论'), h('div', { style: styles.text }, semantics.conclusion)) : null,
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `证据（${risk.evidence?.length ?? 0}）`), risk.evidence?.length ? h('div', { style: styles.chips }, risk.evidence.map((item, index) => { const key = [item.chunk_id ?? '', item.location ?? '', item.observation ?? ''].join('\u0000'); return chip(text(item.location, `证据 ${index + 1}`), () => navigate({ type: 'evidence-detail', key })) })) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '没有证据。')),
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联测试用例（${risk.linked_test_case_ids?.length ?? 0}）`), risk.linked_test_case_ids?.length ? h('div', { style: styles.chips }, risk.linked_test_case_ids.map(id => chip(id, () => navigate({ type: 'case', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '暂无关联测试用例。')))
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联测试用例（${risk.linked_test_case_ids?.length ?? 0}）`), risk.linked_test_case_ids?.length ? h('div', { style: styles.chips }, risk.linked_test_case_ids.map(id => chip(caseById.get(id)?.display_id ?? id, () => navigate({ type: 'case', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '暂无关联测试用例。')))
       }
 
       function renderCases() {
         const query = caseQuery.trim().toLowerCase()
-        const filtered = testCases.filter(item => !query || [item.test_case_id, item.title, item.case_type, ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
-        const canLaunch = selectedCaseIds.length > 0 && selectedEnvironment && !launching && health?.trusted !== false
+        const filtered = testCases.filter(item => !query || [item.display_id, item.test_case_id, item.title, item.case_type, ...(item.linked_risk_ids ?? []).flatMap(id => [id, riskById.get(id)?.display_id])].join(' ').toLowerCase().includes(query))
+        const executionSupported = current?.workflow_version !== 'source-first-v1'
+        const canLaunch = executionSupported && selectedCaseIds.length > 0 && selectedEnvironment && !launching && health?.trusted !== false
         const selectableFilteredIds = filtered.map(item => item.test_case_id).filter(hasText)
         const groups = new Map()
         for (const item of filtered) {
@@ -2470,7 +2452,7 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '执行环境'), h('div', { style: styles.decisionValue }, selectedEnvironment ? environments.find(item => item.id === selectedEnvironment)?.name ?? selectedEnvironment : '未选择')))),
           h('div', { style: { ...styles.card, ...styles.actionCard } },
             h('div', { style: styles.itemTitle }, '执行这份计划'),
-            h('div', { style: styles.itemMeta }, '系统会创建独立执行记录，并保留本次选择、环境和结果。'),
+            h('div', { style: styles.itemMeta }, executionSupported ? '系统会创建独立执行记录，并保留本次选择、环境和结果。' : '当前 Agent 版本暂未提供用例执行接口。可查看用例、选择计划并继续讨论。'),
             h('select', { style: { ...styles.search, marginTop: 8 }, value: selectedEnvironment, onChange: event => setSelectedEnvironment(event.target.value) },
               h('option', { value: '' }, environments.length ? '选择执行环境' : '请先在“环境配置”中新增环境'),
               environments.map(environment => h('option', { key: environment.id, value: environment.id }, `${environment.name} · ${environment.host?.ip || '未配置主机'} + ${environment.array?.ip || '未配置阵列'}`))),
@@ -2497,9 +2479,9 @@ window.__ModuleLoader__.load({
                 const itemKey = caseKeyByItem.get(item)
                 return h('div', { key: `${item.unit_id}:${itemKey}`, style: styles.compactCard },
                   h('div', { style: styles.caseSelect },
-                  h('input', { type: 'checkbox', disabled: !selectable, checked: selectable && selectedCaseIds.includes(item.test_case_id), 'aria-label': selectable ? `选择 ${item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(item.test_case_id) }),
+                  h('input', { type: 'checkbox', disabled: !selectable, checked: selectable && selectedCaseIds.includes(item.test_case_id), 'aria-label': selectable ? `选择 ${item.display_id ?? item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(item.test_case_id) }),
                   h('button', { type: 'button', style: styles.caseDetailButton, onClick: () => navigate({ type: 'case', id: itemKey }) },
-                    h('div', { style: styles.itemTitle }, `${item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`),
+                    h('div', { style: styles.itemTitle }, `${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`),
                     h('div', { style: styles.itemMeta }, `${text(item.case_type, '未标注类型')} · ${item.linked_risk_ids?.length ?? 0} 条关联风险 · ${text(item.status, 'draft')}${selectable ? '' : ' · 分析完成后可加入计划'}`))))
               })
             )
@@ -2593,18 +2575,21 @@ window.__ModuleLoader__.load({
         if (!item) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条测试用例，可能是 Run 已刷新或切换。'))
         return h(React.Fragment, null,
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, text(item.title, '未命名用例')), h('div', { style: styles.chips }, h('span', { style: styles.badge }, text(item.case_type, '未标注类型')), h('span', { style: styles.badge }, text(item.status, 'draft')))),
+          renderRecordBody(item),
+          item.entry ? section('测试入口', sourceFirstRecordBody(item.entry)) : null,
           renderDiscussionCard('case', item),
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '暂无关联风险。')),
+          renderRecordEvidence(item),
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(riskById.get(id)?.display_id ?? id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '暂无关联风险。')),
           stringList('前置条件', item.preconditions), stringList('执行步骤', item.steps, true), stringList('预期结果', item.expected_results, true), stringList('观察点', item.observability), stringList('清理动作', item.cleanup))
       }
 
       function renderEvidence() {
         const query = evidenceQuery.trim().toLowerCase()
-        const filtered = evidence.filter(item => !query || [item.chunk_id, item.location, item.observation, ...(item.risk_ids ?? [])].join(' ').toLowerCase().includes(query))
+        const filtered = evidence.filter(item => !query || [item.display_id, item.chunk_id, item.location, item.observation, ...(item.risk_ids ?? []).flatMap(id => [id, riskById.get(id)?.display_id])].join(' ').toLowerCase().includes(query))
         return h(React.Fragment, null,
           h('input', { style: styles.search, value: evidenceQuery, 'aria-label': '搜索证据', placeholder: '搜索文件位置、观察结论、关联风险…', onChange: event => setEvidenceQuery(event.target.value) }),
           h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${evidence.length} 条`),
-          h('div', { style: { marginTop: 7 } }, filtered.length ? filtered.map((item, index) => { const key = [item.chunk_id, item.location, item.observation].join('\u0000'); return h('button', { key: `${key}:${index}`, type: 'button', style: { ...styles.card, ...styles.clickableCard }, onClick: () => navigate({ type: 'evidence-detail', key }) }, h('div', { style: styles.itemTitle }, text(item.location, '未标注位置')), h('div', { style: styles.itemMeta }, text(item.observation, '无观察结论')), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.slice(0, 4).map(id => h('span', { key: id, style: styles.badge }, id))) : null) }) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '没有符合条件的证据。'))))
+          h('div', { style: { marginTop: 7 } }, filtered.length ? filtered.map((item, index) => { const key = [item.chunk_id, item.location, item.observation].join('\u0000'); return h('button', { key: `${key}:${index}`, type: 'button', style: { ...styles.card, ...styles.clickableCard }, onClick: () => navigate({ type: 'evidence-detail', key }) }, h('div', { style: styles.itemTitle }, text(item.location, '未标注位置')), h('div', { style: styles.itemMeta }, text(item.observation, '无观察结论')), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.slice(0, 4).map(id => h('span', { key: id, style: styles.badge }, riskById.get(id)?.display_id ?? id))) : null) }) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '没有符合条件的证据。'))))
       }
 
       function renderEvidenceDetail() {
@@ -2612,13 +2597,15 @@ window.__ModuleLoader__.load({
         if (!item) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条证据，可能是 Run 已刷新或切换。'))
         return h(React.Fragment, null,
           h('div', { style: styles.card }, field('源码/资料位置', text(item.location, '未标注')), h('div', { style: { marginTop: 9 } }, field('Chunk ID', text(item.chunk_id, '未标注')))),
+          renderRecordBody(item),
           renderDiscussionCard('evidence', item, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
           renderSourcePreview('evidence', item, item),
           section('观察结论', item.observation),
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.risk_ids?.length ?? 0}）`), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '这条证据没有直接绑定风险。')))
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.risk_ids?.length ?? 0}）`), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.map(id => chip(riskById.get(id)?.display_id ?? id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '这条证据没有直接绑定风险。')))
       }
 
       function renderReview() {
+        if (current?.workflow_version === 'source-first-v1') return renderSourceFirstRecords((current.source_first_records ?? []).filter(item => ['independent_review', 'comparison_review'].includes(item.stage)))
         const review = current?.review
         if (!review) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 还没有复核结果。'))
         const comparisonDecisions = review.comparison?.decisions ?? []

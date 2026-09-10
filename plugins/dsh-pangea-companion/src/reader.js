@@ -1,6 +1,7 @@
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { sourceFirstProjection } from './source-first-projection.js'
 
 const STEP_TITLES = [
   '范围和任务契约',
@@ -267,6 +268,14 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
         issues.push(`source-first result JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    if (result && (result.binding?.run_id !== progress.run_id || result.binding?.action_id !== actionId || (action.task_id && result.binding?.task_id !== action.task_id))) {
+      issues.push(`source-first result 绑定与当前任务不一致：${actionId}`)
+      result = null
+    }
+    if (result && action.status === 'accepted' && Number.isInteger(progress.accepted_revisions?.[actionId]) && result.revision !== progress.accepted_revisions[actionId]) {
+      issues.push(`source-first result revision 与已接受版本不一致：${actionId}`)
+      result = null
+    }
     const records = Array.isArray(result?.records) ? result.records : []
     artifacts.push({
       action_id: actionId,
@@ -338,6 +347,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     try { contract = await readJson(contractPath) } catch { contract = null }
   }
   const actionView = await sourceFirstActionArtifacts(runDirectory, progress)
+  const projection = sourceFirstProjection(actionView.artifacts)
   const life = sourceFirstLifecycle(progress)
   const sourceSnapshot = await sourceFirstSnapshot(runDirectory, progress, contract, actionView.artifacts)
   const analysisActions = actionView.artifacts.filter(item => item.role === 'analysis')
@@ -412,7 +422,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       submitted: analysisActions.filter(item => ['settled', 'accepted'].includes(item.status)).length,
       max_parallel: 8,
     },
-    counts: { risks: null, test_cases: null, evidence: null, business_flows: null, review_issues: null },
+    counts: Object.fromEntries(['risks', 'test_cases', 'evidence', 'business_flows'].map(key => [key, projection[key].length])),
     errors: Array.isArray(progress.errors) ? progress.errors : [],
     error_history: actionView.issues,
     review: {
@@ -452,11 +462,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   }
   if (includeDetails) {
     summary.details = {
-      risks: [],
-      test_cases: [],
-      evidence: [],
-      business_flows: [],
-      review_issues: [],
+      ...projection,
       source_first_records: records,
     }
     summary.workflow = workflow

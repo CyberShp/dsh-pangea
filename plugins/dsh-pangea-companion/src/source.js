@@ -25,7 +25,7 @@ export function parseEvidenceLocation(location) {
   return { source, startLine, endLine }
 }
 
-export function resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId }) {
+export function resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout }) {
   const parsed = parseEvidenceLocation(location)
   if (path.isAbsolute(parsed.source)) {
     if (hasText(snapshotRoot)) throw new Error('frozen Run evidence must use repo_id:path:line locations')
@@ -34,7 +34,8 @@ export function resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, rep
 
   const repositoryLocation = /^([^:/\\]+):(.+)$/.exec(parsed.source)
   if (repositoryLocation !== null && hasText(snapshotRoot) && (!repositoryId || repositoryLocation[1] === repositoryId)) {
-    const snapshotRepository = path.resolve(snapshotRoot, 'repository')
+    const snapshotRepository = path.resolve(snapshotRoot, snapshotLayout === 'source-first' ? repositoryId : 'repository')
+    if (!snapshotRepository.startsWith(`${path.resolve(snapshotRoot)}${path.sep}`)) throw new Error('repository escapes the frozen source snapshot')
     const filePath = path.resolve(snapshotRepository, repositoryLocation[2])
     if (filePath !== snapshotRepository && !filePath.startsWith(`${snapshotRepository}${path.sep}`)) {
       throw new Error('evidence path escapes the frozen source snapshot')
@@ -54,8 +55,8 @@ export function resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, rep
   return { ...parsed, filePath: path.resolve(cwd, parsed.source) }
 }
 
-export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, contextLines = 3, maxLines = 160 }) {
-  const resolved = resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId })
+export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout, contextLines = 3, maxLines = 160 }) {
+  const resolved = resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout })
   const raw = await readFile(resolved.filePath, 'utf8')
   if (raw.includes('\u0000')) throw new Error('evidence file is not readable text')
 

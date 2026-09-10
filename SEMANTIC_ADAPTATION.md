@@ -3,8 +3,9 @@
 本分支从 `codetalks-skill@48b7921` 创建，对接 pangea-agent
 `langgraph@58398f10ef7663b23c24310f932a76d77254d0d2`。
 
-工作台通过 companion 创建 source-first Run，展示任务进度、冻结源码信息、
-Agent 原文记录与报告。DSH 根 Agent 通过 report-policy 创建并绑定子任务，
+工作台通过 companion 创建 source-first Run，沿用概览、风险、测试用例、分析资产
+页面，以及搜索、分组、关联跳转、源码预览和讨论草稿操作。运行流程保留阶段、
+任务版本和原文记录，报告入口提供完整交付。DSH 根 Agent 通过 report-policy 创建并绑定子任务，
 按明确的 action_id 结算；Comparison 与定向修正续接原会话。
 OpenCode ACP 使用 `.opencode/agents/pangea-agent.md` 和自己的 dispatch 工具。
 
@@ -32,3 +33,16 @@ node --test tests/semantic-runtime.test.mjs
 
 真正的客户端验收需要从配套 Desktop 页面创建任务，记录实际 provider、model、
 Run ID、任务会话和报告；模型不可用或报告质量未通过时应分别报告。
+
+## 工作台记录映射
+
+页面按 Agent 明确的 record kind 与字段展示风险、用例和流程，保留原始正文与
+结果文件位置。每条记录使用分析单元与 record_id 定位；原始业务编号用于显示和
+搜索。关联仅依据明确编号，在当前分析单元内解析；相同编号不会跨单元串联。
+已接受的定向修正替代对应单元的分析记录，supersedes 记录保留在运行流程供追溯。
+读取层核对结果的 Run、action、task 绑定及已接受 revision。
+
+源码引用按当前 Run 的冻结仓库目录预览。Markdown 正文保留原文，用例组仍作为
+一条组记录展示。统计代表可读取的有效记录数量，不代表语义质量或实际执行结果。
+当前 Agent 版本没有旧 Executor 接口，source-first 页面的执行按钮显示不可用；
+用例查看、计划选择和讨论草稿正常开放。
