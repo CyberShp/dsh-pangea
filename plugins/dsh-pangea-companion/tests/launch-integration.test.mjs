@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import { settleAcpTask } from '../src/index.js'
+import { applyTaskExecutionState, deriveTaskResumeEligibility, reconcileAcpJobs, settleAcpTask } from '../src/index.js'
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
 
@@ -15,6 +15,67 @@ test('task launch diagnostics are wired through direct Skill startup', () => {
   assert.match(source, /stage: 'launch_timeout'/)
   assert.match(source, /!\['preparing', 'running'\]\.includes\(task\.status\)/)
   assert.match(source, /launchLogRouteHandler/)
+})
+
+test('terminal tasks can resume the existing Run from its checkpoint', () => {
+  assert.match(source, /const resume = body\.resume === true/)
+  assert.match(source, /if \(task\.run_id && !resume\)/)
+  assert.match(source, /resumeRunId: resume \? task\.run_id : null/)
+  assert.match(source, /resumeEligibility\.can_resume/)
+})
+
+test('derives resume eligibility from the persisted execution identity and real Job terminal state', () => {
+  const runtime = { jobs: { get() { return { id: 'job-1', startedAt: 100, status: 'failed' } } }, agents: { get() { return { id: 'owner-1' } } } }
+  assert.deepEqual(deriveTaskResumeEligibility(runtime, {
+    run_id: 'run-1', provider: 'pangea-opencode', status: 'failed', execution_status: 'failed',
+    job_id: 'job-1', job_started_at: 100, owner_session_id: 'owner-1',
+  }), { can_resume: true, resume_blocked_reason: null })
+  assert.deepEqual(deriveTaskResumeEligibility(runtime, {
+    run_id: 'run-1', provider: 'pangea-opencode', status: 'failed', execution_status: 'interrupted',
+    job_id: 'job-1', job_started_at: 100, owner_session_id: 'owner-1',
+  }), { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' })
+  assert.equal(deriveTaskResumeEligibility(runtime, {
+    run_id: 'run-1', provider: 'pangea-opencode', status: 'failed', execution_status: 'failed',
+    job_id: 'job-1', job_started_at: 99, owner_session_id: 'owner-1',
+  }).can_resume, false)
+
+  assert.deepEqual(deriveTaskResumeEligibility({ jobs: { get() { return undefined } } }, {
+    run_id: 'run-1', provider: 'pangea-opencode', status: 'failed', execution_status: 'failed',
+    attempt_id: 'attempt-1', job_id: 'job-1', job_started_at: 100, owner_session_id: 'owner-1',
+    attempts: [{
+      attempt_id: 'attempt-1', job_id: 'job-1', job_started_at: 100, owner_session_id: 'owner-1',
+      execution_status: 'failed', ended_at: 200,
+    }],
+  }), { can_resume: true, resume_blocked_reason: null })
+})
+
+test('does not read output from a reused Job id with a different startedAt', async () => {
+  let interrupted
+  let recorded = false
+  const task = {
+    task_id: 'task-1', execution_status: 'running', job_id: 'subagent-1', job_started_at: 100,
+    owner_session_id: 'owner-1', attempts: [],
+  }
+  const runtime = {
+    agents: { get() { return { id: 'owner-1' } } },
+    jobs: {
+      get() { return { id: 'subagent-1', kind: 'subagent', startedAt: 200, status: 'running' } },
+      read() { throw new Error('must not read reused Job') },
+    },
+  }
+  const tasks = {
+    async recordJobActivity() { recorded = true },
+    async markInterrupted(_taskId, message) { interrupted = message },
+  }
+  await reconcileAcpJobs(runtime, tasks, [task], { async append() {} })
+  assert.equal(recorded, false)
+  assert.match(interrupted, /身份不匹配/)
+})
+
+test('persists the Run identity as soon as creation succeeds', () => {
+  assert.match(source, /onRunReady: async run => \{[\s\S]*launchedRun = run[\s\S]*tasks\.bindRun\(task\.task_id, run\.run_id, run\.workflow_version\)/)
+  assert.match(source, /monitor\.bindExecution\(ownerSessionId/)
+  assert.doesNotMatch(source, /tasks\.bindRunBySession\(sessionId, effectiveSnapshot\.current\)/)
 })
 
 test('stops the local Run before attempting DSH session cancellation', () => {
@@ -49,33 +110,108 @@ test('treats exit 0 without validated final artifacts as an ACP failure', async 
   assert.equal(events[0].output, 'agent exited normally')
 })
 
-test('reconciliation refreshes the authoritative job status after consuming output', () => {
-  assert.match(source, /snapshot = readJobSnapshot\(runtime, task\) \?\? update\?\.snapshot/)
+test('settles an ACP Job with its owner identity', async () => {
+  let lookup
+  let activity
+  let settled
+  const task = {
+    task_id: 'task-identity', workspace: '/workspace', data_root: '/workspace/pangea-data', run_id: 'run-identity',
+    provider: 'pangea-opencode', model_route: null, attempt_id: 'attempt-new', owner_session_id: 'owner-new',
+    attempts: [{ attempt_id: 'attempt-old', job_id: 'job-identity', job_started_at: 100, owner_session_id: 'owner-1' }],
+  }
+  const tasks = {
+    async getByJob(id, ref) { lookup = { id, ref }; return task },
+    async recordJobActivity(ref, output) { activity = { ref, output } },
+    async settleJob(ref, value) { settled = { ref, value }; return value },
+  }
+  const runtime = new Proxy({ jobs: { read() { return { text: 'agent output' } } } }, {
+    get(target, property, receiver) {
+      if (property === 'runtime_instance_id' || property === 'instance_id') throw new Error(`cannot get property "${String(property)}" without inject`)
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const owner = { id: 'owner-1' }
+  await settleAcpTask(runtime, tasks, { async append() {} }, {
+    id: 'job-identity', kind: 'subagent', status: 'failed', detail: 'failed', startedAt: 100,
+  }, owner)
+  assert.deepEqual(lookup, {
+    id: 'job-identity',
+    ref: { ownerSessionId: 'owner-1', jobStartedAt: 100 },
+  })
+  assert.deepEqual(activity, {
+    ref: { jobId: 'job-identity', attemptId: 'attempt-old', ownerSessionId: 'owner-1', jobStartedAt: 100 },
+    output: 'agent output',
+  })
+  assert.deepEqual(settled.ref, {
+    jobId: 'job-identity', attemptId: 'attempt-old', ownerSessionId: 'owner-1', jobStartedAt: 100,
+  })
 })
 
-test('settles semantic reports using the exact Run reader while preserving unresolved quality', async () => {
-  const task = { task_id: 'task-1', workspace: '/workspace', data_root: '/workspace/data', run_id: 'run-1' }
-  let outcome
+test('maps an ACP continuation stall to a task attention state', async () => {
+  let settled
+  const task = {
+    task_id: 'task-attention', workspace: '/workspace', data_root: '/workspace/pangea-data', run_id: 'run-attention',
+    provider: 'pangea-opencode', model_route: null,
+  }
   const tasks = {
     async getByJob() { return task },
-    async settleJob(_id, value) { outcome = value; return value },
+    async recordJobActivity() {},
+    async settleJob(_ref, value) { settled = value; return value },
   }
-  const cli = async () => ({ workflow_version: 'source-first-v1', lifecycle_status: 'complete', report_available: false })
-  const logs = { async append() {} }
-  const job = { id: 'job-1', kind: 'subagent', status: 'completed' }
-  for (const quality_status of ['PASS', 'UNRESOLVED']) {
-    await settleAcpTask({}, tasks, logs, job, undefined, cli, async input => {
-      assert.deepEqual(input, { cwd: '/workspace', dataRoot: '/workspace/data', runId: 'run-1' })
-      return { current: { run_id: 'run-1', lifecycle_status: 'complete', report_available: true, quality_status } }
-    })
-    assert.equal(outcome.status, 'completed')
+  await settleAcpTask({ jobs: { read() { return { text: '' } } } }, tasks, { async append() {} }, {
+    id: 'job-attention', kind: 'subagent', status: 'failed',
+    detail: JSON.stringify({ code: 'PANGEA_CONTINUATION_STALLED', message: '两轮续接没有推进 STEP_05' }),
+  })
+  assert.deepEqual(settled, {
+    id: 'job-attention', kind: 'subagent', status: 'failed',
+    detail: '两轮续接没有推进 STEP_05',
+    attention_required: true,
+    attention_code: 'PANGEA_CONTINUATION_STALLED',
+  })
+})
+
+test('does not describe an expected pending projection as an untrusted result', async () => {
+  const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
+  assert.match(source, /if \(health\?\.status === 'warning'\)/)
+  assert.doesNotMatch(source, /if \(health\?\.trusted === false\)/)
+})
+
+test('projects a terminal ACP failure over a stale running Run', () => {
+  const snapshot = {
+    current: {
+      run_id: 'run-1', lifecycle_status: 'running', phase: 'STEP_06', terminal: false,
+      attention_required: false, errors: [],
+    },
+    runs: { items: [{ run_id: 'run-1', lifecycle_status: 'running' }] },
   }
-  await settleAcpTask({}, tasks, logs, job, undefined, cli, async () => ({
-    current: { run_id: 'run-1', lifecycle_status: 'complete', report_available: false },
-  }))
-  assert.equal(outcome.status, 'failed')
-  await settleAcpTask({}, tasks, logs, job, undefined, cli, async () => ({
-    current: { run_id: 'another-run', lifecycle_status: 'complete', report_available: true },
-  }))
-  assert.equal(outcome.status, 'failed')
+  const result = applyTaskExecutionState(snapshot, {
+    task_id: 'task-1', run_id: 'run-1', attempt_id: 'attempt-1', status: 'failed', execution_status: 'failed', provider: 'pangea-opencode',
+    attempts: [{ attempt_id: 'attempt-1', execution_status: 'failed', ended_at: 1000 }],
+    terminal_error: 'child does not support requested model',
+  })
+  assert.equal(result.current.lifecycle_status, 'failed')
+  assert.equal(result.current.phase, 'FAILED')
+  assert.equal(result.current.terminal, true)
+  assert.equal(result.current.attention_required, true)
+  assert.deepEqual(result.current.errors, [{ code: 'ACP_AGENT_FAILED', message: 'child does not support requested model' }])
+  assert.equal(snapshot.current.lifecycle_status, 'running')
+})
+
+test('does not apply an old Run failure or an older terminal observation to a newer state file', () => {
+  const snapshot = { current: {
+    run_id: 'run-06', data_root: '/workspace/pangea-data', lifecycle_status: 'running', phase: 'STEP_03', terminal: false,
+    state_read: { updated_at: '2026-09-07T03:38:18Z' }, errors: [],
+  } }
+  const wrongRun = applyTaskExecutionState(snapshot, {
+    task_id: 'task-05', run_id: 'run-05', data_root: '/workspace/pangea-data', attempt_id: 'attempt-05',
+    status: 'failed', execution_status: 'failed',
+  })
+  assert.strictEqual(wrongRun, snapshot)
+
+  const olderExecution = applyTaskExecutionState(snapshot, {
+    task_id: 'task-06', run_id: 'run-06', data_root: '/workspace/pangea-data', attempt_id: 'attempt-06',
+    status: 'failed', execution_status: 'interrupted',
+    attempts: [{ attempt_id: 'attempt-06', execution_status: 'interrupted', ended_at: Date.parse('2026-09-07T03:22:11Z') }],
+  })
+  assert.strictEqual(olderExecution, snapshot)
 })

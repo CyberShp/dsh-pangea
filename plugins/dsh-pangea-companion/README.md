@@ -15,7 +15,8 @@
 - 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止；停止时即使 ACP 或 PANGEA API 一侧不可用，也会保留错误并继续尝试其余取消动作。
 - 新建分析会先创建冻结的 Codetalks Skill Run，随后使用用户选定的内置 API、NGA、CodeAgent、OpenCode 或 Claude Code 执行 Step 01–09；页面只监听 Skill 状态和 Markdown 产物。
 - 新建分析只接受仓库、目标、资产库勾选、执行 Agent、模型和 effort；分析重点与源码范围由 Skill 自动确定，不接受手写 focus、source scope、结构化资产 ID 或示例文件路径。
-- “Agent Runtime”页集中配置 NGA、CodeAgent、OpenCode 与 Claude Code 的命令、参数、模型目录和 effort。配置保存到 `$DSH_HOME/dsh-pangea-companion/acp-runtime-v1.json`，重启 Harness 后由 Desktop 解析并注册。
+- “新建分析”选择 NGA、CodeAgent、OpenCode 或 Claude Code 后自动读取该 Agent 的可用模型。可以指定本次模型或沿用 Agent 默认；任务保存选择，续跑继续使用。模型列表来自 ACP 会话或 Claude SDK，读取不发送分析 Prompt，不创建 PANGEA Task/Run，也不读取手工模型目录。
+- “Agent Runtime”默认只展示本机 Agent 状态；命令、参数和诊断收在折叠的高级设置中。仅自定义安装或启动异常时需要打开。启动配置仍保存到 `$DSH_HOME/dsh-pangea-companion/acp-runtime-v1.json`，修改后重启 Harness；模型无需在这里填写。
 - 外部 Agent 使用独立 `external-acp` 模型路由，不调用内部 API；模型或 effort 未配置、Provider 未注册、命令无法解析时禁止创建分析。
 - 外部 Job 持久化展示 Job ID、ACP Session、PID、开始时间、运行时长、最后活动和消息输出；取消、失败、进程丢失与恢复检查都有明确终态。
 - 外部 Agent 正常退出但 Skill Run 没有通过 `finalize` 且没有正式报告时仍判失败，不把 exit code 0 当作分析成功。

@@ -1,10 +1,110 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createTaskStore } from '../src/task-store.js'
+import { createTaskStore, writeTaskStoreFile } from '../src/task-store.js'
+
+test('publishes through a unique temporary file and retries transient Windows rename failures', async () => {
+  const calls = []
+  let attempts = 0
+  const operations = {
+    async mkdir(...args) { calls.push(['mkdir', ...args]) },
+    async writeFile(...args) { calls.push(['writeFile', ...args]) },
+    async rename(...args) {
+      calls.push(['rename', ...args])
+      attempts += 1
+      if (attempts === 1) throw Object.assign(new Error('file is busy'), { code: 'EPERM' })
+    },
+    async rm(...args) { calls.push(['rm', ...args]) },
+  }
+  const waits = []
+
+  await writeTaskStoreFile('/profile/tasks-v1.json', '{"version":1}\n', {
+    operations,
+    platform: 'win32',
+    retryDelays: [25],
+    wait: async delay => { waits.push(delay) },
+  })
+
+  const temporary = calls.find(([name]) => name === 'writeFile')[1]
+  assert.notEqual(temporary, '/profile/tasks-v1.json.tmp')
+  assert.match(temporary, /tasks-v1\.json\.[^.]+\.[0-9a-f-]+\.tmp$/)
+  assert.deepEqual(calls.filter(([name]) => name === 'rename').map(([, source, target]) => [source, target]), [
+    [temporary, '/profile/tasks-v1.json'],
+    [temporary, '/profile/tasks-v1.json'],
+  ])
+  assert.deepEqual(waits, [25])
+  assert.equal(calls.some(([name]) => name === 'rm'), false)
+})
+
+test('does not share a temporary file between concurrent task store writes', async () => {
+  const temporaryPaths = []
+  const operations = {
+    async mkdir() {},
+    async writeFile(temporary) { temporaryPaths.push(temporary) },
+    async rename() {},
+    async rm() {},
+  }
+
+  await Promise.all([
+    writeTaskStoreFile('/profile/tasks-v1.json', 'first\n', { operations }),
+    writeTaskStoreFile('/profile/tasks-v1.json', 'second\n', { operations }),
+  ])
+
+  assert.equal(temporaryPaths.length, 2)
+  assert.notEqual(temporaryPaths[0], temporaryPaths[1])
+})
+
+test('keeps the previous task store and removes its temporary file after retries are exhausted', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-persist-failure-'))
+  const storePath = path.join(root, 'tasks-v1.json')
+  await writeFile(storePath, 'previous\n', 'utf8')
+  try {
+    await assert.rejects(
+      writeTaskStoreFile(storePath, 'replacement\n', {
+        operations: {
+          mkdir,
+          writeFile,
+          async rename() { throw Object.assign(new Error('file is busy'), { code: 'EPERM' }) },
+          rm,
+        },
+        platform: 'win32',
+        retryDelays: [0, 0],
+        wait: async () => {},
+      }),
+      /任务存储发布失败.*code=EPERM.*attempts=3/
+    )
+    assert.equal(await readFile(storePath, 'utf8'), 'previous\n')
+    assert.deepEqual((await readdir(root)).sort(), ['tasks-v1.json'])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('does not retain an unreported Task in memory when its first save fails', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-first-save-'))
+  let fail = true
+  const store = createTaskStore({
+    storePath: path.join(root, 'tasks-v1.json'),
+    idFactory: () => 'task-retry',
+    writeStore: async () => {
+      if (fail) throw new Error('persist failed')
+    },
+  })
+
+  try {
+    await assert.rejects(
+      store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '首次失败' } }),
+      /persist failed/
+    )
+    assert.deepEqual(await store.list(), [])
+
+    fail = false
+    const retry = await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '再次创建' } })
+    assert.equal(retry.task_id, 'task-retry')
+    assert.deepEqual((await store.list()).map(task => task.task_id), ['task-retry'])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('reused host job ids keep output and settlement bound to the original start time', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-job-identity-'))
@@ -39,12 +139,15 @@ test('persists a Task before any DSH session or Run exists', async () => {
       workspace: '/workspace', dataRoot: '/workspace/pangea-data',
       input: {
         repository: 'repo-one', target: '认证恢复', source_scope: ['src/auth.c'],
+        scenario: 'root-cause', mode: 'speed',
         model_route: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
       },
     })
     assert.equal(task.task_id, 'task-001')
     assert.equal(task.status, 'preparing')
     assert.equal(task.run_id, null)
+    assert.equal(task.scenario, 'root-cause')
+    assert.equal(task.mode, 'speed')
     assert.deepEqual(task.conversations, [])
     assert.deepEqual(task.model_route, {
       provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed', route_class: 'configured-internal',
@@ -73,21 +176,20 @@ test('binds multiple conversations to one Task and later associates its Run', as
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('does not replace an existing Task Run binding from a generic session snapshot', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-binding-'))
-  const storePath = path.join(root, 'tasks-v1.json')
+test('does not rebind an established Task to an unrelated selected Run', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-identity-'))
   try {
-    const store = createTaskStore({ storePath, idFactory: () => 'task-run-binding' })
-    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '固定 Run' } })
-    await store.addConversation('task-run-binding', { sessionId: 'session-run-binding', title: '分析会话', kind: 'analysis' })
-    await store.bindRunBySession('session-run-binding', { run_id: 'run-created-for-task', lifecycle_status: 'complete' })
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-run-identity' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '身份隔离' } })
+    await store.addConversation('task-run-identity', { sessionId: 'session-owned', title: '分析会话', kind: 'analysis' })
+    await store.bindRun('task-run-identity', 'run-owned')
 
-    const rebound = await store.bindRunBySession('session-run-binding', {
-      run_id: 'another-recent-run', lifecycle_status: 'running',
+    const task = await store.bindRunBySession('session-owned', {
+      run_id: 'run-selected-elsewhere', lifecycle_status: 'failed',
     })
 
-    assert.equal(rebound.run_id, 'run-created-for-task')
-    assert.equal((await store.get('task-run-binding')).run_id, 'run-created-for-task')
+    assert.equal(task.run_id, 'run-owned')
+    assert.equal(task.status, 'preparing')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -147,6 +249,21 @@ test('scopes duplicate Run ids by data root', async () => {
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('rejects ambiguous or conflicting explicit Run bindings', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-conflict-'))
+  let id = 0
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => `task-conflict-${++id}` })
+    for (const sessionId of ['session-a', 'session-b']) {
+      const task = await store.create({ workspace: '/workspace', dataRoot: '/workspace/pangea-data', input: { repository: 'repo', target: sessionId } })
+      await store.addConversation(task.task_id, { sessionId, title: sessionId, kind: 'analysis' })
+      await store.bindRunBySession(sessionId, { run_id: 'duplicate-run', lifecycle_status: 'running' })
+    }
+    await assert.rejects(() => store.getByRun('duplicate-run', { dataRoot: '/workspace/pangea-data' }), /ambiguous Task binding/)
+    await assert.rejects(() => store.bindRun('task-conflict-1', 'different-run'), /already bound to another Run/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('keeps an observed session failure visible while its Run metadata still says running', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-session-failure-'))
   try {
@@ -176,26 +293,28 @@ test('rebinds an explicitly stopped task after a portable workspace move', async
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('freezes an external ACP model route and keeps the job authoritative until settlement', async () => {
+for (const agentModel of [null, 'native/selected']) test(`persists external selection ${agentModel ?? 'default'} across restart and resume`, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-acp-'))
   let now = 2000
   try {
     const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), now: () => ++now, idFactory: () => 'task-acp' })
+    const legacyRoute = { provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high', route_class: 'external-acp' }
     await store.create({
       workspace: '/workspace', dataRoot: '/workspace/pangea-data',
-      input: { repository: 'repo-one', target: '外部分析', provider_id: 'pangea-nga' },
+      input: { repository: 'repo-one', target: '外部分析', provider_id: 'pangea-nga', model_route: legacyRoute, agent_model: agentModel },
     })
-    const route = { provider: 'pangea-nga', model: 'nga-model', reasoning_effort: 'high', route_class: 'external-acp' }
-    await store.prepareProviderLaunch('task-acp', 'pangea-nga', route)
+    assert.deepEqual((await store.get('task-acp')).model_route, legacyRoute)
+    await store.prepareProviderLaunch('task-acp', 'pangea-nga')
     await store.addConversation('task-acp', { sessionId: 'owner-1', title: '分析', kind: 'analysis' })
     await store.bindRunBySession('owner-1', { run_id: 'run-acp', lifecycle_status: 'running' })
     const running = await store.bindJob('task-acp', { jobId: 'job-1', provider: 'pangea-nga', ownerSessionId: 'owner-1' })
-    assert.deepEqual(running.model_route, route)
+    assert.equal(running.model_route, null)
     assert.equal((await store.getByJob('job-1')).task_id, 'task-acp')
     await store.bindAgentRuntime('task-acp', { agentSessionId: 'acp-session-1', processId: 4242 })
     await store.recordJobActivity('job-1', '正在分析 Lua 状态机')
     const active = await store.get('task-acp')
     assert.equal(active.agent_session_id, 'acp-session-1')
+    assert.equal(active.attempts[0].agent_session_id, 'acp-session-1')
     assert.equal(active.process_id, 4242)
     assert.equal(active.last_output, '正在分析 Lua 状态机')
 
@@ -205,5 +324,215 @@ test('freezes an external ACP model route and keeps the job authoritative until 
     const settled = await store.settleJob('job-1', { status: 'completed' })
     assert.equal(settled.status, 'completed')
     assert.equal(settled.execution_status, 'completed')
+    const reopened = createTaskStore({ storePath: path.join(root, 'tasks-v1.json') })
+    assert.equal((await reopened.get('task-acp')).agent_model, agentModel)
+    assert.equal((await reopened.prepareProviderLaunch('task-acp', 'pangea-nga')).agent_model, agentModel)
+    assert.equal((await reopened.prepareProviderLaunch('task-acp', 'pangea-codeagent')).agent_model, null)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('allocates a durable attempt before a Job exists and records Job start time', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-attempt-start-'))
+  let now = 5000
+  try {
+    const store = createTaskStore({
+      storePath: path.join(root, 'tasks-v1.json'),
+      now: () => ++now,
+      idFactory: () => 'task-attempt-start',
+      attemptIdFactory: () => 'attempt-start',
+    })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '启动身份' } })
+    const prepared = await store.prepareProviderLaunch('task-attempt-start', 'pangea-opencode')
+    assert.equal(prepared.attempt_id, 'attempt-start')
+    assert.equal(prepared.attempts[0].execution_status, 'starting')
+    assert.equal(prepared.job_id, null)
+    const ownerBound = await store.bindOwnerSession('task-attempt-start', { ownerSessionId: 'owner-1' })
+    assert.equal(ownerBound.owner_session_id, 'owner-1')
+    assert.equal(ownerBound.attempts[0].owner_session_id, 'owner-1')
+    const bound = await store.bindJob('task-attempt-start', {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-1', jobStartedAt: 5010,
+    })
+    assert.equal(bound.attempt_id, 'attempt-start')
+    assert.equal(bound.job_started_at, 5010)
+    assert.equal(bound.attempts[0].job_started_at, 5010)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('binds a created Run before its DSH session exists so launch failures can resume it', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-created-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-created-run' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '会话创建失败' } })
+    const bound = await store.bindRun('task-created-run', 'run-created-before-session')
+    assert.equal(bound.run_id, 'run-created-before-session')
+    assert.equal(bound.status, 'preparing')
+    const failed = await store.markLaunchFailed('task-created-run', '会话创建失败')
+    assert.equal(failed.run_id, 'run-created-before-session')
+    assert.equal(failed.status, 'failed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('does not resurrect a stopped ACP attempt from a stale running Run snapshot', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-stale-stop-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-stale-stop' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '停止竞态' } })
+    await store.addConversation('task-stale-stop', { sessionId: 'session-stop', title: '分析会话', kind: 'analysis' })
+    await store.bindRunBySession('session-stop', { run_id: 'run-stale-stop', lifecycle_status: 'running' })
+    await store.markStopped('task-stale-stop')
+    await store.reconcileRuns([{ run_id: 'run-stale-stop', lifecycle_status: 'running' }])
+    const task = await store.get('task-stale-stop')
+    assert.equal(task.status, 'stopped')
+    assert.equal(task.execution_status, 'stopped')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('isolates identical Job ids by owner and settles the matching attempt', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-attempts-'))
+  let id = 0
+  try {
+    const store = createTaskStore({
+      storePath: path.join(root, 'tasks-v1.json'),
+      idFactory: () => `task-attempt-${++id}`,
+    })
+    const first = await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '第一条' } })
+    const second = await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '第二条' } })
+    await store.bindJob(first.task_id, {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-a',
+      runtimeInstanceId: 'runtime-a', attemptId: 'attempt-a',
+    })
+    await store.bindJob(second.task_id, {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-b',
+      runtimeInstanceId: 'runtime-b', attemptId: 'attempt-b',
+    })
+
+    assert.equal((await store.getByJob('subagent-1', { ownerSessionId: 'owner-a' })).task_id, first.task_id)
+    assert.equal((await store.getByJob('subagent-1', { ownerSessionId: 'owner-b' })).task_id, second.task_id)
+    await store.recordJobActivity({ jobId: 'subagent-1', ownerSessionId: 'owner-b' }, '第二条输出')
+    await store.settleJob({ jobId: 'subagent-1', ownerSessionId: 'owner-b' }, { status: 'failed', detail: '只失败第二条' })
+
+    const firstAfter = await store.get(first.task_id)
+    const secondAfter = await store.get(second.task_id)
+    assert.equal(firstAfter.status, 'running')
+    assert.equal(firstAfter.last_output, null)
+    assert.equal(secondAfter.status, 'failed')
+    assert.equal(secondAfter.last_output, '第二条输出')
+    assert.equal(secondAfter.attempts[0].attempt_id, 'attempt-b')
+    assert.equal(secondAfter.attempts[0].execution_status, 'failed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('records an ACP continuation stall as needing attention without losing the execution error', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-attention-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-attention' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '续接停滞' } })
+    await store.bindJob('task-attention', {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-a', attemptId: 'attempt-a',
+    })
+    await store.settleJob({ jobId: 'subagent-1', ownerSessionId: 'owner-a' }, {
+      status: 'failed',
+      detail: '两轮续接没有推进 STEP_05',
+      attention_required: true,
+      attention_code: 'PANGEA_CONTINUATION_STALLED',
+    })
+
+    const task = await store.get('task-attention')
+    assert.equal(task.status, 'needs_attention')
+    assert.equal(task.execution_status, 'failed')
+    assert.equal(task.launch_error_code, 'PANGEA_CONTINUATION_STALLED')
+    assert.equal(task.terminal_error, '两轮续接没有推进 STEP_05')
+    assert.equal(task.attempts[0].execution_status, 'failed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('uses Job startedAt as part of the durable execution identity', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-job-start-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-job-start' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: 'Job identity' } })
+    await store.bindJob('task-job-start', {
+      jobId: 'subagent-1', provider: 'pangea-opencode', ownerSessionId: 'owner-a',
+      attemptId: 'attempt-a', jobStartedAt: 100,
+    })
+    assert.equal(await store.getByJob('subagent-1', { ownerSessionId: 'owner-a', jobStartedAt: 200 }), null)
+    assert.equal(await store.recordJobActivity({ jobId: 'subagent-1', ownerSessionId: 'owner-a', jobStartedAt: 200 }, 'wrong job'), null)
+    assert.equal((await store.get('task-job-start')).last_output, null)
+    assert.equal((await store.getByJob('subagent-1', { ownerSessionId: 'owner-a', jobStartedAt: 100 })).task_id, 'task-job-start')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('ignores late output from an older attempt at the task level', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-late-attempt-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-late-attempt' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '迟到输出' } })
+    await store.bindJob('task-late-attempt', {
+      jobId: 'job-old', provider: 'pangea-opencode', ownerSessionId: 'owner',
+      attemptId: 'attempt-old',
+    })
+    const next = await store.prepareProviderLaunch('task-late-attempt', 'pangea-opencode')
+    await store.bindJob('task-late-attempt', {
+      jobId: 'job-new', provider: 'pangea-opencode', ownerSessionId: 'owner',
+      attemptId: next.attempt_id,
+    })
+    await store.recordJobActivity({ jobId: 'job-old', ownerSessionId: 'owner', attemptId: 'attempt-old' }, '旧输出')
+    const task = await store.get('task-late-attempt')
+    assert.equal(task.attempt_id, next.attempt_id)
+    assert.equal(task.last_output, null)
+    assert.equal(task.attempts.find(item => item.attempt_id === 'attempt-old').last_output, '旧输出')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('keeps the first terminal settlement for an attempt', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-terminal-idempotent-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-terminal-idempotent' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '终态幂等' } })
+    await store.bindJob('task-terminal-idempotent', { jobId: 'job-1', provider: 'pangea-opencode', ownerSessionId: 'owner', attemptId: 'attempt-1' })
+    const completed = await store.settleJob({ jobId: 'job-1', ownerSessionId: 'owner', attemptId: 'attempt-1' }, { status: 'completed' })
+    const lateFailure = await store.settleJob({ jobId: 'job-1', ownerSessionId: 'owner', attemptId: 'attempt-1' }, { status: 'failed', detail: '迟到失败' })
+    assert.equal(completed.status, 'completed')
+    assert.equal(lateFailure.status, 'completed')
+    assert.equal(lateFailure.attempts[0].execution_status, 'completed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('keeps a requested stop pending until the Job reports a terminal state', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-stopping-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-stopping' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '停止确认' } })
+    await store.prepareProviderLaunch('task-stopping', 'pangea-opencode')
+    const stopping = await store.markStopping('task-stopping')
+    assert.equal(stopping.execution_status, 'stopping')
+    const bound = await store.bindJob('task-stopping', {
+      jobId: 'job-stopping', provider: 'pangea-opencode', ownerSessionId: 'owner', attemptId: stopping.attempt_id, jobStartedAt: 100,
+    })
+    assert.equal(bound.execution_status, 'stopping')
+    assert.equal(bound.status, 'preparing')
+    assert.equal((await store.get('task-stopping')).attempts[0].execution_status, 'stopping')
+    const stopped = await store.settleJob({ jobId: 'job-stopping', ownerSessionId: 'owner', attemptId: stopping.attempt_id }, { status: 'killed' })
+    assert.equal(stopped.execution_status, 'stopped')
+    assert.equal(stopped.status, 'stopped')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('does not promote a late Job binding from an older attempt to the current task', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-late-bind-'))
+  try {
+    let attempt = 0
+    const store = createTaskStore({
+      storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'task-late-bind', attemptIdFactory: () => `attempt-${++attempt}`,
+    })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '迟到绑定' } })
+    const first = await store.prepareProviderLaunch('task-late-bind', 'pangea-opencode')
+    const second = await store.prepareProviderLaunch('task-late-bind', 'pangea-opencode')
+    const bound = await store.bindJob('task-late-bind', {
+      jobId: 'job-old', provider: 'pangea-opencode', ownerSessionId: 'owner-old', attemptId: first.attempt_id,
+    })
+    assert.equal(bound.attempt_id, second.attempt_id)
+    assert.equal(bound.job_id, null)
+    assert.equal(bound.attempts.find(item => item.attempt_id === first.attempt_id).job_id, 'job-old')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

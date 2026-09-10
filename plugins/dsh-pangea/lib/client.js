@@ -8,6 +8,7 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
     const React = require('react')
+    const ReactDOM = require('react-dom')
     const h = React.createElement
     const inject = ['betterSidebar', 'workspaces', 'sessions']
     const PAGE_PREFIX = 'dsh-pangea:'
@@ -272,7 +273,7 @@ window.__ModuleLoader__.load({
           }
           body[data-pangea-product-shell] #root [data-pane="conversation"] {
             grid-column: 3; grid-row: 1; min-width: 0; margin: 0 !important;
-            box-sizing: border-box; padding-top: 204px;
+            box-sizing: border-box; padding-top: 0;
             border-left: 1px solid #dfe3e8; background: #fbfcfd;
             display: none !important;
           }
@@ -283,6 +284,8 @@ window.__ModuleLoader__.load({
             display: flex !important;
           }
           body[data-pangea-product-shell] #root [data-pane="conversation"] > * { min-height: 0; flex: 1; }
+          body[data-pangea-product-shell] #root [data-pane="conversation"] > [data-pangea-assistant-portal="header"] { flex: 0 0 auto; }
+          body[data-pangea-product-shell] #root [data-pangea-assistant-portal="process"] { display: flex; flex: 0 0 auto; min-height: 0; }
           body[data-pangea-product-shell] #root [data-pane="conversation"] .pXSMma_stack { display: none !important; }
           body[data-pangea-product-shell] #root [data-pane="conversation"] .wSkVaW_root[data-phase="hero"] .wSkVaW_scrollBody {
             justify-content: flex-end !important;
@@ -305,9 +308,8 @@ window.__ModuleLoader__.load({
           }
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelBody { height: 100%; }
           body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-head] {
-            display: block; position: fixed; z-index: 35; top: var(--pangea-topbar-height);
-            left: calc(100vw - var(--pangea-ai-width)); right: auto;
-            box-sizing: border-box; width: var(--pangea-ai-width); height: 204px;
+            display: block; position: static; z-index: auto;
+            box-sizing: border-box; width: 100%; height: 204px;
             padding: 0 24px 16px; border-left: 1px solid #dfe3e8; border-bottom: 1px solid #e5e8ec;
             color: var(--pangea-ink); background: rgba(251,252,253,.98);
           }
@@ -348,13 +350,109 @@ window.__ModuleLoader__.load({
           [data-pangea-assistant-head] { padding-inline: 20px; }
         }
 
+        [data-pangea-assistant-process] { display: none; }
+        [data-pangea-assistant-narrow-toggle] { display: none; }
+        [data-composer-seat][data-pangea-analysis-readonly="true"] [data-composer-card] {
+          pointer-events: none; opacity: .55;
+        }
+        @media (min-width: 1180px) {
+          body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-process] {
+            position: static; z-index: auto; display: flex; flex-direction: column; box-sizing: border-box; width: 100%;
+            height: 100%; min-height: 0; max-height: none; overflow: hidden; padding: 14px 18px 12px; border-top: 1px solid #dfe3e8;
+            color: var(--pangea-ink); background: rgba(251,252,253,.98);
+          }
+          [data-pangea-assistant-process-head] { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: none; font-size: 13px; }
+          [data-pangea-assistant-process-status] { color: #68707c; font-size: 11px; }
+          [data-pangea-assistant-process-status="failed"], [data-pangea-assistant-process-status="interrupted"] { color: var(--pangea-red); }
+          [data-pangea-assistant-process-error] { flex: none; margin-top: 8px; color: var(--pangea-red); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+          [data-pangea-assistant-process-output] { flex: 1; min-height: 48px; overflow: auto; margin: 8px 0 0; padding: 10px; border: 1px solid #e1e4e8; border-radius: 7px; color: #34383f; background: #fff; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+          [data-pangea-assistant-process-events] { flex: none; max-height: 150px; overflow: auto; margin-top: 8px; color: #68707c; font-size: 11px; line-height: 18px; }
+          [data-pangea-assistant-process-events] summary { cursor: pointer; color: #4d5560; }
+        }
+
         @media (max-width: 1179px) {
+          body[data-pangea-product-shell] #root {
+            width: 100% !important; margin-right: 0 !important;
+          }
+          body[data-pangea-product-shell] #root .pI_x6G_frame {
+            box-sizing: border-box;
+          }
+          body[data-pangea-product-shell] #root .pI_x6G_sidebarCol { display: none !important; }
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panel {
+            left: 0 !important; right: 0 !important; width: auto !important;
+            border-left: 0 !important; border-right: 1px solid var(--dsw-alias-border-l2);
+            padding-top: var(--pangea-topbar-height) !important;
+            visibility: visible !important; transform: none !important; pointer-events: auto !important;
+          }
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelResize,
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_tabBar,
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_toggleCluster {
+            display: none !important;
+          }
+          body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelBody { height: 100%; }
           [data-pangea-shell] { grid-template-columns: 74px minmax(0, 1fr); }
           [data-pangea-product-nav] { padding-inline: 9px; }
           [data-pangea-nav-label] { display: none; }
           [data-pangea-nav-button], [data-pangea-tool-button] { grid-template-columns: 1fr; padding: 0; place-items: center; }
           [data-pangea-topbar-title] { margin-left: 18px; padding-left: 18px; font-size: 18px; }
           [data-pangea-project] { display: none; }
+          [data-pangea-assistant-narrow-toggle] {
+            display: inline-flex; align-items: center; height: 34px; margin-right: 10px; padding: 0 12px;
+            border: 1px solid #c7000b; border-radius: 6px; color: #c7000b; background: #fff; font: inherit; cursor: pointer;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant] #root .pI_x6G_frame {
+            grid-template-columns: 0 minmax(0, 1fr) 0 !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant]:not([data-pangea-task-assistant-open]) #root [data-pane="conversation"] {
+            display: none !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant]:not([data-pangea-task-assistant-open]) #root [data-pane="details"] {
+            grid-column: 2; grid-row: 1; display: block !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] #root .pI_x6G_frame {
+            grid-template-columns: 0 0 minmax(0, 1fr) !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] #root [data-pane="details"] { display: none !important; }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] #root [data-pane="conversation"] {
+            grid-column: 3; grid-row: 1; display: flex !important; min-width: 0; padding-top: var(--pangea-topbar-height);
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_panel {
+            border: 0 !important; background: transparent !important; pointer-events: none !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_panelBody,
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_workbench,
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_pane,
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_paneContent,
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-dsh-panel-host] .nArs4W_paneTab {
+            background: transparent !important;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-shell] { background: transparent; pointer-events: none; }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-topbar] { pointer-events: auto; }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-product-nav],
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-page] { display: none !important; }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-assistant-head] {
+            display: block; height: auto; padding: 12px 16px; border-bottom: 1px solid #e5e8ec;
+          }
+          body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-assistant-process] {
+            display: flex; flex-direction: column; height: 100%; min-height: 0; max-height: none; padding: 12px 16px;
+          }
+        }
+
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] {
+          overflow: hidden;
+        }
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] > [data-slot="conversation.session"] {
+          display: none !important;
+        }
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-session-mismatch="true"] > [data-slot="conversation.session"],
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-session-mismatch="true"] > [data-composer-seat] {
+          display: none !important;
+        }
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] > [data-pangea-assistant-portal="process"] {
+          display: flex; flex: 1 1 0; min-height: 0; overflow: hidden;
+        }
+        body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] > [data-composer-seat] {
+          z-index: 7; flex: 0 0 auto; position: sticky; bottom: 0;
         }
 
         body.dsh-desktop-windows-titlebar-layout [data-pangea-topbar] {
@@ -417,7 +515,7 @@ window.__ModuleLoader__.load({
       ], 28, 1.8)
     }
 
-    function ProductHeader({ scope, systemState }) {
+    function ProductHeader({ scope, systemState, assistantVisible, assistantOpen, onToggleAssistant }) {
       return h('header', { 'data-pangea-topbar': true },
         h('div', { 'data-pangea-topbar-brand': true }, h(HuaweiLogo)),
         h('div', { 'data-pangea-topbar-title': true }, 'PANGEA 测试工作台'),
@@ -425,6 +523,10 @@ window.__ModuleLoader__.load({
           h('span', null, workspaceLabel(scope)),
           lineIcon([h('path', { key: 'a', d: 'm7 9 5 5 5-5' })], 18, 1.7)),
         h('span', { 'data-pangea-topbar-spacer': true }),
+        assistantVisible ? h('button', {
+          type: 'button', 'data-pangea-assistant-narrow-toggle': true,
+          'aria-expanded': assistantOpen ? 'true' : 'false', onClick: onToggleAssistant,
+        }, assistantOpen ? '返回分析' : 'AI 助手') : null,
         h('div', { 'data-pangea-system-state': true, 'data-state': systemState.state, role: 'status' },
           h('span', { 'data-pangea-system-dot': true }, systemState.state === 'ok' ? '✓' : '!'),
           h('span', null, systemState.label)))
@@ -510,7 +612,7 @@ window.__ModuleLoader__.load({
           h('article', { 'data-pangea-settings-card': true },
             h('div', null,
               h('h2', { 'data-pangea-settings-card-title': true }, '模型与 API'),
-              h('p', { 'data-pangea-settings-card-description': true }, '配置 DSH 官方模型、自定义模型提供方及 API 凭据。PANGEA 与 ACP 运行器统一使用这里维护的模型路由。')),
+              h('p', { 'data-pangea-settings-card-description': true }, '配置 DSH 对话使用的模型提供方及 API 凭据。外部 Agent 的可用模型可在“新建分析”中直接选择。')),
             h('div', { 'data-pangea-settings-actions': true },
               h('button', { type: 'button', 'data-pangea-settings-action': true, onClick: openModels }, '打开模型设置'))),
           h('article', { 'data-pangea-settings-card': true },
@@ -545,7 +647,7 @@ window.__ModuleLoader__.load({
           h('span', { style: { minWidth: 0 } },
             h('span', { 'data-pangea-assistant-name': true, style: { display: 'block' }, title: context?.runId }, context?.title ?? '选择一个 PANGEA Run'),
             h('span', { 'data-pangea-assistant-meta': true, style: { display: 'block' } }, context?.phase ? `阶段：${context.phase}` : '对话将使用当前工作区上下文'),
-            h('span', { 'data-pangea-assistant-progress': true, style: { display: 'block' } }, percent === undefined ? '等待任务上下文' : `进度：${percent}%`)),
+            h('span', { 'data-pangea-assistant-progress': true, style: { display: 'block' } }, context?.activeConversationKind === 'architecture' ? '画图状态与主分析独立' : percent === undefined ? '等待任务上下文' : `进度：${percent}%`)),
           lineIcon([h('path', { key: 'a', d: 'm8 10 4 4 4-4' })], 18, 1.7)),
         h('div', { 'data-pangea-assistant-actions': true },
           h('select', {
@@ -559,8 +661,148 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', 'data-pangea-assistant-new': true, onClick: () => context?.onCreateConversation?.() }, '新建会话')))
     }
 
-    function ProductShell({ service, betterSidebar, page, scope, tab, visible, tabProps, children }) {
+    function shouldShowAssistantProcess(context) {
+      return Boolean(context?.taskId) && (!context.activeConversationKind && !context.activeConversationId && !context.activeConversationSessionId
+        || context.activeConversationKind === 'analysis'
+        || context.activeConversationKind === 'architecture'
+        || (!context.activeConversationKind && context.activeConversationSessionId === context.ownerSessionId))
+    }
+
+    function assistantSessionId(context) {
+      if (!context?.taskId || !context.activeConversationSessionId) return null
+      const conversation = context.conversations?.find(item => item.conversation_id === context.activeConversationId)
+      if (!conversation || conversation.session_id !== context.activeConversationSessionId) return null
+      // A retry can still list the previous analysis conversation before its
+      // new owner session has been bound. Do not reopen that old attempt.
+      if (conversation.kind === 'analysis' && context.attemptId && conversation.session_id !== context.ownerSessionId) return null
+      return conversation.session_id
+    }
+
+    function setComposerReadonly(composer, readonly) {
+      if (!composer) return
+      if (readonly) composer.dataset.pangeaAnalysisReadonly = 'true'
+      else delete composer.dataset.pangeaAnalysisReadonly
+      for (const card of composer.querySelectorAll('[data-composer-card]')) {
+        card.inert = readonly
+        if (readonly) card.setAttribute('aria-disabled', 'true')
+        else card.removeAttribute('aria-disabled')
+      }
+    }
+
+    function setAnalysisProcessLayout(scroll, composer, active, sessionMatches = true, readonly = active) {
+      if (scroll) {
+        if (active) scroll.dataset.pangeaAnalysisProcess = 'true'
+        else delete scroll.dataset.pangeaAnalysisProcess
+        if (!sessionMatches) scroll.dataset.pangeaSessionMismatch = 'true'
+        else delete scroll.dataset.pangeaSessionMismatch
+      }
+      setComposerReadonly(composer, readonly || !sessionMatches)
+    }
+
+    function AssistantProcess({ context }) {
+      if (!shouldShowAssistantProcess(context)) return null
+      const process = context.process ?? {}
+      const output = typeof process.output === 'string' && process.output.trim() !== ''
+        ? process.output.slice(-12000)
+        : '等待 Agent 产生可显示的过程输出…'
+      const status = process.status ?? 'preparing'
+      const statusLabel = {
+        starting: '正在启动', queued: '排队中', running: context.activeConversationKind === 'architecture' ? '生成中' : '分析中', stopping: '正在停止',
+        completed: '已完成', failed: '失败', killed: '已停止', stopped: '已停止', interrupted: '已中断',
+      }[status] ?? status
+      return h('section', { 'data-pangea-assistant-process': true, 'aria-label': '当前 Run 分析过程' },
+        h('div', { 'data-pangea-assistant-process-head': true },
+          h('strong', null, context.activeConversationKind === 'architecture' ? '画图过程' : '分析过程'), h('span', { 'data-pangea-assistant-process-status': status }, statusLabel)),
+        process.last_activity_at ? h('div', null, `最近活动：${process.last_activity_at}`) : null,
+        h('div', { 'data-pangea-assistant-process-mode': true }, context.activeConversationKind === 'architecture' ? '画图过程只读；修改图表请使用“从当前图创建修改会话”。' : '分析过程只读；需要交流时请切换或新建讨论会话。'),
+        process.error ? h('div', { 'data-pangea-assistant-process-error': true, role: 'alert' }, process.error) : null,
+        h('pre', { 'data-pangea-assistant-process-output': true }, output),
+        Array.isArray(process.events) && process.events.length
+          ? h('details', { 'data-pangea-assistant-process-events': true },
+            h('summary', null, `生命周期 · ${process.events.length} 条`),
+            process.events.map((event, index) => h('div', { key: `${event.at ?? index}:${event.stage ?? index}` }, event.label ?? event.stage ?? '事件')))
+          : null)
+    }
+
+    function AssistantPortals({ context, enabled, currentSessionId }) {
+      const [hosts, setHosts] = React.useState(null)
+      const hostsRef = React.useRef(null)
+      const expectedSessionId = assistantSessionId(context)
+      const sessionMatches = Boolean(expectedSessionId && expectedSessionId === currentSessionId)
+      const analysisActive = shouldShowAssistantProcess(context)
+      const processActive = analysisActive && context?.processMode === 'acp'
+      React.useLayoutEffect(() => {
+        let disposed = false
+        let observer
+        const removeHosts = () => {
+          const current = hostsRef.current
+          if (current) {
+            current.headerHost.remove()
+            current.processHost.remove()
+            setAnalysisProcessLayout(current.scroll, current.composer, false)
+            hostsRef.current = null
+          }
+          if (!disposed) setHosts(null)
+        }
+        if (!enabled || !context?.taskId) {
+          removeHosts()
+          return undefined
+        }
+        const root = document.querySelector('#root') || document.body
+        const mount = () => {
+          if (disposed) return
+          const pane = root.querySelector('[data-pane="conversation"]')
+          const scroll = pane?.querySelector('[data-conversation-scroll]')
+          if (!pane || !scroll) return
+          const composer = scroll.querySelector('[data-composer-seat]')
+          const current = hostsRef.current
+          if (current) {
+            if (current.composer !== composer) {
+              setComposerReadonly(current.composer, false)
+              current.composer = composer
+            }
+            current.scroll = scroll
+            setAnalysisProcessLayout(scroll, composer, processActive, sessionMatches, analysisActive && (context?.activeConversationKind !== 'architecture' || processActive))
+            return
+          }
+          const headerHost = document.createElement('div')
+          headerHost.dataset.pangeaAssistantPortal = 'header'
+          const processHost = document.createElement('div')
+          processHost.dataset.pangeaAssistantPortal = 'process'
+          pane.insertBefore(headerHost, pane.firstChild)
+          scroll.insertBefore(processHost, composer || null)
+          setAnalysisProcessLayout(scroll, composer, processActive, sessionMatches, analysisActive && (context?.activeConversationKind !== 'architecture' || processActive))
+          hostsRef.current = { headerHost, processHost, scroll, composer }
+          setHosts(hostsRef.current)
+        }
+        observer = new MutationObserver(() => {
+          const current = hostsRef.current
+          if (current && (!current.headerHost.isConnected || !current.processHost.isConnected)) removeHosts()
+          mount()
+        })
+        observer.observe(root, { childList: true, subtree: true })
+        mount()
+        return () => {
+          disposed = true
+          observer?.disconnect()
+          removeHosts()
+        }
+      }, [analysisActive, context?.activeConversationKind, context?.activeConversationSessionId, context?.ownerSessionId, context?.processMode, context?.taskId, enabled, processActive, sessionMatches])
+      if (!hosts || !ReactDOM?.createPortal) return null
+      return h(React.Fragment, null,
+        ReactDOM.createPortal(h(AssistantHeader, { context }), hosts.headerHost),
+        ReactDOM.createPortal(processActive
+          ? h(AssistantProcess, { context })
+          : !sessionMatches ? h('p', { role: 'status' }, '正在切换任务会话…') : null, hosts.processHost))
+    }
+
+    function ProductShell({ service, betterSidebar, sessions, page, scope, tab, visible, tabProps, children }) {
       const snapshot = React.useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
+      const selectedTaskId = React.useSyncExternalStore(service.subscribeTaskSelection, service.getSelectedTaskId, service.getSelectedTaskId)
+      const sessionList = React.useSyncExternalStore(
+        React.useCallback(listener => sessions?.list?.subscribe(listener) ?? (() => {}), [sessions]),
+        React.useCallback(() => sessions?.list?.getSnapshot() ?? null, [sessions]),
+      )
       const sidebarSnapshot = React.useSyncExternalStore(
         betterSidebar.subscribeState,
         betterSidebar.getSnapshot,
@@ -569,7 +811,12 @@ window.__ModuleLoader__.load({
       const productStateKey = scope?.cwd ?? scope?.sessionId ?? '__default__'
       const initialProductState = productStateByWorkspace.get(productStateKey) ?? DEFAULT_PRODUCT_STATE
       const [systemState, setSystemState] = React.useState(initialProductState.systemState)
-      const [assistantContext, setAssistantContext] = React.useState(initialProductState.assistantContext)
+      const [cachedAssistantContext, setAssistantContext] = React.useState(initialProductState.assistantContext)
+      const assistantContext = cachedAssistantContext
+        && (!selectedTaskId || cachedAssistantContext.taskId === selectedTaskId)
+        && (!scope?.cwd || cachedAssistantContext.workspaceKey === scope.cwd)
+        ? cachedAssistantContext : null
+      const [assistantOpen, setAssistantOpen] = React.useState(false)
       const sidebarState = sidebarSnapshot?.state
       const productVisible = visible
         || tabIsActive(sidebarState?.splits, tab?.id)
@@ -591,6 +838,13 @@ window.__ModuleLoader__.load({
           }
         }
       }, [assistantContext?.taskId, page.id, productVisible])
+      React.useEffect(() => {
+        const showNarrowAssistant = assistantOpen && productVisible && page.id === 'analysis' && Boolean(assistantContext?.taskId)
+        if (showNarrowAssistant) document.body.setAttribute('data-pangea-task-assistant-open', assistantContext.taskId)
+        else document.body.removeAttribute('data-pangea-task-assistant-open')
+        return () => document.body.removeAttribute('data-pangea-task-assistant-open')
+      }, [assistantContext?.taskId, assistantOpen, page.id, productVisible])
+      React.useEffect(() => { setAssistantOpen(false) }, [assistantContext?.taskId])
       React.useLayoutEffect(() => {
         if (!productVisible) return undefined
         const body = document.body
@@ -686,8 +940,13 @@ window.__ModuleLoader__.load({
           })))
       }
       return h('div', { 'data-pangea-shell': true },
-        h(ProductHeader, { scope, systemState }),
-        h(AssistantHeader, { context: assistantContext }),
+        h(ProductHeader, {
+          scope, systemState,
+          assistantVisible: page.id === 'analysis' && Boolean(assistantContext?.taskId),
+          assistantOpen,
+          onToggleAssistant: () => setAssistantOpen(value => !value),
+        }),
+        h(AssistantPortals, { context: assistantContext, enabled: productVisible && page.id === 'analysis', currentSessionId: sessionList?.current }),
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
           h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => item.id !== 'settings' && pageIsAvailable(item, scope)).map(item => h('button', {
             key: item.id, type: 'button', 'data-pangea-nav-button': true, 'data-active': item.id === page.id ? 'true' : 'false',
@@ -701,7 +960,8 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'browser' ? 'true' : 'false', onClick: () => openUtility('browser', '浏览器') }, utilityIcon('browser'), h('span', { 'data-pangea-nav-label': true }, '浏览器')),
             h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-pangea-native-model-settings': true, 'data-active': page.id === 'settings' ? 'true' : 'false', onClick: () => service.openPage(scope, 'settings') }, utilityIcon('settings'), h('span', { 'data-pangea-nav-label': true }, '设置')))),
         h('main', { 'data-pangea-page': page.id },
-          utility === 'editor' || utility === 'browser' ? renderUtility(utility) : React.cloneElement(children, { visible: productVisible }),
+          h('div', { 'data-pangea-product-content': true, style: { display: utility ? 'none' : undefined } }, React.cloneElement(children, { visible: productVisible })),
+          utility === 'editor' || utility === 'browser' ? h('div', { style: { position: 'absolute', inset: 0, zIndex: 10, display: 'flex' } }, renderUtility(utility)) : null,
           utility === 'terminal' ? h('div', { 'data-pangea-terminal-dock': true }, ...renderUtility('terminal').props.children) : null))
     }
 
@@ -765,7 +1025,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function createPangeaService(betterSidebar) {
+    function createPangeaService(betterSidebar, sessions) {
       const pages = new Map()
       const nativeDisposers = new Map()
       const listeners = new Set()
@@ -776,7 +1036,7 @@ window.__ModuleLoader__.load({
       let revision = 0
       let defaultPageId
       let snapshot = Object.freeze({ revision, pages: Object.freeze([]) })
-      let runDraft = Object.freeze({ revision: 0, requestId: 0, assetIds: Object.freeze([]) })
+      let runDraft = Object.freeze({ revision: 0, requestId: 0, intent: 'create', runId: null, assetIds: Object.freeze([]) })
       let selectedTaskId
       const initializedDefaultSessions = new Set()
       const productSessions = new Set()
@@ -817,9 +1077,10 @@ window.__ModuleLoader__.load({
         else openPage({ sessionId }, page.id)
       }
 
-      function registerProductSession(sessionId) {
+      function registerProductSession(sessionId, pageId) {
         if (typeof sessionId !== 'string' || sessionId.trim() === '') return false
         productSessions.add(sessionId)
+        if (pages.has(pageId)) lastPageBySession.set(sessionId, pageId)
         ensureProductPage()
         return true
       }
@@ -869,7 +1130,7 @@ window.__ModuleLoader__.load({
           available: descriptor.available,
           badge: descriptor.badge,
           component: props => h(ProductShell, {
-            service: publicService, betterSidebar, page, scope: props.scope, tab: props.tab, visible: props.visible,
+            service: publicService, betterSidebar, sessions, page, scope: props.scope, tab: props.tab, visible: props.visible,
             tabProps: props,
           }, h(descriptor.component, props)),
         })
@@ -943,7 +1204,8 @@ window.__ModuleLoader__.load({
         const page = pages.get(pageId)
         if (!page) return false
         if (scope?.sessionId) lastPageBySession.set(scope.sessionId, page.id)
-        const state = betterSidebar.getSnapshot?.()?.state
+        const current = betterSidebar.getSnapshot?.()
+        const state = !scope?.sessionId || current?.sessionId === scope.sessionId ? current?.state : undefined
         const existing = state ? [...allTabs(state.splits), ...allTabs(state.bottomSplits)].find(item => item.type === page.nativeId) : undefined
         if (existing) betterSidebar.updateTab?.(existing.id, { title: typeof page.title === 'function' ? page.title() : page.title, path: '', meta: { ...(existing.meta && typeof existing.meta === 'object' ? existing.meta : {}), pangeaUtility: null } })
         if (existing) betterSidebar.activateTab?.(existing.id, scope)
@@ -990,7 +1252,14 @@ window.__ModuleLoader__.load({
       }
 
       function requestRunCreation(scope, patch = {}) {
-        updateRunDraft({ ...patch, requestId: runDraft.requestId + 1 })
+        updateRunDraft({ ...patch, intent: 'create', runId: null, requestId: runDraft.requestId + 1 })
+        return openPage(scope, 'analysis')
+      }
+
+      function requestRunSelection(scope, runId) {
+        const value = typeof runId === 'string' ? runId.trim() : ''
+        if (!value) return false
+        updateRunDraft({ intent: 'select-run', runId: value, requestId: runDraft.requestId + 1 })
         return openPage(scope, 'analysis')
       }
 
@@ -1009,6 +1278,7 @@ window.__ModuleLoader__.load({
         updateRunDraft,
         subscribeRunDraft,
         requestRunCreation,
+        requestRunSelection,
         registerProductSession,
         selectTask,
         getSelectedTaskId,
@@ -1026,7 +1296,7 @@ window.__ModuleLoader__.load({
       const betterSidebar = ctx.betterSidebar
       if (!betterSidebar) return
       ctx.effect(installProductStyles, 'dsh-pangea: product shell styles')
-      const service = createPangeaService(betterSidebar)
+      const service = createPangeaService(betterSidebar, ctx.sessions)
       ctx.effect(() => service.registerPage({ id: 'settings', title: '设置', order: 1000, component: SettingsPage }), 'dsh-pangea: product settings page')
       ctx.provide('pangea', service)
       ctx.effect(() => installProductWorkspaceBootstrap(ctx, service), 'dsh-pangea: product workspace bootstrap')
@@ -1041,6 +1311,10 @@ window.__ModuleLoader__.load({
     exports.applyBuiltinPolicy = applyBuiltinPolicy
     exports.closeDisallowedTabs = closeDisallowedTabs
     exports.createPangeaService = createPangeaService
+    exports.setComposerReadonly = setComposerReadonly
+    exports.setAnalysisProcessLayout = setAnalysisProcessLayout
+    exports.shouldShowAssistantProcess = shouldShowAssistantProcess
+    exports.assistantSessionId = assistantSessionId
     exports.apply = apply
     return module.exports
   },
@@ -1148,7 +1422,7 @@ window.__ModuleLoader__.load({
     title.textContent = '配置模型与 API'
     title.style.cssText = 'margin:0;font-size:22px;line-height:30px'
     const description = document.createElement('p')
-    description.textContent = 'PANGEA 使用 DSH 管理的官方或自定义模型。请先完成模型与 API 接入。'
+    description.textContent = '请配置模型提供方或自定义 API，并选择默认模型。'
     description.style.cssText = 'margin:10px 0 22px;color:#68707c;font-size:14px;line-height:22px'
 
     const action = document.createElement('button')

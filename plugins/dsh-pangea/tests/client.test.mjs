@@ -8,13 +8,15 @@ import { fileURLToPath } from 'node:url'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const clientPath = path.resolve(here, '..', 'lib', 'client.js')
 
-async function loadClient() {
+async function loadClient(react = { name: 'react' }, extraSandbox = {}) {
   const source = await readFile(clientPath, 'utf8')
   let exported
-  const modules = new Map([['react', { name: 'react' }]])
+  const modules = new Map([['react', react], ['react-dom', { createPortal: (child, host) => ({ child, host }) }]])
   const requireModule = specifier => modules.get(specifier) ?? { name: specifier }
-  const sandbox = { console, window: { __ModuleLoader__: { load(spec) { exported = spec.factory(requireModule) } } } }
+  const { document, ...extras } = extraSandbox
+  const sandbox = { console, ...extras, window: { ...extras.window, __ModuleLoader__: { load(spec) { exported = spec.factory(requireModule) } } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
+  if (document) sandbox.document = document
   return { exported, source, sandbox, requireModule }
 }
 
@@ -273,6 +275,31 @@ test('restores the last PANGEA page only for registered Desktop product sessions
   assert.equal(sidebar.activated.length, activationCount)
 })
 
+test('new analysis sessions restore their requested page on the first sidebar snapshot', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'home', title: '工作台', default: true, component: () => null })
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  service.registerProductSession('new-analysis', 'analysis')
+  sidebar.opened.length = 0
+  sidebar.setSession('new-analysis')
+  assert.equal(sidebar.opened.length, 1)
+  assert.equal(sidebar.opened[0].seed.type, 'dsh-pangea:analysis')
+  assert.equal(sidebar.opened[0].scope.sessionId, 'new-analysis')
+})
+
+test('opening a page in another session never activates a tab belonging to the current session', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  sidebar.setState({ splits: { active: 'analysis:old', tabs: [{ id: 'analysis:old', type: 'dsh-pangea:analysis' }] }, bottomSplits: { tabs: [] } })
+  service.openPage({ sessionId: 'new-analysis' }, 'analysis')
+  assert.equal(sidebar.activated.length, 0)
+  assert.equal(sidebar.opened[0].scope.sessionId, 'new-analysis')
+})
+
 test('shares a deduplicated asset selection with the analysis page', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()
@@ -304,4 +331,215 @@ test('shares a selected Task between the workbench and analysis page', async () 
   assert.deepEqual(changes, ['task-17'])
 
   dispose()
+})
+
+test('deep-links a report to the selected Run without a task index entry', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  const scope = { sessionId: 'session-1', cwd: '/tmp/project' }
+
+  assert.equal(service.requestRunSelection(scope, 'analysis-260905-01'), true)
+  const draft = service.getRunDraft()
+  assert.equal(draft.revision, 1)
+  assert.equal(draft.requestId, 1)
+  assert.equal(draft.intent, 'select-run')
+  assert.equal(draft.runId, 'analysis-260905-01')
+  assert.deepEqual(Array.from(draft.assetIds), [])
+  assert.equal(sidebar.opened[0].seed.type, 'dsh-pangea:analysis')
+})
+
+test('keeps the product page mounted while a file or browser utility is open', async () => {
+  const { source } = await loadClient()
+  assert.match(source, /data-pangea-product-content/)
+  assert.match(source, /display: utility \? 'none' : undefined/)
+})
+
+test('routes ACP process output to the right assistant panel', async () => {
+  const { exported, source } = await loadClient()
+  assert.match(source, /data-pangea-assistant-process/)
+  assert.match(source, /AssistantProcess/)
+  assert.match(source, /process\.output\.slice\(-12000\)/)
+  assert.match(source, /AssistantPortals/)
+  assert.match(source, /data-pane="conversation"/)
+  assert.match(source, /data-conversation-scroll/)
+  assert.match(source, /ReactDOM\.createPortal/)
+  assert.doesNotMatch(source, /\[data-pangea-assistant-process\][\s\S]*position: fixed/)
+  assert.match(source, /activeConversationKind === 'analysis'/)
+  assert.match(source, /context\?\.processMode === 'acp'/)
+  assert.match(source, /data-pangea-assistant-narrow-toggle/)
+  assert.match(source, /@media \(max-width: 1179px\)[\s\S]*data-pangea-task-assistant-open/s)
+  assert.match(source, /data-pangea-task-assistant\]:not\(\[data-pangea-task-assistant-open\]\)[\s\S]*\[data-pane="conversation"\][\s\S]*display: none !important/s)
+  assert.match(source, /data-pangea-task-assistant\]:not\(\[data-pangea-task-assistant-open\]\)[\s\S]*\[data-pane="details"\][\s\S]*display: block !important/s)
+  assert.match(source, /@media \(max-width: 1179px\)[\s\S]*\[data-dsh-panel-host\] \.nArs4W_panel \{[\s\S]*visibility: visible !important;[\s\S]*transform: none !important;/s)
+  assert.match(source, /data-pangea-task-assistant-open\] \[data-pangea-shell\] \{ background: transparent; pointer-events: none; \}/)
+  assert.match(source, /data-pangea-task-assistant-open\] \[data-pangea-topbar\] \{ pointer-events: auto; \}/)
+  assert.match(source, /data-pangea-task-assistant-open\] \[data-pangea-product-nav\],[\s\S]*data-pangea-task-assistant-open\] \[data-pangea-page\] \{ display: none !important; \}/s)
+  assert.match(source, /\[data-conversation-scroll\]\[data-pangea-analysis-process="true"\] > \[data-slot="conversation\.session"\][\s\S]*display: none !important/s)
+  assert.match(source, /\[data-conversation-scroll\]\[data-pangea-analysis-process="true"\] > \[data-pangea-assistant-portal="process"\][\s\S]*flex: 1 1 0/s)
+  assert.match(source, /\[data-conversation-scroll\]\[data-pangea-analysis-process="true"\] > \[data-composer-seat\][\s\S]*position: sticky[\s\S]*bottom: 0/s)
+  assert.match(source, /\[data-pangea-assistant-process\][\s\S]*height: 100%[\s\S]*max-height: none/s)
+  assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', activeConversationKind: 'analysis' }), true)
+  assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', ownerSessionId: 'owner-1', activeConversationSessionId: 'owner-1' }), true)
+  assert.equal(exported.shouldShowAssistantProcess({ taskId: 'task-1', activeConversationKind: 'discussion' }), false)
+
+  const card = {
+    inert: false,
+    attributes: new Map(),
+    setAttribute(name, value) { this.attributes.set(name, value) },
+    removeAttribute(name) { this.attributes.delete(name) },
+  }
+  const composer = {
+    dataset: {},
+    querySelectorAll(selector) { return selector === '[data-composer-card]' ? [card] : [] },
+  }
+  exported.setComposerReadonly(composer, true)
+  assert.equal(composer.dataset.pangeaAnalysisReadonly, 'true')
+  assert.equal(card.inert, true)
+  assert.equal(card.attributes.get('aria-disabled'), 'true')
+  exported.setComposerReadonly(composer, false)
+  assert.equal('pangeaAnalysisReadonly' in composer.dataset, false)
+  assert.equal(card.inert, false)
+  assert.equal(card.attributes.has('aria-disabled'), false)
+})
+
+test('reserves the assistant body for analysis output while keeping the composer docked', async () => {
+  const { exported } = await loadClient()
+  const scroll = { dataset: {} }
+  const card = {
+    inert: false,
+    attributes: new Map(),
+    setAttribute(name, value) { this.attributes.set(name, value) },
+    removeAttribute(name) { this.attributes.delete(name) },
+  }
+  const composer = {
+    dataset: {},
+    querySelectorAll(selector) { return selector === '[data-composer-card]' ? [card] : [] },
+  }
+
+  exported.setAnalysisProcessLayout(scroll, composer, true)
+  assert.equal(scroll.dataset.pangeaAnalysisProcess, 'true')
+  assert.equal(composer.dataset.pangeaAnalysisReadonly, 'true')
+  assert.equal(card.inert, true)
+
+  exported.setAnalysisProcessLayout(scroll, composer, false)
+  assert.equal('pangeaAnalysisProcess' in scroll.dataset, false)
+  assert.equal('pangeaAnalysisReadonly' in composer.dataset, false)
+  assert.equal(card.inert, false)
+
+  exported.setAnalysisProcessLayout(scroll, composer, false, true, true)
+  assert.equal('pangeaAnalysisProcess' in scroll.dataset, false)
+  assert.equal(composer.dataset.pangeaAnalysisReadonly, 'true')
+  assert.equal(card.inert, true)
+})
+
+test('uses only the selected conversation and current attempt as the assistant session', async () => {
+  const { exported } = await loadClient()
+  const context = {
+    taskId: 'task-06', attemptId: 'attempt-06', ownerSessionId: 'session-06',
+    activeConversationId: 'analysis-06', activeConversationSessionId: 'session-06',
+    conversations: [{ conversation_id: 'analysis-06', session_id: 'session-06', kind: 'analysis' }],
+  }
+  assert.equal(exported.assistantSessionId(context), 'session-06')
+  assert.equal(exported.assistantSessionId({ ...context, activeConversationId: 'analysis-05' }), null)
+  assert.equal(exported.assistantSessionId({ ...context, activeConversationSessionId: 'session-05' }), null)
+  assert.equal(exported.assistantSessionId({ ...context, ownerSessionId: null }), null)
+  assert.equal(exported.assistantSessionId({ ...context, ownerSessionId: 'session-retry' }), null)
+  assert.equal(exported.assistantSessionId({ ...context, ownerSessionId: null, conversations: [
+    { conversation_id: 'analysis-06', session_id: 'session-06', kind: 'assistant' },
+  ] }), 'session-06')
+  assert.equal(exported.shouldShowAssistantProcess({ taskId: 'failed-before-session', process: { error: 'snapshot denied' } }), true)
+})
+
+test('task assistant fences old todos until the selected task session is available', async () => {
+  const oldTodos = [{ id: 'old-todo', content: 'Run 05 analysis', status: 'in_progress' }]
+  const oldSession = { id: 'session-05', projectionValues: { todos: oldTodos } }
+  const newSession = { id: 'session-06', projectionValues: { todos: [{ id: 'new-todo', content: 'Run 06 analysis' }] } }
+  const discussionSession = { id: 'session-06-discussion', projectionValues: { todos: [] } }
+  const context = {
+    taskId: 'task-06', runId: 'run-06', workspaceKey: '/workspace', attemptId: 'attempt-06',
+    activeConversationId: null, activeConversationSessionId: null, ownerSessionId: null, conversations: [],
+    process: { status: 'failed', error: 'snapshot denied' },
+  }
+  for (const scenario of ['unbound', 'switching', 'analysis-ready', 'discussion-ready', 'discussion-remount', 'old-task-cache', 'other-workspace-cache']) {
+    let currentSessionId = scenario === 'discussion-remount' ? discussionSession.id
+      : ['analysis-ready', 'discussion-ready'].includes(scenario) ? newSession.id : oldSession.id
+    const bound = ['switching', 'analysis-ready', 'discussion-ready', 'discussion-remount'].includes(scenario)
+    const cached = bound ? {
+      ...context, ownerSessionId: newSession.id, activeConversationId: 'conversation-06',
+      activeConversationSessionId: newSession.id,
+      activeConversationKind: scenario === 'discussion-ready' ? 'assistant' : 'analysis',
+      conversations: [
+        { conversation_id: 'conversation-06', session_id: newSession.id, kind: scenario === 'discussion-ready' ? 'assistant' : 'analysis' },
+        { conversation_id: 'discussion-06', session_id: discussionSession.id, kind: 'assistant' },
+      ],
+    } : { ...context,
+      taskId: scenario === 'old-task-cache' ? 'task-05' : context.taskId,
+      workspaceKey: scenario === 'other-workspace-cache' ? '/other-workspace' : context.workspaceKey,
+    }
+    const effects = []
+    const layouts = []
+    let stateIndex = 0
+    let renderingShell = true
+    const react = {
+      Fragment: Symbol('Fragment'),
+      createElement(type, props, ...children) { return { type, props: { ...props, children: children.length === 1 ? children[0] : children }, children } },
+      cloneElement(node, props) { return { ...node, props: { ...node.props, ...props } } },
+      useState(initial) { return [renderingShell && stateIndex++ === 1 ? cached : initial, () => {}] },
+      useRef(initial) { return { current: initial } },
+      useCallback(fn) { return fn }, useMemo(fn) { return fn() },
+      useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
+      useEffect(fn) { effects.push(fn) }, useLayoutEffect(fn) { layouts.push(fn) },
+    }
+    const card = { inert: false, setAttribute() {}, removeAttribute() {} }
+    const composer = { dataset: {}, querySelectorAll: () => [card] }
+    const scroll = { dataset: {}, querySelector: () => composer, insertBefore() {} }
+    const pane = { querySelector: () => scroll, insertBefore() {} }
+    const root = { querySelector: () => pane }
+    const { exported, source } = await loadClient(react, {
+      document: {
+        body: { setAttribute() {}, getAttribute() {}, removeAttribute() {} },
+        querySelector: () => root, createElement: () => ({ dataset: {}, remove() {}, isConnected: true }),
+      },
+      window: { addEventListener() {}, removeEventListener() {} },
+      MutationObserver: class { observe() {} disconnect() {} },
+    })
+    const opened = []
+    const sessions = {
+      list: { subscribe() { return () => {} }, getSnapshot() { return { current: currentSessionId, byId: { [oldSession.id]: oldSession, [newSession.id]: newSession, [discussionSession.id]: discussionSession } } } },
+      open(id) { opened.push(id); currentSessionId = id },
+    }
+    const sidebar = fakeSidebar()
+    const service = exported.createPangeaService(sidebar, sessions)
+    service.selectTask('task-06')
+    service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+    const shell = sidebar.getTab('dsh-pangea:analysis').component({ scope: { cwd: '/workspace' }, visible: true })
+    const rendered = shell.type(shell.props)
+    const portal = rendered.children.find(node => node?.type?.name === 'AssistantPortals')
+    if (scenario.endsWith('cache')) {
+      assert.equal(portal.props.context, null, scenario)
+      effects.forEach(effect => effect())
+      assert.deepEqual(opened, [])
+      continue
+    }
+    assert.equal(portal.props.context.taskId, 'task-06')
+    // Render the real portal/layout against a composer holding the old todos.
+    renderingShell = false
+    layouts.length = 0
+    portal.type(portal.props)
+    const cleanup = layouts[0]()
+    assert.equal(scroll.dataset.pangeaSessionMismatch, ['unbound', 'switching', 'discussion-remount'].includes(scenario) ? 'true' : undefined, scenario)
+    assert.equal(card.inert, scenario !== 'discussion-ready', scenario)
+    assert.match(source, /\[data-pangea-session-mismatch="true"\] > \[data-composer-seat\] \{\s*display: none !important/)
+    // A shell can remount after the user's explicit discussion switch while
+    // its workspace cache still points to analysis. It must not switch back.
+    effects.forEach(effect => effect())
+    assert.deepEqual(opened, [], scenario)
+    if (scenario === 'discussion-remount') assert.equal(currentSessionId, discussionSession.id)
+    assert.equal(oldSession.projectionValues.todos, oldTodos)
+    cleanup()
+    assert.equal(scroll.dataset.pangeaSessionMismatch, undefined)
+    assert.equal(card.inert, false)
+  }
 })

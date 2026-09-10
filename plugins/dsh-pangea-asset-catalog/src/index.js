@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -73,18 +74,52 @@ export function listOptions(searchParams) {
   const typeValue = searchParams.get('type') ?? ''
   const statusValue = searchParams.get('status') ?? ''
   const kindValue = searchParams.get('kind') ?? ''
+  const repositoryValue = (searchParams.get('repository_id') ?? '').trim().slice(0, 200)
+  const moduleValue = (searchParams.get('module_tag') ?? '').trim().slice(0, 200)
   return {
     page: positiveInteger(searchParams.get('page'), 1),
     pageSize: PAGE_SIZES.has(pageSizeValue) ? pageSizeValue : 20,
     type: ASSET_TYPES.has(typeValue) ? typeValue : '',
     status: ASSET_STATUSES.has(statusValue) ? statusValue : '',
     kind: KNOWLEDGE_KINDS.has(kindValue) ? kindValue : '',
+    repositoryId: repositoryValue,
+    moduleTag: moduleValue,
     query: (searchParams.get('q') ?? '').trim().slice(0, 200),
   }
 }
 
+function semanticAssets(capabilities) {
+  return capabilities?.source_first?.version === 'source-first-v1' || capabilities?.workflow_versions?.includes('source-first-v1')
+}
+
+async function importPreview({ cwd, args, semantic, sourcePath }) {
+  if (!semantic) return runPangea({ cwd, args })
+  const content = await readFile(sourcePath)
+  return { source_name: path.basename(sourcePath), source_size: content.length,
+    source_sha256: createHash('sha256').update(content).digest('hex'), conflicts: [], duplicate: null }
+}
+
+export async function semanticAssetList({ cwd, dataRoot, options, runner = runPangea }) {
+  const items = []
+  let cursor = 0
+  do {
+    const page = await runner({ cwd, args: ['assets', 'list', '--data-root', dataRoot, '--cursor', String(cursor), '--limit', '200'] })
+    items.push(...page.items)
+    cursor = page.next_cursor
+  } while (cursor !== null && cursor !== undefined)
+  const filtered = items.filter(item => (options.status ? item.status === options.status : item.status !== 'archived')
+    && (!options.type || item.asset_type === options.type)
+    && (!options.query || [item.asset_id, item.title, item.source_path].join(' ').toLowerCase().includes(options.query.toLowerCase())))
+  const start = (options.page - 1) * options.pageSize
+  return { items: filtered.slice(start, start + options.pageSize), total: filtered.length,
+    summary: { total: filtered.length, available: filtered.filter(x => x.status === 'available').length,
+      review: filtered.filter(x => x.status === 'awaiting_review').length, failed: filtered.filter(x => x.status === 'failed').length } }
+}
+
 async function listState({ cwd, dataRoot, runtime, options }) {
   const resolvedDataRoot = dataRootFor(cwd, dataRoot)
+  const capabilities = await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] })
+  const semantic = semanticAssets(capabilities)
   const cursor = (options.page - 1) * options.pageSize
   const args = [
     'assets', 'list', '--data-root', resolvedDataRoot,
@@ -92,18 +127,21 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   ]
   if (options.type) args.push('--type', options.type)
   if (options.status) args.push('--status', options.status)
+  else args.push('--exclude-archived')
   if (options.kind) args.push('--kind', options.kind)
+  if (options.repositoryId) args.push('--repository-id', options.repositoryId)
+  if (options.moduleTag) args.push('--module-tag', options.moduleTag)
   if (options.query) args.push('--query', options.query)
-  const [result, methodologies, capabilities, methodologyJob] = await Promise.all([
-    runPangea({ cwd, args }),
+  const [result, methodologies, methodologyJob] = await Promise.all([
+    semantic ? semanticAssetList({ cwd, dataRoot: resolvedDataRoot, options }) : runPangea({ cwd, args }),
     runPangea({ cwd, args: ['methodologies', 'list', '--data-root', resolvedDataRoot, '--limit', '200'] }),
-    runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] }),
     runtime.methodologies.job(cwd, resolvedDataRoot),
   ])
   const totalPages = Math.max(1, Math.ceil(result.total / options.pageSize))
   return {
     status: 'ok',
     data_root: resolvedDataRoot,
+    features: { metadata: !semantic, restore: !semantic, revisions: !semantic, item_review: !semantic },
     assets: result.items.map(asset => ({
       ...asset,
       extraction_job: runtime.job(resolvedDataRoot, asset.asset_id),
@@ -118,6 +156,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
       page: Math.min(options.page, totalPages), page_size: options.pageSize,
       total: result.total, total_pages: totalPages,
       type: options.type, status: options.status, query: options.query,
+      repository_id: options.repositoryId, module_tag: options.moduleTag,
     },
   }
 }
@@ -136,6 +175,7 @@ async function assetDetail({ cwd, dataRoot, runtime, assetId }) {
     integrity: detail.integrity ?? null,
     allowed_steps: detail.allowed_steps ?? [],
     review: detail.review ?? null,
+    failure_record: detail.failure_record ?? null,
   }
 }
 
@@ -167,6 +207,8 @@ async function routeHandler(req, res, runtime) {
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await readBody(req)
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
+    const semantic = semanticAssets(await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] }))
+    if (semantic && ['restore', 'update_metadata', 'review_items'].includes(body.action)) throw new Error('当前分析引擎尚未提供此资产操作')
     if (body.action === 'preview_import') {
       const source = await materializeImportSource(body, resolvedDataRoot)
       try {
@@ -175,7 +217,7 @@ async function routeHandler(req, res, runtime) {
           '--path', source.path, '--type', body.asset_type,
         ]
         if (body.title) args.push('--title', body.title)
-        return json(res, 200, { status: 'ok', preview: await runPangea({ cwd, args }) })
+        return json(res, 200, { status: 'ok', preview: await importPreview({ cwd, args, semantic, sourcePath: source.path }) })
       } finally {
         await source.cleanup()
       }
@@ -187,7 +229,7 @@ async function routeHandler(req, res, runtime) {
           '--path', source.path, '--type', body.asset_type,
         ]
         if (body.title) previewArgs.push('--title', body.title)
-        const preview = await runPangea({ cwd, args: previewArgs })
+        const preview = await importPreview({ cwd, args: previewArgs, semantic, sourcePath: source.path })
         if (body.confirmed_sha256 !== preview.source_sha256) {
           throw new Error('资产内容已变化，请重新预览后再导入')
         }
@@ -195,6 +237,7 @@ async function routeHandler(req, res, runtime) {
           throw new Error(`检测到重复资产：${preview.duplicate.asset_id}`)
         }
         const strategy = body.strategy ?? 'create_new'
+        if (semantic && strategy !== 'create_new') throw new Error('当前分析引擎支持新建资产')
         const args = strategy === 'new_revision'
           ? [
               'assets', 'revise', '--data-root', resolvedDataRoot,
@@ -265,6 +308,7 @@ async function routeHandler(req, res, runtime) {
         'assets', 'update-metadata', '--data-root', resolvedDataRoot,
         '--asset-id', body.asset_id, '--title', body.title.trim(),
       ]
+      if (body.asset_type !== undefined) args.push('--asset-type', body.asset_type)
       for (const value of body.repository_ids ?? []) args.push('--repository-id', value)
       for (const value of body.module_tags ?? []) args.push('--module-tag', value)
       for (const value of body.language_tags ?? []) args.push('--language-tag', value)
@@ -291,6 +335,8 @@ async function routeHandler(req, res, runtime) {
 export async function apply(ctx) {
   const runtime = new AssetActionRuntime(ctx.apiProxy)
   runtime.methodologies = new MethodologyCandidateRuntime(ctx.apiProxy)
+  ctx.on('agent/status', ({ agent, status }) => runtime.methodologies.handleAgentStatus(agent, status))
+  ctx.on('agent/error', ({ agent, error }) => runtime.methodologies.handleAgentError(agent, error))
   const toolDisposers = [ctx.tools.register({
     name: 'pangea_assets_list',
     description: '只读列出 PANGEA 已导入资产及其结构化/审核状态。',

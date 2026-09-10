@@ -54,13 +54,16 @@ export function sourceFirstProjection(artifacts) {
       })
     } else if (['test_case', 'test_case_group'].includes(kind)) {
       result.test_cases.push({ ...row, test_case_id: row.projection_id,
-        case_type: plain(row.case_type ?? row.test_level), status: plain(row.status ?? row.execution_status) || '未标注',
+        case_type: plain(row.case_type ?? row.test_level),
+        linked_flow_ids: resolve(row, row.flow_refs, ['flow_id'], ['flow']), status: plain(row.status ?? row.execution_status) || '未标注',
         preconditions: strings(row.preconditions), steps: list(row.steps).map(step => typeof step === 'object' && step ? `${plain(step.action ?? step)}${step.expected ?? step.expected_result ? ` → ${plain(step.expected ?? step.expected_result)}` : ''}` : plain(step)),
         expected_results: strings(row.expected_results), observability: strings(row.observability ?? row.external_observations), cleanup: strings(row.cleanup),
         linked_risk_ids: resolve(row, [...list(row.linked_risk_ids), ...list(row.risk_refs), ...list(row.source_record.relates_to)], ['risk_id'], ['risk']), evidence: [],
       })
     } else if (kind === 'flow') {
-      result.business_flows.push({ ...row, flow_id: row.projection_id, description: plain(row.description), entry: plain(row.entry), steps: strings(row.steps), evidence: [],
+      result.business_flows.push({ ...row, flow_id: row.projection_id,
+        mainline_steps: list(row.nodes).map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind })),
+        branches: list(row.paths).map(p => ({ branch_id: p.path_id, from_step_id: p.node_ids?.[0], to_step_id: p.node_ids?.at(-1), condition: plain(p.condition), processing: plain(p.explanation), linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })), description: plain(row.description), entry: plain(row.entry), steps: strings(row.steps), evidence: [],
         paths: list(row.paths).map(p => ({ ...p, linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })),
       })
     } else if (!['evidence', 'blackbox_translation'].includes(kind)) result.notes.push(row)

@@ -1,48 +1,43 @@
-# Semantic 分支接入
+# Langgraph 配套工作台
 
-本分支从 `codetalks-skill@48b7921` 创建，对接 pangea-agent
-`langgraph@58398f10ef7663b23c24310f932a76d77254d0d2`。
+`langgraph` 已合入 `origin/codetalks-skill@1f819d3`（2026-09-10），
+对接 `pangea-agent langgraph@58398f10ef7663b23c24310f932a76d77254d0d2`。
+Desktop 配套版本以其 `pangea.components.json` 为准。
 
-工作台通过 companion 创建 source-first Run，沿用概览、风险、测试用例、分析资产
-页面，以及搜索、分组、关联跳转、源码预览和讨论草稿操作。运行流程保留阶段、
-任务版本和原文记录，报告入口提供完整交付。DSH 根 Agent 通过 report-policy 创建并绑定子任务，
-按明确的 action_id 结算；Comparison 与定向修正续接原会话。
-OpenCode ACP 使用 `.opencode/agents/pangea-agent.md` 和自己的 dispatch 工具。
+## 产品行为
 
-工具接入包含 task-open、input-read、整文件规划、分页源码读取、结果读写和修复、
-comparison 读取、review 决定及 work-finish。任务保存保留显式上下文预算；
-已有任务的 Run 绑定不会被其他会话快照覆盖。流程完成和质量状态分别展示。
-ACP 结束时复用 source-first reader 确认当前 Run 的报告；宿主 Job 以编号和
-启动时间共同绑定，输出、结算和停止操作均核对同一次执行。
+沿用最新工作台、PANGEA 分析、测试资产导航。分析页提供概览、业务流程、风险、
+测试用例、运行过程、复核六个入口，以及流程阅读、关联跳转、搜索、冻结源码
+预览、讨论草稿和 CSV/XLSX 导出。
 
-配套 Desktop 分支为 `langgraph`，其
-`pangea.components.json` 固定本仓库提交和上述 Agent 提交。
+Companion 按运行时能力选择 codetalks-skill 或 source-first 协议。source-first
+通过 action_id 绑定和结算任务，Comparison 与定向修正续接原会话。Graph 负责
+独立 Reviewer；宿主单独记录 ACP 执行状态，按 Job 编号、所有者及启动时间
+核对执行身份。任务上下文预算持久保存。
+
+风险、用例、流程按明确 record kind 和字段投影，保留原始正文与业务编号。
+关联在分析单元内解析，已接受的 closure 替代对应单元分析结果，读取时核对
+Run/action/task 绑定与 revision。源码预览读取当前 Run 冻结文件。
+流程展示节点和路径；用例导出同时包含分析单元、原始记录编号与正文。
+
+资产页支持 semantic 引擎的列表、筛选、新建导入、解析、审核和归档。
+导入预览由宿主计算文件摘要并在提交前复核。当前引擎尚未提供资产恢复、
+元数据编辑、新修订和逐条审核，界面按能力控制这些操作。
 
 ## 验证
 
-在 `plugins/dsh-pangea-companion` 运行 `npm test` 验证插件。
-真实 CLI 集成检查另需设置 `PANGEA_INTEGRATION_RUNTIME` 为 Agent 目录，
-`PANGEA_PYTHON` 为已安装 Agent 依赖的 Python，然后运行：
+Companion：211 项检查，210 通过、1 跳过；资产插件：21 项，20 通过、1 跳过；
+产品导航：25 项通过。Companion 包含真实 Python CLI 创建、绑定、规划、结算、
+恢复同一 Run、预算保存和停止检查。执行命令：
 
-```text
-node --test tests/semantic-runtime.test.mjs
+```sh
+PANGEA_INTEGRATION_RUNTIME=/Volumes/Media/pangea-agent \
+PANGEA_PYTHON=/Volumes/Media/pangea-agent/.venv/bin/python npm test
 ```
 
-该检查使用临时样例源码，验证创建、绑定、整文件规划、阶段推进、恢复同一 Run、
-上下文预算保存、工作台读取和停止。它不调用模型，不代表分析质量验收。
-
-真正的客户端验收需要从配套 Desktop 页面创建任务，记录实际 provider、model、
-Run ID、任务会话和报告；模型不可用或报告质量未通过时应分别报告。
-
-## 工作台记录映射
-
-页面按 Agent 明确的 record kind 与字段展示风险、用例和流程，保留原始正文与
-结果文件位置。每条记录使用分析单元与 record_id 定位；原始业务编号用于显示和
-搜索。关联仅依据明确编号，在当前分析单元内解析；相同编号不会跨单元串联。
-已接受的定向修正替代对应单元的分析记录，supersedes 记录保留在运行流程供追溯。
-读取层核对结果的 Run、action、task 绑定及已接受 revision。
-
-源码引用按当前 Run 的冻结仓库目录预览。Markdown 正文保留原文，用例组仍作为
-一条组记录展示。统计代表可读取的有效记录数量，不代表语义质量或实际执行结果。
-当前 Agent 版本没有旧 Executor 接口，source-first 页面的执行按钮显示不可用；
-用例查看、计划选择和讨论草稿正常开放。
+2026-09-10 独立 Desktop profile 实跑 `sample-c-260910-01`，路径为
+Desktop → DSH → OpenCode ACP → MiniMax M2.7，上下文预算 204800。
+Run 达到 complete/PASS，宿主 execution_status 为 completed，HTML/Markdown
+报告可读，CSV/XLSX 导出保留业务编号和分析原文。资产列表和文件预览导入实测成功。
+该样例为单个加法函数，证明组件接入与状态结算；大型仓库质量、Windows 运行和
+DSH 内置 API 模型实跑尚未验收。

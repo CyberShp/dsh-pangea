@@ -4,7 +4,38 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { AssetActionRuntime, dataRootFor } from '../src/pangea-api.js'
+import { AssetActionRuntime, dataRootFor, runPangea } from '../src/pangea-api.js'
+import { apply } from '../src/index.js'
+
+test('real Windows Python preserves Chinese asset titles and error messages', { skip: !process.env.PANGEA_TEST_PYTHON }, async () => {
+  const root = await workspace()
+  const previousPython = process.env.PANGEA_PYTHON
+  const previousUtf8 = process.env.PYTHONUTF8
+  process.env.PANGEA_PYTHON = process.env.PANGEA_TEST_PYTHON
+  process.env.PYTHONUTF8 = '0'
+  try {
+    const source = path.join(root, '中文资料.md')
+    await writeFile(source, '# 资产内容\n边界检查\n', 'utf8')
+    const args = ['assets', 'import', '--data-root', path.join(root, 'data'), '--path', source, '--type', 'reference', '--title', '中文标题验收']
+    await runPangea({ cwd: root, args })
+    const listed = await runPangea({ cwd: root, args: ['assets', 'list', '--data-root', path.join(root, 'data')] })
+    assert.equal(listed.items[0].title, '中文标题验收')
+    await assert.rejects(runPangea({ cwd: root, args }), /重复资产/)
+    const broken = path.join(root, 'broken.xlsx')
+    await writeFile(broken, 'not a workbook')
+    await assert.rejects(runPangea({ cwd: root, args: ['assets', 'import', '--data-root', path.join(root, 'data'), '--path', broken, '--type', 'coverage'] }))
+    const failed = await runPangea({ cwd: root, args: ['assets', 'list', '--data-root', path.join(root, 'data'), '--status', 'failed'] })
+    let route, response
+    await apply({ on: () => () => {}, tools: { register: () => () => {} }, apiProxy: {}, webServer: { register(value) { route = value; return () => {} } } })
+    await route.handler({ method: 'GET', headers: { 'sec-fetch-site': 'same-origin' }, url: `/api/pangea-asset-catalog/state?${new URLSearchParams({ cwd: root, data_root: path.join(root, 'data'), asset_id: failed.items[0].asset_id })}` }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
+    assert.equal(response.failure_record?.asset_id, failed.items[0].asset_id)
+    assert.match(response.failure_record.last_error, /zip/i)
+  } finally {
+    if (previousPython === undefined) delete process.env.PANGEA_PYTHON; else process.env.PANGEA_PYTHON = previousPython
+    if (previousUtf8 === undefined) delete process.env.PYTHONUTF8; else process.env.PYTHONUTF8 = previousUtf8
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 async function workspace() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-asset-runtime-'))

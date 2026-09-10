@@ -25,7 +25,7 @@ test('accepts quoted file URIs and UNC paths copied from Windows Explorer', () =
   )
 })
 
-test('creates a frozen source-first contract and removes it after Run creation', async () => {
+test('creates a frozen 2.0 Skill request and removes it after Run creation', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-run-api-'))
   const marker = path.join(root, '.agents', 'pangea')
   const nested = path.join(root, 'nested')
@@ -38,66 +38,83 @@ test('creates a frozen source-first contract and removes it after Run creation',
     const calls = []
     const result = await createRun(nested, {
       repository: 'repo-one', target: 'session and retry', source_scope: ['src/session.c'],
-      asset_ids: ['asset-1'],
-      focus: ['recovery'], test_case_examples: ['TC-1'],
+      asset_ids: ['asset-1'], scenario: 'root-cause', mode: 'speed',
     }, async call => {
       calls.push(call)
       if (call.args[0] === 'system') {
-        return { workflow_versions: ['source-first-v1'], source_first: { version: 'source-first-v1' } }
+        return { analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
       }
       observed = { call, contract: JSON.parse(await readFile(pending, 'utf8')) }
       return { run_id: 'run-01', data_root: path.join(root, 'pangea-data'), actions: [] }
     })
     assert.equal(workspaceRoot(nested), root)
     assert.equal(result.run_id, 'run-01')
-    assert.deepEqual(observed.call.args, ['runs', 'create', '--contract', pending])
+    assert.deepEqual(observed.call.args, ['runs', 'create', '--request', pending])
     assert.deepEqual(calls[0].args.slice(0, 2), ['system', 'capabilities'])
     assert.equal(observed.contract.repository, 'repo-one')
     assert.equal(observed.contract.target, 'session and retry')
     assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
     assert.equal(observed.contract.run_id, undefined)
-    assert.equal(observed.contract.mode, undefined)
-    assert.equal(observed.contract.workflow_version, 'source-first-v1')
+    assert.equal(observed.contract.scenario, 'root-cause')
+    assert.equal(observed.contract.mode, 'speed')
+    assert.equal(observed.contract.request_version, '2.0')
     assert.equal(observed.contract.data_root, path.join(root, 'pangea-data'))
     assert.deepEqual(observed.contract.asset_ids, ['asset-1'])
-    assert.deepEqual(observed.contract.focus, ['recovery'])
-    assert.deepEqual(observed.contract.test_case_examples, ['TC-1'])
+    assert.equal(observed.contract.focus, undefined)
+    assert.equal(observed.contract.test_case_examples, undefined)
     assert.equal(existsSync(pending), false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test('refuses to create a Run against a backend without source-first-v1', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-skill-api-'))
+test('uses the depth module-analysis defaults and rejects unsupported modes', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-analysis-mode-'))
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
+    let contract
+    await createRun(root, { repository: 'repo-one', target: 'default', source_scope: ['src/a.c'] }, async call => {
+      if (call.args[0] === 'system') return { analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
+      contract = JSON.parse(await readFile(path.join(root, 'pangea-data', '.pangea', 'pending-skill-request.json'), 'utf8'))
+      return { run_id: 'run-02' }
+    })
+    assert.equal(contract.scenario, 'module-analysis')
+    assert.equal(contract.mode, 'depth')
     await assert.rejects(
-      () => createRun(root, { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] }, async () => ({ repositories: ['repo-one'] })),
-      /source-first-v1/,
+      () => createRun(root, { repository: 'repo-one', target: 'invalid', source_scope: ['src/a.c'], mode: 'preview' }, async () => ({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } })),
+      /分析模式/,
     )
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test('preserves focus and test example fields in the source-first contract', async () => {
+test('refuses to create a Run against a backend without codetalks-skill 1.4.9', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-skill-api-'))
+  try {
+    await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
+    await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
+    await assert.rejects(
+      () => createRun(root, { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] }, async () => ({ repositories: ['repo-one'] })),
+      /codetalks-skill 1\.4\.9/,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('rejects legacy focus and test example fields before writing a request', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-legacy-input-'))
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
-    const pending = path.join(root, 'pangea-data', '.pangea', 'pending-skill-request.json')
-    let contract
-    await createRun(root, {
-      repository: 'repo-one', target: 'source-first', source_scope: [], focus: ['manual'], test_case_examples: ['TC-1'],
-    }, async call => {
-      if (call.args[0] === 'system') return { workflow_versions: ['source-first-v1'] }
-      contract = JSON.parse(await readFile(pending, 'utf8'))
-      return { run_id: 'run-02' }
-    })
-    assert.deepEqual(contract.focus, ['manual'])
-    assert.deepEqual(contract.test_case_examples, ['TC-1'])
+    await assert.rejects(
+      () => createRun(root, {
+        repository: 'repo-one', target: 'legacy', source_scope: [], focus: ['manual'],
+      }, async () => ({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } })),
+      /新建分析不支持字段|focus/,
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

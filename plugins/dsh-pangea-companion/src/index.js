@@ -1,16 +1,22 @@
-import { companionSnapshot } from './reader.js'
+import { createView, listViews, loadView, updateView, viewArtifact } from './architecture-views.js'
+import { supportsHostReview } from './analysis-review.js'
+import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
-import { readFile } from 'node:fs/promises'
+import { buildTestCaseCsv, buildTestCaseXlsx } from './export.js'
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { createRuntimeMonitor } from './monitor.js'
 import { createTaskStore } from './task-store.js'
+import { ATTENTION_REQUIRED_CODE, decodeAcpOutcomeDetail } from './acp-outcome.js'
 import { createLaunchLogStore } from './launch-log.js'
 import { createAcpSettingsStore } from './acp-settings.js'
+import { discoverAgentModels } from './agent-models.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
-import { createRun, runPangea, runSourceFirstCommand, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireAcpModel, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
+import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, launchArchitectureSession, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -18,6 +24,7 @@ export const inject = ['tools', 'webServer', 'agents', 'apiProxy', 'subagents', 
 
 const API_PATH = '/api/pangea-companion/state'
 const SOURCE_API_PATH = '/api/pangea-companion/source'
+const EXPORT_API_PATH = '/api/pangea-companion/export'
 const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
 const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
@@ -121,7 +128,7 @@ function renderStatus(value) {
   const health = run.reader_health
   const lines = [
     `PANGEA Run：${run.run_id}`,
-    `阶段：${PHASE_LABELS[run.phase] ?? run.phase}`,
+    `阶段：${run.phase_title ?? PHASE_LABELS[run.phase] ?? run.phase}`,
     `质量状态：${QUALITY_LABELS[run.quality_status] ?? run.quality_status ?? '待定'}`,
     run.workflow_version === 'source-first-v1'
       ? `源码分析单元：${run.analysis.completed}/${run.analysis.total || '由 Graph action 记录'}`
@@ -131,10 +138,10 @@ function renderStatus(value) {
     renderCount(run, 'test_cases', '测试用例'),
     renderCount(run, 'evidence', '证据'),
     `数据源：${SOURCE_LABELS[run.data_source] ?? run.data_source ?? '未知'}`,
-    `源码快照：${['verified', 'manifest_verified'].includes(run.source_snapshot?.status) ? `${run.source_snapshot.file_count ?? 0} 个文件，已冻结` : run.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'}`,
+    `源码快照：${['frozen', 'verified', 'manifest_verified'].includes(run.source_snapshot?.status) ? `${run.source_snapshot.file_count ?? 0} 个文件，已复制到 Run` : run.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'}`,
     `读取健康：${HEALTH_LABELS[health?.status] ?? health?.status ?? '未知'}`,
   ]
-  if (health?.trusted === false) {
+  if (health?.status === 'warning') {
     lines.push('重要：当前结构化结果与报告不一致，不能把 0 条风险/用例解释为“没有风险/用例”。')
   }
   if (run.errors.length > 0) {
@@ -172,6 +179,77 @@ async function requestJson(req) {
   return value
 }
 
+function textResponse(res, status, contentType, body, headers = {}) {
+  res.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store', ...headers })
+  res.end(body)
+}
+
+// The ACP job is an execution boundary around a Skill Run.  If that boundary
+// reaches a terminal failure, the Run's own state file may still say
+// "running" because the Skill process did not get a chance to settle it.
+// Expose the stronger observed terminal state to readers immediately instead
+// of showing a red ACP error next to an apparently active analysis forever.
+export function applyTaskExecutionState(snapshot, task) {
+  if (!snapshot?.current || !task) return snapshot
+  let current = snapshot.current
+  const sameRun = typeof task.run_id === 'string' && task.run_id === current.run_id
+  const sameDataRoot = !task.data_root || !current.data_root
+    || path.resolve(task.data_root) === path.resolve(current.data_root)
+  const currentAttempt = Array.isArray(task.attempts)
+    ? task.attempts.find(attempt => attempt?.attempt_id === task.attempt_id)
+    : null
+  if (!sameRun || !sameDataRoot || !task.attempt_id || (currentAttempt && currentAttempt.attempt_id !== task.attempt_id)) return snapshot
+  const review = task.host_review
+  if (review?.task_id === task.task_id && review.run_id === task.run_id && review.attempt_id === task.attempt_id) {
+    const verified = review.status === 'complete' && review.reviewer_turn_completed_at
+      && review.producer_session_id && review.reviewer_session_id && review.producer_session_id !== review.reviewer_session_id
+    const waiting = review.status === 'waiting' || task.status === 'needs_attention'
+    current = { ...current,
+      semantic_review: { ...current.semantic_review, method: verified ? 'independent_verified' : 'independent_pending',
+        verdict: verified ? review.verdict : null, summary: review.summary ?? '', evidence_status: 'host_recorded',
+        producer_session_id: review.producer_session_id, reviewer_session_id: review.reviewer_session_id,
+        execution_verification: review.execution_verification ?? null },
+      ...(!verified ? { lifecycle_status: waiting ? 'attention_required' : 'running', terminal: waiting,
+        phase: review.status === 'pending' && current.lifecycle_status !== 'complete' ? current.phase : 'REVIEW',
+        phase_title: review.status === 'pending' && current.lifecycle_status !== 'complete' ? current.phase_title : waiting ? '独立复核需要处理' : review.status === 'verifying' ? '执行校验中' : '独立复核中', attention_required: waiting } : {}),
+    }
+    snapshot = { ...snapshot, current }
+  }
+  const executionStatus = task.execution_status
+  const failed = task.status === 'failed' || ['failed', 'interrupted'].includes(executionStatus)
+  const stopped = task.status === 'stopped' || executionStatus === 'stopped'
+  if (!failed && !stopped) return snapshot
+  const stateUpdatedAt = Date.parse(current.state_read?.updated_at ?? '')
+  const executionEndedAt = currentAttempt?.ended_at ?? task.ended_at
+  // The Skill may keep advancing after a runtime connection was classified as
+  // interrupted. A newer state file is direct evidence that this terminal
+  // execution observation no longer describes the active workflow.
+  if (Number.isFinite(stateUpdatedAt) && Number.isFinite(executionEndedAt) && stateUpdatedAt > executionEndedAt) return snapshot
+  const message = task.terminal_error || task.launch_error || (failed ? '外部 Agent 执行失败' : 'Run 已停止')
+  const error = failed && !(current.errors ?? []).some(item => item?.code === 'ACP_AGENT_FAILED')
+    ? { code: 'ACP_AGENT_FAILED', message }
+    : null
+  return {
+    ...snapshot,
+    current: {
+      ...current,
+      lifecycle_status: failed ? 'failed' : 'stopped',
+      phase: failed ? 'FAILED' : 'STOPPED',
+      phase_title: failed ? '执行失败' : '已停止',
+      terminal: true,
+      attention_required: failed,
+      errors: error ? [...(current.errors ?? []), error] : current.errors,
+      external_execution: {
+        status: executionStatus || task.status,
+        provider: task.provider ?? null,
+        task_id: task.task_id,
+        attempt_id: task.attempt_id,
+        message,
+      },
+    },
+  }
+}
+
 async function stateRouteHandler(req, res, monitor, tasks) {
   if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
@@ -182,12 +260,11 @@ async function stateRouteHandler(req, res, monitor, tasks) {
   const sessionId = url.searchParams.get('session_id') ?? undefined
   try {
     const snapshot = await companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
-    if (runId === undefined && sessionId && snapshot.current) {
-      await monitor.bindRun(sessionId, snapshot.current)
-      await tasks.bindRunBySession(sessionId, snapshot.current)
-    }
-    snapshot.monitor = await monitor.snapshot({ sessionId, runId: snapshot.current?.run_id })
-    json(res, 200, snapshot)
+    const task = snapshot.current?.run_id ? await tasks.getByRun(snapshot.current.run_id, { dataRoot: snapshot.data_root }) : null
+    const effectiveSnapshot = applyTaskExecutionState(snapshot, task)
+    if (effectiveSnapshot.current) await monitor.observeRunSnapshot(snapshot.data_root, effectiveSnapshot.current)
+    effectiveSnapshot.monitor = await monitor.snapshot({ sessionId, dataRoot: snapshot.data_root, runId: effectiveSnapshot.current?.run_id })
+    json(res, 200, effectiveSnapshot)
   } catch (error) {
     json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
@@ -334,6 +411,7 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Da
   const timeoutMs = 5 * 60 * 1000
   for (const task of taskItems) {
     if (!['preparing', 'running'].includes(task.status)) continue
+    if (task.execution_status === 'stopping') continue
     if (task.job_id) continue
     const conversation = [...task.conversations].reverse().find(item => item.kind === 'analysis')
     if (!conversation) continue
@@ -373,25 +451,129 @@ function jobOwner(runtime, task) {
   return runtimeService(runtime, 'agents')?.get?.(task.owner_session_id)
 }
 
+async function exportRouteHandler(req, res) {
+  if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  const url = new URL(req.url ?? EXPORT_API_PATH, 'http://localhost')
+  const runId = url.searchParams.get('run_id') ?? ''
+  const format = url.searchParams.get('format') ?? 'csv'
+  try {
+    if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error('run_id is required')
+    if (!['csv', 'xlsx'].includes(format)) throw new Error('仅支持 CSV 或 XLSX 用例导出')
+    const dataRoot = await discoverPangeaDataRoot({
+      cwd: url.searchParams.get('cwd') ?? undefined,
+      dataRoot: url.searchParams.get('data_root') ?? undefined,
+    })
+    const run = await summarizeRun(dataRoot, runId, { includeDetails: true })
+    const filename = `pangea-${runId}-test-cases.${format}`
+    const body = format === 'xlsx' ? buildTestCaseXlsx(run) : buildTestCaseCsv(run)
+    const contentType = format === 'xlsx'
+      ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      : 'text/csv; charset=utf-8'
+    return textResponse(res, 200, contentType, body, {
+      'content-disposition': `attachment; filename="${filename}"`,
+    })
+  } catch (error) {
+    return json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+function jobReference(runtime, task, jobId = task?.job_id) {
+  return {
+    jobId: String(jobId ?? ''),
+    ...(task?.attempt_id ? { attemptId: task.attempt_id } : {}),
+    ...(task?.owner_session_id ? { ownerSessionId: task.owner_session_id } : {}),
+    ...(Number.isFinite(task?.job_started_at) ? { jobStartedAt: task.job_started_at } : {}),
+  }
+}
+
+function jobIdentityIssue(task, snapshot) {
+  if (!snapshot) return `ACP Job ${task?.job_id ?? ''} 不存在，旧执行停止尚未确认`
+  if (!Number.isFinite(task?.job_started_at)) return `ACP Job ${task?.job_id ?? ''} 缺少持久化 startedAt，旧执行身份无法确认`
+  if (!Number.isFinite(snapshot.startedAt) || snapshot.startedAt !== task.job_started_at) {
+    return `ACP Job ${task?.job_id ?? ''} 身份不匹配，旧执行停止尚未确认`
+  }
+  return null
+}
+
 function readJobSnapshot(runtime, task) {
   if (!task?.job_id) return null
   const jobs = runtimeService(runtime, 'jobs')
   if (!jobs?.get) return null
   const snapshot = jobs.get(task.job_id, jobOwner(runtime, task))
-  if (snapshot && task.job_started_at !== snapshot.startedAt) throw new Error('ACP Job 启动身份与当前任务不一致')
+  if (snapshot && task.job_started_at !== snapshot.startedAt) throw new Error('ACP Job 身份不匹配，旧执行停止尚未确认')
   return snapshot
+}
+
+function deriveTaskResumeEligibility(runtime, task) {
+  if (!task?.run_id) return { can_resume: false, resume_blocked_reason: '没有可继续的 Run' }
+  if (task.host_review?.reviewer_session_id && task.host_review.status !== 'complete') {
+    return { can_resume: false, resume_blocked_reason: '独立复核尚未结束；需恢复原 Producer/Reviewer 会话，不能创建替代会话' }
+  }
+  if (task.execution_status === 'interrupted') return { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' }
+  if (['preparing', 'starting', 'running', 'stopping'].includes(task.execution_status)) {
+    return { can_resume: false, resume_blocked_reason: task.execution_status === 'stopping' ? '正在等待停止确认' : '当前执行仍在进行' }
+  }
+  const terminal = ['failed', 'stopped'].includes(task.execution_status)
+    || ['failed', 'needs_attention', 'stopped'].includes(task.status)
+  if (!terminal) return { can_resume: false, resume_blocked_reason: '当前 Run 不满足续跑条件' }
+  if (!task.provider) return { can_resume: true, resume_blocked_reason: null }
+  if (!task.job_id) {
+    return task.agent_session_id || task.process_id
+      ? { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' }
+      : { can_resume: true, resume_blocked_reason: null }
+  }
+  const persistedAttempt = task.attempts?.find(attempt => attempt.attempt_id === task.attempt_id)
+  const persistedTerminal = persistedAttempt
+    && persistedAttempt.job_id === task.job_id
+    && persistedAttempt.owner_session_id === task.owner_session_id
+    && Number.isFinite(task.job_started_at)
+    && persistedAttempt.job_started_at === task.job_started_at
+    && ['completed', 'failed', 'stopped'].includes(persistedAttempt.execution_status)
+    && Number.isFinite(persistedAttempt.ended_at)
+  if (persistedTerminal) return { can_resume: true, resume_blocked_reason: null }
+  let snapshot
+  try { snapshot = readJobSnapshot(runtime, task) } catch { return { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' } }
+  const identityIssue = jobIdentityIssue(task, snapshot)
+  if (identityIssue) return { can_resume: false, resume_blocked_reason: identityIssue }
+  if (!['completed', 'failed', 'killed'].includes(snapshot.status)) {
+    return { can_resume: false, resume_blocked_reason: '旧执行仍未结束' }
+  }
+  return { can_resume: true, resume_blocked_reason: null }
 }
 
 async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea, readSnapshot = companionSnapshot) {
   if (snapshot?.kind !== 'subagent') return null
-  const task = await tasks.getByJob(String(snapshot.id), snapshot.startedAt)
+  const ownerSessionId = typeof owner?.id === 'string' ? owner.id : typeof owner?.session_id === 'string' ? owner.session_id : null
+  const lookup = {
+    ...(ownerSessionId ? { ownerSessionId } : {}),
+    ...(Number.isFinite(snapshot?.startedAt) ? { jobStartedAt: snapshot.startedAt } : {}),
+  }
+  const task = await tasks.getByJob(String(snapshot.id), lookup)
   if (!task) return null
+  const attempt = task.attempts?.find(item => item.job_id === String(snapshot.id)
+    && (!ownerSessionId || item.owner_session_id === ownerSessionId)
+    && (!Number.isFinite(snapshot?.startedAt) || item.job_started_at === snapshot.startedAt))
+  const reference = jobReference(runtime, attempt ?? {
+    ...task,
+    owner_session_id: task.owner_session_id ?? ownerSessionId,
+    job_started_at: Number.isFinite(snapshot?.startedAt) ? snapshot.startedAt : task.job_started_at,
+  }, snapshot.id)
   let output = ''
   try {
     output = runtimeService(runtime, 'jobs')?.read?.(snapshot.id, owner)?.text ?? ''
   } catch { /* terminal state remains authoritative even if final output cannot be read */ }
-  if (output) await tasks.recordJobActivity(String(snapshot.id), output, snapshot.startedAt)
+  if (output) await tasks.recordJobActivity(reference, output)
   let outcome = snapshot
+  const attention = decodeAcpOutcomeDetail(snapshot.detail)
+  if (attention) {
+    outcome = {
+      ...snapshot,
+      detail: attention.message,
+      attention_required: true,
+      attention_code: ATTENTION_REQUIRED_CODE,
+    }
+  }
   if (snapshot.status === 'completed') {
     try {
       let run = await runner({
@@ -427,11 +609,12 @@ async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner
     provider: task.provider,
     model: task.model_route?.model,
     reasoning_effort: task.model_route?.reasoning_effort,
+    attempt_id: reference.attemptId,
     exit_status: outcome.status,
     detail: outcome.detail,
     output,
   })
-  return tasks.settleJob(String(snapshot.id), outcome)
+  return tasks.settleJob(reference, outcome)
 }
 
 async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
@@ -441,20 +624,26 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
     try {
       const owner = jobOwner(runtime, task)
       const jobs = runtimeService(runtime, 'jobs')
-      readJobSnapshot(runtime, task)
+      snapshot = readJobSnapshot(runtime, task)
+      const identityIssue = jobIdentityIssue(task, snapshot)
+      if (identityIssue) throw new Error(identityIssue)
       const update = jobs?.read?.(task.job_id, owner)
-      snapshot = readJobSnapshot(runtime, task) ?? update?.snapshot
+      if (update?.snapshot) {
+        const updateIdentityIssue = jobIdentityIssue(task, update.snapshot)
+        if (updateIdentityIssue) throw new Error(updateIdentityIssue)
+        snapshot = update.snapshot
+      }
       if (update?.text) {
-        await tasks.recordJobActivity(task.job_id, update.text, snapshot?.startedAt)
+        await tasks.recordJobActivity(jobReference(runtime, task), update.text)
         await appendLaunchSafe(launchLogs, task.task_id, {
-          stage: 'acp_output', status: 'info', job_id: task.job_id, output: update.text,
+          stage: 'acp_output', status: 'info', job_id: task.job_id, attempt_id: task.attempt_id, output: update.text,
         })
       }
     } catch (error) {
       const message = `无法恢复 ACP Job ${task.job_id}：${error instanceof Error ? error.message : String(error)}`
       await appendLaunchSafe(launchLogs, task.task_id, {
         stage: 'acp_job_reconcile', status: 'error', job_id: task.job_id,
-        error_code: 'ACP_JOB_LOST', error: message,
+        attempt_id: task.attempt_id, error_code: 'ACP_JOB_LOST', error: message,
       })
       await tasks.markInterrupted(task.task_id, message)
       continue
@@ -463,7 +652,7 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
       const message = `ACP Job ${task.job_id} 不存在，无法证明外部 Agent 仍在运行`
       await appendLaunchSafe(launchLogs, task.task_id, {
         stage: 'acp_job_reconcile', status: 'error', job_id: task.job_id,
-        error_code: 'ACP_JOB_LOST', error: message,
+        attempt_id: task.attempt_id, error_code: 'ACP_JOB_LOST', error: message,
       })
       await tasks.markInterrupted(task.task_id, message)
       continue
@@ -474,7 +663,23 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
   }
 }
 
-async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLogs, runtime) {
+export async function architectureArtifactRoute(req, res, tasks) {
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  try {
+    if (req.method !== 'GET') return json(res, 405, { status: 'error' })
+    const url = new URL(req.url, 'http://localhost')
+    const task = requireWorkspaceTask(await tasks.get(url.searchParams.get('task_id')), url.searchParams.get('cwd'), url.searchParams.get('task_id'))
+    const format = url.searchParams.get('format') || 'html'
+    const data = await viewArtifact(task, url.searchParams.get('view_id'), format)
+    res.setHeader('Content-Type', format === 'svg' ? 'image/svg+xml' : 'text/html; charset=utf-8')
+    res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-downloads; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'")
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    if (url.searchParams.get('download') === '1') res.setHeader('Content-Disposition', `attachment; filename="diagram.${format}"`)
+    res.end(data)
+  } catch (error) { return json(res, 400, { status: 'error', error: error.message }) }
+}
+
+export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLogs, runtime, monitor, runner = runPangea) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? WORKBENCH_API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? undefined
@@ -497,13 +702,16 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       await reconcileTaskLaunches(api, tasks, taskItems, launchLogs)
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+      taskItems = taskItems.map(task => ({ ...task, ...deriveTaskResumeEligibility(runtime, task) }))
       let modelRouting
       try {
         modelRouting = { status: 'ok', ...await internalModelOptions(api) }
       } catch (error) {
         modelRouting = { status: 'error', models: [], failures: [], error: error instanceof Error ? error.message : String(error) }
       }
-      const selectedCandidate = taskId ? await tasks.get(taskId) : sessionId ? await tasks.getBySession(sessionId) : null
+      const selectedCandidate = taskId
+        ? taskItems.find(item => item.task_id === taskId)
+        : sessionId ? taskItems.find(item => item.conversations?.some(conversation => conversation.session_id === sessionId)) : null
       const selectedTask = selectedCandidate?.workspace === workspaceRoot(cwd) ? selectedCandidate : null
       const launchLog = selectedTask ? await launchLogs.read(selectedTask.task_id, { limit: 100 }) : null
       let acpJob = null
@@ -526,13 +734,106 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
+    if (body.action === 'coverage-refresh') {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (!task.run_id || body.run_id !== task.run_id) throw new Error('覆盖率请求不属于当前任务的 Run')
+      if (['starting', 'running', 'stopping'].includes(task.execution_status)) throw new Error('请先停止当前分析，再修正覆盖率查询，避免输入在分析过程中变化')
+      const folder = await mkdtemp(path.join(os.tmpdir(), 'pangea-coverage-refresh-'))
+      try {
+        const file = path.join(folder, 'query.json')
+        await writeFile(file, JSON.stringify(body.query), 'utf8')
+        const page = await runner({ cwd: task.workspace, args: ['runs', 'coverage-refresh', '--data-root', task.data_root, '--run-id', task.run_id, '--query-file', file] })
+        return json(res, 200, { status: 'ok', run_id: task.run_id, page })
+      } finally { await rm(folder, { recursive: true, force: true }) }
+    }
+    if (body.action === 'coverage-page') {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (!task.run_id || body.run_id !== task.run_id) throw new Error('覆盖率请求不属于当前任务的 Run')
+      const args = ['runs', 'coverage-page', '--data-root', task.data_root, '--run-id', task.run_id]
+      for (const [key, flag] of Object.entries({ cursor: '--cursor', limit: '--limit', source: '--source',
+        file_path: '--file-path', kind: '--kind', scope_status: '--scope-status', flow_id: '--flow-id', query: '--query',
+        analysis_status: '--analysis-status', disposition: '--disposition' })) {
+        if (body[key] !== undefined && body[key] !== null && body[key] !== '') args.push(flag, String(body[key]))
+      }
+      const page = await runner({ cwd: task.workspace, args })
+      return json(res, 200, { status: 'ok', run_id: task.run_id, page })
+    }
+    if (body.action.startsWith('architecture-')) {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (!task.run_id) throw new Error('任务尚未关联 Run')
+      if (body.action === 'architecture-list') {
+        const views = await listViews(task)
+        for (const view of views.filter(v => ['generating', 'ready'].includes(v.status))) {
+          if (view.available && !view.job_id) continue
+          if (view.job_id) {
+            const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)
+            const jobs = runtimeService(runtime, 'jobs')
+            let job
+            try { job = owner ? jobs?.get?.(view.job_id, owner) : null } catch { job = null }
+            if (job?.startedAt === view.job_started_at) {
+              let output = view.output ?? ''
+              try { output = jobs.read(view.job_id, owner)?.text?.slice(-12000) || output } catch { /* Retain last captured output. */ }
+              const changed = output !== (view.output ?? '')
+              const changes = { execution_status: job.status, output,
+                ...(changed ? { last_activity_at: new Date().toISOString() } : {}) }
+              if (changed || view.execution_status !== job.status) Object.assign(view, await updateView(task, view.view_id, changes), { status: view.status })
+            }
+            if (view.available) continue
+            if (!job || job.startedAt !== view.job_started_at || ['failed', 'killed', 'completed'].includes(job.status)) {
+              Object.assign(view, await updateView(task, view.view_id, { status: !job || job.startedAt !== view.job_started_at ? 'interrupted' : job.status === 'killed' ? 'stopped' : 'failed', execution_status: job?.status ?? 'interrupted', error: !job ? '执行状态不可确认：画图 Job 已不可读取。已保留会话和输出。' : job.detail || '画图执行已结束，尚无验证通过的产物。' }))
+            }
+          } else if (view.session_id) {
+            try {
+            const history = apiValue(await api.sessions.history(rpc({ sessionId: view.session_id, maxMessages: 12 })))
+            const failure = sessionFailure(history)
+            const lastTurnEvent = [...(history?.events ?? [])].reverse().map(item => item.event ?? item).find(event => ['turn/start', 'turn/end'].includes(event.type ?? event.name))
+            if (failure || (lastTurnEvent?.type ?? lastTurnEvent?.name) === 'turn/end') Object.assign(view, await updateView(task, view.view_id, { status: 'failed', error: failure?.message ?? '画图回合已结束，尚无验证通过的产物。可打开会话继续处理。' }))
+            } catch (error) {
+              Object.assign(view, await updateView(task, view.view_id, { status: 'interrupted', error: `画图会话状态不可确认：${error.message}` }))
+            }
+          }
+        }
+        return json(res, 200, { status: 'ok', views })
+      }
+      if (body.action === 'architecture-create') {
+        const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id, branch_ids: body.branch_ids })
+        try {
+          const launched = await launchArchitectureSession(api, { cwd, task, prompt: prepared.prompt + (body.instruction ? `\n用户修改要求：${body.instruction}` : ''),
+            onEvent: event => updateView(task, prepared.view.view_id, { launch_stage: event.stage, last_activity_at: new Date().toISOString(),
+              ...(event.error ? { error: event.error.message ?? String(event.error) } : {}) }),
+            onSession: async sessionId => {
+              await updateView(task, prepared.view.view_id, { session_id: sessionId })
+              await tasks.addConversation(task.task_id, { sessionId, title: `架构视图 · ${task.target}`, kind: 'architecture', activate: false })
+            },
+            onJob: details => updateView(task, prepared.view.view_id, { job_id: details.jobId, job_started_at: details.jobStartedAt, owner_session_id: details.ownerSessionId }),
+          }, runtime)
+          return json(res, 200, { status: 'ok', ...launched, view: await loadView(task, prepared.view.view_id) })
+        } catch (error) {
+          await updateView(task, prepared.view.view_id, { status: 'failed', error: error.message })
+          throw error
+        }
+      }
+      if (body.action === 'architecture-stop') {
+        const view = await loadView(task, body.view_id)
+        if (view.job_id) {
+          const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)
+          if (!owner) throw new Error('图会话所有者不可用，未确认停止')
+          const jobs = runtimeService(runtime, 'jobs')
+          const job = jobs?.get?.(view.job_id, owner)
+          if (!job || job.startedAt !== view.job_started_at) throw new Error('图任务绑定不可验证')
+          await jobs.kill(view.job_id, owner)
+        }
+        if (view.session_id) apiValue(await api.sessions.cancel(rpc({ sessionId: view.session_id })))
+        return json(res, 200, { status: 'ok', view: await updateView(task, body.view_id, { status: 'stopped' }) })
+      }
+      throw new Error('Unknown architecture action')
+    }
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)
+      if (body.input?.source_task_id) requireWorkspaceTask(await tasks.get(body.input.source_task_id), cwd, body.input.source_task_id)
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
       if (providerId && !acpProviderOption(providerId)) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
-      const selectedModel = providerId
-        ? requireAcpModel(providerId, body.input?.model_route)
-        : await resolveTaskModel(api, body.input?.model_route)
+      const selectedModel = providerId ? null : await resolveTaskModel(api, body.input?.model_route)
       const task = await tasks.create({
         workspace: root,
         dataRoot: dataRootFor(root, actionDataRoot),
@@ -543,65 +844,131 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
     }
     if (body.action === 'task-start') {
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
-      if (task.run_id) throw new Error('task already has a Run')
+      const resume = body.resume === true
+      const resumeEligibility = deriveTaskResumeEligibility(runtime, task)
+      if (task.run_id && !resume) throw new Error('task already has a Run; use resume to continue it')
+      if (resume && !task.run_id) throw new Error('没有可继续的 Run')
+      if (resume && !resumeEligibility.can_resume) throw new Error(resumeEligibility.resume_blocked_reason)
       if (launchLocks.has(task.task_id)) throw new Error('task launch is already in progress')
       launchLocks.add(task.task_id)
-      await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `启动尝试 ${task.launch_attempts + 1}` })
+      await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `${resume ? '继续分析' : '启动'}尝试 ${task.launch_attempts + 1}` })
+      let preparedTask = task
       try {
         const selectedProvider = body.provider_id ?? task.provider
         let selectedModel = null
         if (selectedProvider) {
-          assertRegisteredAcpProvider(runtime, selectedProvider)
-          selectedModel = requireAcpModel(selectedProvider, body.model_route ?? task.model_route)
+          const providerOption = assertRegisteredAcpProvider(runtime, selectedProvider)
           await appendLaunchSafe(launchLogs, task.task_id, {
             stage: 'acp_provider_resolve', status: 'ok', provider: selectedProvider,
-            model: selectedModel.model, reasoning_effort: selectedModel.reasoning_effort,
+            configured_command: providerOption.command,
+            resolved_command: providerOption.resolved_command ?? providerOption.command,
+            launcher_kind: providerOption.launcher_kind
+              ?? (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(providerOption.resolved_command ?? providerOption.command)
+                ? 'windows-batch'
+                : 'direct'),
           })
-          await tasks.prepareProviderLaunch(task.task_id, selectedProvider, selectedModel)
+          preparedTask = await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
         } else {
           await appendLaunchSafe(launchLogs, task.task_id, { stage: 'model_route_resolve', status: 'start' })
           selectedModel = await resolveTaskModel(api, body.model_route ?? task.model_route)
           await appendLaunchSafe(launchLogs, task.task_id, {
             stage: 'model_route_resolve', status: 'ok', provider: selectedModel.provider, model: selectedModel.model,
           })
-          await tasks.prepareLaunch(task.task_id, selectedModel)
+          preparedTask = await tasks.prepareLaunch(task.task_id, selectedModel)
         }
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_prepare', status: 'ok' })
+        let launchedRun = null
         const launched = await launchAnalysisSession(api, {
           cwd,
           dataRoot: actionDataRoot ?? task.data_root,
-          input: { ...task, provider_id: selectedProvider || null },
+          input: { ...task, provider_id: selectedProvider || null, agent_model: preparedTask.agent_model },
           model: selectedModel,
-        }, undefined, session => tasks.addConversation(task.task_id, {
+          resumeRunId: resume ? task.run_id : null,
+        }, runner, session => tasks.addConversation(task.task_id, {
           sessionId: session.session_id,
           title: `${task.title} · 分析`,
           kind: 'analysis',
         }), async event => {
-          await launchLogs.append(task.task_id, event)
-          if (event.stage === 'acp_session_created') {
-            await tasks.bindAgentRuntime(task.task_id, {
-              agentSessionId: event.agent_session_id,
-              processId: event.pid,
+          await launchLogs.append(task.task_id, { ...event, attempt_id: preparedTask.attempt_id })
+        }, runtime, process.env, {
+          reviewBinding: { task_id: task.task_id, attempt_id: preparedTask.attempt_id },
+          onReviewState: value => tasks.recordReview(task.task_id, value),
+          onReviewWaiting: async message => {
+            const current = await tasks.get(task.task_id)
+            if (current.host_review) await tasks.recordReview(task.task_id, { ...current.host_review, status: 'waiting', summary: message })
+          },
+          onRunReady: async run => {
+            launchedRun = run
+            const bound = await tasks.bindRun(task.task_id, run.run_id, run.workflow_version)
+            if (!resume && selectedProvider && supportsHostReview(bound)) await tasks.recordReview(task.task_id, {
+              task_id: task.task_id, attempt_id: preparedTask.attempt_id, run_id: run.run_id, data_root: bound.data_root, status: 'pending',
             })
-          }
-        }, runtime)
-        await tasks.bindRunBySession(launched.session_id, launched.run)
-        if (launched.job_id) {
-          const job = runtimeService(runtime, 'jobs')?.get?.(launched.job_id)
-          await tasks.bindJob(task.task_id, { jobId: launched.job_id, provider: launched.provider, ownerSessionId: launched.session_id, startedAt: job?.startedAt })
-        }
-        await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id })
-        return json(res, 200, { ...launched, task: await tasks.get(task.task_id) })
+            return bound
+          },
+          onOwnerReady: async ({ ownerSessionId }) => {
+            const bound = await tasks.bindOwnerSession(task.task_id, {
+              attemptId: preparedTask.attempt_id,
+              ownerSessionId,
+            })
+            try {
+              await monitor.bindExecution(ownerSessionId, {
+                run_id: launchedRun?.run_id ?? bound.run_id,
+                data_root: bound.data_root,
+                phase: 'PREPARING',
+                analysis: { completed: 0, total: launchedRun?.workflow?.steps?.length ?? null, reworked: 0 },
+              }, {
+                dataRoot: bound.data_root,
+                taskId: bound.task_id,
+                attemptId: preparedTask.attempt_id,
+              })
+            } catch (error) {
+              await appendLaunchSafe(launchLogs, task.task_id, {
+                stage: 'monitor_bind', status: 'error', error,
+                error_code: 'MONITOR_IDENTITY_CONFLICT', attempt_id: preparedTask.attempt_id,
+              })
+            }
+            return bound
+          },
+          onJobCreated: async ({ jobId, ownerSessionId, jobStartedAt }) => {
+            const bound = await tasks.bindJob(task.task_id, {
+              jobId,
+              provider: selectedProvider,
+              ownerSessionId,
+              attemptId: preparedTask.attempt_id,
+              jobStartedAt,
+            })
+            if (bound.execution_status === 'stopping') {
+              const error = new Error('PANGEA 分析已请求停止，ACP 尚未放行')
+              error.code = 'PANGEA_STOP_REQUESTED'
+              throw error
+            }
+            return bound
+          },
+          onAgentStarted: ({ agent_session_id, pid }) => tasks.bindAgentRuntime(task.task_id, {
+            attemptId: preparedTask.attempt_id,
+            agentSessionId: agent_session_id,
+            processId: pid,
+          }),
+        })
+        await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id, attempt_id: preparedTask.attempt_id })
+        const updatedTask = await tasks.get(task.task_id)
+        return json(res, 200, { ...launched, task: { ...updatedTask, ...deriveTaskResumeEligibility(runtime, updatedTask) } })
       } catch (error) {
         await appendLaunchSafe(launchLogs, task.task_id, {
           stage: 'launch_failed', status: 'error', error,
           error_code: typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
+          attempt_id: preparedTask.attempt_id,
         })
-        await tasks.markLaunchFailed(
-          task.task_id,
-          error instanceof Error ? error.message : String(error),
-          typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
-        )
+        const latest = await tasks.get(task.task_id)
+        if (latest?.execution_status === 'stopping' || error?.code === 'PANGEA_STOP_REQUESTED') {
+          await tasks.markStopped(task.task_id, error?.code === 'PANGEA_STOP_REQUESTED' ? null : error)
+        } else {
+          await tasks.markLaunchFailed(
+            task.task_id,
+            error instanceof Error ? error.message : String(error),
+            typeof error?.code === 'string' ? error.code : 'LAUNCH_FAILED',
+          )
+        }
         throw error
       } finally {
         launchLocks.delete(task.task_id)
@@ -641,11 +1008,15 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
         })
       }
       const stopJobs = runtimeService(runtime, 'jobs')
+      if (requestedTask && ['preparing', 'starting', 'running'].includes(requestedTask.execution_status ?? (requestedTask.status === 'running' ? 'running' : ''))) {
+        requestedTask = await tasks.markStopping(requestedTask.task_id)
+      }
       let jobStop = { status: 'not_bound', job_id: requestedTask?.job_id ?? null, error: null }
       if (requestedTask?.job_id && stopJobs?.kill) {
         const owner = runtimeService(runtime, 'agents')?.get?.(requestedTask.owner_session_id)
         try {
-          if (!readJobSnapshot(runtime, requestedTask)) throw new Error('当前任务的 ACP Job 不存在')
+          const identityIssue = jobIdentityIssue(requestedTask, stopJobs.get?.(requestedTask.job_id, owner))
+          if (identityIssue) throw new Error(identityIssue)
           const result = await stopJobs.kill(requestedTask.job_id, owner, '用户请求停止 PANGEA 分析')
           jobStop = { status: 'ok', job_id: requestedTask.job_id, result, error: null }
           await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'ok', job_id: requestedTask.job_id, result })
@@ -690,13 +1061,28 @@ async function workbenchRouteHandler(req, res, api, tasks, launchLocks, launchLo
       }
       await tasks.reconcileRuns([stopped.run], { dataRoot: stopped.data_root })
       const stopError = [runStopError, jobStop.error].filter(Boolean).join('；') || null
-      if (task) await tasks.markStopped(task.task_id, stopError)
+      const jobBound = Boolean(task?.job_id)
+      const stopConfirmed = !jobBound && !launchLocks.has(task?.task_id) || jobStop.result === 'already-finished'
+      if (task && stopConfirmed) {
+        if (jobStop.result === 'already-finished') {
+          try {
+            const snapshot = readJobSnapshot(runtime, task)
+            if (['completed', 'failed', 'killed'].includes(snapshot?.status)) {
+              await settleAcpTask(runtime, tasks, launchLogs, snapshot, jobOwner(runtime, task))
+            }
+          } catch { /* the stop response still reports the exact confirmation state */ }
+        }
+        await tasks.markStopped(task.task_id, stopError)
+      } else if (task && stopError) {
+        await tasks.markStopping(task.task_id, stopError)
+      }
+      const updatedTask = task ? await tasks.get(task.task_id) : null
       return json(res, 200, {
         ...stopped,
         job_stop: jobStop,
         run_stop: runStopError ? { status: 'error', error: runStopError } : { status: 'ok', error: null },
         session_cancel: sessionCancel,
-        task: task ? await tasks.get(task.task_id) : null,
+        task: updatedTask ? { ...updatedTask, ...deriveTaskResumeEligibility(runtime, updatedTask) } : null,
       })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
@@ -726,7 +1112,7 @@ async function repositoryRouteHandler(req, res) {
   }
 }
 
-async function acpSettingsRouteHandler(req, res, settings, runtime) {
+export async function acpSettingsRouteHandler(req, res, settings, runtime) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   try {
     if (req.method === 'GET') {
@@ -742,13 +1128,21 @@ async function acpSettingsRouteHandler(req, res, settings, runtime) {
     }
     if (req.method === 'POST') {
       const body = await requestJson(req)
+      if (body.action === 'models') {
+        const controller = new AbortController()
+        const disconnect = () => { if (!res.writableEnded) controller.abort(new Error('模型列表请求已取消')) }
+        res.on('close', disconnect)
+        try {
+          const catalog = await discoverAgentModels(runtime, { providerId: body.provider_id, cwd: body.cwd, signal: controller.signal })
+          return json(res, 200, { status: 'ok', ...catalog })
+        } finally { res.removeListener('close', disconnect) }
+      }
       if (body.action === 'test') {
         const checks = acpProviderOptions().map(provider => {
           const registered = Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id))
           const reasons = []
           if (!provider.available) reasons.push(provider.resolution_error ?? '启动命令不可用')
           if (!registered) reasons.push('Provider 未注册')
-          if (provider.models.length === 0) reasons.push('尚未配置模型目录')
           return { id: provider.id, label: provider.label, ok: reasons.length === 0, registered, reasons }
         })
         return json(res, 200, { status: 'ok', checks })
@@ -1112,6 +1506,7 @@ export function apply(ctx) {
 
   const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
+  const disposeExportRoute = ctx.webServer.register({ kind: 'exact', path: EXPORT_API_PATH, handler: exportRouteHandler })
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
@@ -1119,16 +1514,19 @@ export function apply(ctx) {
   const jobs = ctx.jobs ?? ctx.get?.('jobs')
   const disposeJobController = jobs?.attachController?.('pangea-companion')
   const disposeJobDone = jobs?.onJobDone?.((snapshot, owner) => settleAcpTask(ctx, tasks, launchLogs, snapshot, owner).catch(() => undefined))
-  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs, ctx) })
+  const disposeArchitectureRoute = ctx.webServer.register({ kind: 'exact', path: '/api/pangea-companion/architecture-artifact', handler: (req, res) => architectureArtifactRoute(req, res, tasks) })
+  const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs, ctx, monitor) })
   const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
   ctx.effect?.(() => async () => {
     disposeRepositoryRoute()
+    disposeArchitectureRoute()
     disposeWorkbenchRoute()
     disposeExecutionRoute()
     disposeAcpSettingsRoute()
     disposeEnvironmentRoute()
     disposeLaunchLogRoute()
     disposeSourceRoute()
+    disposeExportRoute()
     disposeStateRoute()
     disposeJobDone?.()
     disposeJobController?.()
@@ -1147,7 +1545,7 @@ export { createLaunchLogStore, LaunchLogStore } from './launch-log.js'
 export { AcpSettingsStore, createAcpSettingsStore } from './acp-settings.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
-export { createRun, runAdapter, runPangea, runSourceFirstCommand, workspaceRoot } from './pangea-api.js'
-export { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+export { createRun, resumeRun, runAdapter, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
+export { launchAnalysisSession, normalizeRunInput, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'
-export { reconcileAcpJobs, sessionFailure, settleAcpTask }
+export { deriveTaskResumeEligibility, reconcileAcpJobs, sessionFailure, settleAcpTask }

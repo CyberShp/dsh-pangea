@@ -48,7 +48,7 @@ export class MethodologyCandidateRuntime {
 
   async job(cwd, dataRoot) {
     const active = this.latest.get(path.resolve(dataRoot))
-    if (active && !['completed', 'failed'].includes(active.status)) return jobView(active)
+    if (active) return jobView(active)
     const latest = (await this.derivations(cwd, dataRoot))[0]
     return latest ? {
       status: latest.status,

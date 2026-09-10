@@ -1,6 +1,8 @@
 import path from 'node:path'
+import { attentionRequiredOutcome } from './acp-outcome.js'
+import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
 
-import { assertSourceFirstCapabilities, createRun, runPangea, workspaceRoot } from './pangea-api.js'
+import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 import { sourceFirstReportAvailable } from './reader.js'
 
 const DEFAULT_PAGE_SIZE = 20
@@ -12,6 +14,8 @@ const ACP_PROVIDER_DEFAULTS = [
   { id: 'pangea-opencode', label: 'OpenCode', command: 'opencode', args: ['acp'] },
   { id: 'pangea-claude-code', label: 'Claude Code', kind: 'claude-code', command: 'DSH Claude Code Provider', args: [] },
 ]
+const ANALYSIS_SCENARIOS = new Set(['coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
+const ANALYSIS_MODES = new Set(['speed', 'depth'])
 
 function configuredProviders(env) {
   const raw = env[ACP_RUNTIME_CONFIG_ENV]
@@ -24,16 +28,6 @@ function configuredProviders(env) {
     throw new Error(`${ACP_RUNTIME_CONFIG_ENV} 必须包含 version=1 和 providers 对象`)
   }
   return parsed.providers
-}
-
-function configuredModel(value, providerId) {
-  const id = typeof value?.id === 'string' ? value.id.trim() : ''
-  if (!id) throw new Error(`${providerId} 的模型缺少 id`)
-  const label = typeof value?.label === 'string' && value.label.trim() ? value.label.trim() : id
-  if (!Array.isArray(value?.efforts)) throw new Error(`${providerId}/${id} 的 efforts 必须是字符串数组`)
-  const efforts = [...new Set(value.efforts.map(item => typeof item === 'string' ? item.trim() : '').filter(Boolean))]
-  if (efforts.length !== value.efforts.length) throw new Error(`${providerId}/${id} 的 efforts 包含空值或重复值`)
-  return { id, label, efforts }
 }
 
 // External ACP agents are intentionally configured as commands rather than
@@ -50,15 +44,10 @@ export function acpProviderOptions(env = process.env) {
     if (!Array.isArray(args) || args.some(item => typeof item !== 'string' || !item.trim())) {
       throw new Error(`${defaults.id} 的 args 必须是非空字符串数组`)
     }
-    if (value?.models !== undefined && !Array.isArray(value.models)) {
-      throw new Error(`${defaults.id} 的 models 必须是数组`)
-    }
-    const models = (value?.models ?? []).map(item => configuredModel(item, defaults.id))
     return {
       ...defaults,
       command,
       args: args.map(item => item.trim()),
-      models,
       configured: value !== undefined,
       resolved_command: typeof value?.resolved_command === 'string' && value.resolved_command.trim() ? value.resolved_command.trim() : null,
       available: value?.available !== false,
@@ -68,6 +57,7 @@ export function acpProviderOptions(env = process.env) {
       version_status: typeof value?.version_status === 'string' ? value.version_status : null,
       version_error: typeof value?.version_error === 'string' ? value.version_error : null,
       login_status: typeof value?.login_status === 'string' ? value.login_status : null,
+      launcher_kind: typeof value?.launcher_kind === 'string' ? value.launcher_kind : null,
     }
   })
 }
@@ -81,22 +71,6 @@ export function validateAcpRuntimeConfig(value) {
 export function acpProviderOption(providerId, env = process.env) {
   const id = typeof providerId === 'string' ? providerId.trim() : ''
   return acpProviderOptions(env).find(provider => provider.id === id) ?? null
-}
-
-export function requireAcpModel(providerId, value, env = process.env) {
-  const provider = acpProviderOption(providerId, env)
-  if (!provider) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
-  const selected = modelRoute(value)
-  if (!selected || selected.provider !== provider.id) throw new Error(`请选择 ${provider.label} 的执行模型`)
-  const model = provider.models.find(item => item.id === selected.model)
-  if (!model) throw new Error(`所选模型不属于 ${provider.label} 当前配置：${selected.model}`)
-  if (selected.reasoning_effort && !model.efforts.includes(selected.reasoning_effort)) {
-    throw new Error(`${provider.label}/${model.id} 不支持推理级别：${selected.reasoning_effort}`)
-  }
-  if (!selected.reasoning_effort && model.efforts.length > 0) {
-    throw new Error(`请选择 ${provider.label}/${model.id} 的推理级别`)
-  }
-  return { ...selected, route_class: 'external-acp' }
 }
 
 function rpc(payload) {
@@ -203,27 +177,40 @@ function stringList(value) {
 }
 
 function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
-  assertSourceFirstCapabilities(capabilities)
+  const semantic = supportsSourceFirst(capabilities)
+  if (semantic) assertSourceFirstCapabilities(capabilities)
+  else {
+    assertCodetalksSkill(capabilities)
+    const rejected = ['focus', 'test_case_examples'].filter(key => Object.hasOwn(value ?? {}, key))
+    if (rejected.length && !value?.task_id) throw new Error(`新建分析不支持字段：${rejected.join(', ')}`)
+  }
   const repository = typeof value?.repository === 'string' ? value.repository.trim() : ''
   const target = typeof value?.target === 'string' ? value.target.trim() : ''
+  const scenario = typeof value?.scenario === 'string' && value.scenario.trim() ? value.scenario.trim() : 'module-analysis'
+  const mode = typeof value?.mode === 'string' && value.mode.trim() ? value.mode.trim() : 'depth'
   const sourceScope = stringList(value?.source_scope)
   if (!repository) throw new Error('repository is required')
   if (!target) throw new Error('target is required')
-  if (sourceScope.length === 0 && !allowEmptySourceScope) {
+  if (!ANALYSIS_SCENARIOS.has(scenario)) throw new Error(`不支持的分析场景：${scenario}`)
+  if (!ANALYSIS_MODES.has(mode)) throw new Error(`不支持的分析模式：${mode}`)
+  if (sourceScope.length === 0 && !allowEmptySourceScope && scenario !== 'coverage-analysis') {
     throw new Error('source_scope must contain at least one path')
   }
   if (Array.isArray(capabilities?.repositories) && !capabilities.repositories.includes(repository)) {
     throw new Error(`repository is not registered: ${repository}`)
   }
   return {
-    workflow_version: 'source-first-v1',
+    ...(!semantic ? { request_version: '2.0' } : {}),
+    ...(semantic ? { workflow_version: 'source-first-v1', focus: stringList(value?.focus), test_case_examples: stringList(value?.test_case_examples), effective_context_budget: value?.effective_context_budget } : {}),
     repository,
     target,
+    scenario,
+    mode,
     source_scope: sourceScope,
+    ...(scenario === 'coverage-analysis' ? { coverage_input: value.coverage_input } : {}),
     asset_ids: stringList(value?.asset_ids),
-    focus: stringList(value?.focus),
-    test_case_examples: stringList(value?.test_case_examples),
     provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,
+    agent_model: value?.provider_id && typeof value?.agent_model === 'string' ? value.agent_model.trim() || null : null,
   }
 }
 
@@ -318,91 +305,266 @@ async function emitLaunch(onEvent, event) {
   try { await onEvent(event) } catch { /* logging must never change launch behavior */ }
 }
 
+function launchDetails(value, fallback = {}) {
+  const error = value && typeof value === 'object' ? value : {}
+  const text = (camel, snake, defaultValue) => {
+    const candidate = error[camel] ?? error[snake] ?? defaultValue
+    return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : undefined
+  }
+  return {
+    launch_stage: text('launchStage', 'launch_stage', fallback.launch_stage),
+    configured_command: text('configuredCommand', 'configured_command', fallback.configured_command),
+    resolved_command: text('resolvedCommand', 'resolved_command', fallback.resolved_command),
+    launcher_kind: text('launcherKind', 'launcher_kind', fallback.launcher_kind),
+    launcher_command: text('launcherCommand', 'launcher_command', fallback.launcher_command),
+    cwd: text('cwd', 'cwd', fallback.cwd),
+    error_code: Number.isInteger(error.code) ? String(error.code) : text('code', 'error_code', fallback.error_code),
+    syscall: text('syscall', 'syscall', fallback.syscall),
+    ...(text('stderrSummary', 'stderr_summary', fallback.stderr_summary) ? { stderr_summary: text('stderrSummary', 'stderr_summary', fallback.stderr_summary) } : {}),
+    errno: Number.isInteger(error.errno) ? error.errno : fallback.errno,
+  }
+}
+
 async function launchStep(onEvent, stage, action, successDetails = () => ({})) {
+  const startedAt = Date.now()
   await emitLaunch(onEvent, { stage, status: 'start' })
   try {
     const value = await action()
-    await emitLaunch(onEvent, { stage, status: 'ok', ...successDetails(value) })
+    await emitLaunch(onEvent, { stage, status: 'ok', duration_ms: Date.now() - startedAt, ...successDetails(value) })
     return value
   } catch (error) {
-    await emitLaunch(onEvent, { stage, status: 'error', error })
+    await emitLaunch(onEvent, { stage, status: 'error', duration_ms: Date.now() - startedAt, error })
     throw error
   }
 }
 
-function runtimeService(runtime, name) {
+export function runtimeService(runtime, name) {
   return runtime?.[name] ?? runtime?.get?.(name)
 }
 
-async function settleAcpRun(start, signal) {
-  let run
-  try {
-    run = await start
-    const result = await run.result
-    const text = (result.output ?? [])
-      .filter(item => item?.type === 'text')
-      .map(item => item.text)
-      .join('')
-    if (result.stopReason === 'completed') return { status: 'completed', output: text }
-    if (result.stopReason === 'aborted' && result.diagnostic === undefined && signal.aborted) return { status: 'killed' }
-    return { status: 'failed', detail: result.diagnostic ? `${result.stopReason}; diagnostic: ${result.diagnostic}` : result.stopReason }
-  } catch (error) {
-    return { status: signal.aborted ? 'killed' : 'failed', ...(signal.aborted ? {} : { detail: error instanceof Error ? error.message : String(error) }) }
-  } finally {
-    try { await run?.dispose?.() } catch { /* job settlement retains the failure */ }
+function runProgressFingerprint(run) {
+  return JSON.stringify([
+    run?.lifecycle_status ?? null,
+    run?.phase ?? null,
+    run?.completed_steps?.length ?? null,
+    run?.publication?.revision ?? null,
+    run?.step_progress?.completed ?? null,
+    run?.step_progress?.total ?? null,
+    run?.step_progress?.current?.id ?? null,
+    run?.report_available === true,
+    run?.stage ?? null, run?.accepted_revisions ?? null,
+  ])
+}
+
+function continuationPrompt(run) {
+  return [
+    '上一轮回答已经结束，但当前 Codetalks Run 尚未完成。',
+    run?.phase === 'PREPARING' ? '当前 Run 尚未写出初始化状态。先使用首轮提供的 Python 路径执行请求中的 run_guard.py init；若执行失败，报告具体命令、退出码和受限错误摘要并结束。' : null,
+    '请读取运行根目录中的 `内部索引/运行状态.json` 以及当前步骤交接文件，以落盘状态为准继续执行。',
+    `当前阶段：${run?.phase ?? '未知'}；已完成步骤：${run?.completed_steps?.length ?? '未知'}/${run?.workflow?.steps?.length ?? '按当前冻结 manifest'}。`,
+    '继续当前 Run，不要创建新的 Run。',
+  ].filter(Boolean).join('\n')
+}
+
+function acpRunDiagnostics(run) {
+  const value = run.readDiagnostics?.() ?? {}
+  return {
+    remote_session_id: run.remoteSessionId,
+    model: value.model || 'unavailable',
+    message_chunks: value.messageChunks,
+    tool_calls: value.toolCalls,
+    tool_failures: value.toolFailures,
+    error_code: value.errorCode,
+    error_summary: value.errorSummary,
+    stderr_summary: value.stderrSummary,
+    agent_version: value.agentVersion,
+    last_tool_id: value.lastToolId,
+    last_tool_status: value.lastToolStatus,
+    turn_duration_ms: value.turnDurationMs,
+    first_event_ms: value.firstEventMs,
+    stderr_bytes: value.stderrBytes,
+    stderr_truncated: value.stderrTruncated,
+    output_truncated: value.outputTruncated,
+    process_exited: value.processExited,
+    exit_code: value.exitCode,
+    exit_signal: value.exitSignal,
   }
 }
 
-function startAcpJob(runtime, parent, providerId, model, prompt, label, onEvent) {
+async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
+  let run
+  try {
+    run = await start
+    let result = await run.result
+    let output = ''
+    let previousProgress = null
+    let unchangedTurns = 0
+    let turn = 1
+    while (true) {
+      await lifecycle.onTurnEvent?.({
+        stage: 'acp_turn_finished', status: result.stopReason === 'error' ? 'error' : 'info', turn,
+        stop_reason: result.stopReason, protocol_stop_reason: result.protocolStopReason,
+        ...acpRunDiagnostics(run),
+      })
+      output += (result.output ?? [])
+        .filter(item => item?.type === 'text')
+        .map(item => item.text)
+        .join('')
+      if (result.stopReason === 'aborted' && result.diagnostic === undefined && wasCancelled()) return { status: 'killed' }
+      if (result.stopReason !== 'completed') {
+        return { status: 'failed', detail: result.diagnostic ? `${result.stopReason}; diagnostic: ${result.diagnostic}` : result.stopReason, output }
+      }
+      if (typeof lifecycle.inspectRun !== 'function') return { status: 'completed', output }
+      const state = await lifecycle.inspectRun()
+      await lifecycle.onTurnEvent?.({ stage: 'acp_run_inspected', status: 'info', turn, phase: state?.phase,
+        completed: state?.completed_steps?.length,
+        state_path: state?.run_root ? path.join(state.run_root, '内部索引', '运行状态.json') : undefined,
+      })
+      if (signal.aborted || wasCancelled()) return { status: 'killed' }
+      let reviewTurn
+      if (lifecycle.review) {
+        try { reviewTurn = await lifecycle.review.afterProducerTurn(run, state, signal) }
+        catch (error) {
+          if (signal.aborted || wasCancelled()) return { status: 'killed' }
+          await lifecycle.onReviewWaiting?.(error.message)
+          return { ...attentionRequiredOutcome(error.message), output }
+        }
+        if (signal.aborted || wasCancelled()) return { status: 'killed' }
+        if (reviewTurn?.complete) return { status: 'completed', output }
+      } else if (state?.lifecycle_status === 'complete' && state?.report_available === true) return { status: 'completed', output }
+      if (typeof run.continuePrompt !== 'function') {
+        return {
+          ...attentionRequiredOutcome(`ACP 本轮已结束，但当前 Run 尚未完成（${state?.phase ?? state?.lifecycle_status ?? 'unknown'}）`),
+          output,
+        }
+      }
+      const fingerprint = runProgressFingerprint(state)
+      unchangedTurns = fingerprint === previousProgress ? unchangedTurns + 1 : 0
+      previousProgress = fingerprint
+      if (unchangedTurns >= 2) {
+        return {
+          ...attentionRequiredOutcome(`ACP 连续续接未推进当前 Run（${state?.phase ?? 'unknown'}）`),
+          output,
+        }
+      }
+      turn += 1
+      await lifecycle.onTurnEvent?.({ turn, stage: 'acp_turn_continued', phase: state?.phase, completed: state?.completed_steps?.length })
+      result = await run.continuePrompt([{ type: 'text', text: reviewTurn?.prompt ?? lifecycle.continuationPrompt?.(state) ?? continuationPrompt(state) }])
+    }
+  } catch (error) {
+    return wasCancelled()
+      ? { status: 'killed' }
+      : { status: 'failed', detail: error instanceof Error ? error.message : String(error) }
+  } finally {
+    const cleanup = await Promise.allSettled([
+      Promise.resolve().then(() => lifecycle.review?.dispose?.()),
+      Promise.resolve().then(() => run?.dispose?.()),
+    ])
+    try {
+      if (run) await lifecycle.onTurnEvent?.({ stage: 'acp_process_cleanup', status: cleanup.some(item => item.status === 'rejected') ? 'error' : 'info', ...acpRunDiagnostics(run) })
+    } catch { /* job settlement retains the failure */ }
+  }
+}
+
+async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, lifecycle = {}, agentModel = null) {
   const subagents = runtimeService(runtime, 'subagents')
   const jobs = runtimeService(runtime, 'jobs')
   if (!subagents?.start) throw new Error('DSH subagent runtime unavailable: load dsh-subagent')
   if (!jobs?.start) throw new Error('DSH background jobs unavailable: load dsh-jobs and dsh-jobs-local')
   if (!parent) throw new Error('DSH owner Agent is not live for this analysis session')
   if (!subagents.getProvider?.(providerId)) throw new Error(`ACP Provider 未注册：${providerId}`)
+  let hooks
+  let releaseStart
+  let rejectStart
+  const startGate = new Promise((resolve, reject) => {
+    releaseStart = resolve
+    rejectStart = reject
+  })
   const jobId = jobs.start({
     kind: 'subagent',
     label,
     run: () => {
       const controller = new AbortController()
       let activeRun
-      const start = subagents.start(providerId, {
-        label,
-        prompt: [{ type: 'text', text: prompt }],
-        parent,
-        signal: controller.signal,
-        agentOptions: {
-          model: model.model,
-          ...(model.reasoning_effort ? { reasoningEffort: model.reasoning_effort } : {}),
-        },
-      })
-      const observed = Promise.resolve(start).then(run => {
+      let cancelled = false
+      const observed = startGate.then(async () => {
+        await emitLaunch(onEvent, {
+          stage: 'acp_process_spawn', status: 'start', provider: providerId,
+          ...lifecycle.launchContext,
+        })
+        return subagents.start(providerId, {
+          label,
+          prompt: [{ type: 'text', text: prompt }],
+          parent,
+          signal: controller.signal,
+          ...(agentModel ? { agentOptions: { model: agentModel } } : {}),
+        })
+      }).then(async run => {
         activeRun = run
+        const details = launchDetails(run.launch, lifecycle.launchContext)
+        await lifecycle.onAgentStarted?.({
+          provider: providerId,
+          agent_session_id: String(run.id),
+          pid: Number.isInteger(run.processId) ? run.processId : undefined,
+        })
         void emitLaunch(onEvent, {
           stage: 'acp_session_created', status: 'ok', provider: providerId,
-          model: model.model, reasoning_effort: model.reasoning_effort,
           agent_session_id: String(run.id), pid: Number.isInteger(run.processId) ? run.processId : undefined,
+          ...acpRunDiagnostics(run),
+          ...details,
         })
         return run
+      }).catch(async error => {
+        await emitLaunch(onEvent, {
+          stage: 'acp_process_spawn', status: 'error', provider: providerId, error,
+          ...launchDetails(error, { ...lifecycle.launchContext, launch_stage: 'spawn_process' }),
+        })
+        controller.abort(error)
+        try { await activeRun?.dispose?.() } catch { /* the failed launch remains observable through the Job */ }
+        throw error
       })
-      return {
-        cancel: reason => controller.abort(reason ?? 'PANGEA analysis stopped'),
-        done: settleAcpRun(observed, controller.signal),
-        readOutput: () => typeof activeRun?.readOutput === 'function' ? activeRun.readOutput() : '',
+      hooks = {
+        cancel: reason => {
+          cancelled = true
+          controller.abort(reason ?? 'PANGEA analysis stopped')
+        },
+        abort: reason => controller.abort(reason),
+        done: settleAcpRun(observed, controller.signal, () => cancelled, lifecycle),
+        readOutput: () => [typeof activeRun?.readOutput === 'function' ? activeRun.readOutput() : '', lifecycle.review?.readOutput?.()].filter(Boolean).join('\n\n[独立 Reviewer]\n'),
       }
+      return hooks
     },
   })
+  try {
+    const job = jobs.get?.(jobId, parent)
+    if (!Number.isFinite(job?.startedAt)) throw new Error(`ACP Job snapshot 缺少 startedAt：${jobId}`)
+    await lifecycle.onJobCreated?.({
+      jobId: String(jobId),
+      ownerSessionId: parent.id,
+      jobStartedAt: job.startedAt,
+    })
+    releaseStart()
+  } catch (error) {
+    rejectStart(error)
+    try {
+      if (error?.code === 'PANGEA_STOP_REQUESTED') hooks?.cancel?.(error)
+      else hooks?.abort?.(error)
+    } catch { /* local cleanup below remains authoritative */ }
+    try { await hooks?.done } catch { /* settlement has already captured the launch failure */ }
+    throw error
+  }
   return jobId
 }
 
 export async function launchAnalysisSession(
   api,
-  { cwd, dataRoot, input, model },
+  { cwd, dataRoot, input, model, resumeRunId },
   runner = runPangea,
   onSession = async () => {},
   onEvent = async () => {},
   runtime,
   env = process.env,
+  lifecycle = {},
 ) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
@@ -412,33 +574,38 @@ export async function launchAnalysisSession(
     args: ['system', 'capabilities', '--data-root', resolvedDataRoot],
   }), value => ({ repository_count: Array.isArray(value?.repositories) ? value.repositories.length : 0 }))
   const request = normalizeAnalysisInput(input, capabilities, true)
+  const semantic = supportsSourceFirst(capabilities)
+  if (semantic && !request.agent_model && input?.model_route?.model) request.agent_model = input.model_route.model
   await emitLaunch(onEvent, { stage: 'input_validated', status: 'ok' })
   const selectedProvider = request.provider_id
   if (selectedProvider && !runtime) throw new Error(`外部执行 Agent 需要 DSH ACP runtime：${selectedProvider}`)
   const selectedModel = selectedProvider
-    ? requireAcpModel(selectedProvider, model, env)
+    ? null
     : await launchStep(
       onEvent,
       'model_validate',
       () => requireInternalModel(api, model),
       value => ({ provider: value.provider, model: value.model }),
     )
+  const requestedResumeRunId = typeof resumeRunId === 'string' ? resumeRunId.trim() : ''
   const run = await launchStep(
     onEvent,
-    'run_create',
-    () => {
-      const { provider_id: _providerId, ...skillRequest } = request
-      return createRun(root, {
-        ...skillRequest,
-        data_root: resolvedDataRoot,
-        model_id: selectedModel.model,
-        effective_context_budget: Number.isInteger(input?.effective_context_budget)
-          ? input.effective_context_budget
-          : 250000,
-      }, runner)
-    },
-    value => ({ run_id: value.run_id, request_path: value.request_path }),
+    requestedResumeRunId ? 'skill_run_resume' : 'skill_run_create',
+    () => requestedResumeRunId
+      ? resumeRun(root, { dataRoot: resolvedDataRoot, runId: requestedResumeRunId }, runner)
+      : (() => {
+        const { provider_id: _providerId, agent_model: _agentModel, ...skillRequest } = request
+        return createRun(root, { ...skillRequest, data_root: resolvedDataRoot, ...(semantic ? { model_id: request.agent_model ?? selectedModel?.model, effective_context_budget: input?.effective_context_budget ?? 250000 } : {}) }, runner)
+      })(),
+    value => ({
+      run_id: value.run_id,
+      request_path: value.request_path,
+      file_count: value.source_snapshot?.file_count,
+      total_bytes: value.source_snapshot?.total_bytes,
+      snapshot_duration_ms: value.source_snapshot?.snapshot_duration_ms,
+    }),
   )
+  await lifecycle.onRunReady?.({ ...run, workflow_version: semantic ? 'source-first-v1' : run.workflow_version })
   const sessionId = await launchStep(
     onEvent,
     'session_create',
@@ -460,6 +627,25 @@ export async function launchAnalysisSession(
     model: selectedModel,
     run,
   }), () => ({ session_id: sessionId }))
+  await lifecycle.onOwnerReady?.({ ownerSessionId: sessionId })
+  const managedReview = Boolean(!semantic && selectedProvider && supportsHostReview(request) && lifecycle.reviewBinding && !requestedResumeRunId)
+  const legacyPrompt = [
+    requestedResumeRunId
+      ? `继续已有的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，从最近检查点恢复执行，不要创建第二个 Run。`
+      : `立即开始已经创建好的 Codetalks Skill ${request.mode === 'speed' ? '速度型' : '深度型'} ${request.scenario} 分析，按当前 Run 冻结 workflow-manifest.json 完整执行各阶段，不需要再次确认，也不要创建第二个 Run。`,
+    '必须先读取 `.agents/pangea/dsh.md`，再读取下面的 Skill 运行请求并严格执行。',
+    `运行请求：${run.request_path}`,
+    `Run ID：${run.run_id}`,
+    `运行根目录：${run.run_root}`,
+    env.PANGEA_PYTHON ? `Desktop Python 可执行文件：${env.PANGEA_PYTHON}。执行 run_guard.py 时使用此路径；PowerShell 用 & 调用并单引号引用路径（路径内单引号写成两个）。` : null,
+    '遇到宿主环境阻塞时，报告失败步骤、命令退出码和必要错误摘要，然后结束；不要搜索安装目录、凭据配置或历史日志。',
+    requestedResumeRunId ? '这是一次续跑：先读取内部索引/运行状态.json，调用 run_guard.py init --resume 保留已完成步骤，再从当前步骤继续。' : null,
+    '旧 PANGEA Graph、Planning、Worker action、Review、Closure、Reporting、bind、validate 和 settle 均不存在。',
+    '生命周期只以运行根目录中的 `内部索引/运行状态.json` 为准。',
+    managedReview ? '本任务由宿主派发独立 Reviewer。完成阶段 03 后保存并发布分析与用例，结束本轮回复等待宿主；不要执行阶段 04/05，不自行派发或编写独立审查结论。收到宿主复核或修订消息后，只按该消息继续当前 Run。' : null,
+    '',
+    '现在读取运行请求并执行。',
+  ].filter(Boolean).join('\n')
   const runDetails = [
     `冻结 task contract：${run.request_path ?? '由 Graph 返回的当前 Run 输入'}`,
     `Run ID：${run.run_id}`,
@@ -486,17 +672,62 @@ export async function launchAnalysisSession(
     '',
     '现在读取当前 action 并执行 source-first 工作流。',
   ].join('\n')
-  const prompt = runtime && selectedProvider ? externalPrompt : internalPrompt
+  const prompt = semantic ? (runtime && selectedProvider ? externalPrompt : internalPrompt) : legacyPrompt
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
-    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, selectedModel, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent), value => ({ job_id: value, provider: selectedProvider, model: selectedModel.model }))
-    await emitLaunch(onEvent, { stage: 'source_first_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, model: selectedModel.model, reasoning_effort: selectedModel.reasoning_effort, run_id: run.run_id, message: 'PANGEA source-first ACP 分析已启动。' })
+    const providerOption = acpProviderOption(selectedProvider, env)
+    const resolvedCommand = providerOption?.resolved_command ?? providerOption?.command
+    const launcherKind = providerOption?.launcher_kind
+      ?? (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(resolvedCommand ?? '') ? 'windows-batch' : 'direct')
+    const launchContext = {
+      configured_command: providerOption?.command,
+      resolved_command: resolvedCommand,
+      launcher_kind: launcherKind,
+      launcher_command: launcherKind === 'windows-batch' ? env.ComSpec ?? 'cmd.exe' : resolvedCommand,
+      cwd: root,
+    }
+    const acpLifecycle = {
+      ...lifecycle,
+      launchContext,
+      inspectRun: async () => withSourceFirstReports(await runner({
+        cwd: root,
+        args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', run.run_id],
+      }), resolvedDataRoot),
+      ...(semantic ? { continuationPrompt: () => `${prompt}\n继续当前 Run，从 pangea_action_next 返回的 action 恢复执行。` } : {}),
+      onTurnEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
+    }
+    if (managedReview) {
+      acpLifecycle.review = createAnalysisReview({
+        binding: { ...lifecycle.reviewBinding, run_id: run.run_id, run_root: run.run_root, request_path: run.request_path, data_root: resolvedDataRoot },
+        verifyCases: ({ reviewRequestId, formal, signal }) => runner({
+          cwd: root, signal,
+          args: ['runs', 'verify-cases', '--data-root', resolvedDataRoot, '--run-id', run.run_id,
+            '--review-request-id', reviewRequestId, ...(formal ? ['--formal'] : [])],
+        }),
+        startReviewer: async (reviewPrompt, signal) => {
+          await emitLaunch(onEvent, { stage: 'reviewer_spawn', status: 'start', run_id: run.run_id })
+          const reviewer = await runtimeService(runtime, 'subagents').start(selectedProvider, {
+            label: `PANGEA 独立复核 · ${request.target}`, prompt: [{ type: 'text', text: reviewPrompt }], parent, signal,
+            ...(request.agent_model ? { agentOptions: { model: request.agent_model } } : {}),
+          })
+          await emitLaunch(onEvent, { stage: 'reviewer_session_created', status: 'ok', run_id: run.run_id,
+            agent_session_id: String(reviewer.id), ...acpRunDiagnostics(reviewer) })
+          return reviewer
+        },
+        record: async value => {
+          await lifecycle.onReviewState(value)
+          await emitLaunch(onEvent, { ...value, stage: 'reviewer_state', status: 'ok', review_status: value.status, semantic_verdict: value.verdict })
+        },
+      })
+    }
+    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, acpLifecycle, request.agent_model), value => ({ job_id: value, provider: selectedProvider, requested_model: request.agent_model }))
+    await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
     return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
   }
   await launchStep(onEvent, 'prompt_submit', async () => {
     apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
   }, () => ({ session_id: sessionId }))
-  await emitLaunch(onEvent, { stage: 'source_first_started', status: 'ok', session_id: sessionId, run_id: run.run_id, message: 'PANGEA source-first 分析会话已启动。' })
+  await emitLaunch(onEvent, { stage: semantic ? 'source_first_started' : 'skill_started', status: 'ok', session_id: sessionId, run_id: run.run_id, message: 'PANGEA source-first 分析会话已启动。' })
   return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
 }
 
@@ -522,4 +753,38 @@ export async function stopAnalysisRun({ cwd, dataRoot, runId, runner = runPangea
   return { status: 'ok', data_root: resolvedDataRoot, run }
 }
 
+export async function resumeAnalysisRun({ cwd, dataRoot, runId, runner = runPangea }) {
+  const root = workspaceRoot(cwd)
+  const resolvedDataRoot = dataRootFor(root, dataRoot)
+  if (typeof runId !== 'string' || runId.trim() === '') throw new Error('run_id is required')
+  const run = await resumeRun(root, { dataRoot: resolvedDataRoot, runId: runId.trim() }, runner)
+  return { status: 'ok', data_root: resolvedDataRoot, run }
+}
+
 export { dataRootFor }
+
+// Derived sessions have no dependency on the main Run's completion state.
+export async function launchArchitectureSession(api, { cwd, task, prompt, onSession, onJob, onEvent = async () => {} }, runtime, env = process.env) {
+  const provider = task.provider
+  const model = provider ? null : await requireInternalModel(api, task.model_route)
+  const sessionId = await createDshSession(api, workspaceRoot(cwd), `架构视图 · ${task.target}`)
+  if (!provider) apiValue(await api.sessions.selectModel(rpc({ sessionId, provider: model.provider, model: model.model,
+    ...(model.reasoning_effort ? { reasoningEffort: model.reasoning_effort } : {}) })))
+  await onSession(sessionId)
+  if (provider) {
+    const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
+    const jobId = await startAcpJob(runtime, parent, provider, prompt, `架构视图 · ${task.target}`, onEvent, {
+      onTurnEvent: onEvent,
+      onJobCreated: async details => {
+        await onJob(details)
+        // The view consumes completion. Register before releasing ACP startup so
+        // tool-jobs cannot wake this owner as an unconfigured internal API Agent.
+        // Jobs requires a finite timeout; its waiter releases on actual settlement.
+        void runtimeService(runtime, 'jobs').wait(details.jobId, 2_147_483_647, parent)
+      },
+    }, task.agent_model)
+    return { session_id: sessionId, job_id: jobId }
+  }
+  apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
+  return { session_id: sessionId, job_id: null }
+}

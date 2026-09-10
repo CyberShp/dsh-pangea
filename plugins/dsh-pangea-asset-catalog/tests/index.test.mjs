@@ -5,20 +5,22 @@ import { apply, listOptions } from '../src/index.js'
 
 test('normalizes asset pagination filters for the public API', () => {
   assert.deepEqual(
-    listOptions(new URLSearchParams('page=2&page_size=50&type=historical_defect&status=awaiting_review&kind=semantic&q=callback')),
-    { page: 2, pageSize: 50, type: 'historical_defect', status: 'awaiting_review', kind: 'semantic', query: 'callback' },
+    listOptions(new URLSearchParams('page=2&page_size=50&type=historical_defect&status=awaiting_review&kind=semantic&repository_id=repo-one&module_tag=dhcp&q=callback')),
+    { page: 2, pageSize: 50, type: 'historical_defect', status: 'awaiting_review', kind: 'semantic', repositoryId: 'repo-one', moduleTag: 'dhcp', query: 'callback' },
   )
   assert.deepEqual(
     listOptions(new URLSearchParams('page=-1&page_size=999&type=bad&status=bad')),
-    { page: 1, pageSize: 20, type: '', status: '', kind: '', query: '' },
+    { page: 1, pageSize: 20, type: '', status: '', kind: '', repositoryId: '', moduleTag: '', query: '' },
   )
 })
 
-test('host registers the asset catalog tool and same-origin page route without agent listeners', async () => {
+test('host registers asset APIs and methodology lifecycle listeners', async () => {
   const tools = []
   const routes = []
+  const events = []
   let effectDescription = ''
   await apply({
+    on(name) { events.push(name); return () => {} },
     tools: { register(tool) { tools.push(tool); return () => {} } },
     apiProxy: {},
     webServer: { register(route) { routes.push(route); return () => {} } },
@@ -28,5 +30,20 @@ test('host registers the asset catalog tool and same-origin page route without a
   assert.match(tools[0].description, /已导入资产/)
   assert.equal(routes.length, 1)
   assert.equal(routes[0].path, '/api/pangea-asset-catalog/state')
+  assert.deepEqual(events, ['agent/status', 'agent/error'])
   assert.match(effectDescription, /PANGEA Asset Management 2\.0 API/)
+})
+
+test('semantic asset pagination excludes archived records before slicing', async () => {
+  const { semanticAssetList } = await import('../src/index.js')
+  const result = await semanticAssetList({ cwd: '/tmp', dataRoot: '/tmp/data',
+    options: { page: 1, pageSize: 1, type: '', status: '', query: '' },
+    runner: async ({ args }) => {
+      assert.equal(args.includes('--exclude-archived'), false)
+      return { items: [{ asset_id: 'old', status: 'archived' }, { asset_id: 'live', status: 'available' }], next_cursor: null }
+    },
+  })
+  assert.equal(result.total, 1)
+  assert.equal(result.items[0].asset_id, 'live')
+  assert.equal(result.summary.available, 1)
 })
