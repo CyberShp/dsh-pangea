@@ -6,6 +6,7 @@ import path from 'node:path'
 const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
 const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.3.0' })
+const SOURCE_FIRST_VERSION = 'source-first-v1'
 
 export function normalizeSourceScope(values, repository) {
   const items = Array.isArray(values) ? values : []
@@ -32,6 +33,16 @@ export function assertCodetalksSkill(capabilities) {
     throw new Error('PANGEA backend must provide codetalks-skill 1.3.0')
   }
   return skill
+}
+
+export function assertSourceFirstCapabilities(capabilities) {
+  const versions = Array.isArray(capabilities?.workflow_versions)
+    ? capabilities.workflow_versions
+    : []
+  if (!versions.includes(SOURCE_FIRST_VERSION) && capabilities?.source_first?.version !== SOURCE_FIRST_VERSION) {
+    throw new Error(`PANGEA backend must provide ${SOURCE_FIRST_VERSION}`)
+  }
+  return capabilities.source_first ?? { version: SOURCE_FIRST_VERSION }
 }
 
 export function workspaceRoot(cwd) {
@@ -108,31 +119,60 @@ export function runPangea({ cwd, args }) {
 
 export async function createRun(cwd, input, runner = runPangea) {
   const root = workspaceRoot(cwd)
-  const rejectedFields = ['focus', 'test_case_examples'].filter(field => Object.hasOwn(input ?? {}, field))
-  if (rejectedFields.length) throw new Error(`新建分析不支持字段：${rejectedFields.join(', ')}`)
   const pendingPath = path.join(root, PENDING_REQUEST)
   const dataRoot = typeof input.data_root === 'string' && input.data_root.trim() !== ''
     ? path.resolve(root, input.data_root)
     : path.join(root, 'pangea-data')
   const request = {
-    request_version: '2.0',
+    workflow_version: SOURCE_FIRST_VERSION,
     data_root: dataRoot,
     repository: input.repository,
     target: input.target,
     source_scope: normalizeSourceScope(input.source_scope, input.repository),
     asset_ids: input.asset_ids ?? [],
+    focus: Array.isArray(input.focus) ? input.focus : [],
+    test_case_examples: Array.isArray(input.test_case_examples) ? input.test_case_examples : [],
+    ...(typeof input.runtime_commit === 'string' && input.runtime_commit.trim() ? { runtime_commit: input.runtime_commit.trim() } : {}),
+    ...(typeof input.model_id === 'string' && input.model_id.trim() ? { model_id: input.model_id.trim() } : {}),
+    ...(Number.isInteger(input.effective_context_budget) && input.effective_context_budget > 0
+      ? { effective_context_budget: input.effective_context_budget }
+      : {}),
   }
   const capabilities = await runner({
     cwd: root,
     args: ['system', 'capabilities', '--data-root', dataRoot],
   })
-  assertCodetalksSkill(capabilities)
+  assertSourceFirstCapabilities(capabilities)
   await mkdir(path.dirname(pendingPath), { recursive: true })
   await rm(pendingPath, { force: true })
   await writeFile(pendingPath, `${JSON.stringify(request, null, 2)}\n`, 'utf8')
   try {
-    return await runner({ cwd: root, args: ['runs', 'create', '--request', pendingPath] })
+    return await runner({ cwd: root, args: ['runs', 'create', '--contract', pendingPath] })
   } finally {
     await rm(pendingPath, { force: true })
   }
+}
+
+export async function runSourceFirstCommand(cwd, args, runner = runPangea) {
+  const root = workspaceRoot(cwd)
+  if (!Array.isArray(args) || args.length === 0 || args.some(item => typeof item !== 'string' || item.trim() === '')) {
+    throw new TypeError('PANGEA command arguments must be non-empty strings')
+  }
+  return runner({ cwd: root, args })
+}
+
+// The DSH lifecycle policy needs the same deterministic CLI boundary as the
+// explicit source-first tools.  Keep the adapter operation and its identity
+// fields together so a dispatched child can only bind/settle the Graph action
+// that created it.
+export async function runAdapter(cwd, operation, input) {
+  if (!['bind', 'settle'].includes(operation)) throw new Error(`unsupported PANGEA adapter operation: ${operation}`)
+  const values = [
+    'adapter', operation,
+    '--data-root', input?.data_root,
+    '--run-id', input?.run_id,
+    '--action-id', input?.action_id,
+  ]
+  if (operation === 'bind') values.push('--task-id', input?.task_id)
+  return runSourceFirstCommand(cwd, values)
 }

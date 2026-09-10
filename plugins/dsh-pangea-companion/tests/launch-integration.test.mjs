@@ -48,3 +48,7 @@ test('treats exit 0 without validated final artifacts as an ACP failure', async 
   assert.equal(events[0].exit_status, 'failed')
   assert.equal(events[0].output, 'agent exited normally')
 })
+
+test('reconciliation refreshes the authoritative job status after consuming output', () => {
+  assert.match(source, /snapshot = readJobSnapshot\(runtime, task\) \?\? update\?\.snapshot/)
+})

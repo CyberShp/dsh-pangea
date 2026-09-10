@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -120,5 +120,119 @@ test('reads snapshot metadata without rehashing every frozen source file', async
     const current = (await companionSnapshot({ dataRoot, runId })).current
     assert.equal(current.source_snapshot.status, 'manifest_verified')
     assert.equal(current.source_snapshot.file_count, 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('reads source-first progress, frozen inputs, revisions, and raw Agent records without inventing semantic counts', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'source-first-reader-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'source-first-run'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const taskPath = path.join(runRoot, 'agent-tasks', 'source-first', 'analysis-unit-1.json')
+  const resultPath = path.join(runRoot, 'agent-results', 'source-first', 'analysis-unit-1.json')
+  const manifestPath = path.join(runRoot, 'inputs', 'source-manifest.json')
+  const indexPath = path.join(runRoot, 'inputs', 'source-index.json')
+  try {
+    await writeJson(path.join(runRoot, 'inputs', 'task-contract.json'), {
+      workflow_version: 'source-first-v1', repository: 'repo', target: 'frozen target', source_scope: ['src/main.c'],
+    })
+    await writeJson(manifestPath, {
+      workflow_version: 'source-first-v1', requested_scope: ['src/main.c'], source_index_path: indexPath,
+      repositories: [{ repo_id: 'repo', source_root: path.join(runRoot, 'inputs', 'source', 'repo') }],
+    })
+    await writeJson(indexPath, {
+      format_version: 'pangea-source-index-v1', file_count: 1,
+      files: [{ repo_id: 'repo', path: 'src/main.c', line_count: 3, regions: [] }],
+    })
+    await writeJson(taskPath, {
+      workflow_version: 'source-first-v1', action_id: `${runId}:analysis:unit-1`, run_id: runId,
+      task_type: 'source_first_analysis', unit_id: 'unit-1', title: 'Unit one', result_path: resultPath,
+    })
+    await writeJson(resultPath, {
+      format_version: 'pangea-notes-v1',
+      binding: { data_root: dataRoot, run_id: runId, action_id: `${runId}:analysis:unit-1`, task_id: 'task-analysis-1' },
+      revision: 3,
+      records: [{ record_id: 'note-1', kind: 'note', body: { original: 'Agent prose' }, evidence: ['repo:src/main.c:1-3'], relates_to: ['test-1'], created_revision: 3 }],
+      completion: { complete: true, note: 'done', declared_revision: 3 }, warnings: [], receipts: {},
+    })
+    await writeJson(path.join(runRoot, 'progress.json'), {
+      schema_version: '3.1', run_id: runId, workflow_version: 'source-first-v1', lifecycle_status: 'complete', stage: 'complete', quality_status: 'PASS',
+      actions: { [`${runId}:analysis:unit-1`]: { action_id: `${runId}:analysis:unit-1`, action: 'dispatch_agent', role: 'analysis', stage: 'unit_analysis', task_path: taskPath, task_id: 'task-analysis-1', status: 'accepted' } },
+      first_finish_revisions: { [`${runId}:analysis:unit-1`]: 3 }, accepted_revisions: { [`${runId}:analysis:unit-1`]: 3 },
+      analysis_units: [], completed_analysis_units: [], completed_closure_units: [], degradations: [], errors: [], needs_user: false,
+    })
+    await writeFile(path.join(runRoot, 'report.md'), '# source-first\n', 'utf8')
+    await writeFile(path.join(runRoot, 'report.html'), '<h1>source-first</h1>\n', 'utf8')
+    await writeJson(path.join(runRoot, 'report-complete.json'), { files: ['report.md', 'report.html'] })
+    const current = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(current.workflow_version, 'source-first-v1')
+    assert.equal(current.phase, 'COMPLETE')
+    assert.equal(current.quality_status, 'PASS')
+    assert.equal(current.source_snapshot.status, 'manifest_verified')
+    assert.equal(current.source_snapshot.file_count, 1)
+    assert.equal(current.report_available, true)
+    assert.equal(current.counts.risks, null)
+    assert.equal(current.counts.test_cases, null)
+    assert.equal(current.source_first_records[0].records[0].body.original, 'Agent prose')
+    assert.deepEqual(current.source_first_records[0].records[0].evidence, ['repo:src/main.c:1-3'])
+    assert.equal(current.source_first_records[0].revision, 3)
+    assert.equal(current.first_finish_revisions[`${runId}:analysis:unit-1`], 3)
+    assert.equal(current.accepted_revisions[`${runId}:analysis:unit-1`], 3)
+    assert.equal(current.workflow.actions[0].first_finish_revision, 3)
+    assert.equal(current.workflow.actions[0].accepted_revision, 3)
+    await rm(path.join(runRoot, 'report-complete.json'))
+    assert.equal((await companionSnapshot({ dataRoot, runId })).current.report_available, false)
+    const stopped = await readFile(path.join(runRoot, 'progress.json'), 'utf8').then(JSON.parse)
+    stopped.lifecycle_status = 'stopped'
+    stopped.stage = 'analyzing'
+    await writeJson(path.join(runRoot, 'progress.json'), stopped)
+    const stoppedCurrent = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(stoppedCurrent.workflow.steps.find(item => item.stage === 'analyzing').status, 'stopped')
+    assert.equal(stoppedCurrent.workflow.steps.find(item => item.stage === 'reviewing').status, 'pending')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('canonicalizes a symlinked data root before enforcing source-first result boundaries', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'source-first-reader-symlink-'))
+  const workspace = path.join(root, 'workspace')
+  const dataRoot = path.join(root, 'real-data')
+  const linkedDataRoot = path.join(workspace, 'pangea-data')
+  const runId = 'source-first-symlink-run'
+  const runRoot = path.join(dataRoot, 'runs', runId)
+  const taskPath = path.join(runRoot, 'agent-tasks', 'source-first', 'analysis-unit-1.json')
+  const resultPath = path.join(runRoot, 'agent-results', 'source-first', 'analysis-unit-1.json')
+  const manifestPath = path.join(runRoot, 'inputs', 'source-manifest.json')
+  const indexPath = path.join(runRoot, 'inputs', 'source-index.json')
+  try {
+    await writeJson(path.join(runRoot, 'inputs', 'task-contract.json'), {
+      workflow_version: 'source-first-v1', repository: 'repo', target: 'symlink target', source_scope: ['src/main.c'],
+    })
+    await writeJson(manifestPath, {
+      workflow_version: 'source-first-v1', requested_scope: ['src/main.c'], source_index_path: indexPath,
+      repositories: [{ repo_id: 'repo', source_root: path.join(runRoot, 'inputs', 'source', 'repo') }],
+    })
+    await writeJson(indexPath, {
+      format_version: 'pangea-source-index-v1', file_count: 1,
+      files: [{ repo_id: 'repo', path: 'src/main.c', line_count: 1, regions: [] }],
+    })
+    await writeJson(taskPath, {
+      workflow_version: 'source-first-v1', action_id: `${runId}:analysis:unit-1`, run_id: runId,
+      task_type: 'source_first_analysis', unit_id: 'unit-1', title: 'Unit one', result_path: resultPath,
+    })
+    await writeJson(resultPath, {
+      format_version: 'pangea-notes-v1', binding: { data_root: dataRoot, run_id: runId, action_id: `${runId}:analysis:unit-1`, task_id: 'task-1' },
+      revision: 0, records: [], completion: null, warnings: [], receipts: {},
+    })
+    await writeJson(path.join(runRoot, 'progress.json'), {
+      schema_version: '3.1', run_id: runId, workflow_version: 'source-first-v1', lifecycle_status: 'running', stage: 'analyzing', quality_status: null,
+      actions: { [`${runId}:analysis:unit-1`]: { action_id: `${runId}:analysis:unit-1`, action: 'dispatch_agent', role: 'analysis', stage: 'unit_analysis', task_path: taskPath, task_id: 'task-1', status: 'dispatched' } },
+      first_finish_revisions: {}, accepted_revisions: {}, analysis_units: [], completed_analysis_units: [], completed_closure_units: [], degradations: [], errors: [], needs_user: false,
+    })
+    await mkdir(workspace, { recursive: true })
+    await symlink(dataRoot, linkedDataRoot)
+    const snapshot = await companionSnapshot({ cwd: workspace, runId })
+    assert.equal(snapshot.data_root, await realpath(dataRoot))
+    assert.equal(snapshot.current.reader_health.trusted, true)
+    assert.deepEqual(snapshot.current.reader_warnings, [])
   } finally { await rm(root, { recursive: true, force: true }) }
 })

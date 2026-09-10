@@ -58,14 +58,19 @@ function normalizeTask(taskId, value) {
     : []
   return {
     task_id: taskId,
-    request_version: value?.request_version === '2.0' ? '2.0' : '1.0',
+    request_version: value?.request_version === '2.0' ? '2.0' : null,
+    workflow_version: ['legacy-v1', 'source-first-v1'].includes(value?.workflow_version) ? value.workflow_version : null,
     workspace: text(value?.workspace),
     data_root: text(value?.data_root) || null,
     title: text(value?.title, text(value?.target, taskId)),
     repository: text(value?.repository),
     target: text(value?.target),
     source_scope: strings(value?.source_scope),
+    ...(Number.isInteger(value?.effective_context_budget) && value.effective_context_budget > 0
+      ? { effective_context_budget: value.effective_context_budget } : {}),
+    focus: strings(value?.focus),
     asset_ids: strings(value?.asset_ids),
+    test_case_examples: strings(value?.test_case_examples),
     model_route: normalizeModelRoute(value?.model_route),
     provider: text(value?.provider) || null,
     job_id: text(value?.job_id) || null,
@@ -154,11 +159,14 @@ export class TaskStore {
       workspace: root,
       data_root: text(dataRoot) || null,
       title: target,
-      request_version: '2.0',
+      workflow_version: input?.workflow_version === 'legacy-v1' ? 'legacy-v1' : 'source-first-v1',
       repository,
       target,
       source_scope: input?.source_scope,
+      effective_context_budget: input?.effective_context_budget,
+      focus: input?.focus,
       asset_ids: input?.asset_ids,
+      test_case_examples: input?.test_case_examples,
       model_route: input?.model_route,
       provider: input?.provider_id ?? input?.provider,
       status: 'preparing',
@@ -406,7 +414,12 @@ export class TaskStore {
     if (!id || !runId) return null
     const task = Object.values(this.store.tasks).find(item => item.conversations.some(conversation => conversation.session_id === id))
     if (!task) return null
+    // A Task is bound to the Run created for it. Generic session snapshots may
+    // select another recent Run while the UI is switching tasks; never let
+    // that read path overwrite the durable Task -> Run identity.
+    if (task.run_id && task.run_id !== runId) return structuredClone(task)
     task.run_id = runId
+    if (['legacy-v1', 'source-first-v1'].includes(run?.workflow_version)) task.workflow_version = run.workflow_version
     task.status = taskStatusFromRun(run)
     task.launch_error = task.status === 'needs_attention' ? text(run?.error, 'Run 需要处理，分析未正常完成') : null
     task.launch_error_code = task.status === 'needs_attention' ? 'RUN_ATTENTION_REQUIRED' : null

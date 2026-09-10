@@ -1,6 +1,6 @@
 import path from 'node:path'
 
-import { assertCodetalksSkill, createRun, runPangea, workspaceRoot } from './pangea-api.js'
+import { assertSourceFirstCapabilities, createRun, runPangea, workspaceRoot } from './pangea-api.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
@@ -202,9 +202,7 @@ function stringList(value) {
 }
 
 function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
-  assertCodetalksSkill(capabilities)
-  const rejectedFields = ['focus', 'test_case_examples'].filter(field => Object.hasOwn(value ?? {}, field))
-  if (rejectedFields.length) throw new Error(`新建分析不支持字段：${rejectedFields.join(', ')}`)
+  assertSourceFirstCapabilities(capabilities)
   const repository = typeof value?.repository === 'string' ? value.repository.trim() : ''
   const target = typeof value?.target === 'string' ? value.target.trim() : ''
   const sourceScope = stringList(value?.source_scope)
@@ -217,11 +215,13 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     throw new Error(`repository is not registered: ${repository}`)
   }
   return {
-    request_version: '2.0',
+    workflow_version: 'source-first-v1',
     repository,
     target,
     source_scope: sourceScope,
     asset_ids: stringList(value?.asset_ids),
+    focus: stringList(value?.focus),
+    test_case_examples: stringList(value?.test_case_examples),
     provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,
   }
 }
@@ -348,7 +348,6 @@ function startAcpJob(runtime, parent, providerId, model, prompt, label, onEvent)
   const jobId = jobs.start({
     kind: 'subagent',
     label,
-    owner: parent,
     run: () => {
       const controller = new AbortController()
       let activeRun
@@ -411,10 +410,17 @@ export async function launchAnalysisSession(
     )
   const run = await launchStep(
     onEvent,
-    'skill_run_create',
+    'run_create',
     () => {
       const { provider_id: _providerId, ...skillRequest } = request
-      return createRun(root, { ...skillRequest, data_root: resolvedDataRoot }, runner)
+      return createRun(root, {
+        ...skillRequest,
+        data_root: resolvedDataRoot,
+        model_id: selectedModel.model,
+        effective_context_budget: Number.isInteger(input?.effective_context_budget)
+          ? input.effective_context_budget
+          : 250000,
+      }, runner)
     },
     value => ({ run_id: value.run_id, request_path: value.request_path }),
   )
@@ -439,27 +445,43 @@ export async function launchAnalysisSession(
     model: selectedModel,
     run,
   }), () => ({ session_id: sessionId }))
-  const prompt = [
-    '立即开始已经创建好的 Codetalks Skill 深度型模块分析，完整执行 Step 01–09，不需要再次确认，也不要创建第二个 Run。',
-    '必须先读取 `.agents/pangea/dsh.md`，再读取下面的 Skill 运行请求并严格执行。',
-    `运行请求：${run.request_path}`,
+  const runDetails = [
+    `冻结 task contract：${run.request_path ?? '由 Graph 返回的当前 Run 输入'}`,
     `Run ID：${run.run_id}`,
-    `运行根目录：${run.run_root}`,
-    '旧 PANGEA Graph、Planning、Worker action、Review、Closure、Reporting、bind、validate 和 settle 均不存在。',
-    '生命周期只以运行根目录中的 `内部索引/运行状态.json` 为准。',
+    `数据根目录：${run.data_root ?? resolvedDataRoot}`,
+  ]
+  const externalPrompt = [
+    '立即执行 Desktop 已经创建好的 PANGEA source-first Run，不需要再次确认，不得调用 pangea_run_create 创建第二个 Run。',
+    '必须先读取 `.opencode/agents/pangea-agent.md`，并以 OpenCode 的 PANGEA 主 Agent 规则协调当前 Run。',
+    '只调用 OpenCode 插件的 pangea_action_dispatch，并传入当前 data_root、run_id 与 Graph 返回的 exact action_id；dispatch 内部负责创建或续接 worker、bind、等待和 settle。不得绕过它手工处理生命周期，也不得读取或修改其他 Run。',
+    ...runDetails,
+    `首批待执行 action：${JSON.stringify((Array.isArray(run.agent_actions) ? run.agent_actions : []).map(action => ({ action_id: action?.action_id, action: action?.action, stage: action?.stage })).filter(action => action.action_id))}`,
+    '逐项 dispatch 首批 action；每次 dispatch 返回后继续处理其 settle 结果中新出现的 action，直到 Run 形成正式报告或 Graph 明确进入需要人工处理的终态。continue_agent 必须保持原 task_id。',
+    '生命周期、质量和报告只以当前 Run 的 progress/report 为准；旧 Skill Run 只能由历史 reader 读取，不得迁移成新结果。',
     '',
-    '现在读取运行请求并执行。',
+    '现在从上面的首批 action 开始执行 source-first 工作流。',
   ].join('\n')
+  const internalPrompt = [
+    '立即执行 Desktop 已经创建好的 PANGEA source-first Run，不需要再次确认，也不要创建第二个 Run。',
+    '必须先读取 `.agents/pangea/dsh.md`，再按其中的 DSH 根 Agent 生命周期规则执行。',
+    ...runDetails,
+    '先用以上 data_root 和 run_id 调用 pangea_action_next，让当前 DSH 会话绑定 Graph 状态；随后只对返回的 exact action_id 调用 pangea_action_dispatch。',
+    '子 Agent 完成通知到达后，第一且唯一的工作流调用是对该 exact action_id 执行 pangea_action_settle；再继续 dispatch settle 返回的新 action。不得手工 bind、猜 task_id 或读取其他 Run。',
+    '最终只以当前 Run 的 lifecycle_status、quality_status 和正式报告为准；UNRESOLVED 只报告具体原因，不泛化反问用户要新开 Run 还是继续修。',
+    '',
+    '现在读取当前 action 并执行 source-first 工作流。',
+  ].join('\n')
+  const prompt = runtime && selectedProvider ? externalPrompt : internalPrompt
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
     const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, selectedModel, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent), value => ({ job_id: value, provider: selectedProvider, model: selectedModel.model }))
-    await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, model: selectedModel.model, reasoning_effort: selectedModel.reasoning_effort, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
+    await emitLaunch(onEvent, { stage: 'source_first_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, model: selectedModel.model, reasoning_effort: selectedModel.reasoning_effort, run_id: run.run_id, message: 'PANGEA source-first ACP 分析已启动。' })
     return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
   }
   await launchStep(onEvent, 'prompt_submit', async () => {
     apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
   }, () => ({ session_id: sessionId }))
-  await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, run_id: run.run_id, message: 'Codetalks Skill 分析会话已启动。' })
+  await emitLaunch(onEvent, { stage: 'source_first_started', status: 'ok', session_id: sessionId, run_id: run.run_id, message: 'PANGEA source-first 分析会话已启动。' })
   return { status: 'ok', session_id: sessionId, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
 }
 

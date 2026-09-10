@@ -6,7 +6,11 @@ import test from 'node:test'
 
 import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireAcpModel, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
-const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.3.0' } }
+const capabilities = {
+  repositories: ['repo-one'],
+  workflow_versions: ['source-first-v1'],
+  source_first: { version: 'source-first-v1' },
+}
 const acpRuntimeConfig = {
   version: 1,
   providers: {
@@ -116,18 +120,18 @@ test('fails closed before creating a session when the internal credential is mis
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('normalizes Run input and rejects legacy fields and unregistered repositories', () => {
+test('normalizes source-first Run input and preserves focus/examples', () => {
   const input = normalizeRunInput({
     repository: 'repo-one', target: 'session', source_scope: ['src/session.c', 'src/session.c', ''],
-    asset_ids: ['asset-1'],
+    asset_ids: ['asset-1'], focus: ['recovery'], test_case_examples: ['TC-1'],
   }, capabilities)
   assert.deepEqual(input.source_scope, ['src/session.c'])
-  assert.equal(input.request_version, '2.0')
+  assert.equal(input.workflow_version, 'source-first-v1')
   assert.deepEqual(input.asset_ids, ['asset-1'])
-  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], focus: ['recovery'] }, capabilities), /不支持字段.*focus/)
-  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: [], test_case_examples: ['TC-1'] }, capabilities), /不支持字段.*test_case_examples/)
+  assert.deepEqual(input.focus, ['recovery'])
+  assert.deepEqual(input.test_case_examples, ['TC-1'])
   assert.throws(() => normalizeRunInput({ repository: 'other', target: 'x', source_scope: ['x.c'] }, capabilities), /not registered/)
-  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /codetalks-skill 1\.3\.0/)
+  assert.throws(() => normalizeRunInput({ repository: 'repo-one', target: 'x', source_scope: ['x.c'] }, { repositories: ['repo-one'] }), /source-first-v1/)
 })
 
 test('returns paginated Run metadata and reports incompatible backends explicitly', async () => {
@@ -136,7 +140,7 @@ test('returns paginated Run metadata and reports incompatible backends explicitl
     const calls = []
     const snapshot = await workbenchSnapshot({ cwd: root, cursor: 10, limit: 5, runner: async input => {
       calls.push(input)
-      return input.args[0] === 'system' ? { repositories: ['repo-one'] } : { items: [{ run_id: 'run-1' }], next_cursor: 15, total: 21 }
+      return input.args[0] === 'system' ? capabilities : { items: [{ run_id: 'run-1' }], next_cursor: 15, total: 21 }
     } })
     assert.equal(snapshot.compatibility.compatible, true)
     assert.equal(snapshot.runs.total, 21)
@@ -163,7 +167,7 @@ test('returns the selected Run methodologies from the public runs get API unchan
     const calls = []
     const snapshot = await workbenchSnapshot({ cwd: root, runId: 'run-nvme', runner: async input => {
       calls.push(input.args)
-      if (input.args[0] === 'system') return { repositories: ['repo-one'] }
+      if (input.args[0] === 'system') return capabilities
       if (input.args[1] === 'list') return { items: [{ run_id: 'run-nvme' }], next_cursor: null, total: 1 }
       return { run_id: 'run-nvme', methodologies }
     } })
@@ -178,7 +182,7 @@ test('keeps the workbench available when one public runs get detail cannot be re
   const root = await workspace()
   try {
     const snapshot = await workbenchSnapshot({ cwd: root, runId: 'run-bad', runner: async input => {
-      if (input.args[0] === 'system') return { repositories: ['repo-one'] }
+      if (input.args[0] === 'system') return capabilities
       if (input.args[1] === 'list') return { items: [{ run_id: 'run-bad' }], next_cursor: null, total: 1 }
       throw new Error('methodologies unavailable')
     } })
@@ -206,7 +210,8 @@ test('creates a Skill Run before launching its dedicated DSH session', async () 
     const runner = async call => {
       if (call.args[0] === 'system') return capabilities
       assert.deepEqual(call.args.slice(0, 2), ['runs', 'create'])
-      return { run_id: 'skill-run-1', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+      assert.equal(call.args[2], '--contract')
+      return { run_id: 'source-first-run-1', request_path: '/runtime/request.md', data_root: '/runtime/data' }
     }
     const result = await launchAnalysisSession(api, {
       cwd: root,
@@ -222,11 +227,12 @@ test('creates a Skill Run before launching its dedicated DSH session', async () 
     assert.equal(events[2][1].session_id, 'session-1')
     assert.equal(events[3][0], 'prompt')
     assert.match(events[3][1].content[0].text, /\/runtime\/request\.md/)
-    assert.match(events[3][1].content[0].text, /skill-run-1/)
-    assert.match(events[3][1].content[0].text, /Step 01–09/)
-    assert.doesNotMatch(events[3][1].content[0].text, /pangea_run_create/)
-    assert.equal(result.run.run_id, 'skill-run-1')
-    for (const stage of ['capabilities_check', 'model_validate', 'skill_run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'skill_started']) {
+    assert.match(events[3][1].content[0].text, /source-first-run-1/)
+    assert.match(events[3][1].content[0].text, /source-first/)
+    assert.match(events[3][1].content[0].text, /pangea_action_next/)
+    assert.doesNotMatch(events[3][1].content[0].text, /Step 01–09/)
+    assert.equal(result.run.run_id, 'source-first-run-1')
+    for (const stage of ['capabilities_check', 'model_validate', 'run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'source_first_started']) {
       assert.equal(launchEvents.some(event => event.stage === stage), true, `missing launch stage ${stage}`)
     }
     assert.equal(launchEvents.find(event => event.stage === 'session_create' && event.status === 'ok')?.session_id, 'session-1')
@@ -267,6 +273,9 @@ test('starts a selected ACP provider through a DSH background job', async () => 
   try {
     let promptCalled = false
     let providerStarted = false
+    let jobSpec
+    let childParent
+    let childPrompt
     const api = {
       workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
       sessions: {
@@ -280,18 +289,23 @@ test('starts a selected ACP provider through a DSH background job', async () => 
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
         getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
-        async start() {
+        async start(_provider, request) {
           providerStarted = true
+          childParent = request.parent
+          childPrompt = request.prompt[0].text
           return { result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] }), dispose: async () => {} }
         },
       },
       jobs: {
-        start(spec) { const hooks = spec.run(); void hooks.done; return 'subagent-1' },
+        start(spec) { jobSpec = spec; const hooks = spec.run(); void hooks.done; return 'subagent-1' },
       },
     }
     const runner = async call => call.args[0] === 'system'
       ? capabilities
-      : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
+      : {
+          run_id: 'source-first-run-acp', request_path: '/runtime/request.md', data_root: '/runtime/data',
+          agent_actions: [{ action_id: 'source-first-run-acp:planning', action: 'dispatch_agent', stage: 'unit_planning' }],
+        }
     const result = await launchAnalysisSession(api, {
       cwd: root,
       input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga' },
@@ -301,6 +315,14 @@ test('starts a selected ACP provider through a DSH background job', async () => 
     assert.equal(result.provider, 'pangea-nga')
     assert.equal(providerStarted, true)
     assert.equal(promptCalled, false)
+    assert.equal(jobSpec.owner, undefined)
+    assert.equal(childParent, owner)
+    assert.match(jobSpec.label, /PANGEA/)
+    assert.match(childPrompt, /pangea_action_dispatch/)
+    assert.match(childPrompt, /source-first-run-acp:planning/)
+    assert.match(childPrompt, /\.opencode\/agents\/pangea-agent\.md/)
+    assert.doesNotMatch(childPrompt, /\.agents\/pangea\/dsh\.md/)
+    assert.doesNotMatch(childPrompt, /先用以上 data_root 和 run_id 调用 pangea_action_next/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

@@ -1,4 +1,4 @@
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
@@ -12,6 +12,16 @@ const STEP_TITLES = [
   '测试场景、流程和用例设计',
   '独立审查',
   '正式交付',
+]
+
+const SOURCE_FIRST_STAGES = [
+  ['preparing', '准备冻结输入'],
+  ['planning', 'Planning 单元划分'],
+  ['analyzing', '源码区域分析'],
+  ['reviewing', '盲审与同会话对照'],
+  ['closing', '定向 closure'],
+  ['reporting', '报告组装'],
+  ['complete', '已完成'],
 ]
 
 async function pathKind(filePath) {
@@ -119,12 +129,12 @@ export async function discoverPangeaDataRoot({ cwd, dataRoot } = {}) {
     if (!path.isAbsolute(dataRoot)) throw new Error('data_root must be an absolute path')
     const resolved = path.resolve(dataRoot)
     if (await pathKind(path.join(resolved, 'runs')) !== 'directory') throw new Error(`PANGEA data_root does not contain runs/: ${resolved}`)
-    return resolved
+    return realpath(resolved)
   }
   if (typeof cwd !== 'string' || cwd.trim() === '') throw new Error('Cannot discover PANGEA data root without a workspace cwd or explicit data_root')
   const discovered = await findPangeaDataFrom(cwd)
   if (!discovered) throw new Error(`No pangea-data/runs directory found from workspace: ${cwd}`)
-  return discovered
+  return realpath(discovered)
 }
 
 function lifecycle(metadata, state) {
@@ -160,7 +170,305 @@ async function stepRows(state, liveDocuments, formalOutputs, skillRoot) {
   })
 }
 
+function inside(root, candidate) {
+  const resolvedRoot = path.resolve(root)
+  const resolvedCandidate = path.resolve(candidate)
+  return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(`${resolvedRoot}${path.sep}`)
+}
+
+function sourceFirstLifecycle(progress) {
+  const lifecycleStatus = ['running', 'complete', 'stopped', 'failed'].includes(progress?.lifecycle_status)
+    ? progress.lifecycle_status
+    : 'running'
+  const stage = typeof progress?.stage === 'string' && progress.stage.trim() !== ''
+    ? progress.stage
+    : 'preparing'
+  const phase = lifecycleStatus === 'complete' ? 'COMPLETE'
+    : lifecycleStatus === 'stopped' ? 'STOPPED'
+      : lifecycleStatus === 'failed' ? 'FAILED'
+        : stage.toUpperCase()
+  return { lifecycle_status: lifecycleStatus, phase, terminal: lifecycleStatus !== 'running', stage }
+}
+
+function sourceFirstStepRows(progress, runDirectory, artifacts) {
+  const life = sourceFirstLifecycle(progress)
+  const currentIndex = Math.max(0, SOURCE_FIRST_STAGES.findIndex(([stage]) => stage === life.stage))
+  const actionArtifacts = new Map()
+  for (const item of artifacts) {
+    const actionStage = item.stage ?? item.task?.review_stage ?? item.task?.task_type
+    const stage = actionStage === 'unit_analysis' ? 'analyzing'
+      : ['independent_review', 'comparison_review'].includes(actionStage) ? 'reviewing'
+        : actionStage === 'targeted_closure' ? 'closing'
+          : actionStage === 'unit_planning' || actionStage === 'source_first_plan' ? 'planning'
+            : actionStage
+    if (!stage) continue
+    if (!actionArtifacts.has(stage)) actionArtifacts.set(stage, [])
+    for (const file of [item.task_path, item.result_path]) {
+      if (typeof file === 'string' && inside(runDirectory, file) && !actionArtifacts.get(stage).includes(file)) {
+        actionArtifacts.get(stage).push(file)
+      }
+    }
+  }
+  const stageArtifactNames = {
+    preparing: [path.join(runDirectory, 'inputs', 'task-contract.json')],
+    planning: [
+      path.join(runDirectory, 'inputs', 'source-manifest.json'),
+      path.join(runDirectory, 'inputs', 'source-index.json'),
+      path.join(runDirectory, 'inputs', 'source-first-plan.json'),
+    ],
+    reporting: [path.join(runDirectory, 'report.md'), path.join(runDirectory, 'report.html'), path.join(runDirectory, 'report-complete.json')],
+    complete: [path.join(runDirectory, 'report.md'), path.join(runDirectory, 'report.html'), path.join(runDirectory, 'report-complete.json')],
+  }
+  return SOURCE_FIRST_STAGES.map(([stage, title], index) => {
+    const status = life.lifecycle_status === 'complete'
+      ? 'completed'
+      : index < currentIndex
+        ? 'completed'
+        : index === currentIndex
+          ? life.lifecycle_status === 'running' ? 'running' : life.lifecycle_status
+          : 'pending'
+    const stageArtifacts = [
+      ...(stageArtifactNames[stage] ?? []),
+      ...(actionArtifacts.get(stage) ?? []),
+    ]
+    return {
+      step: String(index + 1).padStart(2, '0'),
+      stage,
+      title,
+      status,
+      artifacts: stageArtifacts.filter((file, position) => stageArtifacts.indexOf(file) === position),
+    }
+  })
+}
+
+async function sourceFirstActionArtifacts(runDirectory, progress) {
+  const artifacts = []
+  const issues = []
+  for (const [actionId, action] of Object.entries(progress?.actions ?? {})) {
+    if (!action || typeof action !== 'object') continue
+    const recordedTaskPath = typeof action.task_path === 'string' ? path.resolve(action.task_path) : null
+    const taskPath = recordedTaskPath && await pathKind(recordedTaskPath) === 'file' ? await realpath(recordedTaskPath) : recordedTaskPath
+    if (!taskPath || !inside(runDirectory, taskPath) || await pathKind(taskPath) !== 'file') {
+      issues.push(`source-first action task 不可读取：${actionId}`)
+      continue
+    }
+    let task
+    try { task = await readJson(taskPath) } catch (error) {
+      issues.push(`source-first task JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
+      continue
+    }
+    const recordedResultPath = typeof task?.result_path === 'string' ? path.resolve(task.result_path) : null
+    const resultPath = recordedResultPath && await pathKind(recordedResultPath) === 'file' ? await realpath(recordedResultPath) : recordedResultPath
+    let result = null
+    if (!resultPath || !inside(runDirectory, resultPath)) {
+      issues.push(`source-first result_path 越出 Run：${actionId}`)
+    } else if (await pathKind(resultPath) === 'file') {
+      try { result = await readJson(resultPath) } catch (error) {
+        issues.push(`source-first result JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    const records = Array.isArray(result?.records) ? result.records : []
+    artifacts.push({
+      action_id: actionId,
+      ...action,
+      task,
+      task_path: taskPath,
+      result_path: resultPath,
+      revision: Number.isInteger(result?.revision) ? result.revision : null,
+      completion: result?.completion ?? null,
+      records,
+    })
+  }
+  return { artifacts, issues }
+}
+
+async function sourceFirstSnapshot(runDirectory, progress, contract, actionArtifacts) {
+  const manifestPath = path.join(runDirectory, 'inputs', 'source-manifest.json')
+  const indexPath = path.join(runDirectory, 'inputs', 'source-index.json')
+  const issues = []
+  let manifest = null
+  let index = null
+  if (await pathKind(manifestPath) !== 'file') issues.push('缺少冻结 source manifest')
+  else {
+    try { manifest = await readJson(manifestPath) } catch (error) { issues.push(`source manifest 不可读取：${error instanceof Error ? error.message : String(error)}`) }
+  }
+  if (await pathKind(indexPath) !== 'file') issues.push('缺少冻结 source index')
+  else {
+    try { index = await readJson(indexPath) } catch (error) { issues.push(`source index 不可读取：${error instanceof Error ? error.message : String(error)}`) }
+  }
+  if (manifest && manifest.workflow_version && manifest.workflow_version !== 'source-first-v1') {
+    issues.push('source manifest workflow_version 与 source-first 不一致')
+  }
+  if (index && index.format_version !== 'pangea-source-index-v1') issues.push('source index format_version 不受支持')
+  if (manifest?.source_index_path) {
+    const recordedIndexPath = path.resolve(manifest.source_index_path)
+    const canonicalRecordedIndexPath = await pathKind(recordedIndexPath) === 'file' ? await realpath(recordedIndexPath) : recordedIndexPath
+    const canonicalIndexPath = await realpath(indexPath)
+    if (canonicalRecordedIndexPath !== canonicalIndexPath) issues.push('source manifest 没有指向当前 Run 的 source index')
+  }
+  const fileCount = Number.isInteger(index?.file_count)
+    ? index.file_count
+    : Array.isArray(index?.files) ? index.files.length : null
+  return {
+    status: issues.length ? 'corrupt' : manifest && index ? 'manifest_verified' : 'legacy_unavailable',
+    snapshot_digest: null,
+    file_count: fileCount,
+    issues,
+    manifest_path: manifestPath,
+    index_path: indexPath,
+    repositories: Array.isArray(manifest?.repositories) ? manifest.repositories : [],
+    requested_scope: Array.isArray(manifest?.requested_scope) ? manifest.requested_scope : [],
+  }
+}
+
+async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false } = {}) {
+  const runDirectory = path.join(dataRoot, 'runs', runId)
+  const progressPath = path.join(runDirectory, 'progress.json')
+  const progress = await readJson(progressPath)
+  const contractPath = path.join(runDirectory, 'inputs', 'task-contract.json')
+  let contract = null
+  if (await pathKind(contractPath) === 'file') {
+    try { contract = await readJson(contractPath) } catch { contract = null }
+  }
+  const actionView = await sourceFirstActionArtifacts(runDirectory, progress)
+  const life = sourceFirstLifecycle(progress)
+  const sourceSnapshot = await sourceFirstSnapshot(runDirectory, progress, contract, actionView.artifacts)
+  const analysisActions = actionView.artifacts.filter(item => item.role === 'analysis')
+  const acceptedAnalysis = analysisActions.filter(item => item.status === 'accepted')
+  const reportMd = path.join(runDirectory, 'report.md')
+  const reportHtml = path.join(runDirectory, 'report.html')
+  const reportComplete = path.join(runDirectory, 'report-complete.json')
+  const reportAvailable = life.lifecycle_status === 'complete'
+    && await pathKind(reportMd) === 'file'
+    && await pathKind(reportHtml) === 'file'
+    && await pathKind(reportComplete) === 'file'
+  const records = actionView.artifacts.map(item => ({
+    action_id: item.action_id,
+    action: item.action,
+    role: item.role,
+    stage: item.stage,
+    task_id: item.task_id ?? null,
+    unit_id: item.task?.unit_id ?? null,
+    revision: item.revision,
+    completion: item.completion,
+    records: item.records,
+  }))
+  const workflow = {
+    steps: sourceFirstStepRows(progress, runDirectory, actionView.artifacts),
+    completed_steps: sourceFirstStepRows(progress, runDirectory, actionView.artifacts).filter(item => item.status === 'completed').map(item => item.step),
+    current_step: life.stage,
+    core_rules_ack: {},
+    judge: { required: true, status: progress.stage === 'reviewing' || progress.stage === 'complete' ? 'running' : 'pending' },
+    actions: actionView.artifacts.map(item => ({
+      action_id: item.action_id,
+      action: item.action,
+      role: item.role,
+      stage: item.stage,
+      task_path: item.task_path,
+      task_id: item.task_id ?? null,
+      status: item.status,
+      error: item.error ?? null,
+      revision: item.revision,
+      completion: item.completion,
+      first_finish_revision: progress.first_finish_revisions?.[item.action_id] ?? null,
+      accepted_revision: progress.accepted_revisions?.[item.action_id] ?? null,
+    })),
+    units: analysisActions.map(item => ({
+      unit_id: item.task?.unit_id ?? item.action_id,
+      title: item.task?.title ?? item.task?.unit_id ?? item.action_id,
+      status: item.status,
+      owned_regions: item.task?.owned_regions ?? [],
+      context_regions: item.task?.context_regions ?? [],
+    })),
+    quality_checks: [],
+    unresolved: [...(Array.isArray(progress.degradations) ? progress.degradations : []), ...(progress.blocking_reason ? [progress.blocking_reason] : [])],
+    error_history: [...(Array.isArray(progress.errors) ? progress.errors : []), ...actionView.issues],
+    step_progress: null,
+  }
+  const summary = {
+    run_id: runId,
+    workflow_version: progress.workflow_version ?? 'source-first-v1',
+    ...life,
+    target: contract?.target ?? runId,
+    repository: contract?.repository ?? null,
+    repositories: contract?.repositories ?? sourceSnapshot.repositories.map(item => item.repo_id).filter(Boolean),
+    verdict: progress.quality_status ?? null,
+    quality_status: progress.quality_status ?? null,
+    needs_user: progress.needs_user === true,
+    blocking_reason: progress.blocking_reason ?? null,
+    first_finish_revisions: progress.first_finish_revisions ?? {},
+    accepted_revisions: progress.accepted_revisions ?? {},
+    attention_required: progress.needs_user === true || life.lifecycle_status === 'failed',
+    analysis: {
+      total: analysisActions.length,
+      completed: acceptedAnalysis.length,
+      reworked: 0,
+      running: analysisActions.filter(item => ['dispatched', 'settled'].includes(item.status)).length,
+      pending: analysisActions.filter(item => item.status === 'pending').length,
+      submitted: analysisActions.filter(item => ['settled', 'accepted'].includes(item.status)).length,
+      max_parallel: 8,
+    },
+    counts: { risks: null, test_cases: null, evidence: null, business_flows: null, review_issues: null },
+    errors: Array.isArray(progress.errors) ? progress.errors : [],
+    error_history: actionView.issues,
+    review: {
+      status: progress.stage === 'complete' || (progress.stage === 'reporting' && progress.quality_status) ? 'COMPLETE' : 'PENDING',
+      summary: progress.quality_status ?? 'pending',
+      issues: [],
+      counts: { effective: null },
+      independent: records.find(item => item.stage === 'independent_review') ?? null,
+      comparison: records.find(item => item.stage === 'comparison_review') ?? null,
+    },
+    data_source: 'source-first-notes',
+    reader_health: {
+      status: sourceSnapshot.status === 'corrupt' || actionView.issues.length ? 'warning' : 'ok',
+      trusted: sourceSnapshot.status !== 'corrupt' && actionView.issues.length === 0,
+      data_source: 'source-first-notes',
+      issues: [...sourceSnapshot.issues, ...actionView.issues],
+      count_checks: {},
+    },
+    reader_warnings: [...sourceSnapshot.issues, ...actionView.issues],
+    artifacts: {
+      run_directory: runDirectory,
+      request: await pathKind(contractPath) === 'file' ? contractPath : null,
+      state: progressPath,
+      live_documents: [],
+      formal_outputs: [],
+      report_md: await pathKind(reportMd) === 'file' ? reportMd : null,
+      report_html: await pathKind(reportHtml) === 'file' ? reportHtml : null,
+      report_complete: await pathKind(reportComplete) === 'file' ? reportComplete : null,
+      source_snapshot_manifest: await pathKind(sourceSnapshot.manifest_path) === 'file' ? sourceSnapshot.manifest_path : null,
+      source_index: await pathKind(sourceSnapshot.index_path) === 'file' ? sourceSnapshot.index_path : null,
+    },
+    source_snapshot: sourceSnapshot,
+    validation: { status: 'not_checked', error_count: 0, errors: [] },
+    report_available: reportAvailable,
+    modified_at: (await stat(runDirectory)).mtimeMs,
+    source_first_records: records,
+  }
+  if (includeDetails) {
+    summary.details = {
+      risks: [],
+      test_cases: [],
+      evidence: [],
+      business_flows: [],
+      review_issues: [],
+      source_first_records: records,
+    }
+    summary.workflow = workflow
+  }
+  return summary
+}
+
 export async function summarizeRun(dataRoot, runId, { includeDetails = false } = {}) {
+  const sourceFirstRunDirectory = path.join(dataRoot, 'runs', runId)
+  const sourceFirstProgressPath = path.join(sourceFirstRunDirectory, 'progress.json')
+  if (await pathKind(sourceFirstProgressPath) === 'file') {
+    const progress = await readJson(sourceFirstProgressPath)
+    if (progress?.workflow_version === 'source-first-v1') {
+      return summarizeSourceFirstRun(dataRoot, runId, { includeDetails })
+    }
+  }
   const metadataPath = path.join(dataRoot, '.pangea', 'skill-runs', runId, 'metadata.json')
   if (await pathKind(metadataPath) !== 'file') throw new Error(`Codetalks Skill run does not exist: ${runId}`)
   const metadata = await readJson(metadataPath)
@@ -267,12 +575,17 @@ export async function summarizeRun(dataRoot, runId, { includeDetails = false } =
 }
 
 export async function listRuns(dataRoot, { limit = 20 } = {}) {
-  const root = path.join(dataRoot, '.pangea', 'skill-runs')
-  if (await pathKind(root) !== 'directory') return []
+  const roots = [path.join(dataRoot, 'runs'), path.join(dataRoot, '.pangea', 'skill-runs')]
+  const runIds = new Set()
+  for (const root of roots) {
+    if (await pathKind(root) !== 'directory') continue
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (entry.isDirectory()) runIds.add(entry.name)
+    }
+  }
   const values = []
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    try { values.push(await summarizeRun(dataRoot, entry.name)) } catch { /* one damaged run must not hide others */ }
+  for (const runId of runIds) {
+    try { values.push(await summarizeRun(dataRoot, runId)) } catch { /* one damaged run must not hide others */ }
   }
   values.sort((a, b) => b.modified_at - a.modified_at)
   return values.slice(0, limit)

@@ -1,5 +1,5 @@
 import { companionSnapshot } from './reader.js'
-import { readEvidenceSnippet } from './source.js'
+import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createRuntimeMonitor } from './monitor.js'
@@ -9,7 +9,7 @@ import { createAcpSettingsStore } from './acp-settings.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
-import { runPangea, workspaceRoot } from './pangea-api.js'
+import { createRun, runPangea, runSourceFirstCommand, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, requireAcpModel, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
@@ -53,11 +53,43 @@ const STATUS_PARAMETERS = {
   },
 }
 
+const RUN_CREATE_PARAMETERS = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['repository', 'target', 'source_scope'],
+  properties: {
+    repository: { type: 'string', minLength: 1, description: '当前冻结输入中的仓库 ID。创建前只做确定性目录/文件名范围准备。' },
+    target: { type: 'string', minLength: 1, description: '用户确认的分析对象原文。' },
+    source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '相对仓库根目录的源码范围。' },
+    focus: { type: 'array', items: { type: 'string', minLength: 1 } },
+    asset_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
+    test_case_examples: { type: 'array', items: { type: 'string', minLength: 1 } },
+    data_root: { type: 'string' },
+    runtime_commit: { type: 'string' },
+    model_id: { type: 'string' },
+    effective_context_budget: { type: 'integer', minimum: 1 },
+  },
+}
+
+const RUN_RESUME_PARAMETERS = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['run_id'],
+  properties: {
+    data_root: { type: 'string' },
+    run_id: { type: 'string', minLength: 1 },
+    limit: { type: 'integer', minimum: 1, maximum: 8 },
+  },
+}
+
 const PHASE_LABELS = {
   PREPARING: '等待 Skill 初始化', STEP_BOOTSTRAP: '初始化 Skill',
   STEP_01: 'Step 01 · 范围与契约', STEP_02: 'Step 02 · 输入与计划', STEP_03: 'Step 03 · 广度盘点',
   STEP_04: 'Step 04 · 深度讲解', STEP_05: 'Step 05 · 场景与风险', STEP_06: 'Step 06 · SFMEA 翻译',
   STEP_07: 'Step 07 · 测试设计', STEP_08: 'Step 08 · 独立 Judge', STEP_09: 'Step 09 · 正式交付',
+  PLANNING: 'source-first · Planning 单元划分', ANALYZING: 'source-first · 源码区域分析',
+  REVIEWING: 'source-first · 盲审与同会话对照', CLOSING: 'source-first · 定向 closure',
+  REPORTING: 'source-first · 报告组装',
   COMPLETE: '已完成', INCOMPLETE: '未完整结束', STOPPED: '已停止', FAILED: '运行失败', UNKNOWN: '未知',
 }
 const QUALITY_LABELS = { PASS: '通过', UNRESOLVED: '未解决' }
@@ -67,6 +99,11 @@ const HEALTH_LABELS = { ok: '正常', warning: '需关注', error: '异常' }
 function workspaceCwd(exec) {
   const cwd = exec?.agent?.session?.header?.cwd
   return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : undefined
+}
+
+function resolvedDataRoot(exec, value) {
+  const root = workspaceRoot(workspaceCwd(exec))
+  return path.resolve(root, typeof value === 'string' && value.trim() !== '' ? value : 'pangea-data')
 }
 
 function renderCount(run, key, label) {
@@ -86,11 +123,13 @@ function renderStatus(value) {
     `PANGEA Run：${run.run_id}`,
     `阶段：${PHASE_LABELS[run.phase] ?? run.phase}`,
     `质量状态：${QUALITY_LABELS[run.quality_status] ?? run.quality_status ?? '待定'}`,
-    `Skill 步骤：${run.analysis.completed}/${run.analysis.total}`,
+    run.workflow_version === 'source-first-v1'
+      ? `源码分析单元：${run.analysis.completed}/${run.analysis.total || '由 Graph action 记录'}`
+      : `Skill 步骤：${run.analysis.completed}/${run.analysis.total}`,
     `执行：当前 ${run.analysis.running ?? 0} / 等待 ${run.analysis.pending ?? 0} / 已完成 ${run.analysis.submitted ?? 0}`,
     renderCount(run, 'risks', '风险'),
     renderCount(run, 'test_cases', '测试用例'),
-    `证据：${run.counts.evidence}`,
+    renderCount(run, 'evidence', '证据'),
     `数据源：${SOURCE_LABELS[run.data_source] ?? run.data_source ?? '未知'}`,
     `源码快照：${['verified', 'manifest_verified'].includes(run.source_snapshot?.status) ? `${run.source_snapshot.file_count ?? 0} 个文件，已冻结` : run.source_snapshot?.status === 'legacy_unavailable' ? '历史 Run 未冻结' : '需要检查'}`,
     `读取健康：${HEALTH_LABELS[health?.status] ?? health?.status ?? '未知'}`,
@@ -166,11 +205,28 @@ async function sourceRouteHandler(req, res) {
     let snapshotRoot
     let repositoryId
     if (runId && dataRoot) {
-      const metadataPath = path.join(dataRoot, '.pangea', 'skill-runs', runId, 'metadata.json')
-      const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
-      repositoryId = metadata.request?.repository
-      const candidate = path.join(metadata.run_root, 'inputs', 'source')
-      if (metadata.source_snapshot && candidate) snapshotRoot = candidate
+      const sourceFirstManifestPath = path.join(dataRoot, 'runs', runId, 'inputs', 'source-manifest.json')
+      try {
+        const sourceFirstManifest = JSON.parse(await readFile(sourceFirstManifestPath, 'utf8'))
+        if (sourceFirstManifest?.workflow_version === 'source-first-v1') {
+          const parsed = parseEvidenceLocation(location)
+          const repositoryLocation = /^([^:/\\]+):(.+)$/.exec(parsed.source)
+          if (!repositoryLocation) throw new Error('source-first 原文位置必须使用 repo_id:path:line')
+          repositoryId = repositoryLocation[1]
+          const known = (sourceFirstManifest.repositories ?? []).some(item => item?.repo_id === repositoryId)
+          if (!known) throw new Error(`source-first 原文仓库不在当前冻结输入：${repositoryId}`)
+          snapshotRoot = path.join(dataRoot, 'runs', runId, 'inputs', 'source')
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+      if (!snapshotRoot) {
+        const metadataPath = path.join(dataRoot, '.pangea', 'skill-runs', runId, 'metadata.json')
+        const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
+        repositoryId = metadata.request?.repository
+        const candidate = path.join(metadata.run_root, 'inputs', 'source')
+        if (metadata.source_snapshot && candidate) snapshotRoot = candidate
+      }
     }
     const snippet = await readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId })
     json(res, 200, snippet)
@@ -375,7 +431,7 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
       const owner = jobOwner(runtime, task)
       const jobs = runtimeService(runtime, 'jobs')
       const update = jobs?.read?.(task.job_id, owner)
-      snapshot = update?.snapshot ?? readJobSnapshot(runtime, task)
+      snapshot = readJobSnapshot(runtime, task) ?? update?.snapshot
       if (update?.text) {
         await tasks.recordJobActivity(task.job_id, update.text)
         await appendLaunchSafe(launchLogs, task.task_id, {
@@ -695,6 +751,252 @@ function toolOutput() {
   return { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
 }
 
+const SOURCE_BINDING_PROPERTIES = {
+  data_root: { type: 'string', minLength: 1, description: 'Graph 返回的当前 Run 数据根目录。' },
+  run_id: { type: 'string', minLength: 1 },
+  action_id: { type: 'string', minLength: 1 },
+  task_id: { type: 'string', minLength: 1 },
+}
+
+function sourceCommandArgs(args, { includeTask = true } = {}) {
+  const values = ['--data-root', args.data_root, '--run-id', args.run_id, '--action-id', args.action_id]
+  if (includeTask) values.push('--task-id', args.task_id)
+  return values
+}
+
+function optionalCommandArg(values, flag, value) {
+  if (value === undefined || value === null || value === '') return
+  values.push(flag, String(value))
+}
+
+async function executeSourceFirst(exec, command, values) {
+  return runSourceFirstCommand(workspaceCwd(exec), [command, ...values])
+}
+
+export function sourceFirstTools(ctx, execute = executeSourceFirst) {
+  const binding = (required = ['data_root', 'run_id', 'action_id', 'task_id']) => ({
+    type: 'object',
+    additionalProperties: false,
+    required,
+    properties: SOURCE_BINDING_PROPERTIES,
+  })
+  return [
+    ctx.tools.register({
+      name: 'pangea_task_open',
+      description: '读取 Graph 为当前真实 task_id 创建的任务合同。',
+      parameters: binding(),
+      async execute(args, exec) {
+        return execute(exec, 'task-open', sourceCommandArgs(args))
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_input_read',
+      description: '按 input_id 分页读取当前 task 明确授权的冻结资料或方法论。',
+      parameters: { ...binding(), required: [...binding().required, 'input_id'], properties: { ...SOURCE_BINDING_PROPERTIES, input_id: { type: 'string', minLength: 1 }, cursor: { type: 'string' }, max_chars: { type: 'integer', minimum: 1, maximum: 24000 } } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--input-id', args.input_id]
+        optionalCommandArg(values, '--cursor', args.cursor)
+        optionalCommandArg(values, '--max-chars', args.max_chars)
+        return execute(exec, 'input-read', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_action_next',
+      description: '读取当前明确 Run 的待处理 action。只把 Graph 返回的 exact action_id 交给 bind/settle，不根据顺序或单元名猜测。',
+      parameters: { type: 'object', additionalProperties: false, required: ['data_root', 'run_id'], properties: { data_root: SOURCE_BINDING_PROPERTIES.data_root, run_id: SOURCE_BINDING_PROPERTIES.run_id, limit: { type: 'integer', minimum: 1, maximum: 8 } } },
+      async execute(args, exec) {
+        const values = ['--data-root', args.data_root, '--run-id', args.run_id]
+        optionalCommandArg(values, '--limit', args.limit)
+        return execute(exec, 'adapter', ['next', ...values])
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_action_bind',
+      description: '把一个 Graph action 绑定到当前真实 Agent task。continue_agent 只能回显并复用 Graph 已记录的原 task_id。',
+      parameters: binding(),
+      async execute(args, exec) {
+        return execute(exec, 'adapter', ['bind', ...sourceCommandArgs(args)])
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_action_settle',
+      description: '按 exact action_id 在一次调用内校验并推进当前 Run；不要先调用 validate，也不要把另一个 action 的通知当作当前 action。',
+      parameters: binding(['data_root', 'run_id', 'action_id']),
+      async execute(args, exec) {
+        return execute(exec, 'adapter', ['settle', ...sourceCommandArgs(args, { includeTask: false })])
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_source_index',
+      description: '先读取紧凑文件目录；提供 repo_id+path 后分页读取该文件的稳定 region 坐标。',
+      parameters: { ...binding(), properties: { ...SOURCE_BINDING_PROPERTIES, repo_id: { type: 'string' }, path: { type: 'string' }, cursor: { type: 'string' }, page_size: { type: 'integer', minimum: 1, maximum: 200 } } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args)]
+        optionalCommandArg(values, '--repo-id', args.repo_id)
+        optionalCommandArg(values, '--path', args.path)
+        optionalCommandArg(values, '--cursor', args.cursor)
+        optionalCommandArg(values, '--page-size', args.page_size)
+        return execute(exec, 'source-index', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_source_read',
+      description: '按当前 task 的 region 或精确范围读取冻结原文；越权路径与不属于本 task 的 region 会被拒绝。',
+      parameters: { ...binding(), required: [...binding().required, 'repo_id'], properties: { ...SOURCE_BINDING_PROPERTIES, repo_id: { type: 'string', minLength: 1 }, path: { type: 'string' }, region_id: { type: 'string' }, line_start: { type: 'integer', minimum: 1 }, line_end: { type: 'integer', minimum: 1 }, cursor: { type: 'string' }, max_lines: { type: 'integer', minimum: 1, maximum: 2000 } } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--repo-id', args.repo_id]
+        for (const [flag, value] of [['--path', args.path], ['--region-id', args.region_id], ['--line-start', args.line_start], ['--line-end', args.line_end], ['--cursor', args.cursor], ['--max-lines', args.max_lines]]) optionalCommandArg(values, flag, value)
+        return execute(exec, 'source-read', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_source_search',
+      description: '在当前 task 允许的冻结源码范围内做字面搜索，只返回原文命中和定位，不生成语义调用关系。',
+      parameters: { ...binding(), required: [...binding().required, 'query'], properties: { ...SOURCE_BINDING_PROPERTIES, query: { type: 'string', minLength: 1 }, repo_id: { type: 'string' }, path: { type: 'string' }, cursor: { type: 'string' }, page_size: { type: 'integer', minimum: 1, maximum: 512 } } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--query', args.query]
+        for (const [flag, value] of [['--repo-id', args.repo_id], ['--path', args.path], ['--cursor', args.cursor], ['--page-size', args.page_size]]) optionalCommandArg(values, flag, value)
+        return execute(exec, 'source-search', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_result_write',
+      description: '向 Graph 创建的当前 task result_path 增量写入少量原文 records；body 原样保存，revision 冲突局部恢复。',
+      parameters: { ...binding(), required: [...binding().required, 'expected_revision', 'records'], properties: { ...SOURCE_BINDING_PROPERTIES, expected_revision: { type: 'integer', minimum: 0 }, records: { type: 'array', minItems: 1 }, request_id: { type: 'string' } } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--expected-revision', String(args.expected_revision), '--records', JSON.stringify(args.records)]
+        optionalCommandArg(values, '--request-id', args.request_id)
+        return execute(exec, 'result-write', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_result_read',
+      description: '读取当前 task 已保存的原文 records、revision 和 completion；不从其他 Run 或结果路径兜底。',
+      parameters: { ...binding(), properties: { ...SOURCE_BINDING_PROPERTIES, record_id: { type: 'string' }, cursor: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 500 } } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args)]
+        for (const [flag, value] of [['--record-id', args.record_id], ['--cursor', args.cursor], ['--limit', args.limit]]) optionalCommandArg(values, flag, value)
+        return execute(exec, 'result-read', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_result_repair',
+      description: '仅当当前唯一结果外壳不可读取时，由同一已绑定 worker 使用诊断 sha256 重发自己的 records；可读结果不会被覆盖。',
+      parameters: { ...binding(), required: [...binding().required, 'expected_sha256', 'records'], properties: { ...SOURCE_BINDING_PROPERTIES, expected_sha256: { type: 'string', pattern: '^[0-9a-f]{64}$' }, records: { type: 'array' } } },
+      async execute(args, exec) {
+        return execute(exec, 'result-repair', [
+          ...sourceCommandArgs(args),
+          '--expected-sha256', args.expected_sha256,
+          '--records', JSON.stringify(args.records),
+        ])
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_comparison_read',
+      description: 'comparison Reviewer 的只读输入。必须使用 Graph 给出的 opaque version_set_id，只能读取被锁定的 accepted analysis 与 independent review 版本。',
+      parameters: { ...binding(), required: [...binding().required, 'version_set_id'], properties: { ...SOURCE_BINDING_PROPERTIES, version_set_id: { type: 'string', minLength: 1 }, unit_id: { type: 'string' }, cursor: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 500 } } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--version-set-id', args.version_set_id]
+        for (const [flag, value] of [['--unit-id', args.unit_id], ['--cursor', args.cursor], ['--limit', args.limit]]) optionalCommandArg(values, flag, value)
+        return execute(exec, 'comparison-read', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_plan_write',
+      description: '保存 Planning Agent 的一个原文单元计划。新建由程序分配 unit_id；更新只能复用已返回的 unit_id，并返回 owned region 完整性诊断。',
+      parameters: {
+        ...binding(),
+        required: [...binding().required, 'expected_revision', 'unit'],
+        properties: {
+          ...SOURCE_BINDING_PROPERTIES,
+          expected_revision: { type: 'integer', minimum: 0 },
+          unit: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['title', 'purpose'],
+            properties: {
+              unit_id: { type: 'string', minLength: 1 },
+              title: { type: 'string', minLength: 1 },
+              purpose: { type: 'string', minLength: 1 },
+              owned_regions: { type: 'array', items: { type: 'string', minLength: 1 } },
+              owned_files: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['repo_id', 'path'], properties: { repo_id: { type: 'string' }, path: { type: 'string' } } } },
+              context_regions: { type: 'array', items: { type: 'string', minLength: 1 } },
+              context_files: { type: 'array', items: { type: 'string', minLength: 1 } },
+              coverage_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
+              asset_item_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
+              mechanism_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
+            },
+          },
+          request_id: { type: 'string' },
+        },
+      },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--expected-revision', String(args.expected_revision), '--unit', JSON.stringify(args.unit)]
+        optionalCommandArg(values, '--request-id', args.request_id)
+        return execute(exec, 'plan-write', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_work_finish',
+      description: '提交当前 result revision 的 Agent 完成声明；不按字数、关键词或字段数量判断内容质量。',
+      parameters: { ...binding(), required: [...binding().required, 'revision'], properties: { ...SOURCE_BINDING_PROPERTIES, revision: { type: 'integer', minimum: 0 }, complete: { type: 'boolean' }, note: { type: 'string' }, request_id: { type: 'string' } } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--revision', String(args.revision)]
+        if (args.complete === false) values.push('--no-complete')
+        optionalCommandArg(values, '--note', args.note)
+        optionalCommandArg(values, '--request-id', args.request_id)
+        return execute(exec, 'work-finish', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_review_decide',
+      description: '保存 Reviewer 的原文决定；仅 disposition 和 comparison version_set_id 用于确定性路由，其余语义字段不受 Python 重写。',
+      parameters: {
+        ...binding(),
+        required: [...binding().required, 'expected_revision', 'decision'],
+        properties: {
+          ...SOURCE_BINDING_PROPERTIES,
+          expected_revision: { type: 'integer', minimum: 0 },
+          decision: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['version_set_id', 'disposition', 'summary'],
+            properties: {
+              version_set_id: { type: 'string', minLength: 1 },
+              disposition: { type: 'string', enum: ['pass', 'unresolved', 'finding'] },
+              summary: { type: 'string' },
+              finding_keys: { type: 'array', items: { type: 'string' } },
+              closure_units: { type: 'array', items: { type: 'string' } },
+              body: {},
+            },
+          },
+          request_id: { type: 'string' },
+        },
+      },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--expected-revision', String(args.expected_revision), '--decision', JSON.stringify(args.decision)]
+        optionalCommandArg(values, '--request-id', args.request_id)
+        return execute(exec, 'review-decide', values)
+      },
+      output: toolOutput(),
+    }),
+  ]
+}
+
 export function apply(ctx) {
   const monitor = createRuntimeMonitor()
   const disposeMonitor = monitor.start(ctx)
@@ -707,6 +1009,36 @@ export function apply(ctx) {
   const ssh = new PangeaSshRuntime(environments)
 
   const toolDisposers = [ctx.tools.register({
+    name: 'pangea_run_create',
+    description: '创建 source-first PANGEA Run：Graph 冻结源码索引、结果外壳、task/action/result 绑定，并返回第一批待派发 action。',
+    parameters: RUN_CREATE_PARAMETERS,
+    async execute(args, exec) {
+      const result = await createRun(workspaceCwd(exec), {
+        ...args,
+        effective_context_budget: args.effective_context_budget ?? 250000,
+      })
+      if (result?.workflow_version !== 'source-first-v1') {
+        throw new Error('PANGEA 新 Run 未返回 source-first-v1，拒绝进入 DSH 派发流程')
+      }
+      return { ...result, data_root: result.data_root ?? resolvedDataRoot(exec, args.data_root) }
+    },
+    output: toolOutput(),
+  }), ctx.tools.register({
+    name: 'pangea_run_resume',
+    description: '按明确 run_id 恢复 source-first Run 的待执行 action；不扫描、猜测或重建历史 task。',
+    parameters: RUN_RESUME_PARAMETERS,
+    async execute(args, exec) {
+      const dataRoot = resolvedDataRoot(exec, args.data_root)
+      const values = ['adapter', 'next', '--data-root', dataRoot, '--run-id', args.run_id]
+      optionalCommandArg(values, '--limit', args.limit)
+      const result = await runSourceFirstCommand(workspaceCwd(exec), values)
+      if (result?.workflow_version !== 'source-first-v1') {
+        throw new Error('历史 Run 缺少 source-first-v1 workflow_version，不能猜测恢复路径')
+      }
+      return { ...result, data_root: dataRoot }
+    },
+    output: toolOutput(),
+  }), ctx.tools.register({
     name: 'pangea_status',
     description: '只读查看一个明确 run_id 的 PANGEA 阶段、质量状态、分析进度、结果数量和读取健康状态；不得用它扫描或猜测历史 Run。',
     parameters: STATUS_PARAMETERS,
@@ -760,7 +1092,7 @@ export function apply(ctx) {
     },
     execute: args => ssh.interactive(args.alias, args.exchanges),
     output: toolOutput(),
-  })]
+  }), ...sourceFirstTools(ctx)]
 
   const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
@@ -799,7 +1131,7 @@ export { createLaunchLogStore, LaunchLogStore } from './launch-log.js'
 export { AcpSettingsStore, createAcpSettingsStore } from './acp-settings.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
-export { createRun, runPangea, workspaceRoot } from './pangea-api.js'
+export { createRun, runAdapter, runPangea, runSourceFirstCommand, workspaceRoot } from './pangea-api.js'
 export { launchAnalysisSession, normalizeRunInput, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'
 export { reconcileAcpJobs, sessionFailure, settleAcpTask }

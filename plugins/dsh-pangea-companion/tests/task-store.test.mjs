@@ -49,6 +49,24 @@ test('binds multiple conversations to one Task and later associates its Run', as
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('does not replace an existing Task Run binding from a generic session snapshot', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-run-binding-'))
+  const storePath = path.join(root, 'tasks-v1.json')
+  try {
+    const store = createTaskStore({ storePath, idFactory: () => 'task-run-binding' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo-one', target: '固定 Run' } })
+    await store.addConversation('task-run-binding', { sessionId: 'session-run-binding', title: '分析会话', kind: 'analysis' })
+    await store.bindRunBySession('session-run-binding', { run_id: 'run-created-for-task', lifecycle_status: 'complete' })
+
+    const rebound = await store.bindRunBySession('session-run-binding', {
+      run_id: 'another-recent-run', lifecycle_status: 'running',
+    })
+
+    assert.equal(rebound.run_id, 'run-created-for-task')
+    assert.equal((await store.get('task-run-binding')).run_id, 'run-created-for-task')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('keeps launch failures visible for retry', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-failure-'))
   try {

@@ -177,7 +177,7 @@ window.__ModuleLoader__.load({
     }
 
     const PHASE = {
-      PREPARING: '等待 Skill 初始化', STEP_BOOTSTRAP: '初始化 Skill',
+      PREPARING: '等待 PANGEA 初始化', STEP_BOOTSTRAP: '初始化历史 Skill',
       STEP_01: 'Step 01 · 范围和任务契约', STEP_02: 'Step 02 · 输入与计划', STEP_03: 'Step 03 · 广度盘点',
       STEP_04: 'Step 04 · 深度讲解', STEP_05: 'Step 05 · 场景与风险', STEP_06: 'Step 06 · SFMEA 翻译',
       STEP_07: 'Step 07 · 测试设计', STEP_08: 'Step 08 · 独立 Judge', STEP_09: 'Step 09 · 正式交付',
@@ -1375,7 +1375,7 @@ window.__ModuleLoader__.load({
             action: 'task-create',
             payload: {
               input: {
-                request_version: '2.0',
+                workflow_version: 'source-first-v1',
                 repository: createForm.repository,
                 target: createForm.target,
                 source_scope: createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean),
@@ -1645,9 +1645,10 @@ window.__ModuleLoader__.load({
                       : screen.type === 'environment' ? (environmentForm.id ? '编辑测试环境' : '新增测试环境')
                         : screen.type === 'repository-import' ? '添加源码仓库' : '复核'
 
-      const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? [] : [
-        ['overview', '概览'], ['risks', '风险'], ['cases', '测试用例'], ['evidence', '分析资产'],
-      ]
+      const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? []
+        : current?.workflow_version === 'source-first-v1'
+          ? [['overview', '概览'], ['workflow', '运行流程']]
+          : [['overview', '概览'], ['risks', '风险'], ['cases', '测试用例'], ['evidence', '分析资产']]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
         type: 'button',
@@ -1683,7 +1684,9 @@ window.__ModuleLoader__.load({
       function displayCount(key, number) {
         const check = countCheck(key)
         if (check?.status === 'mismatch') return `${number} / 报告 ${check.report}`
-        if (number === null || number === undefined) return '暂不可读取'
+        if (number === null || number === undefined) {
+          return current?.workflow_version === 'source-first-v1' ? '待解析/原文记录' : '暂不可读取'
+        }
         return String(number)
       }
       function metric(number, name, target, countKey) {
@@ -1797,7 +1800,7 @@ window.__ModuleLoader__.load({
         if (!workbench || workbench.compatibility?.compatible === true) return null
         return h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
           h('div', { style: styles.itemTitle }, '当前 PANGEA 后端与工作台不兼容'),
-          h('div', { style: styles.itemMeta }, '请切换到提供 assets / runs / system 稳定接口的 Codetalks Skill 工作区。'),
+          h('div', { style: styles.itemMeta }, '请切换到提供 source-first runs / system 稳定接口的 PANGEA 工作区。'),
           h('div', { style: { ...styles.error, marginTop: 7 } }, workbench.compatibility?.error ?? '无法读取后端能力。'))
       }
 
@@ -1904,7 +1907,7 @@ window.__ModuleLoader__.load({
                 h('div', { style: styles.itemMeta }, '使用 . 表示整个仓库；创建后原始仓库的后续修改不会影响本次 Run。')),
               h('div', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '分析资产'),
-                h('div', { style: styles.itemMeta }, '分析重点由 Codetalks Skill 固定；这里仅选择资产库中已通过完整性校验的输入。用例示例只能在 Step 07 作为格式/粒度参考。'),
+                h('div', { style: styles.itemMeta }, '分析重点和用例示例会随当前 source-first Run 冻结；Agent 依据冻结源码原文作语义判断。'),
                 h('div', { style: { ...styles.chips, marginTop: 7 } }, selectedAssets.length
                   ? selectedAssets.map(item => h('span', { key: item.asset_id, style: styles.badge }, `${assetTypeLabels[item.asset_type] ?? item.asset_type} · ${item.title}`))
                   : h('span', { style: styles.itemMeta }, '未选择资产（可直接分析源码）')),
@@ -1931,6 +1934,7 @@ window.__ModuleLoader__.load({
 
       function renderWorkflow() {
         if (!current) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '选择一个 Run 后查看流程。'))
+        if (current.workflow_version === 'source-first-v1') return renderSourceFirstWorkflow()
         const steps = workflow.steps ?? []
         const statusLabel = { pending: '等待', running: '执行中', completed: '已完成', failed: '失败' }
         const statusColor = status => status === 'failed'
@@ -1978,6 +1982,108 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.itemTitle }, `${item.code ?? 'validation_error'}${item.step ? ` · Step ${item.step}` : ''}`),
               h('div', { style: styles.text }, item.message ?? String(item)))))) : null,
           workflow.error_history?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '错误历史'), h('pre', { style: styles.text }, JSON.stringify(workflow.error_history, null, 2))) : null)
+      }
+
+      function sourceFirstRecordBody(body) {
+        if (typeof body === 'string') return body
+        try { return JSON.stringify(body, null, 2) } catch { return String(body) }
+      }
+
+      function renderSourceFirstRecords(groups = current?.source_first_records ?? []) {
+        const records = groups.flatMap(group => (group.records ?? []).map(record => ({ ...record, action_id: group.action_id, task_id: group.task_id, revision: group.revision })))
+        const recordNodes = records.map((record, index) => h('details', {
+          key: `${record.action_id}:${record.record_id ?? index}:${index}`,
+          style: { ...styles.card, margin: '8px 0 0', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.06))' },
+        },
+        h('summary', { style: { cursor: 'pointer' } }, `${text(record.kind, 'note')} · ${text(record.record_id, `record-${index + 1}`)} · revision ${record.revision ?? '—'}`),
+        h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `${record.action_id ?? 'unknown action'}${record.task_id ? ` · task ${record.task_id}` : ''}`),
+        h('pre', { style: { ...styles.source, marginTop: 7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(record.body)),
+        Array.isArray(record.evidence) && record.evidence.length ? h('pre', { style: { ...styles.itemMeta, marginTop: 7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, `证据：${sourceFirstRecordBody(record.evidence)}`) : null,
+        Array.isArray(record.relates_to) && record.relates_to.length ? h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `关联：${record.relates_to.map(item => text(item, '')).filter(Boolean).join('、')}`) : null))
+        return h('div', { style: styles.card },
+          h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'Agent 原文记录'), h('span', { style: styles.badge }, `${records.length} 条`)),
+          records.length ? h('div', { style: { marginTop: 8 } }, recordNodes)
+            : h('div', { style: { ...styles.empty, marginTop: 8 } }, '当前还没有可显示的 Agent 原文；空结果不会被解释为分析完成。'))
+      }
+
+      function renderSourceFirstWorkflow() {
+        const steps = current?.workflow?.steps ?? []
+        const actions = current?.workflow?.actions ?? []
+        const statusLabel = { pending: '等待', dispatched: '执行中', settled: '待 Graph 接受', accepted: '已接受', failed: '失败' }
+        const statusColor = status => status === 'failed'
+          ? 'var(--dsw-alias-state-error-primary, #e66767)'
+          : status === 'accepted' ? 'var(--dsw-alias-state-success-primary, #38a892)'
+            : status === 'dispatched' || status === 'settled' ? 'var(--dsw-alias-state-business-primary, #4d9ad6)' : '#c7cdd4'
+        return h(React.Fragment, null,
+          h('div', { style: { ...styles.card, ...styles.notice } },
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'PANGEA source-first 工作流'), h('span', { style: styles.badge }, current.quality_status ?? '待定')),
+            h('div', { style: { ...styles.grid, marginTop: 10 } },
+              field('当前阶段', current.stage ?? current.phase),
+              field('源码快照', current.source_snapshot?.file_count == null ? '待检查' : `${current.source_snapshot.file_count} 个文件`),
+              field('分析单元', `${current.analysis.completed ?? 0} / ${current.analysis.total ?? 0}`),
+              field('用户介入', current.needs_user ? '需要处理' : '无需处理')),
+            current.blocking_reason ? h('pre', { style: { ...styles.text, marginTop: 9, whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(current.blocking_reason)) : null),
+          h('div', { style: styles.sectionTitle }, '阶段进度'),
+          h('div', { style: styles.card }, h('div', { style: styles.stageRail }, steps.map(step => h('div', { key: step.step, style: styles.stageItem },
+            h('span', { style: { ...styles.stageDot, background: step.status === 'completed' ? 'var(--dsw-alias-state-success-primary, #38a892)' : step.status === 'running' ? 'var(--dsw-alias-state-business-primary, #4d9ad6)' : '#c7cdd4' } }),
+            h('div', { style: { flex: 1, minWidth: 0 } },
+              h('div', { style: styles.itemTitle }, `${step.step} · ${step.title}`),
+              step.artifacts?.length ? h('div', { style: styles.chips }, step.artifacts.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file)))) : h('div', { style: styles.itemMeta }, '尚无产物')),
+            h('span', { style: styles.badge }, step.status))))),
+          h('div', { style: styles.sectionTitle }, 'Graph actions'),
+          h('div', { style: styles.card }, actions.length ? actions.map(action => h('div', { key: action.action_id, style: { ...styles.stageItem, borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12))' } },
+            h('span', { style: { ...styles.stageDot, background: statusColor(action.status) } }),
+            h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { style: styles.itemTitle }, `${action.action_id} · ${action.role ?? 'unknown'}`), h('div', { style: styles.itemMeta }, `${action.stage ?? 'unknown'}${action.task_id ? ` · task ${action.task_id}` : ''}`)),
+            h('span', { style: styles.badge }, statusLabel[action.status] ?? action.status))) : h('div', { style: styles.empty }, '当前没有 Graph action。')),
+          renderSourceFirstRecords(),
+          current.artifacts?.source_index ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '冻结输入'), h('div', { style: styles.chips }, chip('打开 source index', () => openSidebarFile(current.artifacts.source_index, 'source-index.json')), current.artifacts.source_snapshot_manifest ? chip('打开 source manifest', () => openSidebarFile(current.artifacts.source_snapshot_manifest, 'source-manifest.json')) : null)) : null,
+          current.reader_health?.issues?.length ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '读取诊断'), h('pre', { style: styles.text }, JSON.stringify(current.reader_health.issues, null, 2))) : null)
+      }
+
+      function renderSourceFirstOverview() {
+        const records = current.source_first_records ?? []
+        const recordCount = records.reduce((total, group) => total + (Array.isArray(group.records) ? group.records.length : 0), 0)
+        const runNeedsAttention = current.needs_user === true || ['needs_attention', 'failed'].includes(selectedTask.status)
+        const nextAction = runNeedsAttention
+          ? { label: '需要用户处理', hint: current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : '当前 source-first Run 需要查看 Graph 诊断。' }
+          : current.terminal
+            ? { label: '查看 source-first 交付', hint: current.report_available ? '报告与 Agent 原文已载入，可以展开查看 revision 和正文。' : 'Run 已结束，但报告尚未形成可读取的完整交付。' }
+            : { label: 'Agent 工作进行中', hint: `当前阶段：${current.stage ?? current.phase}；Graph 会在 action settle 后继续推进。` }
+        const reportCard = current.artifacts?.report_html || current.artifacts?.report_md
+          ? h('div', { style: styles.card },
+            h('div', { style: styles.itemTitle }, 'source-first 报告'),
+            h('div', { style: styles.itemMeta }, current.report_available ? '报告已完成；正文保留 Agent 原文与 Graph revision 事实。' : '报告文件已生成，但完整交付门标记尚未齐备。'),
+            h('div', { style: styles.chips },
+              current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA source-first report.html')) : null,
+              current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA source-first report.md')) : null))
+          : null
+        const errorCard = current.errors?.length
+          ? h('div', { style: { ...styles.card, ...styles.error } },
+            h('div', { style: styles.itemTitle }, '当前错误'),
+            h('pre', { style: styles.text }, JSON.stringify(current.errors, null, 2)))
+          : null
+        return h(React.Fragment, null,
+          renderCompatibility(),
+          h('div', { style: styles.decisionHero },
+            h('div', { style: styles.eyebrow }, '下一步'),
+            h('div', { style: styles.decisionTitle }, nextAction.label),
+            h('div', { style: styles.decisionHint }, nextAction.hint),
+            h('button', { type: 'button', style: { ...styles.button, marginTop: 9 }, onClick: () => jump('workflow') }, '查看运行细节'),
+            h('div', { style: styles.decisionBand },
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '质量状态'), h('div', { style: styles.decisionValue }, QUALITY[current.quality_status] ?? current.quality_status ?? '待定')),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '原文记录'), h('div', { style: styles.decisionValue }, `${recordCount} 条`)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '首轮/接受 revision'), h('div', { style: styles.decisionValue }, `${Object.keys(current.first_finish_revisions ?? {}).length} / ${Object.keys(current.accepted_revisions ?? {}).length}`)))),
+          h('div', { style: styles.card },
+            h('div', { style: styles.row }, h('div', null, h('div', { style: styles.eyebrow }, '当前 source-first Run'), h('div', { style: styles.itemTitle }, current.run_id)), h('span', { style: styles.badge }, current.stage ?? current.phase)),
+            h('div', { style: { marginTop: 10 } }, h('div', { style: styles.row }, h('span', { style: styles.label }, '分析进度'), h('span', { style: styles.label }, current.analysis.total > 0 ? `${current.analysis.completed}/${current.analysis.total}` : '由 Graph action 记录')),
+              current.analysis.total > 0 ? h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } })) : h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, 'Planning/Reviewing 不是按记录数量计分；请查看下方 action 状态。')),
+            h('div', { style: styles.grid }, field('工作流版本', current.workflow_version), field('目标', current.target), field('源码快照', current.source_snapshot?.status ?? '待检查'), field('读取健康', HEALTH[current.reader_health?.status] ?? current.reader_health?.status ?? '未知'))),
+          current.needs_user ? h('div', { style: { ...styles.card, ...styles.healthWarning } }, h('div', { style: styles.itemTitle }, '需要用户处理'), current.blocking_reason ? h('pre', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(current.blocking_reason)) : null) : null,
+          renderSourceFirstRecords(records),
+          reportCard,
+          renderAcpRuntime(),
+          renderLaunchDiagnostics(workbench?.launch_log?.events),
+          errorCard)
       }
 
       function renderFlows() {
@@ -2185,6 +2291,7 @@ window.__ModuleLoader__.load({
           renderLaunchDiagnostics(launchEvents),
           selectedTask.status === 'failed' ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在重试…' : '重试启动') : null))
         }
+        if (current.workflow_version === 'source-first-v1') return renderSourceFirstOverview()
         const uncoveredRisks = risks.filter(isUncoveredRisk)
         const severityRank = { Critical: 0, High: 1, Medium: 2, Low: 3 }
         const priorityScenarios = [...risks].sort((left, right) => (severityRank[left.severity] ?? 9) - (severityRank[right.severity] ?? 9)).slice(0, 3)
@@ -2193,8 +2300,8 @@ window.__ModuleLoader__.load({
           ? { label: '分析需要处理', hint: '当前 Run 未正常完成，请先查看下方错误，再决定是否重新启动。', target: 'workflow' }
           : health?.trusted === false
           ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
-          : !current.terminal
-            ? { label: '等待分析完成', hint: `Codetalks Skill 已完成 ${completed}/${total} 个步骤，可查看完整流程。`, target: 'workflow' }
+            : !current.terminal
+            ? { label: '等待分析完成', hint: `PANGEA 已完成 ${completed}/${total} 个步骤，可查看完整流程。`, target: 'workflow' }
             : uncoveredRisks.length > 0
               ? { label: `处理 ${uncoveredRisks.length} 条未覆盖风险`, hint: '这些风险还没有关联可执行测试用例。', target: 'risks' }
               : testCases.length > 0
