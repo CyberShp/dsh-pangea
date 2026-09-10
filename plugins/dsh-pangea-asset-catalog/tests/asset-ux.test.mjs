@@ -103,3 +103,31 @@ test('review note edits preserve the saved decision and a failed save keeps the 
   const sent = ui.calls.find(call => call.payload?.action === 'review_items').payload
   assert.deepEqual(sent.decisions, [{ item_id: 'I-1', decision: 'accepted', note: '补充证据' }])
 })
+
+
+test('asset detail exposes recoverable deletion and persists category edits', async () => {
+  const ui = await mount()
+  await ui.click('查看详情')
+  assert.ok(ui.button('删除（可恢复）'))
+  await ui.click('编辑信息')
+  ui.change('编辑资产分类', 'historical_defect')
+  await ui.click('保存')
+  assert.equal(ui.calls.find(call => call.payload?.action === 'update_metadata').payload.asset_type, 'historical_defect')
+  await ui.click('删除（可恢复）')
+  assert.ok(ui.calls.some(call => call.payload?.action === 'archive'))
+  assert.ok(!ui.text().includes('返回列表'))
+})
+
+test('approved historical defect starts semantic generation directly from its detail', async () => {
+  const prior = pending.status
+  pending.status = 'available'
+  try {
+    const ui = await mount()
+    // Open the historical defect's own detail, without selecting checkboxes.
+    const buttons = ui.nodes().filter(node => node.type === 'button' && node.children.includes('查看详情'))
+    buttons[1].props.onClick()
+    await tick(); ui.render()
+    await ui.click('开启语义生成会话')
+    assert.deepEqual(ui.calls.find(call => call.payload?.action === 'generate_methodology').payload.asset_ids, ['pending'])
+  } finally { pending.status = prior }
+})

@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
     const STATUS_FILTERS = [
       ['', '全部状态'], ['imported', '待规范化'], ['awaiting_review', '待人工审核'],
       ['available', '可用于分析'], ['no_items', '无结构化条目'], ['rejected', '已拒绝'],
-      ['failed', '失败'], ['archived', '已归档'],
+      ['failed', '失败'], ['archived', '已删除 / 已归档'],
     ]
     const METHODOLOGY_STATUS = { candidate: '待启用', enabled: '已启用', disabled: '已停用' }
     const assetTime = value => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short' }).format(new Date(value)) : '未记录'
@@ -182,6 +182,7 @@ window.__ModuleLoader__.load({
       const [selectedAssets, setSelectedAssets] = React.useState({})
       const [editingAssetId, setEditingAssetId] = React.useState('')
       const [editTitle, setEditTitle] = React.useState('')
+      const [editType, setEditType] = React.useState('')
       const [editRepositories, setEditRepositories] = React.useState('')
       const [editModules, setEditModules] = React.useState('')
       const [editLanguages, setEditLanguages] = React.useState('')
@@ -239,7 +240,8 @@ window.__ModuleLoader__.load({
           if (payload.asset_id) setDetails(current => {
             const next = { ...current }; delete next[payload.asset_id]; return next
           })
-          if (payload.asset_id && activeAsset?.asset_id === payload.asset_id) {
+          if (action === 'archive' || action === 'restore') { setActiveAsset(null); setEditingAssetId('') }
+          if (!['archive', 'restore'].includes(action) && payload.asset_id && activeAsset?.asset_id === payload.asset_id) {
             try {
               const detail = await requestAssetDetail({ cwd, assetId: payload.asset_id })
               setDetails(current => ({ ...current, [payload.asset_id]: detail }))
@@ -263,8 +265,8 @@ window.__ModuleLoader__.load({
                   : action === 'enable_methodology' ? '方法论已启用，后续新 Run 可以冻结引用。'
                     : action === 'disable_methodology' ? '方法论已停用，后续新 Run 不再引用。'
                       : action === 'restore' ? '资产已恢复。'
-                        : action === 'update_metadata' ? '资产信息已更新。'
-                          : '资产已归档。')
+                        : action === 'update_metadata' ? '资产信息已更新；修改分类后请重新解析原文件。'
+                          : '资产已移出资产库，可在“已删除 / 已归档”中恢复。')
           }
           return true
         } catch (value) { setError(value instanceof Error ? value.message : String(value)); return false }
@@ -331,6 +333,7 @@ window.__ModuleLoader__.load({
       function startEdit(asset) {
         setEditingAssetId(asset.asset_id)
         setEditTitle(asset.title)
+        setEditType(asset.asset_type)
         setEditRepositories((asset.repository_ids ?? []).join(', '))
         setEditModules((asset.module_tags ?? []).join(', '))
         setEditLanguages((asset.language_tags ?? []).join(', '))
@@ -344,6 +347,7 @@ window.__ModuleLoader__.load({
         const saved = await act('update_metadata', {
           asset_id: assetId,
           title: editTitle.trim(),
+          asset_type: editType,
           repository_ids: valuesFromText(editRepositories),
           module_tags: valuesFromText(editModules),
           language_tags: valuesFromText(editLanguages),
@@ -452,7 +456,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', disabled: busy || loading, style: styles.button, onClick: () => { if (activeAsset) void toggle(activeAsset.asset_id, true); else void load() } }, loading ? '刷新中…' : '刷新'),
               h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { setActiveAsset(null); setImportOpen(true) } }, '导入资产'))),
           h('nav', { 'aria-label': '资产管理导航', style: { ...styles.wrap, marginTop: 12 } },
-            [['library', '资产库'], ['review', '待审核'], ['methodologies', '方法论'], ['archived', '已归档']].map(([value, label]) =>
+            [['library', '资产库'], ['review', '待审核'], ['methodologies', '方法论'], ['archived', '已删除 / 已归档']].map(([value, label]) =>
               h('button', { key: value, type: 'button', disabled: busy, 'aria-current': section === value && !importOpen ? 'page' : undefined,
                 style: { ...styles.button, ...(section === value && !importOpen ? styles.active : {}) }, onClick: () => navigate(value) }, label)))),
         h('div', { style: styles.content },
@@ -551,12 +555,14 @@ window.__ModuleLoader__.load({
                 asset.status === 'awaiting_review' ? h(React.Fragment, null,
                   h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'approve' }) } }, '审核通过'),
                   h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'reject' }) } }, '拒绝')) : null,
+                asset.asset_type === 'historical_defect' && asset.status === 'available' ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('generate_methodology', { asset_ids: [asset.asset_id] }) } }, '开启语义生成会话') : null,
                 asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => startEdit(asset) }, '编辑信息') : null,
-                asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('archive', { asset_id: asset.asset_id }) } }, '归档')
+                asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('archive', { asset_id: asset.asset_id }) } }, '删除（可恢复）')
                   : h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('restore', { asset_id: asset.asset_id }) } }, '恢复')) : null,
               editingAssetId === asset.asset_id ? h('div', { style: { ...styles.card, marginTop: 9, marginBottom: 0 } },
                 h('div', { style: styles.itemTitle }, '编辑资产信息'),
                 h('div', { style: { ...styles.wrap, marginTop: 8 } },
+                  h('select', { 'aria-label': '编辑资产分类', style: styles.input, value: editType, onChange: event => setEditType(event.target.value) }, TYPES.filter(([value]) => value).map(([value, label]) => h('option', { key: value, value }, label))),
                   h('input', { 'aria-label': '编辑资产标题', style: { ...styles.input, ...styles.grow }, value: editTitle, onChange: event => setEditTitle(event.target.value) }),
                   h('input', { 'aria-label': '关联仓库', placeholder: '仓库 ID，逗号分隔', style: { ...styles.input, ...styles.grow }, value: editRepositories, onChange: event => setEditRepositories(event.target.value) }),
                   h('input', { 'aria-label': '模块标签', placeholder: '模块标签，逗号分隔', style: { ...styles.input, ...styles.grow }, value: editModules, onChange: event => setEditModules(event.target.value) }),

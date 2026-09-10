@@ -257,6 +257,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.deepEqual(pages.map(page => page.title()), ['工作台', 'PANGEA 分析', '环境配置', 'Agent Runtime'])
   assert.deepEqual(pages.map(page => page.order), [0, 10, 20, 30])
   assert.equal(pages[2].available(), false)
+  assert.equal(pages[3].available(), false)
 })
 
 test('shows a health alert only for an actual reader warning', async () => {
@@ -859,7 +860,7 @@ test('client state request encodes workspace and run, passes cancellation, and r
 })
 
 for (const screenType of ['flows', 'coverage']) {
-  test(`renders ${screenType} as its own reader with explicit evidence and case links`, async () => {
+  test(`renders ${screenType} with coverage hidden and legacy navigation safe`, async () => {
     const task = { task_id: 'task', run_id: 'run', data_root: '/data', target: 'synthetic', status: 'complete' }
     const current = { run_id: 'run', data_root: '/data', lifecycle_status: 'complete', scenario: 'coverage-analysis', publication: { state: 'final', revision: 1 }, details: {
       business_flows: [{ flow_id: 'FLOW-1', title: '连接请求', mainline_steps: [{ step_id: 'S1', title: '接收请求', external_action: '请求连接' }], branches: [{ branch_id: 'B1', from_step_id: 'S1', kind: 'timeout', condition: '响应超时', linked_test_case_ids: ['TC-1'], evidence_ids: ['E1'] }] }],
@@ -880,7 +881,13 @@ for (const screenType of ['flows', 'coverage']) {
     if (coverage) nodes.push(...descendants(coverage.type({ ...coverage.props, task: null })))
     const nav = nodes.find(node => node.type === 'nav' && node.props['aria-label'] === 'PANGEA 分析页面')
     const active = descendants(nav).find(node => node.props['aria-current'] === 'page')
-    assert.equal(active.children[0], screenType === 'flows' ? '业务流程' : '覆盖缺口')
+    assert.ok(!descendants(nav).some(node => node.type === 'button' && node.children[0] === '覆盖缺口'))
+    if (screenType === 'coverage') {
+      assert.equal(coverage, undefined)
+      assert.ok(JSON.stringify(nodes).includes('超时恢复'))
+      return
+    }
+    assert.equal(active.children[0], '业务流程')
     const linked = nodes.find(node => node.type === 'button' && node.children[0] === 'TC-1')
     assert.ok(linked)
     linked.props.onClick()

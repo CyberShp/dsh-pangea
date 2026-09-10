@@ -957,6 +957,7 @@ window.__ModuleLoader__.load({
     }
 
     function CoverageBrowser({ cwd, task, runId, target, revision, acquisition, gaps, flows, filters, onFilter, renderLinks, onReload, onNewQuery }) {
+      gaps = Array.isArray(gaps) ? gaps : []
       const [scopeStatus, setScopeStatus] = React.useState('')
       const [flowId, setFlowId] = React.useState('')
       const [position, setPosition] = React.useState({ key: '', cursor: 0 })
@@ -2175,7 +2176,7 @@ window.__ModuleLoader__.load({
                         : screen.type === 'repository-import' ? '添加源码仓库' : '复核'
 
       const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? [] : [
-        ['overview', '概览'], ['flows', '业务流程'], ...(current?.scenario === 'coverage-analysis' ? [['coverage', '覆盖缺口']] : [['risks', '风险']]), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['workflow', '运行过程'], ['review', '复核'],
+        ['overview', '概览'], ['flows', '业务流程'], ...(current?.scenario === 'coverage-analysis' ? [] : [['risks', '风险']]), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['workflow', '运行过程'], ['review', '复核'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -2565,9 +2566,7 @@ window.__ModuleLoader__.load({
         return h('div', { style: styles.chips },
           idList(item.linked_flow_ids).map(id => chip(id, () => { setFlowSelection(id); setFlowReader({ scope: `${current?.run_id}:${id}`, view: 'reader', step: '', query: '', page: 1 }); setBranchFilter(''); navigate({ type: 'flows' }) })),
           idList(item.linked_branch_ids).map(id => { const owner = businessFlows.find(f => (f.branches ?? []).some(b => b.branch_id === id)); return owner ? chip(id, () => { setFlowSelection(owner.flow_id); setFlowReader({ scope: `${current?.run_id}:${owner.flow_id}`, view: 'reader', step: '', query: id, page: 1 }); setBranchFilter(''); navigate({ type: 'flows' }) }) : h('span', { key: id, style: styles.badge }, `${id} · 路径待核对`) }),
-          idList(item.linked_gap_ids).map(id => current?.scenario === 'coverage-analysis'
-            ? chip(id, () => { setGapQuery(id); setGapKind(''); setGapSource(''); setGapStatus(''); setGapDisposition(''); navigate({ type: 'coverage' }) })
-            : h('span', { key: id, style: styles.badge }, id)),
+          idList(item.linked_gap_ids).map(id => h('span', { key: id, style: styles.badge }, id)),
           (item.linked_risk_ids ?? []).map(id => chip(id, () => navigate({ type: 'risk', id }))),
           (item.linked_test_case_ids ?? []).map(id => chip(id, () => navigate({ type: 'case', id }))),
           (item.evidence_ids ?? []).map(id => {
@@ -3322,7 +3321,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'execution') body = renderExecutionResults()
       else if (screen.type === 'environment') body = renderEnvironmentPage()
       else if (screen.type === 'flows') body = renderFlows()
-      else if (screen.type === 'coverage') body = renderCoverage()
+      else if (screen.type === 'coverage') body = renderCases()
       else if (screen.type === 'evidence') body = renderEvidence()
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderReview()
@@ -3372,7 +3371,7 @@ window.__ModuleLoader__.load({
       }), 'dsh-pangea-companion: execution page')
       ctx.effect(() => pangea.registerPage({
         id: 'agent-runtime', title: () => 'Agent Runtime', icon, order: 30,
-        available: () => true,
+        available: () => false,
         component: props => h(AcpSettingsPanel, props),
       }), 'dsh-pangea-companion: Agent Runtime settings page')
     }

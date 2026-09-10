@@ -96,6 +96,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   ]
   if (options.type) args.push('--type', options.type)
   if (options.status) args.push('--status', options.status)
+  else args.push('--exclude-archived')
   if (options.kind) args.push('--kind', options.kind)
   if (options.repositoryId) args.push('--repository-id', options.repositoryId)
   if (options.moduleTag) args.push('--module-tag', options.moduleTag)
@@ -273,6 +274,7 @@ async function routeHandler(req, res, runtime) {
         'assets', 'update-metadata', '--data-root', resolvedDataRoot,
         '--asset-id', body.asset_id, '--title', body.title.trim(),
       ]
+      if (body.asset_type !== undefined) args.push('--asset-type', body.asset_type)
       for (const value of body.repository_ids ?? []) args.push('--repository-id', value)
       for (const value of body.module_tags ?? []) args.push('--module-tag', value)
       for (const value of body.language_tags ?? []) args.push('--language-tag', value)
