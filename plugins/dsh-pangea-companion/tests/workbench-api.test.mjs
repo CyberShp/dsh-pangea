@@ -27,6 +27,26 @@ async function workspace() {
 
 function ok(value) { return { result: { ok: true, value } } }
 
+test('lists and opens source-first reports consistently with the current Run files', async () => {
+  const cwd = await workspace()
+  const dataRoot = path.join(cwd, 'pangea-data')
+  const directory = path.join(dataRoot, 'runs', 'semantic-run')
+  const run = { run_id: 'semantic-run', workflow_version: 'source-first-v1', lifecycle_status: 'complete', quality_status: 'UNRESOLVED', report_available: false }
+  const runner = async ({ args }) => args[0] === 'system' ? capabilities : args[1] === 'list' ? { items: [run], total: 1 } : run
+  try {
+    await mkdir(directory, { recursive: true })
+    for (const file of ['report.md', 'report.html', 'report-complete.json']) await writeFile(path.join(directory, file), 'fixture')
+    const available = await workbenchSnapshot({ cwd, dataRoot, runId: run.run_id, runner })
+    assert.equal(available.runs.items[0].report_available, true)
+    assert.equal(available.run.reports.html, path.join(directory, 'report.html'))
+    assert.equal(available.run.quality_status, 'UNRESOLVED')
+    await rm(path.join(directory, 'report-complete.json'))
+    const incomplete = await workbenchSnapshot({ cwd, dataRoot, runId: run.run_id, runner })
+    assert.equal(incomplete.runs.items[0].report_available, false)
+    assert.equal(incomplete.run.reports.html, null)
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
 function internalModelApi(events = []) {
   return {
     llm: {

@@ -321,6 +321,13 @@ async function sourceFirstSnapshot(runDirectory, progress, contract, actionArtif
   }
 }
 
+export async function sourceFirstReportAvailable(runDirectory, lifecycleStatus) {
+  return lifecycleStatus === 'complete'
+    && await pathKind(path.join(runDirectory, 'report.md')) === 'file'
+    && await pathKind(path.join(runDirectory, 'report.html')) === 'file'
+    && await pathKind(path.join(runDirectory, 'report-complete.json')) === 'file'
+}
+
 async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false } = {}) {
   const runDirectory = path.join(dataRoot, 'runs', runId)
   const progressPath = path.join(runDirectory, 'progress.json')
@@ -338,10 +345,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   const reportMd = path.join(runDirectory, 'report.md')
   const reportHtml = path.join(runDirectory, 'report.html')
   const reportComplete = path.join(runDirectory, 'report-complete.json')
-  const reportAvailable = life.lifecycle_status === 'complete'
-    && await pathKind(reportMd) === 'file'
-    && await pathKind(reportHtml) === 'file'
-    && await pathKind(reportComplete) === 'file'
+  const reportAvailable = await sourceFirstReportAvailable(runDirectory, life.lifecycle_status)
   const records = actionView.artifacts.map(item => ({
     action_id: item.action_id,
     action: item.action,

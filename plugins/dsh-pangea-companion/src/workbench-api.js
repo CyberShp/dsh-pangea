@@ -1,6 +1,7 @@
 import path from 'node:path'
 
 import { assertSourceFirstCapabilities, createRun, runPangea, workspaceRoot } from './pangea-api.js'
+import { sourceFirstReportAvailable } from './reader.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
@@ -230,6 +231,18 @@ export function normalizeRunInput(value, capabilities) {
   return normalizeAnalysisInput(value, capabilities, false)
 }
 
+async function withSourceFirstReports(run, dataRoot) {
+  if (run?.workflow_version !== 'source-first-v1') return run
+  const directory = path.resolve(dataRoot, 'runs', run.run_id)
+  const relative = path.relative(path.resolve(dataRoot, 'runs'), directory)
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Invalid source-first Run path')
+  const available = await sourceFirstReportAvailable(directory, run.lifecycle_status)
+  return { ...run, report_available: available, reports: {
+    html: available ? path.join(directory, 'report.html') : null,
+    markdown: available ? path.join(directory, 'report.md') : null,
+  } }
+}
+
 export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limit = DEFAULT_PAGE_SIZE, runner = runPangea }) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
@@ -244,6 +257,7 @@ export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limi
       cwd: root,
       args: ['runs', 'list', '--data-root', resolvedDataRoot, '--cursor', String(pageCursor), '--limit', String(pageLimit)],
     })
+    runs.items = await Promise.all((runs.items ?? []).map(run => withSourceFirstReports(run, resolvedDataRoot)))
     const requestedRunId = typeof runId === 'string' ? runId.trim() : ''
     let run = null
     let runDetail = null
@@ -253,6 +267,7 @@ export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limi
           cwd: root,
           args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', requestedRunId],
         })
+        run = await withSourceFirstReports(run, resolvedDataRoot)
         runDetail = { run_id: requestedRunId, status: 'ok', error: null }
       } catch (error) {
         runDetail = { run_id: requestedRunId, status: 'error', error: error instanceof Error ? error.message : String(error) }
