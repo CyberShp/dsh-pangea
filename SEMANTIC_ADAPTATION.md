@@ -1,7 +1,7 @@
 # Semantic 分支接入
 
 本分支从 `codetalks-skill@48b7921` 创建，对接 pangea-agent
-`codex/pangea-semantic-analysis-rework@58398f10ef7663b23c24310f932a76d77254d0d2`。
+`langgraph@58398f10ef7663b23c24310f932a76d77254d0d2`。
 
 工作台通过 companion 创建 source-first Run，展示任务进度、冻结源码信息、
 Agent 原文记录与报告。DSH 根 Agent 通过 report-policy 创建并绑定子任务，
@@ -14,7 +14,7 @@ comparison 读取、review 决定及 work-finish。任务保存保留显式上�
 ACP 结束时复用 source-first reader 确认当前 Run 的报告；宿主 Job 以编号和
 启动时间共同绑定，输出、结算和停止操作均核对同一次执行。
 
-配套 Desktop 分支为 `codex/pangea-semantic-adaptation`，其
+配套 Desktop 分支为 `langgraph`，其
 `pangea.components.json` 固定本仓库提交和上述 Agent 提交。
 
 ## 验证
