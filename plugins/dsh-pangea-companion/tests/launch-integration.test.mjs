@@ -52,3 +52,30 @@ test('treats exit 0 without validated final artifacts as an ACP failure', async 
 test('reconciliation refreshes the authoritative job status after consuming output', () => {
   assert.match(source, /snapshot = readJobSnapshot\(runtime, task\) \?\? update\?\.snapshot/)
 })
+
+test('settles semantic reports using the exact Run reader while preserving unresolved quality', async () => {
+  const task = { task_id: 'task-1', workspace: '/workspace', data_root: '/workspace/data', run_id: 'run-1' }
+  let outcome
+  const tasks = {
+    async getByJob() { return task },
+    async settleJob(_id, value) { outcome = value; return value },
+  }
+  const cli = async () => ({ workflow_version: 'source-first-v1', lifecycle_status: 'complete', report_available: false })
+  const logs = { async append() {} }
+  const job = { id: 'job-1', kind: 'subagent', status: 'completed' }
+  for (const quality_status of ['PASS', 'UNRESOLVED']) {
+    await settleAcpTask({}, tasks, logs, job, undefined, cli, async input => {
+      assert.deepEqual(input, { cwd: '/workspace', dataRoot: '/workspace/data', runId: 'run-1' })
+      return { current: { run_id: 'run-1', lifecycle_status: 'complete', report_available: true, quality_status } }
+    })
+    assert.equal(outcome.status, 'completed')
+  }
+  await settleAcpTask({}, tasks, logs, job, undefined, cli, async () => ({
+    current: { run_id: 'run-1', lifecycle_status: 'complete', report_available: false },
+  }))
+  assert.equal(outcome.status, 'failed')
+  await settleAcpTask({}, tasks, logs, job, undefined, cli, async () => ({
+    current: { run_id: 'another-run', lifecycle_status: 'complete', report_available: true },
+  }))
+  assert.equal(outcome.status, 'failed')
+})

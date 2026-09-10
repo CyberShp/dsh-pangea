@@ -378,7 +378,7 @@ function readJobSnapshot(runtime, task) {
   return jobs.get(task.job_id, jobOwner(runtime, task))
 }
 
-async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea) {
+async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea, readSnapshot = companionSnapshot) {
   if (snapshot?.kind !== 'subagent') return null
   const task = await tasks.getByJob(String(snapshot.id))
   if (!task) return null
@@ -390,10 +390,17 @@ async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner
   let outcome = snapshot
   if (snapshot.status === 'completed') {
     try {
-      const run = await runner({
+      let run = await runner({
         cwd: task.workspace,
         args: ['runs', 'get', '--data-root', task.data_root, '--run-id', task.run_id],
       })
+      // Semantic runtime reports use the same source-first reader as the UI.
+      // The public CLI's legacy report_available projection does not describe them.
+      if (run.workflow_version === 'source-first-v1') {
+        const view = await readSnapshot({ cwd: task.workspace, dataRoot: task.data_root, runId: task.run_id })
+        if (view.current?.run_id !== task.run_id) throw new Error('当前任务的 source-first Run 不可读取')
+        run = view.current
+      }
       if (run.lifecycle_status !== 'complete' || run.report_available !== true) {
         outcome = {
           ...snapshot,
