@@ -710,7 +710,40 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     assert.equal(mismatched.source_first_records[0].records.length, 0)
     await writeJson(resultPath, { ...originalResult, revision: 4 })
     assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)
+    const progressPath = path.join(runRoot, 'progress.json')
+    const finishedProgress = JSON.parse(await readFile(progressPath, 'utf8'))
+    const actionId = `${runId}:analysis:unit-1`
+    const waitingProgress = { ...finishedProgress, lifecycle_status: 'running', stage: 'reviewing',
+      accepted_revisions: {}, actions: { [actionId]: { ...finishedProgress.actions[actionId],
+        action: 'continue_agent', stage: 'comparison_review', status: 'pending' } } }
+    const shell = { ...originalResult, revision: 0, records: [],
+      binding: { ...originalResult.binding, task_id: 'pending' },
+      completion: { complete: false, note: '', declared_revision: 0 } }
+    await writeJson(progressPath, waitingProgress)
+    await writeJson(resultPath, shell)
+    const preparing = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(preparing.reader_health.trusted, true)
+    assert.deepEqual(preparing.reader_notices, ['复核准备中，正在绑定复核任务。'])
+    assert.equal(preparing.source_first_records[0].records.length, 0)
+    // Real identity conflicts and published content cannot use the empty-shell exception.
+    for (const invalid of [
+      { ...shell, binding: { ...shell.binding, task_id: 'wrong-task' } },
+      { ...shell, binding: { ...shell.binding, run_id: 'wrong-run' } },
+      { ...shell, binding: { ...shell.binding, action_id: 'wrong-action' } },
+      { ...shell, revision: 1 },
+      { ...shell, records: originalResult.records },
+      { ...shell, completion: { complete: true } },
+    ]) {
+      await writeJson(resultPath, invalid)
+      assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)
+    }
+    await writeJson(resultPath, shell)
+    await writeJson(progressPath, finishedProgress)
+    assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)
     await writeJson(resultPath, originalResult)
+    const bound = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(bound.reader_health.trusted, true)
+    assert.deepEqual(bound.reader_notices, [])
     await rm(path.join(runRoot, 'report-complete.json'))
     assert.equal((await companionSnapshot({ dataRoot, runId })).current.report_available, false)
     const stopped = await readFile(path.join(runRoot, 'progress.json'), 'utf8').then(JSON.parse)

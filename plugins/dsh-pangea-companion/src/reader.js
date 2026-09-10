@@ -698,6 +698,20 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
         issues.push(`source-first result JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // Comparison reuses the reviewer session; its empty shell is initialized
+    // before that session is bound. Only this exact live transition may wait.
+    const awaitingBinding = result?.format_version === 'pangea-notes-v1'
+      && progress.lifecycle_status === 'running'
+      && action.stage === 'comparison_review'
+      && ['pending', 'dispatched'].includes(action.status)
+      && result.binding?.run_id === progress.run_id
+      && result.binding?.action_id === actionId
+      && result.binding?.task_id === 'pending'
+      && result.revision === 0
+      && Array.isArray(result.records) && result.records.length === 0
+      && result.completion?.complete === false
+      && !Object.hasOwn(progress.accepted_revisions ?? {}, actionId)
+    if (awaitingBinding) result = null
     if (result && (result.binding?.run_id !== progress.run_id || result.binding?.action_id !== actionId || (action.task_id && result.binding?.task_id !== action.task_id))) {
       issues.push(`source-first result 绑定与当前任务不一致：${actionId}`)
       result = null
@@ -710,6 +724,7 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
     artifacts.push({
       action_id: actionId,
       ...action,
+      binding_status: awaitingBinding ? 'pending' : 'bound',
       task,
       task_path: taskPath,
       result_path: resultPath,
@@ -808,6 +823,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       action: item.action,
       role: item.role,
       stage: item.stage,
+      binding_status: item.binding_status,
       task_path: item.task_path,
       task_id: item.task_id ?? null,
       status: item.status,
@@ -875,6 +891,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       issues: [...sourceSnapshot.issues, ...actionView.issues],
       count_checks: {},
     },
+    reader_notices: actionView.artifacts.filter(item => item.binding_status === 'pending').map(() => '复核准备中，正在绑定复核任务。'),
     reader_warnings: [...sourceSnapshot.issues, ...actionView.issues],
     artifacts: {
       run_directory: runDirectory,
