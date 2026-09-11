@@ -1193,10 +1193,10 @@ export function sourceFirstTools(ctx, execute = executeSourceFirst) {
   return [
     ctx.tools.register({
       name: 'pangea_task_open',
-      description: '读取 Graph 为当前真实 task_id 创建的任务合同。',
-      parameters: binding(),
+      description: '读取当前已绑定任务；prepare_source=true 同时准备授权范围内的冻结源码原文。pending_reads 必须继续读取，完整交付不代表语义正确。',
+      parameters: { ...binding(), properties: { ...SOURCE_BINDING_PROPERTIES, prepare_source: { type: 'boolean' } } },
       async execute(args, exec) {
-        return execute(exec, 'task-open', sourceCommandArgs(args))
+        return execute(exec, 'task-open', [...sourceCommandArgs(args), ...(args.prepare_source === true ? ['--prepare-source'] : [])])
       },
       output: toolOutput(),
     }),
@@ -1257,11 +1257,11 @@ export function sourceFirstTools(ctx, execute = executeSourceFirst) {
     }),
     ctx.tools.register({
       name: 'pangea_source_read',
-      description: '按当前 task 的 region 或精确范围读取冻结原文；越权路径与不属于本 task 的 region 会被拒绝。',
-      parameters: { ...binding(), required: [...binding().required, 'repo_id'], properties: { ...SOURCE_BINDING_PROPERTIES, repo_id: { type: 'string', minLength: 1 }, path: { type: 'string' }, region_id: { type: 'string' }, line_start: { type: 'integer', minimum: 1 }, line_end: { type: 'integer', minimum: 1 }, cursor: { type: 'string' }, max_lines: { type: 'integer', minimum: 1, maximum: 2000 } } },
+      description: '读取授权冻结源码。整文件省略行范围；next_read 非空时复制整对象继续读取，保留宿主绑定。request_complete 仅表示本次范围交付完成。长行片段需拼接后阅读。',
+      parameters: { ...binding(), required: [...binding().required, 'repo_id'], properties: { ...SOURCE_BINDING_PROPERTIES, repo_id: { type: 'string', minLength: 1 }, path: { type: 'string' }, region_id: { type: 'string' }, line_start: { type: 'integer', minimum: 1 }, line_end: { type: 'integer', minimum: 1 }, cursor: { type: 'string' }, max_lines: { type: 'integer', minimum: 1, maximum: 2000 }, view: { type: 'string', enum: ['legacy', 'compact', 'text'] }, page_token: { type: 'string' }, max_chars: { type: 'integer', minimum: 1 } } },
       async execute(args, exec) {
         const values = [...sourceCommandArgs(args), '--repo-id', args.repo_id]
-        for (const [flag, value] of [['--path', args.path], ['--region-id', args.region_id], ['--line-start', args.line_start], ['--line-end', args.line_end], ['--cursor', args.cursor], ['--max-lines', args.max_lines]]) optionalCommandArg(values, flag, value)
+        for (const [flag, value] of [['--path', args.path], ['--region-id', args.region_id], ['--line-start', args.line_start], ['--line-end', args.line_end], ['--cursor', args.cursor], ['--max-lines', args.max_lines], ['--view', args.view ?? (args.cursor ? 'legacy' : 'text')], ['--page-token', args.page_token], ['--max-chars', args.max_chars]]) optionalCommandArg(values, flag, value)
         return execute(exec, 'source-read', values)
       },
       output: toolOutput(),
@@ -1285,6 +1285,27 @@ export function sourceFirstTools(ctx, execute = executeSourceFirst) {
         const values = [...sourceCommandArgs(args), '--expected-revision', String(args.expected_revision), '--records', JSON.stringify(args.records)]
         optionalCommandArg(values, '--request-id', args.request_id)
         return execute(exec, 'result-write', values)
+      },
+      output: toolOutput(),
+    }),
+    ctx.tools.register({
+      name: 'pangea_result_supersede',
+      description: '替换当前 active 原记录并保留历史。局部修订使用 edits：单个目标、path 指向文本、old 唯一匹配、new 为 Agent 决定的原文；其他字段保留。完整替换使用 replacement。匹配失败交回同一 worker 修正参数。',
+      parameters: { ...binding(), required: [...binding().required, 'expected_revision', 'target_record_ids'], properties: {
+        ...SOURCE_BINDING_PROPERTIES, expected_revision: { type: 'integer', minimum: 0 },
+        target_record_ids: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', pattern: '^rec-[0-9]{6}$' } },
+        replacement: { type: 'object', required: ['body'], properties: { kind: { type: 'string' }, body: {}, evidence: { type: 'array' }, relates_to: { type: 'array' } } },
+        edits: { type: 'array', minItems: 1, items: { type: 'object', required: ['path', 'old', 'new'], properties: {
+          path: { type: 'array', items: { anyOf: [{ type: 'string' }, { type: 'integer', minimum: 0 }] } },
+          old: { type: 'string', minLength: 1 }, new: { type: 'string' },
+        } } }, request_id: { type: 'string' },
+      } },
+      async execute(args, exec) {
+        const values = [...sourceCommandArgs(args), '--expected-revision', String(args.expected_revision), '--target-record-ids', JSON.stringify(args.target_record_ids)]
+        if (args.replacement !== undefined) values.push('--replacement', JSON.stringify(args.replacement))
+        if (args.edits !== undefined) values.push('--edits', JSON.stringify(args.edits))
+        optionalCommandArg(values, '--request-id', args.request_id)
+        return execute(exec, 'result-supersede', values)
       },
       output: toolOutput(),
     }),

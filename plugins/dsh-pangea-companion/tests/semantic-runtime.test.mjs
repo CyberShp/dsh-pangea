@@ -22,7 +22,7 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     await cp(path.join(runtime, '.agents'), path.join(cwd, '.agents'), { recursive: true })
     const repository = path.join(cwd, 'pangea-data', 'repositories', 'sample')
     await mkdir(repository, { recursive: true })
-    await writeFile(path.join(repository, 'sample.c'), 'int add(int a, int b) { return a + b; }\n')
+    await writeFile(path.join(repository, 'sample.c'), 'int add(int a, int b) { return a + b; }\n' + Array.from({ length: 100 }, (_, i) => `// frozen line ${i} ${'x'.repeat(60)}\n`).join(''))
     const run = await createRun(cwd, {
       repository: 'sample', target: 'DSH semantic interface fixture',
       source_scope: ['sample.c'], effective_context_budget: 204800,
@@ -49,6 +49,56 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     const settled = await call('pangea_action_settle', binding)
     assert.equal(settled.stage, 'analyzing')
     assert.equal(settled.agent_actions[0].role, 'analysis')
+    const analysisBinding = { ...binding, action_id: settled.agent_actions[0].action_id, task_id: 'fixture-analysis' }
+    await call('pangea_action_bind', analysisBinding)
+    const prepared = await call('pangea_task_open', { ...analysisBinding, prepare_source: true })
+    assert.equal(prepared.prepared_source.source_delivery_complete, true)
+    assert.match(prepared.prepared_source.pages[0].source.text, /return a \+ b/)
+    const page = await call('pangea_source_read', { ...analysisBinding, repo_id: 'sample', path: 'sample.c' })
+    assert.equal(page.request_complete, true)
+    assert.match(page.text, /return a \+ b/)
+    let paged = await call('pangea_source_read', { ...analysisBinding, repo_id: 'sample', path: 'sample.c', max_chars: 1400 })
+    assert.ok(paged.next_read)
+    let delivered = paged.text
+    while (paged.next_read) {
+      paged = await call('pangea_source_read', { ...analysisBinding, ...paged.next_read, max_chars: 1400 })
+      delivered += '\n' + paged.text
+    }
+    assert.equal(paged.request_complete, true)
+    assert.equal(delivered.split('\n').length, 101)
+    assert.match(delivered, /frozen line 99/)
+    const note = await call('pangea_result_write', { ...analysisBinding, expected_revision: 0,
+      records: [{ kind: 'note', body: '输入 1 和 2，结果 4。', evidence: ['sample:sample.c:1'] }] })
+    const edits = [{ path: [], old: '结果 4', new: '结果 3' }]
+    const corrected = await call('pangea_result_supersede', { ...analysisBinding, expected_revision: note.revision,
+      target_record_ids: ['rec-000001'], edits, request_id: 'correction-1' })
+    const after = await call('pangea_result_read', analysisBinding)
+    assert.ok(JSON.stringify(after).includes('结果 3'))
+    assert.ok(JSON.stringify(after).includes('结果 4'))
+    const retry = await call('pangea_result_supersede', { ...analysisBinding, expected_revision: note.revision,
+      target_record_ids: ['rec-000001'], edits, request_id: 'correction-1' })
+    assert.equal(retry.revision, corrected.revision)
+    await assert.rejects(() => call('pangea_result_supersede', { ...analysisBinding, expected_revision: corrected.revision,
+      target_record_ids: ['rec-000002'], edits }), /唯一匹配/)
+    assert.equal((await call('pangea_result_read', analysisBinding)).revision, corrected.revision)
+    await call('pangea_work_finish', { ...analysisBinding, revision: corrected.revision })
+    const reviewed = await call('pangea_action_settle', analysisBinding)
+    assert.equal(reviewed.agent_actions[0].role, 'review')
+    const reviewBinding = { ...binding, action_id: reviewed.agent_actions[0].action_id, task_id: 'fixture-reviewer' }
+    await call('pangea_action_bind', reviewBinding)
+    const reviewTask = await call('pangea_task_open', { ...reviewBinding, prepare_source: true })
+    assert.equal(reviewTask.prepared_source.source_delivery_complete, true)
+    assert.match(JSON.stringify(reviewTask.prepared_source.pages), /return a \+ b/)
+    const reviewNote = await call('pangea_result_write', { ...reviewBinding, expected_revision: 0, records: [{ kind: 'note', body: '已核对加法源码。' }] })
+    await call('pangea_work_finish', { ...reviewBinding, revision: reviewNote.revision })
+    const comparison = await call('pangea_action_settle', reviewBinding)
+    const comparisonBinding = { ...reviewBinding, action_id: comparison.agent_actions[0].action_id }
+    await call('pangea_action_bind', comparisonBinding)
+    const comparisonTask = await call('pangea_task_open', comparisonBinding)
+    const decision = await call('pangea_review_decide', { ...comparisonBinding, expected_revision: 0, decision: { version_set_id: comparisonTask.task.version_set_id, disposition: 'pass', summary: 'fixture review complete' } })
+    await call('pangea_work_finish', { ...comparisonBinding, revision: decision.revision })
+    const complete = await call('pangea_action_settle', comparisonBinding)
+    assert.equal(complete.lifecycle_status, 'complete')
     const resumed = await runPangea({ cwd, args: ['resume-run', '--data-root', run.data_root, '--run-id', run.run_id] })
     assert.equal(resumed.run_id, run.run_id)
     assert.equal(resumed.data_root, run.data_root)
@@ -56,10 +106,10 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     assert.equal(progress.effective_context_budget, 204800)
     const snapshot = await companionSnapshot({ cwd, dataRoot: run.data_root, runId: run.run_id })
     assert.equal(snapshot.current.run_id, run.run_id)
-    assert.equal(snapshot.current.lifecycle_status, 'running')
-    await runPangea({ cwd, args: ['runs', 'stop', '--data-root', run.data_root, '--run-id', run.run_id] })
+    assert.equal(snapshot.current.lifecycle_status, 'complete')
+    await assert.rejects(() => runPangea({ cwd, args: ['runs', 'stop', '--data-root', run.data_root, '--run-id', run.run_id] }), /已经完成/)
     const stopped = await companionSnapshot({ cwd, dataRoot: run.data_root, runId: run.run_id })
-    assert.equal(stopped.current.lifecycle_status, 'stopped')
+    assert.equal(stopped.current.lifecycle_status, 'complete')
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key]

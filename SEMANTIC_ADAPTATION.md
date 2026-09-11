@@ -1,7 +1,7 @@
 # Langgraph 配套工作台
 
 `langgraph` 已合入 `origin/codetalks-skill@1f819d3`（2026-09-10），
-对接 `pangea-agent langgraph@58398f10ef7663b23c24310f932a76d77254d0d2`。
+对接 `pangea-agent langgraph@a92877f810ec93e8b5f79ffe16c86b1a0fba5e85`。
 Desktop 配套版本以其 `pangea.components.json` 为准。
 
 ## 产品行为
@@ -41,3 +41,15 @@ Run 达到 complete/PASS，宿主 execution_status 为 completed，HTML/Markdown
 报告可读，CSV/XLSX 导出保留业务编号和分析原文。资产列表和文件预览导入实测成功。
 该样例为单个加法函数，证明组件接入与状态结算；大型仓库质量、Windows 运行和
 DSH 内置 API 模型实跑尚未验收。
+
+## 源码交接与局部修订
+
+Agent `a92877f` 配套支持 `task-open --prepare-source`；DSH 在分析、盲审和返修
+启动指引中要求准备冻结源码，保留 pending_reads 的补读要求。`pangea_source_read`
+默认返回 text 分页，支持原样传入 next_read；使用旧 cursor 时保留 legacy 方式。
+新增 `pangea_result_supersede` 传递完整 replacement 或局部 edits，均交给 Agent
+现有实现核对绑定、revision 与精确文本。局部修订保留历史与证据，重复 request_id
+复用回执，匹配失败不写入。
+
+真实 CLI 集成检查覆盖源码准备、101 行源码分页、文本修订与历史、重试、失败不写入、
+盲审源码准备及同一 Reviewer 的 Comparison 结算，最终达到 complete。

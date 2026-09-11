@@ -146,6 +146,7 @@ test('dispatch creates one real child and binds the exact Graph action', async (
   assert.match(h.starts[0].request.persona, /analysis source-first worker/)
   assert.equal(h.starts[0].request.toolFilter.allow.includes('pangea_task_open'), true)
   assert.equal(h.starts[0].request.toolFilter.allow.includes('pangea_result_repair'), true)
+  assert.equal(h.starts[0].request.toolFilter.allow.includes('pangea_result_supersede'), true)
   assert.equal(h.starts[0].request.toolFilter.allow.includes('bash'), false)
   assert.equal(h.starts[0].request.toolFilter.allow.includes('read'), false)
   assert.deepEqual(h.binds[0].input, {

@@ -30,6 +30,7 @@ test('registers source-first lifecycle, source, result, review, and finish tools
     'pangea_source_read',
     'pangea_source_search',
     'pangea_result_write',
+    'pangea_result_supersede',
     'pangea_result_read',
     'pangea_result_repair',
     'pangea_comparison_read',
