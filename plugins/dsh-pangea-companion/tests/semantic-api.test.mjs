@@ -39,7 +39,7 @@ test('creates a frozen source-first contract and removes it after Run creation',
     const result = await createRun(nested, {
       repository: 'repo-one', target: 'session and retry', source_scope: ['src/session.c'],
       asset_ids: ['asset-1'],
-      focus: ['recovery'], test_case_examples: ['TC-1'],
+      focus: ['recovery'], test_case_examples: ['TC-1'], context_scope: ['include/session.h', 'docs/usage.md'],
     }, async call => {
       calls.push(call)
       if (call.args[0] === 'system') {
@@ -56,6 +56,7 @@ test('creates a frozen source-first contract and removes it after Run creation',
     assert.equal(observed.contract.repository, 'repo-one')
     assert.equal(observed.contract.target, 'session and retry')
     assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
+    assert.deepEqual(observed.contract.context_scope, ['include/session.h', 'docs/usage.md'])
     assert.equal(observed.contract.run_id, undefined)
     assert.equal(observed.contract.mode, undefined)
     assert.deepEqual(observed.contract.analysis_settings, { scenario: 'module-analysis', mode: 'depth' })

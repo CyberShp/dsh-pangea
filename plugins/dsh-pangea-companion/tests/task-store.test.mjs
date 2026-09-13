@@ -138,12 +138,13 @@ test('persists a Task before any DSH session or Run exists', async () => {
     const task = await store.create({
       workspace: '/workspace', dataRoot: '/workspace/pangea-data',
       input: {
-        repository: 'repo-one', target: '认证恢复', source_scope: ['src/auth.c'],
+        repository: 'repo-one', target: '认证恢复', source_scope: ['src/auth.c'], context_scope: ['include/auth.h'],
         scenario: 'root-cause', mode: 'speed',
         model_route: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
       },
     })
     assert.equal(task.task_id, 'task-001')
+    assert.deepEqual(task.context_scope, ['include/auth.h'])
     assert.equal(task.status, 'preparing')
     assert.equal(task.run_id, null)
     assert.equal(task.scenario, 'root-cause')

@@ -767,6 +767,7 @@ window.__ModuleLoader__.load({
         repository: form.repository,
         target: form.target,
         source_scope: String(form.source_scope_text ?? '').split(/[\n,]/).map(value => value.trim()).filter(Boolean),
+        ...(String(form.context_scope_text ?? '').trim() ? { context_scope: String(form.context_scope_text).split(/[\n,]/).map(value => value.trim()).filter(Boolean) } : {}),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'module-analysis',
         ...(form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
@@ -1087,7 +1088,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', context_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
       const [assetCatalog, setAssetCatalog] = React.useState(null)
       const [assetCatalogLoading, setAssetCatalogLoading] = React.useState(false)
       const [assetCatalogError, setAssetCatalogError] = React.useState('')
@@ -2463,6 +2464,10 @@ window.__ModuleLoader__.load({
                 h('div', { style: styles.label }, '源码冻结范围'),
                 h('textarea', { 'aria-label': '源码冻结范围', style: { ...styles.textarea, marginTop: 5, minHeight: 72 }, value: createForm.source_scope_text, placeholder: '. 或填写相对仓库根目录的文件/目录，每行一个', onChange: event => setCreateForm(value => ({ ...value, source_scope_text: event.target.value })) }),
                 h('div', { style: styles.itemMeta }, '使用 . 表示整个仓库；创建后原始仓库的后续修改不会影响本次 Run。')),
+              workbench?.capabilities?.workflow_versions?.includes('source-first-v1') ? h('label', { style: { gridColumn: '1 / -1' } },
+                h('div', { style: styles.label }, '参考源码范围（可选）'),
+                h('textarea', { 'aria-label': '参考源码范围', style: { ...styles.textarea, marginTop: 5, minHeight: 60 }, value: createForm.context_scope_text ?? '', placeholder: '相关实现、文档或测试的相对文件路径，每行一个', onChange: event => setCreateForm(value => ({ ...value, context_scope_text: event.target.value })) }),
+                h('div', { style: styles.itemMeta }, '随本次分析冻结，供 Agent 核对上下文；分析目标使用上方范围。')) : null,
               h('div', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '分析资产'),
                 h('div', { style: styles.itemMeta }, '选择本次需要的需求、设计、历史缺陷或参考资料。用例示例仅作为格式与粒度参考。'),
@@ -2798,7 +2803,7 @@ window.__ModuleLoader__.load({
           onReload: loadWorkbench,
           onNewQuery: query => {
             setCreateForm(value => ({ ...value, source_task_id: selectedTask.task_id, repository: selectedTask.repository, target: selectedTask.target,
-              source_scope_text: selectedTask.source_scope.join('\n'), asset_ids: selectedTask.asset_ids,
+              source_scope_text: selectedTask.source_scope.join('\n'), context_scope_text: (selectedTask.context_scope ?? []).join('\n'), asset_ids: selectedTask.asset_ids,
               scenario: 'coverage-analysis', mode: selectedTask.mode, provider_id: selectedTask.provider || '',
               agent_model: selectedTask.agent_model || '', model_route_key: selectedTask.model_route ? modelSelectionKey(selectedTask.model_route) : '',
               coverage_kind: 'query', coverage_product: query.product || '', coverage_version: query.c_version || '',
@@ -3343,6 +3348,8 @@ window.__ModuleLoader__.load({
           renderRecordBody(item),
           renderRecordEvidence(item),
           item.entry ? section('测试入口', sourceFirstRecordBody(item.entry)) : null,
+          item.unit_notes?.length ? section('本分析单元说明', h('div', null, item.unit_notes.map(note => h('details', { key: note.projection_id }, h('summary', { style: styles.itemTitle }, note.title), sourceFirstRecordBody(note.source_record.body))))) : null,
+          item.variants?.length ? section('参数变体', h('div', null, item.variants.map((variant, index) => h('div', { key: index, style: styles.card }, field('输入', variant.input), field('预期', variant.expected))))) : null,
           section('独立验证目标', item.verification_goal || '当前记录未单独声明，请核对用例正文。'),
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '业务路径与覆盖缺口'), linkedItems(item)),
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, text(item.title, '未命名用例')), h('div', { style: styles.chips }, hasText(item.case_type) ? h('span', { style: styles.badge }, item.case_type) : null, hasText(item.priority) ? h('span', { style: styles.badge }, `优先级 ${item.priority}`) : null, hasText(item.status) ? h('span', { style: styles.badge }, item.status) : null)),

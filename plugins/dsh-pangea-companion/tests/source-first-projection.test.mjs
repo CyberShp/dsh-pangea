@@ -76,3 +76,15 @@ test('projects expectation and case identifiers emitted by the live risk-v1 samp
   assert.equal(value.risks[0].current_behavior, 'Unchecked addition')
   assert.deepEqual(value.risks[0].linked_test_case_ids, ['a/c'])
 })
+
+
+test('short cases retain variants and unit notes and follow explicit flow paths in both directions', () => {
+  const cases = [record('c', 'test_case', { case_id: 'TC-1', flow_refs: [], variants: [{ input: 'sha256', expected: 'connected' }] }), record('n', 'note', 'Shared commands: connect --digest sha256'), record('f', 'flow', { flow_id: 'F-1', paths: [{ case_ids: ['TC-1'] }] })]
+  const value = sourceFirstProjection([action('a', cases), action('b', cases)])
+  assert.deepEqual(value.test_cases[0].linked_flow_ids, ['a/f'])
+  assert.deepEqual(value.test_cases[1].linked_flow_ids, ['b/f'])
+  assert.deepEqual(value.test_cases[0].variants, [{ input: 'sha256', expected: 'connected' }])
+  assert.deepEqual(value.test_cases[0].unit_notes.map(n => n.projection_id), ['a/n'])
+  const missing = sourceFirstProjection([action('a', [cases[0], record('f', 'flow', { paths: [{ case_ids: ['unknown'] }] })])])
+  assert.deepEqual(missing.test_cases[0].linked_flow_ids, [])
+})

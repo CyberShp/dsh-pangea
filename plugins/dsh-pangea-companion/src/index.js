@@ -68,6 +68,7 @@ const RUN_CREATE_PARAMETERS = {
     repository: { type: 'string', minLength: 1, description: '当前冻结输入中的仓库 ID。创建前只做确定性目录/文件名范围准备。' },
     target: { type: 'string', minLength: 1, description: '用户确认的分析对象原文。' },
     source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '相对仓库根目录的源码范围。' },
+    context_scope: { type: 'array', items: { type: 'string', minLength: 1 }, description: '冻结为参考资料的仓库相对文件路径；分析目标仍由 source_scope 指定。' },
     focus: { type: 'array', items: { type: 'string', minLength: 1 } },
     asset_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
     test_case_examples: { type: 'array', items: { type: 'string', minLength: 1 } },
@@ -1290,7 +1291,7 @@ export function sourceFirstTools(ctx, execute = executeSourceFirst) {
     }),
     ctx.tools.register({
       name: 'pangea_result_supersede',
-      description: '替换当前 active 原记录并保留历史。局部修订使用 edits：单个目标、path 指向文本、old 唯一匹配、new 为 Agent 决定的原文；其他字段保留。完整替换使用 replacement。匹配失败交回同一 worker 修正参数。',
+      description: '替换当前 active 原记录并保留历史。普通文字正文（含 JSON 序列化字符串）优先单条完整替换：target_record_ids 填原记录 ID，replacement={kind,body,evidence,relates_to} 保留有效内容与证据；后续修改使用 created_records 的新 ID。结构化对象局部修订使用 edits，path 指向文本、old 唯一匹配。匹配失败交回同一 worker 修正参数。',
       parameters: { ...binding(), required: [...binding().required, 'expected_revision', 'target_record_ids'], properties: {
         ...SOURCE_BINDING_PROPERTIES, expected_revision: { type: 'integer', minimum: 0 },
         target_record_ids: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', pattern: '^rec-[0-9]{6}$' } },

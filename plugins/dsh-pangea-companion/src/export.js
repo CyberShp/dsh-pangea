@@ -20,7 +20,7 @@ function testCaseRows(run) {
     [],
     ['用例 ID', '标题', '类型', '状态', '关联风险', '前置条件', '执行步骤', '预期结果', '观察点', '清理动作'],
   ]
-  if (run?.workflow_version === 'source-first-v1') rows.at(-1).push('分析单元', '原始记录', '分析原文')
+  if (run?.workflow_version === 'source-first-v1') rows.at(-1).push('分析单元', '原始记录', '分析原文', '测试入口', '参数变体', '本分析单元说明')
   for (const item of run?.details?.test_cases ?? []) {
     rows.push([
       item.display_id ?? item.test_case_id,
@@ -33,7 +33,7 @@ function testCaseRows(run) {
       item.expected_results,
       item.observability,
       item.cleanup,
-      ...(item.source_record ? [item.unit_id, item.source_record.record_id, item.source_record.body] : []),
+      ...(item.source_record ? [item.unit_id, item.source_record.record_id, item.source_record.body, item.entry, item.variants, item.unit_notes?.map(note => note.source_record.body)] : []),
     ])
   }
   return rows

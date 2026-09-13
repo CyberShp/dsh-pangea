@@ -84,3 +84,19 @@ test('registers source-first lifecycle, source, result, review, and finish tools
     '--action-id', binding.action_id,
   ])
 })
+
+test('passes prepared material unchanged and preserves full replacement evidence', async () => {
+  const registered = new Map(), calls = []
+  const prepared = { prepared_examples: { pages: [{ input_id: 'example_001', body: 'sample' }], pending_inputs: [{ input_id: 'example_002', cursor: null }] }, prepared_source: { original_records: [{ record_id: 'rec-1', body: 'original' }], pending_original_record_ids: ['rec-2'] } }
+  sourceFirstTools({ tools: { register(tool) { registered.set(tool.name, tool); return () => {} } } }, async (_exec, command, args) => { calls.push({ command, args }); return prepared })
+  const binding = { data_root: '/data', run_id: 'run', action_id: 'run:a', task_id: 'child' }
+  const opened = await registered.get('pangea_task_open').execute({ ...binding, prepare_source: true }, {})
+  assert.deepEqual(opened, prepared)
+  await registered.get('pangea_input_read').execute({ ...binding, input_id: 'example_002' }, {})
+  assert.ok(!calls.at(-1).args.includes('--cursor'))
+  const replacement = { kind: 'test_case', body: { title: 'Corrected case' }, evidence: ['repo:file.c:1'], relates_to: ['risk-1'] }
+  await registered.get('pangea_result_supersede').execute({ ...binding, target_record_ids: ['rec-1'], expected_revision: 3, replacement }, {})
+  const args = calls.at(-1).args
+  assert.deepEqual(JSON.parse(args[args.indexOf('--replacement') + 1]), replacement)
+  assert.ok(!args.includes('--edits'))
+})

@@ -133,7 +133,7 @@ export async function createRun(cwd, input, runner = runPangea) {
   const root = workspaceRoot(cwd)
   const detected = await runner({ cwd: root, args: ['system', 'capabilities', '--data-root', typeof input.data_root === 'string' ? path.resolve(root, input.data_root) : path.join(root, 'pangea-data')] })
   if (supportsSourceFirst(detected)) return createSourceFirstRun(cwd, input, runner)
-  const rejectedFields = ['focus', 'test_case_examples'].filter(field => Object.hasOwn(input ?? {}, field))
+  const rejectedFields = ['focus', 'test_case_examples', 'context_scope'].filter(field => Object.hasOwn(input ?? {}, field))
   if (rejectedFields.length) throw new Error(`新建分析不支持字段：${rejectedFields.join(', ')}`)
   const pendingPath = path.join(root, PENDING_REQUEST)
   const dataRoot = typeof input.data_root === 'string' && input.data_root.trim() !== ''
@@ -229,6 +229,7 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     repository: input.repository,
     target: input.target,
     source_scope: normalizeSourceScope(input.source_scope, input.repository),
+    ...(Array.isArray(input.context_scope) ? { context_scope: normalizeSourceScope(input.context_scope, input.repository) } : {}),
     asset_ids: input.asset_ids ?? [],
     focus: Array.isArray(input.focus) ? input.focus : [],
     test_case_examples: Array.isArray(input.test_case_examples) ? input.test_case_examples : [],

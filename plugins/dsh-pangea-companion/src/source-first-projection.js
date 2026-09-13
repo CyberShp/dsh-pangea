@@ -58,6 +58,7 @@ export function sourceFirstProjection(artifacts) {
         case_type: plain(row.case_type ?? row.test_level),
         linked_flow_ids: resolve(row, row.flow_refs, ['flow_id'], ['flow']), status: plain(row.status ?? row.execution_status) || '未标注',
         preconditions: strings(row.preconditions), steps: list(row.steps).map(step => typeof step === 'object' && step ? `${plain(step.action ?? step)}${step.expected ?? step.expected_result ? ` → ${plain(step.expected ?? step.expected_result)}` : ''}` : plain(step)),
+        variants: list(row.variants).map(value => value && typeof value === 'object' ? { ...value, input: plain(value.input), expected: plain(value.expected) } : { input: plain(value), expected: '' }),
         expected_results: strings(row.expected_results), observability: strings(row.observability ?? row.external_observations), cleanup: strings(row.cleanup),
         linked_risk_ids: resolve(row, [...list(row.linked_risk_ids), ...list(row.risk_refs), ...list(row.source_record.relates_to)], ['risk_id'], ['risk']), evidence: [],
       })
@@ -74,6 +75,14 @@ export function sourceFirstProjection(artifacts) {
     if (risk.linked_test_case_ids.includes(testCase.test_case_id) || testCase.linked_risk_ids.includes(risk.risk_id)) {
       risk.linked_test_case_ids = [...new Set([...risk.linked_test_case_ids, testCase.test_case_id])]
       testCase.linked_risk_ids = [...new Set([...testCase.linked_risk_ids, risk.risk_id])]
+    }
+  }
+  for (const testCase of result.test_cases) {
+    testCase.unit_notes = result.notes.filter(note => note.unit_id === testCase.unit_id && note.source_record.kind === 'note')
+    for (const flow of result.business_flows) {
+      if (flow.paths.some(path => path.linked_test_case_ids.includes(testCase.test_case_id))) {
+        testCase.linked_flow_ids = [...new Set([...testCase.linked_flow_ids, flow.flow_id])]
+      }
     }
   }
   for (const row of rows) {

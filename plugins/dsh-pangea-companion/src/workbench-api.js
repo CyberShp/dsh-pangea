@@ -181,7 +181,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   if (semantic) assertSourceFirstCapabilities(capabilities)
   else {
     assertCodetalksSkill(capabilities)
-    const rejected = ['focus', 'test_case_examples'].filter(key => Object.hasOwn(value ?? {}, key))
+    const rejected = ['focus', 'test_case_examples', 'context_scope'].filter(key => Object.hasOwn(value ?? {}, key))
     if (rejected.length && !value?.task_id) throw new Error(`新建分析不支持字段：${rejected.join(', ')}`)
   }
   const repository = typeof value?.repository === 'string' ? value.repository.trim() : ''
@@ -206,7 +206,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   }
   return {
     ...(!semantic ? { request_version: '2.0' } : {}),
-    ...(semantic ? { workflow_version: 'source-first-v1', focus: stringList(value?.focus), test_case_examples: stringList(value?.test_case_examples), effective_context_budget: value?.effective_context_budget } : {}),
+    ...(semantic ? { workflow_version: 'source-first-v1', focus: stringList(value?.focus), context_scope: stringList(value?.context_scope), test_case_examples: stringList(value?.test_case_examples), effective_context_budget: value?.effective_context_budget } : {}),
     repository,
     target,
     scenario,

@@ -23,9 +23,11 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     const repository = path.join(cwd, 'pangea-data', 'repositories', 'sample')
     await mkdir(repository, { recursive: true })
     await writeFile(path.join(repository, 'sample.c'), 'int add(int a, int b) { return a + b; }\n' + Array.from({ length: 100 }, (_, i) => `// frozen line ${i} ${'x'.repeat(60)}\n`).join(''))
+    await mkdir(path.join(repository, 'docs'), { recursive: true })
+    await writeFile(path.join(repository, 'docs/usage.md'), 'Frozen command: add 1 2\n')
     const run = await createRun(cwd, {
       repository: 'sample', target: 'DSH semantic interface fixture',
-      source_scope: ['sample.c'], effective_context_budget: 204800,
+      source_scope: ['sample.c'], context_scope: ['docs/usage.md'], effective_context_budget: 204800,
     })
     const contractPath = path.join(run.data_root, 'runs', run.run_id, 'inputs', 'task-contract.json')
     const frozen = JSON.parse(await readFile(contractPath, 'utf8'))
@@ -33,6 +35,8 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     assert.match(frozen.runtime_provenance.agent.files_sha256['src/pangea_agent/models/contract.py'], /^[a-f0-9]{64}$/)
     assert.match(frozen.runtime_provenance.dsh.files_sha256['src/pangea-api.js'], /^[a-f0-9]{64}$/)
     assert.ok(frozen.runtime_provenance.workspace_rules_sha256['.agents/pangea/dsh.md'])
+    assert.deepEqual(frozen.context_scope, ['docs/usage.md'])
+    await writeFile(path.join(repository, 'docs/usage.md'), 'Live changed command\n')
     const tools = new Map()
     sourceFirstTools({ tools: { register(tool) { tools.set(tool.name, tool); return () => {} } } })
     const exec = { agent: { session: { header: { cwd } } } }
@@ -58,6 +62,11 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     const analysisBinding = { ...binding, action_id: settled.agent_actions[0].action_id, task_id: 'fixture-analysis' }
     await call('pangea_action_bind', analysisBinding)
     const prepared = await call('pangea_task_open', { ...analysisBinding, prepare_source: true })
+    const context = await call('pangea_source_read', { ...analysisBinding, repo_id: 'sample', path: 'docs/usage.md' })
+    assert.match(context.text, /Frozen command: add 1 2/)
+    assert.doesNotMatch(context.text, /Live changed/)
+    const found = await call('pangea_source_search', { ...analysisBinding, repo_id: 'sample', path: 'docs', query: 'Frozen command' })
+    assert.match(JSON.stringify(found), /Frozen command/)
     assert.equal(prepared.prepared_source.source_delivery_complete, true)
     assert.match(prepared.prepared_source.pages[0].source.text, /return a \+ b/)
     const page = await call('pangea_source_read', { ...analysisBinding, repo_id: 'sample', path: 'sample.c' })

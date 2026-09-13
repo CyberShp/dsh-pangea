@@ -1104,3 +1104,45 @@ test('source-first create form disables unsupported analysis options', async () 
   for (const value of ['coverage-analysis', 'root-cause', 'speed']) assert.equal(nodes.find(n => n.type === 'option' && n.props.value === value).props.disabled, true)
   assert.equal(nodes.find(n => n.type === 'option' && n.props.value === 'depth').props.disabled, false)
 })
+
+
+test('short case detail renders variants, opens unit notes and navigates to the explicit flow', async () => {
+  const { sourceFirstProjection } = await import('../src/source-first-projection.js')
+  const details = sourceFirstProjection([{ action_id: 'run:a', task: { unit_id: 'a' }, stage: 'unit_analysis', status: 'accepted', records: [
+    { record_id: 'c', kind: 'test_case', body: { case_id: 'TC-1', entry: '共用操作', variants: [{ input: 'sha256', expected: '连接成功' }] } },
+    { record_id: 'n', kind: 'note', body: '# 共用操作\nconnect --digest sha256' },
+    { record_id: 'f', kind: 'flow', body: { flow_id: 'F-1', title: '连接流程', paths: [{ case_ids: ['TC-1'] }] } },
+  ] }])
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'complete' }
+  const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
+  const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'case', id: 'a/c' } }
+  let index = 0, nextScreen
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 16) nextScreen = value }] } })
+  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  const rendered = JSON.stringify(nodes)
+  for (const text of ['参数变体', 'sha256', '连接成功', '本分析单元说明', 'connect --digest sha256']) assert.ok(rendered.includes(text), text)
+  const link = nodes.find(n => n.type === 'button' && n.children.includes('F-1'))
+  assert.ok(link)
+  link.props.onClick()
+  assert.equal(nextScreen.type, 'flows')
+})
+
+test('reference scope form preserves the analysis target and emits separate reference paths', async () => {
+  const form = { repository: 'repo', target: 'auth', source_scope_text: 'src/auth.c', context_scope_text: '', asset_ids: [], provider_id: 'pangea-opencode' }
+  const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'], workflow_versions: ['source-first-v1'] }, acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create' }, 33: form }
+  let index = 0, changed
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }] } })
+  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const input = descendants(panel.type(panel.props)).find(n => n.props['aria-label'] === '参考源码范围')
+  assert.ok(input)
+  input.props.onChange({ target: { value: 'include/auth.h\ndocs/usage.md' } })
+  const request = client.buildAnalysisRequest(changed)
+  assert.deepEqual(Array.from(request.source_scope), ['src/auth.c'])
+  assert.deepEqual(Array.from(request.context_scope), ['include/auth.h', 'docs/usage.md'])
+  assert.equal(client.buildAnalysisRequest(form).context_scope, undefined)
+})

@@ -46,3 +46,17 @@ test('semantic exports preserve business IDs, unit identity and original case te
   assert.ok(xlsx.includes(Buffer.from('TC-001')))
   assert.ok(xlsx.includes(Buffer.from('输入：1,2\n预期：3')))
 })
+
+
+test('short case exports include executable notes and parameter inputs with expectations', () => {
+  const run = { workflow_version: 'source-first-v1', details: { test_cases: [{
+    display_id: 'TC-1', source_record: { record_id: 'c', body: {} }, entry: 'connect',
+    variants: [{ input: 'sha256', expected: 'connected' }],
+    unit_notes: [{ source_record: { body: 'connect --digest sha256' } }],
+  }] } }
+  for (const output of [buildTestCaseCsv(run), Buffer.from(buildTestCaseXlsx(run)).toString()]) {
+    assert.ok(output.includes('参数变体'))
+    assert.ok(output.includes('connected'))
+    assert.ok(output.includes('connect --digest sha256'))
+  }
+})
