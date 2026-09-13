@@ -857,3 +857,12 @@ test('does not silently fall back to the internal model when an ACP runtime is m
     )
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('source-first selections reject unsupported settings before task creation', () => {
+  const capabilities = { workflow_versions: ['source-first-v1'], source_first: { version: 'source-first-v1' }, repositories: ['repo'] }
+  const input = { repository: 'repo', target: 'sample', source_scope: ['sample.c'] }
+  assert.equal(normalizeRunInput(input, capabilities).mode, 'depth')
+  for (const selection of [{ mode: 'speed' }, { scenario: 'coverage-analysis' }, { coverage_input: { kind: 'file', path: 'coverage.json' } }]) {
+    assert.throws(() => normalizeRunInput({ ...input, ...selection }, capabilities), /不支持/)
+  }
+})

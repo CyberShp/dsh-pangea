@@ -39,15 +39,16 @@ export function sourceFirstProjection(artifacts) {
     }
   }
   const resolve = (row, refs, keys, kind) => [...new Set(list(refs).flatMap(ref => {
-    const id = typeof ref === 'string' ? ref : keys.map(key => ref?.[key]).find(Boolean)
+    const id = typeof ref === 'string' ? ref : [...keys, 'record_id'].map(key => ref?.[key]).find(Boolean)
     const unit = typeof ref === 'object' ? ref?.unit_id ?? row.unit_id : row.unit_id
-    const target = aliases.get(JSON.stringify([unit, id]))
+    const target = aliases.get(JSON.stringify([unit, id])) ?? (typeof id === 'string' && id.includes('/') ? rows.find(candidate => candidate.projection_id === id) : null)
     return target && kind.includes(target.source_record.kind) ? [target.projection_id] : []
   }))]
   for (const row of rows) {
     const kind = row.source_record.kind
     if (kind === 'risk') {
       result.risks.push({ ...row, risk_id: row.projection_id, severity: plain(row.severity) || undefined,
+        narrative: plain(row.narrative ?? row.description), impact: plain(row.impact), expectation: plain(row.expectation),
         dfx: strings(row.dfx), trigger: plain(row.trigger), system_result: plain(row.system_result ?? row.behavior),
         external_observation: plain(row.external_observation ?? row.user_impact), exclusion_condition: plain(row.exclusion_condition),
         linked_test_case_ids: resolve(row, [...list(row.linked_test_case_ids), ...list(row.related_case_ids), ...list(row.source_record.relates_to)], ['case_id', 'test_case_id'], ['test_case', 'test_case_group']), evidence: [],
@@ -87,10 +88,11 @@ export function sourceFirstProjection(artifacts) {
       if (seen.has(signature)) continue
       seen.add(signature)
       const item = { ...row, chunk_id: `${row.projection_id}/evidence-${seen.size}`, location, observation: observation || row.title,
-        risk_ids: owner?.risk_id ? [owner.risk_id] : owner?.linked_risk_ids ?? resolve(row, row.risk_ids ?? row.risk_refs, ['risk_id'], ['risk']),
+        risk_ids: owner?.risk_id ? [owner.risk_id] : owner?.linked_risk_ids ?? resolve(row, [...list(row.risk_ids), ...list(row.risk_refs), ...list(row.source_record.relates_to)], ['risk_id'], ['risk']),
       }
       result.evidence.push(item)
       if (owner) owner.evidence.push(item)
+      else for (const risk of result.risks) if (item.risk_ids.includes(risk.risk_id)) risk.evidence.push(item)
     }
   }
   return result

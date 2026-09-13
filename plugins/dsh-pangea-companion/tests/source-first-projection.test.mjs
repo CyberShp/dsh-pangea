@@ -47,3 +47,23 @@ test('keeps prose and group records intact without fabricating cases or semantic
   assert.deepEqual(value.risks[0].linked_test_case_ids, [])
   assert.equal(value.risks[0].system_result, '')
 })
+
+test('retains complete risk content and resolves record links without matching titles', () => {
+  const body = { risk_id: 'R-1', title: 'Shared title', description: 'Overflow description', trigger: 'INT_MAX + 1', impact: 'Undefined result', expectation: 'Reject input', source_evidence: [{ repo_id: 'sample', path: 'sample.c', line_start: 1, observation: 'Addition' }], extra_detail: { boundary: 'INT_MAX' } }
+  const value = sourceFirstProjection([action('a', [record('r', 'risk', body), record('c', 'test_case', { case_id: 'TC-1' }, { relates_to: [{ record_id: 'r' }] })]), action('b', [record('r', 'risk', { ...body, description: 'Another risk' }), record('c', 'test_case', { case_id: 'TC-1', linked_risk_ids: ['b/r'] })])])
+  assert.equal(value.risks[0].narrative, body.description)
+  assert.equal(value.risks[0].impact, body.impact)
+  assert.equal(value.risks[0].expectation, body.expectation)
+  assert.deepEqual(value.risks[0].source_record.body, body)
+  assert.deepEqual(value.risks[0].linked_test_case_ids, ['a/c'])
+  assert.deepEqual(value.risks[1].linked_test_case_ids, ['b/c'])
+  assert.equal(value.risks[0].evidence[0].location, 'sample:sample.c:1')
+})
+
+
+test('standalone evidence explicitly linked to a risk appears in that risk detail', () => {
+  const records = [record('r', 'risk', { risk_id: 'R-1', title: 'Same' }), record('e', 'evidence', { location: 'sample:sample.c:1', observation: 'Source observation' }, { relates_to: [{ record_id: 'r' }] })]
+  const value = sourceFirstProjection([action('a', records), action('b', records)])
+  assert.deepEqual(value.risks[0].evidence.map(e => e.chunk_id), ['a/e/evidence-1'])
+  assert.deepEqual(value.risks[1].evidence.map(e => e.chunk_id), ['b/e/evidence-1'])
+})

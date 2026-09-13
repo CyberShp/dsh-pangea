@@ -27,6 +27,12 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
       repository: 'sample', target: 'DSH semantic interface fixture',
       source_scope: ['sample.c'], effective_context_budget: 204800,
     })
+    const contractPath = path.join(run.data_root, 'runs', run.run_id, 'inputs', 'task-contract.json')
+    const frozen = JSON.parse(await readFile(contractPath, 'utf8'))
+    assert.deepEqual(frozen.analysis_settings, { scenario: 'module-analysis', mode: 'depth' })
+    assert.match(frozen.runtime_provenance.agent.files_sha256['src/pangea_agent/models/contract.py'], /^[a-f0-9]{64}$/)
+    assert.match(frozen.runtime_provenance.dsh.files_sha256['src/pangea-api.js'], /^[a-f0-9]{64}$/)
+    assert.ok(frozen.runtime_provenance.workspace_rules_sha256['.agents/pangea/dsh.md'])
     const tools = new Map()
     sourceFirstTools({ tools: { register(tool) { tools.set(tool.name, tool); return () => {} } } })
     const exec = { agent: { session: { header: { cwd } } } }
@@ -100,6 +106,7 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     const complete = await call('pangea_action_settle', comparisonBinding)
     assert.equal(complete.lifecycle_status, 'complete')
     const resumed = await runPangea({ cwd, args: ['resume-run', '--data-root', run.data_root, '--run-id', run.run_id] })
+    assert.deepEqual(JSON.parse(await readFile(contractPath, 'utf8')), frozen)
     assert.equal(resumed.run_id, run.run_id)
     assert.equal(resumed.data_root, run.data_root)
     const progress = JSON.parse(await readFile(path.join(run.data_root, 'runs', run.run_id, 'progress.json'), 'utf8'))

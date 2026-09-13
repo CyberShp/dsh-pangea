@@ -88,8 +88,12 @@ export function listOptions(searchParams) {
   }
 }
 
-function semanticAssets(capabilities) {
-  return capabilities?.source_first?.version === 'source-first-v1' || capabilities?.workflow_versions?.includes('source-first-v1')
+export function assetFeatures(capabilities) {
+  const declared = capabilities?.asset_operations
+  if (declared) return Object.fromEntries(['metadata', 'restore', 'revisions', 'item_review', 'preview', 'list_filters'].map(key => [key, declared[key] === true]))
+  // Older runtimes predate operation discovery; retain their known CLI contract.
+  const legacy = !(capabilities?.source_first?.version === 'source-first-v1' || capabilities?.workflow_versions?.includes('source-first-v1'))
+  return { metadata: legacy, restore: legacy, revisions: legacy, item_review: legacy, preview: legacy, list_filters: legacy }
 }
 
 async function importPreview({ cwd, args, semantic, sourcePath }) {
@@ -119,7 +123,7 @@ export async function semanticAssetList({ cwd, dataRoot, options, runner = runPa
 async function listState({ cwd, dataRoot, runtime, options }) {
   const resolvedDataRoot = dataRootFor(cwd, dataRoot)
   const capabilities = await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] })
-  const semantic = semanticAssets(capabilities)
+  const features = assetFeatures(capabilities)
   const cursor = (options.page - 1) * options.pageSize
   const args = [
     'assets', 'list', '--data-root', resolvedDataRoot,
@@ -133,7 +137,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   if (options.moduleTag) args.push('--module-tag', options.moduleTag)
   if (options.query) args.push('--query', options.query)
   const [result, methodologies, methodologyJob] = await Promise.all([
-    semantic ? semanticAssetList({ cwd, dataRoot: resolvedDataRoot, options }) : runPangea({ cwd, args }),
+    !features.list_filters ? semanticAssetList({ cwd, dataRoot: resolvedDataRoot, options }) : runPangea({ cwd, args }),
     runPangea({ cwd, args: ['methodologies', 'list', '--data-root', resolvedDataRoot, '--limit', '200'] }),
     runtime.methodologies.job(cwd, resolvedDataRoot),
   ])
@@ -141,7 +145,8 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   return {
     status: 'ok',
     data_root: resolvedDataRoot,
-    features: { metadata: !semantic, restore: !semantic, revisions: !semantic, item_review: !semantic },
+    features,
+    asset_types: capabilities.asset_types ?? [],
     assets: result.items.map(asset => ({
       ...asset,
       extraction_job: runtime.job(resolvedDataRoot, asset.asset_id),
@@ -207,8 +212,12 @@ async function routeHandler(req, res, runtime) {
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await readBody(req)
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
-    const semantic = semanticAssets(await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] }))
-    if (semantic && ['restore', 'update_metadata', 'review_items'].includes(body.action)) throw new Error('当前分析引擎尚未提供此资产操作')
+    const capabilities = await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] })
+    const features = assetFeatures(capabilities)
+    const semantic = !features.preview
+    const required = { restore: 'restore', update_metadata: 'metadata', review_items: 'item_review' }[body.action]
+    if (required && !features[required]) throw new Error('当前分析引擎尚未提供此资产操作')
+    if (['import', 'preview_import'].includes(body.action) && Array.isArray(capabilities.asset_types) && !capabilities.asset_types.includes(body.asset_type)) throw new Error('当前分析引擎不支持此资产类型')
     if (body.action === 'preview_import') {
       const source = await materializeImportSource(body, resolvedDataRoot)
       try {
@@ -237,7 +246,7 @@ async function routeHandler(req, res, runtime) {
           throw new Error(`检测到重复资产：${preview.duplicate.asset_id}`)
         }
         const strategy = body.strategy ?? 'create_new'
-        if (semantic && strategy !== 'create_new') throw new Error('当前分析引擎支持新建资产')
+        if (!features.revisions && strategy !== 'create_new') throw new Error('当前分析引擎支持新建资产')
         const args = strategy === 'new_revision'
           ? [
               'assets', 'revise', '--data-root', resolvedDataRoot,

@@ -29,7 +29,7 @@ test('creates a frozen source-first contract and removes it after Run creation',
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-run-api-'))
   const marker = path.join(root, '.agents', 'pangea')
   const nested = path.join(root, 'nested')
-  const pending = path.join(root, 'pangea-data', '.pangea', 'pending-skill-request.json')
+  let pending
   try {
     await mkdir(marker, { recursive: true })
     await mkdir(nested, { recursive: true })
@@ -43,8 +43,9 @@ test('creates a frozen source-first contract and removes it after Run creation',
     }, async call => {
       calls.push(call)
       if (call.args[0] === 'system') {
-        return { workflow_versions: ['source-first-v1'], source_first: { version: 'source-first-v1' } }
+        return { workflow_versions: ['source-first-v1'], source_first: { version: 'source-first-v1', contract_fields: ['analysis_settings', 'runtime_provenance'] } }
       }
+      pending = call.args.at(-1)
       observed = { call, contract: JSON.parse(await readFile(pending, 'utf8')) }
       return { run_id: 'run-01', data_root: path.join(root, 'pangea-data'), actions: [] }
     })
@@ -57,6 +58,7 @@ test('creates a frozen source-first contract and removes it after Run creation',
     assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
     assert.equal(observed.contract.run_id, undefined)
     assert.equal(observed.contract.mode, undefined)
+    assert.deepEqual(observed.contract.analysis_settings, { scenario: 'module-analysis', mode: 'depth' })
     assert.equal(observed.contract.workflow_version, 'source-first-v1')
     assert.equal(observed.contract.data_root, path.join(root, 'pangea-data'))
     assert.deepEqual(observed.contract.asset_ids, ['asset-1'])
@@ -87,12 +89,13 @@ test('preserves focus and test example fields in the source-first contract', asy
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
-    const pending = path.join(root, 'pangea-data', '.pangea', 'pending-skill-request.json')
+    let pending
     let contract
     await createRun(root, {
       repository: 'repo-one', target: 'source-first', source_scope: [], focus: ['manual'], test_case_examples: ['TC-1'],
     }, async call => {
       if (call.args[0] === 'system') return { workflow_versions: ['source-first-v1'] }
+      pending = call.args.at(-1)
       contract = JSON.parse(await readFile(pending, 'utf8'))
       return { run_id: 'run-02' }
     })
@@ -101,4 +104,30 @@ test('preserves focus and test example fields in the source-first contract', asy
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('concurrent source-first creations keep separate request files and identities', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-concurrent-create-'))
+  try {
+    await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+    await writeFile(path.join(root, '.agents/pangea/dsh.md'), 'rules')
+    const paths = [], targets = []
+    let release
+    const barrier = new Promise(resolve => { release = resolve })
+    const runner = async call => {
+      if (call.args[0] === 'system') return { workflow_versions: ['source-first-v1'] }
+      const file = call.args.at(-1)
+      paths.push(file)
+      if (paths.length === 2) release()
+      await barrier
+      const contract = JSON.parse(await readFile(file, 'utf8'))
+      targets.push(contract.target)
+      return { run_id: contract.target }
+    }
+    const results = await Promise.all(['first', 'second'].map(target => createRun(root, { repository: 'sample', target, source_scope: ['sample.c'] }, runner)))
+    assert.deepEqual(results.map(r => r.run_id), ['first', 'second'])
+    assert.deepEqual(targets.sort(), ['first', 'second'])
+    assert.notEqual(paths[0], paths[1])
+    assert.ok(paths.every(file => !existsSync(file)))
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

@@ -848,7 +848,10 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   const summary = {
     run_id: runId,
     workflow_version: progress.workflow_version ?? 'source-first-v1',
-    scenario: 'module-analysis',
+    scenario: contract?.analysis_settings?.scenario ?? 'module-analysis',
+    mode: contract?.analysis_settings?.mode ?? null,
+    analysis_settings: contract?.analysis_settings ?? null,
+    runtime_provenance: contract?.runtime_provenance ?? null,
     publication: { state: reportAvailable ? 'final' : actionView.artifacts.some(a => a.records.length) ? 'draft' : 'pending', revision: null },
     delivery_integrity: { status: reportAvailable ? 'complete' : 'incomplete' },
     semantic_review: { verdict: progress.quality_status ?? null, method: 'graph_review' },

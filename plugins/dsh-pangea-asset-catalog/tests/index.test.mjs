@@ -47,3 +47,13 @@ test('semantic asset pagination excludes archived records before slicing', async
   assert.equal(result.items[0].asset_id, 'live')
   assert.equal(result.summary.available, 1)
 })
+
+test('asset actions follow declared capabilities independently of workflow version', async () => {
+  const { assetFeatures } = await import('../src/index.js')
+  const capabilities = { workflow_versions: ['source-first-v1'], asset_operations: { restore: true, metadata: true, preview: true } }
+  assert.equal(assetFeatures(capabilities).restore, true)
+  assert.equal(assetFeatures(capabilities).metadata, true)
+  assert.equal(assetFeatures(capabilities).revisions, false)
+  assert.equal(assetFeatures({ asset_operations: { restore: false } }).restore, false)
+  assert.equal(assetFeatures({ workflow_versions: ['source-first-v1'] }).preview, false)
+})

@@ -188,6 +188,11 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   const target = typeof value?.target === 'string' ? value.target.trim() : ''
   const scenario = typeof value?.scenario === 'string' && value.scenario.trim() ? value.scenario.trim() : 'module-analysis'
   const mode = typeof value?.mode === 'string' && value.mode.trim() ? value.mode.trim() : 'depth'
+  if (semantic) {
+    const options = capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'], coverage_input: false }
+    if (!options.scenarios?.includes(scenario) || !options.modes?.includes(mode)) throw new Error('当前分析引擎不支持所选场景或模式，请选择模块分析 / 深度型')
+    if (value?.coverage_input != null && options.coverage_input !== true) throw new Error('当前分析引擎不支持独立覆盖率输入，请通过分析资产选择 Coverage')
+  }
   const sourceScope = stringList(value?.source_scope)
   if (!repository) throw new Error('repository is required')
   if (!target) throw new Error('target is required')

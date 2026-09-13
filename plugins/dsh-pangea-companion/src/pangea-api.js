@@ -1,3 +1,5 @@
+import { runProvenance } from './runtime-provenance.js'
+import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
@@ -215,12 +217,14 @@ export function assertSourceFirstCapabilities(capabilities) {
 
 async function createSourceFirstRun(cwd, input, runner = runPangea) {
   const root = workspaceRoot(cwd)
-  const pendingPath = path.join(root, PENDING_REQUEST)
+  const pendingPath = path.join(root, path.dirname(PENDING_REQUEST), `pending-source-first-${randomUUID()}.json`)
   const dataRoot = typeof input.data_root === 'string' && input.data_root.trim() !== ''
     ? path.resolve(root, input.data_root)
     : path.join(root, 'pangea-data')
   const request = {
     workflow_version: SOURCE_FIRST_VERSION,
+    runtime_provenance: runProvenance(root),
+    analysis_settings: { scenario: input.scenario ?? 'module-analysis', mode: input.mode ?? 'depth' },
     data_root: dataRoot,
     repository: input.repository,
     target: input.target,
@@ -239,9 +243,11 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     args: ['system', 'capabilities', '--data-root', dataRoot],
   })
   assertSourceFirstCapabilities(capabilities)
+  const options = capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'], coverage_input: false }
+  if (!options.scenarios?.includes(request.analysis_settings.scenario) || !options.modes?.includes(request.analysis_settings.mode) || (input.coverage_input != null && options.coverage_input !== true)) throw new Error('当前分析引擎不支持所选分析设置')
+  for (const field of ['analysis_settings', 'runtime_provenance']) if (!capabilities.source_first?.contract_fields?.includes(field)) delete request[field]
   await mkdir(path.dirname(pendingPath), { recursive: true })
-  await rm(pendingPath, { force: true })
-  await writeFile(pendingPath, `${JSON.stringify(request, null, 2)}\n`, 'utf8')
+  await writeFile(pendingPath, `${JSON.stringify(request, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
   try {
     return await runner({ cwd: root, args: ['runs', 'create', '--contract', pendingPath] })
   } finally {

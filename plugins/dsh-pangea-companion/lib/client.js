@@ -750,7 +750,7 @@ window.__ModuleLoader__.load({
       if (screen.type === 'case') return 'cases'
       if (screen.type === 'evidence-detail') return 'evidence'
       if (screen.type === 'flows') return 'flows'
-      if (screen.type === 'review') return 'review'
+      if (screen.type === 'review') return 'overview'
       return screen.type
     }
 
@@ -1292,7 +1292,7 @@ window.__ModuleLoader__.load({
         const task = workbench?.tasks?.items?.find(item => item.task_id === selectedTaskId)
         if (!task) return
         const taskRun = task.run_id ?? null
-        if (taskRun !== selectedRun) setSelectedRun(taskRun)
+        if (taskRun !== selectedRun) { setSelectedRun(taskRun); setScreen({ type: 'overview' }); setHistory([]) }
       }, [selectedRun, selectedTaskId, workbench?.tasks?.items])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
@@ -2177,10 +2177,10 @@ window.__ModuleLoader__.load({
                   : screen.type === 'evidence-detail' ? '证据详情'
                     : screen.type === 'execution' ? '执行结果'
                       : screen.type === 'environment' ? (environmentForm.id ? '编辑测试环境' : '新增测试环境')
-                        : screen.type === 'repository-import' ? '添加源码仓库' : '复核'
+                        : screen.type === 'repository-import' ? '添加源码仓库' : 'PANGEA 总览'
 
       const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? [] : [
-        ['overview', '概览'], ['flows', '业务流程'], ...(current?.scenario === 'coverage-analysis' ? [] : [['risks', '风险']]), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['workflow', '运行过程'], ['review', '复核'],
+        ['overview', '概览'], ['flows', '业务流程'], ...(current?.scenario === 'coverage-analysis' ? [] : [['risks', '风险']]), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['workflow', '运行过程'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -2365,12 +2365,15 @@ window.__ModuleLoader__.load({
           ? modelOptions.find(item => item.provider === selectedModel.provider && item.model === selectedModel.model)
           : null
         const selectedProvider = providerOptions.find(item => item.id === createForm.provider_id)
+        const semantic = workbench?.capabilities?.source_first?.version === 'source-first-v1' || workbench?.capabilities?.workflow_versions?.includes('source-first-v1')
+        const options = semantic ? workbench.capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'] } : null
+        const supported = (kind, value) => !options || options[kind]?.includes(value)
         const compatible = workbench?.compatibility?.compatible === true
         const executionReady = createForm.provider_id
           ? selectedProvider?.registered === true
           : selectedModelOption?.credential_configured === true
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
-        const canSubmit = compatible && createForm.repository && createForm.target.trim() && (sourceScope.length > 0 || createForm.scenario === 'coverage-analysis') && (createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())) && executionReady && !creatingRun
+        const canSubmit = compatible && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode) && createForm.repository && createForm.target.trim() && (sourceScope.length > 0 || createForm.scenario === 'coverage-analysis') && (createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())) && executionReady && !creatingRun
         const assetItems = assetCatalog?.assets ?? []
         const selectedAssets = createForm.asset_ids.map(assetId => assetLabels[assetId] ?? assetItems.find(item => item.asset_id === assetId)
           ?? { asset_id: assetId, title: assetId })
@@ -2424,17 +2427,18 @@ window.__ModuleLoader__.load({
               }, h('option', { value: '' }, '内置 API Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: item.registered !== true }, `${item.label}${item.registered === true ? '' : ' · 未加载'}`))))),
               internalModelFields,
               createForm.provider_id ? h(AgentModelSelect, { key: `${cwd}/${createForm.provider_id}`, providerId: createForm.provider_id, cwd, visible, value: createForm.agent_model, onChange: agentModel => setCreateForm(form => ({ ...form, agent_model: agentModel })) }) : null,
+              semantic ? h('div', { style: styles.itemMeta }, '当前引擎支持模块分析 / 深度型；覆盖率材料可作为分析资产加入。') : null,
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               h('label', null, h('div', { style: styles.label }, '分析场景'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.scenario,
                 onChange: event => setCreateForm(value => ({ ...value, scenario: event.target.value, source_scope_text: event.target.value === 'coverage-analysis' && value.source_scope_text === '.' ? '' : value.source_scope_text })),
               },
-              h('option', { value: 'module-analysis' }, '模块分析'),
-              h('option', { value: 'coverage-analysis' }, '覆盖率分析'),
-              h('option', { value: 'issue-regression' }, '问题回归'),
-              h('option', { value: 'root-cause' }, '根因定位'),
-              h('option', { value: 'special-risk' }, '专项风险'),
-              h('option', { value: 'custom' }, '自定义'))),
+              h('option', { value: 'module-analysis', disabled: !supported('scenarios', 'module-analysis') }, '模块分析'),
+              h('option', { value: 'coverage-analysis', disabled: !supported('scenarios', 'coverage-analysis') }, '覆盖率分析'),
+              h('option', { value: 'issue-regression', disabled: !supported('scenarios', 'issue-regression') }, '问题回归'),
+              h('option', { value: 'root-cause', disabled: !supported('scenarios', 'root-cause') }, '根因定位'),
+              h('option', { value: 'special-risk', disabled: !supported('scenarios', 'special-risk') }, '专项风险'),
+              h('option', { value: 'custom', disabled: !supported('scenarios', 'custom') }, '自定义'))),
               createForm.scenario === 'coverage-analysis' ? h('div', { style: { gridColumn: '1 / -1' } },
                 h('select', { 'aria-label': '覆盖率输入方式', style: styles.search, value: createForm.coverage_kind, onChange: event => setCreateForm(value => ({ ...value, coverage_kind: event.target.value })) },
                   h('option', { value: 'query' }, '按产品 / 版本 / 模块查询'), h('option', { value: 'file' }, '本地覆盖率文件'), h('option', { value: 'asset' }, '已解析的覆盖率资产')),
@@ -2454,7 +2458,7 @@ window.__ModuleLoader__.load({
               h('label', null, h('div', { style: styles.label }, '分析模式'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.mode,
                 onChange: event => setCreateForm(value => ({ ...value, mode: event.target.value })),
-              }, h('option', { value: 'depth' }, '深度型（含独立复核）'), h('option', { value: 'speed' }, '速度型（快速交付）'))),
+              }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '深度型（含独立复核）'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型（快速交付）'))),
               h('label', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '源码冻结范围'),
                 h('textarea', { 'aria-label': '源码冻结范围', style: { ...styles.textarea, marginTop: 5, minHeight: 72 }, value: createForm.source_scope_text, placeholder: '. 或填写相对仓库根目录的文件/目录，每行一个', onChange: event => setCreateForm(value => ({ ...value, source_scope_text: event.target.value })) }),
@@ -2636,7 +2640,7 @@ window.__ModuleLoader__.load({
       function renderRecordBody(item, compact = false) {
         const record = item?.source_record
         if (!record) return null
-        return h('details', { style: styles.card, open: !compact && typeof record.body === 'string' },
+        return h('details', { style: styles.card, open: !compact && (record.kind === 'risk' || typeof record.body === 'string') },
           h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, compact ? item.title : '分析原文'),
           h('div', { style: styles.itemMeta }, `${item.unit_id} · ${record.record_id} · revision ${record.revision ?? '—'} · ${record.status === 'accepted' ? '已接受' : '分析中'}`),
           h('pre', { style: { ...styles.source, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(record.body)),
@@ -3068,12 +3072,13 @@ window.__ModuleLoader__.load({
               current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md')) : null)) : null,
           h('details', { style: styles.technical },
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, '技术详情'),
-            h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '这里保留流程、证据和复核原始信息，不参与日常主导航。'),
+            h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '查看流程、证据和本次运行的组件信息。'),
+            field('冻结分析设置', current.analysis_settings ? `${current.analysis_settings.scenario} / ${current.analysis_settings.mode}` : '未记录'),
+            h('details', null, h('summary', null, '组件版本与规则指纹'), ['desktop', 'dsh', 'agent'].map(name => { const item = current.runtime_provenance?.[name]; return field(({ desktop: 'Desktop', dsh: 'DSH', agent: 'Agent' })[name], item ? [item.version, item.commit ?? '提交未记录', item.dirty ? '有本地改动' : null].filter(Boolean).join(' · ') : '未记录') }), h('details', null, h('summary', null, '文件指纹'), h('pre', { style: { ...styles.source, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, current.runtime_provenance ? JSON.stringify(current.runtime_provenance, null, 2) : '未记录'))),
             h('div', { style: styles.chips },
               chip(`${current.workflow_version === 'source-first-v1' ? '运行流程' : 'Skill 流程'} · ${workflow.steps?.length ?? 0}`, () => jump('workflow')),
               chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')),
-              chip(`证据 · ${evidence.length}`, () => jump('evidence')),
-              chip(`复核问题 · ${details.review_issues?.length ?? 0}`, () => jump('review')))),
+              chip(`证据 · ${evidence.length}`, () => jump('evidence')))),
           !current.terminal && selectedTask.status !== 'stopped' ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '运行控制'), h('div', { style: styles.itemMeta }, '停止后保留已有产物和运行记录。')),
               pendingStopRun === current.run_id
@@ -3144,7 +3149,7 @@ window.__ModuleLoader__.load({
         if (!risk) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条风险，可能是 Run 已刷新或切换。'))
         const semantics = risk.upstream_semantics
         const severitySource = risk.severity_source === 'sfmea' ? 'SFMEA' : risk.severity_source === 'workbench_projection' ? '工作台投影' : null
-        const causalSection = (title, value) => section(title, hasText(value)
+        const causalSection = (title, value) => risk.source_record && !hasText(value) ? null : section(title, hasText(value)
           ? value
           : hasText(risk.source_section) ? '该项内容尚未完整读取，请核对下方原始风险章节。' : '该项尚未记录。')
         return h(React.Fragment, null,
@@ -3156,14 +3161,16 @@ window.__ModuleLoader__.load({
               hasText(risk.status) ? h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status) : null),
             severitySource ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `等级来源：${severitySource}`) : null,
             Array.isArray(risk.dfx) && risk.dfx.length ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `DFX：${risk.dfx.join('、')}`) : null),
-          renderRecordBody(risk),
           causalSection('风险说明', risk.narrative),
           causalSection('触发条件', risk.trigger),
+          causalSection('影响', risk.impact),
+          causalSection('预期行为', risk.expectation),
           causalSection('代码失效', risk.system_result),
           causalSection('残留状态', risk.residual_effect),
           causalSection('表面正常现象', risk.apparent_normality),
           causalSection('对外暴露', risk.external_observation),
           causalSection('黑盒证明', risk.blackbox_proof),
+          renderRecordBody(risk),
           hasText(risk.source_section) ? section('原始风险章节', risk.source_section) : null,
           renderDiscussionCard('risk', risk, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
           renderRiskSelectionWorkbench(risk),
@@ -3410,7 +3417,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'coverage') body = renderCases()
       else if (screen.type === 'evidence') body = renderEvidence()
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
-      else body = renderReview()
+      else body = renderOverview()
 
       const healthAlert = !['home', 'overview', 'environment'].includes(screen.type) && health?.status === 'warning' ? renderHealthCard(true) : null
       const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },

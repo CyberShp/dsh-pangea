@@ -1062,3 +1062,45 @@ test('flow names remain drafts until steps exist and straight paths need no bran
   assert.equal(client.flowContentState({ mainline_steps: [] }), '流程内容待补齐')
   assert.equal(client.flowContentState({ mainline_steps: [{ step_id: 'S1' }], branches: [] }), '已有步骤')
 })
+
+for (const body of [{ description: '真实风险说明', trigger: '边界输入', impact: '具体影响', expectation: '预期行为内容', unknown_field: '额外原始信息' }, '# Markdown 风险\n\n完整风险说明和触发细节']) {
+  test(`risk page exposes ${typeof body} content and keeps case links scoped`, async () => {
+    const { sourceFirstProjection } = await import('../src/source-first-projection.js')
+    const details = sourceFirstProjection([{ action_id: 'run:analysis:a', task_id: 'job-a', task: { unit_id: 'a' }, stage: 'unit_analysis', status: 'accepted', revision: 2, result_path: '/data/runs/run/result.json', records: [
+      { record_id: 'r', kind: 'risk', body }, { record_id: 'c', kind: 'test_case', body: { case_id: 'TC-1', title: '边界验证', risk_refs: ['r'] } },
+    ] }])
+    const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'complete' }
+    const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
+    const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'risk', id: 'a/r' } }
+    let index = 0, nextScreen
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 16) nextScreen = value }] } })
+    const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const nodes = descendants(panel.type(panel.props))
+    const rendered = JSON.stringify(nodes)
+    assert.ok(rendered.includes(typeof body === 'string' ? '完整风险说明和触发细节' : '真实风险说明'))
+    assert.ok(!rendered.includes('该项尚未记录'))
+    const raw = nodes.find(n => n.type === 'details' && descendants(n).some(child => child.type === 'summary' && child.children.includes('分析原文')))
+    assert.equal(raw.props.open, true)
+    const nav = nodes.find(n => n.type === 'nav' && n.props['aria-label'] === 'PANGEA 分析页面')
+    assert.ok(!JSON.stringify(nav).includes('复核'))
+    const link = nodes.find(n => n.type === 'button' && n.children.includes('TC-1'))
+    assert.ok(link)
+    link.props.onClick()
+    assert.equal(nextScreen.id, 'a/c')
+  })
+}
+
+test('source-first create form disables unsupported analysis options', async () => {
+  const form = { repository: 'repo', target: 'sample', source_scope_text: 'sample.c', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: 'pangea-opencode' }
+  const states = { 1: { compatibility: { compatible: true }, capabilities: { workflow_versions: ['source-first-v1'], repositories: ['repo'] }, acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create' }, 33: form }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  for (const value of ['coverage-analysis', 'root-cause', 'speed']) assert.equal(nodes.find(n => n.type === 'option' && n.props.value === value).props.disabled, true)
+  assert.equal(nodes.find(n => n.type === 'option' && n.props.value === 'depth').props.disabled, false)
+})
