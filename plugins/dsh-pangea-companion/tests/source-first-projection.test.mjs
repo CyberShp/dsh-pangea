@@ -67,3 +67,12 @@ test('standalone evidence explicitly linked to a risk appears in that risk detai
   assert.deepEqual(value.risks[0].evidence.map(e => e.chunk_id), ['a/e/evidence-1'])
   assert.deepEqual(value.risks[1].evidence.map(e => e.chunk_id), ['b/e/evidence-1'])
 })
+
+
+test('projects expectation and case identifiers emitted by the live risk-v1 sample', () => {
+  const body = { title: 'Overflow', description: 'Real description', correct_expectation: 'Check ranges', current_behavior: 'Unchecked addition', case_ids: ['TC-003'] }
+  const value = sourceFirstProjection([action('a', [record('r', 'risk', JSON.stringify(body)), record('c', 'test_case', { case_id: 'TC-003' })])])
+  assert.equal(value.risks[0].expectation, 'Check ranges')
+  assert.equal(value.risks[0].current_behavior, 'Unchecked addition')
+  assert.deepEqual(value.risks[0].linked_test_case_ids, ['a/c'])
+})

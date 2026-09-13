@@ -725,6 +725,10 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     assert.equal(preparing.reader_health.trusted, true)
     assert.deepEqual(preparing.reader_notices, ['复核准备中，正在绑定复核任务。'])
     assert.equal(preparing.source_first_records[0].records.length, 0)
+    await writeJson(resultPath, { ...shell, completion: null })
+    const unsubmitted = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(unsubmitted.reader_health.trusted, true)
+    assert.deepEqual(unsubmitted.reader_notices, ['复核准备中，正在绑定复核任务。'])
     // Real identity conflicts and published content cannot use the empty-shell exception.
     for (const invalid of [
       { ...shell, binding: { ...shell.binding, task_id: 'wrong-task' } },
@@ -733,6 +737,7 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
       { ...shell, revision: 1 },
       { ...shell, records: originalResult.records },
       { ...shell, completion: { complete: true } },
+      { ...shell, completion: undefined },
     ]) {
       await writeJson(resultPath, invalid)
       assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)

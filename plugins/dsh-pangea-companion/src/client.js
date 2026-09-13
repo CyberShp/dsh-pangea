@@ -3165,6 +3165,7 @@ window.__ModuleLoader__.load({
           causalSection('触发条件', risk.trigger),
           causalSection('影响', risk.impact),
           causalSection('预期行为', risk.expectation),
+          causalSection('当前行为', risk.current_behavior),
           causalSection('代码失效', risk.system_result),
           causalSection('残留状态', risk.residual_effect),
           causalSection('表面正常现象', risk.apparent_normality),

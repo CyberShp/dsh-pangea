@@ -26,7 +26,7 @@ Run/action/task 绑定与 revision。源码预览读取当前 Run 冻结文件�
 
 ## 验证
 
-Companion：218 项检查，217 通过、1 跳过；资产插件：22 项，21 通过、1 跳过；
+Companion：219 项检查，218 通过、1 跳过；资产插件：22 项，21 通过、1 跳过；
 产品导航：25 项通过。Companion 包含真实 Python CLI 创建、绑定、规划、结算、
 恢复同一 Run、预算保存和停止检查。执行命令：
 
@@ -56,7 +56,7 @@ Agent `a92877f` 配套支持 `task-open --prepare-source`；DSH 在分析、盲�
 
 ## 风险详情与运行契约（2026-09-13）
 
-风险详情读取 `description`、`impact`、`expectation`，并保留原有 `narrative`、
+风险详情读取 `description`、`impact`、`expectation` / `correct_expectation`、`current_behavior`，并保留原有 `narrative`、
 `behavior`、`user_impact` 等字段。原始 JSON 对象与 Markdown 正文直接展开；
 记录未提供的结构化字段不再形成一排空卡片。`record_id` 关联和带 unit 的记录关联
 均可跳转；独立证据记录通过显式关联进入风险详情，同名风险仍按分析单元隔离。
@@ -74,3 +74,11 @@ Desktop 提供启动时的应用版本与入口指纹，Agent 创建 Run 时加�
 
 同时创建的 Run 各用独立请求文件，结束后只清理本次文件。自动验证覆盖两任务并发、
 冻结设置、恢复时身份不变、对象/Markdown 风险内容、同编号隔离和风险到用例跳转。
+
+
+实际 Desktop → DSH → OpenCode → MiniMax M2.7 小样例 `sample-c-260913-01`
+达到 complete/PASS，产出 1 条风险、3 条用例、1 条流程；浏览器确认风险说明、影响、
+原文、源码证据和关联用例可见。实跑发现的 `completion: null` 空壳与
+`correct_expectation` / `case_ids` 字段变体已加入回归样本。空壳只在运行中的待绑定
+comparison action、revision 0、无记录且未接受时显示准备状态；任务、Run 或 action
+身份冲突和已提交内容仍然报警。

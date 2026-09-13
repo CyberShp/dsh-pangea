@@ -709,7 +709,7 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
       && result.binding?.task_id === 'pending'
       && result.revision === 0
       && Array.isArray(result.records) && result.records.length === 0
-      && result.completion?.complete === false
+      && (result.completion === null || result.completion?.complete === false)
       && !Object.hasOwn(progress.accepted_revisions ?? {}, actionId)
     if (awaitingBinding) result = null
     if (result && (result.binding?.run_id !== progress.run_id || result.binding?.action_id !== actionId || (action.task_id && result.binding?.task_id !== action.task_id))) {

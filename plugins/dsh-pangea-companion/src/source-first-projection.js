@@ -48,10 +48,10 @@ export function sourceFirstProjection(artifacts) {
     const kind = row.source_record.kind
     if (kind === 'risk') {
       result.risks.push({ ...row, risk_id: row.projection_id, severity: plain(row.severity) || undefined,
-        narrative: plain(row.narrative ?? row.description), impact: plain(row.impact), expectation: plain(row.expectation),
+        narrative: plain(row.narrative ?? row.description), impact: plain(row.impact), expectation: plain(row.expectation ?? row.correct_expectation), current_behavior: plain(row.current_behavior),
         dfx: strings(row.dfx), trigger: plain(row.trigger), system_result: plain(row.system_result ?? row.behavior),
         external_observation: plain(row.external_observation ?? row.user_impact), exclusion_condition: plain(row.exclusion_condition),
-        linked_test_case_ids: resolve(row, [...list(row.linked_test_case_ids), ...list(row.related_case_ids), ...list(row.source_record.relates_to)], ['case_id', 'test_case_id'], ['test_case', 'test_case_group']), evidence: [],
+        linked_test_case_ids: resolve(row, [...list(row.linked_test_case_ids), ...list(row.related_case_ids), ...list(row.case_ids), ...list(row.source_record.relates_to)], ['case_id', 'test_case_id'], ['test_case', 'test_case_group']), evidence: [],
       })
     } else if (['test_case', 'test_case_group'].includes(kind)) {
       result.test_cases.push({ ...row, test_case_id: row.projection_id,
