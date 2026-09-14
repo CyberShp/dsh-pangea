@@ -204,7 +204,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /数据读取异常/)
   assert.match(source, /renderIssueCard\('未解决事项'/)
   assert.doesNotMatch(source, /JSON\.stringify\(workflow\.unresolved/)
-  assert.match(source, /当前结构化结果不可信/)
+  assert.match(source, /空风险列表本身不代表读取失败/)
   assert.match(source, /不能把空列表解释为/)
   assert.match(source, /AbortController/)
   assert.match(source, /const ACTIVE_POLL_INTERVAL_MS = 2_000/)
@@ -1145,4 +1145,29 @@ test('reference scope form preserves the analysis target and emits separate refe
   assert.deepEqual(Array.from(request.source_scope), ['src/auth.c'])
   assert.deepEqual(Array.from(request.context_scope), ['include/auth.h', 'docs/usage.md'])
   assert.equal(client.buildAnalysisRequest(form).context_scope, undefined)
+})
+
+
+test('run diagnostics remain attached to their selected Run and zero risks do not inherit other warnings', async () => {
+  const c = await loadClientExports()
+  assert.equal(c.collectionWarning({ status: 'warning', count_checks: {} }, 'risks'), false)
+  assert.equal(c.collectionWarning({ count_checks: { risks: { status: 'mismatch' } } }, 'risks'), true)
+  const task = { run_id: 'A' }, run = { run_id: 'A' }
+  for (const type of ['tasks', 'home', 'create', 'environment']) assert.equal(c.showRunHealth({ type }, task, run, 'analysis'), false)
+  assert.equal(c.showRunHealth({ type: 'risks' }, task, run, 'analysis'), true)
+  assert.equal(c.showRunHealth({ type: 'risks' }, task, { run_id: 'B' }, 'analysis'), false)
+  assert.equal(c.showRunHealth({ type: 'risks' }, task, run, 'execution'), false)
+})
+
+test('record renderer makes tables and JSON fields readable without HTML execution', async () => {
+  const c = await loadClientExports()
+  const tree = c.renderReadableBody('# 说明\n| 条件 | 结果 |\n| --- | --- |\n| A | B |\n<script>alert(1)</script>')
+  const nodes = []
+  const visit = n => { if (Array.isArray(n)) n.forEach(visit); else if (n?.children) { nodes.push(n); visit(n.children) } }
+  visit(tree)
+  assert.ok(nodes.some(n => n.type === 'table'))
+  assert.ok(nodes.every(n => !n.props?.dangerouslySetInnerHTML && n.type !== 'script'))
+  assert.ok(JSON.stringify(tree).includes('<script>alert(1)</script>'))
+  assert.equal(c.renderReadableBody('{"title":"条件","gap":"需要连接"}').type, 'dl')
+  assert.equal(c.artifactLabel('C:\\run\\inputs\\source-index.json'), '源码索引')
 })

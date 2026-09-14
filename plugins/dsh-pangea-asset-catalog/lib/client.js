@@ -260,7 +260,7 @@ window.__ModuleLoader__.load({
             await openAnalysisSession(ctx.sessions, value.methodologies.generation_job.session_id)
           } else {
             setNotice(action === 'import' ? '资产已导入。'
-              : action === 'extract' ? '资产已完成规范化。'
+              : action === 'extract' ? '提取请求已处理，请查看资产状态；结构化提取完成后即可审核或选用。'
                 : action === 'review' || action === 'review_items' ? '审核结果已保存。'
                   : action === 'enable_methodology' ? '方法论已启用，后续新 Run 可以冻结引用。'
                     : action === 'disable_methodology' ? '方法论已停用，后续新 Run 不再引用。'
@@ -559,6 +559,7 @@ window.__ModuleLoader__.load({
                 asset.status !== 'archived' && state?.features?.metadata !== false ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => startEdit(asset) }, '编辑信息') : null,
                 asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('archive', { asset_id: asset.asset_id }) } }, state?.features?.restore === false ? '归档' : '删除（可恢复）')
                   : h('button', { type: 'button', disabled: busy || state?.features?.restore === false, title: state?.features?.restore === false ? '当前分析引擎尚未提供恢复操作' : undefined, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('restore', { asset_id: asset.asset_id }) } }, '恢复')) : null,
+              asset.status === 'extracting' ? h('div', { style: styles.card }, h('div', null, asset.extraction_job?.error ?? '等待结构化提取完成后可用于分析。'), h('button', { type: 'button', disabled: busy || ['preparing', 'queued', 'running', 'finalizing'].includes(asset.extraction_job?.status), style: styles.button, onClick: () => { void act('extract', { asset_id: asset.asset_id }) } }, '继续提取 / 提交已有结果')) : null,
               editingAssetId === asset.asset_id ? h('div', { style: { ...styles.card, marginTop: 9, marginBottom: 0 } },
                 h('div', { style: styles.itemTitle }, '编辑资产信息'),
                 h('div', { style: { ...styles.wrap, marginTop: 8 } },

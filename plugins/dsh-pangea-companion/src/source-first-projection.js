@@ -16,6 +16,13 @@ function activeRecords(records) {
   return records.filter(record => !retired.has(record.record_id))
 }
 
+export function recordTitle(record, body = mapping(record.body)) {
+  if (typeof body.title === 'string' && body.title.trim()) return body.title.trim()
+  const first = typeof record.body === 'string' && !Object.keys(body).length ? record.body.trim().split('\n')[0].trim() : ''
+  if (first && !/^[\s{}\[\],:|`#*-]+$/.test(first)) return first.replace(/^#{1,6}\s+/, '').slice(0, 120)
+  return `${({ unresolved: '待确认事项', summary: '分析总结', note: '分析说明', risk: '风险记录', test_case: '测试用例' })[record.kind] ?? '分析记录'} · ${record.record_id}`
+}
+
 export function sourceFirstProjection(artifacts) {
   const result = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [], notes: [] }
   const closureUnits = new Set(artifacts.filter(a => a.stage === 'targeted_closure' && a.status === 'accepted').map(a => a.task?.unit_id))
@@ -27,7 +34,7 @@ export function sourceFirstProjection(artifacts) {
     return {
       ...body, unit_id: unit, display_id: plain(originalId),
       projection_id: `${unit}/${record.record_id}`,
-      title: plain(body.title) || plain(record.body).split('\n')[0].slice(0, 120) || record.record_id,
+      title: recordTitle(record, body),
       source_record: { ...record, action_id: action.action_id, task_id: action.task_id, revision: action.revision, status: action.status, result_path: action.result_path },
     }
   }))

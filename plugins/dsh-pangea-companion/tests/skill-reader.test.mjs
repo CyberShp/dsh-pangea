@@ -695,6 +695,9 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     assert.equal(current.source_snapshot.file_count, 1)
     assert.equal(current.report_available, true)
     assert.equal(current.counts.risks, 0)
+    assert.equal(current.reader_health.collection_status.risks, 'readable')
+    assert.equal(current.workflow.steps.find(item => item.stage === 'closing').status, 'skipped')
+    assert.ok(current.workflow.step_progress.total > 0)
     assert.equal(current.counts.test_cases, 0)
     assert.equal(current.source_first_records[0].records[0].body.original, 'Agent prose')
     assert.deepEqual(current.source_first_records[0].records[0].evidence, ['repo:src/main.c:1-3'])
@@ -707,6 +710,7 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     await writeJson(resultPath, { ...originalResult, binding: { ...originalResult.binding, task_id: 'another-task' } })
     const mismatched = (await companionSnapshot({ dataRoot, runId })).current
     assert.equal(mismatched.reader_health.trusted, false)
+    assert.equal(mismatched.reader_health.collection_status.risks, 'unavailable')
     assert.equal(mismatched.source_first_records[0].records.length, 0)
     await writeJson(resultPath, { ...originalResult, revision: 4 })
     assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)

@@ -96,3 +96,38 @@ test('an extraction failure is explicit and is never retried or settled', async 
     assert.match(job.error, /normalized text/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+
+test('semantic extraction binds and settles the actual session; repeated requests do not dispatch twice', async () => {
+  const root = await workspace(), calls = [], prompts = []
+  const ok = value => ({ result: { ok: true, value } })
+  let created = 0
+  const api = { sessions: { create: async () => { created++; return ok({ sessionId: 'session-1' }) }, rename: async () => ok({}), prompt: async input => { prompts.push(input); return ok({}) } } }
+  const runner = async ({ args }) => { calls.push(args); return args[0] === 'assets' ? { asset: { asset_id: 'a', title: '设计', status: 'extracting' }, action: { action_id: 'asset:a:extract', task_path: '/tasks/a.json', status: 'pending' } } : { asset: { status: 'available' } } }
+  try {
+    const runtime = new AssetActionRuntime(api, runner)
+    const result = await runtime.start({ cwd: root, assetId: 'a' })
+    assert.equal(result.completed, false)
+    assert.equal(runtime.job(dataRootFor(root), 'a').status, 'queued')
+    await runtime.start({ cwd: root, assetId: 'a' })
+    assert.equal(created, 1); assert.equal(prompts.length, 1)
+    assert.ok(calls[1].includes('session-1'))
+    runtime.handleAgentStatus({ session: { id: 'unrelated' } }, 'idle')
+    runtime.handleAgentStatus({ session: { id: 'session-1' } }, 'running')
+    runtime.handleAgentStatus({ session: { id: 'session-1' } }, 'idle')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(calls.at(-1)[1], 'settle')
+    assert.equal(runtime.job(dataRootFor(root), 'a').status, 'completed')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('restart submits the persisted extraction action without creating another session', async () => {
+  const root = await workspace(), calls = []
+  try {
+    const runtime = new AssetActionRuntime({}, async ({ args }) => { calls.push(args); return args[0] === 'assets' ? { asset: { status: 'extracting' }, action: { action_id: 'asset:a:extract', task_path: '/a', task_id: 'original-session', status: 'dispatched' } } : { asset: { status: 'awaiting_review' } } })
+    const result = await runtime.start({ cwd: root, assetId: 'a' })
+    assert.equal(result.asset.status, 'awaiting_review')
+    assert.equal(calls.length, 2)
+    assert.deepEqual(calls[1].slice(0, 2), ['adapter', 'settle'])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

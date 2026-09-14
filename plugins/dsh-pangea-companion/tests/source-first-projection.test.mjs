@@ -88,3 +88,10 @@ test('short cases retain variants and unit notes and follow explicit flow paths 
   const missing = sourceFirstProjection([action('a', [cases[0], record('f', 'flow', { paths: [{ case_ids: ['unknown'] }] })])])
   assert.deepEqual(missing.test_cases[0].linked_flow_ids, [])
 })
+
+
+test('notes use stable titles for JSON and punctuation while preserving originals', () => {
+  const value = sourceFirstProjection([action('a', [record('n', 'note', '{\n"gap": "missing"\n}'), record('u', 'unresolved', '}'), record('s', 'summary', '# 业务范围\n正文')])])
+  assert.deepEqual(value.notes.map(n => n.title), ['分析说明 · n', '待确认事项 · u', '业务范围'])
+  assert.equal(value.notes[0].source_record.body, '{\n"gap": "missing"\n}')
+})

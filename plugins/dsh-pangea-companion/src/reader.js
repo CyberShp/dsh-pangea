@@ -17,10 +17,10 @@ const STEP_TITLES = [
 
 const SOURCE_FIRST_STAGES = [
   ['preparing', '准备冻结输入'],
-  ['planning', 'Planning 单元划分'],
+  ['planning', '分析单元划分'],
   ['analyzing', '源码区域分析'],
   ['reviewing', '盲审与同会话对照'],
-  ['closing', '定向 closure'],
+  ['closing', '定向修正'],
   ['reporting', '报告组装'],
   ['complete', '已完成'],
 ]
@@ -621,7 +621,7 @@ function sourceFirstLifecycle(progress) {
   return { lifecycle_status: lifecycleStatus, phase, terminal: lifecycleStatus !== 'running', stage }
 }
 
-function sourceFirstStepRows(progress, runDirectory, artifacts) {
+export function sourceFirstStepRows(progress, runDirectory, artifacts) {
   const life = sourceFirstLifecycle(progress)
   const currentIndex = Math.max(0, SOURCE_FIRST_STAGES.findIndex(([stage]) => stage === life.stage))
   const actionArtifacts = new Map()
@@ -651,7 +651,8 @@ function sourceFirstStepRows(progress, runDirectory, artifacts) {
     complete: [path.join(runDirectory, 'report.md'), path.join(runDirectory, 'report.html'), path.join(runDirectory, 'report-complete.json')],
   }
   return SOURCE_FIRST_STAGES.map(([stage, title], index) => {
-    const status = life.lifecycle_status === 'complete'
+    const skipped = stage === 'closing' && !artifacts.some(item => item.stage === 'targeted_closure') && (life.lifecycle_status === 'complete' || currentIndex > index)
+    const status = skipped ? 'skipped' : life.lifecycle_status === 'complete'
       ? 'completed'
       : index < currentIndex
         ? 'completed'
@@ -675,27 +676,32 @@ function sourceFirstStepRows(progress, runDirectory, artifacts) {
 async function sourceFirstActionArtifacts(runDirectory, progress) {
   const artifacts = []
   const issues = []
+  let deliveryUnavailable = false
   for (const [actionId, action] of Object.entries(progress?.actions ?? {})) {
     if (!action || typeof action !== 'object') continue
+    const addIssue = message => {
+      issues.push(message)
+      if (action.stage === 'unit_analysis' || (action.stage === 'targeted_closure' && action.status === 'accepted')) deliveryUnavailable = true
+    }
     const recordedTaskPath = typeof action.task_path === 'string' ? path.resolve(action.task_path) : null
     const taskPath = recordedTaskPath && await pathKind(recordedTaskPath) === 'file' ? await realpath(recordedTaskPath) : recordedTaskPath
     if (!taskPath || !inside(runDirectory, taskPath) || await pathKind(taskPath) !== 'file') {
-      issues.push(`source-first action task 不可读取：${actionId}`)
+      addIssue(`source-first action task 不可读取：${actionId}`)
       continue
     }
     let task
     try { task = await readJson(taskPath) } catch (error) {
-      issues.push(`source-first task JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
+      addIssue(`source-first task JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
       continue
     }
     const recordedResultPath = typeof task?.result_path === 'string' ? path.resolve(task.result_path) : null
     const resultPath = recordedResultPath && await pathKind(recordedResultPath) === 'file' ? await realpath(recordedResultPath) : recordedResultPath
     let result = null
     if (!resultPath || !inside(runDirectory, resultPath)) {
-      issues.push(`source-first result_path 越出 Run：${actionId}`)
+      addIssue(`source-first result_path 越出 Run：${actionId}`)
     } else if (await pathKind(resultPath) === 'file') {
       try { result = await readJson(resultPath) } catch (error) {
-        issues.push(`source-first result JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
+        addIssue(`source-first result JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
       }
     }
     // Comparison reuses the reviewer session; its empty shell is initialized
@@ -713,13 +719,14 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
       && !Object.hasOwn(progress.accepted_revisions ?? {}, actionId)
     if (awaitingBinding) result = null
     if (result && (result.binding?.run_id !== progress.run_id || result.binding?.action_id !== actionId || (action.task_id && result.binding?.task_id !== action.task_id))) {
-      issues.push(`source-first result 绑定与当前任务不一致：${actionId}`)
+      addIssue(`source-first result 绑定与当前任务不一致：${actionId}`)
       result = null
     }
     if (result && action.status === 'accepted' && Number.isInteger(progress.accepted_revisions?.[actionId]) && result.revision !== progress.accepted_revisions[actionId]) {
-      issues.push(`source-first result revision 与已接受版本不一致：${actionId}`)
+      addIssue(`source-first result revision 与已接受版本不一致：${actionId}`)
       result = null
     }
+    if ((!result || !Array.isArray(result.records)) && action.status === 'accepted') addIssue(`已接受结果记录不可读取：${actionId}`)
     const records = Array.isArray(result?.records) ? result.records : []
     artifacts.push({
       action_id: actionId,
@@ -733,7 +740,7 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
       records,
     })
   }
-  return { artifacts, issues }
+  return { artifacts, issues, deliveryUnavailable }
 }
 
 async function sourceFirstSnapshot(runDirectory, progress, contract, actionArtifacts) {
@@ -814,7 +821,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   }))
   const workflow = {
     steps: sourceFirstStepRows(progress, runDirectory, actionView.artifacts),
-    completed_steps: sourceFirstStepRows(progress, runDirectory, actionView.artifacts).filter(item => item.status === 'completed').map(item => item.step),
+    completed_steps: sourceFirstStepRows(progress, runDirectory, actionView.artifacts).filter(item => ['completed', 'skipped'].includes(item.status)).map(item => item.step),
     current_step: life.stage,
     core_rules_ack: {},
     judge: { required: true, status: progress.stage === 'reviewing' || progress.stage === 'complete' ? 'running' : 'pending' },
@@ -843,7 +850,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     quality_checks: [],
     unresolved: [...(Array.isArray(progress.degradations) ? progress.degradations : []), ...(progress.blocking_reason ? [progress.blocking_reason] : [])],
     error_history: [...(Array.isArray(progress.errors) ? progress.errors : []), ...actionView.issues],
-    step_progress: null,
+    step_progress: { completed: sourceFirstStepRows(progress, runDirectory, actionView.artifacts).filter(item => ['completed', 'skipped'].includes(item.status)).length, total: SOURCE_FIRST_STAGES.length },
   }
   const summary = {
     run_id: runId,
@@ -856,6 +863,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     delivery_integrity: { status: reportAvailable ? 'complete' : 'incomplete' },
     semantic_review: { verdict: progress.quality_status ?? null, method: 'graph_review' },
     ...life,
+    phase_title: SOURCE_FIRST_STAGES.find(([stage]) => stage === life.stage)?.[1] ?? life.stage,
     target: contract?.target ?? runId,
     repository: contract?.repository ?? null,
     repositories: contract?.repositories ?? sourceSnapshot.repositories.map(item => item.repo_id).filter(Boolean),
@@ -866,6 +874,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     first_finish_revisions: progress.first_finish_revisions ?? {},
     accepted_revisions: progress.accepted_revisions ?? {},
     attention_required: progress.needs_user === true || life.lifecycle_status === 'failed',
+    completed_steps: workflow.completed_steps,
     analysis: {
       total: analysisActions.length,
       completed: acceptedAnalysis.length,
@@ -893,6 +902,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       data_source: 'source-first-notes',
       issues: [...sourceSnapshot.issues, ...actionView.issues],
       count_checks: {},
+      collection_status: Object.fromEntries(['risks', 'test_cases', 'business_flows', 'evidence'].map(key => [key, actionView.deliveryUnavailable ? 'unavailable' : 'readable'])),
     },
     reader_notices: actionView.artifacts.filter(item => item.binding_status === 'pending').map(() => '复核准备中，正在绑定复核任务。'),
     reader_warnings: [...sourceSnapshot.issues, ...actionView.issues],

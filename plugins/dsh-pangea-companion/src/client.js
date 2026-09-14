@@ -26,6 +26,51 @@ window.__ModuleLoader__.load({
     const ACP_PROVIDER_STORAGE_KEY = 'pangea.acp-provider.v1'
     const MODEL_ROUTE_STORAGE_KEY = 'pangea.model-route.v1'
 
+
+    const STAGE_STATUS = { pending: '未开始', running: '执行中', completed: '已完成', skipped: '无需执行', failed: '失败', stopped: '已停止' }
+    const RECORD_LABELS = { note: '分析说明', summary: '分析总结', unresolved: '待确认事项', flow: '业务流程', test_case: '测试用例', test_case_group: '用例组', risk: '风险', evidence: '源码依据', unit_plan: '单元计划', review_finding: '复核发现', review_decision: '复核结论' }
+    function artifactLabel(file) {
+      const name = file.split(/[\\/]/).pop()
+      return ({ 'task-contract.json': '冻结任务合同', 'source-manifest.json': '冻结源码清单', 'source-index.json': '源码索引', 'source-first-plan.json': '分析范围与单元计划', 'report.md': '测试报告', 'report.html': '离线测试报告', 'report-complete.json': '报告完成记录' })[name]
+        ?? (/task/i.test(file) ? '阶段任务' : /result/i.test(file) ? '阶段结果' : '运行记录')
+    }
+    // All text becomes React text nodes. No HTML execution or external markdown dependency.
+    function renderReadableBody(value) {
+      let body = value
+      if (typeof body === 'string' && /^[\s]*[\[{]/.test(body)) {
+        try { body = JSON.parse(body) } catch { /* preserve non-JSON prose */ }
+      }
+      if (Array.isArray(body)) return h('ul', null, body.map((item, i) => h('li', { key: i }, renderReadableBody(item))))
+      if (body && typeof body === 'object') {
+        const labels = { title: '标题', content: '说明', description: '说明', summary: '总结', gap: '缺口', reason: '原因', scope: '分析范围', source_evidence: '源码依据', what_is_known: '已确认事实', missing_to_resolve: '待补条件', recommended_action: '建议', preconditions: '前置条件', steps: '操作步骤', action: '操作', expected: '预期', cleanup: '清理恢复' }
+        return h('dl', null, Object.entries(body).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, renderReadableBody(value)))))
+      }
+      const lines = String(body ?? '').split(/\r?\n/), nodes = []
+      const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        if (/^\s*```/.test(line)) {
+          const code = []
+          while (++i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i])
+          nodes.push(h('pre', { key: i, style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, code.join('\n')))
+        } else if (line.includes('|') && i + 1 < lines.length && cells(lines[i + 1]).every(cell => /^:?-{3,}:?$/.test(cell))) {
+          const headers = cells(line), rows = []; i++
+          while (i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].trim()) rows.push(cells(lines[++i]))
+          nodes.push(h('div', { key: i, style: { overflowX: 'auto' } }, h('table', { style: { borderCollapse: 'collapse', width: '100%' } }, h('thead', null, h('tr', null, headers.map((cell, j) => h('th', { key: j, style: { textAlign: 'left', padding: 7, borderBottom: '1px solid #aaa' } }, cell)))), h('tbody', null, rows.map((row, j) => h('tr', { key: j }, row.map((cell, k) => h('td', { key: k, style: { padding: 7, verticalAlign: 'top', borderBottom: '1px solid #ddd' } }, cell))))))))
+        } else if (/^#{1,6}\s/.test(line)) nodes.push(h('div', { key: i, style: { fontWeight: 700, marginTop: 10 } }, line.replace(/^#{1,6}\s+/, '')))
+        else if (/^\s*[-*+]\s/.test(line)) nodes.push(h('div', { key: i, style: { paddingLeft: 10, margin: '5px 0' } }, '• ', line.replace(/^\s*[-*+]\s+/, '')))
+        else if (line.trim()) nodes.push(h('p', { key: i, style: { margin: '7px 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, line))
+      }
+      return h('div', null, nodes)
+    }
+    function collectionWarning(health, key) {
+      return health?.count_checks?.[key]?.status === 'mismatch' || health?.collection_status?.[key] === 'unavailable'
+    }
+    function showRunHealth(screen, selectedTask, current, pageMode) {
+      return pageMode === 'analysis' && !!selectedTask?.run_id && selectedTask.run_id === current?.run_id
+        && ['overview', 'workflow', 'flows', 'risks', 'risk', 'cases', 'case', 'evidence', 'evidence-detail'].includes(screen.type)
+    }
+
     function modelSelectionKey(value) {
       return value?.provider && value?.model
         ? JSON.stringify([value.provider, value.model, value.reasoning_effort ?? ''])
@@ -112,7 +157,7 @@ window.__ModuleLoader__.load({
         : executionStatus === 'starting' || executionStatus === 'running' || taskStatus === 'preparing' || taskStatus === 'running')
       const publicationState = current?.publication?.state ?? 'pending'
       const healthStatus = health?.status ?? 'pending'
-      const reliabilityLabel = failed ? '分析失败' : needsAttention ? '需要处理' : stopped ? '已停止' : stopping ? '等待停止确认' : healthStatus === 'warning' ? '不可用于决策' : healthStatus === 'pending' ? (running ? '阶段结果待发布' : '待验证') : HEALTH[healthStatus] ?? healthStatus
+      const reliabilityLabel = failed ? '分析失败' : needsAttention ? '需要处理' : stopped ? '已停止' : stopping ? '等待停止确认' : healthStatus === 'warning' ? '有读取诊断' : healthStatus === 'pending' ? (running ? '阶段结果待发布' : '待验证') : HEALTH[healthStatus] ?? healthStatus
       const publicationLabel = failed && publicationState === 'pending' ? '未发布（运行失败）' : needsAttention && publicationState === 'pending' ? '尚未发布（需要处理）' : stopped && publicationState === 'pending' ? '未发布（已停止）' : stopping && publicationState === 'pending' ? '未发布（停止中）' : publicationState === 'pending' && running ? '阶段结果待发布' : publicationState
       const executionLabel = failed ? '分析失败' : needsAttention ? '需要处理' : stopped ? '已停止' : stopping ? '正在停止' : running ? '分析中' : runStatus === 'complete' || executionStatus === 'completed' ? '已完成' : '等待启动'
       const dataTone = healthStatus === 'error' ? 'error' : publicationState === 'final' && healthStatus === 'ok' ? 'ok' : publicationState === 'draft' ? 'notice' : 'neutral'
@@ -1451,11 +1496,9 @@ window.__ModuleLoader__.load({
       const workflow = current?.workflow ?? { units: [], actions: [], error_history: [], quality_checks: [], unresolved: [] }
       React.useEffect(() => {
         if (!visible) return
-        const systemState = workbenchError || error || workbench?.compatibility?.compatible === false
+        const systemState = workbenchError || workbench?.compatibility?.compatible === false
           ? { state: 'error', label: '系统异常' }
-          : health?.status === 'warning'
-            ? { state: 'warning', label: '需要关注' }
-            : workbench?.compatibility?.compatible === true
+          : workbench?.compatibility?.compatible === true
               ? { state: 'ok', label: '系统正常' }
               : { state: 'checking', label: '系统检查中' }
         window.dispatchEvent(new CustomEvent('pangea:system-state', { detail: systemState }))
@@ -2236,7 +2279,7 @@ window.__ModuleLoader__.load({
       }
       function collectionEmpty(key, normal) {
         if (['unpublished', 'unavailable'].includes(deriveRunPresentation(selectedTask, current, health).countsAvailability)) return '结果尚不可用，暂不显示空列表结论。'
-        return countCheck(key)?.status === 'mismatch' || health?.status === 'warning' ? '数据读取异常：不能把空列表解释为“没有数据”。' : normal
+        return collectionWarning(health, key) ? '数据读取异常：不能把空列表解释为“没有数据”。' : normal
       }
       function healthStyle(status = deriveRunPresentation(selectedTask, current, health).healthStatus) {
         if (status === 'error') return { ...styles.card, ...styles.healthError }
@@ -2259,7 +2302,7 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.itemMeta }, `数据源：${SOURCE[current?.data_source] ?? current?.data_source ?? '未知'}`),
           current?.reader_notices?.length ? h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, current.reader_notices.join(' ')) : null,
           checks.length ? h('div', { style: { ...styles.itemMeta, marginTop: 5 } }, checks.map(([key, check]) => `${names[key]} ${check.structured}${check.status === 'match' ? ' = ' : ' ≠ '}报告 ${check.report}`).join(' · ')) : null,
-          warning && healthStatus === 'warning' ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前结构化结果不可信。尤其当风险/用例显示 0 时，不能解释为“没有风险/用例”。') : null,
+          warning && healthStatus === 'warning' ? h('div', { style: { ...styles.error, marginTop: 7 } }, '当前 Run 存在读取诊断，请查看具体影响项。空风险列表本身不代表读取失败。') : null,
           !compact && health.issues?.length ? h('ul', { style: styles.list }, health.issues.map((item, index) => h('li', { key: `${index}:${item}` }, item))) : null)
       }
 
@@ -2317,10 +2360,10 @@ window.__ModuleLoader__.load({
 
           h('div', { style: styles.sectionTitle }, 'PANGEA 进度'),
           h('div', { style: styles.card },
-            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, current.phase_title ?? PHASE[current.phase] ?? current.phase), h('span', { style: styles.badge }, `${completed}/${total}`)),
+            h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, current.phase_title ?? PHASE[current.phase] ?? current.phase), h('span', { style: styles.badge }, total > 0 ? `${completed}/${total}` : '正在规划')),
             h('div', { style: styles.progressTrack }, h('div', { style: { ...styles.progressFill, width: `${percent}%` } })),
             h('div', { style: styles.grid },
-              field('已完成分析', `${completed} / ${total}`),
+              field('已完成分析', total > 0 ? `${completed} / ${total}` : '正在规划'),
               field('流程状态', outcomePresentation(current).workflow),
               field('交付完整性', outcomePresentation(current).delivery),
               field('审查方式', outcomePresentation(current).review),
@@ -2563,11 +2606,11 @@ window.__ModuleLoader__.load({
             h('span', { style: { ...styles.stageDot, background: statusColor(step.status) } }),
             h('div', { style: { flex: 1, minWidth: 0 } },
               h('div', { style: styles.itemTitle }, `Step ${step.step} · ${step.title}`),
-              step.artifacts?.length ? h('div', { style: styles.chips }, step.artifacts.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file)))) : h('div', { style: styles.itemMeta }, '尚无 Markdown 产物')),
+              step.artifacts?.length ? h('div', { style: styles.chips }, step.artifacts.map(file => chip(artifactLabel(file), () => openSidebarFile(file)))) : h('div', { style: styles.itemMeta }, '尚无 Markdown 产物')),
             h('span', { style: styles.badge }, statusLabel[step.status] ?? step.status))))),
           current.artifacts?.formal_outputs?.length ? h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, `正式输出（${current.artifacts.formal_outputs.length}）`),
-            h('div', { style: styles.chips }, current.artifacts.formal_outputs.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file))))) : null,
+            h('div', { style: styles.chips }, current.artifacts.formal_outputs.map(file => chip(artifactLabel(file), () => openSidebarFile(file))))) : null,
           renderIssueCard('未解决事项', workflow.unresolved),
           current.validation?.status === 'failed' ? h('div', { style: { ...styles.card, ...styles.error } },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '校验失败详情'), h('span', { style: styles.badge }, `${current.validation.error_count ?? current.validation.errors?.length ?? 0} 条`)),
@@ -2648,7 +2691,7 @@ window.__ModuleLoader__.load({
         return h('details', { style: styles.card, open: !compact && (record.kind === 'risk' || typeof record.body === 'string') },
           h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, compact ? item.title : '分析原文'),
           h('div', { style: styles.itemMeta }, `${item.unit_id} · ${record.record_id} · revision ${record.revision ?? '—'} · ${record.status === 'accepted' ? '已接受' : '分析中'}`),
-          h('pre', { style: { ...styles.source, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(record.body)),
+          renderReadableBody(record.body),
           record.result_path ? chip('打开原始记录', () => openSidebarFile(record.result_path, item.title)) : null)
       }
 
@@ -2664,9 +2707,9 @@ window.__ModuleLoader__.load({
           key: `${record.action_id}:${record.record_id ?? index}:${index}`,
           style: { ...styles.card, margin: '8px 0 0', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.06))' },
         },
-        h('summary', { style: { cursor: 'pointer' } }, `${text(record.kind, 'note')} · ${text(record.record_id, `record-${index + 1}`)} · revision ${record.revision ?? '—'}`),
+        h('summary', { style: { cursor: 'pointer' } }, `${RECORD_LABELS[record.kind] ?? '分析记录'} · ${text(record.record_id, `record-${index + 1}`)} · 版本 ${record.revision ?? '—'}`),
         h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `${record.action_id ?? 'unknown action'}${record.task_id ? ` · task ${record.task_id}` : ''}`),
-        h('pre', { style: { ...styles.source, marginTop: 7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(record.body)),
+        renderReadableBody(record.body),
         Array.isArray(record.evidence) && record.evidence.length ? h('pre', { style: { ...styles.itemMeta, marginTop: 7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, `证据：${sourceFirstRecordBody(record.evidence)}`) : null,
         Array.isArray(record.relates_to) && record.relates_to.length ? h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `关联：${record.relates_to.map(item => text(item, '')).filter(Boolean).join('、')}`) : null))
         return h('div', { style: styles.card },
@@ -2687,9 +2730,9 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...styles.card, ...styles.notice } },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, 'PANGEA source-first 工作流'), h('span', { style: styles.badge }, current.quality_status ?? '待定')),
             h('div', { style: { ...styles.grid, marginTop: 10 } },
-              field('当前阶段', current.stage ?? current.phase),
+              field('当前阶段', current.phase_title ?? PHASE[current.phase] ?? current.phase),
               field('源码快照', current.source_snapshot?.file_count == null ? '待检查' : `${current.source_snapshot.file_count} 个文件`),
-              field('分析单元', `${current.analysis.completed ?? 0} / ${current.analysis.total ?? 0}`),
+              field('分析单元', current.analysis.total > 0 ? `${current.analysis.completed ?? 0} / ${current.analysis.total}` : '正在规划分析单元'),
               field('用户介入', current.needs_user ? '需要处理' : '无需处理')),
             current.blocking_reason ? h('pre', { style: { ...styles.text, marginTop: 9, whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(current.blocking_reason)) : null),
           h('div', { style: styles.sectionTitle }, '阶段进度'),
@@ -2697,12 +2740,12 @@ window.__ModuleLoader__.load({
             h('span', { style: { ...styles.stageDot, background: step.status === 'completed' ? 'var(--dsw-alias-state-success-primary, #38a892)' : step.status === 'running' ? 'var(--dsw-alias-state-business-primary, #4d9ad6)' : '#c7cdd4' } }),
             h('div', { style: { flex: 1, minWidth: 0 } },
               h('div', { style: styles.itemTitle }, `${step.step} · ${step.title}`),
-              step.artifacts?.length ? h('div', { style: styles.chips }, step.artifacts.map(file => chip(file.split(/[\\/]/).pop(), () => openSidebarFile(file)))) : h('div', { style: styles.itemMeta }, '尚无产物')),
-            h('span', { style: styles.badge }, step.status))))),
-          h('div', { style: styles.sectionTitle }, 'Graph actions'),
+              step.artifacts?.length ? h('div', { style: styles.chips }, step.artifacts.map(file => chip(artifactLabel(file), () => openSidebarFile(file)))) : h('div', { style: styles.itemMeta }, '尚无产物')),
+            h('span', { style: styles.badge }, STAGE_STATUS[step.status] ?? step.status))))),
+          h('div', { style: styles.sectionTitle }, '阶段任务（文件可能在执行前预先创建）'),
           h('div', { style: styles.card }, actions.length ? actions.map(action => h('div', { key: action.action_id, style: { ...styles.stageItem, borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12))' } },
             h('span', { style: { ...styles.stageDot, background: statusColor(action.status) } }),
-            h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { style: styles.itemTitle }, `${action.action_id} · ${action.role ?? 'unknown'}`), h('div', { style: styles.itemMeta }, `${action.stage ?? 'unknown'}${action.task_id ? ` · task ${action.task_id}` : ''}`)),
+            h('div', { style: { flex: 1, minWidth: 0 } }, h('div', { style: styles.itemTitle }, ({ planning: '单元规划', analysis: '源码分析', review: '独立复核', closure: '定向修正' })[action.role] ?? '阶段任务'), h('div', { style: styles.itemMeta }, `${action.stage ?? 'unknown'}${action.task_id ? ` · task ${action.task_id}` : ''}`)),
             h('span', { style: styles.badge }, statusLabel[action.status] ?? action.status))) : h('div', { style: styles.empty }, '当前没有 Graph action。')),
           renderSourceFirstRecords(),
           current.artifacts?.source_index ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '冻结输入'), h('div', { style: styles.chips }, chip('打开 source index', () => openSidebarFile(current.artifacts.source_index, 'source-index.json')), current.artifacts.source_snapshot_manifest ? chip('打开 source manifest', () => openSidebarFile(current.artifacts.source_snapshot_manifest, 'source-manifest.json')) : null)) : null,
@@ -3026,7 +3069,7 @@ window.__ModuleLoader__.load({
           : presentation.healthStatus === 'warning'
           ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
             : !current.terminal
-            ? { label: '等待分析完成', hint: `PANGEA 已完成 ${completed}/${total} 个步骤，可查看完整流程。`, target: 'workflow' }
+            ? { label: '等待分析完成', hint: workflow.steps?.length ? `PANGEA 已完成 ${workflow.completed_steps?.length ?? 0}/${workflow.steps.length} 个阶段，可查看运行过程。` : '正在准备分析阶段，可查看运行过程。', target: 'workflow' }
             : uncoveredRisks.length > 0
               ? { label: `处理 ${uncoveredRisks.length} 条未覆盖风险`, hint: '这些风险还没有关联可执行测试用例。', target: 'risks' }
               : testCases.length > 0
@@ -3054,7 +3097,7 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, presentation.countsAvailability === 'unpublished' ? '测试结果尚未发布' : presentation.countsAvailability === 'unavailable' ? '测试结果不可读取' : `${displayCount('test_cases', testCases.length)} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, displayCount('evidence', evidence.length))))),
           renderHealthCard(false),
-          current.workflow_version === 'source-first-v1' ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '分析说明与待确认事项'), (details.notes ?? []).map(item => renderRecordBody(item, true))) : null,
+          current.workflow_version === 'source-first-v1' ? h(React.Fragment, null, ['说明', '待确认'].map(group => { const items = (details.notes ?? []).filter(item => (item.source_record.kind === 'unresolved') === (group === '待确认')); return items.length ? h('div', { key: group, style: styles.card }, h('div', { style: styles.itemTitle }, group === '说明' ? '分析说明' : '待确认事项'), items.map(item => renderRecordBody(item, true))) : null })) : null,
           renderLaunchDiagnostics(taskLaunchEvents(selectedTask, workbench)),
           previousFailures.length ? h('details', { style: styles.card },
             h('summary', { style: { cursor: 'pointer', fontWeight: 700 } }, '上一次尝试失败'),
@@ -3146,7 +3189,7 @@ window.__ModuleLoader__.load({
                   hasText(risk.status) ? h('span', { style: styles.badge }, RISK_STATUS[risk.status] ?? risk.status) : null,
                   hasText(risk.translation_status) ? h('span', { style: styles.badge }, TRANSLATION[risk.translation_status] ?? risk.translation_status) : null)))
             )
-          }) : h('div', { style: health?.status === 'warning' ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.status === 'warning' ? styles.error : styles.empty }, collectionEmpty('risks', '没有符合条件的风险。')))))
+          }) : h('div', { style: collectionWarning(health, 'risks') ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: collectionWarning(health, 'risks') ? styles.error : styles.empty }, collectionEmpty('risks', risks.length ? '没有符合筛选条件的风险。' : '本轮未形成风险记录。')))))
       }
 
       function renderRiskDetail() {
@@ -3427,7 +3470,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderOverview()
 
-      const healthAlert = !['home', 'overview', 'environment'].includes(screen.type) && health?.status === 'warning' ? renderHealthCard(true) : null
+      const healthAlert = screen.type !== 'overview' && showRunHealth(screen, selectedTask, current, pageMode) && health?.status === 'warning' ? renderHealthCard(true) : null
       const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
@@ -3516,6 +3559,10 @@ window.__ModuleLoader__.load({
     exports.buildAnalysisRequest = buildAnalysisRequest
     exports.CoverageBrowser = CoverageBrowser
     exports.flowContentState = flowContentState
+    exports.renderReadableBody = renderReadableBody
+    exports.collectionWarning = collectionWarning
+    exports.showRunHealth = showRunHealth
+    exports.artifactLabel = artifactLabel
     exports.apply = apply
     return module.exports
   },

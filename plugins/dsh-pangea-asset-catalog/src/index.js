@@ -344,8 +344,8 @@ async function routeHandler(req, res, runtime) {
 export async function apply(ctx) {
   const runtime = new AssetActionRuntime(ctx.apiProxy)
   runtime.methodologies = new MethodologyCandidateRuntime(ctx.apiProxy)
-  ctx.on('agent/status', ({ agent, status }) => runtime.methodologies.handleAgentStatus(agent, status))
-  ctx.on('agent/error', ({ agent, error }) => runtime.methodologies.handleAgentError(agent, error))
+  ctx.on('agent/status', ({ agent, status }) => { runtime.handleAgentStatus(agent, status); runtime.methodologies.handleAgentStatus(agent, status) })
+  ctx.on('agent/error', ({ agent, error }) => { runtime.handleAgentError(agent, error); runtime.methodologies.handleAgentError(agent, error) })
   const toolDisposers = [ctx.tools.register({
     name: 'pangea_assets_list',
     description: '只读列出 PANGEA 已导入资产及其结构化/审核状态。',
