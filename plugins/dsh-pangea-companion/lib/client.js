@@ -172,7 +172,8 @@ window.__ModuleLoader__.load({
       if (!task || workbench?.selected_task_id !== task.task_id) return []
       return (Array.isArray(workbench.launch_log?.events) ? workbench.launch_log.events : [])
         .filter(event => (!event.task_id || event.task_id === task.task_id)
-          && (!task.attempt_id || event.attempt_id === task.attempt_id))
+          && (!task.attempt_id || event.attempt_id === task.attempt_id)
+          && (!event.run_id || !task.run_id || event.run_id === task.run_id))
     }
 
     function previousAttemptFailures(task) {
@@ -1188,6 +1189,9 @@ window.__ModuleLoader__.load({
       const assetWorkspaceRef = React.useRef(cwd)
       const taskItems = workbench?.tasks?.items ?? []
       const selectedTask = taskItems.find(item => item.task_id === selectedTaskId)
+      const noticeScopeKey = JSON.stringify([cwd, pageMode, screen.type, selectedTask?.task_id, selectedTask?.attempt_id])
+      React.useEffect(() => { setActionNotice(undefined) }, [noticeScopeKey])
+
       const selectedDataRoot = selectedTask?.data_root
       const snapshotSelectionKey = JSON.stringify([cwd ?? '', selectedTaskId ?? '', selectedRun === undefined ? '__auto__' : selectedRun ?? '__none__', normalizedPathIdentity(selectedDataRoot)])
 
@@ -1273,9 +1277,9 @@ window.__ModuleLoader__.load({
           setEnvironments(values)
           setSelectedEnvironment(current => values.some(item => item.id === current) ? current : (values[0]?.id ?? ''))
         } catch (reason) {
-          setActionNotice({ message: `无法读取执行环境：${reason instanceof Error ? reason.message : String(reason)}`, isError: true })
+          setActionNotice({ message: `无法读取执行环境：${reason instanceof Error ? reason.message : String(reason)}`, isError: true, scopeKey: noticeScopeKey })
         }
-      }, [])
+      }, [noticeScopeKey])
 
       const loadRepositories = React.useCallback(async () => {
         if (!cwd || pageMode !== 'home') return undefined
@@ -1694,7 +1698,7 @@ window.__ModuleLoader__.load({
 
       function showActionNotice(message, isError = false) {
         if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current)
-        setActionNotice({ message, isError })
+        setActionNotice({ message, isError, scopeKey: noticeScopeKey })
         // Errors contain the actionable launch/stop reason.  Keep them on
         // screen until the next user action instead of hiding them after a
         // short toast timeout.
@@ -1716,6 +1720,7 @@ window.__ModuleLoader__.load({
           ['源码复制耗时(ms)', event?.snapshot_duration_ms],
           ['Run 阶段', event?.phase], ['完成步骤', event?.completed], ['状态文件', event?.state_path],
           ['错误码', event?.error_code], ['错误摘要', event?.error_summary], ['stderr 摘要', event?.stderr_summary],
+          ['最近工具名称', event?.last_tool_name], ['工具开始', event?.tool_started_at_ms ? formatTime(new Date(event.tool_started_at_ms).toISOString()) : null], ['工具结束', event?.tool_finished_at_ms ? formatTime(new Date(event.tool_finished_at_ms).toISOString()) : null], ['工具耗时(ms)', event?.tool_duration_ms],
           ['进程已退出', event?.process_exited], ['退出码', event?.exit_code], ['退出信号', event?.exit_signal],
           ['stderr 已截断', event?.stderr_truncated], ['输出已截断', event?.output_truncated],
         ].filter(([, value]) => value !== undefined && value !== null && value !== '')
@@ -3470,12 +3475,12 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderOverview()
 
+      const requiresSnapshot = !['home', 'tasks', 'create', 'environment', 'repository-import'].includes(screen.type)
       const healthAlert = screen.type !== 'overview' && showRunHealth(screen, selectedTask, current, pageMode) && health?.status === 'warning' ? renderHealthCard(true) : null
-      const errorNotice = error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
+      const errorNotice = requiresSnapshot && error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
         h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load({ foreground: true }) } }, '重试')) : null
-      const requiresSnapshot = !['home', 'tasks', 'create', 'environment', 'repository-import'].includes(screen.type)
       const initialLoading = requiresSnapshot && loading && snapshot === undefined
       const repositoryGate = pageMode === 'home' && repositoryState === undefined
         ? h('div', { style: styles.onboardingShell }, h('div', { style: { ...styles.onboardingCard, textAlign: 'center' }, role: repositoryError ? 'alert' : 'status' },
@@ -3487,7 +3492,7 @@ window.__ModuleLoader__.load({
       const contentBody = repositoryGate ?? (initialLoading
         ? h('div', { style: styles.card, role: 'status' }, h('div', { style: styles.empty }, '正在读取当前 Run…'))
         : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body))
-      const actionFeedback = actionNotice ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
+      const actionFeedback = actionNotice?.scopeKey === noticeScopeKey ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 测试工作台' },
         ['home', 'tasks'].includes(screen.type) ? null : header,
         h('div', { style: screen.type === 'home' && repositoryState?.onboarding_required ? { padding: 0 }

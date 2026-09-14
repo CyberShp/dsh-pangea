@@ -1154,7 +1154,7 @@ export async function acpSettingsRouteHandler(req, res, settings, runtime) {
     }
     return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   } catch (error) {
-    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error), diagnostics: error.diagnostics, diagnostic_log_path: error.diagnosticLogPath })
   }
 }
 

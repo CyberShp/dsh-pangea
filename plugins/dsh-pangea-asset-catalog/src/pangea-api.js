@@ -69,7 +69,7 @@ export function runPangea({ cwd, args }) {
         }
         resolve(envelope.result)
       } catch (error) {
-        reject(new Error(stderr.trim() || error.message))
+        reject(new Error(/页面文件太小|paging file is too small|WinError 1455/i.test(stderr) ? `Windows 提交内存不足，Python 尚未启动；请检查已提交内存、页面文件及残留进程。\n${stderr.trim()}` : stderr.trim() || error.message))
       }
     })
   })
@@ -82,7 +82,7 @@ export function dataRootFor(cwd, explicit) {
 
 function rpc(payload) { return { rpcId: `pangea-asset-${Date.now()}-${Math.random()}`, payload } }
 function apiValue(response) {
-  if (!response?.result?.ok) throw new Error(response?.result?.error?.message ?? 'DSH API request failed')
+  if (!response?.result?.ok) throw Object.assign(new Error(response?.result?.error?.message ?? 'DSH API request failed'), { code: response?.result?.error?.code })
   return response.result.value
 }
 
@@ -113,18 +113,19 @@ export class AssetActionRuntime {
     if (operation === 'bind') args.push('--task-id', job.sessionId)
     return this.runner({ cwd: job.cwd, args })
   }
-  async start({ cwd, dataRoot, assetId, providerId = '', model, agentModel }) {
+  async start({ cwd, dataRoot, assetId, providerId = '', model, agentModel, restart = false }) {
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
     const key = `${path.resolve(resolvedDataRoot)}\n${assetId}`
     const active = this.jobs.get(key)
     if (active && ['preparing', 'queued', 'running', 'finalizing'].includes(active.status)) {
-      return { completed: false, reused: true, session_id: active.sessionId }
+      return { completed: false, reused: true, session_id: active.ownerSessionId ?? active.sessionId }
     }
     const job = { cwd, dataRoot: resolvedDataRoot, assetId, status: 'preparing', startedAt: new Date().toISOString(),
       worker: active?.worker, ownerSessionId: active?.ownerSessionId, providerId, model: providerId ? agentModel : model }
     this.jobs.set(key, job)
     try {
-      const prepared = await this.runner({ cwd, args: ['assets', 'extract', '--data-root', resolvedDataRoot, '--asset-id', assetId] })
+      if (restart) await active?.worker?.dispose?.()
+      const prepared = await this.runner({ cwd, args: ['assets', 'extract', '--data-root', resolvedDataRoot, '--asset-id', assetId, ...(restart ? ['--restart'] : [])] })
       if (!prepared.action) {
         if (!['available', 'awaiting_review', 'no_items'].includes(prepared.asset?.status)) throw new Error('资产未完成提取且没有返回提取任务')
         job.status = 'completed'
@@ -184,8 +185,10 @@ export class AssetActionRuntime {
       apiValue(await this.api.sessions.prompt(rpc({ sessionId: job.sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
       return { completed: false, session_id: job.sessionId, action: job.action }
     } catch (error) {
-      job.status = 'failed'; job.error = error.message; job.completedAt = new Date().toISOString()
-      throw error
+      job.status = 'failed'; job.error = error.code === 'session-not-found'
+        ? `原资产解析会话不存在：${job.sessionId}。已有结果已保留；可点击“重新发起解析”创建新的提取尝试。` : error.message
+      job.completedAt = new Date().toISOString()
+      throw new Error(job.error)
     }
   }
   async runExternal(job, prompt, agentModel) {
@@ -209,6 +212,7 @@ export class AssetActionRuntime {
       if (job.status === 'completed') await job.worker.dispose?.()
     } catch (error) {
       job.status = 'failed'; job.error = error.message; job.completedAt = new Date().toISOString()
+      try { await job.worker?.dispose?.() } catch (cleanup) { job.error += `；进程清理失败：${cleanup.message}` }
     }
   }
   async finish(job) {

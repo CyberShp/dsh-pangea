@@ -1,4 +1,6 @@
 import path from 'node:path'
+import { readFile, writeFile, rename, mkdir } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 
 // This host routes Graph identities; all content/quality decisions stay with
 // the worker. Live handles are retained on a recoverable pause so continuing
@@ -27,10 +29,20 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   let state = liveRuns.get(key)
   if (state?.busy) throw new Error(`当前 Run 已由宿主执行：${runId}`)
   if (state && (state.providerId !== providerId || state.agentModel !== agentModel)) throw new Error('续跑必须保持原执行器与模型，不能替换已绑定 worker')
-  state ??= { providerId, agentModel, workers: new Map(), busy: false, terminal: false }
+  state ??= { providerId, agentModel, workers: new Map(), closed: new Set(), busy: false, terminal: false }
   liveRuns.set(key, state)
   state.busy = true
   let current
+  const bindingsPath = path.join(path.resolve(dataRoot), 'runs', runId, 'acp-workers.json')
+  let bindings = {}
+  const remember = async worker => {
+    if (!worker.remoteSessionId) return
+    bindings[String(worker.id)] = { providerId, agentModel, remoteSessionId: worker.remoteSessionId }
+    await mkdir(path.dirname(bindingsPath), { recursive: true })
+    const temporary = `${bindingsPath}.${randomUUID()}.tmp`
+    await writeFile(temporary, JSON.stringify({ runId, workers: bindings }, null, 2))
+    await rename(temporary, bindingsPath)
+  }
   const check = () => { if (signal.aborted) throw signal.reason ?? new Error('执行已取消') }
   const cli = args => { check(); return runner({ cwd, args, signal }) }
   const adapter = (operation, action, extra = []) => cli(['adapter', operation, '--data-root', dataRoot, '--run-id', runId,
@@ -38,6 +50,12 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   const event = async value => { try { await onEvent(value) } catch { /* telemetry does not route actions */ } }
   async function execute() {
     try {
+      if (!runId || runId === '.' || runId === '..' || /[\\/]/.test(runId)) throw new Error('无效 run_id')
+      try {
+        const saved = JSON.parse(await readFile(bindingsPath, 'utf8'))
+        if (saved.runId !== runId) throw new Error('ACP 会话记录与 Run 不一致')
+        bindings = saved.workers
+      } catch (error) { if (error.code !== 'ENOENT') throw error }
       while (true) {
         check()
         const next = await adapter('next')
@@ -53,10 +71,29 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         state.inflight = action
         if (!action.action_id || !['dispatch_agent', 'continue_agent'].includes(action.action)) throw new Error('Graph action 不可派发')
         let worker = action.task_id ? state.workers.get(action.task_id) : null
-        if (action.task_id && !worker) throw new Error(`原 worker 会话不可续接：${action.task_id}；保留当前 Run 和结果，不创建替代会话`)
+        if (action.task_id && (!worker || state.closed.has(action.task_id))) {
+          const binding = bindings[action.task_id]
+          if (!binding || binding.providerId !== providerId || binding.agentModel !== agentModel) throw new Error(`原 worker 会话不可续接：${action.task_id}；没有匹配的持久 ACP 身份，保留结果`)
+          worker = await subagents.start(providerId, { parent, signal,
+            onDiagnostic: value => { if (value.stage === 'tool_event') void event({ stage: 'source_first_tool_event', action_id: action.action_id, last_tool_id: value.lastToolId,
+              last_tool_name: value.lastToolName, last_tool_status: value.lastToolStatus, tool_started_at_ms: value.lastToolStartedAt,
+              tool_finished_at_ms: value.lastToolFinishedAt, tool_duration_ms: value.lastToolDurationMs }) },
+            resume: { taskId: action.task_id, remoteSessionId: binding.remoteSessionId },
+            prompt: [], ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
+          if (String(worker.id) !== action.task_id || worker.remoteSessionId !== binding.remoteSessionId) {
+            await worker.dispose?.()
+            throw new Error('执行器未恢复原会话，拒绝重新绑定')
+          }
+          state.workers.set(action.task_id, worker)
+          state.closed.delete(action.task_id)
+        }
         if (!worker) {
           if (action.action === 'continue_agent') throw new Error(`续接 action 缺少原 task_id：${action.action_id}`)
-          worker = await subagents.start(providerId, { parent, signal, label: `PANGEA · ${action.role} · ${action.action_id}`,
+          worker = await subagents.start(providerId, { parent, signal,
+            onDiagnostic: value => { if (value.stage === 'tool_event') void event({ stage: 'source_first_tool_event', action_id: action.action_id,
+              last_tool_id: value.lastToolId, last_tool_name: value.lastToolName, last_tool_status: value.lastToolStatus,
+              tool_started_at_ms: value.lastToolStartedAt, tool_finished_at_ms: value.lastToolFinishedAt, tool_duration_ms: value.lastToolDurationMs }) },
+            label: `PANGEA · ${action.role} · ${action.action_id}`,
             prompt: text('等待 Desktop 完成当前任务身份绑定。不要读取文件或调用工具，只回复“就绪”并结束本轮。'),
             ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
           current = worker
@@ -65,6 +102,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
             throw new Error('当前执行器不支持原会话续接，无法执行 source-first 工作流')
           }
           state.workers.set(String(worker.id), worker)
+          await remember(worker)
           await adapter('bind', action, ['--task-id', String(worker.id)])
           state.inflight = { ...action, task_id: String(worker.id), action: 'continue_agent' }
           const ready = await worker.result
@@ -90,6 +128,17 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
             output: text(JSON.stringify({ action_id: action.action_id, validation: settled.validation, attention_required: true })) }
         }
       }
+    } catch (error) {
+      // Failed transports cannot keep child processes alive indefinitely.
+      // Persisted remote IDs allow an explicit later resume; no auto restart loop.
+      const cleanup = await Promise.allSettled([...state.workers].map(async ([id, worker]) => {
+        await worker.dispose?.()
+        state.closed.add(id)
+      }))
+      const failures = cleanup.filter(item => item.status === 'rejected')
+      if (failures.length) error.message += `；进程清理失败：${failures.map(item => String(item.reason)).join('；')}`
+      state.inflight = null
+      throw error
     } finally { state.busy = false }
   }
   return {

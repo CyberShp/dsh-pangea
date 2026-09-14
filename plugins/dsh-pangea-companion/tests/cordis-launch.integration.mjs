@@ -191,3 +191,50 @@ test('uses real Cordis and Jobs to persist one exact ACP attempt through settlem
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('source-first dispatch uses global restrictions while report remains child-scoped', async () => {
+  const { Context } = await importFromAppRoot('@deepseek-ai/cordis/lib/index.js')
+  const { ToolRuntime } = await importFromAppRoot('@deepseek-ai/dsh-tools/lib/index.js')
+  const { createScope } = await importFromAppRoot('@deepseek-ai/dsh-scope/lib/index.js')
+  const { installReportTool } = await importFromAppRoot('@deepseek-ai/dsh-tool-subagent-report/lib/index.js')
+  const { apply } = await import('../src/report-policy.js')
+  const context = new Context()
+  context.provide('systemPrompt', { tools() {}, section() { return () => {} } })
+  const registry = new ToolRuntime(context)
+  const childKey = {}
+  const child = createScope(context, childKey)
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-report-registry-'))
+  const rules = path.join(root, '.agents/pangea')
+  await mkdir(rules, { recursive: true })
+  await writeFile(path.join(rules, 'dsh.md'), 'source-first')
+  await writeFile(path.join(rules, 'planning-worker.md'), 'planning')
+  const taskPath = path.join(root, 'planning.json')
+  await writeFile(taskPath, JSON.stringify({ run_id: 'run', action_id: 'run:planning', result_path: path.join(root, 'result.json') }))
+  let dispatch, post, started = 0, bound = 0
+  const owner = { id: 'owner', options: {}, session: { header: { cwd: root } } }
+  try {
+    apply({ tools: { register(tool) { dispatch = tool }, guard() {} }, systemPrompt: context.systemPrompt,
+      on(name, fn) { if (name === 'tools/post-execute') post = fn },
+      subagents: { async startContinuable(spec) {
+        started++
+        for (const name of spec.request.toolFilter.allow) if (name !== 'report') {
+          registry.register({ name, description: name, parameters: {}, output: { schema: { type: 'object', properties: {} }, render() { return [] } }, execute() { return {} } })
+        }
+        assert.throws(() => child.ctx.tools.restrict({ allow: [...spec.request.toolFilter.allow, 'report'] }), /unknown global tool/)
+        child.ctx.tools.restrict(spec.request.toolFilter)
+        installReportTool(child.ctx, { subagents: { reportFrom() {} } }, 'quiet')
+        assert.ok(child.ctx.tools.wireSchemas(childKey).schemas.some(tool => tool.name === 'report'))
+        assert.ok(!registry.wireSchemas().schemas.some(tool => tool.name === 'report'))
+        return { childId: 'original-child' }
+      }, async followup() {} },
+    }, async () => { bound++; return {} })
+    const value = { workflow_version: 'source-first-v1', run_id: 'run', data_root: root,
+      actions: [{ action_id: 'run:planning', role: 'planning', action: 'dispatch_agent', task_path: taskPath }] }
+    await post({ name: 'pangea_action_next', agent: owner }, { value }, async () => ({ kind: 'accept', value }))
+    const result = await dispatch.execute({ action_id: 'run:planning' }, { agent: owner })
+    assert.equal(result.subagent_id, 'original-child')
+    assert.equal(result.bound, true)
+    assert.equal(started, 1)
+    assert.equal(bound, 1)
+  } finally { await child.dispose(); await context.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
+})

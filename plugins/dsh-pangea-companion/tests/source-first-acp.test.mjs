@@ -169,3 +169,35 @@ test('host ACP controller completes a real Python Graph using bound CLI writes',
     await rm(cwd, { recursive: true, force: true })
   }
 })
+
+test('a crashed transport is disposed and explicit continuation restores persisted identities', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'pangea-acp-resume-'))
+  let taskId, complete = false, starts = 0, disposals = 0
+  const controller = new AbortController()
+  let run
+  const options = { providerId: 'pangea-codeagent', agentModel: 'model', parent: {}, cwd: root, dataRoot: root, runId: 'resume', signal: controller.signal,
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[1] === 'next') return { run_id: 'resume', lifecycle_status: complete ? 'complete' : 'running', actions: complete ? [] : [
+        { action_id: 'resume:planning', role: 'planning', stage: 'unit_planning', action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId }] }
+      if (args[1] === 'bind') { taskId = args.at(-1); return {} }
+      if (args[1] === 'settle') complete = true
+      return {}
+    }, subagents: { start: async (_provider, request) => {
+      starts++
+      if (starts === 2) assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote-original' })
+      else assert.equal(request.resume, undefined)
+      return { id: 'original', remoteSessionId: 'remote-original', result: Promise.resolve({ stopReason: 'completed' }),
+        continuePrompt: async () => { if (starts === 1) throw new Error('ACP connection closed'); return { stopReason: 'completed' } },
+        dispose: async () => { disposals++ } }
+    } } }
+  try {
+    run = createSourceFirstAcpRun(options)
+    await assert.rejects(run.result, /ACP connection closed/)
+    assert.equal(disposals, 1)
+    run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).stopReason, 'completed')
+    assert.equal(taskId, 'original')
+    assert.equal(starts, 2)
+  } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
+})

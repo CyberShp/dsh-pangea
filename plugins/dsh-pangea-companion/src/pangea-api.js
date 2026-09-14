@@ -123,7 +123,7 @@ export function runPangea({ cwd, args, signal }) {
         }
         resolve(envelope.result)
       } catch (error) {
-        reject(new Error(stderr.trim() || error.message))
+        reject(new Error(/页面文件太小|paging file is too small|WinError 1455/i.test(stderr) ? `Windows 提交内存不足，Python 尚未启动；请检查已提交内存、页面文件及残留进程。\n${stderr.trim()}` : stderr.trim() || error.message))
       }
     })
   })

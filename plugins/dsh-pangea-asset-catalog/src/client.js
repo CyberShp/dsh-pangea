@@ -603,6 +603,8 @@ window.__ModuleLoader__.load({
                   h('span', { style: styles.chip }, STATUS[asset.status] ?? asset.status),
                   !isExpanded ? h('button', { type: 'button', style: styles.button, onClick: () => { void toggle(asset.asset_id) } }, asset.status === 'awaiting_review' ? '查看并审核' : '查看详情') : null)),
               h('div', { style: styles.meta }, `修订 ${asset.revision ?? 1} · ${asset.asset_type === 'coverage' ? `覆盖记录 ${asset.structured_item_count ?? 0}` : '文档文本与附件'} · 更新于 ${assetTime(asset.updated_at)}（UTC+8）`),
+              asset.extraction_job?.status === 'failed' ? h('button', { type: 'button', disabled: busy, style: styles.button,
+                onClick: () => { void act('extract', { asset_id: asset.asset_id, restart: true }) } }, '重新发起解析') : null,
               asset.extraction_job?.session_id ? h('button', { type: 'button', style: styles.button, onClick: () => { void openAnalysisSession(ctx.sessions, asset.extraction_job.session_id) } }, '打开解析会话') : null,
               asset.extraction_job?.output ? h('details', null, h('summary', null, '解析进度'), h('pre', { style: styles.pre }, asset.extraction_job.output)) : null,
               isExpanded ? h('div', { style: { ...styles.wrap, marginTop: 8 } },

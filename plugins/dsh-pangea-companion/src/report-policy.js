@@ -345,7 +345,8 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
             parent: exec.agent,
             persona: roleInstructions(exec, action),
             agentOptions: { ...exec.agent.options },
-            toolFilter: { allow: [...SOURCE_TOOLS, 'report'] },
+            // report is installed by the host in the child scope, not the global registry.
+            toolFilter: { allow: [...SOURCE_TOOLS] },
           },
           signal: exec.signal,
         })
@@ -393,6 +394,11 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
     const state = exec?.agent ? states.get(exec.agent.id) : undefined
     if (!state) return undefined
 
+    // Observation and asking for help must remain possible when dispatch fails.
+    if (['pangea_status', 'ask_user_question'].includes(exec.name)) return undefined
+    if (exec.name === 'pangea_action_next' && state.activeChildren.size === 0 && state.dispatchAttempts.size === 0
+      && exec.arguments?.run_id === state.runId && typeof exec.arguments?.data_root === 'string'
+      && resolve(exec.arguments.data_root) === resolve(state.dataRoot)) return undefined
     const pending = pendingActionFor(state, exec)
     if (pending) return undefined
     const settle = settleActionFor(state, exec)

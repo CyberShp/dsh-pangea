@@ -270,7 +270,7 @@ async function routeHandler(req, res, runtime) {
       }
     } else if (body.action === 'extract') {
       await runtime.start({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id,
-        providerId: body.provider_id, model: body.model_route, agentModel: body.agent_model })
+        providerId: body.provider_id, model: body.model_route, agentModel: body.agent_model, restart: body.restart === true })
     } else if (body.action === 'review') {
       await runPangea({
         cwd,

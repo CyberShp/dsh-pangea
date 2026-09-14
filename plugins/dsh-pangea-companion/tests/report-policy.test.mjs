@@ -48,6 +48,8 @@ function harness() {
   const ctx = {
     subagents: {
       async startContinuable(spec) {
+        // The real host rejects child-local tools in the global allow list.
+        assert.equal(spec.request.toolFilter.allow.includes('report'), false)
         starts.push(spec)
         return { childId: `child-${starts.length}` }
       },
@@ -138,6 +140,9 @@ test('dispatch creates one real child and binds the exact Graph action', async (
     data_root: path.join(root, 'pangea-data'),
     actions: [current],
   })
+  assert.equal(h.guard(execFor(owner, 'pangea_action_next', { run_id: 'run-01', data_root: path.join(root, 'pangea-data') })), undefined)
+  assert.equal(h.guard(execFor(owner, 'pangea_status', {})), undefined)
+  assert.equal(h.guard(execFor(owner, 'ask_user_question', {})), undefined)
   const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
   const value = await h.tools.get('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
   assert.deepEqual(value, { kind: 'continuable', subagent_id: 'child-1', action_id: current.action_id, bound: true })
