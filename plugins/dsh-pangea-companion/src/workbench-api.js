@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
+import { createSourceFirstAcpRun } from './source-first-acp.js'
 
 import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 import { sourceFirstReportAvailable } from './reader.js'
@@ -415,6 +416,7 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
         .filter(item => item?.type === 'text')
         .map(item => item.text)
         .join('')
+      if (result.attentionRequired) return { ...attentionRequiredOutcome(result.diagnostic ?? '当前 action 需要处理'), output }
       if (result.stopReason === 'aborted' && result.diagnostic === undefined && wasCancelled()) return { status: 'killed' }
       if (result.stopReason !== 'completed') {
         return { status: 'failed', detail: result.diagnostic ? `${result.stopReason}; diagnostic: ${result.diagnostic}` : result.stopReason, output }
@@ -497,6 +499,7 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
           stage: 'acp_process_spawn', status: 'start', provider: providerId,
           ...lifecycle.launchContext,
         })
+        if (lifecycle.startRun) return lifecycle.startRun({ subagents, parent, signal: controller.signal })
         return subagents.start(providerId, {
           label,
           prompt: [{ type: 'text', text: prompt }],
@@ -677,7 +680,9 @@ export async function launchAnalysisSession(
     '',
     '现在读取当前 action 并执行 source-first 工作流。',
   ].join('\n')
-  const prompt = semantic ? (runtime && selectedProvider ? externalPrompt : internalPrompt) : legacyPrompt
+  const prompt = semantic ? (runtime && selectedProvider
+    ? selectedProvider === 'pangea-opencode' ? externalPrompt : 'Desktop 宿主按 Graph 派发当前 Run 的 worker。'
+    : internalPrompt) : legacyPrompt
   if (runtime && selectedProvider) {
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
     const providerOption = acpProviderOption(selectedProvider, env)
@@ -700,6 +705,13 @@ export async function launchAnalysisSession(
       }), resolvedDataRoot),
       ...(semantic ? { continuationPrompt: () => `${prompt}\n继续当前 Run，从 pangea_action_next 返回的 action 恢复执行。` } : {}),
       onTurnEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
+      ...(semantic && selectedProvider !== 'pangea-opencode' ? {
+        startRun: ({ subagents, parent, signal }) => createSourceFirstAcpRun({
+          subagents, parent, signal, providerId: selectedProvider, agentModel: request.agent_model,
+          cwd: root, dataRoot: resolvedDataRoot, runId: run.run_id, runner, python: env.PANGEA_PYTHON,
+          onEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
+        }),
+      } : {}),
     }
     if (managedReview) {
       acpLifecycle.review = createAnalysisReview({

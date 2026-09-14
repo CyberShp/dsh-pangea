@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { acpProviderOption, internalModelOptions, requireInternalModel } from '../../dsh-pangea-companion/src/workbench-api.js'
 
 function workspaceRoot(cwd) {
   if (typeof cwd !== 'string' || cwd.trim() === '') throw new Error('workspace cwd is required')
@@ -86,16 +87,24 @@ function apiValue(response) {
 }
 
 export class AssetActionRuntime {
-  constructor(api, runner = runPangea) {
+  constructor(api, runner = runPangea, runtime = {}) {
     this.api = api
     this.runner = runner
     this.jobs = new Map()
     this.sessions = new Map()
+    this.runtime = runtime
+  }
+  async executionOptions() {
+    return internalModelOptions(this.api)
   }
   job(dataRoot, assetId) {
     const job = this.jobs.get(`${path.resolve(dataRoot)}\n${assetId}`)
     if (!job) return null
-    return { status: job.status, started_at: job.startedAt, session_id: job.sessionId,
+    const output = job.worker?.readOutput?.()
+    if (output) job.output = `${job.output ?? ''}${output}`.slice(-24000)
+    return { status: job.status, started_at: job.startedAt, session_id: job.ownerSessionId ?? job.sessionId,
+      provider_id: job.providerId, model: job.model,
+      output: job.output,
       completed_at: job.completedAt, error: job.error }
   }
   async adapter(job, operation) {
@@ -104,14 +113,15 @@ export class AssetActionRuntime {
     if (operation === 'bind') args.push('--task-id', job.sessionId)
     return this.runner({ cwd: job.cwd, args })
   }
-  async start({ cwd, dataRoot, assetId }) {
+  async start({ cwd, dataRoot, assetId, providerId = '', model, agentModel }) {
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
     const key = `${path.resolve(resolvedDataRoot)}\n${assetId}`
     const active = this.jobs.get(key)
     if (active && ['preparing', 'queued', 'running', 'finalizing'].includes(active.status)) {
       return { completed: false, reused: true, session_id: active.sessionId }
     }
-    const job = { cwd, dataRoot: resolvedDataRoot, assetId, status: 'preparing', startedAt: new Date().toISOString() }
+    const job = { cwd, dataRoot: resolvedDataRoot, assetId, status: 'preparing', startedAt: new Date().toISOString(),
+      worker: active?.worker, ownerSessionId: active?.ownerSessionId, providerId, model: providerId ? agentModel : model }
     this.jobs.set(key, job)
     try {
       const prepared = await this.runner({ cwd, args: ['assets', 'extract', '--data-root', resolvedDataRoot, '--asset-id', assetId] })
@@ -123,6 +133,7 @@ export class AssetActionRuntime {
       }
       job.action = prepared.action
       job.sessionId = prepared.action.task_id || null
+      if (!job.sessionId) { job.worker = null; job.ownerSessionId = null }
       if (job.sessionId) {
         // A restart resumes the asset's persisted identity, never a guessed latest session.
         try {
@@ -131,7 +142,18 @@ export class AssetActionRuntime {
           job.completedAt = new Date().toISOString()
           return { completed: true, asset: settled.asset }
         } catch (error) { job.repairReason = error.message }
+      }
+      if (providerId) {
+        if (!acpProviderOption(providerId) || !this.runtime.subagents?.getProvider?.(providerId)) throw new Error('所选执行器不可用，请在资产解析设置中选择可用执行器')
+        if (job.sessionId && (!job.worker || String(job.worker.id) !== job.sessionId)) throw new Error(`原资产会话不能由所选执行器续接：${job.sessionId}。请保持原执行器，不能替换已绑定会话。`)
+        if (job.worker && (active.providerId !== providerId || active.model !== agentModel)) throw new Error('资产续接必须保持原执行器与模型')
       } else {
+        // Explicitly configure the actual extraction session, never rely on
+        // Desktop's intentionally empty agent-default-model route.
+        job.model = await requireInternalModel(this.api, model)
+        if (job.worker) throw new Error('资产已绑定外部执行器，请保持原执行器续接')
+      }
+      if (!job.sessionId) {
         const root = workspaceRoot(cwd)
         let payload = { cwd: root }
         if (this.api.workspace?.list) {
@@ -139,22 +161,54 @@ export class AssetActionRuntime {
           if (!workspace) throw new Error(`current DSH workspace is not registered: ${root}`)
           payload = { workspaceId: workspace.workspaceId }
         }
-        job.sessionId = apiValue(await this.api.sessions.create(rpc(payload))).sessionId
-        await this.adapter(job, 'bind')
-        apiValue(await this.api.sessions.rename(rpc({ sessionId: job.sessionId, title: `资产提取 · ${prepared.asset.title ?? assetId}` })))
+        job.ownerSessionId = apiValue(await this.api.sessions.create(rpc(payload))).sessionId
+        apiValue(await this.api.sessions.rename(rpc({ sessionId: job.ownerSessionId, title: `资产提取 · ${prepared.asset.title ?? assetId}` })))
+        if (!providerId) { job.sessionId = job.ownerSessionId; await this.adapter(job, 'bind') }
       }
-      this.sessions.set(job.sessionId, job)
-      job.status = 'queued'
-      apiValue(await this.api.sessions.prompt(rpc({ sessionId: job.sessionId, mode: 'queue', content: [{ type: 'text', text: [
-        `读取 ${path.join(workspaceRoot(cwd), '.agents', 'pangea', 'asset-extraction-worker.md')} 并执行。`,
+      const prompt = [
+        providerId ? '你是资产提取 worker，直接读取下面的 task JSON，按其 result_schema_path 提取 extracted_text_path 和 attachments 中的原文；不调用插件工具、不创建 Run、不派发子 Agent。保留原文出处，不臆造需求或缺陷。'
+          : `读取 ${path.join(workspaceRoot(cwd), '.agents', 'pangea', 'asset-extraction-worker.md')} 并执行。`,
         `task_path: ${job.action.task_path}`,
         '只读取此 task 的输入，在 task 指定 result_path 写完整提取 JSON。宿主负责提交，不要另建 action 或运行分析。',
         ...(job.repairReason ? [`修正同一结果后完成：${job.repairReason}`] : []),
-      ].join('\n') }] })))
+      ].join('\n')
+      if (providerId) {
+        job.status = 'queued'
+        job.done = this.runExternal(job, prompt, agentModel)
+        return { completed: false, session_id: job.ownerSessionId, action: job.action }
+      }
+      apiValue(await this.api.sessions.selectModel(rpc({ sessionId: job.sessionId, provider: job.model.provider,
+        model: job.model.model, ...(job.model.reasoning_effort ? { reasoningEffort: job.model.reasoning_effort } : {}) })))
+      this.sessions.set(job.sessionId, job)
+      job.status = 'queued'
+      apiValue(await this.api.sessions.prompt(rpc({ sessionId: job.sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
       return { completed: false, session_id: job.sessionId, action: job.action }
     } catch (error) {
       job.status = 'failed'; job.error = error.message; job.completedAt = new Date().toISOString()
       throw error
+    }
+  }
+  async runExternal(job, prompt, agentModel) {
+    try {
+      job.status = 'running'
+      if (!job.worker) {
+        const parent = this.runtime.agents?.get?.(job.ownerSessionId)
+        if (!parent) throw new Error('资产提取的宿主会话不可用')
+        job.worker = await this.runtime.subagents.start(job.providerId, { parent, label: `资产提取 · ${job.assetId}`,
+          prompt: [{ type: 'text', text: '等待宿主绑定资产任务，不读取文件或调用工具，只回复就绪并结束本轮。' }],
+          ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
+        if (!job.worker?.id || typeof job.worker.continuePrompt !== 'function') throw new Error('所选执行器不支持资产任务原会话续接')
+        job.sessionId = String(job.worker.id)
+        await this.adapter(job, 'bind')
+        const ready = await job.worker.result
+        if (ready.stopReason !== 'completed') throw new Error(`资产会话初始化失败：${ready.stopReason} ${ready.diagnostic ?? ''}`)
+      }
+      const result = await job.worker.continuePrompt([{ type: 'text', text: prompt }])
+      if (result.stopReason !== 'completed') throw new Error(`资产提取未完成：${result.stopReason} ${result.diagnostic ?? ''}`)
+      await this.finish(job)
+      if (job.status === 'completed') await job.worker.dispose?.()
+    } catch (error) {
+      job.status = 'failed'; job.error = error.message; job.completedAt = new Date().toISOString()
     }
   }
   async finish(job) {

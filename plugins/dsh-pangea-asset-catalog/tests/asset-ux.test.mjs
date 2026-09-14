@@ -71,6 +71,30 @@ test('asset navigation separates catalog, methodology, import and one asset deta
   assert.ok(ui.field('选择资产文件'))
 })
 
+test('asset extraction requires a selected internal model and forwards its route', async () => {
+  const ui = await mount()
+  await ui.click('查看详情')
+  await ui.click('重新解析原文件')
+  assert.ok(ui.text().includes('选择模型'))
+  assert.ok(!ui.calls.some(call => call.payload?.action === 'extract'))
+  ui.change('资产解析模型', JSON.stringify({ provider: 'configured', model: 'my-model' }))
+  await ui.click('重新解析原文件')
+  const sent = ui.calls.find(call => call.payload?.action === 'extract').payload
+  assert.deepEqual(sent.model_route, { provider: 'configured', model: 'my-model' })
+})
+
+test('asset extraction forwards the selected external executor and model', async () => {
+  const ui = await mount()
+  await ui.click('查看详情')
+  ui.change('资产解析执行器', 'pangea-codeagent')
+  ui.change('资产解析模型', 'native/model')
+  await ui.click('重新解析原文件')
+  const sent = ui.calls.find(call => call.payload?.action === 'extract').payload
+  assert.equal(sent.provider_id, 'pangea-codeagent')
+  assert.equal(sent.agent_model, 'native/model')
+  assert.equal(sent.model_route, undefined)
+})
+
 test('failed import and metadata save retain the editable form', async () => {
   const ui = await mount()
   await ui.click('导入资产')

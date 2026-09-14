@@ -9,6 +9,7 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const inject = ['pangea', 'sessions']
     const API_PATH = '/api/pangea-asset-catalog/state'
+    const ACP_SETTINGS_API_PATH = '/api/pangea-companion/acp-settings'
     const TYPES = [
       ['', '全部'], ['requirement', '需求'], ['design', '设计'],
       ['historical_defect', '历史缺陷'], ['reference', '参考资料'], ['coverage', 'Coverage'],
@@ -190,7 +191,42 @@ window.__ModuleLoader__.load({
       const [methodologyDetails, setMethodologyDetails] = React.useState({})
       const [section, setSection] = React.useState('library')
       const [loading, setLoading] = React.useState(false)
+      const [executor, setExecutor] = React.useState('')
+      const [executorOptions, setExecutorOptions] = React.useState([])
+      const [modelOptions, setModelOptions] = React.useState([])
+      const [selectedModel, setSelectedModel] = React.useState('')
+      const [modelLoading, setModelLoading] = React.useState(false)
+      const [modelError, setModelError] = React.useState('')
       const selectedAssetIds = Object.keys(selectedAssets)
+
+      React.useEffect(() => {
+        if (!cwd || visible === false) return undefined
+        const controller = new AbortController()
+        void fetch(ACP_SETTINGS_API_PATH, { signal: controller.signal }).then(async response => {
+          const body = await response.json()
+          if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? '执行器列表读取失败')
+          setExecutorOptions(body.providers ?? [])
+        }).catch(error => { if (!controller.signal.aborted) setModelError(error.message) })
+        return () => controller.abort()
+      }, [cwd, visible])
+
+      React.useEffect(() => {
+        if (!cwd || visible === false) return undefined
+        const controller = new AbortController()
+        setModelLoading(true); setModelOptions([]); setSelectedModel(''); setModelError('')
+        const url = executor ? ACP_SETTINGS_API_PATH : `${API_PATH}?cwd=${encodeURIComponent(cwd)}&execution_options=1`
+        void fetch(url, { signal: controller.signal, ...(executor ? { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'models', provider_id: executor, cwd }) } : {}) }).then(async response => {
+          const body = await response.json()
+          if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? '模型列表读取失败')
+          const options = executor ? (body.models ?? []).map(item => ({ value: item.id, label: item.label ?? item.id }))
+            : (body.models ?? []).filter(item => item.credential_configured).map(item => ({ value: JSON.stringify({ provider: item.provider, model: item.model }), label: `${item.provider} / ${item.model}` }))
+          setModelOptions(options)
+          if (options.length === 1) setSelectedModel(options[0].value)
+        }).catch(error => { if (!controller.signal.aborted) setModelError(error.message) })
+          .finally(() => { if (!controller.signal.aborted) setModelLoading(false) })
+        return () => controller.abort()
+      }, [cwd, visible, executor])
 
       React.useEffect(() => {
         if (visible === false) return undefined
@@ -232,6 +268,15 @@ window.__ModuleLoader__.load({
       async function act(action, payload = {}) {
         setBusy(true); setError(''); setNotice('')
         try {
+          if (action === 'extract') {
+            const asset = (state?.assets ?? []).find(item => item.asset_id === payload.asset_id)
+            if (asset?.asset_type !== 'coverage') {
+              if (modelLoading || modelError) throw new Error(modelError || '正在读取可用模型，请稍候')
+              if (!selectedModel && (!executor || modelOptions.length)) throw new Error('请在“解析执行设置”中选择模型')
+              payload = { ...payload, provider_id: executor,
+                ...(executor ? { agent_model: selectedModel || undefined } : { model_route: JSON.parse(selectedModel) }) }
+            }
+          }
           const value = await requestAction({ cwd, action, payload, page, pageSize, type, status, kind, query })
           setState(value)
           if (action === 'archive' && payload.asset_id) setSelectedAssets(values => {
@@ -460,6 +505,15 @@ window.__ModuleLoader__.load({
               h('button', { key: value, type: 'button', disabled: busy, 'aria-current': section === value && !importOpen ? 'page' : undefined,
                 style: { ...styles.button, ...(section === value && !importOpen ? styles.active : {}) }, onClick: () => navigate(value) }, label)))),
         h('div', { style: styles.content },
+          showLibrary && !importOpen ? h('details', { style: styles.card, open: Boolean(activeAsset && activeAsset.asset_type !== 'coverage') },
+            h('summary', null, '解析执行设置'),
+            h('div', { style: { ...styles.wrap, marginTop: 8 } },
+              h('select', { 'aria-label': '资产解析执行器', style: styles.input, value: executor, disabled: busy, onChange: event => setExecutor(event.target.value) },
+                h('option', { value: '' }, '内置 API'), executorOptions.map(item => h('option', { key: item.id, value: item.id, disabled: !item.registered || item.available === false }, item.label))),
+              h('select', { 'aria-label': '资产解析模型', style: styles.input, value: selectedModel, disabled: busy || modelLoading, onChange: event => setSelectedModel(event.target.value) },
+                h('option', { value: '' }, modelLoading ? '读取模型中…' : executor && !modelOptions.length ? '使用执行器默认模型' : '选择模型'),
+                modelOptions.map(item => h('option', { key: item.value, value: item.value }, item.label)))),
+            h('div', { style: styles.meta }, modelError || '用于解析需求、设计与历史缺陷等文档；Coverage 文件直接解析，无需模型。')) : null,
           activeAsset || importOpen ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, marginBottom: 12 }, onClick: () => { setActiveAsset(null); setImportOpen(false); setEditingAssetId('') } }, '返回列表') : null,
           showLibrary && !activeAsset ? h('div', { style: { ...styles.meta, marginBottom: 12 } },
             `共 ${summary.total ?? 0} 个资产 · 可用 ${summary.available ?? 0} · 待审核 ${summary.review ?? 0} · 失败 ${summary.failed ?? 0}`) : null,
@@ -549,6 +603,8 @@ window.__ModuleLoader__.load({
                   h('span', { style: styles.chip }, STATUS[asset.status] ?? asset.status),
                   !isExpanded ? h('button', { type: 'button', style: styles.button, onClick: () => { void toggle(asset.asset_id) } }, asset.status === 'awaiting_review' ? '查看并审核' : '查看详情') : null)),
               h('div', { style: styles.meta }, `修订 ${asset.revision ?? 1} · ${asset.asset_type === 'coverage' ? `覆盖记录 ${asset.structured_item_count ?? 0}` : '文档文本与附件'} · 更新于 ${assetTime(asset.updated_at)}（UTC+8）`),
+              asset.extraction_job?.session_id ? h('button', { type: 'button', style: styles.button, onClick: () => { void openAnalysisSession(ctx.sessions, asset.extraction_job.session_id) } }, '打开解析会话') : null,
+              asset.extraction_job?.output ? h('details', null, h('summary', null, '解析进度'), h('pre', { style: styles.pre }, asset.extraction_job.output)) : null,
               isExpanded ? h('div', { style: { ...styles.wrap, marginTop: 8 } },
                 ['imported', 'available', 'no_items', 'rejected', 'failed'].includes(asset.status)
                   ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('extract', { asset_id: asset.asset_id }) } }, asset.status === 'imported' ? '解析原文件' : '重新解析原文件') : null,

@@ -7,7 +7,7 @@ import { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
 import { MethodologyCandidateRuntime } from './methodology-runtime.js'
 
 export const name = 'dsh-pangea-asset-catalog'
-export const inject = ['tools', 'webServer', 'apiProxy']
+export const inject = ['tools', 'webServer', 'apiProxy', 'agents', 'subagents']
 
 const API_PATH = '/api/pangea-asset-catalog/state'
 const PAGE_SIZES = new Set([20, 50, 100])
@@ -200,6 +200,7 @@ async function routeHandler(req, res, runtime) {
   const options = listOptions(url.searchParams)
   try {
     if (req.method === 'GET') {
+      if (url.searchParams.get('execution_options') === '1') return json(res, 200, { status: 'ok', ...await runtime.executionOptions() })
       const assetId = url.searchParams.get('asset_id')
       const methodologyId = url.searchParams.get('methodology_id')
       const value = methodologyId
@@ -268,7 +269,8 @@ async function routeHandler(req, res, runtime) {
         await source.cleanup()
       }
     } else if (body.action === 'extract') {
-      await runtime.start({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id })
+      await runtime.start({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id,
+        providerId: body.provider_id, model: body.model_route, agentModel: body.agent_model })
     } else if (body.action === 'review') {
       await runPangea({
         cwd,
@@ -342,7 +344,7 @@ async function routeHandler(req, res, runtime) {
 }
 
 export async function apply(ctx) {
-  const runtime = new AssetActionRuntime(ctx.apiProxy)
+  const runtime = new AssetActionRuntime(ctx.apiProxy, runPangea, { agents: ctx.agents, subagents: ctx.subagents })
   runtime.methodologies = new MethodologyCandidateRuntime(ctx.apiProxy)
   ctx.on('agent/status', ({ agent, status }) => { runtime.handleAgentStatus(agent, status); runtime.methodologies.handleAgentStatus(agent, status) })
   ctx.on('agent/error', ({ agent, error }) => { runtime.handleAgentError(agent, error); runtime.methodologies.handleAgentError(agent, error) })

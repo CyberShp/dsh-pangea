@@ -102,15 +102,21 @@ test('semantic extraction binds and settles the actual session; repeated request
   const root = await workspace(), calls = [], prompts = []
   const ok = value => ({ result: { ok: true, value } })
   let created = 0
-  const api = { sessions: { create: async () => { created++; return ok({ sessionId: 'session-1' }) }, rename: async () => ok({}), prompt: async input => { prompts.push(input); return ok({}) } } }
+  const selected = []
+  const api = { llm: { providers: async () => ok({ providers: [{ provider: 'configured', declared: true, active: true }] }),
+      models: async () => ok({ groups: [{ id: 'configured', models: [{ id: 'model-1' }] }] }) }, settings: { describe: async () => ok({ namespaces: [] }) },
+    sessions: { create: async () => { created++; return ok({ sessionId: 'session-1' }) }, rename: async () => ok({}),
+      selectModel: async input => { selected.push(input.payload); return ok({}) },
+      prompt: async input => { assert.equal(selected.length, 1); prompts.push(input); return ok({}) } } }
   const runner = async ({ args }) => { calls.push(args); return args[0] === 'assets' ? { asset: { asset_id: 'a', title: '设计', status: 'extracting' }, action: { action_id: 'asset:a:extract', task_path: '/tasks/a.json', status: 'pending' } } : { asset: { status: 'available' } } }
   try {
     const runtime = new AssetActionRuntime(api, runner)
-    const result = await runtime.start({ cwd: root, assetId: 'a' })
+    const result = await runtime.start({ cwd: root, assetId: 'a', model: { provider: 'configured', model: 'model-1' } })
     assert.equal(result.completed, false)
     assert.equal(runtime.job(dataRootFor(root), 'a').status, 'queued')
     await runtime.start({ cwd: root, assetId: 'a' })
     assert.equal(created, 1); assert.equal(prompts.length, 1)
+    assert.deepEqual(selected, [{ sessionId: 'session-1', provider: 'configured', model: 'model-1' }])
     assert.ok(calls[1].includes('session-1'))
     runtime.handleAgentStatus({ session: { id: 'unrelated' } }, 'idle')
     runtime.handleAgentStatus({ session: { id: 'session-1' } }, 'running')
@@ -129,5 +135,42 @@ test('restart submits the persisted extraction action without creating another s
     assert.equal(result.asset.status, 'awaiting_review')
     assert.equal(calls.length, 2)
     assert.deepEqual(calls[1].slice(0, 2), ['adapter', 'settle'])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('missing internal model fails before creating or prompting a blank-provider session', async () => {
+  const root = await workspace()
+  try {
+    const runtime = new AssetActionRuntime({ sessions: { create: async () => assert.fail('must not create') } }, async () => ({
+      asset: { status: 'extracting' }, action: { action_id: 'asset:a:extract', task_path: '/a' } }))
+    await assert.rejects(runtime.start({ cwd: root, assetId: 'a' }), /请选择一个已配置的内部模型/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('CodeAgent asset extraction binds the external worker, waits for completion and settles', async () => {
+  const root = await workspace(), calls = [], prompts = []
+  const ok = value => ({ result: { ok: true, value } })
+  const api = { sessions: { create: async () => ok({ sessionId: 'owner' }), rename: async () => ok({}),
+    prompt: async () => assert.fail('must not prompt blank internal model') } }
+  let bound = false, finished = false
+  const runner = async ({ args }) => {
+    calls.push(args)
+    if (args[0] === 'assets') return { asset: { status: 'extracting' }, action: { action_id: 'asset:a:extract', task_path: '/a' } }
+    if (args[1] === 'bind') { assert.equal(args.at(-1), 'external-worker'); bound = true; return {} }
+    assert.equal(finished, true); return { asset: { status: 'awaiting_review' } }
+  }
+  const runtime = new AssetActionRuntime(api, runner, { agents: { get: id => ({ id }) }, subagents: {
+    getProvider: () => ({}), start: async (id, request) => {
+      assert.equal(id, 'pangea-codeagent'); assert.equal(request.agentOptions.model, 'selected')
+      return { id: 'external-worker', result: Promise.resolve({ stopReason: 'completed' }),
+        continuePrompt: async prompt => { assert.equal(bound, true); prompts.push(prompt); finished = true; return { stopReason: 'completed' } }, dispose: async () => {} }
+    } } })
+  try {
+    const started = await runtime.start({ cwd: root, assetId: 'a', providerId: 'pangea-codeagent', agentModel: 'selected' })
+    assert.equal(started.session_id, 'owner')
+    await [...runtime.jobs.values()][0].done
+    assert.equal(runtime.job(dataRootFor(root), 'a').status, 'completed')
+    assert.doesNotMatch(prompts[0][0].text, /\.opencode|\.agents\/pangea/)
+    assert.equal(calls.at(-1)[1], 'settle')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
