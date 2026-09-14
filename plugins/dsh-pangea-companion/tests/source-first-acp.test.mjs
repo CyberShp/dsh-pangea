@@ -5,6 +5,50 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRun, runPangea } from '../src/pangea-api.js'
+import { companionSnapshot } from '../src/reader.js'
+
+test('ACP output polling emits only new worker text, with no idle session labels', async () => {
+  let pendingOutput = '', finished = false
+  let releaseTurn, enteredTurn
+  const turn = new Promise(resolve => { releaseTurn = resolve })
+  const started = new Promise(resolve => { enteredTurn = resolve })
+  const controller = new AbortController()
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: '/data',
+    runId: 'output-polling', signal: controller.signal,
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[1] === 'next') return { run_id: 'output-polling', lifecycle_status: finished ? 'complete' : 'running',
+        actions: finished ? [] : [{ action_id: 'output-polling:planning', role: 'planning', stage: 'unit_planning', action: 'dispatch_agent' }] }
+      if (args[1] === 'settle') finished = true
+      return {}
+    },
+    subagents: { start: async () => ({ id: '236a6dd4-37db-4aff-8a0f-273b45a7e00e', result: Promise.resolve({ stopReason: 'completed' }),
+      continuePrompt: async () => { enteredTurn(); await turn; return { stopReason: 'completed' } },
+      readOutput: () => { const output = pendingOutput; pendingOutput = ''; return output }, dispose: async () => {},
+    }) },
+  })
+  try {
+    await started
+    for (let i = 0; i < 20; i++) assert.equal(run.readOutput(), '')
+    pendingOutput = '就绪'
+    assert.equal(run.readOutput(), '[236a6dd4-37db-4aff-8a0f-273b45a7e00e]\n就绪\n')
+    for (let i = 0; i < 20; i++) assert.equal(run.readOutput(), '')
+    // Identical text emitted in a later turn is real output, not a duplicate.
+    pendingOutput = '就绪'
+    assert.match(run.readOutput(), /就绪/)
+    pendingOutput = '正在读取源码'
+    assert.match(run.readOutput(), /正在读取源码/)
+    assert.equal(run.readOutput(), '')
+    releaseTurn()
+    assert.equal((await run.result).stopReason, 'completed')
+    assert.equal(run.readOutput(), '')
+  } finally {
+    releaseTurn()
+    controller.abort()
+    await run.result.catch(() => {})
+    await run.dispose()
+  }
+})
 
 for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code']) {
   test(`${providerId} executes planning, analysis, blind/comparison and closure in exact original sessions`, async () => {
@@ -97,6 +141,8 @@ test('host ACP controller completes a real Python Graph using bound CLI writes',
             const call = (command, args = []) => runPangea({ cwd, args: [command, ...binding, ...args] })
             const { task } = await call('task-open')
             stages.push([task.task_type, task.review_stage, id])
+            const snapshot = await companionSnapshot({ dataRoot: created.data_root, runId: created.run_id })
+            assert.equal(snapshot.current.reader_health.trusted, true, JSON.stringify(snapshot.current.reader_warnings))
             const current = await call('result-read')
             let saved
             if (task.task_type === 'source_first_plan') {

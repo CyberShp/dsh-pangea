@@ -704,11 +704,11 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
         addIssue(`source-first result JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    // Comparison reuses the reviewer session; its empty shell is initialized
-    // before that session is bound. Only this exact live transition may wait.
+    // Every source-first action starts with a pending shell. Host bind updates
+    // progress first; the first result operation seals the shell's task ID.
+    // Only an untouched shell in a live, unaccepted action may wait here.
     const awaitingBinding = result?.format_version === 'pangea-notes-v1'
       && progress.lifecycle_status === 'running'
-      && action.stage === 'comparison_review'
       && ['pending', 'dispatched'].includes(action.status)
       && result.binding?.run_id === progress.run_id
       && result.binding?.action_id === actionId
@@ -904,7 +904,8 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       count_checks: {},
       collection_status: Object.fromEntries(['risks', 'test_cases', 'business_flows', 'evidence'].map(key => [key, actionView.deliveryUnavailable ? 'unavailable' : 'readable'])),
     },
-    reader_notices: actionView.artifacts.filter(item => item.binding_status === 'pending').map(() => '复核准备中，正在绑定复核任务。'),
+    reader_notices: [...new Set(actionView.artifacts.filter(item => item.binding_status === 'pending').map(item =>
+      item.stage === 'comparison_review' ? '复核准备中，正在绑定复核任务。' : '任务准备中，等待 Agent 首次访问结果。'))],
     reader_warnings: [...sourceSnapshot.issues, ...actionView.issues],
     artifacts: {
       run_directory: runDirectory,

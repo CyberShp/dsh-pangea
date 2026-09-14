@@ -733,6 +733,25 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     const unsubmitted = (await companionSnapshot({ dataRoot, runId })).current
     assert.equal(unsubmitted.reader_health.trusted, true)
     assert.deepEqual(unsubmitted.reader_notices, ['复核准备中，正在绑定复核任务。'])
+    // Planning and analysis also bind progress before the first result access.
+    // They can remain in this legitimate state while the worker reads inputs.
+    for (const stage of ['unit_planning', 'unit_analysis', 'independent_review', 'comparison_review', 'targeted_closure']) {
+      for (const status of ['pending', 'dispatched']) {
+        await writeJson(progressPath, { ...waitingProgress, actions: {
+          [actionId]: { ...waitingProgress.actions[actionId], stage, status },
+        } })
+        const waiting = (await companionSnapshot({ dataRoot, runId })).current
+        assert.equal(waiting.reader_health.trusted, true, `${stage}/${status}`)
+        assert.equal(waiting.workflow.actions[0].binding_status, 'pending')
+        assert.equal(waiting.source_first_records[0].records.length, 0)
+        assert.deepEqual(waiting.reader_notices, [stage === 'comparison_review'
+          ? '复核准备中，正在绑定复核任务。' : '任务准备中，等待 Agent 首次访问结果。'])
+        await writeJson(resultPath, { ...shell, binding: { ...shell.binding, task_id: 'another-session' } })
+        assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)
+        await writeJson(resultPath, { ...shell, completion: null })
+      }
+    }
+    await writeJson(progressPath, waitingProgress)
     // Real identity conflicts and published content cannot use the empty-shell exception.
     for (const invalid of [
       { ...shell, binding: { ...shell.binding, task_id: 'wrong-task' } },

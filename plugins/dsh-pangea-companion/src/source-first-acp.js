@@ -97,7 +97,12 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     // emitted separately at bind. Do not invent an external session ID.
     id: parent?.id,
     result: execute(),
-    readOutput: () => [...state.workers.entries()].map(([id, worker]) => `[${id}]\n${worker.readOutput?.() ?? ''}`).join('\n'),
+    readOutput: () => [...state.workers.entries()].map(([id, worker]) => {
+      // ACP readOutput drains new text. An idle poll must stay empty or the
+      // jobs stream treats the session label itself as fresh agent output.
+      const output = worker.readOutput?.() ?? ''
+      return output ? `[${id}]\n${output}\n` : ''
+    }).filter(Boolean).join(''),
     readDiagnostics: () => current?.readDiagnostics?.() ?? {},
     async dispose() {
       if (!state.terminal && !signal.aborted) return
