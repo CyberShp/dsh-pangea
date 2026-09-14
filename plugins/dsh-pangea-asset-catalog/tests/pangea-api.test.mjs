@@ -162,6 +162,7 @@ test('CodeAgent asset extraction binds the external worker, waits for completion
   const runtime = new AssetActionRuntime(api, runner, { agents: { get: id => ({ id }) }, subagents: {
     getProvider: () => ({}), start: async (id, request) => {
       assert.equal(id, 'pangea-codeagent'); assert.equal(request.agentOptions.model, 'selected')
+      assert.equal(request.signal.aborted, false)
       return { id: 'external-worker', result: Promise.resolve({ stopReason: 'completed' }),
         continuePrompt: async prompt => { assert.equal(bound, true); prompts.push(prompt); finished = true; return { stopReason: 'completed' } }, dispose: async () => {} }
     } } })

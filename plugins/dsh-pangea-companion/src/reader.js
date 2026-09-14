@@ -908,6 +908,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       comparison: records.find(item => item.stage === 'comparison_review') ?? null,
     },
     data_source: 'source-first-notes',
+    input_materials: includeDetails ? await readInputMaterials(runDirectory) : [],
     reader_health: {
       status: sourceSnapshot.status === 'corrupt' || actionView.issues.length ? 'warning' : 'ok',
       trusted: sourceSnapshot.status !== 'corrupt' && actionView.issues.length === 0,

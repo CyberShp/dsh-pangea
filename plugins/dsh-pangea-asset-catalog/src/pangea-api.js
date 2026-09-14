@@ -250,7 +250,8 @@ export class AssetActionRuntime {
       if (!job.worker) {
         const parent = this.runtime.agents?.get?.(job.ownerSessionId)
         if (!parent) throw new Error('资产提取的宿主会话不可用')
-        job.worker = await this.runtime.subagents.start(job.providerId, { parent, label: `资产提取 · ${job.assetId}`,
+        job.controller = new AbortController()
+        job.worker = await this.runtime.subagents.start(job.providerId, { parent, signal: job.controller.signal, label: `资产提取 · ${job.assetId}`,
           prompt: [{ type: 'text', text: '等待宿主绑定资产任务，不读取文件或调用工具，只回复就绪并结束本轮。' }],
           ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
         if (!job.worker?.id || typeof job.worker.continuePrompt !== 'function') throw new Error('所选执行器不支持资产任务原会话续接')

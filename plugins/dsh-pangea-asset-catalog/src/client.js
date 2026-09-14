@@ -475,7 +475,7 @@ window.__ModuleLoader__.load({
         setStatus(value === 'review' ? 'awaiting_review' : value === 'archived' ? 'archived' : '')
         setError(''); setNotice('')
       }
-      const assistantAsset = importOpen ? null : activeAsset ? (state?.assets?.find(item => item.asset_id === activeAsset.asset_id) ?? activeAsset) : state?.assets?.find(item => item.extraction_job)
+      const assistantAsset = importOpen ? null : activeAsset ?? state?.assets?.find(item => item.extraction_job)
       const job = assistantAsset?.extraction_job
       const jobLabel = { preparing: '准备中', queued: '等待处理', running: '正在提取', finalizing: '保存结果', completed: '已完成', failed: '处理失败', interrupted: '处理已中断' }
       const modelLabel = job?.model ? typeof job.model === 'string' ? job.model : `${job.model.provider} / ${job.model.model}` : ''
