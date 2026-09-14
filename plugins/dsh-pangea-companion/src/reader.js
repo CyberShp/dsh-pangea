@@ -368,6 +368,18 @@ export async function readInputMaterials(runDirectory) {
   const manifest = await read('inputs/assets/manifest.json')
   const consumption = await read('内部索引/输入材料索引.json')
   const assets = Array.isArray(manifest?.assets) ? manifest.assets : []
+  const frozenItems = await read('inputs/asset-items.json')
+  const groups = new Map()
+  for (const item of Object.values(frozenItems ?? {})) {
+    if (!item?.asset_id) continue
+    if (!groups.has(item.asset_id)) groups.set(item.asset_id, { asset_id: item.asset_id, title: item.asset_title ?? item.asset_id, structured_items: [] })
+    groups.get(item.asset_id).structured_items.push(item)
+  }
+  for (const group of groups.values()) {
+    const existing = assets.find(asset => asset.asset_id === group.asset_id)
+    if (existing) existing.structured_items = group.structured_items
+    else assets.push(group)
+  }
   const items = Array.isArray(consumption?.items) ? consumption.items : []
   const array = value => Array.isArray(value) ? value : []
   return assets.filter(asset => asset && typeof asset === 'object').map(asset => {

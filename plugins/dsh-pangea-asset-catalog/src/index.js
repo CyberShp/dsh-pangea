@@ -103,7 +103,7 @@ async function importPreview({ cwd, args, semantic, sourcePath }) {
     source_sha256: createHash('sha256').update(content).digest('hex'), conflicts: [], duplicate: null }
 }
 
-export async function semanticAssetList({ cwd, dataRoot, options, runner = runPangea }) {
+export async function semanticAssetList({ cwd, dataRoot, options, runtime, runner = runPangea }) {
   const items = []
   let cursor = 0
   do {
@@ -111,13 +111,14 @@ export async function semanticAssetList({ cwd, dataRoot, options, runner = runPa
     items.push(...page.items)
     cursor = page.next_cursor
   } while (cursor !== null && cursor !== undefined)
-  const filtered = items.filter(item => (options.status ? item.status === options.status : item.status !== 'archived')
+  const displayStatus = item => item.status !== 'archived' && ['failed', 'interrupted'].includes(runtime?.job(dataRoot, item.asset_id)?.status) ? 'failed' : item.status
+  const filtered = items.filter(item => (options.status ? displayStatus(item) === options.status : item.status !== 'archived')
     && (!options.type || item.asset_type === options.type)
     && (!options.query || [item.asset_id, item.title, item.source_path].join(' ').toLowerCase().includes(options.query.toLowerCase())))
   const start = (options.page - 1) * options.pageSize
   return { items: filtered.slice(start, start + options.pageSize), total: filtered.length,
     summary: { total: filtered.length, available: filtered.filter(x => x.status === 'available').length,
-      review: filtered.filter(x => x.status === 'awaiting_review').length, failed: filtered.filter(x => x.status === 'failed').length } }
+      review: filtered.filter(x => x.status === 'awaiting_review').length, failed: filtered.filter(x => displayStatus(x) === 'failed').length } }
 }
 
 async function listState({ cwd, dataRoot, runtime, options }) {
@@ -137,7 +138,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   if (options.moduleTag) args.push('--module-tag', options.moduleTag)
   if (options.query) args.push('--query', options.query)
   const [result, methodologies, methodologyJob] = await Promise.all([
-    !features.list_filters ? semanticAssetList({ cwd, dataRoot: resolvedDataRoot, options }) : runPangea({ cwd, args }),
+    !features.list_filters ? semanticAssetList({ cwd, dataRoot: resolvedDataRoot, options, runtime }) : runPangea({ cwd, args }),
     runPangea({ cwd, args: ['methodologies', 'list', '--data-root', resolvedDataRoot, '--limit', '200'] }),
     runtime.methodologies.job(cwd, resolvedDataRoot),
   ])
@@ -233,41 +234,11 @@ async function routeHandler(req, res, runtime) {
       }
     } else if (body.action === 'import') {
       const source = await materializeImportSource(body, resolvedDataRoot)
+      let imported
       try {
-        const previewArgs = [
-          'assets', 'preview', '--data-root', resolvedDataRoot,
-          '--path', source.path, '--type', body.asset_type,
-        ]
-        if (body.title) previewArgs.push('--title', body.title)
-        const preview = await importPreview({ cwd, args: previewArgs, semantic, sourcePath: source.path })
-        if (body.confirmed_sha256 !== preview.source_sha256) {
-          throw new Error('资产内容已变化，请重新预览后再导入')
-        }
-        if (preview.duplicate) {
-          throw new Error(`检测到重复资产：${preview.duplicate.asset_id}`)
-        }
-        const strategy = body.strategy ?? 'create_new'
-        if (!features.revisions && strategy !== 'create_new') throw new Error('当前分析引擎支持新建资产')
-        const args = strategy === 'new_revision'
-          ? [
-              'assets', 'revise', '--data-root', resolvedDataRoot,
-              '--asset-id', body.conflict_asset_id, '--path', source.path,
-            ]
-          : strategy === 'create_new'
-            ? [
-                'assets', 'import', '--data-root', resolvedDataRoot,
-                '--path', source.path, '--type', body.asset_type,
-              ]
-            : null
-        if (!args) throw new Error(`不支持的冲突策略：${strategy}`)
-        if (strategy === 'new_revision' && !preview.conflicts.some(item => item.asset_id === body.conflict_asset_id)) {
-          throw new Error('新修订目标不在本次预览的冲突列表中')
-        }
-        if (body.title) args.push('--title', body.title)
-        await runPangea({ cwd, args })
-      } finally {
-        await source.cleanup()
-      }
+        imported = await importAndExtract({ cwd, dataRoot: resolvedDataRoot, body, sourcePath: source.path, runtime })
+      } finally { await source.cleanup() }
+      return json(res, 200, { ...await listState({ cwd, dataRoot: resolvedDataRoot, runtime, options }), imported_asset_id: imported.asset_id })
     } else if (body.action === 'extract') {
       await runtime.start({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id,
         providerId: body.provider_id, model: body.model_route, agentModel: body.agent_model, restart: body.restart === true })
@@ -343,9 +314,23 @@ async function routeHandler(req, res, runtime) {
   }
 }
 
+export async function importAndExtract({ cwd, dataRoot, body, sourcePath, runtime, runner = runPangea }) {
+  const args = ['assets', 'import', '--data-root', dataRoot, '--path', sourcePath, '--type', body.asset_type]
+  if (body.title) args.push('--title', body.title)
+  const result = await runner({ cwd, args })
+  const asset = result.asset ?? result
+  if (!asset.asset_id) throw new Error('导入结果未返回资产编号')
+  try {
+    await runtime.start({ cwd, dataRoot, assetId: asset.asset_id, providerId: body.provider_id,
+      model: body.model_route, agentModel: body.agent_model })
+  } catch { /* The imported file and the persisted failed job remain visible for retry. */ }
+  return asset
+}
+
 export async function apply(ctx) {
   const runtime = new AssetActionRuntime(ctx.apiProxy, runPangea, { agents: ctx.agents, subagents: ctx.subagents })
   runtime.methodologies = new MethodologyCandidateRuntime(ctx.apiProxy)
+  ctx.on('session/event', (session, event) => runtime.handleSessionEvent(session, event))
   ctx.on('agent/status', ({ agent, status }) => { runtime.handleAgentStatus(agent, status); runtime.methodologies.handleAgentStatus(agent, status) })
   ctx.on('agent/error', ({ agent, error }) => { runtime.handleAgentError(agent, error); runtime.methodologies.handleAgentError(agent, error) })
   const toolDisposers = [ctx.tools.register({

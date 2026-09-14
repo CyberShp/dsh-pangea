@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { acpProviderOption, internalModelOptions, requireInternalModel } from '../../dsh-pangea-companion/src/workbench-api.js'
 
@@ -97,16 +98,60 @@ export class AssetActionRuntime {
   async executionOptions() {
     return internalModelOptions(this.api)
   }
+  historyPath(dataRoot, assetId) {
+    return path.join(path.resolve(dataRoot), '.pangea', 'asset-jobs', `${createHash('sha256').update(assetId).digest('hex')}.json`)
+  }
+  saved(dataRoot, assetId) {
+    const file = this.historyPath(dataRoot, assetId)
+    if (!existsSync(file)) return null
+    return JSON.parse(readFileSync(file, 'utf8'))
+  }
+  persist(job) {
+    const file = this.historyPath(job.dataRoot, job.assetId)
+    mkdirSync(path.dirname(file), { recursive: true })
+    const value = { status: job.status, started_at: job.startedAt, completed_at: job.completedAt,
+      session_id: job.ownerSessionId ?? job.sessionId, worker_id: job.sessionId,
+      provider_id: job.providerId, model: job.model, output: job.output ?? '', error: job.error,
+      events: job.events ?? [], history: job.history ?? [] }
+    const temporary = `${file}.${randomUUID()}.tmp`
+    writeFileSync(temporary, JSON.stringify(value), 'utf8')
+    renameSync(temporary, file)
+    return value
+  }
+  capture(job) {
+    const output = job.worker?.readOutput?.()
+    if (output) { job.output = `${job.output ?? ''}${output}`; this.persist(job) }
+  }
+  watch(job) {
+    job.timer = setInterval(() => { try { this.capture(job) } catch (error) { job.error = `运行记录保存失败：${error.message}` } }, 1000)
+    job.timer.unref?.()
+  }
+  record(job, label) {
+    job.events ??= []
+    job.events.push({ at: new Date().toISOString(), label })
+    return this.persist(job)
+  }
+  handleSessionEvent(session, event) {
+    const job = this.sessions.get(session?.id)
+    if (!job || ['completed', 'failed'].includes(job.status)) return
+    if (event.type === 'assistant/message') {
+      const content = event.data?.message?.content
+      const text = typeof content === 'string' ? content : (content ?? []).filter(item => item.type === 'text').map(item => item.text).join('\n')
+      if (text) { job.output = `${job.output ?? ''}${text}\n`; this.persist(job) }
+    } else if (event.type === 'tool/call') this.record(job, `正在使用工具：${event.data.name}`)
+  }
   job(dataRoot, assetId) {
     const job = this.jobs.get(`${path.resolve(dataRoot)}\n${assetId}`)
-    if (!job) return null
-    const output = job.worker?.readOutput?.()
-    if (output) job.output = `${job.output ?? ''}${output}`.slice(-24000)
-    return { status: job.status, started_at: job.startedAt, session_id: job.ownerSessionId ?? job.sessionId,
-      provider_id: job.providerId, model: job.model,
-      output: job.output,
-      completed_at: job.completedAt, error: job.error }
+    if (!job) {
+      const saved = this.saved(dataRoot, assetId)
+      if (!saved) return null
+      if (['preparing', 'queued', 'running', 'finalizing'].includes(saved.status)) return { ...saved, status: 'interrupted', error: '应用已重启，处理过程已保存。可以重新处理此资产。', session_available: false }
+      return { ...saved, session_available: false }
+    }
+    this.capture(job)
+    return { ...this.persist(job), session_available: Boolean(job.sessionId) }
   }
+
   async adapter(job, operation) {
     const args = ['adapter', operation, '--data-root', job.dataRoot, '--asset-id', job.assetId,
       '--action-id', job.action.action_id]
@@ -120,16 +165,19 @@ export class AssetActionRuntime {
     if (active && ['preparing', 'queued', 'running', 'finalizing'].includes(active.status)) {
       return { completed: false, reused: true, session_id: active.ownerSessionId ?? active.sessionId }
     }
-    const job = { cwd, dataRoot: resolvedDataRoot, assetId, status: 'preparing', startedAt: new Date().toISOString(),
+    const previous = this.job(resolvedDataRoot, assetId)
+    const job = { history: previous ? [...(previous.history ?? []), { ...previous, history: undefined }] : [], events: [], cwd, dataRoot: resolvedDataRoot, assetId, status: 'preparing', startedAt: new Date().toISOString(),
       worker: active?.worker, ownerSessionId: active?.ownerSessionId, providerId, model: providerId ? agentModel : model }
     this.jobs.set(key, job)
     try {
+      this.record(job, '正在准备资产内容')
       if (restart) await active?.worker?.dispose?.()
       const prepared = await this.runner({ cwd, args: ['assets', 'extract', '--data-root', resolvedDataRoot, '--asset-id', assetId, ...(restart ? ['--restart'] : [])] })
       if (!prepared.action) {
         if (!['available', 'awaiting_review', 'no_items'].includes(prepared.asset?.status)) throw new Error('资产未完成提取且没有返回提取任务')
         job.status = 'completed'
         job.completedAt = new Date().toISOString()
+        this.record(job, '资产处理完成')
         return { completed: true, asset: prepared.asset }
       }
       job.action = prepared.action
@@ -141,6 +189,7 @@ export class AssetActionRuntime {
           const settled = await this.adapter(job, 'settle')
           job.status = 'completed'
           job.completedAt = new Date().toISOString()
+          this.record(job, '已接收保存的提取结果')
           return { completed: true, asset: settled.asset }
         } catch (error) { job.repairReason = error.message }
       }
@@ -170,24 +219,28 @@ export class AssetActionRuntime {
         providerId ? '你是资产提取 worker，直接读取下面的 task JSON，按其 result_schema_path 提取 extracted_text_path 和 attachments 中的原文；不调用插件工具、不创建 Run、不派发子 Agent。保留原文出处，不臆造需求或缺陷。'
           : `读取 ${path.join(workspaceRoot(cwd), '.agents', 'pangea', 'asset-extraction-worker.md')} 并执行。`,
         `task_path: ${job.action.task_path}`,
-        '只读取此 task 的输入，在 task 指定 result_path 写完整提取 JSON。宿主负责提交，不要另建 action 或运行分析。',
+        '用中文简要说明正在读取的资料、提取进度和处理结果。只读取此 task 的输入，在 task 指定 result_path 写完整提取 JSON。宿主负责提交，不要另建 action 或运行分析。',
         ...(job.repairReason ? [`修正同一结果后完成：${job.repairReason}`] : []),
       ].join('\n')
       if (providerId) {
         job.status = 'queued'
+        this.record(job, '已选择外部 Agent，正在启动')
         job.done = this.runExternal(job, prompt, agentModel)
         return { completed: false, session_id: job.ownerSessionId, action: job.action }
       }
       apiValue(await this.api.sessions.selectModel(rpc({ sessionId: job.sessionId, provider: job.model.provider,
         model: job.model.model, ...(job.model.reasoning_effort ? { reasoningEffort: job.model.reasoning_effort } : {}) })))
       this.sessions.set(job.sessionId, job)
+      this.record(job, '已绑定所选 API 模型')
       job.status = 'queued'
       apiValue(await this.api.sessions.prompt(rpc({ sessionId: job.sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
+      this.record(job, '任务已提交，等待模型处理')
       return { completed: false, session_id: job.sessionId, action: job.action }
     } catch (error) {
       job.status = 'failed'; job.error = error.code === 'session-not-found'
-        ? `原资产解析会话不存在：${job.sessionId}。已有结果已保留；可点击“重新发起解析”创建新的提取尝试。` : error.message
+        ? `原资产解析会话不存在：${job.sessionId}。已有结果已保留；可点击“重新处理资产”创建新的提取尝试。` : error.message
       job.completedAt = new Date().toISOString()
+      this.record(job, '资产处理未完成')
       throw new Error(job.error)
     }
   }
@@ -202,6 +255,8 @@ export class AssetActionRuntime {
           ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
         if (!job.worker?.id || typeof job.worker.continuePrompt !== 'function') throw new Error('所选执行器不支持资产任务原会话续接')
         job.sessionId = String(job.worker.id)
+        this.watch(job)
+        this.record(job, 'Agent 已启动，正在读取资料')
         await this.adapter(job, 'bind')
         const ready = await job.worker.result
         if (ready.stopReason !== 'completed') throw new Error(`资产会话初始化失败：${ready.stopReason} ${ready.diagnostic ?? ''}`)
@@ -213,7 +268,7 @@ export class AssetActionRuntime {
     } catch (error) {
       job.status = 'failed'; job.error = error.message; job.completedAt = new Date().toISOString()
       try { await job.worker?.dispose?.() } catch (cleanup) { job.error += `；进程清理失败：${cleanup.message}` }
-    }
+    } finally { this.capture(job); clearInterval(job.timer); this.record(job, job.status === 'completed' ? '资产处理完成' : '资产处理未完成') }
   }
   async finish(job) {
     if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
@@ -221,17 +276,19 @@ export class AssetActionRuntime {
     try { await this.adapter(job, 'settle'); job.status = 'completed' }
     catch (error) { job.status = 'failed'; job.error = error.message }
     job.completedAt = new Date().toISOString()
+    this.capture(job); clearInterval(job.timer); this.record(job, job.status === 'completed' ? '提取结果已保存' : '提取结果需要处理')
   }
   handleAgentStatus(agent, status) {
     const job = this.sessions.get(agent?.session?.id)
     if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
-    if (status === 'running') job.status = 'running'
+    if (status === 'running') { job.status = 'running'; this.record(job, '模型正在处理资产') }
     if (status === 'idle' && job.status === 'running') void this.finish(job)
   }
   handleAgentError(agent, error) {
     const job = this.sessions.get(agent?.session?.id)
     if (!job || job.status === 'completed') return
     job.status = 'failed'; job.error = error?.message ?? String(error); job.completedAt = new Date().toISOString()
+    this.record(job, '模型运行失败')
   }
 }
 

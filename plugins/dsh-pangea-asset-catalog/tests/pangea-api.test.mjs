@@ -174,3 +174,44 @@ test('CodeAgent asset extraction binds the external worker, waits for completion
     assert.equal(calls.at(-1)[1], 'settle')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('asset process survives runtime recreation with provider, output and retry history', async () => {
+  const root = await workspace(), dataRoot = dataRootFor(root)
+  try {
+    const runtime = new AssetActionRuntime({})
+    const job = { dataRoot, assetId: 'a', status: 'running', startedAt: '2026-09-14T00:00:00Z', providerId: 'pangea-codeagent', model: 'selected-model', sessionId: 'worker', ownerSessionId: 'owner', output: '已读取需求文档\n', events: [] }
+    runtime.jobs.set(`${path.resolve(dataRoot)}\na`, job)
+    runtime.sessions.set('worker', job)
+    runtime.handleSessionEvent({ id: 'unrelated' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Unrelated' }] } } })
+    runtime.handleSessionEvent({ id: 'worker' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '正在提取适用条件' }] } } })
+    const recovered = new AssetActionRuntime({}).job(dataRoot, 'a')
+    assert.equal(recovered.status, 'interrupted')
+    assert.equal(recovered.session_available, false)
+    assert.equal(recovered.provider_id, 'pangea-codeagent')
+    assert.match(recovered.output, /适用条件/)
+    assert.doesNotMatch(recovered.output, /Unrelated/)
+    const calls = []
+    const next = new AssetActionRuntime({}, async ({ args }) => { calls.push(args); return { asset: { asset_id: 'a', status: 'available' } } })
+    await next.start({ cwd: root, assetId: 'a', restart: true })
+    assert.ok(calls[0].includes('--restart'))
+    const final = new AssetActionRuntime({}).job(dataRoot, 'a')
+    assert.equal(final.status, 'completed')
+    assert.equal(final.history.length, 1)
+    assert.match(final.history[0].output, /适用条件/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('one import starts processing with the selected executor and retains a failed import result', async () => {
+  const { importAndExtract } = await import('../src/index.js')
+  const calls = [], starts = []
+  const asset = await importAndExtract({ cwd: '/workspace', dataRoot: '/data', sourcePath: '/input/case.md',
+    body: { asset_type: 'test_case_example', title: '重连示例', provider_id: 'pangea-codeagent', agent_model: 'chosen' },
+    runner: async ({ args }) => { calls.push(args); return { asset: { asset_id: 'case-1' } } },
+    runtime: { async start(request) { starts.push(request); throw new Error('Provider failed after import') } } })
+  assert.equal(asset.asset_id, 'case-1')
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].slice(0, 2), ['assets', 'import'])
+  assert.equal(starts[0].assetId, 'case-1')
+  assert.equal(starts[0].providerId, 'pangea-codeagent')
+  assert.equal(starts[0].agentModel, 'chosen')
+})

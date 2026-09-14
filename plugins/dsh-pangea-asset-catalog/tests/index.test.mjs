@@ -30,7 +30,7 @@ test('host registers asset APIs and methodology lifecycle listeners', async () =
   assert.match(tools[0].description, /已导入资产/)
   assert.equal(routes.length, 1)
   assert.equal(routes[0].path, '/api/pangea-asset-catalog/state')
-  assert.deepEqual(events, ['agent/status', 'agent/error'])
+  assert.deepEqual(events, ['session/event', 'agent/status', 'agent/error'])
   assert.match(effectDescription, /PANGEA Asset Management 2\.0 API/)
 })
 
@@ -56,4 +56,17 @@ test('asset actions follow declared capabilities independently of workflow versi
   assert.equal(assetFeatures(capabilities).revisions, false)
   assert.equal(assetFeatures({ asset_operations: { restore: false } }).restore, false)
   assert.equal(assetFeatures({ workflow_versions: ['source-first-v1'] }).preview, false)
+})
+
+test('interrupted extraction appears in failed filter while preserving asset status', async () => {
+  const { semanticAssetList } = await import('../src/index.js')
+  const result = await semanticAssetList({ cwd: '/tmp', dataRoot: '/tmp/data',
+    options: { page: 1, pageSize: 20, status: 'failed' },
+    runtime: { job: () => ({ status: 'interrupted' }) },
+    runner: async () => ({ items: [{ asset_id: 'working', status: 'extracting' }, { asset_id: 'archived', status: 'archived' }], next_cursor: null }),
+  })
+  assert.equal(result.total, 1)
+  assert.equal(result.summary.failed, 1)
+  assert.equal(result.items[0].asset_id, 'working')
+  assert.equal(result.items[0].status, 'extracting')
 })

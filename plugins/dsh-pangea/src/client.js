@@ -291,6 +291,9 @@ window.__ModuleLoader__.load({
             justify-content: flex-end !important;
           }
           body[data-pangea-product-shell] #root [data-pane="conversation"] .wSkVaW_heroGlow { display: none !important; }
+          body[data-pangea-product-shell][data-pangea-task-assistant] [data-pane="conversation"] [data-conversation-scroll] :is(p,li,pre) {
+            font-size: 16px !important; line-height: 1.75 !important;
+          }
           body[data-pangea-product-shell] #root .pI_x6G_handle { display: none !important; }
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panel {
             left: 0 !important; right: 0 !important; width: auto !important;
@@ -326,17 +329,17 @@ window.__ModuleLoader__.load({
             width: 46px; height: 46px; display: grid; place-items: center; border-radius: 9px;
             color: var(--pangea-red); background: #fff0f1; border: 1px solid #ffd5d8;
           }
-          [data-pangea-assistant-name] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 700; }
-          [data-pangea-assistant-meta] { margin-top: 5px; color: #757c87; font-size: 12px; line-height: 1.35; }
-          [data-pangea-assistant-progress] { margin-top: 5px; color: #68707c; font-size: 11px; }
+          [data-pangea-assistant-name] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 700; }
+          [data-pangea-assistant-meta] { margin-top: 5px; color: #757c87; font-size: 16px; line-height: 1.35; }
+          [data-pangea-assistant-progress] { margin-top: 5px; color: #68707c; font-size: 16px; }
           [data-pangea-assistant-actions] { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
           [data-pangea-assistant-select] {
             min-width: 0; flex: 1; height: 30px; border: 1px solid #d9dde3; border-radius: 5px;
-            padding: 0 8px; color: #34383f; background: #fff; font: inherit; font-size: 12px;
+            padding: 0 8px; color: #34383f; background: #fff; font: inherit; font-size: 16px;
           }
           [data-pangea-assistant-new] {
             height: 30px; border: 1px solid #c7000b; border-radius: 5px; padding: 0 10px;
-            color: #c7000b; background: #fff; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+            color: #c7000b; background: #fff; font: inherit; font-size: 16px; font-weight: 600; cursor: pointer;
           }
         }
 
@@ -361,12 +364,12 @@ window.__ModuleLoader__.load({
             height: 100%; min-height: 0; max-height: none; overflow: hidden; padding: 14px 18px 12px; border-top: 1px solid #dfe3e8;
             color: var(--pangea-ink); background: rgba(251,252,253,.98);
           }
-          [data-pangea-assistant-process-head] { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: none; font-size: 13px; }
-          [data-pangea-assistant-process-status] { color: #68707c; font-size: 11px; }
+          [data-pangea-assistant-process-head] { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: none; font-size: 16px; }
+          [data-pangea-assistant-process-status] { color: #68707c; font-size: 16px; }
           [data-pangea-assistant-process-status="failed"], [data-pangea-assistant-process-status="interrupted"] { color: var(--pangea-red); }
-          [data-pangea-assistant-process-error] { flex: none; margin-top: 8px; color: var(--pangea-red); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
-          [data-pangea-assistant-process-output] { flex: 1; min-height: 48px; overflow: auto; margin: 8px 0 0; padding: 10px; border: 1px solid #e1e4e8; border-radius: 7px; color: #34383f; background: #fff; font: 11px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-          [data-pangea-assistant-process-events] { flex: none; max-height: 150px; overflow: auto; margin-top: 8px; color: #68707c; font-size: 11px; line-height: 18px; }
+          [data-pangea-assistant-process-error] { flex: none; margin-top: 8px; color: var(--pangea-red); font-size: 16px; line-height: 26px; overflow-wrap: anywhere; }
+          [data-pangea-assistant-process-output] { flex: 1; min-height: 48px; overflow: auto; margin: 8px 0 0; padding: 10px; border: 1px solid #e1e4e8; border-radius: 7px; color: #34383f; background: #fff; font: 16px/1.75 "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; }
+          [data-pangea-assistant-process-events] { flex: none; max-height: 150px; overflow: auto; margin-top: 8px; color: #68707c; font-size: 16px; line-height: 26px; }
           [data-pangea-assistant-process-events] summary { cursor: pointer; color: #4d5560; }
         }
 
@@ -637,6 +640,10 @@ window.__ModuleLoader__.load({
         h('p', { 'data-pangea-settings-note': true }, '支持签名完整 ZIP 和与当前版本严格匹配的增量补丁 ZIP；请选择原始压缩包，不要提前解压。'))
     }
 
+    function chinesePhase(value) {
+      return { PREPARING: '准备中', PLANNING: '规划中', ANALYZING: '分析中', REVIEWING: '检查分析结果', REVIEW: '检查分析结果', INDEPENDENT_REVIEW: '独立检查', COMPARISON_REVIEW: '对照检查', TARGETED_CLOSURE: '完善结果', COMPLETED: '已完成', COMPLETE: '已完成', FAILED: '需要处理', STOPPED: '已停止', INTERRUPTED: '已中断', PENDING: '等待开始', QUEUED: '等待处理', RUNNING: '运行中', FINALIZING: '保存结果' }[String(value ?? '').toUpperCase()] ?? value
+    }
+
     function AssistantHeader({ context }) {
       const percent = Number.isFinite(context?.percent) ? Math.max(0, Math.min(100, context.percent)) : undefined
       const conversations = Array.isArray(context?.conversations) ? context.conversations : []
@@ -645,8 +652,8 @@ window.__ModuleLoader__.load({
         h('div', { 'data-pangea-assistant-card': true },
           h('span', { 'data-pangea-assistant-icon': true }, assistantGlyph()),
           h('span', { style: { minWidth: 0 } },
-            h('span', { 'data-pangea-assistant-name': true, style: { display: 'block' }, title: context?.runId }, context?.title ?? '选择一个 PANGEA Run'),
-            h('span', { 'data-pangea-assistant-meta': true, style: { display: 'block' } }, context?.phase ? `阶段：${context.phase}` : '对话将使用当前工作区上下文'),
+            h('span', { 'data-pangea-assistant-name': true, style: { display: 'block' }, title: context?.runId }, context?.title ?? '选择一个分析任务'),
+            h('span', { 'data-pangea-assistant-meta': true, style: { display: 'block' } }, context?.phase ? `阶段：${chinesePhase(context.phase)}` : '对话将使用当前工作区上下文'),
             h('span', { 'data-pangea-assistant-progress': true, style: { display: 'block' } }, context?.activeConversationKind === 'architecture' ? '画图状态与主分析独立' : percent === undefined ? '等待任务上下文' : `进度：${percent}%`)),
           lineIcon([h('path', { key: 'a', d: 'm8 10 4 4 4-4' })], 18, 1.7)),
         h('div', { 'data-pangea-assistant-actions': true },
@@ -707,9 +714,9 @@ window.__ModuleLoader__.load({
         : '等待 Agent 产生可显示的过程输出…'
       const status = process.status ?? 'preparing'
       const statusLabel = {
-        starting: '正在启动', queued: '排队中', running: context.activeConversationKind === 'architecture' ? '生成中' : '分析中', stopping: '正在停止',
+        preparing: '准备中', pending: '等待开始', finalizing: '保存结果', starting: '正在启动', queued: '排队中', running: context.activeConversationKind === 'architecture' ? '生成中' : '分析中', stopping: '正在停止',
         completed: '已完成', failed: '失败', killed: '已停止', stopped: '已停止', interrupted: '已中断',
-      }[status] ?? status
+      }[status] ?? chinesePhase(status)
       return h('section', { 'data-pangea-assistant-process': true, 'aria-label': '当前 Run 分析过程' },
         h('div', { 'data-pangea-assistant-process-head': true },
           h('strong', null, context.activeConversationKind === 'architecture' ? '画图过程' : '分析过程'), h('span', { 'data-pangea-assistant-process-status': status }, statusLabel)),
@@ -719,8 +726,8 @@ window.__ModuleLoader__.load({
         h('pre', { 'data-pangea-assistant-process-output': true }, output),
         Array.isArray(process.events) && process.events.length
           ? h('details', { 'data-pangea-assistant-process-events': true },
-            h('summary', null, `生命周期 · ${process.events.length} 条`),
-            process.events.map((event, index) => h('div', { key: `${event.at ?? index}:${event.stage ?? index}` }, event.label ?? event.stage ?? '事件')))
+            h('summary', null, `运行记录 · ${process.events.length} 条`),
+            process.events.map((event, index) => h('div', { key: `${event.at ?? index}:${event.stage ?? index}` }, event.label ?? chinesePhase(event.stage) ?? '事件')))
           : null)
     }
 

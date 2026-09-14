@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
       }
       if (Array.isArray(body)) return h('ul', null, body.map((item, i) => h('li', { key: i }, renderReadableBody(item))))
       if (body && typeof body === 'object') {
-        const labels = { title: '标题', content: '说明', description: '说明', summary: '总结', gap: '缺口', reason: '原因', scope: '分析范围', source_evidence: '源码依据', what_is_known: '已确认事实', missing_to_resolve: '待补条件', recommended_action: '建议', preconditions: '前置条件', steps: '操作步骤', action: '操作', expected: '预期', cleanup: '清理恢复' }
+        const labels = { candidate_id: '条目编号', asset_id: '资产编号', asset_title: '资产名称', item_id: '原文条目编号', item_type: '资料类型', topic: '主题', inputs: '输入', outputs: '输出', constraints: '适用条件与约束', acceptance_criteria: '验收标准', modules: '适用模块', interfaces: '接口', states: '状态', main_flows: '主要场景', branch_flows: '分支场景', error_flows: '异常场景', recovery_flows: '恢复场景', symptom: '问题表现', trigger: '触发条件', root_cause: '问题原因', propagation: '影响过程', defect_mechanism: '问题机理', exclusion_conditions: '排除条件', applicable_modules: '适用模块', key_facts: '关键事实', expected_results: '预期结果', related_problems: '相关问题', source_references: '原文出处', location: '位置', path: '文件', title: '标题', content: '说明', description: '说明', summary: '总结', gap: '缺口', reason: '原因', scope: '分析范围', source_evidence: '源码依据', what_is_known: '已确认事实', missing_to_resolve: '待补条件', recommended_action: '建议', preconditions: '前置条件', steps: '操作步骤', action: '操作', expected: '预期', cleanup: '清理恢复' }
         return h('dl', null, Object.entries(body).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, renderReadableBody(value)))))
       }
       const lines = String(body ?? '').split(/\r?\n/), nodes = []
@@ -1135,6 +1135,18 @@ window.__ModuleLoader__.load({
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
       const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', context_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
+      React.useEffect(() => {
+        if (!cwd || screen.type !== 'create') return
+        try {
+          const saved = JSON.parse(window.localStorage?.getItem(`pangea-execution:${cwd}`) ?? '{}')
+          if (saved.provider_id !== undefined) setCreateForm(form => ({ ...form, provider_id: saved.provider_id, agent_model: saved.agent_model ?? '', model_route_key: saved.model_route ? modelSelectionKey(saved.model_route) : '' }))
+        } catch {}
+      }, [cwd, screen.type])
+      React.useEffect(() => {
+        if (!cwd || screen.type !== 'create' || (!createForm.provider_id && !createForm.model_route_key)) return
+        try { window.localStorage?.setItem(`pangea-execution:${cwd}`, JSON.stringify({ provider_id: createForm.provider_id, agent_model: createForm.agent_model, model_route: modelRouteFromKey(createForm.model_route_key) })) } catch {}
+      }, [cwd, screen.type, createForm.provider_id, createForm.agent_model, createForm.model_route_key])
+
       const [assetCatalog, setAssetCatalog] = React.useState(null)
       const [assetCatalogLoading, setAssetCatalogLoading] = React.useState(false)
       const [assetCatalogError, setAssetCatalogError] = React.useState('')
@@ -1375,6 +1387,10 @@ window.__ModuleLoader__.load({
         if (options.length === 0) return
         setCreateForm(value => {
           if (options.some(item => item.id === value.provider_id)) return value
+          try {
+            const selection = JSON.parse(window.localStorage?.getItem(`pangea-execution:${cwd}`) ?? '{}')
+            if (selection.provider_id === '') return value
+          } catch {}
           let remembered = ''
           try { remembered = window.localStorage?.getItem(ACP_PROVIDER_STORAGE_KEY) ?? '' } catch { /* storage unavailable */ }
           const selected = options.some(item => item.id === remembered) ? remembered : options.length === 1 ? options[0].id : ''
@@ -2259,7 +2275,7 @@ window.__ModuleLoader__.load({
             } }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
               h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
-              h('div', { style: styles.subline }, selectedTask
+              h('div', { style: screen.type === 'create' ? { ...styles.subline, fontSize: 16 } : styles.subline }, selectedTask
                 ? selectedTask.title
                 : 'PANGEA 测试平台'))),
           h('div', { style: styles.chips },
@@ -2427,7 +2443,7 @@ window.__ModuleLoader__.load({
         const selectedAssets = createForm.asset_ids.map(assetId => assetLabels[assetId] ?? assetItems.find(item => item.asset_id === assetId)
           ?? { asset_id: assetId, title: assetId })
         const assetPagination = assetCatalog?.pagination
-        const assetTypeLabels = { requirement: '需求', design: '设计', historical_defect: '历史缺陷', reference: '参考资料', coverage: 'Coverage', test_case_example: '用例示例' }
+        const assetTypeLabels = { requirement: '需求', design: '设计', historical_defect: '历史缺陷', reference: '参考资料', coverage: 'Coverage', test_case_example: '示例用例' }
         const formField = (label, key, placeholder) => h('label', null,
           h('div', { style: styles.label }, label),
           h('input', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm[key], placeholder, onChange: event => setCreateForm(value => ({ ...value, [key]: event.target.value })) }))
@@ -2453,30 +2469,16 @@ window.__ModuleLoader__.load({
               onChange: event => setCreateForm(value => ({ ...value, model_route_key: modelSelectionKey({ ...selectedModel, reasoning_effort: event.target.value }) })),
             }, h('option', { value: '' }, '默认'), selectedModelOption.reasoning.efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name ?? effort.id)))) : null,
         ) : null
-        return h(React.Fragment, null,
+        return h('section', { className: 'pangea-create-form', 'aria-label': '新建分析' },
+          h('style', null, '.pangea-create-form{max-width:1040px;margin:0 auto;font-size:16px}.pangea-create-form label{display:block;min-width:0}.pangea-create-form label>div{font-size:16px!important;font-weight:600!important;color:#303843!important;margin-bottom:10px}.pangea-create-form input,.pangea-create-form select,.pangea-create-form textarea,.pangea-create-form button{font-size:16px!important;min-height:44px;line-height:1.6}.pangea-create-form textarea{min-height:110px}.pangea-create-form p,.pangea-create-form span{font-size:16px!important;line-height:1.65}.pangea-create-form .pangea-input-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px!important}.pangea-form-section{grid-column:1/-1;font-size:21px;margin:28px 0 0;padding-top:24px;border-top:1px solid #e0e4e9}.pangea-form-section:first-child{border:0;padding:0;margin-top:12px}@media(max-width:760px){.pangea-create-form .pangea-input-grid{grid-template-columns:1fr}}'),
           renderCompatibility(),
-            h('div', { style: { ...styles.card, ...styles.compatibility } },
-              h('div', { style: styles.itemTitle }, '分析输入'),
-            h('div', { style: styles.itemMeta }, '选择仓库、源码范围、资产和执行 Agent。Run 创建后将只读取这里冻结的源码副本。'),
-            h('div', { style: styles.formGrid },
+            h('div', { style: { ...styles.card, padding: '28px 32px' } },
+              h('h1', { style: { fontSize: 28, margin: '0 0 8px' } }, '新建分析'),
+            h('p', { style: { color: '#596273', marginBottom: 24 } }, '确定分析目标，选择资料与 Agent。'),
+            h('div', { className: 'pangea-input-grid', style: styles.formGrid },
+              h('h2', { className: 'pangea-form-section' }, '01 · 分析目标'),
               h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
                 h('option', { value: '' }, repositories.length ? '选择仓库' : '没有可用仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository)))),
-              h('label', null, h('div', { style: styles.label }, '执行方式'), h('select', {
-                style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.provider_id,
-                onChange: event => {
-                  const providerId = event.target.value
-                  setCreateForm(value => ({
-                    ...value,
-                    provider_id: providerId,
-                    agent_model: '',
-                    model_route_key: providerId ? '' : value.model_route_key,
-                  }))
-                  try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ }
-                },
-              }, h('option', { value: '' }, '内置 API Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: item.registered !== true }, `${item.label}${item.registered === true ? '' : ' · 未加载'}`))))),
-              internalModelFields,
-              createForm.provider_id ? h(AgentModelSelect, { key: `${cwd}/${createForm.provider_id}`, providerId: createForm.provider_id, cwd, visible, value: createForm.agent_model, onChange: agentModel => setCreateForm(form => ({ ...form, agent_model: agentModel })) }) : null,
-              semantic ? h('div', { style: styles.itemMeta }, '当前引擎支持模块分析 / 深度型；覆盖率材料可作为分析资产加入。') : null,
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               h('label', null, h('div', { style: styles.label }, '分析场景'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.scenario,
@@ -2499,31 +2501,32 @@ window.__ModuleLoader__.load({
                     try { const selected = await window.dshDesktopDirectoryPicker.pick({ purpose: 'coverage' }); if (selected) setCreateForm(value => ({ ...value, coverage_path: selected })) }
                     catch (error) { showActionNotice(error.message, true) }
                   } }, '选择覆盖率文件') : null,
-                  h('div', { style: styles.itemMeta }, '支持中文函数名、代码路径、覆盖次数等表头；直接导入会自动解析，无需先进入资产管理。'))
+                  h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '支持中文函数名、代码路径、覆盖次数等表头；直接导入会自动解析，无需先进入资产管理。'))
                 : createForm.coverage_kind === 'query' ? h(React.Fragment, null,
                   h('div', { style: styles.formGrid }, formField('产品', 'coverage_product', '产品名'), formField('C 版本', 'coverage_version', '精确版本，保留空格'), formField('模块', 'coverage_module', '模块名'), formField('B 版本（可选）', 'coverage_b_version', '可不填')),
-                  h('div', { style: styles.itemMeta }, workbench?.capabilities?.coverage_query_skill?.available ? '本地覆盖率查询 Skill 已就绪；产品与版本分开传入，平台名称由查询 Skill 匹配。' : '请放入 <PANGEA 解压目录>/local-skills/coverage-query，然后刷新重新检测。')) : null,
-                h('div', { style: styles.itemMeta }, '代码范围可留空，由 Agent 从覆盖输入定位所需源码。')) : null,
+                  h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, workbench?.capabilities?.coverage_query_skill?.available ? '本地覆盖率查询 Skill 已就绪；产品与版本分开传入，平台名称由查询 Skill 匹配。' : '请放入 <PANGEA 解压目录>/local-skills/coverage-query，然后刷新重新检测。')) : null,
+                h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '代码范围可留空，由 Agent 从覆盖输入定位所需源码。')) : null,
               h('label', null, h('div', { style: styles.label }, '分析模式'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.mode,
                 onChange: event => setCreateForm(value => ({ ...value, mode: event.target.value })),
-              }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '深度型（含独立复核）'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型（快速交付）'))),
+              }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '深度分析'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型（快速交付）'))),
               h('label', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '源码冻结范围'),
                 h('textarea', { 'aria-label': '源码冻结范围', style: { ...styles.textarea, marginTop: 5, minHeight: 72 }, value: createForm.source_scope_text, placeholder: '. 或填写相对仓库根目录的文件/目录，每行一个', onChange: event => setCreateForm(value => ({ ...value, source_scope_text: event.target.value })) }),
-                h('div', { style: styles.itemMeta }, '使用 . 表示整个仓库；创建后原始仓库的后续修改不会影响本次 Run。')),
+                h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '填写文件或目录；使用 . 选择整个仓库。')),
               workbench?.capabilities?.workflow_versions?.includes('source-first-v1') ? h('label', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '参考源码范围（可选）'),
                 h('textarea', { 'aria-label': '参考源码范围', style: { ...styles.textarea, marginTop: 5, minHeight: 60 }, value: createForm.context_scope_text ?? '', placeholder: '相关实现、文档或测试的相对文件路径，每行一个', onChange: event => setCreateForm(value => ({ ...value, context_scope_text: event.target.value })) }),
-                h('div', { style: styles.itemMeta }, '随本次分析冻结，供 Agent 核对上下文；分析目标使用上方范围。')) : null,
+                h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '填写辅助理解所需的文件。')) : null,
+              h('h2', { className: 'pangea-form-section' }, '02 · 分析资料'),
               h('div', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '分析资产'),
-                h('div', { style: styles.itemMeta }, '选择本次需要的需求、设计、历史缺陷或参考资料。用例示例仅作为格式与粒度参考。'),
+                h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '选择需求、设计、历史缺陷、参考资料或示例用例，将其中的条件与问题带入本次分析。'),
                 h('div', { style: { ...styles.chips, marginTop: 7 } }, selectedAssets.length
                   ? selectedAssets.map(item => h('button', { key: item.asset_id, type: 'button', style: styles.badge,
                     'aria-label': `移除资产 ${item.title}`, onClick: () => toggleCreateAsset(item.asset_id),
                   }, `${assetTypeLabels[item.asset_type] ?? '资产'} · ${item.title} ×`))
-                  : h('span', { style: styles.itemMeta }, '未选择资产（可直接分析源码）')),
+                  : h('span', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '未选择资产（可直接分析源码）')),
                 h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => setAssetSelectorOpen(value => !value) }, assetSelectorOpen ? '收起资产库' : '从资产库选择'),
                 assetSelectorOpen ? h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } },
                   h('form', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 }, onSubmit: event => { event.preventDefault(); setAssetPage(1); setAssetQuery(assetQueryDraft.trim()) } },
@@ -2534,17 +2537,33 @@ window.__ModuleLoader__.load({
                       h('option', { value: 'all' }, '全部可用资产'), h('option', { value: 'repository', disabled: !createForm.repository }, '仅关联当前仓库')),
                     h('button', { type: 'submit', style: styles.button }, '搜索'),
                     h('button', { type: 'button', style: styles.button, onClick: () => setAssetRefresh(value => value + 1) }, '刷新资产')),
-                  assetCatalogLoading ? h('div', { style: styles.itemMeta }, '正在读取可用资产…') : null,
+                  assetCatalogLoading ? h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '正在读取可用资产…') : null,
                   assetCatalogError ? h('div', { style: styles.error, role: 'alert' }, assetCatalogError) : null,
-                  !assetCatalogLoading && !assetCatalogError && assetCatalog && assetItems.length === 0 ? h('div', { style: styles.itemMeta },
+                  !assetCatalogLoading && !assetCatalogError && assetCatalog && assetItems.length === 0 ? h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } },
                     assetQuery || assetType || assetRepositoryOnly ? '当前筛选没有结果，可切换为全部可用资产或清除搜索条件。' : `暂无可用资产；待审核 ${assetCatalog.summary?.review ?? 0} 个。可在资产管理中导入或审核，然后返回刷新。`) : null,
                   assetItems.map(item => h('label', { key: item.asset_id, style: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12))' } },
                     h('input', { type: 'checkbox', checked: createForm.asset_ids.includes(item.asset_id), onChange: () => toggleCreateAsset(item.asset_id) }),
                     h('span', { style: { minWidth: 0 } }, h('span', { style: styles.itemTitle }, item.title), h('span', { style: { ...styles.itemMeta, display: 'block' } }, `${assetTypeLabels[item.asset_type] ?? item.asset_type} · 修订 ${item.revision ?? 1} · ${(item.repository_ids ?? []).join('、') || '未限定仓库'} · ${item.source_name ?? item.source_path}`)))),
                   assetPagination ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
-                    h('span', { style: styles.itemMeta }, `第 ${assetPagination.page} / ${assetPagination.total_pages} 页 · 共 ${assetPagination.total} 个 · 已选 ${createForm.asset_ids.length} 个`),
+                    h('span', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, `第 ${assetPagination.page} / ${assetPagination.total_pages} 页 · 共 ${assetPagination.total} 个 · 已选 ${createForm.asset_ids.length} 个`),
                     h('button', { type: 'button', style: styles.button, disabled: assetCatalogLoading || assetPage <= 1, onClick: () => setAssetPage(value => value - 1) }, '上一页'),
                     h('button', { type: 'button', style: styles.button, disabled: assetCatalogLoading || assetPage >= assetPagination.total_pages, onClick: () => setAssetPage(value => value + 1) }, '下一页')) : null) : null),
+              h('h2', { className: 'pangea-form-section' }, '03 · Agent 与模型'),
+              h('label', null, h('div', { style: styles.label }, '执行方式'), h('select', {
+                style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.provider_id,
+                onChange: event => {
+                  const providerId = event.target.value
+                  setCreateForm(value => ({
+                    ...value,
+                    provider_id: providerId,
+                    agent_model: '',
+                    model_route_key: providerId ? '' : value.model_route_key,
+                  }))
+                  try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ }
+                },
+              }, h('option', { value: '' }, '内置 API Agent'), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: item.registered !== true }, `${item.label}${item.registered === true ? '' : ' · 未加载'}`))))),
+              internalModelFields,
+              createForm.provider_id ? h(AgentModelSelect, { key: `${cwd}/${createForm.provider_id}`, providerId: createForm.provider_id, cwd, visible, value: createForm.agent_model, onChange: agentModel => setCreateForm(form => ({ ...form, agent_model: agentModel })) }) : null,
               ),
             !createForm.provider_id && modelRouting.status === 'error' ? h('div', { style: { ...styles.error, marginTop: 8 }, role: 'alert' }, `模型目录读取失败：${modelRouting.error ?? '未知错误'}`) : null,
             modelRouting.status === 'ok' && modelOptions.length === 0 && !createForm.provider_id ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, '没有可用的内置 API 模型，请先到“设置”配置模型与 API。', h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })) }, '打开模型设置')) : null,
@@ -3085,9 +3104,10 @@ window.__ModuleLoader__.load({
           h('details', { style: styles.card }, h('summary', null, `输入材料 · ${current.input_materials?.length ?? 0} 份`),
             selectedTask?.source_task_id ? field('修正输入前的任务', selectedTask.source_task_id) : null,
             (current.input_materials ?? []).map(material => h('div', { key: material.asset_id, style: styles.card },
-              h('div', { style: styles.itemTitle }, material.title), field('消费状态', material.consumption_state),
-              field('资产修订 / 解析版本', `${material.revision} / ${material.parser_version || '旧版'}`),
-              chip('查看冻结文本', () => openSidebarFile(material.frozen_normalized_text_path)),
+              h('div', { style: styles.itemTitle }, material.title), field('使用情况', material.consumption_state),
+              material.revision ? field('资产版本', material.revision) : null,
+              material.frozen_normalized_text_path ? chip('查看原文', () => openSidebarFile(material.frozen_normalized_text_path)) : null,
+              material.structured_items?.length ? h('div', { style: { fontSize: 16, lineHeight: 1.7 } }, material.structured_items.map(item => h('details', { key: item.candidate_id, style: { marginTop: 16 } }, h('summary', { style: { fontSize: 18, fontWeight: 650 } }, item.title ?? item.topic ?? item.item_id), renderReadableBody(item)))) : null,
               (material.attachments ?? []).map(attachment => chip(attachment.location, () => openSidebarFile(attachment.attachment_path))),
               field('读取范围', JSON.stringify(material.consumption?.consumed_ranges ?? [])),
               field('关联分析条目', (material.linked_ids ?? []).join('、')),

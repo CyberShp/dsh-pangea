@@ -81,3 +81,15 @@ test('diagram API captures Job output, isolates missing Jobs and preserves valid
   assert.match(body.views.find(v => v.view_id === 'live').output, /Reading implementation/)
   assert.match(JSON.parse(await readFile(path.join(views, 'live/manifest.json'), 'utf8')).output, /Reading implementation/)
 })
+
+test('frozen asset items expose conditions and problems without borrowing the live asset catalog', async t => {
+  const root = await fixture(t)
+  await mkdir(path.join(root, 'inputs'), { recursive: true })
+  const item = { asset_id: 'asset-1', asset_title: '重连示例', candidate_id: 'asset-1:E1', item_id: 'E1', item_type: 'test_case_example', preconditions: ['连接已建立'], related_problems: ['重连超时'], expected_results: ['恢复连接'] }
+  await writeFile(path.join(root, 'inputs/asset-items.json'), JSON.stringify({ 'asset-1:E1': item }))
+  const materials = await readInputMaterials(root)
+  assert.equal(materials.length, 1)
+  assert.equal(materials[0].title, '重连示例')
+  assert.deepEqual(materials[0].structured_items, [item])
+  assert.deepEqual(materials[0].linked_ids, [])
+})
