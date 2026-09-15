@@ -61,10 +61,15 @@ export function sourceFirstProjection(artifacts) {
         linked_test_case_ids: resolve(row, [...list(row.linked_test_case_ids), ...list(row.related_case_ids), ...list(row.case_ids), ...list(row.source_record.relates_to)], ['case_id', 'test_case_id'], ['test_case', 'test_case_group']), evidence: [],
       })
     } else if (['test_case', 'test_case_group'].includes(kind)) {
+      const pairedSteps = list(row.steps ?? row.test_steps).map(step =>
+        step && typeof step === 'object'
+          ? { action: plain(step.action ?? step.step), expected: plain(step.expected ?? step.expected_result) }
+          : { action: plain(step), expected: '' })
       result.test_cases.push({ ...row, test_case_id: row.projection_id,
         case_type: plain(row.case_type ?? row.test_level),
         linked_flow_ids: resolve(row, row.flow_refs, ['flow_id'], ['flow']), status: plain(row.status ?? row.execution_status) || '未标注',
-        preconditions: strings(row.preconditions), steps: list(row.steps).map(step => typeof step === 'object' && step ? `${plain(step.action ?? step)}${step.expected ?? step.expected_result ? ` → ${plain(step.expected ?? step.expected_result)}` : ''}` : plain(step)),
+        preconditions: strings(row.preconditions ?? row.precondition), step_pairs: pairedSteps,
+        steps: pairedSteps.map(step => `${step.action || '未提供操作'}${step.expected ? ` → ${step.expected}` : ''}`),
         variants: list(row.variants).map(value => value && typeof value === 'object' ? { ...value, input: plain(value.input), expected: plain(value.expected) } : { input: plain(value), expected: '' }),
         expected_results: strings(row.expected_results), observability: strings(row.observability ?? row.external_observations), cleanup: strings(row.cleanup),
         linked_risk_ids: resolve(row, [...list(row.linked_risk_ids), ...list(row.risk_refs), ...list(row.source_record.relates_to)], ['risk_id'], ['risk']), evidence: [],
@@ -72,7 +77,7 @@ export function sourceFirstProjection(artifacts) {
     } else if (kind === 'flow') {
       result.business_flows.push({ ...row, flow_id: row.projection_id,
         mainline_steps: list(row.nodes).map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind })),
-        branches: list(row.paths).map(p => ({ branch_id: p.path_id, from_step_id: p.node_ids?.[0], to_step_id: p.node_ids?.at(-1), condition: plain(p.condition), processing: plain(p.explanation), linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })), description: plain(row.description), entry: plain(row.entry), steps: strings(row.steps), evidence: [],
+        branches: list(row.paths).map(p => ({ branch_id: p.path_id, from_step_id: p.node_ids?.[0], to_step_id: p.node_ids?.at(-1), condition: plain(p.condition), processing: plain(p.explanation), linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })), description: plain(row.description), entry: plain(row.entry ?? row.trigger), steps: strings(row.steps), evidence: [],
         paths: list(row.paths).map(p => ({ ...p, linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })),
       })
     } else if (!['evidence', 'blackbox_translation'].includes(kind)) result.notes.push(row)

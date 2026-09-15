@@ -266,7 +266,7 @@ window.__ModuleLoader__.load({
       }, [visible, cwd, load])
 
       const active = Boolean(
-        state?.assets?.some(asset => ['preparing', 'queued', 'running', 'finalizing'].includes(asset.extraction_job?.status))
+        state?.assets?.some(asset => ['preparing', 'queued', 'running', 'repairing', 'finalizing'].includes(asset.extraction_job?.status))
         || ['queued', 'running', 'finalizing'].includes(state?.methodologies?.generation_job?.status)
       )
       React.useEffect(() => {
@@ -280,7 +280,7 @@ window.__ModuleLoader__.load({
         try {
           if (action === 'extract' || action === 'import') {
             const asset = (state?.assets ?? []).find(item => item.asset_id === payload.asset_id)
-            if ((asset?.asset_type ?? payload.asset_type) !== 'coverage') {
+            if ((asset?.asset_type ?? payload.asset_type) !== 'coverage' && payload.provider_id === undefined) {
               if (modelLoading || modelError) throw new Error(modelError || '正在读取可用模型，请稍候')
               if (!selectedModel && (!executor || modelOptions.length)) throw new Error('请在右侧 AI 助手中选择模型')
               payload = { ...payload, provider_id: executor,
@@ -477,7 +477,7 @@ window.__ModuleLoader__.load({
       }
       const assistantAsset = importOpen ? null : activeAsset ?? state?.assets?.find(item => item.extraction_job)
       const job = assistantAsset?.extraction_job
-      const jobLabel = { preparing: '准备中', queued: '等待处理', running: '正在提取', finalizing: '保存结果', completed: '已完成', failed: '处理失败', interrupted: '处理已中断' }
+      const jobLabel = { preparing: '准备中', queued: '等待处理', running: '正在提取', finalizing: '保存结果', repairing: '修正类型', needs_attention: '需要处理', completed: '已完成', failed: '处理失败', interrupted: '处理已中断' }
       const modelLabel = job?.model ? typeof job.model === 'string' ? job.model : `${job.model.provider} / ${job.model.model}` : ''
       const renderJob = value => h(React.Fragment, null,
         value.error ? h('p', { role: 'alert', style: styles.error }, value.error) : null,
@@ -499,7 +499,8 @@ window.__ModuleLoader__.load({
           h('p', { style: { fontWeight: 650 } }, jobLabel[job.status] ?? '等待处理'),
           h('p', { style: styles.meta }, `${job.provider_id ? executorOptions.find(item => item.id === job.provider_id)?.label ?? job.provider_id : modelLabel ? '内置 API' : '文件解析'}${modelLabel ? ` · ${modelLabel}` : ''}`),
           renderJob(job),
-          ['failed', 'interrupted'].includes(job.status) ? h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, disabled: busy, onClick: () => { void act('extract', { asset_id: assistantAsset.asset_id, restart: true }) } }, '重新处理资产') : null,
+          job.status === 'needs_attention' ? h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => { void act('extract', { asset_id: assistantAsset.asset_id, provider_id: job.provider_id, ...(job.provider_id ? { agent_model: job.model } : { model_route: job.model }) }) } }, '原会话继续修正') : null,
+          ['failed', 'interrupted', 'needs_attention'].includes(job.status) ? h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, disabled: busy, onClick: () => { void act('extract', { asset_id: assistantAsset.asset_id, restart: true }) } }, '重新处理资产') : null,
           (job.history ?? []).map((past, index) => h('details', { key: index, style: { marginTop: 20 } }, h('summary', { style: styles.itemTitle }, `历史处理 · ${assetTime(past.started_at)}`), renderJob(past))))
           : h('p', { style: { lineHeight: 1.7 } }, '选择文件后点击“导入并处理”。处理过程和结果会保存在这里。'))
       return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 资产管理' },
@@ -587,11 +588,11 @@ window.__ModuleLoader__.load({
                   h('div', null, h('div', { style: styles.itemTitle }, asset.title), h('div', { style: styles.meta }, `${asset.source_name ?? asset.source_path} · ${(asset.repository_ids ?? []).join('、') || '未限定仓库'}`))),
                 h('div', { style: { ...styles.wrap, justifyContent: 'flex-end' } },
                   h('span', { style: styles.chip }, TYPES.find(([value]) => value === asset.asset_type)?.[1] ?? asset.asset_type),
-                  h('span', { style: styles.chip }, asset.status !== 'archived' && ['failed', 'interrupted'].includes(asset.extraction_job?.status) ? jobLabel[asset.extraction_job.status] : STATUS[asset.status] ?? asset.status),
+                  h('span', { style: styles.chip }, asset.status !== 'archived' && ['failed', 'interrupted', 'needs_attention'].includes(asset.extraction_job?.status) ? jobLabel[asset.extraction_job.status] : STATUS[asset.status] ?? asset.status),
                   !isExpanded ? h('button', { type: 'button', style: styles.button, onClick: () => { void toggle(asset.asset_id) } }, asset.status === 'awaiting_review' ? '查看并审核' : '查看详情') : null)),
               h('div', { style: styles.meta }, `修订 ${asset.revision ?? 1} · ${asset.asset_type === 'coverage' ? `覆盖记录 ${asset.structured_item_count ?? 0}` : `提取条目 ${asset.structured_item_count ?? 0}`} · 更新于 ${assetTime(asset.updated_at)}（UTC+8）`),
               isExpanded ? h('div', { style: { ...styles.wrap, marginTop: 8 } },
-                (['imported', 'available', 'no_items', 'rejected', 'failed'].includes(asset.status) || ['failed', 'interrupted'].includes(asset.extraction_job?.status))
+                (['imported', 'available', 'no_items', 'rejected', 'failed'].includes(asset.status) || ['failed', 'interrupted', 'needs_attention'].includes(asset.extraction_job?.status))
                   ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('extract', { asset_id: asset.asset_id, restart: true }) } }, '重新处理') : null,
                 asset.status === 'awaiting_review' ? h(React.Fragment, null,
                   h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'approve' }) } }, '审核通过'),

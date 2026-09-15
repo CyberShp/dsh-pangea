@@ -719,14 +719,22 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
     // Every source-first action starts with a pending shell. Host bind updates
     // progress first; the first result operation seals the shell's task ID.
     // Only an untouched shell in a live, unaccepted action may wait here.
+    // Older Graph versions copied the accepted analysis into a closure seed
+    // before its original worker first accessed it. It is not a published result.
+    const closureSeed = action.stage === 'targeted_closure'
+      && action.action === 'continue_agent' && Boolean(action.task_id)
+      && task.task_type === 'source_first_closure'
+      && Number.isInteger(task.base_revision) && result?.revision === task.base_revision
+      && result?.completion === null
+      && result?.receipts && Object.keys(result.receipts).length === 0
     const awaitingBinding = result?.format_version === 'pangea-notes-v1'
       && progress.lifecycle_status === 'running'
       && ['pending', 'dispatched'].includes(action.status)
       && result.binding?.run_id === progress.run_id
       && result.binding?.action_id === actionId
       && result.binding?.task_id === 'pending'
-      && result.revision === 0
-      && Array.isArray(result.records) && result.records.length === 0
+      && Array.isArray(result.records)
+      && ((result.revision === 0 && result.records.length === 0) || closureSeed)
       && (result.completion === null || result.completion?.complete === false)
       && !Object.hasOwn(progress.accepted_revisions ?? {}, actionId)
     if (awaitingBinding) result = null

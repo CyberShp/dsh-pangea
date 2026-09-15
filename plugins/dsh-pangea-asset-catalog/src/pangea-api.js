@@ -145,7 +145,7 @@ export class AssetActionRuntime {
     if (!job) {
       const saved = this.saved(dataRoot, assetId)
       if (!saved) return null
-      if (['preparing', 'queued', 'running', 'finalizing'].includes(saved.status)) return { ...saved, status: 'interrupted', error: '应用已重启，处理过程已保存。可以重新处理此资产。', session_available: false }
+      if (['preparing', 'queued', 'running', 'repairing', 'finalizing'].includes(saved.status)) return { ...saved, status: 'interrupted', error: '应用已重启，处理过程已保存。可以重新处理此资产。', session_available: false }
       return { ...saved, session_available: false }
     }
     this.capture(job)
@@ -162,7 +162,7 @@ export class AssetActionRuntime {
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
     const key = `${path.resolve(resolvedDataRoot)}\n${assetId}`
     const active = this.jobs.get(key)
-    if (active && ['preparing', 'queued', 'running', 'finalizing'].includes(active.status)) {
+    if (active && ['preparing', 'queued', 'running', 'repairing', 'finalizing'].includes(active.status)) {
       return { completed: false, reused: true, session_id: active.ownerSessionId ?? active.sessionId }
     }
     const previous = this.job(resolvedDataRoot, assetId)
@@ -215,10 +215,13 @@ export class AssetActionRuntime {
         apiValue(await this.api.sessions.rename(rpc({ sessionId: job.ownerSessionId, title: `资产提取 · ${prepared.asset.title ?? assetId}` })))
         if (!providerId) { job.sessionId = job.ownerSessionId; await this.adapter(job, 'bind') }
       }
+      job.repairCount = 0
       const prompt = [
         providerId ? '你是资产提取 worker，直接读取下面的 task JSON，按其 result_schema_path 提取 extracted_text_path 和 attachments 中的原文；不调用插件工具、不创建 Run、不派发子 Agent。保留原文出处，不臆造需求或缺陷。'
           : `读取 ${path.join(workspaceRoot(cwd), '.agents', 'pangea', 'asset-extraction-worker.md')} 并执行。`,
         `task_path: ${job.action.task_path}`,
+        `本次资产类型：${prepared.asset.asset_type}。每条 item_type 必须等于 task.asset_type；只提取该类型，不混合其他类型。`,
+        '先读取 task.extraction_instructions 中当前类型的冻结方法和 task.result_schema_path。原文不支持当前类型时返回空 items 并说明，不机械转换类型、不编造内容。',
         '用中文简要说明正在读取的资料、提取进度和处理结果。只读取此 task 的输入，在 task 指定 result_path 写完整提取 JSON。宿主负责提交，不要另建 action 或运行分析。',
         ...(job.repairReason ? [`修正同一结果后完成：${job.repairReason}`] : []),
       ].join('\n')
@@ -272,16 +275,36 @@ export class AssetActionRuntime {
     } finally { this.capture(job); clearInterval(job.timer); this.record(job, job.status === 'completed' ? '资产处理完成' : '资产处理未完成') }
   }
   async finish(job) {
-    if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
+    if (!job || ['completed', 'failed', 'needs_attention', 'finalizing'].includes(job.status)) return
     job.status = 'finalizing'
     try { await this.adapter(job, 'settle'); job.status = 'completed' }
-    catch (error) { job.status = 'failed'; job.error = error.message }
+    catch (error) {
+      const typeMismatch = error.message.includes('提取结果类型与资产类型不一致')
+      if (typeMismatch && !job.repairCount) {
+        job.repairCount = 1
+        job.status = 'repairing'
+        this.record(job, '条目类型不匹配，交回原会话修正一次')
+        const content = [{ type: 'text', text: `修正当前资产的同一结果文件，不新建任务、不丢弃有效内容。task_path: ${job.action.task_path}。读取 task.asset_type、extraction_instructions 和 result_schema_path。${error.message}` }]
+        try {
+          if (job.worker) {
+            const repaired = await job.worker.continuePrompt(content)
+            if (repaired.stopReason !== 'completed') throw new Error(`资产修正未完成：${repaired.stopReason}`)
+            await this.finish(job)
+          } else {
+            job.status = 'queued'
+            apiValue(await this.api.sessions.prompt(rpc({ sessionId: job.sessionId, mode: 'queue', content })))
+          }
+          return
+        } catch (repairError) { error = repairError }
+      }
+      job.status = typeMismatch ? 'needs_attention' : 'failed'; job.error = error.message
+    }
     job.completedAt = new Date().toISOString()
     this.capture(job); clearInterval(job.timer); this.record(job, job.status === 'completed' ? '提取结果已保存' : '提取结果需要处理')
   }
   handleAgentStatus(agent, status) {
     const job = this.sessions.get(agent?.session?.id)
-    if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
+    if (!job || ['completed', 'failed', 'needs_attention', 'repairing', 'finalizing'].includes(job.status)) return
     if (status === 'running') { job.status = 'running'; this.record(job, '模型正在处理资产') }
     if (status === 'idle' && job.status === 'running') void this.finish(job)
   }

@@ -95,3 +95,16 @@ test('notes use stable titles for JSON and punctuation while preserving original
   assert.deepEqual(value.notes.map(n => n.title), ['分析说明 · n', '待确认事项 · u', '业务范围'])
   assert.equal(value.notes[0].source_record.body, '{\n"gap": "missing"\n}')
 })
+
+
+test('existing unit aliases display paired operations without changing source bodies', () => {
+  const body = { title: 'legacy unit', precondition: ['ready'], test_steps: [{ step: 'connect', expected: 'success' }], expected_results: ['connected'] }
+  const view = sourceFirstProjection([{ stage: 'unit_analysis', status: 'accepted', task: { unit_id: 'u2' }, records: [{ record_id: 'r1', kind: 'test_case', body }] }])
+  const row = view.test_cases[0]
+  assert.deepEqual(row.preconditions, ['ready'])
+  assert.deepEqual(row.step_pairs, [{ action: 'connect', expected: 'success' }])
+  assert.deepEqual(row.steps, ['connect → success'])
+  assert.deepEqual(row.expected_results, ['connected'])
+  assert.equal(row.source_record.body, body)
+  assert.equal(body.steps, undefined)
+})

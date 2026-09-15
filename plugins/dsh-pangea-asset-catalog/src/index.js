@@ -111,7 +111,7 @@ export async function semanticAssetList({ cwd, dataRoot, options, runtime, runne
     items.push(...page.items)
     cursor = page.next_cursor
   } while (cursor !== null && cursor !== undefined)
-  const displayStatus = item => item.status !== 'archived' && ['failed', 'interrupted'].includes(runtime?.job(dataRoot, item.asset_id)?.status) ? 'failed' : item.status
+  const displayStatus = item => item.status !== 'archived' && ['failed', 'interrupted', 'needs_attention'].includes(runtime?.job(dataRoot, item.asset_id)?.status) ? 'failed' : item.status
   const filtered = items.filter(item => (options.status ? displayStatus(item) === options.status : item.status !== 'archived')
     && (!options.type || item.asset_type === options.type)
     && (!options.query || [item.asset_id, item.title, item.source_path].join(' ').toLowerCase().includes(options.query.toLowerCase())))

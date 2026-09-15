@@ -216,3 +216,34 @@ test('one import starts processing with the selected executor and retains a fail
   assert.equal(starts[0].providerId, 'pangea-codeagent')
   assert.equal(starts[0].agentModel, 'chosen')
 })
+
+
+for (const external of [false, true]) for (const repaired of [false, true]) {
+  test(`type mismatch repairs once in the same ${external ? 'ACP' : 'API'} session; corrected=${repaired}`, async () => {
+    const root = await workspace()
+    let settles = 0, continuations = 0
+    const prompts = []
+    const runtime = new AssetActionRuntime({ sessions: { prompt: async request => { prompts.push(request.payload); return { result: { ok: true, value: {} } } } } }, async () => {
+      settles++
+      if (settles === 1 || !repaired) throw new Error('提取结果类型与资产类型不一致：expected=design；条目=[r1,requirement]')
+      return { asset: { asset_id: 'repair-1', status: 'available' } }
+    })
+    const job = { assetId: 'repair-1', dataRoot: root, cwd: root, sessionId: 'original', status: 'running', action: { action_id: 'asset:repair' } }
+    if (external) job.worker = { continuePrompt: async () => { continuations++; return { stopReason: 'completed' } } }
+    try {
+      await runtime.finish(job)
+      if (!external) {
+        assert.equal(prompts.length, 1)
+        assert.equal(prompts[0].sessionId, 'original')
+        assert.match(prompts[0].content[0].text, /同一结果文件/)
+        job.status = 'running'; await runtime.finish(job)
+      }
+      assert.equal(settles, 2)
+      assert.equal(job.status, repaired ? 'completed' : 'needs_attention')
+      if (external) assert.equal(continuations, 1)
+      assert.equal(job.sessionId, 'original')
+      await runtime.finish(job)
+      assert.equal(settles, 2)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+}

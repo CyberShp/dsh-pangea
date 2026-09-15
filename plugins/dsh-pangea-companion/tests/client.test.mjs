@@ -1171,3 +1171,46 @@ test('record renderer makes tables and JSON fields readable without HTML executi
   assert.equal(c.renderReadableBody('{"title":"条件","gap":"需要连接"}').type, 'dl')
   assert.equal(c.artifactLabel('C:\\run\\inputs\\source-index.json'), '源码索引')
 })
+
+
+for (const body of [
+  { preconditions: ['ready'], steps: [{ action: 'connect now', expected: 'connected response' }] },
+  { precondition: ['ready'], test_steps: [{ step: 'connect now', expected: 'connected response' }], expected_results: ['global expectation'] },
+]) test('case detail renders canonical and existing alias steps as paired table cells', async () => {
+  const { sourceFirstProjection } = await import('../src/source-first-projection.js')
+  const details = sourceFirstProjection([{ stage: 'unit_analysis', status: 'accepted', task: { unit_id: 'u' }, records: [{ record_id: 'c', kind: 'test_case', body }] }])
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'complete' }
+  const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
+  const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'case', id: 'u/c' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  const table = nodes.find(node => node.type === 'table' && JSON.stringify(node).includes('connect now'))
+  assert.ok(table)
+  const cells = descendants(table).filter(node => node.type === 'td')
+  assert.ok(cells.some(node => node.children.includes('connect now')))
+  assert.ok(cells.some(node => node.children.includes('connected response')))
+})
+
+test('path-only flow renders complete entry and path content without inventing graph nodes', async () => {
+  const body = { flow_id: 'F2', title: 'TLS flow', trigger: 'bad key', entry_points: ['connect --tls'], paths: [{ path_id: 'P2', steps: [{ action: 'connect', expected: 'handshake rejected' }], cleanup: 'disconnect now' }] }
+  const { sourceFirstProjection } = await import('../src/source-first-projection.js')
+  const details = sourceFirstProjection([{ stage: 'unit_analysis', status: 'accepted', task: { unit_id: 'u' }, records: [{ record_id: 'f', kind: 'flow', body }] }])
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'complete' }
+  const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
+  const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  const pathView = nodes.find(node => node.props['aria-label'] === '业务路径阅读')
+  assert.ok(pathView)
+  const rendered = JSON.stringify(pathView)
+  for (const text of ['connect --tls', 'handshake rejected', 'disconnect now']) assert.ok(rendered.includes(text))
+  assert.ok(JSON.stringify(nodes).includes('暂不能据此绘制流程图'))
+})

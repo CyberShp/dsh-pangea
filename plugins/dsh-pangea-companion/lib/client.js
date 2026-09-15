@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
       }
       if (Array.isArray(body)) return h('ul', null, body.map((item, i) => h('li', { key: i }, renderReadableBody(item))))
       if (body && typeof body === 'object') {
-        const labels = { candidate_id: '条目编号', asset_id: '资产编号', asset_title: '资产名称', item_id: '原文条目编号', item_type: '资料类型', topic: '主题', inputs: '输入', outputs: '输出', constraints: '适用条件与约束', acceptance_criteria: '验收标准', modules: '适用模块', interfaces: '接口', states: '状态', main_flows: '主要场景', branch_flows: '分支场景', error_flows: '异常场景', recovery_flows: '恢复场景', symptom: '问题表现', trigger: '触发条件', root_cause: '问题原因', propagation: '影响过程', defect_mechanism: '问题机理', exclusion_conditions: '排除条件', applicable_modules: '适用模块', key_facts: '关键事实', expected_results: '预期结果', related_problems: '相关问题', source_references: '原文出处', location: '位置', path: '文件', title: '标题', content: '说明', description: '说明', summary: '总结', gap: '缺口', reason: '原因', scope: '分析范围', source_evidence: '源码依据', what_is_known: '已确认事实', missing_to_resolve: '待补条件', recommended_action: '建议', preconditions: '前置条件', steps: '操作步骤', action: '操作', expected: '预期', cleanup: '清理恢复' }
+        const labels = { entry_points: '业务入口', paths: '业务路径', path_id: '路径编号', condition: '触发条件', node_ids: '节点顺序', case_ids: '关联用例', explanation: '路径说明', candidate_id: '条目编号', asset_id: '资产编号', asset_title: '资产名称', item_id: '原文条目编号', item_type: '资料类型', topic: '主题', inputs: '输入', outputs: '输出', constraints: '适用条件与约束', acceptance_criteria: '验收标准', modules: '适用模块', interfaces: '接口', states: '状态', main_flows: '主要场景', branch_flows: '分支场景', error_flows: '异常场景', recovery_flows: '恢复场景', symptom: '问题表现', trigger: '触发条件', root_cause: '问题原因', propagation: '影响过程', defect_mechanism: '问题机理', exclusion_conditions: '排除条件', applicable_modules: '适用模块', key_facts: '关键事实', expected_results: '预期结果', related_problems: '相关问题', source_references: '原文出处', location: '位置', path: '文件', title: '标题', content: '说明', description: '说明', summary: '总结', gap: '缺口', reason: '原因', scope: '分析范围', source_evidence: '源码依据', what_is_known: '已确认事实', missing_to_resolve: '待补条件', recommended_action: '建议', preconditions: '前置条件', steps: '操作步骤', action: '操作', expected: '预期', cleanup: '清理恢复' }
         return h('dl', null, Object.entries(body).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, renderReadableBody(value)))))
       }
       const lines = String(body ?? '').split(/\r?\n/), nodes = []
@@ -1004,7 +1004,7 @@ window.__ModuleLoader__.load({
     const COVERAGE_SCOPE_LABELS = { in_scope: '范围内', out_of_scope: '范围外', unresolved: '待确认', unclassified: '未判定' }
     const idList = value => Array.isArray(value) ? value.filter(item => typeof item === 'string') : []
     function flowContentState(flow) {
-      return Array.isArray(flow?.mainline_steps) && flow.mainline_steps.length ? '已有步骤' : '流程内容待补齐'
+      return Array.isArray(flow?.mainline_steps) && flow.mainline_steps.length ? '已有步骤' : flow?.paths?.length ? '按路径阅读' : '流程内容待补齐'
     }
 
     function CoverageBrowser({ cwd, task, runId, target, revision, acquisition, gaps, flows, filters, onFilter, renderLinks, onReload, onNewQuery }) {
@@ -2509,7 +2509,7 @@ window.__ModuleLoader__.load({
               h('label', null, h('div', { style: styles.label }, '分析模式'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.mode,
                 onChange: event => setCreateForm(value => ({ ...value, mode: event.target.value })),
-              }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '深度分析'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型（快速交付）'))),
+              }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '标准型（独立盲审＋对照复核）'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型（直接审核，跳过盲审）'))),
               h('label', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '源码冻结范围'),
                 h('textarea', { 'aria-label': '源码冻结范围', style: { ...styles.textarea, marginTop: 5, minHeight: 72 }, value: createForm.source_scope_text, placeholder: '. 或填写相对仓库根目录的文件/目录，每行一个', onChange: event => setCreateForm(value => ({ ...value, source_scope_text: event.target.value })) }),
@@ -2785,6 +2785,7 @@ window.__ModuleLoader__.load({
         const updateReader = changes => { setFlowReader({ ...reader, ...changes }); setBranchSelection('') }
         const steps = Array.isArray(flow?.mainline_steps) ? flow.mainline_steps : []
         const structured = Array.isArray(flow?.mainline_steps)
+        const pathOnly = Boolean(flow?.source_record && !steps.length && flow.paths?.length)
         const allBranches = Array.isArray(flow?.branches) ? flow.branches : []
         const unbound = item => !steps.some(step => step.step_id === item.from_step_id)
         const step = steps.find(item => item.step_id === reader.step)
@@ -2822,7 +2823,12 @@ window.__ModuleLoader__.load({
                 renderRecordBody(flow),
                 h('div', { style: { marginBottom: 14 } }, h('div', { style: styles.itemTitle }, flow.title || '流程'), h('div', { style: styles.itemMeta }, flow.description || flow.entry), linkedItems(flow)),
                 flow.document_status === 'live_draft' ? h('div', { role: 'status', style: styles.notice }, '当前显示活文档步骤草稿；正式发布状态以阶段投影为准。') : null,
-                !steps.length ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, '尚无可解析的主干步骤。请查看上方流程原文；这不表示流程没有步骤，也不表示分析已完成。') : null,
+                !steps.length ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, pathOnly ? '原文提供了业务路径，以下按原文阅读。缺少节点与连线，暂不能据此绘制流程图。' : '尚无可解析的主干步骤。请查看上方流程原文；这不表示流程没有步骤，也不表示分析已完成。') : null,
+                pathOnly ? h('section', { 'aria-label': '业务路径阅读' },
+                  flow.entry_points ? h('div', { style: styles.card }, h('h3', null, '业务入口'), renderReadableBody(flow.entry_points)) : null,
+                  flow.paths.map((item, index) => h('article', { key: index, style: styles.card },
+                    h('h3', null, item.title || item.path_id || `路径 ${index + 1}`),
+                    renderReadableBody(Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'linked_test_case_ids'))), linkedItems(item)))) :
                 h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'start' } },
                   h('aside', { 'aria-label': '主干步骤', style: { ...styles.card, flex: '1 1 210px', minWidth: 0, maxHeight: '65vh', overflowY: 'auto' } },
                     h('div', { style: { ...styles.itemTitle, marginBottom: 12 } }, flow.source_record ? '流程节点' : '主干步骤'),
@@ -3187,6 +3193,9 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.decisionHero },
             h('div', { style: styles.eyebrow }, '风险概览'),
             h('div', { style: styles.decisionTitle }, `${risks.length} 条风险`),
+            current.workflow_version === 'source-first-v1' ? h('div', { style: styles.itemMeta }, current.lifecycle_status === 'complete'
+              ? (risks.length ? '已记录风险；具体复核与修正结论请查看原文。' : '分析已结束，未形成独立风险记录；检查范围与结论以单元总结为准，不代表未检查范围安全。')
+              : (risks.length ? '已记录风险，当前 Run 尚未完成复核与收尾。' : '分析或复核进行中，当前尚无独立风险记录。')) : null,
             h('div', { style: styles.decisionHint }, '查看风险等级、触发条件和关联测试用例。'),
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '严重'), h('div', { style: styles.decisionValue }, severityCounts.Critical)),
@@ -3423,7 +3432,14 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, text(item.title, '未命名用例')), h('div', { style: styles.chips }, hasText(item.case_type) ? h('span', { style: styles.badge }, item.case_type) : null, hasText(item.priority) ? h('span', { style: styles.badge }, `优先级 ${item.priority}`) : null, hasText(item.status) ? h('span', { style: styles.badge }, item.status) : null)),
           renderDiscussionCard('case', item),
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '未关联实现风险；本用例的测试目的以验证目标和路径依据为准。')),
-          stringList('前置条件', item.preconditions), stringList('执行步骤', item.steps, true), stringList('预期结果', item.expected_results, true), stringList('观察点', item.observability), stringList('清理动作', item.cleanup))
+          stringList('前置条件', item.preconditions),
+          item.step_pairs ? section('操作与预期', item.step_pairs.length
+            ? h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
+              h('thead', null, h('tr', null, ['序号', '操作步骤', '预期结果'].map(label => h('th', { key: label, style: { textAlign: 'left', padding: 8 } }, label)))),
+              h('tbody', null, item.step_pairs.map((step, index) => h('tr', { key: index },
+                [index + 1, step.action || '未提供操作', step.expected || '未提供逐步预期，请核对整体预期及原文'].map((value, column) => h('td', { key: column, style: { padding: 8, verticalAlign: 'top', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, value))))))
+            : '原文未提供可识别的操作步骤，请核对分析原文。') : stringList('执行步骤', item.steps, true),
+          stringList(item.step_pairs ? '整体预期（原文单独提供）' : '预期结果', item.expected_results, true), stringList('观察点', item.observability), stringList('清理动作', item.cleanup))
       }
 
       function renderEvidence() {

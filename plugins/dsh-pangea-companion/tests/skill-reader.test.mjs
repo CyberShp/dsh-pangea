@@ -751,6 +751,32 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
         await writeJson(resultPath, { ...shell, completion: null })
       }
     }
+    const originalTask = JSON.parse(await readFile(taskPath, 'utf8'))
+    await writeJson(taskPath, { ...originalTask, task_type: 'source_first_closure', base_revision: originalResult.revision })
+    const closingProgress = { ...waitingProgress, stage: 'closing', actions: {
+      [actionId]: { ...waitingProgress.actions[actionId], stage: 'targeted_closure' },
+    } }
+    const seed = { ...originalResult, binding: { ...originalResult.binding, task_id: 'pending' }, completion: null, receipts: {} }
+    await writeJson(progressPath, closingProgress)
+    await writeJson(resultPath, seed)
+    const seeded = (await companionSnapshot({ dataRoot, runId })).current
+    assert.equal(seeded.reader_health.trusted, true)
+    assert.equal(seeded.workflow.actions[0].binding_status, 'pending')
+    assert.equal(seeded.source_first_records[0].records.length, 0)
+    for (const invalid of [
+      { ...seed, revision: seed.revision + 1 },
+      { ...seed, binding: { ...seed.binding, task_id: 'another-worker' } },
+      { ...seed, binding: { ...seed.binding, action_id: 'other-action' } },
+      { ...seed, completion: { complete: true } },
+      { ...seed, receipts: { changed: true } },
+    ]) {
+      await writeJson(resultPath, invalid)
+      assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)
+    }
+    await writeJson(resultPath, seed)
+    await writeJson(progressPath, { ...closingProgress, actions: { [actionId]: { ...closingProgress.actions[actionId], status: 'accepted' } } })
+    assert.equal((await companionSnapshot({ dataRoot, runId })).current.reader_health.trusted, false)
+    await writeJson(taskPath, originalTask)
     await writeJson(progressPath, waitingProgress)
     // Real identity conflicts and published content cannot use the empty-shell exception.
     for (const invalid of [
