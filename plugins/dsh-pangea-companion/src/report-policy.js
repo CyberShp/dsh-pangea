@@ -1,6 +1,23 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
-import { runAdapter } from './pangea-api.js'
+import { runAdapter, runPangea } from './pangea-api.js'
+
+const budgetedChildren = new Map()
+
+export function interruptSourceFirstChildren({ dataRoot, runId }) {
+  for (const [id, entry] of budgetedChildren) {
+    if (resolve(entry.dataRoot) !== resolve(dataRoot) || entry.runId !== runId) continue
+    clearTimeout(entry.timer)
+    entry.ctx.subagents.interrupt(id, { kind: 'ancestor', agent: entry.parent })
+    budgetedChildren.delete(id)
+  }
+}
+
+async function recordExecution(cwd, binding, event, reason = '', budgetMs, automatic = false) {
+  return runPangea({ cwd, args: ['runs', 'execution', '--data-root', binding.dataRoot, '--run-id', binding.runId,
+    '--action-id', binding.actionId, '--task-id', binding.childId, '--event', event,
+    ...(reason ? ['--reason', reason] : []), ...(budgetMs ? ['--budget-ms', String(budgetMs)] : []), ...(automatic ? ['--automatic'] : [])] })
+}
 
 export const name = 'dsh-pangea-companion-report-policy'
 export const inject = ['subagents', 'tools', 'systemPrompt']
@@ -269,9 +286,47 @@ function rootDirectMutationError(exec) {
   return undefined
 }
 
-export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
+export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, execution = recordExecution) {
   const states = new Map()
   const childScopes = new Map()
+  const closureWindows = new Map()
+  async function trackExecution(exec, state, action, childId) {
+    const binding = { dataRoot: state.dataRoot, runId: state.runId, actionId: action.action_id, childId }
+    const entry = { ...binding, ctx, parent: exec.agent, cwd: workspaceCwd(exec) }
+    const isClosure = action.stage === 'targeted_closure'
+    let window = closureWindows.get(action.action_id)
+    if (!window) {
+      const task = typeof action.task_path === 'string' && existsSync(action.task_path) ? JSON.parse(readFileSync(action.task_path, 'utf8')) : {}
+      window = { started: Date.now(), budget: isClosure ? task.execution_budget_ms ?? 1800000 : undefined, repairs: 0, turns: 0 }
+      closureWindows.set(action.action_id, window)
+    }
+    const pause = async reason => {
+      await execution(entry.cwd, binding, 'paused', reason)
+      const active = state.activeChildren.get(childId) ?? childScopes.get(childId)
+      if (active) active.status = 'paused'
+      state.pendingActions.delete(action.action_id)
+      state.dispatchAttempts.delete(action.action_id)
+      ctx.subagents.interrupt(childId, { kind: 'ancestor', agent: exec.agent })
+      budgetedChildren.delete(childId)
+    }
+    if (isClosure && action.pending_repair && window.repairs >= 1) {
+      await pause('原会话自动修复一次后仍未完成，等待继续或交付')
+      throw new Error('定向修正已暂停，保留结果，等待继续或交付')
+    }
+    const automatic = Boolean(action.pending_repair && window.turns > 0)
+    if (isClosure && automatic) window.repairs++
+    window.turns++
+    await execution(entry.cwd, binding, 'started', '', window?.budget, automatic)
+    if (isClosure) {
+      entry.timer = setTimeout(() => { void pause('定向修正达到执行预算，保留结果').catch(error => {
+        ctx.subagents.interrupt(childId, { kind: 'ancestor', agent: exec.agent })
+        const child = childScopes.get(childId)
+        if (child) { child.status = 'paused'; child.pauseError = String(error) }
+      }) }, Math.max(1, window.budget - (Date.now() - window.started)))
+      entry.timer.unref?.()
+    }
+    budgetedChildren.set(childId, entry)
+  }
 
   ctx.tools.register({
     name: 'pangea_action_dispatch',
@@ -302,6 +357,10 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
       if (!state) throw new Error('当前会话没有绑定的 source-first Run')
       const action = state.pendingActions.get(args.action_id)
       if (!action) throw new Error(`source-first action 当前不可派发：${args.action_id}`)
+      if (['unit_analysis', 'targeted_closure'].includes(action.stage)
+        && [...state.activeChildren.values()].filter(child => child.status === 'running').length >= 3) {
+        throw new Error('已有三个单元正在执行，等待其中一个结束后继续派发')
+      }
       const previous = state.dispatchAttempts.get(action.action_id)
       if (previous) {
         await adapter(workspaceCwd(exec), 'bind', {
@@ -319,6 +378,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
           childId: previous.childId,
         })
         previous.status = 'running'
+        await trackExecution(exec, state, action, previous.childId)
         await ctx.subagents.followup(
           exec.agent,
           previous.childId,
@@ -371,6 +431,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
       })
       const attempt = state.dispatchAttempts.get(action.action_id)
       if (attempt) attempt.status = 'running'
+      await trackExecution(exec, state, action, childId)
       await ctx.subagents.followup(
         exec.agent,
         childId,
@@ -383,7 +444,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
 
   ctx.tools.guard(exec => {
     const child = exec?.agent ? childScopes.get(exec.agent.id) : undefined
-    if (child) return childMutationError(child, exec)
+    if (child) return child.status === 'paused' ? '本单元执行已暂停，保留记录等待用户继续' : childMutationError(child, exec)
     if (exec?.agent?.session?.header?.origin === 'subagent' && SOURCE_TOOLS.has(exec.name)) {
       return 'source-first 子 Agent 尚未完成 Graph bind；绑定完成后重试当前工具。'
     }
@@ -414,10 +475,16 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
     return undefined
   })
 
-  const noticeSettled = ({ agent, message }) => {
+  const noticeSettled = async ({ agent, message }) => {
     if (message?.source?.kind !== 'subagent-settled') return
     const state = states.get(agent?.id)
     const childId = message.source.senderSessionId
+    const tracked = budgetedChildren.get(childId)
+    if (tracked) {
+      clearTimeout(tracked.timer)
+      budgetedChildren.delete(childId)
+      await execution(tracked.cwd, tracked, 'finished')
+    }
     const child = state?.activeChildren.get(childId)
     if (child?.status === 'running') child.status = 'settled'
     if (!child && state) {
@@ -440,6 +507,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
     if (runStart && value && typeof value === 'object') {
       const parsed = workflowResult(value)
       if (parsed && (parsed.actions.length > 0 || parsed.workflowVersion === 'source-first-v1')) {
+        if (exec.name === 'pangea_run_resume') closureWindows.clear()
         state = state && exec.name === 'pangea_action_next' ? state : createState(parsed)
         if (state !== states.get(exec.agent.id)) states.set(exec.agent.id, state)
         addActions(state, parsed)
@@ -485,7 +553,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter) {
   return () => {}
 }
 
-export function apply(ctx, adapter = runAdapter) {
+export function apply(ctx, adapter = runAdapter, execution = recordExecution) {
   ctx.systemPrompt?.section({
     name: 'pangea:dsh-workspace',
     order: 116,
@@ -495,5 +563,5 @@ export function apply(ctx, adapter = runAdapter) {
   // owns the child-scoped `report` tool and its `tool:report` prompt section.
   // Registering another setup here makes every source-first dispatch fail
   // when both setups mount into the same continuable child scope.
-  installPangeaLifecyclePolicy(ctx, adapter)
+  installPangeaLifecyclePolicy(ctx, adapter, execution)
 }

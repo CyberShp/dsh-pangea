@@ -162,3 +162,29 @@ test('coverage pages use the stored task Run and root and reject unrelated reque
     assert.equal(calls.length, 1)
   } finally { await value.close() }
 })
+
+test('deliver-current freezes the stored Run before delivery and rejects a different Run', async () => {
+  const value = await fixture()
+  const calls = []
+  try {
+    await value.tasks.bindRun(value.task.task_id, 'run-06', 'source-first-v1')
+    const runner = async ({ args }) => {
+      calls.push(args)
+      return { run_id: 'run-06', workflow_version: 'source-first-v1', stage: args[1] === 'deliver-current' ? 'complete' : 'closing', lifecycle_status: args[1] === 'deliver-current' ? 'complete' : args[1] === 'stop' ? 'stopped' : 'running', quality_status: 'UNRESOLVED', partial_delivery: true }
+    }
+    const request = async runId => {
+      const req = Readable.from([Buffer.from(JSON.stringify({ action: 'deliver-current', task_id: value.task.task_id, run_id: runId, data_root: '/wrong-root' }))])
+      req.method = 'POST'; req.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: value.root })}`; req.headers = { 'sec-fetch-site': 'same-origin' }
+      const response = {}, res = { writeHead(status) { response.status = status }, end(body) { response.body = JSON.parse(body) } }
+      await workbenchRouteHandler(req, res, value.api, value.tasks, value.launchLocks, value.launchLogs, {}, value.monitor, runner)
+      return response
+    }
+    assert.equal((await request('other-run')).status, 400)
+    assert.equal(calls.length, 0)
+    const response = await request('run-06')
+    assert.equal(response.status, 200, JSON.stringify(response.body))
+    assert.deepEqual(calls.map(args => args[1]), ['get', 'stop', 'deliver-current'])
+    assert.ok(calls.every(args => args[args.indexOf('--data-root') + 1] === value.dataRoot))
+    assert.equal(response.body.run.quality_status, 'UNRESOLVED')
+  } finally { await value.close() }
+})

@@ -37,9 +37,10 @@ function execFor(owner, name, args) {
   }
 }
 
-function harness() {
+function harness(execution = async () => ({})) {
   const listeners = new Map()
   const tools = new Map()
+  const interrupts = []
   const starts = []
   const followups = []
   const binds = []
@@ -47,6 +48,7 @@ function harness() {
   let guard
   const ctx = {
     subagents: {
+      interrupt(id) { interrupts.push(id) },
       async startContinuable(spec) {
         // The real host rejects child-local tools in the global allow list.
         assert.equal(spec.request.toolFilter.allow.includes('report'), false)
@@ -73,9 +75,10 @@ function harness() {
     binds.push({ operation, input })
     return { action_id: input.action_id, status: 'dispatched' }
   }
-  apply(ctx, adapter)
+  apply(ctx, adapter, execution)
   return {
     tools,
+    interrupts,
     starts,
     followups,
     binds,
@@ -230,4 +233,39 @@ test('child can use only its bound result/source scope and cannot advance lifecy
   assert.match(h.guard(execFor(child, 'pangea_action_settle', boundArgs)), /只能由根 Agent/)
   assert.match(h.guard(execFor(child, 'write', { file_path: path.join(root, 'pangea-data', 'runs', 'run-01', 'other.json') })), /只能写当前 task/)
   assert.match(h.guard(execFor(child, 'write', { file_path: current.resultPath })), /必须通过已绑定的 result\/plan\/review 工具/)
+})
+
+test('internal closure timeout pauses and interrupts the exact original worker', async () => {
+  const root = await fixture()
+  const owner = agent(root, 'budget-root')
+  const current = { ...action(root, 'closure', 'continue_agent', 'original-worker'), stage: 'targeted_closure' }
+  await prepareAction(root, current)
+  await writeFile(current.task_path, JSON.stringify({ workflow_version: 'source-first-v1', action_id: current.action_id, run_id: 'run-01', result_path: current.resultPath, execution_budget_ms: 20 }))
+  const events = []
+  const h = harness(async (_cwd, binding, event) => { events.push({ binding, event }) })
+  await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: 'run-01', data_root: path.join(root, 'pangea-data'), actions: [current] })
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  const result = await h.tools.get('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
+  await h.post(dispatch, result)
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.deepEqual(h.interrupts, ['original-worker'])
+  assert.deepEqual(events.map(item => item.event), ['started', 'paused'])
+  assert.equal(events[1].binding.childId, 'original-worker')
+  assert.match(h.guard(execFor(agent(root, 'original-worker'), 'pangea_result_write', {})), /暂停/)
+})
+
+test('internal dispatch limits running unit workers to three', async () => {
+  const root = await fixture()
+  const owner = agent(root, 'cap-root')
+  const actions = Array.from({ length: 4 }, (_, i) => action(root, `analysis-${i}`))
+  for (const current of actions) await prepareAction(root, current)
+  const h = harness()
+  await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: 'run-01', data_root: path.join(root, 'pangea-data'), actions })
+  for (const current of actions.slice(0, 3)) {
+    const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+    await h.post(dispatch, await h.tools.get('pangea_action_dispatch').execute(dispatch.arguments, dispatch))
+  }
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: actions[3].action_id })
+  await assert.rejects(h.tools.get('pangea_action_dispatch').execute(dispatch.arguments, dispatch), /三个单元/)
+  assert.equal(h.starts.length, 3)
 })

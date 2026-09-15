@@ -1,3 +1,5 @@
+import { stopSourceFirstAcpRun } from './source-first-acp.js'
+import { interruptSourceFirstChildren } from './report-policy.js'
 import { createView, listViews, loadView, updateView, viewArtifact } from './architecture-views.js'
 import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
@@ -987,6 +989,32 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       const task = await tasks.activateConversation(body.task_id, body.conversation_id)
       return json(res, 200, { status: 'ok', task })
     }
+    if (body.action === 'deliver-current') {
+      const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (!task.run_id || task.run_id !== body.run_id) throw new Error('交付请求与当前任务 Run 不一致')
+      if (launchLocks.has(task.task_id)) throw new Error('当前任务仍在启动，请等待启动完成')
+      const current = await runner({ cwd: workspaceRoot(cwd), args: ['runs', 'get', '--data-root', task.data_root, '--run-id', task.run_id] })
+      if (current.stage !== 'closing' || current.workflow_version !== 'source-first-v1') throw new Error('当前 Run 不在定向修正阶段')
+      // The serialized stop drains in-flight result mutations and closes write
+      // admission first. Cancel exact workers before rendering the saved revision.
+      await stopAnalysisRun({ cwd, dataRoot: task.data_root, runId: task.run_id, runner })
+      await stopSourceFirstAcpRun({ dataRoot: task.data_root, runId: task.run_id })
+      interruptSourceFirstChildren({ dataRoot: task.data_root, runId: task.run_id })
+      if (task.job_id) {
+        const owner = jobOwner(runtime, task)
+        const jobs = runtimeService(runtime, 'jobs')
+        const issue = jobIdentityIssue(task, jobs?.get?.(task.job_id, owner))
+        if (issue) throw new Error(issue)
+        await jobs.kill(task.job_id, owner, '用户结束修正并交付当前结果')
+        const settled = await jobs.wait(task.job_id, 30000, owner)
+        if (!['completed', 'failed', 'killed'].includes(settled.status)) throw new Error('停止请求已保存，worker 尚未确认结束；可稍后再次交付')
+      }
+      const analysis = [...task.conversations].reverse().find(item => item.kind === 'analysis')
+      if (analysis) apiValue(await api.sessions.cancel(rpc({ sessionId: analysis.session_id })))
+      const run = await runner({ cwd: workspaceRoot(cwd), args: ['runs', 'deliver-current', '--data-root', task.data_root, '--run-id', task.run_id] })
+      await tasks.reconcileRuns([run], { dataRoot: task.data_root })
+      return json(res, 200, { status: 'ok', run, task: await tasks.get(task.task_id) })
+    }
     if (body.action === 'stop') {
       // Legacy ordering contract: const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })
       const currentWorkspace = workspaceRoot(cwd)
@@ -1036,6 +1064,8 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       let runStopError = null
       try {
         stopped = await stopAnalysisRun({ cwd, dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
+        await stopSourceFirstAcpRun({ dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
+        interruptSourceFirstChildren({ dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
       } catch (error) {
         runStopError = error instanceof Error ? error.message : String(error)
         stopped = {

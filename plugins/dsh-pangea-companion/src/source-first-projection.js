@@ -25,8 +25,8 @@ export function recordTitle(record, body = mapping(record.body)) {
 
 export function sourceFirstProjection(artifacts) {
   const result = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [], notes: [] }
-  const closureUnits = new Set(artifacts.filter(a => a.stage === 'targeted_closure' && a.status === 'accepted').map(a => a.task?.unit_id))
-  const delivery = artifacts.filter(a => (a.stage === 'targeted_closure' && a.status === 'accepted') || (a.stage === 'unit_analysis' && !closureUnits.has(a.task?.unit_id)))
+  const closureUnits = new Set(artifacts.filter(a => a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)).map(a => a.task?.unit_id))
+  const delivery = artifacts.filter(a => (a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)) || (a.stage === 'unit_analysis' && !closureUnits.has(a.task?.unit_id)))
   const rows = delivery.flatMap(action => activeRecords(action.records ?? []).map(record => {
     const body = mapping(record.body)
     const unit = action.task?.unit_id ?? action.action_id
@@ -67,6 +67,8 @@ export function sourceFirstProjection(artifacts) {
           : { action: plain(step), expected: '' })
       result.test_cases.push({ ...row, test_case_id: row.projection_id,
         case_type: plain(row.case_type ?? row.test_level),
+        readiness: row.execution_readiness === 'ready' ? 'ready' : ['needs_instrumentation', 'unknown'].includes(row.execution_readiness) ? 'needs_setup' : 'unclassified',
+        missing_execution_conditions: row.execution_readiness === 'ready' ? [] : strings(row.readiness_reason),
         linked_flow_ids: resolve(row, row.flow_refs, ['flow_id'], ['flow']), status: plain(row.status ?? row.execution_status) || '未标注',
         preconditions: strings(row.preconditions ?? row.precondition), step_pairs: pairedSteps,
         steps: pairedSteps.map(step => `${step.action || '未提供操作'}${step.expected ? ` → ${step.expected}` : ''}`),

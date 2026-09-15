@@ -664,7 +664,9 @@ export function sourceFirstStepRows(progress, runDirectory, artifacts) {
   }
   return SOURCE_FIRST_STAGES.map(([stage, title], index) => {
     const skipped = stage === 'closing' && !artifacts.some(item => item.stage === 'targeted_closure') && (life.lifecycle_status === 'complete' || currentIndex > index)
-    const status = skipped ? 'skipped' : life.lifecycle_status === 'complete'
+    const status = stage === 'closing' && progress.partial_delivery ? 'stopped'
+      : stage === 'closing' && progress.needs_user && !artifacts.some(item => item.stage === 'targeted_closure' && item.status === 'dispatched') ? 'paused'
+      : skipped ? 'skipped' : life.lifecycle_status === 'complete'
       ? 'completed'
       : index < currentIndex
         ? 'completed'
@@ -737,7 +739,10 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
       && ((result.revision === 0 && result.records.length === 0) || closureSeed)
       && (result.completion === null || result.completion?.complete === false)
       && !Object.hasOwn(progress.accepted_revisions ?? {}, actionId)
-    if (awaitingBinding) result = null
+    const undeliveredSeed = progress.partial_delivery && action.status === 'paused' && closureSeed
+      && result?.binding?.run_id === progress.run_id && result?.binding?.action_id === actionId
+      && result?.binding?.task_id === 'pending' && action.delivery_revision == null
+    if (awaitingBinding || undeliveredSeed) result = null
     if (result && (result.binding?.run_id !== progress.run_id || result.binding?.action_id !== actionId || (action.task_id && result.binding?.task_id !== action.task_id))) {
       addIssue(`source-first result 绑定与当前任务不一致：${actionId}`)
       result = null
@@ -751,12 +756,15 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
     artifacts.push({
       action_id: actionId,
       ...action,
-      binding_status: awaitingBinding ? 'pending' : 'bound',
+      binding_status: undeliveredSeed ? 'not_delivered' : awaitingBinding ? 'pending' : 'bound',
       task,
       task_path: taskPath,
       result_path: resultPath,
       revision: Number.isInteger(result?.revision) ? result.revision : null,
       completion: result?.completion ?? null,
+      last_saved_at_ms: result?.last_record_write_at_ms ?? null,
+      modified_records: records.filter(record => record.created_revision > (task.base_revision ?? 0)).length,
+      finding_count: task.correction_record_ids?.length ?? 0,
       records,
     })
   }
@@ -880,7 +888,8 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     analysis_settings: contract?.analysis_settings ?? null,
     runtime_provenance: contract?.runtime_provenance ?? null,
     publication: { state: reportAvailable ? 'final' : actionView.artifacts.some(a => a.records.length) ? 'draft' : 'pending', revision: null },
-    delivery_integrity: { status: reportAvailable ? 'complete' : 'incomplete' },
+    partial_delivery: progress.partial_delivery === true,
+    delivery_integrity: { status: progress.partial_delivery ? 'partial' : reportAvailable ? 'complete' : 'incomplete' },
     semantic_review: { verdict: progress.quality_status ?? null, method: 'graph_review' },
     ...life,
     phase_title: SOURCE_FIRST_STAGES.find(([stage]) => stage === life.stage)?.[1] ?? life.stage,
@@ -902,9 +911,18 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       running: analysisActions.filter(item => ['dispatched', 'settled'].includes(item.status)).length,
       pending: analysisActions.filter(item => item.status === 'pending').length,
       submitted: analysisActions.filter(item => ['settled', 'accepted'].includes(item.status)).length,
-      max_parallel: 8,
+      max_parallel: 3,
     },
     counts: Object.fromEntries(['risks', 'test_cases', 'evidence', 'business_flows'].map(key => [key, projection[key].length])),
+    case_readiness: Object.fromEntries(['ready', 'needs_setup', 'unclassified'].map(key => [key, projection.test_cases.filter(item => item.readiness === key).length])),
+    execution_progress: actionView.artifacts.map(item => ({
+      action_id: item.action_id, unit_id: item.task?.unit_id, stage: item.stage, status: item.status,
+      worker_turns: item.worker_turns ?? 0, auto_continuations: item.auto_continuations ?? 0,
+      started_at_ms: item.execution_started_at_ms, finished_at_ms: item.execution_finished_at_ms,
+      elapsed_ms: item.execution_elapsed_ms ?? 0, budget_ms: item.execution_budget_ms,
+      modified_records: item.modified_records, last_saved_at_ms: item.last_saved_at_ms,
+      finding_count: item.finding_count, reason: item.error,
+    })),
     errors: Array.isArray(progress.errors) ? progress.errors : [],
     error_history: actionView.issues,
     review: {

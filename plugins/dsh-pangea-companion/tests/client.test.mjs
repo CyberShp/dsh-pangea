@@ -1214,3 +1214,20 @@ test('path-only flow renders complete entry and path content without inventing g
   for (const text of ['connect --tls', 'handshake rejected', 'disconnect now']) assert.ok(rendered.includes(text))
   assert.ok(JSON.stringify(nodes).includes('暂不能据此绘制流程图'))
 })
+
+test('closure progress and delivery control are visible on the workflow page', async () => {
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'running' }
+  const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', stage: 'closing', lifecycle_status: 'running', analysis: { total: 1, completed: 1 }, details: {}, execution_progress: [{ action_id: 'closure-u', unit_id: 'u', stage: 'targeted_closure', status: 'paused', elapsed_ms: 900000, worker_turns: 2, auto_continuations: 1, finding_count: 4, modified_records: 3 }] }
+  const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'workflow' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  const progress = nodes.find(node => node.props['aria-label'] === '实际执行进度')
+  assert.ok(progress)
+  assert.match(JSON.stringify(progress), /worker 回合 2 · 自动续接 1/)
+  assert.match(JSON.stringify(progress), /不代表已解决数量/)
+  assert.ok(nodes.some(node => node.type === 'button' && node.children.includes('结束修正，交付当前结果')))
+})

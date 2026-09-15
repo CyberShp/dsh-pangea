@@ -8,6 +8,18 @@ import { randomUUID } from 'node:crypto'
 const liveRuns = new Map()
 const text = value => [{ type: 'text', text: value }]
 
+export async function stopSourceFirstAcpRun({ dataRoot, runId }) {
+  const state = liveRuns.get(JSON.stringify([path.resolve(dataRoot), runId]))
+  if (!state) return false
+  state.controller?.abort(new Error('用户结束当前执行'))
+  await state.promise?.catch(() => {})
+  const results = await Promise.allSettled([...state.workers.values()].map(worker => worker.dispose?.()))
+  const failed = results.find(result => result.status === 'rejected')
+  if (failed) throw failed.reason
+  liveRuns.delete(JSON.stringify([path.resolve(dataRoot), runId]))
+  return true
+}
+
 export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, python }) {
   const binding = ['--data-root', dataRoot, '--run-id', runId, '--action-id', action.action_id, '--task-id', taskId]
   return [
@@ -24,7 +36,7 @@ export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, pyt
   ].filter(Boolean).join('\n')
 }
 
-export function createSourceFirstAcpRun({ subagents, parent, providerId, agentModel, cwd, dataRoot, runId, runner, signal, onEvent = async () => {}, python }) {
+export function createSourceFirstAcpRun({ subagents, parent, providerId, agentModel, cwd, dataRoot, runId, runner, signal, onEvent = async () => {}, python, mode, closureBudgetMs }) {
   const key = JSON.stringify([path.resolve(dataRoot), runId])
   let state = liveRuns.get(key)
   if (state?.busy) throw new Error(`当前 Run 已由宿主执行：${runId}`)
@@ -32,6 +44,10 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   state ??= { providerId, agentModel, workers: new Map(), closed: new Set(), busy: false, terminal: false }
   liveRuns.set(key, state)
   state.busy = true
+  state.controller = new AbortController()
+  signal = AbortSignal.any([signal, state.controller.signal])
+  const closureWindows = new Map()
+  const pausedReasons = []
   let current
   const bindingsPath = path.join(path.resolve(dataRoot), 'runs', runId, 'acp-workers.json')
   let bindings = {}
@@ -100,12 +116,55 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     await event({ stage: 'source_first_worker_bound', action_id: action.action_id, agent_session_id: taskId, remote_session_id: worker.remoteSessionId, provider: providerId })
     const binding = ['--data-root', dataRoot, '--run-id', runId, '--action-id', action.action_id, '--task-id', taskId]
     const opened = await cli(['task-open', ...binding, ...(['unit_analysis', 'independent_review', 'targeted_closure'].includes(action.stage) ? ['--prepare-source'] : [])])
-    const result = await worker.continuePrompt(text(workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, python })))
+    const execution = (eventName, reason = '', budget, automatic = false) => cli(['runs', 'execution', ...binding, '--event', eventName,
+      ...(reason ? ['--reason', reason] : []), ...(budget ? ['--budget-ms', String(budget)] : []), ...(automatic ? ['--automatic'] : [])])
+    const isClosure = action.stage === 'targeted_closure'
+    const budget = isClosure ? closureBudgetMs ?? opened.task?.execution_budget_ms ?? (mode === 'speed' ? 900000 : 1800000) : null
+    let window = closureWindows.get(action.action_id)
+    if (!window) { window = { started: Date.now(), repairs: 0, turns: 0 }; closureWindows.set(action.action_id, window) }
+    const pause = async reason => {
+      await execution('paused', reason)
+      await worker.dispose?.()
+      state.closed.add(taskId)
+      pausedReasons.push(reason)
+      await event({ stage: 'source_first_worker_paused', action_id: action.action_id, reason })
+    }
+    if (isClosure && action.pending_repair && window.repairs >= 1) {
+      await pause('原会话自动修复一次后仍未完成；保留结果，等待继续或交付')
+      return
+    }
+    const automatic = Boolean(action.pending_repair && window.turns > 0)
+    if (isClosure && automatic) window.repairs++
+    window.turns++
+    await execution('started', '', budget, automatic)
+    await event({ stage: 'source_first_worker_started', action_id: action.action_id, budget_ms: budget })
+    let result, timer, abortTurn
+    const timeout = new Error('本单元定向修正达到执行预算，保留已保存结果')
+    try {
+      const turn = worker.continuePrompt(text(workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, python })))
+      const cancelled = new Promise((_, reject) => {
+        abortTurn = () => reject(signal.reason ?? new Error('执行已取消'))
+        signal.addEventListener('abort', abortTurn, { once: true })
+        if (signal.aborted) abortTurn()
+      })
+      result = budget ? await Promise.race([turn, cancelled, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(timeout), Math.max(1, budget - (Date.now() - window.started)))
+      })]) : await Promise.race([turn, cancelled])
+    } catch (error) {
+      if (error !== timeout) throw error
+      await pause(timeout.message)
+      return
+    } finally { clearTimeout(timer); if (abortTurn) signal.removeEventListener('abort', abortTurn) }
     check()
+    await execution('finished')
     await event({ stage: 'source_first_worker_finished', action_id: action.action_id, agent_session_id: taskId, stop_reason: result.stopReason, ...worker.readDiagnostics?.() })
     if (result.stopReason !== 'completed') throw new Error(`Worker 回合未完成：${action.action_id} ${result.stopReason} ${result.diagnostic ?? ''}`)
     const settled = await adapter('settle', action)
     await event({ stage: 'source_first_action_settled', action_id: action.action_id, validation: settled.validation?.status })
+    if (isClosure && (settled.attention_required || settled.validation?.recoverable === false)) {
+      await pause(`定向修正需要处理：${JSON.stringify(settled.validation)}`)
+      return
+    }
     if (settled.attention_required || settled.validation?.recoverable === false) {
       return { stopReason: 'completed', attentionRequired: true,
         diagnostic: `当前 action ${action.action_id} 需要处理：${JSON.stringify(settled.validation)}`,
@@ -127,11 +186,11 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         const actions = next.actions ?? []
         if (!actions.length) {
           state.terminal = next.lifecycle_status === 'complete'
-          return { stopReason: 'completed', output: text(state.terminal ? '当前 Run 已完成。' : '当前 Run 没有可派发 action，请查看运行状态。') }
+          return { stopReason: 'completed', attentionRequired: !state.terminal && (next.attention_required || pausedReasons.length > 0), diagnostic: pausedReasons.join('；') || '当前 Run 有暂停单元，等待继续或交付', output: text(state.terminal ? '当前 Run 已完成。' : '当前 Run 没有可派发 action，请查看暂停单元。') }
         }
-        // Only independent analysis units overlap. The CLI and persisted bindings
-        // share one ordered write queue; review and continuation stages stay serial.
-        const pending = actions.every(action => action.stage === 'unit_analysis') ? actions : actions.slice(0, 1)
+        // Independent analysis or closure units overlap. The CLI and persisted bindings
+        // share one ordered write queue; independent and comparison reviews retain their dependency order.
+        const pending = actions.every(action => ['unit_analysis', 'targeted_closure'].includes(action.stage)) ? actions : actions.slice(0, 1)
         let cursor = 0, failure, attention
         const consume = async () => {
           while (!failure && !attention && cursor < pending.length) {
@@ -157,11 +216,12 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       throw error
     } finally { state.busy = false }
   }
+  state.promise = execute()
   return {
     // The coordinator is the real DSH owner session; worker identities are
     // emitted separately at bind. Do not invent an external session ID.
     id: parent?.id,
-    result: execute(),
+    result: state.promise,
     readOutput: () => [...state.workers.entries()].map(([id, worker]) => {
       // ACP readOutput drains new text. An idle poll must stay empty or the
       // jobs stream treats the session label itself as fresh agent output.

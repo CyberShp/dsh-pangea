@@ -705,10 +705,10 @@ export async function launchAnalysisSession(
       }), resolvedDataRoot),
       ...(semantic ? { continuationPrompt: () => `${prompt}\n继续当前 Run，从 pangea_action_next 返回的 action 恢复执行。` } : {}),
       onTurnEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
-      ...(semantic && selectedProvider !== 'pangea-opencode' ? {
+      ...(semantic ? {
         startRun: ({ subagents, parent, signal }) => createSourceFirstAcpRun({
           subagents, parent, signal, providerId: selectedProvider, agentModel: request.agent_model,
-          cwd: root, dataRoot: resolvedDataRoot, runId: run.run_id, runner, python: env.PANGEA_PYTHON,
+          cwd: root, dataRoot: resolvedDataRoot, runId: run.run_id, runner, python: env.PANGEA_PYTHON, mode: request.mode,
           onEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
         }),
       } : {}),

@@ -108,3 +108,14 @@ test('existing unit aliases display paired operations without changing source bo
   assert.equal(row.source_record.body, body)
   assert.equal(body.steps, undefined)
 })
+
+test('execution readiness uses explicit declarations and partial closure preserves the source body', () => {
+  const ready = record('ready', 'test_case', { title: 'CLI connect', execution_readiness: 'ready' })
+  const pending = record('pending', 'test_case', { title: 'inject failure', execution_readiness: 'needs_instrumentation', readiness_reason: '需开发提供注入桩' })
+  const old = record('old', 'test_case', { title: 'legacy' })
+  const partial = { ...action('a', [ready, pending, old]), stage: 'targeted_closure', status: 'paused', delivery_revision: 4 }
+  const result = sourceFirstProjection([action('a', [record('first', 'test_case', { title: 'before' })]), partial])
+  assert.deepEqual(result.test_cases.map(item => item.readiness), ['ready', 'needs_setup', 'unclassified'])
+  assert.equal(result.test_cases[1].source_record.body, pending.body)
+  assert.deepEqual(result.test_cases[1].missing_execution_conditions, ['需开发提供注入桩'])
+})

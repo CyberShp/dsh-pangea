@@ -64,6 +64,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
       if (args[0] === 'task-open') return { task: { action_id: `run:${index}`, inputs: [] } }
       if (args[1] === 'next') return { run_id: providerId, lifecycle_status: index === steps.length ? 'complete' : 'running', actions: index === steps.length ? [] : [action()] }
       if (args[1] === 'bind') { bindings.push([args[args.indexOf('--action-id') + 1], args.at(-1)]); return {} }
+      if (args[0] === 'runs' && args[1] === 'execution') return {}
       assert.equal(args[1], 'settle'); index++; return {}
     }
     const run = createSourceFirstAcpRun({ providerId, agentModel: 'selected/model', parent: {}, cwd: '/work', dataRoot: '/data', runId: providerId,
@@ -290,5 +291,73 @@ test('a failed unit stops new dispatch while other running units keep their comp
     assert.equal(created, 3)
     assert.deepEqual(settled.sort(), ['failure:1', 'failure:2'])
     assert.equal(disposed.length, 3)
+  } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('closure budget pauses only its original worker, other units complete, explicit continuation restores it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'closure-budget-'))
+  const runId = 'closure-budget', controller = new AbortController()
+  const actions = Array.from({ length: 4 }, (_, i) => ({ action_id: `${runId}:${i}`, role: 'closure', stage: 'targeted_closure', action: 'continue_agent', task_id: `original-${i}` }))
+  const bindings = Object.fromEntries(actions.map((a, i) => [a.task_id, { providerId: 'pangea-nga', remoteSessionId: `remote-${i}` }]))
+  await mkdir(path.join(root, 'runs', runId), { recursive: true })
+  await writeFile(path.join(root, 'runs', runId, 'acp-workers.json'), JSON.stringify({ runId, workers: bindings }))
+  const done = new Set(), paused = new Set(), resumed = [], events = []
+  let active = 0, peak = 0, allowSlow = false
+  const options = { providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId, signal: controller.signal, closureBudgetMs: 80,
+    runner: async ({ args }) => {
+      const id = args[args.indexOf('--action-id') + 1]
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[1] === 'next') return { run_id: runId, lifecycle_status: done.size === 4 ? 'complete' : 'running', attention_required: paused.size > 0, actions: actions.filter(a => !done.has(a.action_id) && !paused.has(a.action_id)) }
+      if (args[1] === 'execution') { events.push([id, args[args.indexOf('--event') + 1]]); if (args.includes('paused')) paused.add(id) }
+      if (args[1] === 'settle') done.add(id)
+      return {}
+    }, subagents: { start: async (_provider, request) => {
+      resumed.push(request.resume)
+      const id = request.resume.taskId
+      let running = false
+      return { id, remoteSessionId: request.resume.remoteSessionId,
+        dispose: async () => { if (running) { active--; running = false } },
+        continuePrompt: async () => {
+          running = true; active++; peak = Math.max(peak, active)
+          if (id === 'original-0' && !allowSlow) return new Promise(() => {})
+          await new Promise(resolve => setTimeout(resolve, 5))
+          active--; running = false
+          return { stopReason: 'completed' }
+        } }
+    } } }
+  let run
+  try {
+    run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).attentionRequired, true)
+    assert.equal(peak, 3)
+    assert.equal(done.size, 3)
+    assert.deepEqual([...paused], [`${runId}:0`])
+    assert.equal(events.filter(([, event]) => event === 'paused').length, 1)
+    allowSlow = true; paused.clear() // Simulates the explicit runs resume command, tested against Python separately.
+    run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).attentionRequired, false)
+    assert.equal(done.size, 4)
+    assert.deepEqual(resumed.at(-1), { taskId: 'original-0', remoteSessionId: 'remote-0' })
+  } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('closure allows one mechanical repair then pauses instead of looping', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'closure-repairs-'))
+  const runId = 'repair-limit', controller = new AbortController()
+  let turns = 0, repairs = 0, paused = false
+  await mkdir(path.join(root, 'runs', runId), { recursive: true })
+  await writeFile(path.join(root, 'runs', runId, 'acp-workers.json'), JSON.stringify({ runId, workers: { original: { providerId: 'pangea-nga', remoteSessionId: 'remote' } } }))
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', cwd: root, dataRoot: root, runId, parent: {}, signal: controller.signal,
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[1] === 'next') return { run_id: runId, lifecycle_status: 'running', attention_required: paused, actions: paused ? [] : [{ action_id: 'closure', task_id: 'original', role: 'closure', stage: 'targeted_closure', action: 'continue_agent', ...(repairs ? { pending_repair: { reason: 'completion missing' } } : {}) }] }
+      if (args[1] === 'settle') { repairs++; return { validation: { status: 'incomplete' } } }
+      if (args[1] === 'execution' && args.includes('paused')) paused = true
+      return {}
+    }, subagents: { start: async () => ({ id: 'original', remoteSessionId: 'remote', dispose: async () => {}, continuePrompt: async () => { turns++; return { stopReason: 'completed' } } }) } })
+  try {
+    assert.equal((await run.result).attentionRequired, true)
+    assert.equal(turns, 2)
+    assert.equal(repairs, 2)
   } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
 })

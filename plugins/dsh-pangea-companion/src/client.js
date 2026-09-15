@@ -27,7 +27,8 @@ window.__ModuleLoader__.load({
     const MODEL_ROUTE_STORAGE_KEY = 'pangea.model-route.v1'
 
 
-    const STAGE_STATUS = { pending: '未开始', running: '执行中', completed: '已完成', skipped: '无需执行', failed: '失败', stopped: '已停止' }
+    const STAGE_STATUS = { pending: '未开始', running: '执行中', completed: '已完成', paused: '待继续', skipped: '无需执行', failed: '失败', stopped: '已停止' }
+    const CASE_READINESS = { ready: '具备执行条件（未代表实测通过）', needs_setup: '待补执行条件', unclassified: '执行条件未标注' }
     const RECORD_LABELS = { note: '分析说明', summary: '分析总结', unresolved: '待确认事项', flow: '业务流程', test_case: '测试用例', test_case_group: '用例组', risk: '风险', evidence: '源码依据', unit_plan: '单元计划', review_finding: '复核发现', review_decision: '复核结论' }
     function artifactLabel(file) {
       const name = file.split(/[\\/]/).pop()
@@ -1962,6 +1963,14 @@ window.__ModuleLoader__.load({
         }
         if (createdTask) await startTask(createdTask)
       }
+      async function deliverCurrentRun() {
+        if (!current || !selectedTask) return
+        try {
+          await requestWorkbenchAction({ cwd, action: 'deliver-current', payload: { task_id: selectedTask.task_id, run_id: current.run_id, data_root: selectedTask.data_root } })
+          showActionNotice('已交付当前保存结果；未完成修正和未解决事项保留，质量状态为 UNRESOLVED。')
+          await Promise.all([load(), loadWorkbench()])
+        } catch (reason) { showActionNotice(`交付未完成：${reason instanceof Error ? reason.message : String(reason)}`, true) }
+      }
       async function stopCurrentRun() {
         if (!cwd || !current || current.terminal) return
         try {
@@ -2572,9 +2581,30 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务'))
       }
 
+      function renderCorrectionProgress() {
+        return h(React.Fragment, null,
+            current.partial_delivery ? h('div', { role: 'status', style: styles.notice }, '已结束返修并交付当前结果；部分修正未完成，未解决事项和未复核内容保留。') : null,
+            current.case_readiness ? h('div', { style: styles.itemMeta }, `具备执行条件 ${current.case_readiness.ready} · 待补执行条件 ${current.case_readiness.needs_setup} · 未标注 ${current.case_readiness.unclassified}`) : null,
+            current.execution_progress?.length ? h('section', { 'aria-label': '实际执行进度', style: styles.card },
+              h('h3', null, '实际执行进度'),
+              current.execution_progress.filter(item => item.stage === 'targeted_closure' || ['dispatched', 'paused'].includes(item.status)).map(item => {
+                const elapsed = item.elapsed_ms + (item.started_at_ms && !item.finished_at_ms ? Math.max(0, Date.now() - item.started_at_ms) : 0)
+                return h('div', { key: item.action_id, style: styles.card },
+                  h('div', null, `${item.unit_id || item.action_id} · ${item.status === 'paused' ? '修正暂停' : item.status === 'accepted' ? '已完成本轮' : item.status}`),
+                  h('div', null, `累计 ${Math.floor(elapsed / 60000)} 分钟 · worker 回合 ${item.worker_turns} · 自动续接 ${item.auto_continuations}`),
+                  h('div', null, `关联 ${item.finding_count} 项复核发现 · 已新增或替换 ${item.modified_records} 条记录（不代表已解决数量）`),
+                  h('div', null, item.last_saved_at_ms ? `最近保存 ${Math.max(0, Math.floor((Date.now() - item.last_saved_at_ms) / 1000))} 秒前` : '尚无保存记录'),
+                  item.reason ? h('div', null, item.reason) : null)
+              })) : null,
+            current.stage === 'closing' && selectedTask ? h('div', { style: styles.card },
+              h('div', null, '定向修正可以继续，也可以结束并交付已有结果。结束后不再自动返修，未完成项明确保留。'),
+              h('button', { type: 'button', style: styles.button, onClick: () => { void deliverCurrentRun() } }, '结束修正，交付当前结果')) : null
+        )
+      }
+
       function renderWorkflow() {
         if (!current) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '选择一个 Run 后查看流程。'))
-        if (current.workflow_version === 'source-first-v1') return renderSourceFirstWorkflow()
+        if (current.workflow_version === 'source-first-v1') return h(React.Fragment, null, renderCorrectionProgress(), renderSourceFirstWorkflow())
         const steps = workflow.steps ?? []
         const statusLabel = { pending: '等待', running: '执行中', completed: '已完成', failed: '失败' }
         const publication = current.publication ?? { state: 'pending', revision: 0, step_id: null }
@@ -2731,7 +2761,7 @@ window.__ModuleLoader__.load({
           key: `${record.action_id}:${record.record_id ?? index}:${index}`,
           style: { ...styles.card, margin: '8px 0 0', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.06))' },
         },
-        h('summary', { style: { cursor: 'pointer' } }, `${RECORD_LABELS[record.kind] ?? '分析记录'} · ${text(record.record_id, `record-${index + 1}`)} · 版本 ${record.revision ?? '—'}`),
+        h('summary', { style: { cursor: 'pointer' } }, `${RECORD_LABELS[record.kind] ?? '分析记录'} · ${text(record.record_id, `record-${index + 1}`)} · 结果文件修订 ${record.revision ?? '—'}`),
         h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `${record.action_id ?? 'unknown action'}${record.task_id ? ` · task ${record.task_id}` : ''}`),
         renderReadableBody(record.body),
         Array.isArray(record.evidence) && record.evidence.length ? h('pre', { style: { ...styles.itemMeta, marginTop: 7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, `证据：${sourceFirstRecordBody(record.evidence)}`) : null,
@@ -3083,7 +3113,7 @@ window.__ModuleLoader__.load({
             h('div', { style: { ...styles.text, marginTop: 7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, launchFailure.error ?? launchFailure.message ?? selectedTask.launch_error)) : null,
           /* ACP process output is rendered in the product shell's right assistant panel. */
           renderLaunchDiagnostics(launchEvents),
-          ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) && mayRetryLaunch ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? (selectedTask.run_id ? '正在继续…' : '正在重试…') : (selectedTask.run_id ? '继续分析' : '重试启动')) : null,
+          ['failed', 'needs_attention', 'stopped'].includes(selectedTask.status) && mayRetryLaunch ? h('button', { type: 'button', disabled: creatingRun, style: { ...styles.primaryButton, width: 'auto', marginTop: 14, ...(creatingRun ? styles.buttonDisabled : {}) }, onClick: () => { void startTask(selectedTask) } }, creatingRun ? (selectedTask.run_id ? '正在继续…' : '正在重试…') : (selectedTask.run_id ? (current?.stage === 'closing' ? '继续当前修正' : '继续分析') : '重试启动')) : null,
           selectedTask.run_id && !launchPresentation.canResume ? h('div', { style: { ...styles.itemMeta, marginTop: 14 } }, `暂不能继续：${launchPresentation.resumeBlockedReason}`) : null))
         }
         const uncoveredRisks = risks.filter(isUncoveredRisk)
@@ -3145,10 +3175,11 @@ window.__ModuleLoader__.load({
             h('span', { style: { ...styles.itemMeta, display: 'block' } }, text(risk.trigger, '未记录触发条件')))))) : h('div', { style: styles.card }, h('div', { style: styles.empty }, collectionEmpty('risks', '当前没有风险结论。'))),
           current.artifacts?.report_html || current.artifacts?.report_md ? h('div', { style: styles.card },
             h('div', { style: styles.itemTitle }, '最终报告'),
-            h('div', { style: styles.itemMeta }, '报告是完整交付物；日常处理优先使用上面的任务入口。'),
+            h('div', { style: styles.itemMeta }, current.partial_delivery ? '当前结果报告保留未完成修正和未解决项。' : '报告是完整交付物；日常处理优先使用上面的任务入口。'),
             h('div', { style: styles.chips },
               current.artifacts.report_html ? chip('打开 HTML 报告', () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html')) : null,
               current.artifacts.report_md ? chip('打开 Markdown 报告', () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md')) : null)) : null,
+          renderCorrectionProgress(),
           h('details', { style: styles.technical },
             h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600 } }, '技术详情'),
             h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, '查看流程、证据和本次运行的组件信息。'),
@@ -3293,6 +3324,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.eyebrow }, '测试用例'),
             h('div', { style: styles.decisionTitle }, `${testCases.length} 条测试用例`),
             h('div', { style: styles.decisionHint }, '按独立验证目标查看用例、关联路径、覆盖缺口和执行步骤。'),
+            current?.case_readiness ? h('div', { style: styles.itemMeta }, `具备执行条件 ${current.case_readiness.ready} · 待补执行条件 ${current.case_readiness.needs_setup} · 未标注 ${current.case_readiness.unclassified}`) : null,
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '用例总数'), h('div', { style: styles.decisionValue }, testCases.length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已选择'), h('div', { style: styles.decisionValue }, selectedCaseIds.length)),
@@ -3423,6 +3455,8 @@ window.__ModuleLoader__.load({
         if (!item) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 中找不到这条测试用例，可能是 Run 已刷新或切换。'))
         return h(React.Fragment, null,
           renderRecordBody(item),
+          item.source_record ? section('执行条件', CASE_READINESS[item.readiness] || CASE_READINESS.unclassified) : null,
+          item.missing_execution_conditions?.length ? stringList('待补执行条件', item.missing_execution_conditions) : null,
           renderRecordEvidence(item),
           item.entry ? section('测试入口', sourceFirstRecordBody(item.entry)) : null,
           item.unit_notes?.length ? section('本分析单元说明', h('div', null, item.unit_notes.map(note => h('details', { key: note.projection_id }, h('summary', { style: styles.itemTitle }, note.title), sourceFirstRecordBody(note.source_record.body))))) : null,
