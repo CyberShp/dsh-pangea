@@ -210,6 +210,7 @@ test('source-first dispatch uses global restrictions while report remains child-
   await writeFile(path.join(rules, 'planning-worker.md'), 'planning')
   const taskPath = path.join(root, 'planning.json')
   await writeFile(taskPath, JSON.stringify({ run_id: 'run', action_id: 'run:planning', result_path: path.join(root, 'result.json') }))
+  const executionEvents = []
   let dispatch, post, started = 0, bound = 0
   const owner = { id: 'owner', options: {}, session: { header: { cwd: root } } }
   try {
@@ -227,7 +228,12 @@ test('source-first dispatch uses global restrictions while report remains child-
         assert.ok(!registry.wireSchemas().schemas.some(tool => tool.name === 'report'))
         return { childId: 'original-child' }
       }, async followup() {} },
-    }, async () => { bound++; return {} })
+    }, async () => { bound++; return {} }, async (cwd, binding, event) => {
+      // This registry test uses a synthetic Run; execution facts must use the
+      // same injected boundary as bind, not launch an unrelated system Python.
+      executionEvents.push({ cwd, binding, event })
+      return {}
+    })
     const value = { workflow_version: 'source-first-v1', run_id: 'run', data_root: root,
       actions: [{ action_id: 'run:planning', role: 'planning', action: 'dispatch_agent', task_path: taskPath }] }
     await post({ name: 'pangea_action_next', agent: owner }, { value }, async () => ({ kind: 'accept', value }))
@@ -236,5 +242,6 @@ test('source-first dispatch uses global restrictions while report remains child-
     assert.equal(result.bound, true)
     assert.equal(started, 1)
     assert.equal(bound, 1)
+    assert.deepEqual(executionEvents, [{ cwd: root, binding: { dataRoot: root, runId: 'run', actionId: 'run:planning', childId: 'original-child' }, event: 'started' }])
   } finally { await child.dispose(); await context.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
 })
