@@ -224,6 +224,18 @@ export function normalizeRunInput(value, capabilities) {
   return normalizeAnalysisInput(value, capabilities, false)
 }
 
+export async function queryCoverageAsset({ cwd, dataRoot, query, runner = runPangea }) {
+  const root = workspaceRoot(cwd)
+  for (const key of ['product', 'c_version', 'module']) {
+    if (typeof query?.[key] !== 'string' || !query[key].trim()) throw new Error(`覆盖率查询缺少 ${key}`)
+  }
+  if (query.b_version !== undefined && typeof query.b_version !== 'string') throw new Error('b_version 必须是字符串')
+  // Preserve the same literal product/version arguments as codetalks-skill.
+  return runner({ cwd: root, args: ['assets', 'query-coverage', '--data-root', dataRootFor(root, dataRoot),
+    '--product', query.product, '--version', query.c_version, '--module', query.module,
+    ...(query.b_version ? ['--b-version', query.b_version] : [])] })
+}
+
 async function withSourceFirstReports(run, dataRoot) {
   if (run?.workflow_version !== 'source-first-v1') return run
   const directory = path.resolve(dataRoot, 'runs', run.run_id)

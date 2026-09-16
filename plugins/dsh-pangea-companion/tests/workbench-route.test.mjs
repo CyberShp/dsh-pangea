@@ -12,6 +12,35 @@ import { createTaskStore } from '../src/task-store.js'
 
 function ok(value) { return { result: { ok: true, value } } }
 
+test('new-analysis coverage query uses literal arguments and returns acquisition state without starting a Run', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'query-route-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  const calls = []
+  async function request(query, origin = 'same-origin') {
+    const req = Readable.from([Buffer.from(JSON.stringify({ action: 'coverage-query', query, data_root: 'custom-data' }))])
+    req.method = 'POST'
+    req.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: root })}`
+    req.headers = { 'sec-fetch-site': origin }
+    const response = {}
+    await workbenchRouteHandler(req, { writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) } },
+      {}, {}, new Set(), {}, {}, {}, async options => { calls.push(options); return { status: 'no_data', asset: null, message: '无数据' } })
+    return response
+  }
+  const query = { product: 'PANGEA', c_version: ' V600R013C00 ', module: 'nvme tcp', b_version: 'B001' }
+  const result = await request(query)
+  assert.equal(result.code, 200)
+  assert.equal(result.body.acquisition.status, 'no_data')
+  assert.equal(result.body.acquisition.asset, null)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].args, ['assets', 'query-coverage', '--data-root', path.join(root, 'custom-data'),
+    '--product', 'PANGEA', '--version', ' V600R013C00 ', '--module', 'nvme tcp', '--b-version', 'B001'])
+  assert.equal((await request({ ...query, module: '' })).code, 400)
+  assert.equal((await request(query, 'cross-site')).code, 403)
+  assert.equal(calls.length, 1)
+})
+
 async function fixture() {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-workbench-route-')))
   await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })

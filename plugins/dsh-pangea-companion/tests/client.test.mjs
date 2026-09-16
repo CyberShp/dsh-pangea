@@ -58,6 +58,55 @@ function descendants(node) {
   return [node, ...node.children.flatMap(descendants)]
 }
 
+test('module analysis queries coverage, selects partial results and removes stale selection on failed requery', async () => {
+  let index = 0, resolveQuery
+  const form = { repository: 'repo', target: 'TLS', source_scope_text: 'tls', asset_ids: ['design'], scenario: 'module-analysis', mode: 'depth',
+    provider_id: 'pangea-opencode', coverage_product: 'PANGEA', coverage_version: ' V600R013C00 ', coverage_module: 'nvme tcp', coverage_b_version: '' }
+  const states = { 1: { data_root: '/workspace/custom-data', compatibility: { compatible: true }, capabilities: {
+    repositories: ['repo'], workflow_versions: ['source-first-v1'], coverage_query_skill: { available: true } },
+    acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create' }, 33: form }
+  const calls = []
+  const react = { ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!(key in states)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } }
+  const client = await loadClientExports(react, async (url, options) => {
+    calls.push(JSON.parse(options.body))
+    return new Promise(resolve => { resolveQuery = acquisition => resolve({ ok: true, json: async () => ({ status: 'ok', acquisition }) }) })
+  })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const render = () => {
+    index = 0
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    return descendants(panel.type(panel.props))
+  }
+  const button = nodes => nodes.find(node => node.type === 'button' && node.children.includes('查询并加入本次分析'))
+  const first = button(render()).props.onClick()
+  assert.equal(calls[0].action, 'coverage-query')
+  assert.equal(calls[0].query.c_version, ' V600R013C00 ')
+  assert.equal(calls[0].data_root, '/workspace/custom-data')
+  assert.equal(render().find(node => node.children.includes('正在查询覆盖率…')).props.disabled, true)
+  resolveQuery({ status: 'partial', record_count: 4, asset: { asset_id: 'query-1', title: '内网覆盖率', asset_type: 'coverage', status: 'available' },
+    missing: ['summary/branch'], warnings: ['部分数据'], query_input: calls[0].query })
+  await first
+  assert.deepEqual(Array.from(states[33].asset_ids), ['design', 'query-1'])
+  let nodes = render()
+  assert.ok(nodes.some(node => node.props['aria-label'] === '移除资产 内网覆盖率'))
+  const request = client.buildAnalysisRequest(states[33])
+  assert.deepEqual(Array.from(request.asset_ids), ['design', 'query-1'])
+  assert.equal(request.coverage_input, undefined)
+  const retry = button(nodes).props.onClick()
+  resolveQuery({ status: 'error', asset: null, message: '版本匹配失败' })
+  await retry
+  assert.deepEqual(Array.from(states[33].asset_ids), ['design'])
+  nodes = render()
+  assert.ok(nodes.some(node => node.children.includes('版本匹配失败')))
+  states[1].capabilities.coverage_query_skill.available = false
+  assert.equal(button(render()).props.disabled, true)
+})
+
 for (const providerId of ['pangea-nga', 'pangea-opencode', 'pangea-codeagent', 'pangea-claude-code']) {
   test(`new analysis selects advertised ${providerId} models and clears selection when changing Agent`, async () => {
     let index = 0, phase = 'form', changed

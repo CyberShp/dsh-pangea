@@ -1164,6 +1164,8 @@ window.__ModuleLoader__.load({
       const [assetRepositoryOnly, setAssetRepositoryOnly] = React.useState(false)
       const [assetRefresh, setAssetRefresh] = React.useState(0)
       const [assetLabels, setAssetLabels] = React.useState({})
+      const [coverageQueryBusy, setCoverageQueryBusy] = React.useState(false)
+      const [coverageQueryResult, setCoverageQueryResult] = React.useState(null)
       const [flowSelection, setFlowSelection] = React.useState('')
       const [branchSelection, setBranchSelection] = React.useState('')
       const [branchFilter, setBranchFilter] = React.useState('')
@@ -1418,6 +1420,8 @@ window.__ModuleLoader__.load({
           setAssetLabels({})
           setAssetPage(1)
           setAssetSelectorOpen(false)
+          setCoverageQueryBusy(false)
+          setCoverageQueryResult(null)
           setCreateForm(value => value.asset_ids.length ? { ...value, asset_ids: [] } : value)
         }
         assetWorkspaceRef.current = cwd
@@ -1876,6 +1880,30 @@ window.__ModuleLoader__.load({
             : [...value.asset_ids, assetId],
         }))
       }
+      async function queryCoverageForAnalysis() {
+        if (!cwd || coverageQueryBusy || creatingRun) return
+        const query = { product: createForm.coverage_product, c_version: createForm.coverage_version,
+          module: createForm.coverage_module, b_version: createForm.coverage_b_version || '' }
+        const previousAsset = coverageQueryResult?.asset?.asset_id
+        setCreateForm(value => ({ ...value, asset_ids: value.asset_ids.filter(id => id !== previousAsset) }))
+        setCoverageQueryBusy(true)
+        setCoverageQueryResult(null)
+        try {
+          const { acquisition } = await requestWorkbenchAction({ cwd, action: 'coverage-query', payload: { query, data_root: workbench?.data_root } })
+          if (assetWorkspaceRef.current !== cwd) return
+          setCoverageQueryResult(acquisition)
+          const asset = acquisition?.asset
+          if (['success', 'partial'].includes(acquisition?.status) && asset?.status === 'available') {
+            setAssetLabels(value => ({ ...value, [asset.asset_id]: asset }))
+            setCreateForm(value => ({ ...value, asset_ids: [...new Set([...value.asset_ids, asset.asset_id])] }))
+            setAssetRefresh(value => value + 1)
+          }
+        } catch (error) {
+          if (assetWorkspaceRef.current === cwd) setCoverageQueryResult({ status: 'error', message: error.message })
+        } finally {
+          if (assetWorkspaceRef.current === cwd) setCoverageQueryBusy(false)
+        }
+      }
       function repositoryNameFromPath(value) {
         return String(value ?? '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
       }
@@ -1929,7 +1957,7 @@ window.__ModuleLoader__.load({
         navigate({ type: 'repository-import' })
       }
       async function submitNewRun() {
-        if (!cwd || creatingRun || workbench?.compatibility?.compatible !== true) return
+        if (!cwd || creatingRun || coverageQueryBusy || workbench?.compatibility?.compatible !== true) return
         setCreatingRun(true)
         let createdTask
         try {
@@ -1943,6 +1971,7 @@ window.__ModuleLoader__.load({
           createdTask = created.task
           ctx?.pangea?.updateRunDraft?.({ assetIds: [] })
           setCreateForm(value => ({ ...value, asset_ids: [] }))
+          setCoverageQueryResult(null)
           setWorkbench(value => ({
             ...(value ?? {}),
             tasks: {
@@ -2447,7 +2476,7 @@ window.__ModuleLoader__.load({
           ? selectedProvider?.registered === true
           : selectedModelOption?.credential_configured === true
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
-        const canSubmit = compatible && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode) && createForm.repository && createForm.target.trim() && (sourceScope.length > 0 || createForm.scenario === 'coverage-analysis') && (createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())) && executionReady && !creatingRun
+        const canSubmit = compatible && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode) && createForm.repository && createForm.target.trim() && (sourceScope.length > 0 || createForm.scenario === 'coverage-analysis') && (createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())) && executionReady && !creatingRun && !coverageQueryBusy
         const assetItems = assetCatalog?.assets ?? []
         const selectedAssets = createForm.asset_ids.map(assetId => assetLabels[assetId] ?? assetItems.find(item => item.asset_id === assetId)
           ?? { asset_id: assetId, title: assetId })
@@ -2528,6 +2557,27 @@ window.__ModuleLoader__.load({
                 h('textarea', { 'aria-label': '参考源码范围', style: { ...styles.textarea, marginTop: 5, minHeight: 60 }, value: createForm.context_scope_text ?? '', placeholder: '相关实现、文档或测试的相对文件路径，每行一个', onChange: event => setCreateForm(value => ({ ...value, context_scope_text: event.target.value })) }),
                 h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '填写辅助理解所需的文件。')) : null,
               h('h2', { className: 'pangea-form-section' }, '02 · 分析资料'),
+              semantic ? h('details', { style: { gridColumn: '1 / -1' } },
+                h('summary', { style: styles.label }, '从内网查询覆盖率（可选）'),
+                h('p', null, '填写查询对象，获取后自动加入本次分析，无需上传覆盖率文件。'),
+                h('div', { style: styles.formGrid }, formField('产品', 'coverage_product', '例如 PANGEA'),
+                  formField('C 版本', 'coverage_version', '版本原文，保留空格'),
+                  formField('模块', 'coverage_module', '覆盖率平台上的模块名称'),
+                  formField('B 版本（可选）', 'coverage_b_version', '可不填')),
+                h('p', { style: styles.itemMeta }, workbench?.capabilities?.coverage_query_skill?.available
+                  ? '查询服务已就绪。产品与版本分开传入，由查询 Skill 匹配平台名称。'
+                  : '请放入 <PANGEA 解压目录>/local-skills/coverage-query，然后刷新重新检测。'),
+                h('button', { type: 'button', style: styles.button, onClick: queryCoverageForAnalysis,
+                  disabled: !compatible || !workbench?.capabilities?.coverage_query_skill?.available || coverageQueryBusy || creatingRun
+                    || !String(createForm.coverage_product ?? "").trim() || !String(createForm.coverage_version ?? "").trim() || !String(createForm.coverage_module ?? "").trim(),
+                }, coverageQueryBusy ? '正在查询覆盖率…' : '查询并加入本次分析'),
+                coverageQueryResult ? h('div', { role: 'status', style: { marginTop: 12, whiteSpace: 'pre-wrap' } },
+                  h('strong', null, ({ success: '查询成功', partial: '查询结果不完整', no_data: '未查询到数据', error: '查询失败' })[coverageQueryResult.status] ?? coverageQueryResult.status),
+                  coverageQueryResult.query_input ? h('p', null, [coverageQueryResult.query_input.product, coverageQueryResult.query_input.c_version, coverageQueryResult.query_input.module, coverageQueryResult.query_input.b_version].filter(Boolean).join(' / ')) : null,
+                  coverageQueryResult.asset ? h('p', null, `${coverageQueryResult.record_count ?? 0} 条可定位缺口；${createForm.asset_ids.includes(coverageQueryResult.asset.asset_id) ? '已加入本次分析' : '未选中，可从资产库重新选择'}。后续按本次源码范围匹配。`) : null,
+                  coverageQueryResult.message ? h('p', null, coverageQueryResult.message) : null,
+                  coverageQueryResult.missing?.length ? h('p', null, `缺失来源：${coverageQueryResult.missing.map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('；')}`) : null,
+                  (coverageQueryResult.warnings ?? []).map((warning, index) => h('p', { key: index }, typeof warning === 'string' ? warning : JSON.stringify(warning)))) : null) : null,
               h('div', { style: { gridColumn: '1 / -1' } },
                 h('div', { style: styles.label }, '分析资产'),
                 h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '选择需求、设计、历史缺陷、参考资料或示例用例，将其中的条件与问题带入本次分析。'),
