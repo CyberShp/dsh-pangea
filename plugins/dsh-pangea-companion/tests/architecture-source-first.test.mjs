@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile, mkdir, rm, access } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, mkdir, rm, access, symlink } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createView } from '../src/architecture-views.js'
@@ -84,4 +84,20 @@ test('accepted closure replaces analysis for diagrams and corrupt accepted bindi
   result.binding.run_id = 'another-run'
   await writeFile(closureResult, JSON.stringify(result))
   await assert.rejects(createView(f.task, {}, f.env), /不可读取/)
+})
+
+test('direct architecture reader accepts an aliased data root without weakening Run boundaries', async t => {
+  const f = await fixture(t)
+  const alias = `${f.task.data_root}-alias`
+  await symlink(f.task.data_root, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  t.after(() => rm(alias, { recursive: true, force: true }))
+  const created = await createView({ ...f.task, data_root: alias }, { flow_id: f.flowId }, f.env)
+  assert.equal((await context(f, created)).business_flows[0].title, 'TLS session')
+  const progressPath = path.join(f.run, 'progress.json')
+  const progress = JSON.parse(await readFile(progressPath, 'utf8'))
+  const outsideTask = path.join(f.task.data_root, 'outside-task.json')
+  await writeFile(outsideTask, JSON.stringify({ unit_id: 'tls', result_path: f.resultPath }))
+  progress.actions[f.actionId].task_path = outsideTask
+  await writeFile(progressPath, JSON.stringify(progress))
+  await assert.rejects(createView({ ...f.task, data_root: alias }, {}, f.env), /不可读取/)
 })

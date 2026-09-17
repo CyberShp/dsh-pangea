@@ -818,7 +818,9 @@ export async function sourceFirstReportAvailable(runDirectory, lifecycleStatus) 
 }
 
 async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false } = {}) {
-  const runDirectory = path.join(dataRoot, 'runs', runId)
+  // Task/result paths are canonicalized below. Canonicalize their boundary too:
+  // direct callers may supply a Windows short path or a linked data root.
+  const runDirectory = await realpath(path.join(dataRoot, 'runs', runId))
   const progressPath = path.join(runDirectory, 'progress.json')
   const progress = await readJson(progressPath)
   const contractPath = path.join(runDirectory, 'inputs', 'task-contract.json')
