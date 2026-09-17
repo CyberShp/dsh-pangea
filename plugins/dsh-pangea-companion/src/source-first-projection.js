@@ -16,7 +16,49 @@ function activeRecords(records) {
   return records.filter(record => !retired.has(record.record_id))
 }
 
+export function normalizeFlow(body) {
+  const warnings = []
+  const alias = (row, key, alternate, where) => {
+    if (row[key] != null && row[alternate] != null && row[key] !== row[alternate]) warnings.push(`${where}: ${key} 与 ${alternate} 不一致，按 ${key} 展示；原文保留`)
+    return row[key] ?? row[alternate]
+  }
+  const nodes = list(body.nodes).flatMap((node, index) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) { warnings.push(`nodes[${index}] 不是节点对象`); return [] }
+    const id = alias(node, 'id', 'node_id', `nodes[${index}]`)
+    const label = alias(node, 'label', 'name', `nodes[${index}]`)
+    if (typeof id !== 'string' || !id.trim() || typeof label !== 'string' || !label.trim()) {
+      warnings.push(`nodes[${index}] 缺少字符串 id/node_id 或 label/name，未绘制；请查看原文`); return []
+    }
+    return [{ ...node, id, label, description: alias(node, 'description', '说明', `nodes[${index}]`), source_evidence: node.source_evidence ?? node['源码依据'] }]
+  })
+  const ids = new Set(nodes.map(n => n.id))
+  const duplicate = ids.size !== nodes.length
+  if (duplicate) warnings.push('节点 ID 重复，无法可靠定位连线；请修正当前流程原记录')
+  const edges = list(body.edges).flatMap((edge, index) => {
+    if (!edge || typeof edge !== 'object' || Array.isArray(edge)) { warnings.push(`edges[${index}] 不是连线对象`); return [] }
+    const source = alias(edge, 'source_step_key', 'source', `edges[${index}]`)
+    const target = alias(edge, 'target_step_key', 'target', `edges[${index}]`)
+    if (!ids.has(source) || !ids.has(target) || duplicate) { warnings.push(`edges[${index}] 端点无法对应唯一节点，未绘制；原文保留`); return [] }
+    return [{ ...edge, source_step_key: source, target_step_key: target }]
+  })
+  for (const [index, path] of list(body.paths).entries()) {
+    if (list(path?.node_ids).some(id => !ids.has(id))) warnings.push(`paths[${index}] 引用了缺失节点；原文路径保留`)
+  }
+  if (!nodes.length) warnings.push('没有可解析的节点，请查看原文；这不代表分析已完成')
+  return { ...body, title: alias(body, 'title', '标题', 'flow'), description: alias(body, 'description', '说明', 'flow'),
+    nodes: duplicate ? [] : nodes, edges, projection_warnings: warnings }
+}
+
+export function coverageSummary(cases, gaps) {
+  const known = Array.isArray(gaps) ? new Set(gaps.map(row => row?.coverage_id).filter(id => typeof id === 'string' && id)) : null
+  const refs = new Set(cases.flatMap(row => list(row.coverage_refs).map(ref => typeof ref === 'string' ? ref : ref?.coverage_id)).filter(id => typeof id === 'string' && id))
+  return { valid_gaps: known ? known.size : null, coverage_cases: cases.filter(row => row.purpose === 'coverage').length,
+    linked_valid_gaps: known ? [...refs].filter(id => known.has(id)).length : null,
+    unverified_refs: known ? [...refs].filter(id => !known.has(id)).length : refs.size }
+}
+
 export function recordTitle(record, body = mapping(record.body)) {
+  if (record.kind === 'flow' && typeof body.title !== 'string' && typeof body['标题'] === 'string') return body['标题']
   if (typeof body.title === 'string' && body.title.trim()) return body.title.trim()
   const first = typeof record.body === 'string' && !Object.keys(body).length ? record.body.trim().split('\n')[0].trim() : ''
   if (first && !/^[\s{}\[\],:|`#*-]+$/.test(first)) return first.replace(/^#{1,6}\s+/, '').slice(0, 120)
@@ -28,7 +70,8 @@ export function sourceFirstProjection(artifacts) {
   const closureUnits = new Set(artifacts.filter(a => a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)).map(a => a.task?.unit_id))
   const delivery = artifacts.filter(a => (a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)) || (a.stage === 'unit_analysis' && !closureUnits.has(a.task?.unit_id)))
   const rows = delivery.flatMap(action => activeRecords(action.records ?? []).map(record => {
-    const body = mapping(record.body)
+    const raw = mapping(record.body)
+    const body = record.kind === 'flow' ? normalizeFlow(raw) : raw
     const unit = action.task?.unit_id ?? action.action_id
     const originalId = body.risk_id ?? body.case_id ?? body.test_case_id ?? body.flow_id ?? body.coverage_id ?? record.record_id
     return {
@@ -78,7 +121,7 @@ export function sourceFirstProjection(artifacts) {
       })
     } else if (kind === 'flow') {
       result.business_flows.push({ ...row, flow_id: row.projection_id,
-        mainline_steps: list(row.nodes).map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind })),
+        mainline_steps: list(row.nodes).map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind, source_evidence: node.source_evidence })),
         branches: list(row.paths).map(p => ({ branch_id: p.path_id, from_step_id: p.node_ids?.[0], to_step_id: p.node_ids?.at(-1), condition: plain(p.condition), processing: plain(p.explanation), linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })), description: plain(row.description), entry: plain(row.entry ?? row.trigger), steps: strings(row.steps), evidence: [],
         paths: list(row.paths).map(p => ({ ...p, linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })),
       })

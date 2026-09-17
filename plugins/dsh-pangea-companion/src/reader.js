@@ -1,7 +1,7 @@
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { sourceFirstProjection } from './source-first-projection.js'
+import { sourceFirstProjection, coverageSummary } from './source-first-projection.js'
 
 const STEP_TITLES = [
   '范围和任务契约',
@@ -830,6 +830,10 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   }
   const actionView = await sourceFirstActionArtifacts(runDirectory, progress)
   const projection = sourceFirstProjection(actionView.artifacts)
+  let coverageGaps = null
+  try { coverageGaps = await readJson(path.join(runDirectory, 'inputs', 'coverage-gaps.json')) } catch { /* Old Runs may not have frozen coverage input. */ }
+  const coverageOverview = coverageSummary(projection.test_cases, coverageGaps)
+
   const life = sourceFirstLifecycle(progress)
   const sourceSnapshot = await sourceFirstSnapshot(runDirectory, progress, contract, actionView.artifacts)
   const analysisActions = actionView.artifacts.filter(item => item.role === 'analysis')
@@ -883,6 +887,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     step_progress: { completed: sourceFirstStepRows(progress, runDirectory, actionView.artifacts).filter(item => ['completed', 'skipped'].includes(item.status)).length, total: SOURCE_FIRST_STAGES.length },
   }
   const summary = {
+    coverage_summary: coverageOverview,
     run_id: runId,
     workflow_version: progress.workflow_version ?? 'source-first-v1',
     scenario: contract?.analysis_settings?.scenario ?? 'module-analysis',

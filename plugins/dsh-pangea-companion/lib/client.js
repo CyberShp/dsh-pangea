@@ -2901,6 +2901,7 @@ window.__ModuleLoader__.load({
             : reader.view === 'diagram' ? renderDiagrams(flow)
               : h(React.Fragment, null,
                 renderRecordBody(flow),
+                flow.projection_warnings?.length ? h('div', { role: 'status', style: styles.notice }, '流程字段需核对：', h('ul', null, flow.projection_warnings.map((message, index) => h('li', { key: index }, message)))) : null,
                 h('div', { style: { marginBottom: 14 } }, h('div', { style: styles.itemTitle }, flow.title || '流程'), h('div', { style: styles.itemMeta }, flow.description || flow.entry), linkedItems(flow)),
                 flow.document_status === 'live_draft' ? h('div', { role: 'status', style: styles.notice }, '当前显示活文档步骤草稿；正式发布状态以阶段投影为准。') : null,
                 !steps.length ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, pathOnly ? '原文提供了业务路径，以下按原文阅读。缺少节点与连线，暂不能据此绘制流程图。' : '尚无可解析的主干步骤。请查看上方流程原文；这不表示流程没有步骤，也不表示分析已完成。') : null,
@@ -3373,6 +3374,7 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.decisionHero },
             h('div', { style: styles.eyebrow }, '测试用例'),
             h('div', { style: styles.decisionTitle }, `${testCases.length} 条测试用例`),
+            current?.coverage_summary ? h('div', { style: styles.itemMeta }, `有效 Coverage 缺口 ${current.coverage_summary.valid_gaps ?? '未记录/不可读取'} · 补测用例 ${current.coverage_summary.coverage_cases} · 用例关联的去重有效缺口 ${current.coverage_summary.linked_valid_gaps ?? '无法核实'} · 待核实引用 ${current.coverage_summary.unverified_refs}。关联不代表实测覆盖，未解决原因见分析记录。`) : null,
             h('div', { style: styles.decisionHint }, '按独立验证目标查看用例、关联路径、覆盖缺口和执行步骤。'),
             current?.case_readiness ? h('div', { style: styles.itemMeta }, `具备执行条件 ${current.case_readiness.ready} · 待补执行条件 ${current.case_readiness.needs_setup} · 未标注 ${current.case_readiness.unclassified}`) : null,
             h('div', { style: styles.decisionBand },

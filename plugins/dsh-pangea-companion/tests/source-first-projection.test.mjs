@@ -119,3 +119,33 @@ test('execution readiness uses explicit declarations and partial closure preserv
   assert.equal(result.test_cases[1].source_record.body, pending.body)
   assert.deepEqual(result.test_cases[1].missing_execution_conditions, ['需开发提供注入桩'])
 })
+
+test('three units preserve normal records and render explicit aliases only in unit 3', () => {
+  const good = { flow_id: 'F1', title: '正常', nodes: [{ id: 'a', label: '提交请求' }], edges: [], paths: [] }
+  const third = { flow_id: 'F1', 标题: '异常单元', 说明: '原文', nodes: [{ node_id: 'a', name: '提交请求' }, { node_id: 'b', name: '收到拒绝' }], edges: [{ source: 'a', target: 'b' }] }
+  const normal = [action('u1', [record('f', 'flow', good)]), action('u2', [record('f', 'flow', good)])]
+  const before = sourceFirstProjection(normal)
+  const value = sourceFirstProjection([...normal, action('u3', [record('f', 'flow', third)])])
+  assert.deepEqual(value.business_flows.slice(0, 2), before.business_flows)
+  const flow = value.business_flows[2]
+  assert.equal(flow.title, '异常单元')
+  assert.deepEqual(flow.mainline_steps.map(n => [n.step_id, n.title]), [['a', '提交请求'], ['b', '收到拒绝']])
+  assert.equal(flow.edges[0].target_step_key, 'b')
+  assert.equal(flow.source_record.body, third)
+})
+test('invalid or duplicate nodes are diagnosed without invented identifiers', () => {
+  const body = { nodes: [null, { name: 'missing id' }, { id: 'a', label: 'first' }, { id: 'a', label: 'second' }], edges: [{ source: 'a', target: 'missing' }] }
+  const flow = sourceFirstProjection([action('u3', [record('f', 'flow', body)])]).business_flows[0]
+  assert.deepEqual(flow.mainline_steps, [])
+  assert.deepEqual(flow.edges, [])
+  assert.ok(flow.projection_warnings.some(x => x.includes('重复')))
+  assert.ok(flow.projection_warnings.some(x => x.includes('缺少')))
+  assert.equal(flow.source_record.body, body)
+})
+test('coverage purpose and valid references are counted independently', async () => {
+  const { coverageSummary } = await import('../src/source-first-projection.js')
+  const cases = [{ purpose: 'coverage', coverage_refs: ['C1'] }, { purpose: 'branch', coverage_refs: ['C1', { coverage_id: 'C2' }] }, { purpose: 'risk', coverage_refs: ['C3', 'outside'] }]
+  assert.deepEqual(coverageSummary(cases, ['C1', 'C2', 'C3', 'C4'].map(coverage_id => ({ coverage_id }))), { valid_gaps: 4, coverage_cases: 1, linked_valid_gaps: 3, unverified_refs: 1 })
+  assert.equal(coverageSummary(cases, null).linked_valid_gaps, null)
+  assert.equal(coverageSummary(cases, []).linked_valid_gaps, 0)
+})
