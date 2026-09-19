@@ -80,7 +80,7 @@ function flowContext(projection, flow, branchIds) {
   return { business_flows: [{ ...flow, evidence }], risks, test_cases: cases, evidence, notes: [] }
 }
 
-export async function createView(task, { type = 'workflow', flow_id = null, previous_view_id = null, branch_ids } = {}, env = process.env) {
+export async function createView(task, { type = 'workflow', flow_id = null, previous_view_id = null, branch_ids, profile } = {}, env = process.env) {
   if (!DIAGRAM_TYPES.includes(type)) throw new Error('Unsupported diagram type')
   const archify = env.PANGEA_ARCHIFY_ROOT
   if (!archify) throw new Error('Archify runtime unavailable')
@@ -100,6 +100,11 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   flow_id ??= previous?.flow_id ?? null
   const flow = flow_id ? projection.business_flows?.find(item => item.flow_id === flow_id) : null
   if (flow_id && !flow) throw new Error('该流程已更新或尚未产出，请刷新后重新选择。')
+  const viewProfile = profile ?? previous?.profile ?? 'standard'
+  if (!['standard', 'function_variables'].includes(viewProfile)) throw new Error('Unsupported diagram profile')
+  if (viewProfile === 'function_variables' && (!flow || type !== 'workflow')) throw new Error('Function diagram requires a flow and workflow type')
+  if (previous && (previous.profile ?? 'standard') !== viewProfile) throw new Error('Diagram profile mismatch')
+  if (previous && viewProfile === 'function_variables' && previous.flow_id !== flow_id) throw new Error('Function diagram flow mismatch')
   const branchIds = branch_ids ?? previous?.branch_ids ?? null
   if (branchIds !== null && (!flow || !Array.isArray(branchIds) || !branchIds.length || new Set(branchIds).size !== branchIds.length
     || branchIds.some(id => !(flow.branches ?? []).some(branch => branch.branch_id === id)))) throw new Error('Invalid architecture branch scope')
@@ -129,7 +134,7 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     const candidate = await readFile(path.join(await viewRoot(task, previous.view_id), 'candidate.json'))
     await writeFile(path.join(folder, 'candidate.json'), candidate)
   }
-  const view = { view_id: viewId, task_id: task.task_id, run_id: task.run_id, flow_id, type, branch_ids: branchIds,
+  const view = { view_id: viewId, task_id: task.task_id, run_id: task.run_id, flow_id, type, profile: viewProfile, branch_ids: branchIds,
     source_revision: context.publication?.revision ?? null, workflow_version: context.workflow_version,
     publication: context.publication, source_records: sourceRecords, status: 'generating',
     previous_view_id, session_id: null, job_id: null, created_at: stamp(), updated_at: stamp() }
@@ -137,6 +142,12 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   const renderer = fileURLToPath(new URL('./architecture-render.mjs', import.meta.url))
   return { view, prompt: [
     `为 ${task.target} 创建 ${type} 架构视图。${previous ? '这是关联的新画图会话；candidate.json 是旧图，必须按本次 context.json 核对更新。' : ''}`,
+    ...(viewProfile === 'function_variables' ? [
+      '绘制当前业务流程的函数与变量流程图，使用 workflow schema。以真实函数为节点，节点标明函数名、入参、返回值、关键局部或共享变量，并附冻结源码的相对路径与行号。',
+      '有向连线表达真实调用关系，标明调用方向、分支条件、实参到形参的传递、返回值接收和关键变量的赋值或状态变化；循环、递归和回调须忠实表达。按 schema 支持的 label、描述或详情字段组织信息，保持主图可读。',
+      '从已发布业务流程定位冻结源码，只读取该流程相关函数。逐一核对函数定义、调用点与变量读写；不得将业务步骤直接冒充函数，不得推测运行时具体值。无法确认的动态调用、外部实现、入参、返回值或变量变化明确标注“待确认”及原因。',
+      '图中展示已核对范围与缺失信息；若源码不可读或没有可核对的函数，报告原因，不生成虚构图。此图为源码静态关系，不能声称运行时轨迹已验证。',
+    ] : []),
     ...(branchIds ? [`本图是局部分支图，仅包含 ${branchIds.join('、')}。主干仅作定位和回接上下文；图题须注明“局部分支”，不得把本图表述为完整流程。`] : []),
     `先读取 ${path.join(archify, 'SKILL.md')}，按需读对应 schema/example；PANGEA 集成约定优先：不运行更新检查，不访问外网，不要求公开仓库，不读取秘密配置。`,
     `当前分析上下文：${path.join(folder, 'context.json')}。源码位置按其中 source_snapshot 的 repositories、manifest_path 和 index_path 读取，不猜测旧源码目录。`,

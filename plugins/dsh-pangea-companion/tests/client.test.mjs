@@ -1280,3 +1280,53 @@ test('closure progress and delivery control are visible on the workflow page', a
   assert.match(JSON.stringify(progress), /不代表已解决数量/)
   assert.ok(nodes.some(node => node.type === 'button' && node.children.includes('结束修正，交付当前结果')))
 })
+
+test('flow views default to text and isolate function diagrams by flow, run and profile', async () => {
+  const task = { task_id: 'task', run_id: 'run', status: 'complete' }
+  const current = { run_id: 'run', details: { business_flows: [{ flow_id: 'F1', title: 'One' }, { flow_id: 'F2', title: 'Two' }] } }
+  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
+  const views = [
+    { view_id: 'standard', flow_id: 'F1' },
+    { view_id: 'functions', flow_id: 'F1', profile: 'function_variables' },
+    { view_id: 'other-flow', flow_id: 'F2', profile: 'function_variables' },
+    { view_id: 'other-run', flow_id: 'F1', profile: 'function_variables', run_id: 'old' },
+  ].map(v => ({ task_id: 'task', run_id: 'run', type: 'workflow', available: true, status: 'ready', ...v }))
+  const requests = []
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } }, async (_url, options) => {
+    requests.push(JSON.parse(options.body))
+    return { ok: true, async json() { return { status: 'ok', views } } }
+  })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const render = () => { index = 0; return descendants(panel.type(panel.props)) }
+  const find = label => render().find(n => n.props['aria-label'] === label)
+  const button = label => render().find(n => n.type === 'button' && n.children[0] === label)
+  assert.equal(find('流程阅读视图').props['aria-pressed'], true)
+  assert.ok(button('文字方案'))
+  find('函数与变量流程图视图').props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(render().find(n => n.type === 'iframe').props.title, '函数与变量流程图')
+  assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=functions&/)
+  assert.equal(find('架构图类型'), undefined)
+  await button('生成函数与变量流程图').props.onClick()
+  const request = requests.find(r => r.action === 'architecture-create')
+  assert.equal(request.profile, 'function_variables')
+  assert.equal(request.flow_id, 'F1')
+  assert.equal(request.type, 'workflow')
+  await button('从当前图创建修改会话').props.onClick()
+  assert.equal(requests.filter(r => r.action === 'architecture-create').at(-1).previous_view_id, 'functions')
+  find('流程图视图').props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=standard&/)
+  find('选择业务流程').props.onChange({ target: { value: 'F2' } })
+  assert.equal(find('流程阅读视图').props['aria-pressed'], true)
+  find('函数与变量流程图视图').props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=other-flow&/)
+})

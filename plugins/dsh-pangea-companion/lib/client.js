@@ -2750,23 +2750,24 @@ window.__ModuleLoader__.load({
         finally { setDiagramBusy(false) }
       }
 
-      function renderDiagrams(flow) {
-        const views = diagramViews.filter(v => v.run_id === current?.run_id && v.task_id === selectedTask?.task_id && (!v.flow_id || v.flow_id === flow?.flow_id))
+      function renderDiagrams(flow, profile = 'standard') {
+        const functions = profile === 'function_variables'
+        const views = diagramViews.filter(v => v.run_id === current?.run_id && v.task_id === selectedTask?.task_id && (v.profile ?? 'standard') === profile && (functions ? v.flow_id === flow?.flow_id : (!v.flow_id || v.flow_id === flow?.flow_id)))
         const selected = views.find(v => v.view_id === diagramSelection) ?? views[0]
         const artifactUrl = (format, download = false) => '/api/pangea-companion/architecture-artifact?' + new URLSearchParams({ cwd: cwd || '', task_id: selectedTask.task_id, view_id: selected.view_id, format, ...(download ? { download: '1' } : {}) })
         return h('div', { style: styles.card },
-          h('div', { style: styles.itemTitle }, '流程图'),
+          h('div', { style: styles.itemTitle }, functions ? '函数与变量流程图' : 'Archify'),
           h('div', { style: styles.chips },
-            h('select', { 'aria-label': '架构图类型', style: styles.button, value: diagramType, onChange: e => setDiagramType(e.target.value) }, [['workflow', '业务流程图'], ['architecture', '模块架构图'], ['sequence', '时序图'], ['lifecycle', '生命周期图'], ['dataflow', '数据流图']].map(([v, label]) => h('option', { key: v, value: v }, label))),
-            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !flow, onClick: () => diagramAction('architecture-create', { type: diagramType, flow_id: flow.flow_id, instruction: '先表达主干步骤和回接关系；分支较多时按挂接步骤及类型分组，组上保留分支数量与编号。仅使用已发布关系，不要把所有分支说明塞进一个节点。' }) }, '生成流程总览'),
-            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !current, onClick: () => diagramAction('architecture-create', { type: 'architecture' }) }, '生成模块架构图'),
+            !functions ? h('select', { 'aria-label': '架构图类型', style: styles.button, value: diagramType, onChange: e => setDiagramType(e.target.value) }, [['workflow', '业务流程图'], ['architecture', '模块架构图'], ['sequence', '时序图'], ['lifecycle', '生命周期图'], ['dataflow', '数据流图']].map(([v, label]) => h('option', { key: v, value: v }, label))) : null,
+            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !flow, onClick: () => diagramAction('architecture-create', { type: functions ? 'workflow' : diagramType, profile, flow_id: flow.flow_id, instruction: functions ? '' : '先表达主干步骤和回接关系；分支较多时按挂接步骤及类型分组，组上保留分支数量与编号。仅使用已发布关系，不要把所有分支说明塞进一个节点。' }) }, functions ? '生成函数与变量流程图' : '生成流程总览'),
+            !functions ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !current, onClick: () => diagramAction('architecture-create', { type: 'architecture' }) }, '生成模块架构图') : null,
             h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-list') }, '刷新架构视图')),
-          views.length ? h('select', { 'aria-label': '选择架构视图', style: styles.search, value: selected?.view_id || '', onChange: e => setDiagramSelection(e.target.value) }, views.map(v => h('option', { key: v.view_id, value: v.view_id }, `${businessFlows.find(f => f.flow_id === v.flow_id)?.title || v.flow_id || '模块全景'} · ${{ workflow: '业务流程图', architecture: '模块架构图', sequence: '时序图', lifecycle: '生命周期图', dataflow: '数据流图' }[v.type] || v.type} · ${{ generating: '生成中', ready: '可查看', failed: '失败', stopped: '已停止', interrupted: '状态不可确认' }[v.status] || v.status} · ${v.view_id.slice(0, 8)}`))) : h('div', { style: styles.itemMeta }, '选择一个流程按需生成图表。多分支的条件、回接与证据可在“流程阅读”中逐步查看。'),
+          views.length ? h('select', { 'aria-label': '选择架构视图', style: styles.search, value: selected?.view_id || '', onChange: e => setDiagramSelection(e.target.value) }, views.map(v => h('option', { key: v.view_id, value: v.view_id }, `${businessFlows.find(f => f.flow_id === v.flow_id)?.title || v.flow_id || '模块全景'} · ${functions ? '函数与变量流程图' : ({ workflow: '业务流程图', architecture: '模块架构图', sequence: '时序图', lifecycle: '生命周期图', dataflow: '数据流图' }[v.type] || v.type)} · ${{ generating: '生成中', ready: '可查看', failed: '失败', stopped: '已停止', interrupted: '状态不可确认' }[v.status] || v.status} · ${v.view_id.slice(0, 8)}`))) : h('div', { style: styles.itemMeta }, functions ? '按需读取当前流程及冻结源码，生成函数调用、入参、返回值和关键变量变化图。无法确认的信息会标为待确认。' : '选择一个流程按需生成图表。多分支的条件、回接与证据可在“文字方案”中逐步查看。'),
           selected ? h(React.Fragment, null,
             selected.branch_ids?.length ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `局部分支图 · 仅包含 ${selected.branch_ids.length} 条分支：${selected.branch_ids.join('、')}`) : null,
             selected.source_revision !== current?.publication?.revision ? h('div', { style: styles.itemMeta }, '此图基于其他分析版本，可按需重新生成。') : null,
             selected.error ? h('div', { style: styles.error }, selected.error) : null,
-            selected.available ? h('iframe', { title: 'Archify 架构图', src: artifactUrl('html'), sandbox: 'allow-scripts allow-downloads', style: { width: '100%', height: '72vh', minHeight: 480, border: '1px solid #e5e8ec', borderRadius: 8, marginTop: 12 } }) : null,
+            selected.available ? h('iframe', { title: functions ? '函数与变量流程图' : 'Archify 架构图', src: artifactUrl('html'), sandbox: 'allow-scripts allow-downloads', style: { width: '100%', height: '72vh', minHeight: 480, border: '1px solid #e5e8ec', borderRadius: 8, marginTop: 12 } }) : null,
             h('div', { style: styles.chips },
               selected.session_id ? h('button', { type: 'button', style: styles.button, onClick: async () => {
                 try {
@@ -2781,7 +2782,7 @@ window.__ModuleLoader__.load({
               selected.status === 'generating' ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止本次画图') : null,
               selected.available ? ['html', 'svg'].map(format => h('a', { key: format, style: styles.chip, href: artifactUrl(format, true), download: `diagram.${format}` }, `导出 ${format.toUpperCase()}`)) : null),
             h('input', { 'aria-label': '架构图修改要求', style: styles.search, value: diagramInstruction, placeholder: '例如：展开超时分支', onChange: e => setDiagramInstruction(e.target.value) }),
-            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || selected.status === 'generating', onClick: () => diagramAction('architecture-create', { type: selected.type, flow_id: selected.flow_id, previous_view_id: selected.view_id, instruction: diagramInstruction }) }, '从当前图创建修改会话')) : null)
+            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || selected.status === 'generating', onClick: () => diagramAction('architecture-create', { type: selected.type, profile, flow_id: selected.flow_id, previous_view_id: selected.view_id, instruction: diagramInstruction }) }, '从当前图创建修改会话')) : null)
       }
 
       function sourceFirstRecordBody(body) {
@@ -2895,9 +2896,10 @@ window.__ModuleLoader__.load({
             h('div', { style: toolbar },
               h('input', { style: { ...styles.search, flex: '1 1 180px', minWidth: 0, width: 'auto', margin: 0 }, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称或入口…', onChange: event => setFlowQuery(event.target.value) }),
               h('select', { style: { ...styles.search, flex: '2 1 230px', minWidth: 0, maxWidth: '100%', width: 'auto', margin: 0 }, 'aria-label': '选择业务流程', value: flow?.flow_id || '', onChange: event => { setFlowSelection(event.target.value); setBranchSelection('') } }, filtered.map(item => h('option', { key: item.flow_id, value: item.flow_id }, `${item.display_id || item.flow_id} · ${item.title || '未命名流程'}`))),
-              h('div', { role: 'group', 'aria-label': '流程展示方式', style: toolbar }, ['reader', 'diagram'].map(view => h('button', { key: view, type: 'button', 'aria-label': view === 'reader' ? '流程阅读视图' : '流程图视图', 'aria-pressed': reader.view === view, style: { ...styles.button, ...(reader.view === view ? selectedStyle : {}) }, onClick: () => { setFlowReader({ ...reader, view }); if (view === 'diagram') void diagramAction('architecture-list') } }, view === 'reader' ? '流程阅读' : '流程图')))),
+              h('div', { role: 'group', 'aria-label': '流程展示方式', style: toolbar }, [['reader', '文字方案', '流程阅读视图'], ['diagram', 'Archify', '流程图视图'], ['functions', '函数与变量流程图', '函数与变量流程图视图']].map(([view, label, aria]) => h('button', { key: view, type: 'button', 'aria-label': aria, 'aria-pressed': reader.view === view, style: { ...styles.button, ...(reader.view === view ? selectedStyle : {}) }, onClick: () => { setFlowReader({ ...reader, view }); if (view !== 'reader') void diagramAction('architecture-list') } }, label)))),
             flow ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `${steps.length ? `${steps.length} 个${flow.source_record ? '流程节点' : '主干步骤'}` : flowContentState(flow)} · ${allBranches.length} 条分支 · ${allBranches.filter(b => b.status === 'unresolved').length} 条待确认 · ${allBranches.filter(b => !b.linked_test_case_ids?.length).length} 条未关联用例`) : null),
           !flow ? h('div', { style: styles.empty }, query ? '没有匹配的业务流程，请调整搜索。' : collectionEmpty('business_flows', '当前 Run 没有业务流程。'))
+            : reader.view === 'functions' ? renderDiagrams(flow, 'function_variables')
             : reader.view === 'diagram' ? renderDiagrams(flow)
               : h(React.Fragment, null,
                 renderRecordBody(flow),
