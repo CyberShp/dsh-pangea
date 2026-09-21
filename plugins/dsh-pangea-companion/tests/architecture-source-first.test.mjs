@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile, mkdir, rm, access, symlink } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { mkdtemp, readFile, writeFile, mkdir, rm, access, symlink, rename, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createView } from '../src/architecture-views.js'
@@ -23,6 +24,10 @@ test('existing source-first Run creates views with no legacy index and keeps ful
   const f = await fixture(t), before = await readFile(f.resultPath, 'utf8')
   const created = await createView(f.task, { flow_id: f.flowId }, f.env)
   const value = await context(f, created)
+  const candidate = JSON.parse(await readFile(path.join(f.run, '派生视图/archify', created.view.view_id, 'candidate.json'), 'utf8'))
+  assert.equal(candidate.schema_version, 2)
+  assert.equal(candidate.meta.quality_profile, 'showcase')
+  assert.deepEqual(candidate.nodes, [])
   assert.equal(value.business_flows.length, 1)
   assert.equal(value.business_flows[0].nodes.length, 4)
   assert.equal(value.business_flows[0].edges.length, 4)
@@ -45,10 +50,33 @@ test('partial diagram trims paths, edges, nodes, raw flow body and cases; revisi
   assert.deepEqual(flow.paths.map(p => p.path_id), ['reject'])
   assert.deepEqual(flow.source_record.body.paths.map(p => p.path_id), ['reject'])
   assert.deepEqual(value.test_cases.map(c => c.test_case_id), ['tls/c2'])
-  await writeFile(path.join(f.run, '派生视图/archify', created.view.view_id, 'candidate.json'), '{}')
+  const previousCandidate = '{"schema_version":1,"nodes":[{"id":"existing"}]}'
+  await writeFile(path.join(f.run, '派生视图/archify', created.view.view_id, 'candidate.json'), previousCandidate)
   const revised = await createView(f.task, { previous_view_id: created.view.view_id }, f.env)
   assert.equal(revised.view.flow_id, f.flowId)
   assert.deepEqual(revised.view.branch_ids, ['reject'])
+  assert.equal(await readFile(path.join(f.run, '派生视图/archify', revised.view.view_id, 'candidate.json'), 'utf8'), previousCandidate)
+})
+
+test('generated command runs the bound renderer with literal spaces, quotes and shell metacharacters', async t => {
+  const f = await fixture(t)
+  const archify = `${f.env.PANGEA_ARCHIFY_ROOT} ' $literal &`
+  await rename(f.env.PANGEA_ARCHIFY_ROOT, archify)
+  await writeFile(path.join(archify, 'bin/archify.mjs'), `
+    import { writeFileSync } from 'node:fs';
+    writeFileSync(process.argv[5], '<html><svg viewBox="0 0 20 20"></svg></html>');
+    console.log(JSON.stringify({ ok: true, args: process.argv.slice(2) }));
+  `)
+  const created = await createView(f.task, { flow_id: f.flowId }, { PANGEA_ARCHIFY_ROOT: archify, PANGEA_NODE: process.execPath })
+  const command = created.prompt.match(/```(?:powershell|sh)\n([^\n]+)\n```/)[1]
+  const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/sh'
+  const args = process.platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-Command', command] : ['-c', command]
+  const result = spawnSync(shell, args, { encoding: 'utf8', timeout: 15000 })
+  assert.equal(result.status, 0, result.stderr)
+  const folder = await realpath(path.join(f.run, '派生视图/archify', created.view.view_id))
+  const receipt = JSON.parse(await readFile(path.join(folder, 'validation-receipt.json'), 'utf8'))
+  assert.deepEqual(receipt.args, ['deliver', 'workflow', path.join(folder, 'candidate.json'), path.join(folder, 'diagram.html'), '--quality', 'showcase', '--json'])
+  assert.match(await readFile(path.join(folder, 'diagram.svg'), 'utf8'), /xmlns=/)
 })
 test('stale legacy projection cannot override source-first records; absent content and stale selection are explicit', async t => {
   const f = await fixture(t)

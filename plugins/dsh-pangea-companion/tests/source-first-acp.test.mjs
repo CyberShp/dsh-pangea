@@ -61,7 +61,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
     const action = () => ({ action_id: `run:${index}`, role: steps[index][0], stage: steps[index][1],
       action: steps[index][2] ? 'continue_agent' : 'dispatch_agent', task_id: steps[index][2], task_path: `/run/task-${index}.json` })
     const runner = async ({ args }) => {
-      if (args[0] === 'task-open') return { task: { action_id: `run:${index}`, inputs: [] } }
+      if (args[0] === 'task-open') return { task: { action_id: `run:${index}`, inputs: [], version_set_id: 'comparison-version-fixture' } }
       if (args[1] === 'next') return { run_id: providerId, lifecycle_status: index === steps.length ? 'complete' : 'running', actions: index === steps.length ? [] : [action()] }
       if (args[1] === 'bind') { bindings.push([args[args.indexOf('--action-id') + 1], args.at(-1)]); return {} }
       if (args[0] === 'runs' && args[1] === 'execution') return {}
@@ -78,9 +78,19 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
     assert.equal((await run.result).stopReason, 'completed')
     assert.equal(created, 3)
     assert.deepEqual(prompts.map(p => p[0]), ['worker-1', 'worker-2', 'worker-3', 'worker-3', 'worker-2'])
-    for (const [, prompt] of prompts) {
+    for (const [step, [, prompt]] of prompts.entries()) {
       assert.doesNotMatch(prompt, /\.opencode|\.agents\/pangea|pangea_action_dispatch/)
       assert.match(prompt, /source-first-cli-worker\.md/)
+      if (steps[step][1] === 'comparison_review') {
+        assert.match(prompt, /review-decide --expected-revision N --decision JSON对象.*最后 work-finish/)
+        assert.match(prompt, /decision 回显 task\.version_set_id/)
+        assert.match(prompt, /无 finding 或资料不足也须裁决/)
+        assert.match(prompt, /summary\/finding 不能代替 review_decision/)
+        assert.match(prompt, /decision 必须包含当前版本绑定：\{"version_set_id":"comparison-version-fixture"\}/)
+        assert.match(prompt, /ok=false 表示裁决未保存.*不能继续 work-finish/)
+      } else {
+        assert.doesNotMatch(prompt, /review-decide|review_decision/)
+      }
     }
     assert.ok(bindings.some(([actionId, taskId]) => actionId === 'run:4' && taskId === 'worker-2'))
     await run.dispose(); assert.equal(disposed.length, 3)

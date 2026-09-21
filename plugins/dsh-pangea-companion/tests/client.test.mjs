@@ -1340,6 +1340,76 @@ test('closure progress and delivery control are visible on the workflow page', a
   assert.ok(nodes.some(node => node.type === 'button' && node.children.includes('结束修正，交付当前结果')))
 })
 
+async function executionMetricsView(metrics, { detailRunId = 'run', screen = 'workflow' } = {}) {
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'running' }
+  const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'running', quality_status: 'not_reviewed',
+    analysis: { total: 1, completed: 0 }, details: {} }
+  const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] }, run: { run_id: detailRunId, execution_metrics: metrics } }, 4: 'run', 5: 'task', 16: { type: screen } }
+  const before = JSON.stringify(states)
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  assert.equal(JSON.stringify(states), before, 'reading execution metrics must not change Run or quality state')
+  return nodes
+}
+
+const metricsText = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : (Array.isArray(node) ? node : node?.children ?? []).map(metricsText).join('')
+
+test('workflow execution metrics preserve recorded zero, missing counters and per-stage coverage', async () => {
+  const stages = [
+    { stage: 'unit_analysis', action_count: 2, timed_action_count: 1, unfinished_timed_action_count: 1, worker_elapsed_ms: 60000,
+      worker_turns: 2, auto_continuations: 0, repair_dispatches: null, counter_action_counts: { worker_turns: 1, auto_continuations: 1, repair_dispatches: 0 } },
+    { stage: 'comparison_review', action_count: 1, timed_action_count: 1, unfinished_timed_action_count: 0, worker_elapsed_ms: 1000,
+      worker_turns: 1, auto_continuations: null, repair_dispatches: 0, counter_action_counts: { worker_turns: 1, auto_continuations: 0, repair_dispatches: 1 } },
+  ]
+  const metrics = { action_count: 3, timed_action_count: 2, unfinished_timed_action_count: 1, worker_elapsed_ms: 61000,
+    worker_turns: 3, auto_continuations: 0, repair_dispatches: 0, counter_action_counts: { worker_turns: 2, auto_continuations: 1, repair_dispatches: 1 }, stages }
+  const nodes = await executionMetricsView(metrics)
+  const details = nodes.find(node => node.props['aria-label'] === '耗时与往返')
+  assert.equal(details.type, 'details')
+  assert.notEqual(details.props.open, true)
+  const rows = descendants(details).filter(node => node.type === 'tr')
+  assert.equal(rows.length, 4, 'one header, two stages and the recorded subtotal')
+  const analysisCells = rows[1].children.flat(Infinity).filter(node => node.type === 'td')
+  assert.match(metricsText(analysisCells[0]), /1 分 0 秒.*计时覆盖 1 \/ 2 个任务.*1 个任务计时未结束/)
+  assert.equal(metricsText(analysisCells[1]), '2记录覆盖 1 / 2 个任务')
+  assert.equal(metricsText(analysisCells[2]), '0记录覆盖 1 / 2 个任务')
+  assert.equal(metricsText(analysisCells[3]), '未记录')
+  const reviewCells = rows[2].children.flat(Infinity).filter(node => node.type === 'td')
+  assert.equal(metricsText(reviewCells[2]), '未记录')
+  assert.equal(metricsText(reviewCells[3]), '0')
+  assert.match(metricsText(rows[3]), /已记录合计.*1 分 1 秒.*计时覆盖 2 \/ 3 个任务/)
+  assert.match(metricsText(details), /并行 worker 的累计时间不等于整次运行耗时或模型推理时间/)
+  assert.match(metricsText(details), /当前未结束回合尚未计入累计时间/)
+})
+
+test('legacy or different Run execution metrics never appear as measured zero or leak another Run', async () => {
+  const metrics = { action_count: 2, timed_action_count: 0, worker_elapsed_ms: null,
+    stages: [{ stage: 'unit_analysis', action_count: 2, timed_action_count: 0, worker_elapsed_ms: null, worker_turns: null, auto_continuations: null, repair_dispatches: null }] }
+  for (const [value, options] of [[undefined, {}], [metrics, { detailRunId: 'another-run' }]]) {
+    const nodes = await executionMetricsView(value, options)
+    const details = nodes.find(node => node.props['aria-label'] === '耗时与往返')
+    assert.match(metricsText(details), /未记录当前 Run 的阶段执行指标/)
+    assert.ok(!descendants(details).some(node => node.type === 'table'))
+  }
+  const nodes = await executionMetricsView(metrics)
+  const table = nodes.find(node => node.props['aria-label'] === '阶段执行指标')
+  const stageRow = descendants(table).filter(node => node.type === 'tr')[1]
+  const cells = stageRow.children.flat(Infinity).filter(node => node.type === 'td')
+  assert.match(metricsText(cells[0]), /^未记录计时覆盖 0 \/ 2 个任务$/)
+  for (const cell of cells.slice(1)) assert.equal(metricsText(cell), '未记录')
+  assert.doesNotMatch(metricsText(table), /NaN|undefined|0 毫秒/)
+})
+
+test('execution diagnostics stay off the analysis overview', async () => {
+  const nodes = await executionMetricsView({ stages: [] }, { screen: 'overview' })
+  assert.ok(!nodes.some(node => node.props['aria-label'] === '耗时与往返'))
+})
+
 test('flow views default to text and isolate function diagrams by flow, run and profile', async () => {
   const task = { task_id: 'task', run_id: 'run', status: 'complete' }
   const current = { run_id: 'run', details: { business_flows: [{ flow_id: 'F1', title: 'One' }, { flow_id: 'F2', title: 'Two' }] } }

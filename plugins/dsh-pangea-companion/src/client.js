@@ -2785,9 +2785,39 @@ window.__ModuleLoader__.load({
         )
       }
 
+      function renderExecutionMetrics() {
+        const metrics = current?.run_id && workbench?.run?.run_id === current.run_id ? workbench.run.execution_metrics : null
+        const stages = metrics?.stages ?? []
+        const stageLabels = { structured_extraction: '资产提取', source_first_plan: '单元规划', unit_planning: '单元规划', unit_analysis: '单元分析', independent_review: '独立复核', comparison_review: '对照复核', targeted_closure: '定向修正' }
+        const cellStyle = { textAlign: 'left', padding: '10px 12px', verticalAlign: 'top', borderBottom: '1px solid var(--dsw-alias-border-l1, #e5e9ef)' }
+        const countCell = (item, key) => {
+          if (item[key] == null) return '未记录'
+          const covered = item.counter_action_counts?.[key]
+          return h(React.Fragment, null, String(item[key]), covered != null && covered < item.action_count
+            ? h('div', { style: styles.itemMeta }, `记录覆盖 ${covered} / ${item.action_count} 个任务`) : null)
+        }
+        const timeCell = item => h(React.Fragment, null,
+          item.worker_elapsed_ms == null ? '未记录' : item.worker_elapsed_ms < 1000 ? `${item.worker_elapsed_ms} 毫秒` : durationLabel(0, item.worker_elapsed_ms),
+          h('div', { style: styles.itemMeta }, `计时覆盖 ${item.timed_action_count ?? '未记录'} / ${item.action_count ?? '未记录'} 个任务`),
+          item.unfinished_timed_action_count > 0 ? h('div', { style: styles.itemMeta }, `${item.unfinished_timed_action_count} 个任务计时未结束`) : null)
+        return h('details', { key: current?.run_id, style: styles.card, 'aria-label': '耗时与往返' },
+          h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '耗时与往返'),
+          h('p', { style: styles.itemMeta }, '仅汇总已记录的执行数据。并行 worker 的累计时间不等于整次运行耗时或模型推理时间，也不代表分析质量。'),
+          stages.length ? h(React.Fragment, null,
+            h('div', { className: 'pangea-reader-table', role: 'region', 'aria-label': '各阶段耗时与往返', tabIndex: 0, style: { overflowX: 'auto', marginTop: 12 } },
+              h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 14 }, 'aria-label': '阶段执行指标' },
+                h('thead', null, h('tr', null, ['阶段', '累计 worker 时间', 'worker 回合', '自动续接', '机械修复'].map(label => h('th', { key: label, scope: 'col', style: cellStyle }, label)))),
+                h('tbody', null, [...stages.map(item => ({ ...item, label: stageLabels[item.stage] ?? item.stage })), { ...metrics, stage: '__total', label: '已记录合计' }].map(item =>
+                  h('tr', { key: item.stage }, h('th', { scope: 'row', style: cellStyle }, item.label),
+                    h('td', { style: cellStyle }, timeCell(item)),
+                    ...['worker_turns', 'auto_continuations', 'repair_dispatches'].map(key => h('td', { key, style: cellStyle }, countCell(item, key)))))))),
+            metrics.unfinished_timed_action_count > 0 ? h('p', { style: styles.itemMeta }, '当前未结束回合尚未计入累计时间；回合结束并保存后更新。') : null)
+            : h('p', { style: styles.itemMeta }, '未记录当前 Run 的阶段执行指标。'))
+      }
+
       function renderWorkflow() {
         if (!current) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '选择一个 Run 后查看流程。'))
-        if (current.workflow_version === 'source-first-v1') return h(React.Fragment, null, renderCorrectionProgress(), renderSourceFirstWorkflow())
+        if (current.workflow_version === 'source-first-v1') return h(React.Fragment, null, renderCorrectionProgress(), renderExecutionMetrics(), renderSourceFirstWorkflow())
         const steps = workflow.steps ?? []
         const statusLabel = { pending: '等待', running: '执行中', completed: '已完成', failed: '失败' }
         const publication = current.publication ?? { state: 'pending', revision: 0, step_id: null }
@@ -2822,6 +2852,7 @@ window.__ModuleLoader__.load({
               current.artifacts?.request ? chip('打开任务请求', () => openSidebarFile(current.artifacts.request, 'Codetalks request.md')) : null,
               current.artifacts?.state ? chip('打开运行状态', () => openSidebarFile(current.artifacts.state, '运行状态.json')) : null,
               current.artifacts?.source_snapshot_manifest ? chip('打开源码快照清单', () => openSidebarFile(current.artifacts.source_snapshot_manifest, 'source manifest.json')) : null)),
+          renderExecutionMetrics(),
           h('div', { style: { ...styles.card, ...styles.notice } },
             h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, '性能观测'), h('span', { style: styles.badge }, '仅用于比较')),
             h('div', { style: styles.grid },

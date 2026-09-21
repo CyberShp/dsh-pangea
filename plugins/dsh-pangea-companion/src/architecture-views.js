@@ -133,6 +133,12 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   if (previous) {
     const candidate = await readFile(path.join(await viewRoot(task, previous.view_id), 'candidate.json'))
     await writeFile(path.join(folder, 'candidate.json'), candidate)
+  } else if (type === 'workflow') {
+    await writeFile(path.join(folder, 'candidate.json'), JSON.stringify({
+      schema_version: 2, diagram_type: 'workflow',
+      meta: { title: flow?.title || task.target || '业务流程', locale: 'zh-CN', quality_profile: 'showcase' },
+      lanes: [], nodes: [], edges: [],
+    }, null, 2))
   }
   const view = { view_id: viewId, task_id: task.task_id, run_id: task.run_id, flow_id, type, profile: viewProfile, branch_ids: branchIds,
     source_revision: context.publication?.revision ?? null, workflow_version: context.workflow_version,
@@ -140,22 +146,29 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     previous_view_id, session_id: null, job_id: null, created_at: stamp(), updated_at: stamp() }
   await writeFile(path.join(folder, 'manifest.json'), JSON.stringify(view, null, 2))
   const renderer = fileURLToPath(new URL('./architecture-render.mjs', import.meta.url))
+  const quote = value => `'${value.replaceAll("'", process.platform === 'win32' ? "''" : "'\"'\"'")}'`
+  const renderCommand = `${process.platform === 'win32' ? '& ' : ''}${[env.PANGEA_NODE || process.execPath, renderer, folder, archify].map(quote).join(' ')}`
   return { view, prompt: [
     `为 ${task.target} 创建 ${type} 架构视图。${previous ? '这是关联的新画图会话；candidate.json 是旧图，必须按本次 context.json 核对更新。' : ''}`,
     ...(viewProfile === 'function_variables' ? [
-      '绘制当前业务流程的函数与变量流程图，使用 workflow schema。以真实函数为节点，节点标明函数名、入参、返回值、关键局部或共享变量，并附冻结源码的相对路径与行号。',
+      '绘制当前业务流程的函数与变量流程图，使用 workflow schema。以真实函数为节点，label 保留准确函数名，sublabel/tag 写简短说明；完整签名、入参、返回值、关键局部或共享变量、冻结源码相对路径与行号放入对应 cards，明确关联函数名，不把长段说明塞入单行节点。',
       '有向连线表达真实调用关系，标明调用方向、分支条件、实参到形参的传递、返回值接收和关键变量的赋值或状态变化；循环、递归和回调须忠实表达。按 schema 支持的 label、描述或详情字段组织信息，保持主图可读。',
       '从已发布业务流程定位冻结源码，只读取该流程相关函数。逐一核对函数定义、调用点与变量读写；不得将业务步骤直接冒充函数，不得推测运行时具体值。无法确认的动态调用、外部实现、入参、返回值或变量变化明确标注“待确认”及原因。',
       '图中展示已核对范围与缺失信息；若源码不可读或没有可核对的函数，报告原因，不生成虚构图。此图为源码静态关系，不能声称运行时轨迹已验证。',
     ] : []),
     ...(branchIds ? [`本图是局部分支图，仅包含 ${branchIds.join('、')}。主干仅作定位和回接上下文；图题须注明“局部分支”，不得把本图表述为完整流程。`] : []),
     `先读取 ${path.join(archify, 'SKILL.md')}，按需读对应 schema/example；PANGEA 集成约定优先：不运行更新检查，不访问外网，不要求公开仓库，不读取秘密配置。`,
+    ...(type === 'workflow' ? [
+      previous ? '保留旧 candidate.json 的 schema_version；核对语义后按诊断修改。' : 'candidate.json 已提供 schema_version: 2 的空模板；补全真实 lanes、nodes、edges，不复制示例事实。',
+      'schema v2 的 col 是逻辑列，由编译器计算列距、路由和画布范围。首次排版省略 meta.viewBox、yOffset、via、channelX、channelY、labelAt、fromSide、toSide，使用自动路由；仅按具体诊断添加必要几何约束。',
+      '使用 semanticChecks 时，从源码核对起点与所有终止分支并完整声明 allowedTerminals；不能仅为通过校验而删除分支、调用或语义标签。',
+    ] : []),
     `当前分析上下文：${path.join(folder, 'context.json')}。源码位置按其中 source_snapshot 的 repositories、manifest_path 和 index_path 读取，不猜测旧源码目录。`,
     '保留流程 nodes、edges、paths 的分支与回接关系；原始记录是分析依据，测试步骤不能直接当作组件依赖。仅核对当前对象及必要依赖，不扩大成全仓分析。',
     '遵循上下文 publication 与 partial_delivery 标识；未最终交付的图标注“当前分析视图”。无证据的关系不补画，reader_warnings 涉及的内容不得表述为已验证。',
     '只核对本图相关实现；语义疑点在会话报告，不能改主 Run 的报告、投影、风险、用例、状态。',
     `唯一写入目录：${folder}。编写 candidate.json；不要修改 manifest.json。`,
-    `完成后使用参数数组调用 Node：${env.PANGEA_NODE || process.execPath}，参数 ${JSON.stringify([renderer, folder, archify])}。PowerShell 路径须字面引用。`,
+    `完成后原样执行以下 ${process.platform === 'win32' ? 'PowerShell' : 'shell'} 命令，Node 可执行文件、参数及输出目录已绑定：\n\`\`\`${process.platform === 'win32' ? 'powershell' : 'sh'}\n${renderCommand}\n\`\`\``,
     '该命令运行 Archify deliver 并保存收据。失败只修 candidate.json，再执行同一命令；两轮诊断无改善时如实报告。渲染验证不证明源码结论正确。',
     '产物生成后在会话简要说明，不启动主分析流程。',
   ].join('\n') }
