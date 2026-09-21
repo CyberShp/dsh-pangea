@@ -172,7 +172,13 @@ export async function listViews(task) {
       let receipt
       try { receipt = await readJson(path.join(root, entry.name, 'validation-receipt.json')) } catch { /* pending */ }
       const html = await readFile(path.join(root, entry.name, 'diagram.html')).then(() => true, () => false)
-      items.push({ ...view, status: view.status === 'stopped' ? 'stopped' : receipt?.ok && html ? 'ready' : receipt && !receipt.ok ? 'failed' : view.status, available: Boolean(receipt?.ok && html) })
+      const available = Boolean(receipt?.ok && html)
+      // A rejected candidate can be repaired by the live Job. Its lifecycle,
+      // reconciled by architecture-list, determines whether generation failed.
+      items.push({ ...view, status: view.status === 'stopped' ? 'stopped' : available ? 'ready' : view.status, available,
+        error: available ? null : view.error,
+        validation_error: receipt?.ok === false ? receipt.error || '图表尚未通过校验' : null,
+        validation_diagnostics: receipt?.ok === false ? receipt.diagnostics ?? [] : [] })
     } catch { /* Keep unreadable view isolated from main analysis. */ }
   }
   return items.sort((a, b) => b.created_at.localeCompare(a.created_at))

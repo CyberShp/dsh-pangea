@@ -13,6 +13,7 @@ function fakeReact() {
     createElement(type, props, ...children) { return { type, props: props ?? {}, children } },
     Fragment: Symbol('Fragment'),
     useState(initial) { return [initial, () => {}] },
+    useRef(initial) { return { current: initial } },
     useCallback(fn) { return fn },
     useEffect() {},
   }

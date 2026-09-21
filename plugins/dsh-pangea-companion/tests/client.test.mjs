@@ -43,11 +43,12 @@ test('create form shows and can remove selected assets absent from its repositor
   assert.deepEqual(Array.from(changed.asset_ids), ['tagged'])
 })
 
-async function loadClientExports(react = fakeReact(), fetcher = async () => { throw new Error('fetch must not run during registration') }) {
+async function loadClientExports(react = fakeReact(), fetcher = async () => { throw new Error('fetch must not run during registration') }, onEvent = () => {}) {
   const source = await readFile(clientPath, 'utf8')
   let exported
-  const sandbox = { URLSearchParams, AbortController, console, fetch: fetcher, setInterval, clearInterval }
-  sandbox.window = { setInterval, clearInterval, setTimeout: (...args) => setTimeout(...args).unref(), clearTimeout, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? react : {}) } } }
+  const sandbox = { URLSearchParams, AbortController, console, fetch: fetcher, setInterval, clearInterval,
+    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail } } }
+  sandbox.window = { dispatchEvent: onEvent, setInterval, clearInterval, setTimeout: (...args) => setTimeout(...args).unref(), clearTimeout, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? react : {}) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   return exported
 }
@@ -1215,10 +1216,68 @@ test('record renderer makes tables and JSON fields readable without HTML executi
   const visit = n => { if (Array.isArray(n)) n.forEach(visit); else if (n?.children) { nodes.push(n); visit(n.children) } }
   visit(tree)
   assert.ok(nodes.some(n => n.type === 'table'))
+  assert.ok(nodes.some(n => n.type === 'h2' && n.children.includes('说明')))
+  assert.ok(nodes.some(n => n.props.role === 'region' && n.props.tabIndex === 0 && n.props['aria-label'] === '条件、结果'))
+  assert.ok(nodes.filter(n => n.type === 'th').every(n => n.props.scope === 'col'))
   assert.ok(nodes.every(n => !n.props?.dangerouslySetInnerHTML && n.type !== 'script'))
   assert.ok(JSON.stringify(tree).includes('<script>alert(1)</script>'))
   assert.equal(c.renderReadableBody('{"title":"条件","gap":"需要连接"}').type, 'dl')
   assert.equal(c.artifactLabel('C:\\run\\inputs\\source-index.json'), '源码索引')
+})
+
+test('task filters can reset a no-results state without changing the selected task', async () => {
+  let index = 0
+  const states = {
+    1: { compatibility: { compatible: true }, tasks: { items: [{ task_id: 'T-1', title: '网络模块', repository: 'demo', status: 'completed' }] } },
+    5: 'T-1', 6: 'missing', 7: 'failed',
+  }
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    return [Object.hasOwn(states, key) ? states[key] : initial, value => { states[key] = value }]
+  } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const render = () => { index = 0; const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true }); return descendants(panel.type(panel.props)) }
+  let nodes = render()
+  assert.ok(nodes.some(n => n.type === 'button' && n.children.includes('失败') && n.props['aria-pressed'] === true))
+  assert.ok(nodes.some(n => n.props.role === 'status' && n.children.includes('显示 0 / 1 个任务')))
+  nodes.find(n => n.type === 'button' && n.children.includes('清除筛选')).props.onClick()
+  assert.equal(states[6], '')
+  assert.equal(states[7], '全部')
+  assert.equal(states[5], 'T-1')
+  nodes = render()
+  assert.ok(nodes.some(n => n.props.className === 'pangea-task-row'))
+})
+
+test('task list separates loading from empty data and prevents creating before capability check', async () => {
+  const client = await loadClientExports()
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  assert.ok(nodes.some(n => n.props.role === 'status' && n.children.includes('正在读取分析任务…')))
+  assert.ok(!nodes.some(n => n.children.includes('开始第一次源码分析')))
+  assert.equal(nodes.find(n => n.type === 'button' && n.children.includes('新建分析任务')).props.disabled, true)
+})
+
+test('create form explains the next missing requirement and enables only a ready task', async () => {
+  let index = 0
+  const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['demo'] }, acp_providers: [{ id: 'agent', label: 'Agent', registered: true }] }, 16: { type: 'create' } }
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const render = () => { index = 0; const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true }); return descendants(panel.type(panel.props)) }
+  assert.ok(render().some(n => n.props.id === 'pangea-create-hint' && n.children.includes('请先选择源码仓库。')))
+  states[33] = { ...states[33], repository: 'demo' }
+  assert.ok(render().some(n => n.props.id === 'pangea-create-hint' && n.children.includes('请填写本次分析目标。')))
+  states[33] = { ...states[33], target: 'TLS', provider_id: 'agent' }
+  const nodes = render()
+  assert.equal(nodes.find(n => n.type === 'button' && n.children.includes('创建分析任务')).props.disabled, false)
+  assert.ok(!nodes.some(n => n.props.id === 'pangea-create-hint'))
 })
 
 
@@ -1319,8 +1378,13 @@ test('flow views default to text and isolate function diagrams by flow, run and 
   assert.equal(request.profile, 'function_variables')
   assert.equal(request.flow_id, 'F1')
   assert.equal(request.type, 'workflow')
-  await button('从当前图创建修改会话').props.onClick()
+  assert.equal(button('生成修改版').props.disabled, true)
+  find('架构图修改要求').props.onChange({ target: { value: '标注关键变量变化' } })
+  assert.equal(button('生成修改版').props.disabled, false)
+  render().find(n => n.type === 'form' && descendants(n).some(child => child.props['aria-label'] === '架构图修改要求')).props.onSubmit({ preventDefault() {} })
+  await new Promise(resolve => setImmediate(resolve))
   assert.equal(requests.filter(r => r.action === 'architecture-create').at(-1).previous_view_id, 'functions')
+  assert.equal(requests.filter(r => r.action === 'architecture-create').at(-1).instruction, '标注关键变量变化')
   find('流程图视图').props.onClick()
   await new Promise(resolve => setImmediate(resolve))
   assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=standard&/)
@@ -1329,4 +1393,152 @@ test('flow views default to text and isolate function diagrams by flow, run and 
   find('函数与变量流程图视图').props.onClick()
   await new Promise(resolve => setImmediate(resolve))
   assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=other-flow&/)
+})
+
+async function diagramWorkspace(overrides = []) {
+  const views = [
+    { view_id: 'functions-v2', flow_id: 'F1', profile: 'function_variables', session_id: 'function-session-2' },
+    { view_id: 'functions-v1', flow_id: 'F1', profile: 'function_variables', session_id: 'function-session-1' },
+    { view_id: 'archify-v2', flow_id: 'F1', type: 'sequence', session_id: 'archify-session-2' },
+    { view_id: 'archify-v1', flow_id: 'F1', session_id: 'archify-session-1' },
+    { view_id: 'functions-other-flow', flow_id: 'F2', profile: 'function_variables', session_id: 'other-flow-session' },
+    { view_id: 'functions-old-run', flow_id: 'F1', profile: 'function_variables', run_id: 'old-run' },
+    { view_id: 'functions-other-task', flow_id: 'F1', profile: 'function_variables', task_id: 'other-task' },
+  ].map(view => ({ task_id: 'task', run_id: 'run', type: 'workflow', status: 'ready', available: true, ...view,
+    ...overrides.find(override => override.view_id === view.view_id) }))
+  const task = { task_id: 'task', run_id: 'run', status: 'complete', title: 'CPU usage', active_conversation_id: 'analysis-session',
+    conversations: [{ conversation_id: 'analysis-session', session_id: 'analysis-session', kind: 'analysis' },
+      ...views.filter(view => view.session_id).map(view => ({ conversation_id: view.session_id, session_id: view.session_id, kind: 'architecture' }))] }
+  const current = { run_id: 'run', details: { business_flows: [{ flow_id: 'F1', title: 'Calculation' }, { flow_id: 'F2', title: 'Initialization' }] } }
+  const states = { 0: { current }, 1: { compatibility: { compatible: true }, tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
+  const requests = [], opened = [], registered = [], refs = [], events = []
+  let index = 0, refIndex = 0, publishContext
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = typeof initial === 'function' ? initial() : initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  }, useRef(initial) {
+    return refs[refIndex++] ??= { current: initial }
+  }, useEffect(effect, dependencies) {
+    // Exercise the cross-panel context effect; polling is supplied by the HTTP fixture.
+    if (dependencies.includes(current) && dependencies.includes(states[1].tasks.items[0])) publishContext = effect
+  } }, async (_url, options = {}) => {
+    if (!options.body) return { ok: true, json: async () => ({ status: 'ok', ...states[1] }) }
+    const request = JSON.parse(options.body)
+    requests.push(request)
+    if (request.action === 'task-conversation-activate') {
+      assert.equal(request.task_id, 'task')
+      assert.ok(task.conversations.some(item => item.conversation_id === request.conversation_id))
+      states[1] = { ...states[1], tasks: { items: [{ ...states[1].tasks.items[0], active_conversation_id: request.conversation_id }] } }
+      return { ok: true, json: async () => ({ status: 'ok' }) }
+    }
+    assert.equal(request.action, 'architecture-list')
+    return { ok: true, json: async () => ({ status: 'ok', views }) }
+  }, event => events.push(event))
+  const pages = [], ctx = { sessions: { open(session) { opened.push(session) } }, pangea: {
+    registerPage(page) { pages.push(page) }, registerProductSession(session, page) { registered.push([session, page]) },
+  }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const render = () => { index = 0; refIndex = 0; return descendants(panel.type(panel.props)) }
+  const find = label => render().find(node => node.props['aria-label'] === label)
+  const context = () => {
+    render()
+    assert.ok(publishContext, 'the analysis page must publish its right-panel context')
+    publishContext()
+    return events.findLast(event => event.type === 'pangea:run-context').detail
+  }
+  return { render, find, context, requests, opened, registered }
+}
+
+test('switching diagram profiles and versions activates the matching conversation and keeps scope isolated', async () => {
+  const workspace = await diagramWorkspace()
+  const { find, render, requests, opened, registered } = workspace
+  const selectedView = () => new URL(render().find(node => node.type === 'iframe').props.src, 'http://localhost').searchParams.get('view_id')
+  const options = () => descendants(find('选择架构视图')).filter(node => node.type === 'option').map(node => node.props.value)
+  const expectSession = session => {
+    assert.equal(requests.filter(request => request.action === 'task-conversation-activate').at(-1).conversation_id, session)
+    assert.equal(opened.at(-1), session)
+    assert.deepEqual(registered.at(-1), [session, 'analysis'])
+  }
+  await find('函数与变量流程图视图').props.onClick()
+  assert.equal(selectedView(), 'functions-v2')
+  assert.deepEqual(options(), ['functions-v2', 'functions-v1'])
+  expectSession('function-session-2')
+  await find('选择架构视图').props.onChange({ target: { value: 'functions-v1' } })
+  assert.equal(selectedView(), 'functions-v1')
+  expectSession('function-session-1')
+  await find('流程图视图').props.onClick()
+  assert.equal(selectedView(), 'archify-v2')
+  assert.deepEqual(options(), ['archify-v2', 'archify-v1'])
+  expectSession('archify-session-2')
+  await find('选择架构视图').props.onChange({ target: { value: 'archify-v1' } })
+  assert.equal(selectedView(), 'archify-v1')
+  expectSession('archify-session-1')
+  find('选择业务流程').props.onChange({ target: { value: 'F2' } })
+  assert.equal(find('流程阅读视图').props['aria-pressed'], true)
+  await find('函数与变量流程图视图').props.onClick()
+  assert.deepEqual(options(), ['functions-other-flow'])
+  assert.equal(selectedView(), 'functions-other-flow')
+  expectSession('other-flow-session')
+})
+
+test('right-panel diagram conversation selection updates the left flow, profile and version', async () => {
+  const { find, render, context, opened } = await diagramWorkspace()
+  await find('函数与变量流程图视图').props.onClick()
+  await context().onSelectConversation('archify-session-2')
+  assert.equal(find('流程图视图').props['aria-pressed'], true)
+  assert.equal(find('选择架构视图').props.value, 'archify-v2')
+  assert.equal(find('架构图类型').props.value, 'sequence')
+  await context().onSelectConversation('archify-session-1')
+  assert.equal(find('流程图视图').props['aria-pressed'], true)
+  assert.equal(find('选择架构视图').props.value, 'archify-v1')
+  assert.equal(find('架构图类型').props.value, 'workflow')
+  assert.equal(render().find(node => node.type === 'iframe').props.title, 'Archify 架构图')
+  assert.equal(opened.at(-1), 'archify-session-1')
+  await context().onSelectConversation('other-flow-session')
+  assert.equal(find('选择业务流程').props.value, 'F2')
+  assert.equal(find('函数与变量流程图视图').props['aria-pressed'], true)
+  assert.equal(find('选择架构视图').props.value, 'functions-other-flow')
+  assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=functions-other-flow&/)
+  assert.equal(context().activeConversationSessionId, 'other-flow-session')
+  await context().onSelectConversation('function-session-1')
+  assert.equal(find('选择业务流程').props.value, 'F1')
+  assert.equal(find('选择架构视图').props.value, 'functions-v1')
+  assert.equal(context().activeConversationSessionId, 'function-session-1')
+})
+
+test('a diagram still generating after layout validation shows repair progress in both panels', async () => {
+  const validationError = 'node_overflow: label extends past the viewport'
+  const { find, render, context } = await diagramWorkspace([{ view_id: 'functions-v2', available: false,
+    status: 'generating', execution_status: 'running', validation_error: validationError }])
+  await find('函数与变量流程图视图').props.onClick()
+  const workspace = find('函数与变量图工作区')
+  const nodes = descendants(workspace)
+  const progress = nodes.find(node => node.props.className === 'pangea-diagram-empty')
+  assert.equal(progress.props.role, 'status')
+  assert.match(JSON.stringify(progress), /正在修正布局/)
+  assert.match(JSON.stringify(progress), /完成后会自动显示/)
+  assert.ok(!nodes.some(node => node.props.role === 'alert'))
+  assert.ok(!render().some(node => node.type === 'iframe'))
+  const diagnostics = nodes.find(node => node.type === 'details' && descendants(node).some(child => child.type === 'summary' && child.children.includes('生成记录与诊断')))
+  assert.notEqual(diagnostics.props.open, true)
+  assert.match(JSON.stringify(diagnostics), /node_overflow/)
+  assert.equal(context().phase, '正在修正布局')
+  assert.equal(context().process.status, 'running')
+  assert.ok(nodes.some(node => node.type === 'button' && node.children.includes('停止生成')))
+})
+
+test('a terminal diagram failure remains actionable instead of showing layout repair', async () => {
+  const { find, context } = await diagramWorkspace([{ view_id: 'functions-v2', available: false,
+    status: 'failed', execution_status: 'failed', validation_error: 'node_overflow', error: 'Layout generation ended without a usable artifact' }])
+  await find('函数与变量流程图视图').props.onClick()
+  const nodes = descendants(find('函数与变量图工作区'))
+  const failure = nodes.find(node => node.props.className === 'pangea-diagram-empty')
+  assert.equal(failure.props.role, 'alert')
+  assert.match(JSON.stringify(failure), /Layout generation ended without a usable artifact/)
+  assert.doesNotMatch(JSON.stringify(failure), /正在修正布局/)
+  assert.ok(!nodes.some(node => node.type === 'button' && node.children.includes('停止生成')))
+  assert.equal(context().phase, '需要处理')
+  assert.equal(context().process.status, 'failed')
 })

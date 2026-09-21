@@ -782,12 +782,13 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
               try { output = jobs.read(view.job_id, owner)?.text?.slice(-12000) || output } catch { /* Retain last captured output. */ }
               const changed = output !== (view.output ?? '')
               const changes = { execution_status: job.status, output,
+                ...(view.available ? { error: null } : {}),
                 ...(changed ? { last_activity_at: new Date().toISOString() } : {}) }
               if (changed || view.execution_status !== job.status) Object.assign(view, await updateView(task, view.view_id, changes), { status: view.status })
             }
             if (view.available) continue
             if (!job || job.startedAt !== view.job_started_at || ['failed', 'killed', 'completed'].includes(job.status)) {
-              Object.assign(view, await updateView(task, view.view_id, { status: !job || job.startedAt !== view.job_started_at ? 'interrupted' : job.status === 'killed' ? 'stopped' : 'failed', execution_status: job?.status ?? 'interrupted', error: !job ? '执行状态不可确认：画图 Job 已不可读取。已保留会话和输出。' : job.detail || '画图执行已结束，尚无验证通过的产物。' }))
+              Object.assign(view, await updateView(task, view.view_id, { status: !job || job.startedAt !== view.job_started_at ? 'interrupted' : job.status === 'killed' ? 'stopped' : 'failed', execution_status: job?.status ?? 'interrupted', error: !job ? '执行状态不可确认：画图 Job 已不可读取。已保留会话和输出。' : job.detail || view.validation_error || '画图执行已结束，尚无验证通过的产物。' }))
             }
           } else if (view.session_id) {
             try {

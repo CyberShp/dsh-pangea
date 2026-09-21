@@ -18,6 +18,7 @@ window.__ModuleLoader__.load({
       assistantContext: null,
     })
     const productStateByWorkspace = new Map()
+    const productBodyAttributeOwners = new Map()
     const LEGACY_TAB_TYPES = new Set([
       'dsh-pangea-companion:pangea',
       'dsh-pangea-asset-catalog:assets',
@@ -115,7 +116,7 @@ window.__ModuleLoader__.load({
 
         [data-pangea-shell] {
           width: 100%; height: 100%; min-width: 0; min-height: 0;
-          display: grid; grid-template-columns: 244px minmax(0, 1fr);
+          display: grid; grid-template-columns: 216px minmax(0, 1fr);
           color: var(--dsw-alias-label-primary); background: #fff;
           font-family: "Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
           font-synthesis: none;
@@ -143,7 +144,7 @@ window.__ModuleLoader__.load({
         }
         [data-pangea-project] {
           min-width: 188px; max-width: 260px; height: 40px; display: grid;
-          grid-template-columns: minmax(0,1fr) 18px; align-items: center; gap: 14px;
+          grid-template-columns: minmax(0,1fr); align-items: center;
           margin-left: 38px; padding: 0 14px; border: 1px solid #d7dbe1; border-radius: 5px;
           color: #34383f; background: #fff; font: inherit; font-size: 14px; text-align: left;
           box-shadow: 0 1px 2px rgba(18,24,32,.03); cursor: default;
@@ -164,34 +165,44 @@ window.__ModuleLoader__.load({
         [data-pangea-assistant-head] { display: none; }
         [data-pangea-product-nav] {
           box-sizing: border-box; min-width: 0; min-height: 0; display: flex; flex-direction: column;
-          padding: 22px 14px 18px; border-right: 1px solid #dfe3e8;
-          background: #f7f8fa;
+          padding: 18px 12px 14px; border-right: 1px solid #dfe3e8;
+          overflow-y: auto; scrollbar-width: thin; background: #f7f8fa;
         }
-        [data-pangea-nav-list], [data-pangea-tool-list] { display: grid; gap: 7px; }
+        [data-pangea-nav-list], [data-pangea-tool-list] { display: grid; gap: 5px; flex-shrink: 0; }
+        [data-pangea-nav-heading] { padding: 0 12px 7px; color: var(--pangea-muted); font-size: 11px; font-weight: 650; letter-spacing: .06em; }
         [data-pangea-nav-button], [data-pangea-tool-button] {
-          box-sizing: border-box; width: 100%; min-height: 52px; display: grid;
-          grid-template-columns: 29px minmax(0, 1fr); align-items: center; gap: 12px;
-          padding: 0 15px; border: 1px solid transparent; border-radius: 7px;
+          box-sizing: border-box; width: 100%; min-height: 44px; display: grid;
+          grid-template-columns: 25px minmax(0, 1fr); align-items: center; gap: 10px;
+          padding: 0 12px; border: 1px solid transparent; border-radius: 7px;
           color: #424953; background: transparent;
-          text-align: left; font: inherit; font-size: 15px; font-weight: 520; cursor: pointer;
-          transition: color .15s ease, background .15s ease, box-shadow .15s ease, transform .15s ease;
+          text-align: left; font: inherit; font-size: 14px; font-weight: 520; cursor: pointer;
+          transition: color .15s ease, background .15s ease, box-shadow .15s ease;
         }
+        [data-pangea-tool-button] { min-height: 40px; }
+        [data-pangea-nav-label] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         [data-pangea-nav-button]:hover, [data-pangea-tool-button]:hover {
           color: #17191d; background: #eef0f3;
         }
         [data-pangea-nav-button][data-active="true"] {
           color: #fff; background: linear-gradient(135deg, #c7000b 0%, #df0011 100%);
-          box-shadow: 0 10px 22px rgba(199,0,11,.22);
+          box-shadow: 0 3px 9px rgba(199,0,11,.16); font-weight: 650;
         }
         [data-pangea-tool-button][data-active="true"] {
           color: var(--pangea-red); background: #fff0f1;
           box-shadow: inset 3px 0 var(--pangea-red); font-weight: 680;
         }
         [data-pangea-nav-icon] { width: 25px; height: 25px; display: grid; place-items: center; }
-        [data-pangea-nav-divider] { height: 1px; margin: 18px 7px 12px; background: #e5e7eb; }
+        [data-pangea-nav-divider] { height: 1px; flex-shrink: 0; margin: 18px 7px 14px; background: #e5e7eb; }
         [data-pangea-tool-list] { margin-top: auto; }
+        [data-pangea-shell] :is(button,select):focus-visible,
+        [data-pangea-assistant-head] :is(button,select):focus-visible {
+          outline: 2px solid var(--pangea-red); outline-offset: 3px;
+        }
         [data-pangea-page] { position: relative; min-width: 0; min-height: 0; display: flex; overflow: hidden; background: #f5f6f8; }
         [data-pangea-page] > * { flex: 1; min-width: 0; min-height: 0; }
+        [data-pangea-page][data-pangea-terminal-open] {
+          display: grid; grid-template-rows: minmax(0, 1fr) min(42%, 365px);
+        }
         [data-pangea-settings-page] {
           box-sizing: border-box; width: 100%; height: 100%; overflow: auto;
           padding: 42px clamp(28px, 5vw, 72px) 64px; color: var(--pangea-ink); background: #f5f6f8;
@@ -242,10 +253,9 @@ window.__ModuleLoader__.load({
         [data-pangea-utility-body] { min-width: 0; min-height: 0; overflow: hidden; background: #fff; }
         [data-pangea-utility-body] > * { width: 100%; height: 100%; min-width: 0; min-height: 0; }
         [data-pangea-terminal-dock] {
-          position: absolute; z-index: 12; left: 0; right: 0; bottom: 0; height: min(42%, 365px);
-          min-height: 270px; display: grid; grid-template-rows: 46px minmax(0, 1fr);
+          box-sizing: border-box; min-width: 0; min-height: 0; overflow: hidden;
+          display: grid; grid-template-rows: 46px minmax(0, 1fr);
           border-top: 3px solid var(--pangea-red); color: #e4e7eb; background: #171a1f;
-          box-shadow: 0 -12px 28px rgba(24,29,36,.22);
         }
         [data-pangea-terminal-dock] [data-pangea-utility-head] {
           border-color: #343a43; color: #e4e7eb; background: #242830;
@@ -312,40 +322,46 @@ window.__ModuleLoader__.load({
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelBody { height: 100%; }
           body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-head] {
             display: block; position: static; z-index: auto;
-            box-sizing: border-box; width: 100%; height: 204px;
-            padding: 0 24px 16px; border-left: 1px solid #dfe3e8; border-bottom: 1px solid #e5e8ec;
+            box-sizing: border-box; width: 100%; height: auto;
+            padding: 0 20px 14px; border-left: 1px solid #dfe3e8; border-bottom: 1px solid #e5e8ec;
             color: var(--pangea-ink); background: rgba(251,252,253,.98);
           }
+        }
           [data-pangea-assistant-title] {
-            height: 58px; display: flex; align-items: center; justify-content: space-between;
+            height: 48px; display: flex; align-items: center; justify-content: space-between;
             font-size: 17px; font-weight: 720; letter-spacing: -.01em;
           }
           [data-pangea-assistant-card] {
-            height: 90px; display: grid; grid-template-columns: 48px minmax(0,1fr) 20px;
-            align-items: center; gap: 14px; padding: 0 14px; border: 1px solid #d9dde3;
+            display: grid; grid-template-columns: 36px minmax(0,1fr);
+            align-items: start; gap: 10px; padding: 12px; border: 1px solid #d9dde3;
             border-radius: 9px; background: #fff; box-shadow: 0 2px 8px rgba(25,31,40,.035);
           }
           [data-pangea-assistant-icon] {
-            width: 46px; height: 46px; display: grid; place-items: center; border-radius: 9px;
+            width: 36px; height: 36px; display: grid; place-items: center; border-radius: 9px;
             color: var(--pangea-red); background: #fff0f1; border: 1px solid #ffd5d8;
           }
           [data-pangea-assistant-name] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 700; }
-          [data-pangea-assistant-meta] { margin-top: 5px; color: #757c87; font-size: 16px; line-height: 1.35; }
-          [data-pangea-assistant-progress] { margin-top: 5px; color: #68707c; font-size: 16px; }
-          [data-pangea-assistant-actions] { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+          [data-pangea-assistant-meta] { margin-top: 5px; color: #757c87; font-size: 14px; line-height: 1.45; }
+          [data-pangea-assistant-progress] { margin-top: 4px; color: #68707c; font-size: 13px; }
           [data-pangea-assistant-select] {
-            min-width: 0; flex: 1; height: 30px; border: 1px solid #d9dde3; border-radius: 5px;
-            padding: 0 8px; color: #34383f; background: #fff; font: inherit; font-size: 16px;
+            min-width: 0; flex: 1; height: 36px; border: 1px solid #d9dde3; border-radius: 6px;
+            padding: 0 8px; color: #34383f; background: #fff; font: inherit; font-size: 14px;
           }
           [data-pangea-assistant-new] {
-            height: 30px; border: 1px solid #c7000b; border-radius: 5px; padding: 0 10px;
-            color: #c7000b; background: #fff; font: inherit; font-size: 16px; font-weight: 600; cursor: pointer;
+            height: 36px; flex: none; border: 1px solid #c7000b; border-radius: 6px; padding: 0 10px;
+            color: #c7000b; background: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
           }
-        }
+        [data-pangea-assistant-section-label] { display: block; margin-bottom: 5px; color: #68707c; font-size: 12px; font-weight: 600; }
+        [data-pangea-assistant-conversations] { margin-top: 12px; }
+        [data-pangea-assistant-actions] { display: flex; align-items: center; gap: 8px; }
+        [data-pangea-assistant-feedback] { margin: 7px 0 0; color: #68707c; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+        [data-pangea-assistant-feedback="error"] { color: #b51d29; }
+        [data-pangea-assistant-actions] :disabled { cursor: wait; opacity: .6; }
+        [data-pangea-assistant-actions] :focus-visible { outline: 2px solid #c7000b; outline-offset: 2px; }
 
         @media (min-width: 1180px) and (max-width: 1479px) {
           :root { --pangea-ai-width: 360px; }
-          [data-pangea-shell] { grid-template-columns: 220px minmax(0, 1fr); }
+          [data-pangea-shell] { grid-template-columns: 196px minmax(0, 1fr); }
           [data-pangea-topbar] { padding-left: 28px; }
           [data-pangea-topbar-title] { margin-left: 22px; padding-left: 22px; font-size: 20px; }
           [data-pangea-project] { min-width: 168px; max-width: 220px; margin-left: 28px; }
@@ -355,8 +371,8 @@ window.__ModuleLoader__.load({
 
         [data-pangea-assistant-process] { display: none; }
         [data-pangea-assistant-narrow-toggle] { display: none; }
-        [data-composer-seat][data-pangea-analysis-readonly="true"] [data-composer-card] {
-          pointer-events: none; opacity: .55;
+        [data-composer-seat][data-pangea-analysis-readonly="true"] {
+          display: none !important;
         }
         @media (min-width: 1180px) {
           body[data-pangea-product-shell][data-pangea-task-assistant] [data-pangea-assistant-process] {
@@ -368,7 +384,9 @@ window.__ModuleLoader__.load({
           [data-pangea-assistant-process-status] { color: #68707c; font-size: 16px; }
           [data-pangea-assistant-process-status="failed"], [data-pangea-assistant-process-status="interrupted"] { color: var(--pangea-red); }
           [data-pangea-assistant-process-error] { flex: none; margin-top: 8px; color: var(--pangea-red); font-size: 16px; line-height: 26px; overflow-wrap: anywhere; }
-          [data-pangea-assistant-process-output] { flex: 1; min-height: 48px; overflow: auto; margin: 8px 0 0; padding: 10px; border: 1px solid #e1e4e8; border-radius: 7px; color: #34383f; background: #fff; font: 16px/1.75 "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; }
+          [data-pangea-assistant-process-output] { flex: 1; min-height: 48px; overflow: auto; margin: 8px 0 0; padding: 12px; border: 1px solid #e1e4e8; border-radius: 7px; color: #34383f; background: #fff; font: 15px/1.7 "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif; overflow-wrap: anywhere; }
+          [data-pangea-assistant-process-output] > div > :first-child { margin-top: 0; }
+          [data-pangea-assistant-process-output] pre { padding: 8px; border-radius: 5px; background: #f5f6f8; white-space: pre-wrap; }
           [data-pangea-assistant-process-events] { flex: none; max-height: 150px; overflow: auto; margin-top: 8px; color: #68707c; font-size: 16px; line-height: 26px; }
           [data-pangea-assistant-process-events] summary { cursor: pointer; color: #4d5560; }
         }
@@ -395,7 +413,7 @@ window.__ModuleLoader__.load({
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelBody { height: 100%; }
           [data-pangea-shell] { grid-template-columns: 74px minmax(0, 1fr); }
           [data-pangea-product-nav] { padding-inline: 9px; }
-          [data-pangea-nav-label] { display: none; }
+          [data-pangea-nav-label], [data-pangea-nav-heading] { display: none; }
           [data-pangea-nav-button], [data-pangea-tool-button] { grid-template-columns: 1fr; padding: 0; place-items: center; }
           [data-pangea-topbar-title] { margin-left: 18px; padding-left: 18px; font-size: 18px; }
           [data-pangea-project] { display: none; }
@@ -403,6 +421,9 @@ window.__ModuleLoader__.load({
             display: inline-flex; align-items: center; height: 34px; margin-right: 10px; padding: 0 12px;
             border: 1px solid #c7000b; border-radius: 6px; color: #c7000b; background: #fff; font: inherit; cursor: pointer;
           }
+          [data-pangea-settings-page] { padding: 28px 24px 40px; }
+          [data-pangea-settings-card] { grid-template-columns: minmax(0,1fr); gap: 18px; padding: 22px; }
+          [data-pangea-settings-actions] { justify-content: flex-start; }
           body[data-pangea-product-shell][data-pangea-task-assistant] #root .pI_x6G_frame {
             grid-template-columns: 0 minmax(0, 1fr) 0 !important;
           }
@@ -439,6 +460,22 @@ window.__ModuleLoader__.load({
           body[data-pangea-product-shell][data-pangea-task-assistant-open] [data-pangea-assistant-process] {
             display: flex; flex-direction: column; height: 100%; min-height: 0; max-height: none; padding: 12px 16px;
           }
+        }
+
+        @media (max-width: 760px) {
+          [data-pangea-topbar] { padding-inline: 14px; }
+          [data-pangea-topbar-brand] { width: 88px; }
+          [data-pangea-logo] { width: 84px; }
+          [data-pangea-topbar-title] { margin-left: 12px; padding-left: 12px; font-size: 16px; }
+          [data-pangea-topbar-subtitle] { display: none; }
+          [data-pangea-topbar-spacer] { min-width: 12px; }
+          [data-pangea-system-state] { min-width: 0; gap: 6px; padding: 0; font-size: 12px; }
+          [data-pangea-system-state] > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+          [data-pangea-system-dot] { flex-shrink: 0; }
+          [data-pangea-assistant-narrow-toggle] { flex-shrink: 0; padding-inline: 8px; font-size: 12px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          [data-pangea-nav-button], [data-pangea-tool-button] { transition: none; }
         }
 
         body[data-pangea-product-shell] #root [data-conversation-scroll][data-pangea-analysis-process="true"] {
@@ -521,17 +558,16 @@ window.__ModuleLoader__.load({
     function ProductHeader({ scope, systemState, assistantVisible, assistantOpen, onToggleAssistant }) {
       return h('header', { 'data-pangea-topbar': true },
         h('div', { 'data-pangea-topbar-brand': true }, h(HuaweiLogo)),
-        h('div', { 'data-pangea-topbar-title': true }, 'PANGEA 测试工作台'),
-        h('button', { type: 'button', 'data-pangea-project': true, title: scope?.cwd ?? '' },
-          h('span', null, workspaceLabel(scope)),
-          lineIcon([h('path', { key: 'a', d: 'm7 9 5 5 5-5' })], 18, 1.7)),
+        h('div', { 'data-pangea-topbar-title': true }, 'PANGEA', h('span', { 'data-pangea-topbar-subtitle': true }, '\u00a0测试工作台')),
+        h('div', { 'data-pangea-project': true, title: scope?.cwd ?? '', 'aria-label': `当前项目：${workspaceLabel(scope)}` },
+          h('span', null, workspaceLabel(scope))),
         h('span', { 'data-pangea-topbar-spacer': true }),
         assistantVisible ? h('button', {
           type: 'button', 'data-pangea-assistant-narrow-toggle': true,
           'aria-expanded': assistantOpen ? 'true' : 'false', onClick: onToggleAssistant,
         }, assistantOpen ? '返回分析' : 'AI 助手') : null,
         h('div', { 'data-pangea-system-state': true, 'data-state': systemState.state, role: 'status' },
-          h('span', { 'data-pangea-system-dot': true }, systemState.state === 'ok' ? '✓' : '!'),
+          h('span', { 'data-pangea-system-dot': true, 'aria-hidden': true }, systemState.state === 'ok' ? '✓' : '!'),
           h('span', null, systemState.label)))
     }
 
@@ -645,27 +681,68 @@ window.__ModuleLoader__.load({
     }
 
     function AssistantHeader({ context }) {
+      const [pending, setPending] = React.useState(null)
+      const [failure, setFailure] = React.useState(null)
+      const operationRef = React.useRef(null)
       const percent = Number.isFinite(context?.percent) ? Math.max(0, Math.min(100, context.percent)) : undefined
       const conversations = Array.isArray(context?.conversations) ? context.conversations : []
+      const activeConversation = conversations.find(item => item.conversation_id === context?.activeConversationId)
+      const kind = activeConversation?.kind ?? context?.activeConversationKind
+      const kindLabel = item => item.kind_label || ({ analysis: '分析记录', architecture: '图表', assistant: '讨论' }[item.kind] ?? '讨论')
+      const pendingType = context?.conversationPending || (pending?.taskId === context?.taskId ? pending?.type : '')
+      const busy = Boolean(pendingType)
+      const error = !busy && failure?.taskId === context?.taskId ? failure.message : ''
+      const taskTitle = context?.taskTitle || context?.title || '选择一个分析任务'
+      const runAction = async (type, conversationId) => {
+        if (!context?.taskId || busy || operationRef.current?.taskId === context.taskId) return
+        const callback = type === 'create' ? context.onCreateConversation : context.onSelectConversation
+        if (typeof callback !== 'function' || (type === 'select' && conversationId === context.activeConversationId)) return
+        const operation = { taskId: context.taskId, type, conversationId }
+        operationRef.current = operation
+        setPending(operation)
+        setFailure(null)
+        try {
+          await callback(conversationId)
+        } catch (reason) {
+          if (operationRef.current === operation) setFailure({ taskId: operation.taskId,
+            message: `${type === 'create' ? '新建讨论失败' : '切换会话失败'}：${reason?.message || String(reason)}` })
+        } finally {
+          if (operationRef.current === operation) {
+            operationRef.current = null
+            setPending(null)
+          }
+        }
+      }
+      const feedback = busy ? pendingType === 'create' ? '正在创建讨论会话…' : '正在切换会话…'
+        : error || (kind === 'analysis' ? '分析记录只读；可新建讨论，继续提问。'
+          : kind === 'architecture' ? '当前图表的生成记录。' : '讨论会话，可以继续提问。')
       return h('aside', { 'data-pangea-assistant-head': true, 'aria-label': 'AI 助手当前任务' },
         h('div', { 'data-pangea-assistant-title': true }, h('span', null, 'AI 助手')),
         h('div', { 'data-pangea-assistant-card': true },
           h('span', { 'data-pangea-assistant-icon': true }, assistantGlyph()),
           h('span', { style: { minWidth: 0 } },
-            h('span', { 'data-pangea-assistant-name': true, style: { display: 'block' }, title: context?.runId }, context?.title ?? '选择一个分析任务'),
-            h('span', { 'data-pangea-assistant-meta': true, style: { display: 'block' } }, context?.phase ? `阶段：${chinesePhase(context.phase)}` : '对话将使用当前工作区上下文'),
-            h('span', { 'data-pangea-assistant-progress': true, style: { display: 'block' } }, context?.activeConversationKind === 'architecture' ? '画图状态与主分析独立' : percent === undefined ? '等待任务上下文' : `进度：${percent}%`)),
-          lineIcon([h('path', { key: 'a', d: 'm8 10 4 4 4-4' })], 18, 1.7)),
-        h('div', { 'data-pangea-assistant-actions': true },
-          h('select', {
-            'data-pangea-assistant-select': true,
-            'aria-label': '切换任务会话',
-            value: context?.activeConversationId ?? '',
-            onChange: event => context?.onSelectConversation?.(event.target.value),
-          }, conversations.length
-            ? conversations.map(item => h('option', { key: item.conversation_id, value: item.conversation_id }, item.title))
-            : h('option', { value: '' }, '尚未创建会话')),
-          h('button', { type: 'button', 'data-pangea-assistant-new': true, onClick: () => context?.onCreateConversation?.() }, '新建会话')))
+            h('span', { 'data-pangea-assistant-section-label': true }, '当前任务'),
+            h('span', { 'data-pangea-assistant-name': true, style: { display: 'block' }, title: taskTitle }, taskTitle))),
+        h('div', { 'data-pangea-assistant-conversations': true, 'aria-busy': busy },
+          h('div', null,
+            h('span', { 'data-pangea-assistant-section-label': true }, '当前会话'),
+            h('div', { 'data-pangea-assistant-actions': true },
+              h('select', {
+                'data-pangea-assistant-select': true,
+                'aria-label': '切换任务会话',
+                disabled: busy || !conversations.length,
+                value: context?.activeConversationId ?? '',
+                onChange: event => runAction('select', event.target.value),
+              }, conversations.length
+                ? conversations.map(item => h('option', { key: item.conversation_id, value: item.conversation_id }, `${kindLabel(item)} · ${item.display_title || item.title}`))
+                : h('option', { value: '' }, '尚未创建会话')),
+              h('button', { type: 'button', 'data-pangea-assistant-new': true,
+                disabled: busy || !context?.taskId,
+                onClick: () => runAction('create'),
+              }, pendingType === 'create' ? '创建中…' : '新建讨论'))),
+          context?.phase && kind !== 'assistant' ? h('div', { 'data-pangea-assistant-meta': true },
+            `${chinesePhase(context.phase)}${kind === 'analysis' && percent !== undefined ? ` · ${percent}%` : ''}`) : null,
+          h('p', { 'data-pangea-assistant-feedback': error ? 'error' : 'status', role: error ? 'alert' : 'status', 'aria-live': 'polite' }, feedback)))
     }
 
     function shouldShowAssistantProcess(context) {
@@ -720,10 +797,10 @@ window.__ModuleLoader__.load({
       return h('section', { 'data-pangea-assistant-process': true, 'aria-label': '当前 Run 分析过程' },
         h('div', { 'data-pangea-assistant-process-head': true },
           h('strong', null, context.activeConversationKind === 'architecture' ? '画图过程' : '分析过程'), h('span', { 'data-pangea-assistant-process-status': status }, statusLabel)),
-        process.last_activity_at ? h('div', null, `最近活动：${process.last_activity_at}`) : null,
-        h('div', { 'data-pangea-assistant-process-mode': true }, context.activeConversationKind === 'architecture' ? '画图过程只读；修改图表请使用“从当前图创建修改会话”。' : '分析过程只读；需要交流时请切换或新建讨论会话。'),
+        process.last_activity_at ? h('div', { title: process.last_activity_at }, `最近活动：${new Date(process.last_activity_at).toLocaleTimeString('zh-CN', { hour12: false })}`) : null,
+        h('div', { 'data-pangea-assistant-process-mode': true }, context.activeConversationKind === 'architecture' ? '画图过程只读；展开“修改或生成新版本”，填写要求后选择“生成修改版”。' : '分析过程只读；需要交流时请切换或新建讨论会话。'),
         process.error ? h('div', { 'data-pangea-assistant-process-error': true, role: 'alert' }, process.error) : null,
-        h('pre', { 'data-pangea-assistant-process-output': true }, output),
+        h('div', { 'data-pangea-assistant-process-output': true }, context.renderProcessOutput ? context.renderProcessOutput(output) : output),
         Array.isArray(process.events) && process.events.length
           ? h('details', { 'data-pangea-assistant-process-events': true },
             h('summary', null, `运行记录 · ${process.events.length} 条`),
@@ -803,7 +880,18 @@ window.__ModuleLoader__.load({
           : !sessionMatches ? h('p', { role: 'status' }, '正在切换任务会话…') : null, hosts.processHost))
     }
 
+    function setProductBodyAttribute(name, value, owner) {
+      if (value !== null) {
+        productBodyAttributeOwners.set(name, owner)
+        document.body.setAttribute(name, value)
+      } else if (productBodyAttributeOwners.get(name) === owner) {
+        productBodyAttributeOwners.delete(name)
+        document.body.removeAttribute(name)
+      }
+    }
+
     function ProductShell({ service, betterSidebar, sessions, page, scope, tab, visible, tabProps, children }) {
+      const bodyAttributeOwner = React.useRef({}).current
       const snapshot = React.useSyncExternalStore(service.subscribe, service.getSnapshot, service.getSnapshot)
       const selectedTaskId = React.useSyncExternalStore(service.subscribeTaskSelection, service.getSelectedTaskId, service.getSelectedTaskId)
       const sessionList = React.useSyncExternalStore(
@@ -830,26 +918,18 @@ window.__ModuleLoader__.load({
         || tabIsActive(sidebarState?.bottomSplits, tab?.id)
       React.useEffect(() => {
         if (!productVisible) return undefined
-        document.body.setAttribute('data-pangea-product-shell', page.id)
-        return () => {
-          if (document.body.getAttribute('data-pangea-product-shell') === page.id) document.body.removeAttribute('data-pangea-product-shell')
-        }
+        setProductBodyAttribute('data-pangea-product-shell', page.id, bodyAttributeOwner)
+        return () => setProductBodyAttribute('data-pangea-product-shell', null, bodyAttributeOwner)
       }, [page.id, productVisible])
       React.useEffect(() => {
         const showAssistant = productVisible && page.id === 'analysis' && Boolean(assistantContext?.taskId)
-        if (showAssistant) document.body.setAttribute('data-pangea-task-assistant', assistantContext.taskId)
-        else document.body.removeAttribute('data-pangea-task-assistant')
-        return () => {
-          if (document.body.getAttribute('data-pangea-task-assistant') === assistantContext?.taskId) {
-            document.body.removeAttribute('data-pangea-task-assistant')
-          }
-        }
+        setProductBodyAttribute('data-pangea-task-assistant', showAssistant ? assistantContext.taskId : null, bodyAttributeOwner)
+        return () => setProductBodyAttribute('data-pangea-task-assistant', null, bodyAttributeOwner)
       }, [assistantContext?.taskId, page.id, productVisible])
       React.useEffect(() => {
         const showNarrowAssistant = assistantOpen && productVisible && page.id === 'analysis' && Boolean(assistantContext?.taskId)
-        if (showNarrowAssistant) document.body.setAttribute('data-pangea-task-assistant-open', assistantContext.taskId)
-        else document.body.removeAttribute('data-pangea-task-assistant-open')
-        return () => document.body.removeAttribute('data-pangea-task-assistant-open')
+        setProductBodyAttribute('data-pangea-task-assistant-open', showNarrowAssistant ? assistantContext.taskId : null, bodyAttributeOwner)
+        return () => setProductBodyAttribute('data-pangea-task-assistant-open', null, bodyAttributeOwner)
       }, [assistantContext?.taskId, assistantOpen, page.id, productVisible])
       React.useEffect(() => { setAssistantOpen(false) }, [assistantContext?.taskId])
       React.useLayoutEffect(() => {
@@ -895,6 +975,7 @@ window.__ModuleLoader__.load({
       }, [productStateKey, productVisible])
       const utility = ['editor', 'terminal', 'browser'].includes(tab?.meta?.pangeaUtility)
         ? tab.meta.pangeaUtility : undefined
+      const pageCovered = utility === 'editor' || utility === 'browser'
       const mergedEditorStore = React.useMemo(() => {
         const store = tabProps?.store
         if (!store) return store
@@ -930,7 +1011,7 @@ window.__ModuleLoader__.load({
         const descriptor = betterSidebar.getTab(type)
         if (!descriptor || !tabProps?.store) {
           return h('div', { 'data-pangea-utility-host': true },
-            h('div', { 'data-pangea-utility-head': true }, h('div', { 'data-pangea-utility-title': true }, utilityLabels[type]), h('span', { 'data-pangea-utility-spacer': true }), h('button', { type: 'button', 'data-pangea-utility-close': true, onClick: closeUtility }, '×')),
+            h('div', { 'data-pangea-utility-head': true }, h('div', { 'data-pangea-utility-title': true }, utilityLabels[type]), h('span', { 'data-pangea-utility-spacer': true }), h('button', { type: 'button', 'data-pangea-utility-close': true, 'aria-label': `关闭${utilityLabels[type]}`, onClick: closeUtility }, '×')),
             h('div', { 'data-pangea-utility-body': true, style: { display: 'grid', placeItems: 'center', color: '#737b86' } }, '当前 DSH 工具不可用'))
         }
         const toolTab = { ...tab, type, title: utilityLabels[type] }
@@ -955,19 +1036,33 @@ window.__ModuleLoader__.load({
         }),
         h(AssistantPortals, { context: assistantContext, enabled: productVisible && page.id === 'analysis', currentSessionId: sessionList?.current }),
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
-          h('nav', { 'data-pangea-nav-list': true }, snapshot.pages.filter(item => item.id !== 'settings' && pageIsAvailable(item, scope)).map(item => h('button', {
-            key: item.id, type: 'button', 'data-pangea-nav-button': true, 'data-active': item.id === page.id ? 'true' : 'false',
-            onClick: () => service.openPage(scope, item.id),
-          }, h('span', { 'data-pangea-nav-icon': true }, productIcon(pageMeta[item.id]?.icon ?? item.id, 23)),
-          h('span', { 'data-pangea-nav-label': true }, pageMeta[item.id]?.label ?? (typeof item.title === 'function' ? item.title() : item.title))))),
+          h('div', { 'data-pangea-nav-heading': true, 'aria-hidden': true }, '工作空间'),
+          h('nav', { 'data-pangea-nav-list': true, 'aria-label': '工作空间' }, snapshot.pages.filter(item => item.id !== 'settings' && pageIsAvailable(item, scope)).map(item => {
+            const label = pageMeta[item.id]?.label ?? (typeof item.title === 'function' ? item.title() : item.title)
+            const active = item.id === page.id && !pageCovered
+            return h('button', {
+              key: item.id, type: 'button', 'data-pangea-nav-button': true, 'data-active': active ? 'true' : 'false',
+              'aria-label': label, title: label, 'aria-current': active ? 'page' : undefined,
+              onClick: () => service.openPage(scope, item.id),
+            }, h('span', { 'data-pangea-nav-icon': true }, productIcon(pageMeta[item.id]?.icon ?? item.id, 23)),
+            h('span', { 'data-pangea-nav-label': true }, label))
+          })),
           h('div', { 'data-pangea-nav-divider': true }),
-          h('div', { 'data-pangea-tool-list': true },
-            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'editor' ? 'true' : 'false', onClick: () => openUtility('editor', '文件') }, utilityIcon('file'), h('span', { 'data-pangea-nav-label': true }, '文件')),
-            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'terminal' ? 'true' : 'false', onClick: () => openUtility('terminal', '终端') }, utilityIcon('terminal'), h('span', { 'data-pangea-nav-label': true }, '终端')),
-            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-active': utility === 'browser' ? 'true' : 'false', onClick: () => openUtility('browser', '浏览器') }, utilityIcon('browser'), h('span', { 'data-pangea-nav-label': true }, '浏览器')),
-            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-pangea-native-model-settings': true, 'data-active': page.id === 'settings' ? 'true' : 'false', onClick: () => service.openPage(scope, 'settings') }, utilityIcon('settings'), h('span', { 'data-pangea-nav-label': true }, '设置')))),
-        h('main', { 'data-pangea-page': page.id },
-          h('div', { 'data-pangea-product-content': true, style: { display: utility ? 'none' : undefined } }, React.cloneElement(children, { visible: productVisible })),
+          h('nav', { 'data-pangea-tool-list': true, 'aria-label': '工具与设置' },
+            h('div', { 'data-pangea-nav-heading': true, 'aria-hidden': true }, '工具'),
+            ...[
+              { type: 'editor', label: '文件', icon: 'file' },
+              { type: 'terminal', label: '终端', icon: 'terminal' },
+              { type: 'browser', label: '浏览器', icon: 'browser' },
+            ].map(item => h('button', {
+              key: item.type, type: 'button', 'data-pangea-tool-button': true,
+              'data-active': utility === item.type ? 'true' : 'false', 'aria-pressed': utility === item.type,
+              'aria-label': item.label, title: item.label,
+              onClick: () => utility === item.type ? closeUtility() : openUtility(item.type, item.label),
+            }, utilityIcon(item.icon), h('span', { 'data-pangea-nav-label': true }, item.label))),
+            h('button', { type: 'button', 'data-pangea-tool-button': true, 'data-pangea-native-model-settings': true, 'data-active': page.id === 'settings' && !pageCovered ? 'true' : 'false', 'aria-current': page.id === 'settings' && !pageCovered ? 'page' : undefined, 'aria-label': '设置', title: '设置', onClick: () => service.openPage(scope, 'settings') }, utilityIcon('settings'), h('span', { 'data-pangea-nav-label': true }, '设置')))),
+        h('main', { 'data-pangea-page': page.id, 'data-pangea-terminal-open': utility === 'terminal' ? true : undefined },
+          h('div', { 'data-pangea-product-content': true, style: { display: pageCovered ? 'none' : undefined } }, React.cloneElement(children, { visible: productVisible })),
           utility === 'editor' || utility === 'browser' ? h('div', { style: { position: 'absolute', inset: 0, zIndex: 10, display: 'flex' } }, renderUtility(utility)) : null,
           utility === 'terminal' ? h('div', { 'data-pangea-terminal-dock': true }, ...renderUtility('terminal').props.children) : null))
     }
@@ -1322,6 +1417,7 @@ window.__ModuleLoader__.load({
     exports.setAnalysisProcessLayout = setAnalysisProcessLayout
     exports.shouldShowAssistantProcess = shouldShowAssistantProcess
     exports.assistantSessionId = assistantSessionId
+    exports.AssistantHeader = AssistantHeader
     exports.apply = apply
     return module.exports
   },

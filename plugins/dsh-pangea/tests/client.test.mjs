@@ -20,6 +20,149 @@ async function loadClient(react = { name: 'react' }, extraSandbox = {}) {
   return { exported, source, sandbox, requireModule }
 }
 
+async function assistantHeaderHarness(context) {
+  const hooks = []
+  let cursor = 0
+  const react = {
+    createElement(type, props, ...children) { return { type, props: props ?? {}, children: children.flat(Infinity).filter(value => value !== null) } },
+    useState(initial) {
+      const index = cursor++
+      if (!(index in hooks)) hooks[index] = initial
+      return [hooks[index], value => { hooks[index] = value }]
+    },
+    useRef(initial) {
+      const index = cursor++
+      if (!(index in hooks)) hooks[index] = { current: initial }
+      return hooks[index]
+    },
+  }
+  const { exported } = await loadClient(react)
+  const walk = node => typeof node === 'object' && node !== null ? [node, ...node.children.flatMap(walk)] : []
+  const text = node => typeof node === 'object' && node !== null ? node.children.map(text).join('') : String(node ?? '')
+  return {
+    render(next = context) {
+      context = next
+      cursor = 0
+      const tree = exported.AssistantHeader({ context })
+      const nodes = walk(tree)
+      return {
+        tree, text: text(tree),
+        select: nodes.find(node => node.type === 'select'),
+        create: nodes.find(node => node.type === 'button'),
+        feedback: nodes.find(node => 'data-pangea-assistant-feedback' in node.props),
+        options: nodes.filter(node => node.type === 'option').map(text),
+      }
+    },
+  }
+}
+
+test('assistant identifies the task and conversation purpose with distinct diagram names', async () => {
+  const context = {
+    taskId: 'cpu', taskTitle: 'CPU 使用率统计', title: '架构视图 · cpuload', phase: '图表可查看', percent: 100,
+    activeConversationId: 'functions', activeConversationKind: 'architecture',
+    conversations: [
+      { conversation_id: 'analysis', kind: 'analysis', display_title: '主分析过程', title: '旧名称' },
+      { conversation_id: 'module', kind: 'architecture', display_title: '模块架构图 · v1', title: '相同旧名称' },
+      { conversation_id: 'functions', kind: 'architecture', display_title: '函数与变量图 · v1', title: '相同旧名称' },
+      { conversation_id: 'discussion', kind: 'assistant', kind_label: '讨论', display_title: '讨论 1' },
+    ],
+  }
+  const harness = await assistantHeaderHarness(context)
+  const view = harness.render()
+  assert.match(view.text, /当前任务CPU 使用率统计/)
+  assert.match(view.text, /当前会话/)
+  assert.equal(view.select.props.value, 'functions')
+  assert.deepEqual(view.options, ['分析记录 · 主分析过程', '图表 · 模块架构图 · v1', '图表 · 函数与变量图 · v1', '讨论 · 讨论 1'])
+  assert.doesNotMatch(view.text, /100%|相同旧名称/)
+  assert.match(view.text, /新建讨论/)
+  const discussion = harness.render({ ...context, activeConversationId: 'discussion', activeConversationKind: 'assistant' })
+  assert.doesNotMatch(discussion.text, /图表可查看|100%/)
+  assert.match(discussion.text, /讨论会话，可以继续提问/)
+})
+
+test('assistant prevents duplicate creation and shows an inline error before retry', async () => {
+  let reject, resolve, calls = 0
+  const context = {
+    taskId: 'cpu', activeConversationId: 'analysis', activeConversationKind: 'analysis',
+    conversations: [{ conversation_id: 'analysis', kind: 'analysis', title: '主分析过程' }],
+    onCreateConversation() { calls++; return new Promise((accept, fail) => { resolve = accept; reject = fail }) },
+  }
+  const harness = await assistantHeaderHarness(context)
+  const initial = harness.render()
+  const request = initial.create.props.onClick()
+  await initial.create.props.onClick()
+  let view = harness.render()
+  assert.equal(calls, 1)
+  assert.equal(view.create.props.disabled, true)
+  assert.equal(view.select.props.disabled, true)
+  assert.match(view.text, /正在创建讨论会话/)
+  reject(new Error('网络连接失败'))
+  await request
+  view = harness.render()
+  assert.equal(view.create.props.disabled, false)
+  assert.equal(view.feedback.props.role, 'alert')
+  assert.match(view.text, /新建讨论失败：网络连接失败/)
+  const retry = view.create.props.onClick()
+  assert.equal(calls, 2)
+  assert.doesNotMatch(harness.render().text, /网络连接失败/)
+  resolve()
+  await retry
+  assert.equal(harness.render().create.props.disabled, false)
+})
+
+test('assistant keeps selection authoritative while switching and scopes feedback to its task', async () => {
+  let reject, calls = 0
+  const context = {
+    taskId: 'cpu', activeConversationId: 'analysis', activeConversationKind: 'analysis',
+    conversations: [{ conversation_id: 'analysis', kind: 'analysis', title: '主分析过程' }, { conversation_id: 'discussion', kind: 'assistant', title: '讨论 1' }],
+    onSelectConversation(id) { calls++; assert.equal(id, 'discussion'); return new Promise((_resolve, fail) => { reject = fail }) },
+  }
+  const harness = await assistantHeaderHarness(context)
+  const initial = harness.render()
+  await initial.select.props.onChange({ target: { value: 'analysis' } })
+  assert.equal(calls, 0)
+  const request = initial.select.props.onChange({ target: { value: 'discussion' } })
+  await initial.select.props.onChange({ target: { value: 'discussion' } })
+  let view = harness.render()
+  assert.equal(calls, 1)
+  assert.equal(view.select.props.value, 'analysis')
+  assert.equal(view.create.props.disabled, true)
+  assert.match(view.text, /正在切换会话/)
+  reject(new Error('会话不存在'))
+  await request
+  view = harness.render()
+  assert.equal(view.select.props.value, 'analysis')
+  assert.match(view.text, /切换会话失败：会话不存在/)
+  const otherTask = harness.render({ ...context, taskId: 'memory' })
+  assert.doesNotMatch(otherTask.text, /会话不存在/)
+  assert.equal(otherTask.select.props.disabled, false)
+})
+
+test('assistant reflects conversation operations started from the diagram panel', async () => {
+  let calls = 0
+  const context = {
+    taskId: 'cpu', activeConversationId: 'diagram', activeConversationKind: 'architecture',
+    conversations: [{ conversation_id: 'diagram', kind: 'architecture', title: '函数与变量图' }],
+    onCreateConversation() { calls++ },
+    onSelectConversation() { calls++ },
+  }
+  const harness = await assistantHeaderHarness(context)
+  for (const type of ['select', 'create']) {
+    const view = harness.render({ ...context, conversationPending: type })
+    assert.equal(view.create.props.disabled, true)
+    assert.equal(view.select.props.disabled, true)
+    assert.match(view.text, type === 'create' ? /正在创建讨论会话/ : /正在切换会话/)
+    await view.create.props.onClick()
+    await view.select.props.onChange({ target: { value: 'another' } })
+  }
+  assert.equal(calls, 0)
+  const ready = harness.render({ ...context, conversationPending: '' })
+  assert.equal(ready.create.props.disabled, false)
+  assert.equal(ready.select.props.disabled, false)
+  await ready.create.props.onClick()
+  assert.equal(calls, 1)
+})
+
 function fakeSidebar() {
   const tabs = new Map([
     ['editor', { id: 'editor', order: 10 }],
@@ -350,10 +493,64 @@ test('deep-links a report to the selected Run without a task index entry', async
   assert.equal(sidebar.opened[0].seed.type, 'dsh-pangea:analysis')
 })
 
-test('keeps the product page mounted while a file or browser utility is open', async () => {
-  const { source } = await loadClient()
-  assert.match(source, /data-pangea-product-content/)
-  assert.match(source, /display: utility \? 'none' : undefined/)
+test('names compact navigation, follows the visible page, and toggles tools without losing the page', async () => {
+  const react = {
+    createElement(type, props, ...children) { return { type, props: { ...props, children: children.flat() } } },
+    cloneElement(node, props) { return { ...node, props: { ...node.props, ...props } } },
+    useState(initial) { return [initial, () => {}] },
+    useRef(initial) { return { current: initial } },
+    useCallback(fn) { return fn }, useMemo(fn) { return fn() },
+    useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
+    useEffect() {}, useLayoutEffect() {},
+  }
+  const { exported } = await loadClient(react)
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  for (const id of ['analysis', 'assets', 'settings']) {
+    service.registerPage({ id, title: id, component: () => null })
+  }
+  const scope = { sessionId: 'session-1', cwd: '/tmp/project' }
+  const nodes = tree => tree && typeof tree === 'object'
+    ? [tree, ...(tree.props?.children ?? []).flatMap(nodes)] : []
+
+  for (const utility of [undefined, 'editor', 'browser', 'terminal']) {
+    const tab = { id: 'analysis-tab', type: 'dsh-pangea:analysis', meta: { pangeaUtility: utility } }
+    sidebar.setState({ splits: { tabs: [tab], active: tab.id }, bottomSplits: { tabs: [] } })
+    const shell = sidebar.getTab(tab.type).component({ scope, tab, visible: true })
+    const rendered = shell.type(shell.props)
+    const elements = nodes(rendered)
+    const navButtons = elements.filter(node => node.props?.['data-pangea-nav-button'] || node.props?.['data-pangea-tool-button'])
+    assert.equal(navButtons.length, 6)
+    for (const button of navButtons) {
+      assert.ok(button.props['aria-label'], 'icon-only navigation keeps its accessible name')
+      assert.equal(button.props.title, button.props['aria-label'])
+    }
+    const analysis = navButtons.find(node => node.props['aria-label'] === 'PANGEA 分析')
+    const covered = utility === 'editor' || utility === 'browser'
+    assert.equal(analysis.props['aria-current'], covered ? undefined : 'page')
+    const content = elements.find(node => node.props?.['data-pangea-product-content'])
+    assert.ok(content.props.children[0], 'the page stays mounted while using a tool')
+    assert.equal(content.props.style.display, covered ? 'none' : undefined, 'terminal retains the visible page above its dock')
+    const main = elements.find(node => node.type === 'main')
+    assert.equal(main.props['data-pangea-terminal-open'], utility === 'terminal' ? true : undefined)
+    assert.equal(main.props.children.filter(node => node?.props?.['data-pangea-product-content']).length, 1)
+    if (utility === 'terminal') assert.ok(main.props.children.some(node => node?.props?.['data-pangea-terminal-dock']), 'terminal shares the main grid with the page')
+    const fileButton = navButtons.find(node => node.props['aria-label'] === '文件')
+    assert.equal(fileButton.props['aria-pressed'], utility === 'editor')
+    fileButton.props.onClick()
+    assert.equal(sidebar.updated.at(-1).patch.meta.pangeaUtility, utility === 'editor' ? null : 'editor')
+    if (utility) {
+      const close = elements.find(node => node.props?.['data-pangea-utility-close'])
+      assert.match(close.props['aria-label'], /^关闭/)
+      close.props.onClick()
+      assert.equal(sidebar.updated.at(-1).patch.meta.pangeaUtility, null)
+    }
+    const header = rendered.props.children.find(node => node.type?.name === 'ProductHeader')
+    const workspace = nodes(header.type(header.props)).find(node => node.props?.['data-pangea-project'])
+    assert.equal(workspace.type, 'div', 'current workspace does not promise an unavailable switcher')
+    assert.equal(workspace.props['aria-label'], '当前项目：project')
+    assert.equal(workspace.props.title, scope.cwd)
+  }
 })
 
 test('routes ACP process output to the right assistant panel', async () => {
@@ -404,8 +601,10 @@ test('routes ACP process output to the right assistant panel', async () => {
   assert.equal(card.attributes.has('aria-disabled'), false)
 })
 
-test('reserves the assistant body for analysis output while keeping the composer docked', async () => {
-  const { exported } = await loadClient()
+test('hides the readonly composer and restores it for a matching discussion session', async () => {
+  const { exported, source } = await loadClient()
+  assert.match(source, /\[data-composer-seat\]\[data-pangea-analysis-readonly="true"\]\s*\{\s*display: none !important;/)
+  assert.match(source, /展开“修改或生成新版本”，填写要求后选择“生成修改版”/)
   const scroll = { dataset: {} }
   const card = {
     inert: false,
@@ -450,6 +649,65 @@ test('uses only the selected conversation and current attempt as the assistant s
     { conversation_id: 'analysis-06', session_id: 'session-06', kind: 'assistant' },
   ] }), 'session-06')
   assert.equal(exported.shouldShowAssistantProcess({ taskId: 'failed-before-session', process: { error: 'snapshot denied' } }), true)
+})
+
+test('discussion to diagram switch keeps the active assistant visible after old shell cleanup', async () => {
+  let rendering
+  const bodyAttributes = new Map()
+  const react = {
+    Fragment: Symbol('Fragment'),
+    createElement(type, props, ...children) { return { type, props: { ...props, children: children.length === 1 ? children[0] : children }, children } },
+    cloneElement(node, props) { return { ...node, props: { ...node.props, ...props } } },
+    useState(initial) { return [rendering.stateIndex++ === 1 ? rendering.context : initial, () => {}] },
+    useRef(initial) { return { current: initial } },
+    useCallback(fn) { return fn }, useMemo(fn) { return fn() },
+    useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
+    useEffect(fn) { rendering.effects.push(fn) }, useLayoutEffect() {},
+  }
+  const { exported } = await loadClient(react, {
+    document: { body: {
+      setAttribute(name, value) { bodyAttributes.set(name, value) },
+      getAttribute(name) { return bodyAttributes.get(name) },
+      removeAttribute(name) { bodyAttributes.delete(name) },
+    } },
+    window: { addEventListener() {}, removeEventListener() {} },
+  })
+  const sidebar = fakeSidebar()
+  const sessions = { list: { subscribe() {}, getSnapshot() { return { current: 'discussion' } } } }
+  const service = exported.createPangeaService(sidebar, sessions)
+  service.selectTask('cpu')
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  const baseContext = { taskId: 'cpu', workspaceKey: '/workspace', processMode: 'acp',
+    conversations: [
+      { conversation_id: 'discussion', session_id: 'discussion', kind: 'assistant' },
+      { conversation_id: 'functions', session_id: 'functions', kind: 'architecture' },
+    ] }
+  const mount = (conversationId, visible) => {
+    rendering = { stateIndex: 0, effects: [], context: { ...baseContext,
+      activeConversationId: conversationId, activeConversationSessionId: conversationId,
+      activeConversationKind: conversationId === 'functions' ? 'architecture' : 'assistant' } }
+    const shell = sidebar.getTab('dsh-pangea:analysis').component({ scope: { cwd: '/workspace' }, visible })
+    const rendered = shell.type(shell.props)
+    const portal = rendered.children.find(node => node?.type?.name === 'AssistantPortals')
+    const cleanups = rendering.effects.map(effect => effect()).filter(value => typeof value === 'function')
+    return { portal, cleanup: () => cleanups.forEach(cleanup => cleanup()) }
+  }
+  const discussion = mount('discussion', true)
+  assert.equal(bodyAttributes.get('data-pangea-task-assistant'), 'cpu')
+  const diagram = mount('functions', true)
+  assert.equal(diagram.portal.props.enabled, true)
+  assert.equal(diagram.portal.props.context.activeConversationKind, 'architecture')
+  // Session switches temporarily retain both ProductShell instances for this task.
+  discussion.cleanup()
+  const hiddenDiscussion = mount('discussion', false)
+  assert.equal(hiddenDiscussion.portal.props.enabled, false)
+  assert.equal(bodyAttributes.get('data-pangea-product-shell'), 'analysis')
+  assert.equal(bodyAttributes.get('data-pangea-task-assistant'), 'cpu')
+  hiddenDiscussion.cleanup()
+  assert.equal(bodyAttributes.get('data-pangea-task-assistant'), 'cpu')
+  diagram.cleanup()
+  assert.equal(bodyAttributes.has('data-pangea-task-assistant'), false)
+  assert.equal(bodyAttributes.has('data-pangea-product-shell'), false)
 })
 
 test('task assistant fences old todos until the selected task session is available', async () => {

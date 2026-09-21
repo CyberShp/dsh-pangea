@@ -30,6 +30,16 @@ window.__ModuleLoader__.load({
     const STAGE_STATUS = { pending: '未开始', running: '执行中', completed: '已完成', paused: '待继续', skipped: '无需执行', failed: '失败', stopped: '已停止' }
     const CASE_READINESS = { ready: '具备执行条件（未代表实测通过）', needs_setup: '待补执行条件', unclassified: '执行条件未标注' }
     const RECORD_LABELS = { note: '分析说明', summary: '分析总结', unresolved: '待确认事项', flow: '业务流程', test_case: '测试用例', test_case_group: '用例组', risk: '风险', evidence: '源码依据', unit_plan: '单元计划', review_finding: '复核发现', review_decision: '复核结论' }
+    const DIAGRAM_LABELS = { workflow: '业务流程图', architecture: '模块架构图', sequence: '时序图', lifecycle: '生命周期图', dataflow: '数据流图' }
+    const DIAGRAM_STATUS = { generating: '正在生成', ready: '已生成', failed: '生成失败', stopped: '已停止', interrupted: '执行已中断' }
+    function diagramName(view) {
+      return view?.profile === 'function_variables' ? '函数与变量图' : DIAGRAM_LABELS[view?.type] || '图表'
+    }
+    function diagramVersion(view, views) {
+      const versions = views.filter(item => item.run_id === view.run_id && item.flow_id === view.flow_id && item.type === view.type && (item.profile ?? 'standard') === (view.profile ?? 'standard'))
+        .slice().sort((a, b) => String(a.created_at ?? '').localeCompare(String(b.created_at ?? '')))
+      return `v${versions.findIndex(item => item.view_id === view.view_id) + 1}`
+    }
     function artifactLabel(file) {
       const name = file.split(/[\\/]/).pop()
       return ({ 'task-contract.json': '冻结任务合同', 'source-manifest.json': '冻结源码清单', 'source-index.json': '源码索引', 'source-first-plan.json': '分析范围与单元计划', 'report.md': '测试报告', 'report.html': '离线测试报告', 'report-complete.json': '报告完成记录' })[name]
@@ -41,10 +51,10 @@ window.__ModuleLoader__.load({
       if (typeof body === 'string' && /^[\s]*[\[{]/.test(body)) {
         try { body = JSON.parse(body) } catch { /* preserve non-JSON prose */ }
       }
-      if (Array.isArray(body)) return h('ul', null, body.map((item, i) => h('li', { key: i }, renderReadableBody(item))))
+      if (Array.isArray(body)) return h('ul', { className: 'pangea-reader' }, body.map((item, i) => h('li', { key: i }, renderReadableBody(item))))
       if (body && typeof body === 'object') {
         const labels = { entry_points: '业务入口', paths: '业务路径', path_id: '路径编号', condition: '触发条件', node_ids: '节点顺序', case_ids: '关联用例', explanation: '路径说明', candidate_id: '条目编号', asset_id: '资产编号', asset_title: '资产名称', item_id: '原文条目编号', item_type: '资料类型', topic: '主题', inputs: '输入', outputs: '输出', constraints: '适用条件与约束', acceptance_criteria: '验收标准', modules: '适用模块', interfaces: '接口', states: '状态', main_flows: '主要场景', branch_flows: '分支场景', error_flows: '异常场景', recovery_flows: '恢复场景', symptom: '问题表现', trigger: '触发条件', root_cause: '问题原因', propagation: '影响过程', defect_mechanism: '问题机理', exclusion_conditions: '排除条件', applicable_modules: '适用模块', key_facts: '关键事实', expected_results: '预期结果', related_problems: '相关问题', source_references: '原文出处', location: '位置', path: '文件', title: '标题', content: '说明', description: '说明', summary: '总结', gap: '缺口', reason: '原因', scope: '分析范围', source_evidence: '源码依据', what_is_known: '已确认事实', missing_to_resolve: '待补条件', recommended_action: '建议', preconditions: '前置条件', steps: '操作步骤', action: '操作', expected: '预期', cleanup: '清理恢复' }
-        return h('dl', null, Object.entries(body).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, renderReadableBody(value)))))
+        return h('dl', { className: 'pangea-reader' }, Object.entries(body).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, renderReadableBody(value)))))
       }
       const lines = String(body ?? '').split(/\r?\n/), nodes = []
       const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
@@ -57,12 +67,12 @@ window.__ModuleLoader__.load({
         } else if (line.includes('|') && i + 1 < lines.length && cells(lines[i + 1]).every(cell => /^:?-{3,}:?$/.test(cell))) {
           const headers = cells(line), rows = []; i++
           while (i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].trim()) rows.push(cells(lines[++i]))
-          nodes.push(h('div', { key: i, style: { overflowX: 'auto' } }, h('table', { style: { borderCollapse: 'collapse', width: '100%' } }, h('thead', null, h('tr', null, headers.map((cell, j) => h('th', { key: j, style: { textAlign: 'left', padding: 7, borderBottom: '1px solid #aaa' } }, cell)))), h('tbody', null, rows.map((row, j) => h('tr', { key: j }, row.map((cell, k) => h('td', { key: k, style: { padding: 7, verticalAlign: 'top', borderBottom: '1px solid #ddd' } }, cell))))))))
-        } else if (/^#{1,6}\s/.test(line)) nodes.push(h('div', { key: i, style: { fontWeight: 700, marginTop: 10 } }, line.replace(/^#{1,6}\s+/, '')))
+          nodes.push(h('div', { key: i, className: 'pangea-reader-table', tabIndex: 0, role: 'region', 'aria-label': headers.join('、'), style: { overflowX: 'auto' } }, h('table', { style: { borderCollapse: 'collapse', width: '100%' } }, h('thead', null, h('tr', null, headers.map((cell, j) => h('th', { key: j, scope: 'col', style: { textAlign: 'left', padding: 7, borderBottom: '1px solid #aaa' } }, cell)))), h('tbody', null, rows.map((row, j) => h('tr', { key: j }, row.map((cell, k) => h('td', { key: k, style: { padding: 7, verticalAlign: 'top', borderBottom: '1px solid #ddd' } }, cell))))))))
+        } else if (/^#{1,6}\s/.test(line)) nodes.push(h(`h${Math.min(6, line.match(/^#+/)[0].length + 1)}`, { key: i }, line.replace(/^#{1,6}\s+/, '')))
         else if (/^\s*[-*+]\s/.test(line)) nodes.push(h('div', { key: i, style: { paddingLeft: 10, margin: '5px 0' } }, '• ', line.replace(/^\s*[-*+]\s+/, '')))
         else if (line.trim()) nodes.push(h('p', { key: i, style: { margin: '7px 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, line))
       }
-      return h('div', null, nodes)
+      return h('div', { className: 'pangea-reader' }, nodes)
     }
     function collectionWarning(health, key) {
       return health?.count_checks?.[key]?.status === 'mismatch' || health?.collection_status?.[key] === 'unavailable'
@@ -399,8 +409,78 @@ window.__ModuleLoader__.load({
       coverage: '请检查当前对象还缺少哪些测试覆盖，只列出有明确依据的缺口。',
     }
 
+    const panelCss = `
+      .pangea-companion { scrollbar-gutter: stable; }
+      .pangea-companion * { box-sizing: border-box; }
+      .pangea-companion button, .pangea-companion input, .pangea-companion select, .pangea-companion textarea { font-family: inherit; }
+      .pangea-companion button { transition: box-shadow .15s, border-color .15s; }
+      .pangea-companion button:not(:disabled):hover { box-shadow: inset 0 0 0 1px #c7000b55; }
+      .pangea-companion button:disabled { opacity: .55; cursor: not-allowed; }
+      .pangea-companion :is(button,input,select,textarea,summary,[tabindex]):focus-visible { outline: 3px solid #b72237 !important; outline-offset: 3px; }
+      .pangea-companion summary { cursor: pointer; line-height: 1.7; }
+      .pangea-companion .pangea-content { min-width: 0; }
+      .pangea-page-heading { margin: 0; }
+      .pangea-page-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; flex-shrink: 0; }
+      .pangea-task-filters { padding: 18px; border: 1px solid #dfe3e8; border-radius: 10px; background: #fff; margin-bottom: 16px; }
+      .pangea-empty-state { padding: 36px 24px; text-align: center; }
+      .pangea-empty-state p { color: #68707c; line-height: 1.7; margin: 8px 0 18px; }
+      .pangea-task-row:hover, .pangea-home-row:hover { background: #fff7f7 !important; }
+      .pangea-task-row > span, .pangea-home-row > span { min-width: 0; overflow-wrap: anywhere; }
+      .pangea-reader { line-height: 1.85; overflow-wrap: anywhere; font-size: 14px; }
+      .pangea-reader :is(h2,h3,h4,h5,h6) { color: inherit; line-height: 1.5; margin: 24px 0 10px; font-size: 16px; }
+      .pangea-reader h2 { font-size: 20px; padding-bottom: 10px; border-bottom: 1px solid #e4e7eb; }
+      .pangea-reader > :first-child { margin-top: 0; }
+      .pangea-reader dd { margin-bottom: 16px; }
+      .pangea-reader pre { padding: 14px 16px; background: #f3f5f8; border: 1px solid #e1e5ea; border-radius: 8px; line-height: 1.65; font-size: 13px; }
+      .pangea-reader-table { margin: 16px 0; border: 1px solid #dfe3e8; border-radius: 8px; }
+      .pangea-reader-table table { min-width: 360px; }
+      .pangea-reader-table th { background: #f3f5f8; font-weight: 650; }
+      .pangea-reader-table :is(th,td) { padding: 12px 14px !important; border-bottom: 1px solid #e4e7eb !important; }
+      .pangea-reader-table tbody tr:nth-child(even) { background: #fafbfc; }
+      .pangea-flow-modes { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; background: #f0f2f5; border: 1px solid #e3e6eb; border-radius: 10px; }
+      .pangea-flow-modes button { border: 0 !important; background: transparent !important; padding: 9px 13px !important; color: #667085 !important; box-shadow: none !important; }
+      .pangea-flow-modes button[aria-pressed="true"] { background: white !important; color: #ad0b1b !important; box-shadow: 0 1px 4px #172b4d14 !important; font-weight: 650; }
+      .pangea-diagram-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 20px; }
+      .pangea-diagram-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 18px; border-top: 1px solid #edf0f3; border-bottom: 1px solid #edf0f3; background: #fbfcfd; }
+      .pangea-diagram-status { display: inline-flex; align-items: center; flex-shrink: 0; gap: 6px; padding: 5px 10px; border-radius: 20px; background: #edf0f4; color: #667085; font-size: 12px; }
+      .pangea-diagram-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+      .pangea-diagram-status.ready { color: #18764c; background: #eaf6ef; }
+      .pangea-diagram-status.generating { color: #906400; background: #fff6da; }
+      .pangea-diagram-status.failed, .pangea-diagram-status.interrupted { color: #b42318; background: #fff0ed; }
+      .pangea-diagram-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; min-height: 260px; padding: 28px; background: #fafbfc; }
+      .pangea-diagram-empty strong { font-size: 18px; }
+      .pangea-diagram-empty p { color: #667085; line-height: 1.7; max-width: 520px; }
+      .pangea-diagram-caption { padding: 10px 18px; font-size: 12px; line-height: 1.6; color: #667085; border-top: 1px solid #edf0f3; }
+      .pangea-diagram-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 14px 18px; border-top: 1px solid #edf0f3; }
+      .pangea-diagram-compose { padding: 16px 18px; border-top: 1px solid #edf0f3; }
+      .pangea-diagram-compose > summary { font-size: 14px; font-weight: 600; cursor: pointer; }
+      .pangea-diagram-dialog { width: calc(100vw - 48px); max-width: none; height: calc(100vh - 48px); max-height: none; padding: 0; border: 1px solid #dfe3ea; border-radius: 14px; color: #17191d; background: white; box-shadow: 0 20px 70px #10182840; }
+      .pangea-diagram-dialog::backdrop { background: #18223088; }
+      @container pangea-panel (max-width: 950px) {
+        .pangea-metrics { grid-template-columns: repeat(2,minmax(0,1fr)) !important; }
+        .pangea-home-columns { grid-template-columns: minmax(0,1fr) !important; min-height: 0 !important; }
+        .pangea-page-hero { flex-wrap: wrap; gap: 16px !important; }
+        .pangea-create-form .pangea-input-grid { grid-template-columns: minmax(0,1fr) !important; }
+      }
+      @container pangea-panel (max-width: 700px) {
+        .pangea-content { padding: 20px 16px 32px !important; }
+        .pangea-table-heading { display: none !important; }
+        .pangea-task-row, .pangea-home-row { grid-template-columns: minmax(0,1fr) auto !important; gap: 10px !important; padding: 16px !important; }
+        .pangea-task-row > :first-child, .pangea-home-row > :first-child { grid-column: 1 / -1; white-space: normal !important; }
+        .pangea-task-row > :nth-child(4) { grid-column: 1 / -1; }
+        .pangea-home-row > :nth-child(3) { grid-column: 1 / -1; }
+        .pangea-home-row > :last-child { display: none; }
+        .pangea-panel-header { flex-wrap: wrap; }
+        .pangea-page-heading { font-size: 26px !important; }
+      }
+      @container pangea-panel (max-width: 380px) {
+        .pangea-metrics { grid-template-columns: minmax(0,1fr) !important; }
+      }
+      @media (prefers-reduced-motion: reduce) { .pangea-companion button { transition: none; } }
+    `
+
     const styles = {
-      root: { height: '100%', overflow: 'auto', boxSizing: 'border-box', color: '#17191d', background: '#f5f6f8', fontFamily: '"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif', fontSize: 14, WebkitFontSmoothing: 'antialiased' },
+      root: { height: '100%', overflow: 'auto', containerType: 'inline-size', containerName: 'pangea-panel', boxSizing: 'border-box', color: '#17191d', background: '#f5f6f8', fontFamily: '"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif', fontSize: 14, WebkitFontSmoothing: 'antialiased' },
       sticky: { position: 'sticky', top: 0, zIndex: 5, padding: '17px 22px 0', background: 'var(--dsw-alias-bg-layer-1, #fff)', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))' },
       header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
       headerLeft: { minWidth: 0, display: 'flex', alignItems: 'center', gap: 7 },
@@ -408,14 +488,14 @@ window.__ModuleLoader__.load({
       subline: { marginTop: 5, color: 'var(--dsw-alias-label-tertiary, #7a818b)', fontSize: 12, lineHeight: 1.45, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       backButton: { border: 0, background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', padding: '4px 2px', cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' },
       button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '7px 10px', cursor: 'pointer', fontSize: 13 },
-      primaryButton: { width: '100%', border: '1px solid var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', color: 'var(--dsw-alias-label-on-primary, #fff)', borderRadius: 7, padding: '9px 12px', cursor: 'pointer', fontSize: 14, fontWeight: 600 },
+      primaryButton: { width: '100%', border: '1px solid var(--pangea-red, #c7000b)', background: 'var(--pangea-red, #c7000b)', color: '#fff', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontSize: 14, fontWeight: 600 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
       nav: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(72px, 1fr)', gap: 0, marginTop: 12, overflowX: 'auto' },
       navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '11px 4px 10px', cursor: 'pointer', fontSize: 13 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
-      content: { padding: '20px 22px 30px' },
-      homeContent: { padding: '32px 36px 42px', background: '#f5f6f8' },
-      card: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.22))', background: 'var(--dsw-alias-bg-layer-1, transparent)', borderRadius: 9, padding: 12, marginBottom: 11 },
+      content: { padding: '24px 28px 40px', maxWidth: 1320, margin: '0 auto' },
+      homeContent: { padding: '32px 36px 42px', maxWidth: 1440, margin: '0 auto', background: '#f5f6f8' },
+      card: { border: '1px solid var(--dsw-alias-border-l2, #dfe3e8)', background: 'var(--dsw-alias-bg-layer-1, #fff)', borderRadius: 10, padding: 18, marginBottom: 14 },
       healthOk: { borderColor: 'var(--dsw-alias-state-success-secondary, #4fb8a8)', background: 'var(--dsw-alias-state-success-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
       healthError: { borderColor: 'var(--dsw-alias-state-error-secondary, #e66767)', background: 'var(--dsw-alias-interactive-bg-hover-danger, var(--dsw-alias-bg-layer-1, transparent))' },
       healthWarning: { borderColor: 'var(--dsw-alias-state-warn-secondary, #c9974f)', background: 'var(--dsw-alias-state-warn-tertiary, var(--dsw-alias-bg-layer-1, transparent))' },
@@ -438,10 +518,10 @@ window.__ModuleLoader__.load({
       statusDot: { width: 6, height: 6, flex: '0 0 auto', borderRadius: '50%', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       chips: { display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 7 },
       chip: { border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, padding: '5px 9px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 12 },
-      search: { width: '100%', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '9px 10px', outline: 'none', fontSize: 14, marginBottom: 8 },
+      search: { width: '100%', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #cfd5dc)', background: 'var(--dsw-alias-bg-layer-1, #fff)', color: 'inherit', borderRadius: 8, padding: '10px 12px', fontSize: 14, marginBottom: 8 },
       filters: { display: 'flex', gap: 5, overflowX: 'auto', paddingBottom: 5, marginBottom: 3 },
       filter: { flex: '0 0 auto', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, background: 'transparent', color: 'inherit', padding: '5px 10px', fontSize: 13, cursor: 'pointer' },
-      filterActive: { background: 'var(--dsw-alias-bg-layer-3, rgba(127,127,127,.15))', fontWeight: 700 },
+      filterActive: { background: '#fff0f1', color: '#aa0010', borderColor: '#e7a4aa', fontWeight: 700 },
       text: { fontSize: 14, lineHeight: 1.65, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
       list: { margin: '6px 0 0', paddingLeft: 20, fontSize: 14, lineHeight: 1.65 },
       separator: { border: 0, borderTop: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', margin: '10px 0' },
@@ -488,10 +568,10 @@ window.__ModuleLoader__.load({
       timelineTitle: { marginTop: 2, fontSize: 13, fontWeight: 600, lineHeight: 1.45 },
       timelineDetail: { marginTop: 3, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 12, lineHeight: 1.5, overflowWrap: 'anywhere' },
       eyebrow: { color: 'var(--dsw-alias-state-business-primary, #4d9ad6)', fontSize: 12, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' },
-      decisionHero: { border: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', borderLeft: '3px solid var(--dsw-alias-state-business-primary, #4d9ad6)', borderRadius: 8, padding: 13, marginBottom: 11, background: 'linear-gradient(135deg, var(--dsw-alias-bg-layer-1, #171717), var(--dsw-alias-bg-layer-2, #202020))' },
+      decisionHero: { border: '1px solid var(--dsw-alias-border-l2, #dfe3e8)', borderLeft: '3px solid var(--pangea-red, #c7000b)', borderRadius: 10, padding: 22, marginBottom: 18, background: 'var(--dsw-alias-bg-layer-1, #fff)' },
       decisionTitle: { marginTop: 5, fontSize: 18, fontWeight: 780, lineHeight: 1.3, letterSpacing: '-0.02em' },
       decisionHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 13, lineHeight: 1.55 },
-      decisionBand: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 6, marginTop: 11 },
+      decisionBand: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 14, marginTop: 18 },
       decisionItem: { minWidth: 0, borderTop: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', paddingTop: 7 },
       decisionValue: { marginTop: 3, fontSize: 14, fontWeight: 600, lineHeight: 1.4, overflowWrap: 'anywhere' },
       group: { marginBottom: 14 },
@@ -1195,6 +1275,11 @@ window.__ModuleLoader__.load({
       const [gapStatus, setGapStatus] = React.useState('')
       const [gapDisposition, setGapDisposition] = React.useState('')
       const [flowReader, setFlowReader] = React.useState({ scope: '', view: 'reader', step: '', query: '', page: 1 })
+      const [diagramError, setDiagramError] = React.useState('')
+      const [diagramFullscreen, setDiagramFullscreen] = React.useState(false)
+      const [conversationPending, setConversationPending] = React.useState('')
+      const diagramDialogRef = React.useRef(null)
+      const conversationActionRef = React.useRef(false)
       const requestRef = React.useRef({ sequence: 0, controller: null })
       const workbenchRequestRef = React.useRef({ sequence: 0, controller: null })
       const snapshotRef = React.useRef(undefined)
@@ -1546,16 +1631,27 @@ window.__ModuleLoader__.load({
           attemptId: selectedTask.attempt_id,
           ownerSessionId: selectedTask.owner_session_id,
           jobId: selectedTask.job_id,
-          title: activeConversation?.kind === 'architecture' ? `架构视图 · ${selectedTask.target}` : selectedTask.title,
+          taskTitle: selectedTask.title,
+          title: selectedTask.title,
           processMode: selectedTask.provider ? 'acp' : 'internal',
-          phase: activeConversation?.kind === 'architecture' ? activeDiagram?.available ? '图表可查看' : activeDiagram?.error ? '需要处理' : '生成图表' : selectedCurrent ? (selectedCurrent.phase_title ?? PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
+          phase: activeConversation?.kind === 'architecture' ? activeDiagram?.available ? '图表可查看' : activeDiagram?.status === 'generating' && activeDiagram?.validation_error ? '正在修正布局' : activeDiagram?.error ? '需要处理' : '生成图表' : selectedCurrent ? (selectedCurrent.phase_title ?? PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
-          conversations: selectedTask.conversations ?? [],
+          conversations: (selectedTask.conversations ?? []).map((conversation, index) => {
+            const view = diagramViews.find(item => item.session_id === conversation.session_id)
+            return { ...conversation,
+              kind_label: conversation.kind === 'analysis' ? '分析记录' : conversation.kind === 'architecture' ? '图表' : '讨论',
+              display_title: view ? `${diagramName(view)} · ${businessFlows.find(flow => flow.flow_id === view.flow_id)?.title || '模块全景'} · ${diagramVersion(view, diagramViews)}`
+                : conversation.kind === 'analysis' ? '主分析过程'
+                  : conversation.kind === 'architecture' ? `图表 ${index}` : conversation.title?.startsWith(selectedTask.title) ? `讨论 ${index}` : conversation.title,
+            }
+          }),
           activeConversationId: selectedTask.active_conversation_id,
           activeConversationSessionId: activeConversation?.session_id ?? null,
           activeConversationKind: activeConversation?.kind ?? null,
+          conversationPending,
           presentation,
           processOutput: selectedTask.last_output || outputEvent?.output || '',
+          renderProcessOutput: renderReadableBody,
           process: activeConversation?.kind === 'architecture' ? {
             status: activeDiagram?.available ? 'completed' : ['failed', 'stopped', 'interrupted'].includes(activeDiagram?.status) ? activeDiagram.status : activeDiagram?.execution_status ?? activeDiagram?.status ?? 'starting',
             output: activeDiagram?.output ?? '', error: activeDiagram?.error ?? '', last_activity_at: activeDiagram?.last_activity_at,
@@ -1569,10 +1665,10 @@ window.__ModuleLoader__.load({
               label: launchEventLabel(event),
             })),
           },
-          onSelectConversation: conversationId => { void selectTaskConversation(conversationId) },
-          onCreateConversation: () => { void createTaskConversationForCurrent() },
+          onSelectConversation: conversationId => selectTaskConversation(conversationId),
+          onCreateConversation: () => createTaskConversationForCurrent(),
         } : null }))
-      }, [current, error, health?.status, pageMode, screen.type, selectedTask, visible, diagramViews, workbench?.compatibility?.compatible, workbench?.launch_log?.events, workbenchError])
+      }, [current, error, health?.status, pageMode, screen.type, selectedTask, visible, diagramViews, conversationPending, workbench?.compatibility?.compatible, workbench?.launch_log?.events, workbenchError])
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
       const methodologyDetailError = workbench?.run_detail?.run_id === current?.run_id && workbench?.run_detail?.status === 'error'
         ? workbench.run_detail.error : ''
@@ -1689,31 +1785,51 @@ window.__ModuleLoader__.load({
       }
 
       async function createTaskConversationForCurrent() {
-        if (!selectedTask || creatingRun) return
+        if (!selectedTask) throw new Error('请先选择分析任务。')
+        if (conversationActionRef.current) throw new Error('正在切换会话，请稍候。')
+        conversationActionRef.current = true
+        setConversationPending('create')
         setCreatingRun(true)
         try {
-          const created = await requestWorkbenchAction({ cwd, action: 'task-conversation-create', payload: { task_id: selectedTask.task_id } })
+          const number = (selectedTask.conversations ?? []).filter(item => !['analysis', 'architecture'].includes(item.kind)).length + 1
+          const created = await requestWorkbenchAction({ cwd, action: 'task-conversation-create', payload: { task_id: selectedTask.task_id, title: `讨论 ${number} · ${selectedTask.repository || '当前任务'}` } })
           ctx?.pangea?.registerProductSession?.(created.session_id, 'analysis')
-          ctx?.sessions?.open?.(created.session_id)
+          await ctx?.sessions?.open?.(created.session_id)
           await loadWorkbench()
         } catch (reason) {
-          showActionNotice(`无法新建会话：${reason instanceof Error ? reason.message : String(reason)}`, true)
+          throw new Error(`无法新建讨论：${reason instanceof Error ? reason.message : String(reason)}`)
         } finally {
+          conversationActionRef.current = false
+          setConversationPending('')
           setCreatingRun(false)
         }
       }
 
       async function selectTaskConversation(conversationId) {
-        if (!selectedTask || !conversationId) return
+        if (!selectedTask || !conversationId) throw new Error('请先选择会话。')
         const conversation = selectedTask.conversations?.find(item => item.conversation_id === conversationId)
-        if (!conversation) return
+        if (!conversation) throw new Error('会话已更新，请刷新后重试。')
+        if (conversationActionRef.current) throw new Error('正在切换会话，请稍候。')
+        conversationActionRef.current = true
+        setConversationPending('select')
         try {
           await requestWorkbenchAction({ cwd, action: 'task-conversation-activate', payload: { task_id: selectedTask.task_id, conversation_id: conversationId } })
           ctx?.pangea?.registerProductSession?.(conversation.session_id, 'analysis')
-          ctx?.sessions?.open?.(conversation.session_id)
+          await ctx?.sessions?.open?.(conversation.session_id)
+          const view = diagramViews.find(item => item.session_id === conversation.session_id)
+          if (view && screen.type === 'flows') {
+            setDiagramSelection(view.view_id)
+            setDiagramType(view.type || 'workflow')
+            if (view.flow_id) setFlowSelection(view.flow_id)
+            const flowId = view.flow_id || flowSelection || businessFlows[0]?.flow_id
+            setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : 'diagram', step: '', query: '', page: 1 })
+          }
           await loadWorkbench()
         } catch (reason) {
-          showActionNotice(`无法切换会话：${reason instanceof Error ? reason.message : String(reason)}`, true)
+          throw new Error(`无法切换会话：${reason instanceof Error ? reason.message : String(reason)}`)
+        } finally {
+          conversationActionRef.current = false
+          setConversationPending('')
         }
       }
 
@@ -2283,7 +2399,7 @@ window.__ModuleLoader__.load({
                         : screen.type === 'repository-import' ? '添加源码仓库' : 'PANGEA 总览'
 
       const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? [] : [
-        ['overview', '概览'], ['flows', '业务流程'], ...(current?.scenario === 'coverage-analysis' ? [] : [['risks', '风险']]), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['workflow', '运行过程'],
+        ['overview', '概览'], ['flows', '业务流程'], ...(current?.scenario === 'coverage-analysis' ? [] : [['risks', '风险']]), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['evidence', '源码依据'], ['workflow', '运行过程'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -2305,15 +2421,15 @@ window.__ModuleLoader__.load({
       }
 
       const header = h('div', { style: styles.sticky },
-        h('div', { style: styles.header },
+        h('div', { className: 'pangea-panel-header', style: styles.header },
           h('div', { style: styles.headerLeft },
             screen.type !== 'home' && screen.type !== 'tasks' ? h('button', { type: 'button', style: styles.backButton, onClick: () => {
               if (pageMode === 'analysis' && ['overview', 'risks', 'cases', 'review'].includes(screen.type)) jump('tasks')
               else goBack()
             } }, '← 返回') : null,
             h('div', { style: { minWidth: 0 } },
-              h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { style: styles.title }, screenTitle)),
-              h('div', { style: screen.type === 'create' ? { ...styles.subline, fontSize: 16 } : styles.subline }, selectedTask
+              h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { role: screen.type === 'create' ? undefined : 'heading', 'aria-level': screen.type === 'create' ? undefined : 1, style: styles.title }, screenTitle)),
+              h('div', { style: screen.type === 'create' ? { ...styles.subline, fontSize: 14 } : styles.subline }, screen.type === 'create' ? '选择仓库、分析目标与执行方式' : selectedTask
                 ? selectedTask.title
                 : 'PANGEA 测试平台'))),
           h('div', { style: styles.chips },
@@ -2339,6 +2455,11 @@ window.__ModuleLoader__.load({
       function collectionEmpty(key, normal) {
         if (['unpublished', 'unavailable'].includes(deriveRunPresentation(selectedTask, current, health).countsAvailability)) return '结果尚不可用，暂不显示空列表结论。'
         return collectionWarning(health, key) ? '数据读取异常：不能把空列表解释为“没有数据”。' : normal
+      }
+      function renderResultCount(shown, total, hasFilters, reset) {
+        return h('div', { style: styles.toolbar },
+          h('span', { style: styles.itemMeta, role: 'status' }, `显示 ${shown} / ${total} 条`),
+          hasFilters ? h('button', { type: 'button', style: styles.backButton, onClick: reset }, '清除筛选') : null)
       }
       function healthStyle(status = deriveRunPresentation(selectedTask, current, health).healthStatus) {
         if (status === 'error') return { ...styles.card, ...styles.healthError }
@@ -2450,7 +2571,9 @@ window.__ModuleLoader__.load({
 
       function renderCompatibility() {
         if (workbenchError) return h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
-          h('div', { style: styles.itemTitle }, '工作台接口读取失败'), h('div', { style: styles.error }, workbenchError))
+          h('div', { style: styles.itemTitle }, workbench ? '同步失败，显示上次任务列表' : '暂时无法读取工作台'),
+          h('div', { style: styles.error }, workbenchError),
+          h('button', { type: 'button', disabled: workbenchLoading, style: { ...styles.button, marginTop: 10 }, onClick: () => { void loadWorkbench() } }, workbenchLoading ? '正在重试…' : '重试同步'))
         if (!workbench || workbench.compatibility?.compatible === true) return null
         return h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
           h('div', { style: styles.itemTitle }, '当前 PANGEA 后端与工作台不兼容'),
@@ -2476,7 +2599,16 @@ window.__ModuleLoader__.load({
           ? selectedProvider?.registered === true
           : selectedModelOption?.credential_configured === true
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
-        const canSubmit = compatible && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode) && createForm.repository && createForm.target.trim() && (sourceScope.length > 0 || createForm.scenario === 'coverage-analysis') && (createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())) && executionReady && !creatingRun && !coverageQueryBusy
+        const coverageReady = createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())
+        const submitBlockReason = !compatible ? '等待工作台就绪后即可创建分析。'
+          : !supported('scenarios', createForm.scenario) || !supported('modes', createForm.mode) ? '请选择当前环境支持的分析场景与模式。'
+          : !createForm.repository ? '请先选择源码仓库。'
+          : !createForm.target.trim() ? '请填写本次分析目标。'
+          : sourceScope.length === 0 && createForm.scenario !== 'coverage-analysis' ? '请填写源码冻结范围，使用 . 可选择整个仓库。'
+          : !coverageReady ? '请补全覆盖率输入：文件、资产或查询条件。'
+          : !executionReady ? '请选择已就绪的 Agent 或已配置凭据的内置模型。'
+          : coverageQueryBusy ? '覆盖率正在查询，请等待查询完成。' : ''
+        const canSubmit = !submitBlockReason && !creatingRun
         const assetItems = assetCatalog?.assets ?? []
         const selectedAssets = createForm.asset_ids.map(assetId => assetLabels[assetId] ?? assetItems.find(item => item.asset_id === assetId)
           ?? { asset_id: assetId, title: assetId })
@@ -2628,7 +2760,8 @@ window.__ModuleLoader__.load({
             modelRouting.status === 'ok' && modelOptions.length === 0 && !createForm.provider_id ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, '没有可用的内置 API 模型，请先到“设置”配置模型与 API。', h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })) }, '打开模型设置')) : null,
             createForm.provider_id && selectedProvider?.registered === true ? h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, `${selectedProvider.label} · ${createForm.agent_model ? `指定模型：${createForm.agent_model}` : '使用 Agent 默认模型'} · 推理配置沿用 Agent 默认。`) : null,
             createForm.provider_id && selectedProvider?.registered !== true ? h('div', { style: { ...styles.healthWarning, marginTop: 8 }, role: 'status' }, `${selectedProvider?.label ?? createForm.provider_id} 尚未在当前 Desktop 加载，请检查插件配置。`) : null,
-            h('button', { type: 'button', disabled: !canSubmit, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务'))
+            submitBlockReason ? h('p', { id: 'pangea-create-hint', role: 'status', style: { ...styles.itemMeta, marginTop: 16 } }, submitBlockReason) : null,
+            h('button', { type: 'button', disabled: !canSubmit, 'aria-describedby': submitBlockReason ? 'pangea-create-hint' : undefined, 'aria-busy': creatingRun, style: { ...styles.primaryButton, marginTop: 10, ...(!canSubmit ? styles.buttonDisabled : {}) }, onClick: () => { void submitNewRun() } }, creatingRun ? '正在创建任务…' : '创建分析任务'))
       }
 
       function renderCorrectionProgress() {
@@ -2740,49 +2873,111 @@ window.__ModuleLoader__.load({
       async function diagramAction(action, extra = {}) {
         if (!selectedTask) return
         setDiagramBusy(true)
+        setDiagramError('')
         try {
           const result = await requestWorkbenchAction({ cwd, action, payload: { task_id: selectedTask.task_id, ...extra } })
           if (result.session_id) ctx?.pangea?.registerProductSession?.(result.session_id, 'analysis')
           const listed = await requestWorkbenchAction({ cwd, action: 'architecture-list', payload: { task_id: selectedTask.task_id } })
           setDiagramViews(listed.views ?? [])
-          if (result.view) setDiagramSelection(result.view.view_id)
-        } catch (error) { showActionNotice(`架构视图：${error.message}`, true) }
+          if (result.view) {
+            setDiagramInstruction('')
+            await chooseDiagram(result.view)
+          }
+          return listed.views ?? []
+        } catch (error) { setDiagramError(`图表操作未完成：${error.message}`) }
         finally { setDiagramBusy(false) }
+      }
+
+      function matchingDiagrams(flow, profile, views = diagramViews) {
+        return views.filter(view => view.run_id === current?.run_id && view.task_id === selectedTask?.task_id && (view.profile ?? 'standard') === profile
+          && (profile === 'function_variables' ? view.flow_id === flow?.flow_id : (!view.flow_id || view.flow_id === flow?.flow_id)))
+      }
+
+      async function chooseDiagram(view) {
+        if (!view) return
+        setDiagramSelection(view.view_id)
+        setDiagramType(view.type || 'workflow')
+        if (view.flow_id) setFlowSelection(view.flow_id)
+        const flowId = view.flow_id || flowSelection || businessFlows[0]?.flow_id
+        setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : 'diagram', step: '', query: '', page: 1 })
+        setDiagramError('')
+        if (!view.session_id || view.session_id === selectedTask?.active_conversation_id) return
+        if (conversationActionRef.current) { setDiagramError('会话正在切换，请稍后点击“查看图表会话”。'); return }
+        conversationActionRef.current = true
+        setConversationPending('select')
+        setDiagramBusy(true)
+        try {
+          await requestWorkbenchAction({ cwd, action: 'task-conversation-activate', payload: { task_id: selectedTask.task_id, conversation_id: view.session_id } })
+          ctx?.pangea?.registerProductSession?.(view.session_id, 'analysis')
+          await ctx?.sessions?.open?.(view.session_id)
+          await loadWorkbench()
+        } catch (error) { setDiagramError(`图表已选中，但会话切换失败：${error.message}`) }
+        finally { conversationActionRef.current = false; setConversationPending(''); setDiagramBusy(false) }
+      }
+
+      async function changeFlowView(reader, view, flow) {
+        setFlowReader({ ...reader, view })
+        setDiagramError('')
+        if (view === 'reader') return
+        const listed = await diagramAction('architecture-list')
+        if (!listed) return
+        const views = matchingDiagrams(flow, view === 'functions' ? 'function_variables' : 'standard', listed)
+        await chooseDiagram(views.find(item => item.view_id === diagramSelection) ?? views[0])
       }
 
       function renderDiagrams(flow, profile = 'standard') {
         const functions = profile === 'function_variables'
-        const views = diagramViews.filter(v => v.run_id === current?.run_id && v.task_id === selectedTask?.task_id && (v.profile ?? 'standard') === profile && (functions ? v.flow_id === flow?.flow_id : (!v.flow_id || v.flow_id === flow?.flow_id)))
+        const views = matchingDiagrams(flow, profile)
         const selected = views.find(v => v.view_id === diagramSelection) ?? views[0]
         const artifactUrl = (format, download = false) => '/api/pangea-companion/architecture-artifact?' + new URLSearchParams({ cwd: cwd || '', task_id: selectedTask.task_id, view_id: selected.view_id, format, ...(download ? { download: '1' } : {}) })
-        return h('div', { style: styles.card },
-          h('div', { style: styles.itemTitle }, functions ? '函数与变量流程图' : 'Archify'),
-          h('div', { style: styles.chips },
-            !functions ? h('select', { 'aria-label': '架构图类型', style: styles.button, value: diagramType, onChange: e => setDiagramType(e.target.value) }, [['workflow', '业务流程图'], ['architecture', '模块架构图'], ['sequence', '时序图'], ['lifecycle', '生命周期图'], ['dataflow', '数据流图']].map(([v, label]) => h('option', { key: v, value: v }, label))) : null,
-            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !flow, onClick: () => diagramAction('architecture-create', { type: functions ? 'workflow' : diagramType, profile, flow_id: flow.flow_id, instruction: functions ? '' : '先表达主干步骤和回接关系；分支较多时按挂接步骤及类型分组，组上保留分支数量与编号。仅使用已发布关系，不要把所有分支说明塞进一个节点。' }) }, functions ? '生成函数与变量流程图' : '生成流程总览'),
-            !functions ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy || !current, onClick: () => diagramAction('architecture-create', { type: 'architecture' }) }, '生成模块架构图') : null,
-            h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-list') }, '刷新架构视图')),
-          views.length ? h('select', { 'aria-label': '选择架构视图', style: styles.search, value: selected?.view_id || '', onChange: e => setDiagramSelection(e.target.value) }, views.map(v => h('option', { key: v.view_id, value: v.view_id }, `${businessFlows.find(f => f.flow_id === v.flow_id)?.title || v.flow_id || '模块全景'} · ${functions ? '函数与变量流程图' : ({ workflow: '业务流程图', architecture: '模块架构图', sequence: '时序图', lifecycle: '生命周期图', dataflow: '数据流图' }[v.type] || v.type)} · ${{ generating: '生成中', ready: '可查看', failed: '失败', stopped: '已停止', interrupted: '状态不可确认' }[v.status] || v.status} · ${v.view_id.slice(0, 8)}`))) : h('div', { style: styles.itemMeta }, functions ? '按需读取当前流程及冻结源码，生成函数调用、入参、返回值和关键变量变化图。无法确认的信息会标为待确认。' : '选择一个流程按需生成图表。多分支的条件、回接与证据可在“文字方案”中逐步查看。'),
+        const generating = selected?.status === 'generating'
+        const status = generating && selected.validation_error ? '正在修正布局' : DIAGRAM_STATUS[selected?.status] || '尚未生成'
+        const newType = functions ? 'workflow' : diagramType
+        const create = () => diagramAction('architecture-create', { type: newType, profile, flow_id: newType === 'architecture' ? null : flow.flow_id,
+          instruction: functions ? '' : '先表达主干步骤和回接关系；分支较多时按挂接步骤及类型分组，组上保留分支数量与编号。仅使用已发布关系，不要把所有分支说明塞进一个节点。' })
+        const frame = fullscreen => h('iframe', { title: fullscreen ? '图表全屏预览' : functions ? '函数与变量流程图' : 'Archify 架构图', src: artifactUrl('html'), sandbox: 'allow-scripts allow-downloads',
+          style: { display: 'block', width: '100%', height: fullscreen ? 'calc(100vh - 120px)' : 'min(72vh, 820px)', minHeight: fullscreen ? 0 : 460, border: 0, background: '#f8fafc' } })
+        return h('section', { 'aria-label': functions ? '函数与变量图工作区' : 'Archify 图表工作区', className: 'pangea-diagram-workspace', style: { ...styles.card, padding: 0, overflow: 'hidden' } },
+          h('div', { className: 'pangea-diagram-header' },
+            h('div', null, h('h3', { style: { margin: 0, fontSize: 17 } }, functions ? '函数与变量流程图' : 'Archify 图表'),
+              h('div', { style: { ...styles.itemMeta, marginTop: 5 } }, functions ? '沿调用路径查看入参、返回值和关键变量变化' : '用图表理解流程、模块关系和数据流向')),
+            h('span', { role: 'status', className: `pangea-diagram-status ${selected?.status || ''}` }, status)),
+          diagramError ? h('div', { role: 'alert', style: { ...styles.error, margin: '0 18px 14px' } }, diagramError) : null,
+          h('div', { className: 'pangea-diagram-toolbar' },
+            views.length ? h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, flex: '1 1 260px', minWidth: 0 } }, h('span', { style: styles.itemMeta }, '当前图表'),
+              h('select', { 'aria-label': '选择架构视图', style: { ...styles.search, flex: 1, minWidth: 0, width: 'auto', margin: 0 }, disabled: diagramBusy, value: selected?.view_id || '', onChange: e => chooseDiagram(views.find(view => view.view_id === e.target.value)) },
+                views.map(view => h('option', { key: view.view_id, value: view.view_id }, `${diagramName(view)} · ${diagramVersion(view, diagramViews)} · ${DIAGRAM_STATUS[view.status] || view.status}${view.created_at ? ` · ${formatTime(view.created_at)}` : ''}`)))) : null,
+            selected?.available ? h('button', { type: 'button', style: styles.button, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏查看') : null,
+            selected?.available ? ['html', 'svg'].map(format => h('a', { key: format, style: styles.chip, href: artifactUrl(format, true), download: `diagram.${format}` }, `导出 ${format.toUpperCase()}`)) : null,
+            h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-list') }, diagramBusy ? '正在更新…' : '刷新状态')),
           selected ? h(React.Fragment, null,
-            selected.branch_ids?.length ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `局部分支图 · 仅包含 ${selected.branch_ids.length} 条分支：${selected.branch_ids.join('、')}`) : null,
-            selected.source_revision !== current?.publication?.revision ? h('div', { style: styles.itemMeta }, '此图基于其他分析版本，可按需重新生成。') : null,
-            selected.error ? h('div', { style: styles.error }, selected.error) : null,
-            selected.available ? h('iframe', { title: functions ? '函数与变量流程图' : 'Archify 架构图', src: artifactUrl('html'), sandbox: 'allow-scripts allow-downloads', style: { width: '100%', height: '72vh', minHeight: 480, border: '1px solid #e5e8ec', borderRadius: 8, marginTop: 12 } }) : null,
-            h('div', { style: styles.chips },
-              selected.session_id ? h('button', { type: 'button', style: styles.button, onClick: async () => {
-                try {
-                  await requestWorkbenchAction({ cwd, action: 'task-conversation-activate', payload: { task_id: selectedTask.task_id, conversation_id: selected.session_id } })
-                  ctx?.pangea?.registerProductSession?.(selected.session_id, 'analysis')
-                  await loadWorkbench()
-                  ctx?.sessions?.open?.(selected.session_id)
-                } catch (error) { showActionNotice(`无法打开画图会话：${error.message}`, true) }
-              } }, '打开画图会话') : null,
-              selected.output ? h('details', null, h('summary', null, '画图过程输出'), h('pre', { style: styles.source }, selected.output)) : null,
-              selected.last_activity_at ? h('div', { style: styles.itemMeta }, `最近活动：${selected.last_activity_at}`) : null,
-              selected.status === 'generating' ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止本次画图') : null,
-              selected.available ? ['html', 'svg'].map(format => h('a', { key: format, style: styles.chip, href: artifactUrl(format, true), download: `diagram.${format}` }, `导出 ${format.toUpperCase()}`)) : null),
-            h('input', { 'aria-label': '架构图修改要求', style: styles.search, value: diagramInstruction, placeholder: '例如：展开超时分支', onChange: e => setDiagramInstruction(e.target.value) }),
-            h('button', { type: 'button', style: styles.button, disabled: diagramBusy || selected.status === 'generating', onClick: () => diagramAction('architecture-create', { type: selected.type, profile, flow_id: selected.flow_id, previous_view_id: selected.view_id, instruction: diagramInstruction }) }, '从当前图创建修改会话')) : null)
+            selected.branch_ids?.length ? h('div', { className: 'pangea-diagram-caption' }, `局部分支图 · ${selected.branch_ids.length} 条分支：${selected.branch_ids.join('、')}`) : null,
+            selected.source_revision !== (current?.publication?.revision ?? null) ? h('div', { className: 'pangea-diagram-caption' }, '此图基于较早的分析版本，可重新生成。') : null,
+            selected.available ? frame(false) : h('div', { className: 'pangea-diagram-empty', role: generating ? 'status' : 'alert' },
+              h('strong', null, status), h('p', null, generating ? selected.validation_error ? '图表正在根据校验结果调整，完成后会自动显示。' : '正在整理图表并检查布局，完成后会自动显示。' : selected.error || '没有可预览的图表。可以查看生成记录，或重新生成。'),
+              generating ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止生成') : null),
+            selected.available ? h('div', { className: 'pangea-diagram-caption' }, '使用图内 + / − 缩放，放大后拖动画布；按 0 复位。') : null,
+            h('div', { className: 'pangea-diagram-footer' },
+              selected.session_id ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => chooseDiagram(selected) }, '查看图表会话') : null,
+              h('span', { style: styles.itemMeta }, selected.last_activity_at ? `更新于 ${formatTime(selected.last_activity_at)}` : ''),
+              h('details', { style: { flexBasis: '100%' } }, h('summary', { style: { cursor: 'pointer', color: '#667085' } }, '生成记录与诊断'),
+                selected.error || selected.validation_error ? h('div', { role: 'status', style: styles.healthWarning }, selected.validation_error || selected.error) : null,
+                selected.validation_diagnostics?.length ? renderReadableBody(selected.validation_diagnostics) : null,
+                selected.output ? renderReadableBody(selected.output) : h('p', { style: styles.itemMeta }, '暂无生成记录。'))),
+            h('dialog', { ref: diagramDialogRef, className: 'pangea-diagram-dialog', 'aria-label': '图表全屏查看', onClose: () => setDiagramFullscreen(false) },
+              h('div', { className: 'pangea-diagram-header' }, h('strong', null, `${diagramName(selected)} · ${diagramVersion(selected, diagramViews)}`), h('button', { type: 'button', style: styles.button, onClick: () => diagramDialogRef.current?.close() }, '返回工作台')),
+              diagramFullscreen && selected.available ? frame(true) : null)) : h('div', { className: 'pangea-diagram-empty' },
+              h('strong', null, '还没有图表'), h('p', null, functions ? '根据当前流程和冻结源码，生成函数调用与变量变化图。' : '选择图表类型，生成当前流程的可视化视图。')),
+          h('details', { key: selected?.view_id || 'new', open: !selected, className: 'pangea-diagram-compose' },
+            h('summary', null, selected ? '修改或生成新版本' : '生成图表'),
+            h('div', { className: 'pangea-diagram-toolbar', style: { padding: '14px 0 0', border: 0 } },
+              !functions ? h('select', { 'aria-label': '架构图类型', style: styles.button, value: diagramType, onChange: e => setDiagramType(e.target.value) }, Object.entries(DIAGRAM_LABELS).map(([value, label]) => h('option', { key: value, value }, label))) : null,
+              h('button', { type: 'button', style: selected ? styles.button : styles.primaryButton, disabled: diagramBusy || generating || !flow, onClick: create }, functions ? '生成函数与变量流程图' : `生成${DIAGRAM_LABELS[newType]}`)),
+            selected ? h('form', { style: { marginTop: 14 }, onSubmit: event => { event.preventDefault(); if (diagramInstruction.trim() && !diagramBusy && !generating) void diagramAction('architecture-create', { type: selected.type, profile, flow_id: selected.flow_id, previous_view_id: selected.view_id, instruction: diagramInstruction.trim() }) } },
+              h('label', { style: styles.label, htmlFor: 'pangea-diagram-instruction' }, '希望怎样修改这张图？'),
+              h('textarea', { id: 'pangea-diagram-instruction', 'aria-label': '架构图修改要求', rows: 2, style: { ...styles.search, resize: 'vertical', marginTop: 8 }, value: diagramInstruction, placeholder: '例如：展开计时分支，并标注 work_tsc 的变化', onChange: e => setDiagramInstruction(e.target.value) }),
+              h('div', { style: styles.row }, h('span', { style: styles.itemMeta }, '保留当前版本，生成一张修改后的新图。'),
+                h('button', { type: 'submit', style: styles.primaryButton, disabled: diagramBusy || generating || !diagramInstruction.trim() }, '生成修改版'))) : null))
       }
 
       function sourceFirstRecordBody(body) {
@@ -2896,7 +3091,7 @@ window.__ModuleLoader__.load({
             h('div', { style: toolbar },
               h('input', { style: { ...styles.search, flex: '1 1 180px', minWidth: 0, width: 'auto', margin: 0 }, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称或入口…', onChange: event => setFlowQuery(event.target.value) }),
               h('select', { style: { ...styles.search, flex: '2 1 230px', minWidth: 0, maxWidth: '100%', width: 'auto', margin: 0 }, 'aria-label': '选择业务流程', value: flow?.flow_id || '', onChange: event => { setFlowSelection(event.target.value); setBranchSelection('') } }, filtered.map(item => h('option', { key: item.flow_id, value: item.flow_id }, `${item.display_id || item.flow_id} · ${item.title || '未命名流程'}`))),
-              h('div', { role: 'group', 'aria-label': '流程展示方式', style: toolbar }, [['reader', '文字方案', '流程阅读视图'], ['diagram', 'Archify', '流程图视图'], ['functions', '函数与变量流程图', '函数与变量流程图视图']].map(([view, label, aria]) => h('button', { key: view, type: 'button', 'aria-label': aria, 'aria-pressed': reader.view === view, style: { ...styles.button, ...(reader.view === view ? selectedStyle : {}) }, onClick: () => { setFlowReader({ ...reader, view }); if (view !== 'reader') void diagramAction('architecture-list') } }, label)))),
+              h('div', { role: 'group', 'aria-label': '流程展示方式', className: 'pangea-flow-modes' }, [['reader', '文字方案', '流程阅读视图'], ['diagram', 'Archify', '流程图视图'], ['functions', '函数与变量', '函数与变量流程图视图']].map(([view, label, aria]) => h('button', { key: view, type: 'button', 'aria-label': aria, 'aria-pressed': reader.view === view, disabled: diagramBusy, style: styles.button, onClick: () => changeFlowView(reader, view, flow) }, label)))),
             flow ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `${steps.length ? `${steps.length} 个${flow.source_record ? '流程节点' : '主干步骤'}` : flowContentState(flow)} · ${allBranches.length} 条分支 · ${allBranches.filter(b => b.status === 'unresolved').length} 条待确认 · ${allBranches.filter(b => !b.linked_test_case_ids?.length).length} 条未关联用例`) : null),
           !flow ? h('div', { style: styles.empty }, query ? '没有匹配的业务流程，请调整搜索。' : collectionEmpty('business_flows', '当前 Run 没有业务流程。'))
             : reader.view === 'functions' ? renderDiagrams(flow, 'function_variables')
@@ -3026,7 +3221,7 @@ window.__ModuleLoader__.load({
         const reportRows = reportRuns.slice(0, 5)
         const metricCard = (kind, color, label, value, caption) => h('section', { style: styles.metricCard, title: caption },
           dashboardIcon(kind, color),
-          h('div', null, h('div', { style: styles.metricLabel }, label), h('div', { style: { ...styles.metricValue, color } }, value)),
+          h('div', null, h('div', { style: styles.metricLabel }, label), h('div', { style: { ...styles.metricValue, color } }, workbench ? value : '—')),
           h('span', { style: { ...styles.metricAccent, background: color }, 'aria-hidden': true }))
         const appCard = (kind, title, copy, onClick) => h('button', {
           type: 'button', style: styles.appCard, onClick,
@@ -3036,13 +3231,16 @@ window.__ModuleLoader__.load({
         const runUpdatedAt = run => run.updated_at ?? run.updated_at_ms ?? run.completed_at ?? run.created_at
 
         return h(React.Fragment, null,
-          h('section', { style: styles.homeHero },
+          renderCompatibility(),
+          h('section', { className: 'pangea-page-hero', style: styles.homeHero },
             h('div', null,
-              h('div', { style: styles.homeTitle }, '测试工作台')),
-            h('div', { style: { display: 'flex', gap: 10 } },
+              h('h1', { className: 'pangea-page-heading', style: styles.homeTitle }, '测试工作台'),
+              h('p', { style: styles.homeLead }, '从源码到测试结论，集中查看进度、待办与分析报告。')),
+            h('div', { className: 'pangea-page-actions' },
+              renderRefreshButton(),
               h('button', { type: 'button', style: { ...styles.environmentSecondaryButton, height: 42 }, onClick: openRepositoryImport }, '添加仓库'),
               h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...styles.redButton, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: openAnalysisCreate }, '新建分析'))),
-          h('div', { style: styles.metricGrid, 'aria-label': '任务指标' },
+          h('div', { className: 'pangea-metrics', style: styles.metricGrid, 'aria-label': '任务指标' },
             metricCard('running', '#2f7acb', '进行中', runningTasks.length, '正在准备或分析中的任务'),
             metricCard('review', '#cf0a2c', '需要处理', attentionTasks.length, '需要用户继续判断或重新启动的任务'),
             metricCard('risk', '#2da44e', '已完成', completedTasks.length, '已完成完整分析流程的任务'),
@@ -3051,18 +3249,18 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.homeSectionHeader },
               h('div', { style: styles.homeSectionTitle }, '需要处理'),
               h('button', { type: 'button', style: styles.backButton, onClick: () => openProductPage('analysis', '分析任务') }, '查看全部任务')),
-            h('div', { style: styles.homeTableHeader },
+            h('div', { className: 'pangea-table-heading', style: styles.homeTableHeader },
               h('span', null, '任务'), h('span', null, '仓库'), h('span', null, '目标'), h('span', null, '状态'), h('span', null, '更新时间'), h('span', null)),
             workRows.length ? workRows.map(task => {
-              return h('button', { key: task.task_id, type: 'button', style: styles.homeTableRow, onClick: () => openTaskFromWorkbench(task) },
+              return h('button', { key: task.task_id, type: 'button', className: 'pangea-home-row', style: styles.homeTableRow, onClick: () => openTaskFromWorkbench(task) },
                 h('span', { style: { fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: task.title }, task.title),
                 h('span', { style: { color: '#59616c', fontSize: 13 } }, task.repository),
                 h('span', { style: { color: '#59616c', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.target),
                 h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.execution_status === 'stopping' ? 'stopping' : task.status) } }, taskStatusLabel(task.execution_status === 'stopping' ? 'stopping' : task.status)),
                 h('span', { style: { color: '#59616c', fontSize: 13, fontVariantNumeric: 'tabular-nums' } }, formatDate(task.updated_at)),
-                h('span', { style: { color: '#7a818b', fontSize: 20, lineHeight: 1, letterSpacing: 1 }, 'aria-hidden': true }, '⋮'))
-            }) : h('div', { style: { ...styles.empty, padding: 18 } }, '当前没有需要处理的任务。')),
-          h('div', { style: styles.homeColumns },
+                h('span', { style: { color: '#7a818b', fontSize: 20, lineHeight: 1 }, 'aria-hidden': true }, '›'))
+            }) : h('div', { style: { ...styles.empty, padding: 24 }, role: 'status' }, !workbench ? (workbenchError ? '待办暂不可用，请重试同步。' : '正在读取待办任务…') : '当前没有需要处理的任务，可在分析任务中查看所有进度。')),
+          h('div', { className: 'pangea-home-columns', style: styles.homeColumns },
             h('section', { style: { ...styles.homeSection, padding: 16 } },
               h('div', { style: { ...styles.homeSectionTitle, margin: '2px 2px 14px' } }, '快捷入口'),
               h('div', { style: styles.appGrid, 'aria-label': '快捷入口' },
@@ -3074,7 +3272,7 @@ window.__ModuleLoader__.load({
                 reportGlyph(),
                 h('span', { style: { minWidth: 0, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: run.run_id }, runLabel(run)),
                 h('span', { style: { color: '#737b86', fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, formatDate(runUpdatedAt(run))),
-                h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))) : h('div', { style: { ...styles.empty, padding: '16px 0' } }, '当前已载入列表中没有报告。'))))
+                h('span', { style: styles.appArrow, 'aria-hidden': true }, '›'))) : h('div', { style: { ...styles.empty, padding: '16px 0' } }, !workbench ? '等待报告列表同步…' : '分析生成报告后，可在这里继续阅读。'))))
       }
 
       function taskStatusLabel(status) {
@@ -3109,34 +3307,46 @@ window.__ModuleLoader__.load({
           ['全部', '全部'], ['preparing', '正在准备'], ['running', '分析中'],
           ['needs_attention', '需要处理'], ['completed', '已完成'], ['stopped', '已停止'], ['failed', '失败'],
         ]
-        const columns = 'minmax(260px, 1.8fr) minmax(150px, .9fr) minmax(110px, .7fr) minmax(130px, .8fr)'
+        const columns = 'minmax(0, 1.8fr) minmax(0, .9fr) minmax(86px, .7fr) minmax(0, 1fr)'
+        const hasFilters = Boolean(query || taskStatus !== '全部')
+        const resetFilters = () => { setTaskQuery(''); setTaskStatus('全部') }
         return h(React.Fragment, null,
           renderCompatibility(),
-          h('section', { style: styles.homeHero },
+          h('section', { className: 'pangea-page-hero', style: styles.homeHero },
             h('div', null,
-              h('div', { style: { ...styles.homeTitle, fontSize: 28 } }, '分析任务'),
-              h('div', { style: styles.homeLead }, '创建、跟踪并进入一个明确的 PANGEA 分析任务。Run 和 DSH Session 收纳在任务详情中。')),
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+              h('h1', { className: 'pangea-page-heading', style: { ...styles.homeTitle, fontSize: 28 } }, '分析任务'),
+              h('div', { style: styles.homeLead }, '查看分析进度，处理待办，或打开任务继续阅读结果。')),
+            h('div', { className: 'pangea-page-actions' },
               renderRefreshButton(),
-              h('button', { type: 'button', style: styles.redButton, onClick: () => jump('create') }, '新建分析任务'))),
-          h('input', { style: styles.search, value: taskQuery, 'aria-label': '搜索分析任务', placeholder: '搜索任务名称或仓库…', onChange: event => setTaskQuery(event.target.value) }),
-          h('div', { style: styles.filters }, statusFilters.map(([value, label]) => h('button', {
-            key: value, type: 'button', style: { ...styles.filter, ...(taskStatus === value ? styles.filterActive : {}) }, onClick: () => setTaskStatus(value),
-          }, label))),
-          h('section', { style: { ...styles.homeSection, marginTop: 8 } },
-            h('div', { style: { ...styles.homeTableHeader, gridTemplateColumns: columns } },
+              h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: styles.redButton, onClick: () => jump('create') }, '新建分析任务'))),
+          h('div', { className: 'pangea-task-filters' },
+            h('label', { style: { display: 'block', fontWeight: 600, marginBottom: 8 }, htmlFor: 'pangea-task-search' }, '查找任务'),
+            h('input', { id: 'pangea-task-search', type: 'search', style: styles.search, value: taskQuery, 'aria-label': '搜索分析任务', placeholder: '搜索任务名称、仓库或分析目标…', onChange: event => setTaskQuery(event.target.value) }),
+            h('div', { style: styles.filters, role: 'group', 'aria-label': '按任务状态筛选' }, statusFilters.map(([value, label]) => h('button', {
+              key: value, type: 'button', 'aria-pressed': taskStatus === value, style: { ...styles.filter, ...(taskStatus === value ? styles.filterActive : {}) }, onClick: () => setTaskStatus(value),
+            }, label))),
+            h('div', { style: styles.toolbar },
+              h('span', { style: styles.itemMeta, role: 'status' }, workbench ? `显示 ${filtered.length} / ${taskItems.length} 个任务` : '正在同步任务列表…'),
+              hasFilters ? h('button', { type: 'button', style: styles.backButton, onClick: resetFilters }, '清除筛选') : null)),
+          h('section', { style: { ...styles.homeSection, marginTop: 8 }, 'aria-label': '分析任务列表', 'aria-busy': workbenchLoading },
+            h('div', { className: 'pangea-table-heading', style: { ...styles.homeTableHeader, gridTemplateColumns: columns } },
               h('span', null, '任务名称'), h('span', null, '仓库'), h('span', null, '状态'), h('span', null, '更新时间')),
             filtered.length ? filtered.map(task => h('button', {
               key: task.task_id,
               type: 'button',
+              className: 'pangea-task-row',
               style: { ...styles.homeTableRow, gridTemplateColumns: columns },
               onClick: () => chooseTask(task),
             },
-            h('span', { style: { fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.title),
-            h('span', { style: { color: '#59616c', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.repository),
+            h('span', { title: task.title, style: { fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.title),
+            h('span', { title: task.repository, style: { color: '#59616c', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.repository),
             h('span', { style: { ...styles.homeStatus, color: taskStatusColor(task.execution_status === 'stopping' ? 'stopping' : task.status) } }, taskStatusLabel(task.execution_status === 'stopping' ? 'stopping' : task.status)),
             h('span', { style: { color: '#59616c', fontSize: 13, fontVariantNumeric: 'tabular-nums' } }, formatDate(task.updated_at))))
-              : h('div', { style: { ...styles.empty, padding: 24 } }, query || taskStatus !== '全部' ? '没有符合条件的任务。' : '还没有分析任务。')))
+              : !workbench ? h('div', { className: 'pangea-empty-state', role: 'status' }, workbenchError ? '任务列表暂不可用，请重试同步。' : '正在读取分析任务…')
+              : h('div', { className: 'pangea-empty-state' },
+                h('strong', null, hasFilters ? '没有符合条件的任务' : '开始第一次源码分析'),
+                h('p', null, hasFilters ? '试试其他关键词，或清除筛选查看全部任务。' : '选择一个仓库和分析目标，结果与进度会集中显示在这里。'),
+                h('button', { type: 'button', style: hasFilters ? styles.button : styles.redButton, disabled: !hasFilters && workbench?.compatibility?.compatible !== true, onClick: hasFilters ? resetFilters : () => jump('create') }, hasFilters ? '查看全部任务' : '创建分析任务'))))
       }
 
       function renderOverview() {
@@ -3287,8 +3497,8 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已关联用例'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.linked_test_case_ids?.length ?? 0) > 0).length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '有直接证据'), h('div', { style: styles.decisionValue }, risks.filter(item => (item.evidence?.length ?? 0) > 0).length)))),
           h('input', { style: styles.search, value: riskQuery, 'aria-label': '搜索风险', placeholder: '搜索风险编号、标题、触发条件…', onChange: event => setRiskQuery(event.target.value) }),
-          h('div', { style: styles.filters }, ['全部', ...RISK_SEVERITY_LEVELS, ...(severityCounts.Ungraded ? ['Ungraded'] : [])].map(level => h('button', { key: level, type: 'button', style: { ...styles.filter, ...(riskSeverity === level ? styles.filterActive : {}) }, onClick: () => setRiskSeverity(level) }, level === '全部' ? `全部 ${risks.length}` : level === 'Ungraded' ? `未分级 ${severityCounts.Ungraded}` : `${SEVERITY[level]} ${severityCounts[level]}`))),
-          h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${risks.length} 条`),
+          h('div', { style: styles.filters, role: 'group', 'aria-label': '按风险等级筛选' }, ['全部', ...RISK_SEVERITY_LEVELS, ...(severityCounts.Ungraded ? ['Ungraded'] : [])].map(level => h('button', { key: level, type: 'button', 'aria-pressed': riskSeverity === level, style: { ...styles.filter, ...(riskSeverity === level ? styles.filterActive : {}) }, onClick: () => setRiskSeverity(level) }, level === '全部' ? `全部 ${risks.length}` : level === 'Ungraded' ? `未分级 ${severityCounts.Ungraded}` : `${SEVERITY[level]} ${severityCounts[level]}`))),
+          renderResultCount(filtered.length, risks.length, riskQuery || riskSeverity !== '全部', () => { setRiskQuery(''); setRiskSeverity('全部') }),
           h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
             const unit = unitById.get(unitId)
             const unitFlows = flowsByUnit.get(unitId) ?? []
@@ -3397,7 +3607,7 @@ window.__ModuleLoader__.load({
                 chip('复制选中用例', () => { void copySelectedCases() }),
                 chip('清空', () => setSelectedCaseIds([]))))),
           h('input', { style: styles.search, value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例编号、目标、流程、缺口…', onChange: event => setCaseQuery(event.target.value) }),
-          h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${testCases.length} 条`),
+          renderResultCount(filtered.length, testCases.length, caseQuery, () => setCaseQuery('')),
           h('div', { style: { marginTop: 10 } }, filtered.length ? [...groups.entries()].map(([unitId, items]) => {
             const unit = unitById.get(unitId)
             const unitFlows = flowsByUnit.get(unitId) ?? []
@@ -3535,7 +3745,7 @@ window.__ModuleLoader__.load({
         const filtered = evidence.filter(item => !query || [item.display_id, item.chunk_id, item.location, item.observation, ...(item.risk_ids ?? []).flatMap(id => [id, riskById.get(id)?.display_id])].join(' ').toLowerCase().includes(query))
         return h(React.Fragment, null,
           h('input', { style: styles.search, value: evidenceQuery, 'aria-label': '搜索证据', placeholder: '搜索文件位置、观察结论、关联风险…', onChange: event => setEvidenceQuery(event.target.value) }),
-          h('div', { style: styles.itemMeta }, `显示 ${filtered.length} / ${evidence.length} 条`),
+          renderResultCount(filtered.length, evidence.length, evidenceQuery, () => setEvidenceQuery('')),
           h('div', { style: { marginTop: 7 } }, filtered.length ? filtered.map((item, index) => { const key = [item.chunk_id, item.location, item.observation].join('\u0000'); return h('button', { key: `${key}:${index}`, type: 'button', style: { ...styles.card, ...styles.clickableCard }, onClick: () => navigate({ type: 'evidence-detail', key }) }, h('div', { style: styles.itemTitle }, text(item.location, '未标注位置')), h('div', { style: styles.itemMeta }, text(item.observation, '无观察结论')), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.slice(0, 4).map(id => h('span', { key: id, style: styles.badge }, riskById.get(id)?.display_id ?? id))) : null) }) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '没有符合条件的证据。'))))
       }
 
@@ -3617,9 +3827,10 @@ window.__ModuleLoader__.load({
         ? h('div', { style: styles.card, role: 'status' }, h('div', { style: styles.empty }, '正在读取当前 Run…'))
         : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body))
       const actionFeedback = actionNotice?.scopeKey === noticeScopeKey ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
-      return h('div', { style: styles.root, role: 'region', 'aria-label': 'PANGEA 测试工作台' },
+      return h('div', { className: 'pangea-companion', style: styles.root, role: 'region', 'aria-label': 'PANGEA 测试工作台' },
+        h('style', null, panelCss),
         ['home', 'tasks'].includes(screen.type) ? null : header,
-        h('div', { style: screen.type === 'home' && repositoryState?.onboarding_required ? { padding: 0 }
+        h('div', { className: 'pangea-content', style: screen.type === 'home' && repositoryState?.onboarding_required ? { padding: 0 }
           : screen.type === 'home' ? styles.homeContent
             : ['environment', 'repository-import'].includes(screen.type) ? { padding: 0 } : styles.content }, actionFeedback, errorNotice, contentBody))
     }
