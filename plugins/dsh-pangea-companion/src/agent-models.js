@@ -5,7 +5,7 @@ import { workspaceRoot } from './pangea-api.js'
 
 // Query the registered runtime in the same workspace used for analysis. No prompt,
 // task, Run, manual catalog or internal API credentials are involved.
-export async function discoverAgentModels(runtime, { providerId, cwd, signal, timeoutMs = 20000 }) {
+export async function discoverAgentModels(runtime, { providerId, cwd, signal, timeoutMs = 40000 }) {
   if (!acpProviderOption(providerId)) throw new Error(`未知的执行 Agent：${providerId}`)
   const provider = runtimeService(runtime, 'subagents')?.getProvider?.(providerId)
   if (!provider?.discoverModels) throw new Error('当前 Agent 运行时不支持读取模型列表，请更新 Desktop')
