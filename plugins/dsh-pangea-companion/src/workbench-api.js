@@ -610,7 +610,7 @@ export async function launchAnalysisSession(
   const requestedResumeRunId = typeof resumeRunId === 'string' ? resumeRunId.trim() : ''
   const run = await launchStep(
     onEvent,
-    requestedResumeRunId ? 'skill_run_resume' : 'skill_run_create',
+    requestedResumeRunId ? 'run_resume' : 'run_create',
     () => requestedResumeRunId
       ? resumeRun(root, { dataRoot: resolvedDataRoot, runId: requestedResumeRunId }, runner)
       : (() => {

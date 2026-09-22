@@ -118,7 +118,9 @@ export function runPangea({ cwd, args, signal }) {
       try {
         const envelope = parseEnvelope(stdout)
         if (code !== 0 || envelope.ok !== true) {
-          reject(new Error(envelope.error?.message ?? stderr.trim() ?? `PANGEA CLI exited with ${code}`))
+          const message = envelope.error?.message || stderr.trim() || `PANGEA CLI exited with ${code}`
+          const detail = typeof envelope.error?.detail === 'string' ? envelope.error.detail.trim() : ''
+          reject(new Error(detail ? `${message}\nPython 调用位置：\n${detail.slice(-6000)}` : message))
           return
         }
         resolve(envelope.result)
