@@ -1,3 +1,4 @@
+import { riskApplicable } from './analysis-scenes.js'
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
@@ -368,6 +369,13 @@ export async function readInputMaterials(runDirectory) {
   const manifest = await read('inputs/assets/manifest.json')
   const consumption = await read('内部索引/输入材料索引.json')
   const assets = Array.isArray(manifest?.assets) ? manifest.assets : []
+  const snapshots = await read('inputs/asset-snapshots.json')
+  for (const snapshot of Array.isArray(snapshots) ? snapshots : []) {
+    if (!assets.some(asset => asset.asset_id === snapshot.asset_id)) {
+      assets.push({ ...snapshot.metadata, asset_id: snapshot.asset_id, input_revision: snapshot.input_revision,
+        title: snapshot.metadata?.title ?? snapshot.asset_id, frozen_snapshot_path: 'inputs/asset-snapshots.json' })
+    }
+  }
   const frozenItems = await read('inputs/asset-items.json')
   const groups = new Map()
   for (const item of Object.values(frozenItems ?? {})) {
@@ -828,6 +836,17 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   if (await pathKind(contractPath) === 'file') {
     try { contract = await readJson(contractPath) } catch { contract = null }
   }
+  let analysisScene = null, sceneIssue = null, coverageMatch = null
+  if (contract?.analysis_profile === 'behavior-test-v2') {
+    try {
+      analysisScene = await readJson(path.join(runDirectory, 'inputs', 'analysis-scene.json'))
+      if (analysisScene.format_version !== 'analysis-scene-v1' || analysisScene.profile !== contract.analysis_profile || analysisScene.id !== contract.analysis_settings?.scenario) throw new Error('场景规格与冻结合同不匹配')
+    } catch (error) { analysisScene = null; sceneIssue = `冻结场景不可读取：${error.message}` }
+    try {
+      const match = await readJson(path.join(runDirectory, 'inputs', 'coverage-match-summary.json'))
+      coverageMatch = { sources: match.sources ?? [], matched: match.matched?.length ?? 0, unmatched: match.unmatched?.length ?? 0, ambiguous: match.ambiguous?.length ?? 0, unmatched_preview: (match.unmatched ?? []).slice(0, 50), ambiguous_preview: (match.ambiguous ?? []).slice(0, 50), diagnostic_path: path.join(runDirectory, 'inputs/coverage-match-summary.json'), note: match.note }
+    } catch { coverageMatch = { sources: [], note: '覆盖数据匹配诊断不可读取，不能推定没有缺口。' } }
+  }
   const actionView = await sourceFirstActionArtifacts(runDirectory, progress)
   const projection = sourceFirstProjection(actionView.artifacts)
   let coverageGaps = null
@@ -888,6 +907,9 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   }
   const summary = {
     coverage_summary: coverageOverview,
+    coverage_match: coverageMatch,
+    analysis_profile: contract?.analysis_profile ?? null,
+    analysis_scene: analysisScene,
     run_id: runId,
     workflow_version: progress.workflow_version ?? 'source-first-v1',
     scenario: contract?.analysis_settings?.scenario ?? 'module-analysis',
@@ -946,13 +968,13 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       status: sourceSnapshot.status === 'corrupt' || actionView.issues.length ? 'warning' : 'ok',
       trusted: sourceSnapshot.status !== 'corrupt' && actionView.issues.length === 0,
       data_source: 'source-first-notes',
-      issues: [...sourceSnapshot.issues, ...actionView.issues],
+      issues: [...sourceSnapshot.issues, ...actionView.issues, ...(sceneIssue ? [sceneIssue] : [])],
       count_checks: {},
       collection_status: Object.fromEntries(['risks', 'test_cases', 'business_flows', 'evidence'].map(key => [key, actionView.deliveryUnavailable ? 'unavailable' : 'readable'])),
     },
     reader_notices: [...new Set(actionView.artifacts.filter(item => item.binding_status === 'pending').map(item =>
       item.stage === 'comparison_review' ? '复核准备中，正在绑定复核任务。' : '任务准备中，等待 Agent 首次访问结果。'))],
-    reader_warnings: [...sourceSnapshot.issues, ...actionView.issues],
+    reader_warnings: [...sourceSnapshot.issues, ...actionView.issues, ...(sceneIssue ? [sceneIssue] : [])],
     artifacts: {
       run_directory: runDirectory,
       request: await pathKind(contractPath) === 'file' ? contractPath : null,
@@ -971,6 +993,8 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     modified_at: (await stat(runDirectory)).mtimeMs,
     source_first_records: records,
   }
+  if (!riskApplicable(summary)) summary.reader_health.collection_status.risks = 'not_applicable'
+  if (sceneIssue) { summary.reader_health.status = 'warning'; summary.reader_health.trusted = false }
   if (includeDetails) {
     summary.details = {
       ...projection,

@@ -1612,3 +1612,17 @@ test('a terminal diagram failure remains actionable instead of showing layout re
   assert.equal(context().phase, '需要处理')
   assert.equal(context().process.status, 'failed')
 })
+
+
+test('v2 text-only flow is readable and branch discussion does not add risk context', async () => {
+  const client = await loadClientExports()
+  const run = { analysis_profile: 'behavior-test-v2', analysis_scene: { presentation: { risks: false } } }
+  assert.equal(client.flowContentState({ text: '入口→拒绝或成功' }), '已有文字流程')
+  assert.equal(client.riskApplicable(run), false)
+  const draft = client.buildDiscussionDraft({ kind: 'case', runId: 'r', run, item: { title: '拒绝', linked_risk_ids: ['risk-1'] }, risks: [{ risk_id: 'risk-1', title: '历史风险' }] })
+  assert.doesNotMatch(draft, /关联风险/)
+  const record = { action_id: 'r:analysis:tls', record_id: 'flow', revision: 1 }
+  const view = { workflow_version: 'source-first-v1', source_records: [record] }
+  assert.equal(client.diagramIsStale(view, { workflow_version: 'source-first-v1', details: { business_flows: [{ source_record: record }] } }), false)
+  assert.equal(client.diagramIsStale(view, { workflow_version: 'source-first-v1', details: { business_flows: [{ source_record: { ...record, revision: 2 } }] } }), true)
+})

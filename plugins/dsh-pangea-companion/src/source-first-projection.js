@@ -44,7 +44,7 @@ export function normalizeFlow(body) {
   for (const [index, path] of list(body.paths).entries()) {
     if (list(path?.node_ids).some(id => !ids.has(id))) warnings.push(`paths[${index}] 引用了缺失节点；原文路径保留`)
   }
-  if (!nodes.length) warnings.push('没有可解析的节点，请查看原文；这不代表分析已完成')
+  if (!nodes.length && !(body.format_version === 'module-flow-text-v1' && typeof body.text === 'string' && body.text.trim())) warnings.push('没有可解析的节点，请查看原文；这不代表分析已完成')
   return { ...body, title: alias(body, 'title', '标题', 'flow'), description: alias(body, 'description', '说明', 'flow'),
     nodes: duplicate ? [] : nodes, edges, projection_warnings: warnings }
 }
@@ -120,7 +120,7 @@ export function sourceFirstProjection(artifacts) {
         linked_risk_ids: resolve(row, [...list(row.linked_risk_ids), ...list(row.risk_refs), ...list(row.source_record.relates_to)], ['risk_id'], ['risk']), evidence: [],
       })
     } else if (kind === 'flow') {
-      result.business_flows.push({ ...row, flow_id: row.projection_id,
+      result.business_flows.push({ ...row, logical_flow_id: row.flow_id ?? row.display_id, text: plain(row.text), flow_id: row.projection_id,
         mainline_steps: list(row.nodes).map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind, source_evidence: node.source_evidence })),
         branches: list(row.paths).map(p => ({ branch_id: p.path_id, from_step_id: p.node_ids?.[0], to_step_id: p.node_ids?.at(-1), condition: plain(p.condition), processing: plain(p.explanation), linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })), description: plain(row.description), entry: plain(row.entry ?? row.trigger), steps: strings(row.steps), evidence: [],
         paths: list(row.paths).map(p => ({ ...p, linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })),

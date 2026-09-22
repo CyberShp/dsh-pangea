@@ -104,7 +104,8 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   if (!['standard', 'function_variables'].includes(viewProfile)) throw new Error('Unsupported diagram profile')
   if (viewProfile === 'function_variables' && (!flow || type !== 'workflow')) throw new Error('Function diagram requires a flow and workflow type')
   if (previous && (previous.profile ?? 'standard') !== viewProfile) throw new Error('Diagram profile mismatch')
-  if (previous && viewProfile === 'function_variables' && previous.flow_id !== flow_id) throw new Error('Function diagram flow mismatch')
+  if (previous && viewProfile === 'function_variables' && previous.flow_id !== flow_id
+    && !(previous.logical_flow_id && previous.logical_flow_id === flow?.logical_flow_id && previous.flow_unit_id === flow?.unit_id)) throw new Error('Function diagram flow mismatch')
   const branchIds = branch_ids ?? previous?.branch_ids ?? null
   if (branchIds !== null && (!flow || !Array.isArray(branchIds) || !branchIds.length || new Set(branchIds).size !== branchIds.length
     || branchIds.some(id => !(flow.branches ?? []).some(branch => branch.branch_id === id)))) throw new Error('Invalid architecture branch scope')
@@ -141,6 +142,7 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     }, null, 2))
   }
   const view = { view_id: viewId, task_id: task.task_id, run_id: task.run_id, flow_id, type, profile: viewProfile, branch_ids: branchIds,
+    logical_flow_id: flow?.logical_flow_id ?? null, flow_unit_id: flow?.unit_id ?? null,
     source_revision: context.publication?.revision ?? null, workflow_version: context.workflow_version,
     publication: context.publication, source_records: sourceRecords, status: 'generating',
     previous_view_id, session_id: null, job_id: null, created_at: stamp(), updated_at: stamp() }
