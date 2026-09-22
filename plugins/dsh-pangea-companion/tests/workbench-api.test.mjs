@@ -277,16 +277,16 @@ test('creates a Skill Run before launching its dedicated DSH session', async () 
     assert.doesNotMatch(events[3][1].content[0].text, /Step 01–09/)
     assert.doesNotMatch(events[3][1].content[0].text, /pangea_run_create/)
     assert.equal(result.run.run_id, 'skill-run-1')
-    for (const stage of ['capabilities_check', 'model_validate', 'skill_run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'skill_started']) {
+    for (const stage of ['capabilities_check', 'model_validate', 'run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'skill_started']) {
       assert.equal(launchEvents.some(event => event.stage === stage), true, `missing launch stage ${stage}`)
     }
     assert.equal(launchEvents.find(event => event.stage === 'session_create' && event.status === 'ok')?.session_id, 'session-1')
-    const created = launchEvents.find(event => event.stage === 'skill_run_create' && event.status === 'ok')
+    const created = launchEvents.find(event => event.stage === 'run_create' && event.status === 'ok')
     assert.equal(Number.isInteger(created?.duration_ms), true)
     assert.equal(created?.file_count, 7)
     assert.equal(created?.total_bytes, 8192)
     assert.equal(created?.snapshot_duration_ms, 23)
-    for (const stage of ['capabilities_check', 'model_validate', 'skill_run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit']) {
+    for (const stage of ['capabilities_check', 'model_validate', 'run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit']) {
       assert.equal(Number.isInteger(launchEvents.find(event => event.stage === stage && event.status === 'ok')?.duration_ms), true)
     }
   } finally { await rm(root, { recursive: true, force: true }) }
@@ -351,8 +351,8 @@ test('resumes an existing Run without creating a second Run', async () => {
     assert.equal(result.run.run_id, 'skill-run-1')
     assert.equal(events.at(-1)[0], 'prompt')
     assert.match(events.at(-1)[1].content[0].text, /run_guard\.py init --resume/)
-    assert.equal(launchEvents.some(event => event.stage === 'skill_run_resume' && event.status === 'ok'), true)
-    assert.equal(launchEvents.some(event => event.stage === 'skill_run_create'), false)
+    assert.equal(launchEvents.some(event => event.stage === 'run_resume' && event.status === 'ok'), true)
+    assert.equal(launchEvents.some(event => event.stage === 'run_create'), false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

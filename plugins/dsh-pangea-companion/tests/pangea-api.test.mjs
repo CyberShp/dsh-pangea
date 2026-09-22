@@ -5,7 +5,36 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createRun, normalizeSourceScope, workspaceRoot } from '../src/pangea-api.js'
+import { createRun, normalizeSourceScope, runPangea, workspaceRoot } from '../src/pangea-api.js'
+import { LaunchLogStore } from '../src/launch-log.js'
+
+test('CLI failure locations survive subprocess transport and launch-log persistence', {
+  skip: !process.env.PANGEA_PYTHON && 'Set PANGEA_PYTHON for the subprocess diagnostic test.',
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-cli-error-'))
+  try {
+    await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
+    await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules')
+    const pkg = path.join(root, 'src', 'pangea_agent')
+    await mkdir(path.join(pkg, 'cli'), { recursive: true })
+    await writeFile(path.join(pkg, '__init__.py'), '')
+    await writeFile(path.join(pkg, 'cli', '__init__.py'), '')
+    for (const detail of ['prepare_inputs.py:131 in _freeze_sources', '']) {
+      await writeFile(path.join(pkg, 'cli', 'main.py'), `import json\nprint(json.dumps({'api_version': '1.0', 'ok': False, 'error': {'message': '[WinError 3] missing path', 'detail': '${detail}'}}))\nraise SystemExit(1)\n`)
+      let failure
+      await assert.rejects(runPangea({ cwd: root, args: ['runs', 'create'] }), error => {
+        failure = error
+        assert.match(error.message, /WinError 3/)
+        if (detail) assert.ok(error.message.includes(detail))
+        else assert.equal(error.message, '[WinError 3] missing path')
+        return true
+      })
+      const logs = new LaunchLogStore({ root: path.join(root, 'logs') })
+      await logs.append('task', { stage: 'run_create', status: 'error', error: failure })
+      assert.equal((await logs.read('task')).events.at(-1).error, failure.message)
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('accepts a copied Windows repository address as source scope', () => {
   assert.deepEqual(
