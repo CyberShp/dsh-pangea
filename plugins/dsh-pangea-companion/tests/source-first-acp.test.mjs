@@ -1,11 +1,66 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createSourceFirstAcpRun } from '../src/source-first-acp.js'
+import { createSourceFirstAcpRun, workerPrompt } from '../src/source-first-acp.js'
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRun, runPangea } from '../src/pangea-api.js'
 import { companionSnapshot } from '../src/reader.js'
+
+test('16 and 2000 file scopes do not inflate ACP prompts, including repairs and old task views', () => {
+  const make = count => {
+    const paths = Array.from({ length: count }, (_, i) => ({ repo_id: 'sample', path: `src/file-${i}.c` }))
+    return workerPrompt({ action: { action_id: 'r:a', role: 'analysis', stage: 'unit_analysis', task_path: '/task.json',
+      pending_repair: { error: { code: 'IncompleteSourceFirstResult', message: 'empty', details: paths }, history: paths } },
+    opened: { task: { allowed_paths: paths, all_scope_paths: paths, owned_regions: paths }, prepared_source: { pages: paths } },
+    cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 't' })
+  }
+  assert.equal(make(16), make(2000))
+  assert.ok(make(2000).length < 4000)
+  assert.doesNotMatch(make(2000), /file-1999|allowed_paths|prepared_source/)
+  assert.match(make(2000), /task-open.*精简视图/)
+})
+
+for (const failureMode of ['throw', 'diagnostic', 'completed-with-error']) {
+  test(`input-too-long ${failureMode} pauses original action without empty settlement or retries`, async () => {
+    let turns = 0, created = 0
+    const calls = [], events = []
+    const controller = new AbortController()
+    const message = 'Payload Too Large: input too long, exceed max input length, max input length is 169984, current input length is 520281'
+    const runId = `context-limit-${failureMode}`
+    const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', cwd: '/work', dataRoot: '/data', runId,
+      signal: controller.signal, onEvent: async value => events.push(value),
+      runner: async ({ args }) => {
+        calls.push(args)
+        assert.ok(!args.includes('--prepare-source'))
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[1] === 'next') return { run_id: runId, actions: [{ action_id: `${runId}:a`, action: 'dispatch_agent', role: 'analysis', stage: 'unit_analysis' }] }
+        if (args[1] === 'settle') assert.fail('transport failure must not settle an empty result')
+        return {}
+      },
+      subagents: { start: async () => {
+        created++
+        return { id: `${runId}-original`, result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {},
+          readDiagnostics: () => failureMode === 'completed-with-error' ? { errorSummary: message } : {},
+          continuePrompt: async () => {
+            turns++
+            if (failureMode === 'throw') throw new Error(message)
+            return { stopReason: failureMode === 'diagnostic' ? 'error' : 'completed', diagnostic: failureMode === 'diagnostic' ? message : '' }
+          } }
+      } },
+    })
+    try {
+      const result = await run.result
+      assert.equal(result.attentionRequired, true)
+      assert.match(result.output[0].text, /INPUT_TOO_LONG/)
+      assert.equal(turns, 1)
+      assert.equal(created, 1)
+      assert.ok(calls.some(args => args.includes('paused')))
+      assert.ok(events.some(event => event.stage === 'source_first_prompt_ready' && event.prompt_bytes > event.prompt_chars))
+      assert.ok(events.some(event => event.error_code === 'INPUT_TOO_LONG'))
+    } finally { controller.abort(); await run.dispose() }
+  })
+}
 
 test('ACP output polling emits only new worker text, with no idle session labels', async () => {
   let pendingOutput = '', finished = false
@@ -129,13 +184,13 @@ test('missing original reviewer never spawns a replacement', async () => {
   controller.abort(); await run.dispose()
 })
 
-for (const [mode, closure] of [['depth', false], ['speed', false], ['speed', true]]) test(`host ACP controller completes a real Python Graph in ${mode} mode using bound CLI writes${closure ? ' with closure' : ''}`, {
+for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false], ['speed', true], ['speed', false, 2000]]) test(`host ACP controller completes a real Python Graph in ${mode} mode using bound CLI writes${closure ? ' with closure' : ''} (${fileCount} files)`, {
   skip: !process.env.PANGEA_INTEGRATION_RUNTIME && 'Requires the staged Python runtime',
 }, async () => {
   const runtime = process.env.PANGEA_INTEGRATION_RUNTIME
   const cwd = await mkdtemp(path.join(tmpdir(), 'pangea-acp-graph-'))
   const previous = process.env.PYTHONPATH
-  process.env.PYTHONPATH = path.join(runtime, 'src')
+  process.env.PYTHONPATH = [path.join(runtime, 'src'), previous].filter(Boolean).join(path.delimiter)
   let run
   const controller = new AbortController()
   try {
@@ -143,7 +198,8 @@ for (const [mode, closure] of [['depth', false], ['speed', false], ['speed', tru
     const repository = path.join(cwd, 'pangea-data', 'repositories', 'sample')
     await mkdir(repository, { recursive: true })
     await writeFile(path.join(repository, 'tls.c'), 'int tls_connect(int enabled) { return enabled ? 0 : -1; }\n')
-    const created = await createRun(cwd, { repository: 'sample', target: 'TLS connect', source_scope: ['tls.c'], mode, effective_context_budget: 204800 })
+    for (let i = 1; i < fileCount; i++) await writeFile(path.join(repository, `dependency-${i}.c`), `int dependency_${i}(void) { return ${i}; }\n`)
+    const created = await createRun(cwd, { repository: 'sample', target: 'TLS connect', source_scope: [fileCount > 1 ? '.' : 'tls.c'], mode, effective_context_budget: 204800 })
     let count = 0
     const stages = []
     let unitId
@@ -156,10 +212,25 @@ for (const [mode, closure] of [['depth', false], ['speed', false], ['speed', tru
             const binding = JSON.parse(prompt[0].text.split('\n').find(line => line.startsWith('每次 CLI')).split('：').slice(1).join('：'))
             const call = (command, args = []) => runPangea({ cwd, args: [command, ...binding, ...args] })
             const { task } = await call('task-open')
+            assert.ok(prompt[0].text.length < 5000)
+            assert.ok(JSON.stringify(task).length < 14000)
+            assert.equal(task.allowed_paths, undefined)
+            assert.equal(task.all_scope_paths, undefined)
             stages.push([task.task_type, task.review_stage, id])
             const snapshot = await companionSnapshot({ dataRoot: created.data_root, runId: created.run_id })
             assert.equal(snapshot.current.reader_health.trusted, true, JSON.stringify(snapshot.current.reader_warnings))
-            if (task.task_type === 'source_first_analysis') unitId = task.unit_id
+            if (task.task_type === 'source_first_analysis') {
+              unitId = task.unit_id
+              if (fileCount > 1) {
+                const page = await call('input-read', ['--input-id', 'task:allowed_paths', '--max-chars', '777'])
+                assert.ok(page.next_cursor)
+                assert.ok(page.text.length <= 777)
+                // Compact delivery must not remove legitimate dependency access.
+                const source = await call('source-read', ['--repo-id', 'sample', '--path', 'dependency-1999.c', '--view', 'text'])
+                assert.match(JSON.stringify(source), /dependency_1999/)
+                await assert.rejects(call('source-read', ['--repo-id', 'sample', '--path', '../outside.c', '--view', 'text']))
+              }
+            }
             if (task.task_type === 'source_first_closure') {
               const seed = JSON.parse(await readFile(task.result_path, 'utf8'))
               assert.equal(seed.binding.task_id, id)
@@ -204,7 +275,7 @@ for (const [mode, closure] of [['depth', false], ['speed', false], ['speed', tru
   }
 })
 
-test('a crashed transport is disposed and explicit continuation restores persisted identities', async () => {
+for (const contextError of [false, true]) test(`a ${contextError ? 'context-limited' : 'crashed'} transport is disposed and explicit continuation restores persisted identities`, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'pangea-acp-resume-'))
   let taskId, complete = false, starts = 0, disposals = 0
   const controller = new AbortController()
@@ -222,12 +293,14 @@ test('a crashed transport is disposed and explicit continuation restores persist
       if (starts === 2) assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote-original' })
       else assert.equal(request.resume, undefined)
       return { id: 'original', remoteSessionId: 'remote-original', result: Promise.resolve({ stopReason: 'completed' }),
-        continuePrompt: async () => { if (starts === 1) throw new Error('ACP connection closed'); return { stopReason: 'completed' } },
+        readDiagnostics: () => ({ errorSummary: null, stderrSummary: contextError ? 'old turn: input too long' : '' }),
+        continuePrompt: async () => { if (starts === 1) throw new Error(contextError ? 'input too long' : 'ACP connection closed'); return { stopReason: 'completed' } },
         dispose: async () => { disposals++ } }
     } } }
   try {
     run = createSourceFirstAcpRun(options)
-    await assert.rejects(run.result, /ACP connection closed/)
+    if (contextError) assert.equal((await run.result).attentionRequired, true)
+    else await assert.rejects(run.result, /ACP connection closed/)
     assert.equal(disposals, 1)
     run = createSourceFirstAcpRun(options)
     assert.equal((await run.result).stopReason, 'completed')

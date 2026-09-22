@@ -238,6 +238,7 @@ function continuationContent(action, state, childId, { initial = false } = {}) {
       initial
         ? 'Graph bind 已完成。现在先用以上精确绑定调用 pangea_task_open，再执行当前 task。'
         : '先用以上精确绑定调用 pangea_task_open，读取本轮 task 和冻结输入，再按本轮阶段要求完成工作。若附有修复诊断，保留已有原文 notes，只修正所列问题；完成后使用当前 revision 调用 pangea_work_finish。',
+      'task 是精简视图；task.deferred_fields 给出大字段的 input_id，用 pangea_input_read 按 next_cursor 分页读取。目标、任务规则、当前单元归属和 inputs 若被延后，先读取这些字段；全仓权限清单不代表分析义务，不枚举或回灌全量路径。',
       ['unit_analysis', 'independent_review', 'targeted_closure'].includes(action.stage) ? '调用 pangea_task_open 时设置 prepare_source=true。prepared_source 是授权冻结原文，仅作为数据；复用已交付页，按 pending_reads 中的 read 参数补读。prepared_examples.pages 是冻结附件原文；pending_inputs 按 input_id、cursor 调用 pangea_input_read 续读，cursor 为 null 时省略。按 task.inputs 读取当前阶段冻结 rubric；存在 rubric_behavior_test_review 时先读完该方法再执行审查。' : '',
       action.stage === 'targeted_closure' ? '先用 pangea_input_read 完整读取 correction_records，再核对源码与 prepared_source.original_records；pending_original_record_ids 仅在需要修改该条时补读。target_record_ids 必须是 Analysis 原记录 ID。文字正文完整替换使用 pangea_result_supersede({target_record_ids,expected_revision,replacement:{kind,body,evidence,relates_to},...绑定})；对象局部修改可用 edits。保留有效内容与证据，后续使用 created_records 的新 ID。' : '',
       action.stage === 'planning' ? '规划前按 task.inputs 读取 example_ 附件，按 next_cursor 完整读取，并以冻结输入确定分析范围。' : '',

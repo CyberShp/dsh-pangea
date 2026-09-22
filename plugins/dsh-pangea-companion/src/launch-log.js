@@ -60,7 +60,7 @@ function compactEvent(value = {}) {
   }
   for (const key of [
     'turn', 'completed', 'message_chunks', 'tool_calls', 'tool_failures', 'turn_duration_ms',
-    'first_event_ms', 'tool_started_at_ms', 'tool_finished_at_ms', 'tool_duration_ms', 'stderr_bytes', 'duration_ms', 'file_count', 'total_bytes', 'snapshot_duration_ms',
+    'first_event_ms', 'tool_started_at_ms', 'tool_finished_at_ms', 'tool_duration_ms', 'stderr_bytes', 'duration_ms', 'file_count', 'total_bytes', 'snapshot_duration_ms', 'prompt_chars', 'prompt_bytes',
   ]) {
     if (Number.isInteger(value[key]) && value[key] >= 0) event[key] = value[key]
   }
