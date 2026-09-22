@@ -57,7 +57,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
       ['review', 'comparison_review', 'worker-3'], ['closure', 'targeted_closure', 'worker-2'],
     ]
     let index = 0, created = 0
-    const bindings = [], prompts = [], disposed = []
+    const bindings = [], prompts = [], disposed = [], events = []
     const action = () => ({ action_id: `run:${index}`, role: steps[index][0], stage: steps[index][1],
       action: steps[index][2] ? 'continue_agent' : 'dispatch_agent', task_id: steps[index][2], task_path: `/run/task-${index}.json` })
     const runner = async ({ args }) => {
@@ -68,15 +68,19 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
       assert.equal(args[1], 'settle'); index++; return {}
     }
     const run = createSourceFirstAcpRun({ providerId, agentModel: 'selected/model', parent: {}, cwd: '/work', dataRoot: '/data', runId: providerId,
-      signal: new AbortController().signal, runner,
+      signal: new AbortController().signal, runner, onEvent: async event => events.push(event),
       subagents: { start: async (provider, request) => {
         assert.equal(provider, providerId); assert.equal(request.agentOptions.model, 'selected/model')
         const id = `worker-${++created}`
         return { id, result: Promise.resolve({ stopReason: 'completed' }),
+          readDiagnostics: () => ({ stage: 'models_received', model: 'selected/model' }),
           continuePrompt: async value => { prompts.push([id, value[0].text]); return { stopReason: 'completed' } }, dispose: async () => disposed.push(id) }
       } } })
     assert.equal((await run.result).stopReason, 'completed')
     assert.equal(created, 3)
+    const finished = events.filter(event => event.stage === 'source_first_worker_finished')
+    assert.equal(finished.length, steps.length)
+    assert.ok(finished.every(event => event.model === 'selected/model' && event.stop_reason === 'completed'))
     assert.deepEqual(prompts.map(p => p[0]), ['worker-1', 'worker-2', 'worker-3', 'worker-3', 'worker-2'])
     for (const [step, [, prompt]] of prompts.entries()) {
       assert.doesNotMatch(prompt, /\.opencode|\.agents\/pangea|pangea_action_dispatch/)

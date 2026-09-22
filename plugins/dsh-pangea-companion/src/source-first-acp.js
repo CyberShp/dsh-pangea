@@ -164,7 +164,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     } finally { clearTimeout(timer); if (abortTurn) signal.removeEventListener('abort', abortTurn) }
     check()
     await execution('finished')
-    await event({ stage: 'source_first_worker_finished', action_id: action.action_id, agent_session_id: taskId, stop_reason: result.stopReason, ...worker.readDiagnostics?.() })
+    await event({ ...worker.readDiagnostics?.(), stage: 'source_first_worker_finished', action_id: action.action_id, agent_session_id: taskId, stop_reason: result.stopReason })
     if (result.stopReason !== 'completed') throw new Error(`Worker 回合未完成：${action.action_id} ${result.stopReason} ${result.diagnostic ?? ''}`)
     const settled = await adapter('settle', action)
     await event({ stage: 'source_first_action_settled', action_id: action.action_id, validation: settled.validation?.status })
