@@ -1,3 +1,4 @@
+import { riskApplicable } from './analysis-scenes.js'
 function cell(value) {
   if (Array.isArray(value)) return value.map(item => cell(item)).join('；')
   if (value === null || value === undefined) return ''
@@ -6,6 +7,8 @@ function cell(value) {
 }
 
 function testCaseRows(run) {
+  const risk = riskApplicable(run)
+  const v2 = run?.analysis_profile === 'behavior-test-v2'
   const rows = [
     ['Run', run?.run_id],
     ['结果状态', run?.publication?.state ?? 'pending'],
@@ -18,22 +21,27 @@ function testCaseRows(run) {
     ['交付完整性', run?.delivery_integrity?.status ?? 'not_checked'],
     ['审查方式', run?.semantic_review?.method ?? 'not_recorded'],
     [],
-    ['用例 ID', '标题', '类型', '状态', '关联风险', '前置条件', '执行步骤', '预期结果', '观察点', '清理动作'],
+    ['用例 ID', '标题', '类型', '状态', ...(risk ? ['关联风险'] : []), '前置条件', '执行步骤', '预期结果', '观察点', '清理动作'],
   ]
   if (run?.workflow_version === 'source-first-v1') rows.at(-1).push('分析单元', '原始记录', '分析原文', '测试入口', '参数变体', '本分析单元说明', '执行条件', '待补执行条件')
+  if (v2) {
+    rows.splice(1, 0, ['分析场景', run.analysis_scene?.label ?? run.scenario], ['规则版本', run.analysis_scene?.format_version ?? run.analysis_profile])
+    rows.at(-1).push('流程/路径引用', 'Coverage引用', '源码依据', '覆盖数据来源与匹配')
+  }
   for (const item of run?.details?.test_cases ?? []) {
     rows.push([
       item.display_id ?? item.test_case_id,
       item.title,
       item.case_type,
       item.status,
-      item.linked_risk_ids,
+      ...(risk ? [item.linked_risk_ids] : []),
       item.preconditions,
       item.steps,
       item.expected_results,
       item.observability,
       item.cleanup,
       ...(item.source_record ? [item.unit_id, item.source_record.record_id, item.source_record.body, item.entry, item.variants, item.unit_notes?.map(note => note.source_record.body), ({ ready: '具备执行条件', needs_setup: '待补执行条件', unclassified: '未标注' })[item.readiness] ?? '未标注', item.missing_execution_conditions] : []),
+      ...(v2 ? [item.flow_refs ?? item.linked_flow_ids, item.coverage_refs, item.source_evidence ?? item.evidence, run.coverage_match] : []),
     ])
   }
   return rows

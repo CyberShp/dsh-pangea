@@ -1,3 +1,4 @@
+import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import path from 'node:path'
 import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
@@ -15,7 +16,7 @@ const ACP_PROVIDER_DEFAULTS = [
   { id: 'pangea-opencode', label: 'OpenCode', command: 'opencode', args: ['acp'] },
   { id: 'pangea-claude-code', label: 'Claude Code', kind: 'claude-code', command: 'DSH Claude Code Provider', args: [] },
 ]
-const ANALYSIS_SCENARIOS = new Set(['coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
+const ANALYSIS_SCENARIOS = new Set(['risk-analysis', 'branch-analysis', 'coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
 const ANALYSIS_MODES = new Set(['speed', 'depth'])
 
 function configuredProviders(env) {
@@ -190,8 +191,8 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   const scenario = typeof value?.scenario === 'string' && value.scenario.trim() ? value.scenario.trim() : 'module-analysis'
   const mode = typeof value?.mode === 'string' && value.mode.trim() ? value.mode.trim() : 'depth'
   if (semantic) {
-    const options = capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'], coverage_input: false }
-    if (!options.scenarios?.includes(scenario) || !options.modes?.includes(mode)) throw new Error('当前分析引擎不支持所选场景或模式，请选择模块分析 / 深度型')
+    const options = analysisOptions(capabilities, value?.analysis_profile)
+    if (!options.scenarios?.includes(scenario) || !options.modes?.includes(mode)) throw new Error('当前分析引擎不支持所选场景或模式，请更新配套组件或选择已支持的设置')
     if (value?.coverage_input != null && options.coverage_input !== true) throw new Error('当前分析引擎不支持独立覆盖率输入，请通过分析资产选择 Coverage')
   }
   const sourceScope = stringList(value?.source_scope)
@@ -213,7 +214,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     scenario,
     mode,
     source_scope: sourceScope,
-    ...(scenario === 'coverage-analysis' ? { coverage_input: value.coverage_input } : {}),
+    ...(value?.analysis_profile === SCENE_PROFILE ? { analysis_profile: SCENE_PROFILE, asset_revisions: value.asset_revisions ?? {} } : scenario === 'coverage-analysis' ? { coverage_input: value.coverage_input } : {}),
     asset_ids: stringList(value?.asset_ids),
     provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,
     agent_model: value?.provider_id && typeof value?.agent_model === 'string' ? value.agent_model.trim() || null : null,
@@ -234,6 +235,17 @@ export async function queryCoverageAsset({ cwd, dataRoot, query, runner = runPan
   return runner({ cwd: root, args: ['assets', 'query-coverage', '--data-root', dataRootFor(root, dataRoot),
     '--product', query.product, '--version', query.c_version, '--module', query.module,
     ...(query.b_version ? ['--b-version', query.b_version] : [])] })
+}
+
+export async function importCoverageAsset({ cwd, dataRoot, source, runner = runPangea }) {
+  if (typeof source !== 'string' || !source.trim()) throw new Error('请选择覆盖率文件')
+  const root = workspaceRoot(cwd), resolved = dataRootFor(root, dataRoot)
+  const asset = await runner({ cwd: root, args: ['assets', 'import', '--data-root', resolved, '--path', source, '--type', 'coverage'] })
+  await runner({ cwd: root, args: ['assets', 'extract', '--data-root', resolved, '--asset-id', asset.asset_id] })
+  const detail = await runner({ cwd: root, args: ['assets', 'get', '--data-root', resolved, '--asset-id', asset.asset_id] })
+  return { ...(detail.result?.acquisition ?? {}), status: detail.asset?.status === 'available' ? detail.result?.acquisition?.status ?? 'success' : 'no_data', asset: detail.asset,
+    record_count: detail.asset?.structured_item_count ?? 0, warnings: detail.result?.warnings ?? [],
+    message: detail.asset?.status === 'available' ? '覆盖率文件已解析并加入可选资产。' : '未取得可用覆盖记录，请检查文件格式和内容。' }
 }
 
 async function withSourceFirstReports(run, dataRoot) {

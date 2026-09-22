@@ -770,7 +770,7 @@ window.__ModuleLoader__.load({
       if (!hasText(value)) return []
       return value.trim().split(/(?<=[。！？；;])\s*/).map(item => item.trim()).filter(hasText)
     }
-    function buildDiscussionDraft({ kind, item, runId, risks = [], testCases = [], intent = 'review', selectedClaim, sourceSnippet, sourceSnippets = [] }) {
+    function buildDiscussionDraft({ kind, item, runId, run, risks = [], testCases = [], intent = 'review', selectedClaim, sourceSnippet, sourceSnippets = [] }) {
       const lines = [DISCUSSION_INTENTS[intent] ?? DISCUSSION_INTENTS.review, '', '[PANGEA 局部上下文]', `Run：${text(runId, '未知')}`]
       const riskById = new Map(risks.map(risk => [risk.risk_id, risk]))
       const caseById = new Map(testCases.map(testCase => [testCase.test_case_id, testCase]))
@@ -813,7 +813,7 @@ window.__ModuleLoader__.load({
         discussionList(lines, '预期结果', item?.expected_results)
         discussionList(lines, '观察点', item?.observability)
         discussionList(lines, '清理动作', item?.cleanup)
-        discussionList(lines, '关联风险', (item?.linked_risk_ids ?? []).map(id => {
+        if (riskApplicable(run)) discussionList(lines, '关联风险', (item?.linked_risk_ids ?? []).map(id => {
           const linked = riskById.get(id)
           return linked ? `${id} ${text(linked.title, '')}`.trim() : id
         }))
@@ -827,7 +827,7 @@ window.__ModuleLoader__.load({
         } else {
           discussionLine(lines, 'Chunk ID', item?.chunk_id)
           discussionLine(lines, '观察结论', item?.observation)
-          discussionList(lines, '关联风险', (item?.risk_ids ?? []).map(id => {
+          if (riskApplicable(run)) discussionList(lines, '关联风险', (item?.risk_ids ?? []).map(id => {
             const linked = riskById.get(id)
             return linked ? `${id} ${text(linked.title, '')}`.trim() : id
           }))
@@ -897,7 +897,8 @@ window.__ModuleLoader__.load({
         ...(String(form.context_scope_text ?? '').trim() ? { context_scope: String(form.context_scope_text).split(/[\n,]/).map(value => value.trim()).filter(Boolean) } : {}),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'module-analysis',
-        ...(form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
+        ...(form.analysis_profile ? { analysis_profile: form.analysis_profile, asset_revisions: form.asset_revisions ?? {} } : {}),
+        ...(form.analysis_profile !== 'behavior-test-v2' && form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
           ? { kind: 'file', path: form.coverage_path }
           : form.coverage_kind === 'asset' ? { kind: 'asset', asset_id: form.coverage_asset_id }
           : { kind: 'query', query: { product: form.coverage_product, c_version: form.coverage_version, b_version: form.coverage_b_version || '', module: form.coverage_module } } } : {}),
@@ -906,6 +907,14 @@ window.__ModuleLoader__.load({
         model_route: form.provider_id ? null : modelRouteFromKey(form.model_route_key),
         agent_model: form.provider_id ? form.agent_model || null : null,
       }
+    }
+    function riskApplicable(run) {
+      return run?.analysis_profile === 'behavior-test-v2' ? run.analysis_scene?.presentation?.risks === true : run?.scenario !== 'coverage-analysis'
+    }
+    function diagramIsStale(view, run) {
+      if (run?.workflow_version !== 'source-first-v1') return view?.source_revision !== (run?.publication?.revision ?? null)
+      const records = Object.values(run?.details ?? {}).filter(Array.isArray).flat().flatMap(row => row?.source_record ? [row.source_record] : [])
+      return (view?.source_records ?? []).some(source => !records.some(record => record.action_id === source.action_id && record.record_id === source.record_id && record.revision === source.revision))
     }
     function writableConversation(task) {
       const conversations = Array.isArray(task?.conversations) ? task.conversations : []
@@ -1085,6 +1094,7 @@ window.__ModuleLoader__.load({
     const COVERAGE_SCOPE_LABELS = { in_scope: '范围内', out_of_scope: '范围外', unresolved: '待确认', unclassified: '未判定' }
     const idList = value => Array.isArray(value) ? value.filter(item => typeof item === 'string') : []
     function flowContentState(flow) {
+      if (typeof flow?.text === 'string' && flow.text.trim()) return '已有文字流程'
       return Array.isArray(flow?.mainline_steps) && flow.mainline_steps.length ? '已有步骤' : flow?.paths?.length ? '按路径阅读' : '流程内容待补齐'
     }
 
@@ -1246,6 +1256,16 @@ window.__ModuleLoader__.load({
       const [assetLabels, setAssetLabels] = React.useState({})
       const [coverageQueryBusy, setCoverageQueryBusy] = React.useState(false)
       const [coverageQueryResult, setCoverageQueryResult] = React.useState(null)
+      const coverageRequestKey = JSON.stringify([createForm.repository, createForm.coverage_product, createForm.coverage_version, createForm.coverage_module, createForm.coverage_b_version, createForm.coverage_path])
+      const coverageRequestRef = React.useRef(coverageRequestKey)
+      coverageRequestRef.current = coverageRequestKey
+      React.useEffect(() => {
+        if (coverageQueryResult?.selection_key && coverageQueryResult.selection_key !== coverageRequestKey) {
+          const staleId = coverageQueryResult.asset?.asset_id
+          setCreateForm(value => ({ ...value, asset_ids: value.asset_ids.filter(id => id !== staleId) }))
+          setCoverageQueryResult(null)
+        }
+      }, [coverageRequestKey, coverageQueryResult])
       const [flowSelection, setFlowSelection] = React.useState('')
       const [branchSelection, setBranchSelection] = React.useState('')
       const [branchFilter, setBranchFilter] = React.useState('')
@@ -1522,7 +1542,7 @@ window.__ModuleLoader__.load({
           query: assetQuery, type: assetType, signal: controller.signal }).then(value => {
           if (controller.signal.aborted) return
           setAssetCatalog(value)
-          setAssetLabels(previous => ({ ...previous, ...Object.fromEntries((value.assets ?? []).map(item => [item.asset_id, item])) }))
+          setAssetLabels(previous => ({ ...Object.fromEntries((value.assets ?? []).map(item => [item.asset_id, item])), ...previous }))
         }).catch(reason => {
           if (!controller.signal.aborted) setAssetCatalogError(reason instanceof Error ? reason.message : String(reason))
         }).finally(() => {
@@ -1599,7 +1619,14 @@ window.__ModuleLoader__.load({
       const monitoredRun = monitor?.run
       const health = current?.reader_health
       const details = current?.details ?? { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [] }
+      const riskEnabled = riskApplicable(current)
       const risks = details.risks ?? []
+      React.useEffect(() => {
+        if (current && !riskEnabled) {
+          if (['risk', 'risks'].includes(screen.type)) { setScreen({ type: 'overview' }); setHistory([]) }
+          if (branchFilter === 'high_risk') setBranchFilter('')
+        }
+      }, [current?.run_id, riskEnabled, screen.type, branchFilter])
       const testCases = details.test_cases ?? []
       const evidence = details.evidence ?? []
       const businessFlows = details.business_flows ?? []
@@ -1971,7 +1998,7 @@ window.__ModuleLoader__.load({
           `交付完整性：${outcomePresentation(current).delivery}`,
           `审查方式：${outcomePresentation(current).review}`,
           `最终语义结论：${outcomePresentation(current).semantic}`,
-          `风险：${risks.length} 条（其中 ${risks.filter(isUncoveredRisk).length} 条尚未覆盖，${risks.filter(isUnreachableRisk).length} 条从受支持入口不可达）`,
+          riskEnabled ? `风险：${risks.length} 条（其中 ${risks.filter(isUncoveredRisk).length} 条尚未覆盖，${risks.filter(isUnreachableRisk).length} 条从受支持入口不可达）` : '本次未开展风险分析。',
           `测试用例：${testCases.length} 条`,
           `执行记录：${snapshot?.executor_runs?.length ?? 0} 个`,
           '',
@@ -1989,6 +2016,8 @@ window.__ModuleLoader__.load({
       }
       function toggleCreateAsset(assetId) {
         if (!assetId) return
+        const selected = assetCatalog?.assets?.find(item => item.asset_id === assetId)
+        if (!createForm.asset_ids.includes(assetId) && selected) setAssetLabels(value => ({ ...value, [assetId]: selected }))
         setCreateForm(value => ({
           ...value,
           asset_ids: value.asset_ids.includes(assetId)
@@ -2000,14 +2029,15 @@ window.__ModuleLoader__.load({
         if (!cwd || coverageQueryBusy || creatingRun) return
         const query = { product: createForm.coverage_product, c_version: createForm.coverage_version,
           module: createForm.coverage_module, b_version: createForm.coverage_b_version || '' }
+        const requestKey = coverageRequestRef.current
         const previousAsset = coverageQueryResult?.asset?.asset_id
         setCreateForm(value => ({ ...value, asset_ids: value.asset_ids.filter(id => id !== previousAsset) }))
         setCoverageQueryBusy(true)
         setCoverageQueryResult(null)
         try {
           const { acquisition } = await requestWorkbenchAction({ cwd, action: 'coverage-query', payload: { query, data_root: workbench?.data_root } })
-          if (assetWorkspaceRef.current !== cwd) return
-          setCoverageQueryResult(acquisition)
+          if (assetWorkspaceRef.current !== cwd || coverageRequestRef.current !== requestKey) return
+          setCoverageQueryResult({ ...acquisition, selection_key: requestKey })
           const asset = acquisition?.asset
           if (['success', 'partial'].includes(acquisition?.status) && asset?.status === 'available') {
             setAssetLabels(value => ({ ...value, [asset.asset_id]: asset }))
@@ -2019,6 +2049,26 @@ window.__ModuleLoader__.load({
         } finally {
           if (assetWorkspaceRef.current === cwd) setCoverageQueryBusy(false)
         }
+      }
+      async function importCoverageForAnalysis() {
+        if (!cwd || coverageQueryBusy || creatingRun) return
+        const requestKey = coverageRequestRef.current
+        const previousAsset = coverageQueryResult?.asset?.asset_id
+        setCreateForm(value => ({ ...value, asset_ids: value.asset_ids.filter(id => id !== previousAsset) }))
+        setCoverageQueryResult(null)
+        setCoverageQueryBusy(true)
+        try {
+          const { acquisition } = await requestWorkbenchAction({ cwd, action: 'coverage-import', payload: { path: createForm.coverage_path, data_root: workbench?.data_root } })
+          if (assetWorkspaceRef.current !== cwd || coverageRequestRef.current !== requestKey) return
+          setCoverageQueryResult({ ...acquisition, selection_key: requestKey })
+          if (acquisition?.asset?.status === 'available') {
+            const asset = acquisition.asset
+            setAssetLabels(value => ({ ...value, [asset.asset_id]: asset }))
+            setCreateForm(value => ({ ...value, asset_ids: [...new Set([...value.asset_ids, asset.asset_id])] }))
+            setAssetRefresh(value => value + 1)
+          }
+        } catch (error) { if (assetWorkspaceRef.current === cwd) setCoverageQueryResult({ status: 'error', message: error.message }) }
+        finally { if (assetWorkspaceRef.current === cwd) setCoverageQueryBusy(false) }
       }
       function repositoryNameFromPath(value) {
         return String(value ?? '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
@@ -2081,7 +2131,12 @@ window.__ModuleLoader__.load({
             cwd,
             action: 'task-create',
             payload: {
-              input: buildAnalysisRequest(createForm),
+              input: buildAnalysisRequest({ ...createForm,
+                ...(workbench?.capabilities?.source_first?.analysis_options_by_profile?.['behavior-test-v2'] ? {
+                  analysis_profile: 'behavior-test-v2',
+                  asset_revisions: Object.fromEntries(createForm.asset_ids.map(id => [id, (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision]).filter(([, revision]) => revision)),
+                } : {}),
+              }),
             },
           })
           createdTask = created.task
@@ -2277,7 +2332,7 @@ window.__ModuleLoader__.load({
         showActionNotice(`已在侧栏打开 ${title ?? text(value, '文件')}`)
       }
       async function addToConversation(kind, item, intent = 'review', sourceSnippet) {
-        const draft = buildDiscussionDraft({ kind, item, intent, runId: current?.run_id, risks, testCases, sourceSnippet })
+        const draft = buildDiscussionDraft({ kind, item, intent, runId: current?.run_id, run: current, risks, testCases, sourceSnippet })
         try {
           const inserted = await appendToDiscussionConversation(draft)
           showActionNotice(inserted ? '已加入讨论会话，可以直接发送。' : '无法访问讨论会话输入框。', !inserted)
@@ -2304,7 +2359,7 @@ window.__ModuleLoader__.load({
             cwd, dataRoot: snapshot?.data_root, runId: current?.run_id, location: item.location,
           })))
           const draft = buildDiscussionDraft({
-            kind: 'risk', item: risk, intent, runId: current?.run_id, risks, testCases,
+            kind: 'risk', item: risk, intent, runId: current?.run_id, run: current, risks, testCases,
             selectedClaim: selectedRiskClaim, sourceSnippets,
           })
           const inserted = await appendToDiscussionConversation(draft)
@@ -2399,7 +2454,7 @@ window.__ModuleLoader__.load({
                         : screen.type === 'repository-import' ? '添加源码仓库' : 'PANGEA 总览'
 
       const navigationItems = pageMode !== 'analysis' || !selectedTask || ['tasks', 'create'].includes(screen.type) ? [] : [
-        ['overview', '概览'], ['flows', '业务流程'], ...(current?.scenario === 'coverage-analysis' ? [] : [['risks', '风险']]), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['evidence', '源码依据'], ['workflow', '运行过程'],
+        ['overview', '概览'], ['flows', '业务流程'], ...(riskEnabled ? [['risks', '风险']] : []), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['evidence', '源码依据'], ['workflow', '运行过程'],
       ]
       const navigation = navigationItems.length ? h('nav', { style: styles.nav, 'aria-label': 'PANGEA 分析页面' }, navigationItems.map(([type, label]) => h('button', {
         key: type,
@@ -2592,20 +2647,23 @@ window.__ModuleLoader__.load({
           : null
         const selectedProvider = providerOptions.find(item => item.id === createForm.provider_id)
         const semantic = workbench?.capabilities?.source_first?.version === 'source-first-v1' || workbench?.capabilities?.workflow_versions?.includes('source-first-v1')
-        const options = semantic ? workbench.capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'] } : null
+        const sceneOptions = workbench?.capabilities?.source_first?.analysis_options_by_profile?.['behavior-test-v2']
+        const options = semantic ? sceneOptions ?? workbench.capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'] } : null
         const supported = (kind, value) => !options || options[kind]?.includes(value)
         const compatible = workbench?.compatibility?.compatible === true
         const executionReady = createForm.provider_id
           ? selectedProvider?.registered === true
           : selectedModelOption?.credential_configured === true
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
-        const coverageReady = createForm.scenario !== 'coverage-analysis' || (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim())
+        const selectedCoverage = createForm.asset_ids.some(id => (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.asset_type === 'coverage' && (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.status === 'available')
+        const coverageReady = createForm.scenario !== 'coverage-analysis' || (sceneOptions ? selectedCoverage : (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim()))
         const submitBlockReason = !compatible ? '等待工作台就绪后即可创建分析。'
           : !supported('scenarios', createForm.scenario) || !supported('modes', createForm.mode) ? '请选择当前环境支持的分析场景与模式。'
           : !createForm.repository ? '请先选择源码仓库。'
           : !createForm.target.trim() ? '请填写本次分析目标。'
-          : sourceScope.length === 0 && createForm.scenario !== 'coverage-analysis' ? '请填写源码冻结范围，使用 . 可选择整个仓库。'
-          : !coverageReady ? '请补全覆盖率输入：文件、资产或查询条件。'
+          : sourceScope.length === 0 && (sceneOptions || createForm.scenario !== 'coverage-analysis') ? '请填写源码冻结范围，使用 . 可选择整个仓库。'
+          : sceneOptions && createForm.asset_ids.some(id => !(assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision) ? '所选资产版本尚未读取，请刷新资产后重新选择。'
+          : !coverageReady ? '请先查询、导入或选择可用覆盖率资产。'
           : !executionReady ? '请选择已就绪的 Agent 或已配置凭据的内置模型。'
           : coverageQueryBusy ? '覆盖率正在查询，请等待查询完成。' : ''
         const canSubmit = !submitBlockReason && !creatingRun
@@ -2644,7 +2702,7 @@ window.__ModuleLoader__.load({
           renderCompatibility(),
             h('div', { style: { ...styles.card, padding: '28px 32px' } },
               h('h1', { style: { fontSize: 28, margin: '0 0 8px' } }, '新建分析'),
-            h('p', { style: { color: '#596273', marginBottom: 24 } }, '确定分析目标，选择资料与 Agent。'),
+            h('p', { style: { color: '#596273', marginBottom: 24 } }, sceneOptions ? '先梳理模块文字流程，再执行所选分析。Archify 和函数变量图可在结果中单独生成。' : '确定分析目标，选择资料与 Agent。'),
             h('div', { className: 'pangea-input-grid', style: styles.formGrid },
               h('h2', { className: 'pangea-form-section' }, '01 · 分析目标'),
               h('label', null, h('div', { style: styles.label }, '仓库'), h('select', { style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.repository, onChange: event => setCreateForm(value => ({ ...value, repository: event.target.value })) },
@@ -2652,15 +2710,16 @@ window.__ModuleLoader__.load({
               formField('分析目标', 'target', '例如：DHCHAP 认证与恢复路径'),
               h('label', null, h('div', { style: styles.label }, '分析场景'), h('select', {
                 style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: createForm.scenario,
-                onChange: event => setCreateForm(value => ({ ...value, scenario: event.target.value, source_scope_text: event.target.value === 'coverage-analysis' && value.source_scope_text === '.' ? '' : value.source_scope_text })),
+                onChange: event => setCreateForm(value => ({ ...value, scenario: event.target.value })),
               },
               h('option', { value: 'module-analysis', disabled: !supported('scenarios', 'module-analysis') }, '模块分析'),
+              ...(sceneOptions?.scenario_descriptors ?? []).filter(item => !['module-analysis', 'coverage-analysis'].includes(item.id)).map(item => h('option', { key: item.id, value: item.id }, item.label)),
               h('option', { value: 'coverage-analysis', disabled: !supported('scenarios', 'coverage-analysis') }, '覆盖率分析'),
-              h('option', { value: 'issue-regression', disabled: !supported('scenarios', 'issue-regression') }, '问题回归'),
-              h('option', { value: 'root-cause', disabled: !supported('scenarios', 'root-cause') }, '根因定位'),
-              h('option', { value: 'special-risk', disabled: !supported('scenarios', 'special-risk') }, '专项风险'),
-              h('option', { value: 'custom', disabled: !supported('scenarios', 'custom') }, '自定义'))),
-              createForm.scenario === 'coverage-analysis' ? h('div', { style: { gridColumn: '1 / -1' } },
+              !sceneOptions && h('option', { value: 'issue-regression', disabled: !supported('scenarios', 'issue-regression') }, '问题回归'),
+              !sceneOptions && h('option', { value: 'root-cause', disabled: !supported('scenarios', 'root-cause') }, '根因定位'),
+              !sceneOptions && h('option', { value: 'special-risk', disabled: !supported('scenarios', 'special-risk') }, '专项风险'),
+              !sceneOptions && h('option', { value: 'custom', disabled: !supported('scenarios', 'custom') }, '自定义'))),
+              !sceneOptions && createForm.scenario === 'coverage-analysis' ? h('div', { style: { gridColumn: '1 / -1' } },
                 h('select', { 'aria-label': '覆盖率输入方式', style: styles.search, value: createForm.coverage_kind, onChange: event => setCreateForm(value => ({ ...value, coverage_kind: event.target.value })) },
                   h('option', { value: 'query' }, '按产品 / 版本 / 模块查询'), h('option', { value: 'file' }, '本地覆盖率文件'), h('option', { value: 'asset' }, '已解析的覆盖率资产')),
                 createForm.coverage_kind === 'asset' ? h('select', { 'aria-label': '覆盖率资产', style: styles.search, value: createForm.coverage_asset_id || '', onChange: event => setCreateForm(value => ({ ...value, coverage_asset_id: event.target.value })) },
@@ -2690,8 +2749,8 @@ window.__ModuleLoader__.load({
                 h('div', { style: { ...styles.itemMeta, fontSize: 16, color: '#596273' } }, '填写辅助理解所需的文件。')) : null,
               h('h2', { className: 'pangea-form-section' }, '02 · 分析资料'),
               semantic ? h('details', { style: { gridColumn: '1 / -1' } },
-                h('summary', { style: styles.label }, '从内网查询覆盖率（可选）'),
-                h('p', null, '填写查询对象，获取后自动加入本次分析，无需上传覆盖率文件。'),
+                h('summary', { style: styles.label }, createForm.scenario === 'coverage-analysis' ? '覆盖率输入（必需）' : '覆盖率输入（可选）'),
+                h('p', null, '填写查询对象并获取，或导入本地文件；已有覆盖率资产可在下方资产库选择。'),
                 h('div', { style: styles.formGrid }, formField('产品', 'coverage_product', '例如 PANGEA'),
                   formField('C 版本', 'coverage_version', '版本原文，保留空格'),
                   formField('模块', 'coverage_module', '覆盖率平台上的模块名称'),
@@ -2703,6 +2762,7 @@ window.__ModuleLoader__.load({
                   disabled: !compatible || !workbench?.capabilities?.coverage_query_skill?.available || coverageQueryBusy || creatingRun
                     || !String(createForm.coverage_product ?? "").trim() || !String(createForm.coverage_version ?? "").trim() || !String(createForm.coverage_module ?? "").trim(),
                 }, coverageQueryBusy ? '正在查询覆盖率…' : '查询并加入本次分析'),
+                sceneOptions ? h('div', { style: { marginTop: 12 } }, formField('本地覆盖率文件', 'coverage_path', 'XLSX 或 combined JSON 的完整路径'), h('button', { type: 'button', style: styles.button, disabled: coverageQueryBusy || creatingRun || !createForm.coverage_path?.trim(), onClick: importCoverageForAnalysis }, '解析文件并加入本次分析')) : null,
                 coverageQueryResult ? h('div', { role: 'status', style: { marginTop: 12, whiteSpace: 'pre-wrap' } },
                   h('strong', null, ({ success: '查询成功', partial: '查询结果不完整', no_data: '未查询到数据', error: '查询失败' })[coverageQueryResult.status] ?? coverageQueryResult.status),
                   coverageQueryResult.query_input ? h('p', null, [coverageQueryResult.query_input.product, coverageQueryResult.query_input.c_version, coverageQueryResult.query_input.module, coverageQueryResult.query_input.b_version].filter(Boolean).join(' / ')) : null,
@@ -2893,7 +2953,7 @@ window.__ModuleLoader__.load({
           idList(item.linked_flow_ids).map(id => chip(businessFlows.find(f => f.flow_id === id)?.display_id ?? id, () => { setFlowSelection(id); setFlowReader({ scope: `${current?.run_id}:${id}`, view: 'reader', step: '', query: '', page: 1 }); setBranchFilter(''); navigate({ type: 'flows' }) })),
           idList(item.linked_branch_ids).map(id => { const owner = businessFlows.find(f => (f.branches ?? []).some(b => b.branch_id === id)); return owner ? chip(id, () => { setFlowSelection(owner.flow_id); setFlowReader({ scope: `${current?.run_id}:${owner.flow_id}`, view: 'reader', step: '', query: id, page: 1 }); setBranchFilter(''); navigate({ type: 'flows' }) }) : h('span', { key: id, style: styles.badge }, `${id} · 路径待核对`) }),
           idList(item.linked_gap_ids).map(id => h('span', { key: id, style: styles.badge }, id)),
-          (item.linked_risk_ids ?? []).map(id => chip(riskById.get(id)?.display_id ?? id, () => navigate({ type: 'risk', id }))),
+          riskEnabled && (item.linked_risk_ids ?? []).map(id => chip(riskById.get(id)?.display_id ?? id, () => navigate({ type: 'risk', id }))),
           (item.linked_test_case_ids ?? []).map(id => chip(caseById.get(id)?.display_id ?? id, () => navigate({ type: 'case', id }))),
           (item.evidence_ids ?? []).map(id => {
             const entry = evidence.find(value => value.evidence_id === id)
@@ -2921,15 +2981,17 @@ window.__ModuleLoader__.load({
 
       function matchingDiagrams(flow, profile, views = diagramViews) {
         return views.filter(view => view.run_id === current?.run_id && view.task_id === selectedTask?.task_id && (view.profile ?? 'standard') === profile
-          && (profile === 'function_variables' ? view.flow_id === flow?.flow_id : (!view.flow_id || view.flow_id === flow?.flow_id)))
+          && ((view.logical_flow_id && view.logical_flow_id === flow?.logical_flow_id && view.flow_unit_id === flow?.unit_id)
+            || (profile === 'function_variables' ? view.flow_id === flow?.flow_id : (!view.flow_id || view.flow_id === flow?.flow_id))))
       }
 
       async function chooseDiagram(view) {
         if (!view) return
         setDiagramSelection(view.view_id)
         setDiagramType(view.type || 'workflow')
-        if (view.flow_id) setFlowSelection(view.flow_id)
-        const flowId = view.flow_id || flowSelection || businessFlows[0]?.flow_id
+        const currentFlow = businessFlows.find(flow => flow.flow_id === view.flow_id || (view.logical_flow_id && flow.logical_flow_id === view.logical_flow_id && flow.unit_id === view.flow_unit_id))
+        if (currentFlow) setFlowSelection(currentFlow.flow_id)
+        const flowId = currentFlow?.flow_id || flowSelection || businessFlows[0]?.flow_id
         setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : 'diagram', step: '', query: '', page: 1 })
         setDiagramError('')
         if (!view.session_id || view.session_id === selectedTask?.active_conversation_id) return
@@ -2983,7 +3045,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-list') }, diagramBusy ? '正在更新…' : '刷新状态')),
           selected ? h(React.Fragment, null,
             selected.branch_ids?.length ? h('div', { className: 'pangea-diagram-caption' }, `局部分支图 · ${selected.branch_ids.length} 条分支：${selected.branch_ids.join('、')}`) : null,
-            selected.source_revision !== (current?.publication?.revision ?? null) ? h('div', { className: 'pangea-diagram-caption' }, '此图基于较早的分析版本，可重新生成。') : null,
+            diagramIsStale(selected, current) ? h('div', { className: 'pangea-diagram-caption' }, '此图基于较早的分析版本，可重新生成。') : null,
             selected.available ? frame(false) : h('div', { className: 'pangea-diagram-empty', role: generating ? 'status' : 'alert' },
               h('strong', null, status), h('p', null, generating ? selected.validation_error ? '图表正在根据校验结果调整，完成后会自动显示。' : '正在整理图表并检查布局，完成后会自动显示。' : selected.error || '没有可预览的图表。可以查看生成记录，或重新生成。'),
               generating ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止生成') : null),
@@ -3004,7 +3066,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'pangea-diagram-toolbar', style: { padding: '14px 0 0', border: 0 } },
               !functions ? h('select', { 'aria-label': '架构图类型', style: styles.button, value: diagramType, onChange: e => setDiagramType(e.target.value) }, Object.entries(DIAGRAM_LABELS).map(([value, label]) => h('option', { key: value, value }, label))) : null,
               h('button', { type: 'button', style: selected ? styles.button : styles.primaryButton, disabled: diagramBusy || generating || !flow, onClick: create }, functions ? '生成函数与变量流程图' : `生成${DIAGRAM_LABELS[newType]}`)),
-            selected ? h('form', { style: { marginTop: 14 }, onSubmit: event => { event.preventDefault(); if (diagramInstruction.trim() && !diagramBusy && !generating) void diagramAction('architecture-create', { type: selected.type, profile, flow_id: selected.flow_id, previous_view_id: selected.view_id, instruction: diagramInstruction.trim() }) } },
+            selected ? h('form', { style: { marginTop: 14 }, onSubmit: event => { event.preventDefault(); if (diagramInstruction.trim() && !diagramBusy && !generating) void diagramAction('architecture-create', { type: selected.type, profile, flow_id: selected.flow_id ? flow.flow_id : null, previous_view_id: selected.view_id, instruction: diagramInstruction.trim() }) } },
               h('label', { style: styles.label, htmlFor: 'pangea-diagram-instruction' }, '希望怎样修改这张图？'),
               h('textarea', { id: 'pangea-diagram-instruction', 'aria-label': '架构图修改要求', rows: 2, style: { ...styles.search, resize: 'vertical', marginTop: 8 }, value: diagramInstruction, placeholder: '例如：展开计时分支，并标注 work_tsc 的变化', onChange: e => setDiagramInstruction(e.target.value) }),
               h('div', { style: styles.row }, h('span', { style: styles.itemMeta }, '保留当前版本，生成一张修改后的新图。'),
@@ -3132,7 +3194,8 @@ window.__ModuleLoader__.load({
                 flow.projection_warnings?.length ? h('div', { role: 'status', style: styles.notice }, '流程字段需核对：', h('ul', null, flow.projection_warnings.map((message, index) => h('li', { key: index }, message)))) : null,
                 h('div', { style: { marginBottom: 14 } }, h('div', { style: styles.itemTitle }, flow.title || '流程'), h('div', { style: styles.itemMeta }, flow.description || flow.entry), linkedItems(flow)),
                 flow.document_status === 'live_draft' ? h('div', { role: 'status', style: styles.notice }, '当前显示活文档步骤草稿；正式发布状态以阶段投影为准。') : null,
-                !steps.length ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, pathOnly ? '原文提供了业务路径，以下按原文阅读。缺少节点与连线，暂不能据此绘制流程图。' : '尚无可解析的主干步骤。请查看上方流程原文；这不表示流程没有步骤，也不表示分析已完成。') : null,
+                flow.text ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '模块文字流程'), h('pre', { style: { ...styles.text, whiteSpace: 'pre-wrap' } }, flow.text)) : null,
+                !steps.length && !flow.text ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, pathOnly ? '原文提供了业务路径，以下按原文阅读。缺少节点与连线，暂不能据此绘制流程图。' : '尚无可解析的主干步骤。请查看上方流程原文；这不表示流程没有步骤，也不表示分析已完成。') : null,
                 pathOnly ? h('section', { 'aria-label': '业务路径阅读' },
                   flow.entry_points ? h('div', { style: styles.card }, h('h3', null, '业务入口'), renderReadableBody(flow.entry_points)) : null,
                   flow.paths.map((item, index) => h('article', { key: index, style: styles.card },
@@ -3154,7 +3217,7 @@ window.__ModuleLoader__.load({
                       h('div', { style: toolbar },
                         h('input', { style: { ...styles.search, flex: '1 1 170px', width: 'auto', margin: 0 }, value: reader.query, 'aria-label': '搜索分支', placeholder: '搜索条件、处理或回接…', onChange: event => updateReader({ query: event.target.value, page: 1 }) }),
                         h('select', { style: { ...styles.search, width: 'auto', margin: 0 }, value: branchFilter, 'aria-label': '筛选分支', onChange: event => { setBranchFilter(event.target.value); updateReader({ page: 1 }) } },
-                          [['', '全部分支'], ['high_risk', '关联高风险'], ...Object.entries(kindLabels), ['unresolved', '待确认'], ['no_case', '未关联用例']].map(([id, label]) => h('option', { key: id, value: id }, label)))),
+                          [['', '全部分支'], ...(riskEnabled ? [['high_risk', '关联高风险']] : []), ...Object.entries(kindLabels), ['unresolved', '待确认'], ['no_case', '未关联用例']].map(([id, label]) => h('option', { key: id, value: id }, label)))),
                       h('div', { key: JSON.stringify([scope, reader.step, reader.query, branchFilter, page]), style: { marginTop: 12, maxHeight: '42vh', overflowY: 'auto' }, 'aria-label': '分支列表' }, pageBranches.map(item => h('button', { key: item.branch_id, type: 'button', 'aria-label': `查看分支 ${item.branch_id}`, 'aria-pressed': item === branch,
                         style: { ...styles.runButton, width: '100%', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: 8, marginBottom: 6, ...(item === branch ? selectedStyle : {}) }, onClick: () => setBranchSelection(item.branch_id) },
                         h('div', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, h('div', { style: styles.itemTitle }, `${item.branch_id} · ${item.condition || '条件待确认'}`), h('div', { style: styles.itemMeta }, `${stepTitle(item.from_step_id)} → ${destination(item)}`)),
@@ -3424,11 +3487,11 @@ window.__ModuleLoader__.load({
           ? { label: '先处理数据读取异常', hint: '结构化结果与报告不一致，当前数量不能用于测试决策。', target: 'workflow' }
             : !current.terminal
             ? { label: '等待分析完成', hint: workflow.steps?.length ? `PANGEA 已完成 ${workflow.completed_steps?.length ?? 0}/${workflow.steps.length} 个阶段，可查看运行过程。` : '正在准备分析阶段，可查看运行过程。', target: 'workflow' }
-            : uncoveredRisks.length > 0
+            : riskEnabled && uncoveredRisks.length > 0
               ? { label: `处理 ${uncoveredRisks.length} 条未覆盖风险`, hint: '这些风险还没有关联可执行测试用例。', target: 'risks' }
               : testCases.length > 0
                 ? { label: '查看测试用例', hint: `${testCases.length} 条用例可供查看和继续讨论。`, target: 'cases' }
-                : { label: '查看分析结论', hint: '当前没有生成测试用例。', target: 'risks' }
+                : { label: '查看分析结论', hint: '当前没有生成测试用例，可查看模块流程和分析说明。', target: riskEnabled ? 'risks' : 'flows' }
         return h(React.Fragment, null,
           renderCompatibility(),
           h('details', { style: styles.card }, h('summary', null, `输入材料 · ${current.input_materials?.length ?? 0} 份`),
@@ -3449,7 +3512,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: { ...styles.button, marginTop: 9 }, onClick: () => jump(nextAction.target) }, nextAction.target === 'workflow' ? '查看运行细节' : '进入处理'),
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析可信度'), h('div', { style: styles.decisionValue }, presentation.reliabilityLabel)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, presentation.countsAvailability === 'unpublished' ? '测试结果尚未发布' : presentation.countsAvailability === 'unavailable' ? '测试结果不可读取' : `${displayCount('test_cases', testCases.length)} 条用例 / ${uncoveredRisks.length} 条风险未覆盖`)),
+              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '测试准备'), h('div', { style: styles.decisionValue }, presentation.countsAvailability === 'unpublished' ? '测试结果尚未发布' : presentation.countsAvailability === 'unavailable' ? '测试结果不可读取' : (riskEnabled ? `${displayCount('test_cases', testCases.length)} 条用例 / ${uncoveredRisks.length} 条风险未覆盖` : `${displayCount('test_cases', testCases.length)} 条用例 · 风险分析不适用`))),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '分析资产'), h('div', { style: styles.decisionValue }, displayCount('evidence', evidence.length))))),
           renderHealthCard(false),
           current.workflow_version === 'source-first-v1' ? h(React.Fragment, null, ['说明', '待确认'].map(group => { const items = (details.notes ?? []).filter(item => (item.source_record.kind === 'unresolved') === (group === '待确认')); return items.length ? h('div', { key: group, style: styles.card }, h('div', { style: styles.itemTitle }, group === '说明' ? '分析说明' : '待确认事项'), items.map(item => renderRecordBody(item, true))) : null })) : null,
@@ -3459,8 +3522,8 @@ window.__ModuleLoader__.load({
             h('div', { style: { ...styles.itemMeta, marginTop: 8 } }, '当前已开始新的分析尝试；下面保留的是历史失败记录。'),
             h('div', { style: { ...styles.error, marginTop: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, previousFailures[0].terminal_error),
             previousFailures[0].ended_at ? h('div', { style: { ...styles.itemMeta, marginTop: 6 } }, `结束时间：${formatDate(previousFailures[0].ended_at)}`) : null) : null,
-          h('div', { style: styles.sectionTitle }, '优先失败场景'),
-          priorityScenarios.length ? h('div', { style: styles.card }, priorityScenarios.map((risk, index) => h('button', {
+          riskEnabled && h('div', { style: styles.sectionTitle }, '优先失败场景'),
+          !riskEnabled ? h('div', { style: styles.card }, '本次未开展风险分析。请按模块流程和所选专项查看结果。') : priorityScenarios.length ? h('div', { style: styles.card }, priorityScenarios.map((risk, index) => h('button', {
             key: riskKeyByItem.get(risk), type: 'button', style: { ...styles.runButton, display: 'flex', gap: 7, alignItems: 'flex-start' }, onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }),
           },
           h('span', { style: styles.scenarioIndex }, String(index + 1).padStart(2, '0')),
@@ -3483,6 +3546,17 @@ window.__ModuleLoader__.load({
               chip(`${current.workflow_version === 'source-first-v1' ? '运行流程' : 'Skill 流程'} · ${workflow.steps?.length ?? 0}`, () => jump('workflow')),
               chip(`业务流程 · ${businessFlows.length}`, () => jump('flows')),
               chip(`证据 · ${evidence.length}`, () => jump('evidence')))),
+          current.coverage_match ? h('section', { style: styles.card },
+            h('div', { style: styles.itemTitle }, '覆盖数据与匹配诊断'),
+            h('div', { style: styles.itemMeta }, `来源 ${current.coverage_match.sources.length} · 匹配 ${current.coverage_match.matched ?? '未知'} · 未匹配 ${current.coverage_match.unmatched ?? '未知'} · 匹配歧义 ${current.coverage_match.ambiguous ?? '未知'}`),
+            current.coverage_match.sources.map(source => h('details', { key: source.asset_id, style: styles.technical },
+              h('summary', null, `${source.asset_id} · ${source.status ?? '状态未记录'} · ${source.record_count ?? 0} 条输入`),
+              h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, JSON.stringify(source, null, 2)))),
+            current.coverage_match.unmatched || current.coverage_match.ambiguous ? h('details', { style: styles.technical },
+              h('summary', null, '待匹配项（各显示前 50 条）'),
+              renderReadableBody({ 未匹配: current.coverage_match.unmatched_preview, 匹配歧义: current.coverage_match.ambiguous_preview }),
+              current.coverage_match.diagnostic_path ? chip('查看完整匹配诊断', () => openSidebarFile(current.coverage_match.diagnostic_path)) : null) : null,
+            h('div', { style: styles.itemMeta }, current.coverage_match.note || '匹配只表示输入与源码位置对应，不代表实测覆盖率或数据版本适用性已核实。')) : null,
           !current.terminal && selectedTask.status !== 'stopped' ? h('div', { style: { ...styles.card, ...styles.healthWarning } },
             h('div', { style: styles.row }, h('div', null, h('div', { style: styles.itemTitle }, '运行控制'), h('div', { style: styles.itemMeta }, '停止后保留已有产物和运行记录。')),
               pendingStopRun === current.run_id
@@ -3623,7 +3697,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.decisionBand },
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '用例总数'), h('div', { style: styles.decisionValue }, testCases.length)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '已选择'), h('div', { style: styles.decisionValue }, selectedCaseIds.length)),
-              h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '关联风险的用例'), h('div', { style: styles.decisionValue }, linkedCases)),
+              riskEnabled && h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '关联风险的用例'), h('div', { style: styles.decisionValue }, linkedCases)),
               h('div', { style: styles.decisionItem }, h('div', { style: styles.label }, '导出格式'), h('div', { style: styles.decisionValue }, 'CSV / XLSX')))),
           h('div', { style: { ...styles.card, ...styles.actionCard } },
             h('div', { style: styles.itemTitle }, '测试用例出口'),
@@ -3657,7 +3731,7 @@ window.__ModuleLoader__.load({
                   h('input', { type: 'checkbox', disabled: !selectable, checked: selectable && selectedCaseIds.includes(item.test_case_id), 'aria-label': selectable ? `选择 ${item.display_id ?? item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(item.test_case_id) }),
                   h('button', { type: 'button', style: styles.caseDetailButton, onClick: () => navigate({ type: 'case', id: itemKey }) },
                     h('div', { style: styles.itemTitle }, `${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`),
-                    h('div', { style: styles.itemMeta }, [text(item.case_type, '类型待补充'), `${item.linked_risk_ids?.length ?? 0} 条关联风险`, hasText(item.priority) ? `优先级 ${item.priority}` : '', hasText(item.status) ? item.status : ''].filter(Boolean).join(' · ')))))
+                    h('div', { style: styles.itemMeta }, [text(item.case_type, '类型待补充'), riskEnabled ? `${item.linked_risk_ids?.length ?? 0} 条关联风险` : '', hasText(item.priority) ? `优先级 ${item.priority}` : '', hasText(item.status) ? item.status : ''].filter(Boolean).join(' · ')))))
               })
             )
           }) : h('div', { style: health?.status === 'warning' ? { ...styles.card, ...styles.healthError } : styles.card }, h('div', { style: health?.status === 'warning' ? styles.error : styles.empty }, collectionEmpty('test_cases', '没有符合条件的测试用例。')))))
@@ -3760,7 +3834,7 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '业务路径与覆盖缺口'), linkedItems(item)),
           h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, text(item.title, '未命名用例')), h('div', { style: styles.chips }, hasText(item.case_type) ? h('span', { style: styles.badge }, item.case_type) : null, hasText(item.priority) ? h('span', { style: styles.badge }, `优先级 ${item.priority}`) : null, hasText(item.status) ? h('span', { style: styles.badge }, item.status) : null)),
           renderDiscussionCard('case', item),
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '未关联实现风险；本用例的测试目的以验证目标和路径依据为准。')),
+          riskEnabled && h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.linked_risk_ids?.length ?? 0}）`), item.linked_risk_ids?.length ? h('div', { style: styles.chips }, item.linked_risk_ids.map(id => chip(id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '未关联实现风险；本用例的测试目的以验证目标和路径依据为准。')),
           stringList('前置条件', item.preconditions),
           item.step_pairs ? section('操作与预期', item.step_pairs.length
             ? h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
@@ -3775,7 +3849,7 @@ window.__ModuleLoader__.load({
         const query = evidenceQuery.trim().toLowerCase()
         const filtered = evidence.filter(item => !query || [item.display_id, item.chunk_id, item.location, item.observation, ...(item.risk_ids ?? []).flatMap(id => [id, riskById.get(id)?.display_id])].join(' ').toLowerCase().includes(query))
         return h(React.Fragment, null,
-          h('input', { style: styles.search, value: evidenceQuery, 'aria-label': '搜索证据', placeholder: '搜索文件位置、观察结论、关联风险…', onChange: event => setEvidenceQuery(event.target.value) }),
+          h('input', { style: styles.search, value: evidenceQuery, 'aria-label': '搜索证据', placeholder: riskEnabled ? '搜索文件位置、观察结论、关联风险…' : '搜索文件位置、观察结论…', onChange: event => setEvidenceQuery(event.target.value) }),
           renderResultCount(filtered.length, evidence.length, evidenceQuery, () => setEvidenceQuery('')),
           h('div', { style: { marginTop: 7 } }, filtered.length ? filtered.map((item, index) => { const key = [item.chunk_id, item.location, item.observation].join('\u0000'); return h('button', { key: `${key}:${index}`, type: 'button', style: { ...styles.card, ...styles.clickableCard }, onClick: () => navigate({ type: 'evidence-detail', key }) }, h('div', { style: styles.itemTitle }, text(item.location, '未标注位置')), h('div', { style: styles.itemMeta }, text(item.observation, '无观察结论')), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.slice(0, 4).map(id => h('span', { key: id, style: styles.badge }, riskById.get(id)?.display_id ?? id))) : null) }) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '没有符合条件的证据。'))))
       }
@@ -3789,7 +3863,7 @@ window.__ModuleLoader__.load({
           renderDiscussionCard('evidence', item, sourcePreview.key === previewKey && sourcePreview.status === 'ready' ? sourcePreview.value : undefined),
           renderSourcePreview('evidence', item, item),
           section('观察结论', item.observation),
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.risk_ids?.length ?? 0}）`), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.map(id => chip(riskById.get(id)?.display_id ?? id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '这条证据没有直接绑定风险。')))
+          riskEnabled && h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, `关联风险（${item.risk_ids?.length ?? 0}）`), item.risk_ids?.length ? h('div', { style: styles.chips }, item.risk_ids.map(id => chip(riskById.get(id)?.display_id ?? id, () => navigate({ type: 'risk', id })))) : h('div', { style: { ...styles.empty, marginTop: 6 } }, '这条证据没有直接绑定风险。')))
       }
 
       function renderReview() {
@@ -3927,6 +4001,8 @@ window.__ModuleLoader__.load({
     exports.riskSeverityCounts = riskSeverityCounts
     exports.filterRisks = filterRisks
     exports.analysisBackTarget = analysisBackTarget
+    exports.riskApplicable = riskApplicable
+    exports.diagramIsStale = diagramIsStale
     exports.buildAnalysisRequest = buildAnalysisRequest
     exports.CoverageBrowser = CoverageBrowser
     exports.flowContentState = flowContentState

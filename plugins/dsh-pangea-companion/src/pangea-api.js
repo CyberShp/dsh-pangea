@@ -1,3 +1,4 @@
+import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import { runProvenance } from './runtime-provenance.js'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -10,7 +11,7 @@ const PANGEA_MARKER = path.join('.agents', 'pangea', 'dsh.md')
 const PENDING_REQUEST = path.join('pangea-data', '.pangea', 'pending-skill-request.json')
 const SOURCE_FIRST_VERSION = 'source-first-v1'
 const REQUIRED_ANALYSIS_SKILL = Object.freeze({ skill_id: 'codetalks-skill', version: '1.4.9' })
-const ANALYSIS_SCENARIOS = new Set(['coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
+const ANALYSIS_SCENARIOS = new Set(['risk-analysis', 'branch-analysis', 'coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
 const ANALYSIS_MODES = new Set(['speed', 'depth'])
 
 export function normalizeSourceScope(values, repository) {
@@ -226,6 +227,8 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
   const request = {
     workflow_version: SOURCE_FIRST_VERSION,
     runtime_provenance: runProvenance(root),
+    ...(input.analysis_profile ? { analysis_profile: input.analysis_profile } : {}),
+    ...(input.asset_revisions ? { asset_revisions: input.asset_revisions } : {}),
     analysis_settings: { scenario: input.scenario ?? 'module-analysis', mode: input.mode ?? 'depth' },
     data_root: dataRoot,
     repository: input.repository,
@@ -246,8 +249,9 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     args: ['system', 'capabilities', '--data-root', dataRoot],
   })
   assertSourceFirstCapabilities(capabilities)
-  const options = capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'], coverage_input: false }
+  const options = analysisOptions(capabilities, input.analysis_profile)
   if (!options.scenarios?.includes(request.analysis_settings.scenario) || !options.modes?.includes(request.analysis_settings.mode) || (input.coverage_input != null && options.coverage_input !== true)) throw new Error('当前分析引擎不支持所选分析设置')
+  if (input.analysis_profile === SCENE_PROFILE && ['analysis_profile', 'analysis_settings', 'asset_revisions'].some(field => !capabilities.source_first?.contract_fields?.includes(field))) throw new Error('引擎缺少场景或资产修订合同支持')
   for (const field of ['analysis_settings', 'runtime_provenance']) if (!capabilities.source_first?.contract_fields?.includes(field)) delete request[field]
   await mkdir(path.dirname(pendingPath), { recursive: true })
   await writeFile(pendingPath, `${JSON.stringify(request, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })

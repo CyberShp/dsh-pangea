@@ -18,7 +18,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, launchArchitectureSession, queryCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, launchArchitectureSession, queryCoverageAsset, importCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -739,6 +739,10 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
     if (body.action === 'coverage-query') {
       const acquisition = await queryCoverageAsset({ cwd, dataRoot: actionDataRoot, query: body.query, runner })
+      return json(res, 200, { status: 'ok', acquisition })
+    }
+    if (body.action === 'coverage-import') {
+      const acquisition = await importCoverageAsset({ cwd, dataRoot: actionDataRoot, source: body.path, runner })
       return json(res, 200, { status: 'ok', acquisition })
     }
     if (body.action === 'coverage-refresh') {
