@@ -1870,7 +1870,7 @@ window.__ModuleLoader__.load({
       }
       function launchEventLabel(event) {
         const status = event?.status === 'error' ? '失败' : event?.status === 'ok' ? '完成' : event?.status === 'start' ? '开始' : '信息'
-        const stage = event?.stage ?? 'unknown'
+        const stage = ({ source_first_ready_wait: '等待 Agent 就绪', source_first_waiting: '等待执行器响应', source_first_cancel_requested: '正在确认取消', source_first_cancel_confirmed: '原回合已结束', source_first_recovering: '恢复原会话', source_first_recovered: '恢复回合结束', source_first_late_response: '收到延迟响应', source_first_worker_paused: '单元已暂停' })[event?.stage] ?? event?.stage ?? 'unknown'
         const time = event?.at ? formatTime(event.at) : ''
         const detail = event?.error ?? event?.detail ?? event?.message ?? event?.output ?? ''
         const context = [event?.provider, event?.requested_model ? `指定：${event.requested_model}` : null, event?.model, event?.reasoning_effort, event?.job_id, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
