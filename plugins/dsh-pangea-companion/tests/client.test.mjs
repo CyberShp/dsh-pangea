@@ -1626,3 +1626,17 @@ test('v2 text-only flow is readable and branch discussion does not add risk cont
   assert.equal(client.diagramIsStale(view, { workflow_version: 'source-first-v1', details: { business_flows: [{ source_record: record }] } }), false)
   assert.equal(client.diagramIsStale(view, { workflow_version: 'source-first-v1', details: { business_flows: [{ source_record: { ...record, revision: 2 } }] } }), true)
 })
+
+
+test('flow reader hides nested source evidence without changing stored records or other readers', async () => {
+  const c = await loadClientExports()
+  const body = { title: '连接流程', source_evidence: ['private.c:10-20'], nodes: [{ label: '建立连接', source_evidence: [{ path: 'nested.c', lines: [30, 40] }] }] }
+  const original = JSON.stringify(body)
+  const rendered = JSON.stringify(c.renderReadableBody(body, true))
+  assert.ok(rendered.includes('建立连接'))
+  assert.ok(!rendered.includes('private.c'))
+  assert.ok(!rendered.includes('nested.c'))
+  assert.ok(!rendered.includes('源码依据'))
+  assert.equal(JSON.stringify(body), original)
+  assert.ok(JSON.stringify(c.renderReadableBody(body)).includes('private.c'))
+})

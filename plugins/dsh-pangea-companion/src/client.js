@@ -46,15 +46,15 @@ window.__ModuleLoader__.load({
         ?? (/task/i.test(file) ? '阶段任务' : /result/i.test(file) ? '阶段结果' : '运行记录')
     }
     // All text becomes React text nodes. No HTML execution or external markdown dependency.
-    function renderReadableBody(value) {
+    function renderReadableBody(value, hideSourceEvidence = false) {
       let body = value
       if (typeof body === 'string' && /^[\s]*[\[{]/.test(body)) {
         try { body = JSON.parse(body) } catch { /* preserve non-JSON prose */ }
       }
-      if (Array.isArray(body)) return h('ul', { className: 'pangea-reader' }, body.map((item, i) => h('li', { key: i }, renderReadableBody(item))))
+      if (Array.isArray(body)) return h('ul', { className: 'pangea-reader' }, body.map((item, i) => h('li', { key: i }, renderReadableBody(item, hideSourceEvidence))))
       if (body && typeof body === 'object') {
         const labels = { entry_points: '业务入口', paths: '业务路径', path_id: '路径编号', condition: '触发条件', node_ids: '节点顺序', case_ids: '关联用例', explanation: '路径说明', candidate_id: '条目编号', asset_id: '资产编号', asset_title: '资产名称', item_id: '原文条目编号', item_type: '资料类型', topic: '主题', inputs: '输入', outputs: '输出', constraints: '适用条件与约束', acceptance_criteria: '验收标准', modules: '适用模块', interfaces: '接口', states: '状态', main_flows: '主要场景', branch_flows: '分支场景', error_flows: '异常场景', recovery_flows: '恢复场景', symptom: '问题表现', trigger: '触发条件', root_cause: '问题原因', propagation: '影响过程', defect_mechanism: '问题机理', exclusion_conditions: '排除条件', applicable_modules: '适用模块', key_facts: '关键事实', expected_results: '预期结果', related_problems: '相关问题', source_references: '原文出处', location: '位置', path: '文件', title: '标题', content: '说明', description: '说明', summary: '总结', gap: '缺口', reason: '原因', scope: '分析范围', source_evidence: '源码依据', what_is_known: '已确认事实', missing_to_resolve: '待补条件', recommended_action: '建议', preconditions: '前置条件', steps: '操作步骤', action: '操作', expected: '预期', cleanup: '清理恢复' }
-        return h('dl', { className: 'pangea-reader' }, Object.entries(body).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, renderReadableBody(value)))))
+        return h('dl', { className: 'pangea-reader' }, Object.entries(body).filter(([key]) => !hideSourceEvidence || !['source_evidence', '源码依据'].includes(key)).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, renderReadableBody(value, hideSourceEvidence)))))
       }
       const lines = String(body ?? '').split(/\r?\n/), nodes = []
       const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
@@ -3084,7 +3084,7 @@ window.__ModuleLoader__.load({
         return h('details', { style: styles.card, open: !compact && (record.kind === 'risk' || typeof record.body === 'string') },
           h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, compact ? item.title : '分析原文'),
           h('div', { style: styles.itemMeta }, `${item.unit_id} · ${record.record_id} · revision ${record.revision ?? '—'} · ${record.status === 'accepted' ? '已接受' : '分析中'}`),
-          renderReadableBody(record.body),
+          renderReadableBody(record.body, record.kind === 'flow'),
           record.result_path ? chip('打开原始记录', () => openSidebarFile(record.result_path, item.title)) : null)
       }
 
@@ -3102,7 +3102,7 @@ window.__ModuleLoader__.load({
         },
         h('summary', { style: { cursor: 'pointer' } }, `${RECORD_LABELS[record.kind] ?? '分析记录'} · ${text(record.record_id, `record-${index + 1}`)} · 结果文件修订 ${record.revision ?? '—'}`),
         h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `${record.action_id ?? 'unknown action'}${record.task_id ? ` · task ${record.task_id}` : ''}`),
-        renderReadableBody(record.body),
+        renderReadableBody(record.body, record.kind === 'flow'),
         Array.isArray(record.evidence) && record.evidence.length ? h('pre', { style: { ...styles.itemMeta, marginTop: 7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, `证据：${sourceFirstRecordBody(record.evidence)}`) : null,
         Array.isArray(record.relates_to) && record.relates_to.length ? h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `关联：${record.relates_to.map(item => text(item, '')).filter(Boolean).join('、')}`) : null))
         return h('div', { style: styles.card },
@@ -3197,18 +3197,17 @@ window.__ModuleLoader__.load({
                 flow.text ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '模块文字流程'), h('pre', { style: { ...styles.text, whiteSpace: 'pre-wrap' } }, flow.text)) : null,
                 !steps.length && !flow.text ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, pathOnly ? '原文提供了业务路径，以下按原文阅读。缺少节点与连线，暂不能据此绘制流程图。' : '尚无可解析的主干步骤。请查看上方流程原文；这不表示流程没有步骤，也不表示分析已完成。') : null,
                 pathOnly ? h('section', { 'aria-label': '业务路径阅读' },
-                  flow.entry_points ? h('div', { style: styles.card }, h('h3', null, '业务入口'), renderReadableBody(flow.entry_points)) : null,
+                  flow.entry_points ? h('div', { style: styles.card }, h('h3', null, '业务入口'), renderReadableBody(flow.entry_points, true)) : null,
                   flow.paths.map((item, index) => h('article', { key: index, style: styles.card },
                     h('h3', null, item.title || item.path_id || `路径 ${index + 1}`),
-                    renderReadableBody(Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'linked_test_case_ids'))), linkedItems(item)))) :
-                h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'start' } },
+                    renderReadableBody(Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'linked_test_case_ids')), true), linkedItems(item)))) :
+                (steps.length || allBranches.length) ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'start' } },
                   h('aside', { 'aria-label': '主干步骤', style: { ...styles.card, flex: '1 1 210px', minWidth: 0, maxHeight: '65vh', overflowY: 'auto' } },
                     h('div', { style: { ...styles.itemTitle, marginBottom: 12 } }, flow.source_record ? '流程节点' : '主干步骤'),
                     stepButton('', '全部步骤', allBranches.length, '查看全部分支'),
                     steps.map((item, index) => stepButton(item.step_id, `${String(index + 1).padStart(2, '0')}  ${item.title || item.step_id}`, allBranches.filter(b => b.from_step_id === item.step_id).length, `查看步骤 ${item.step_id} 的分支`)),
                     allBranches.some(unbound) ? stepButton('__unbound', '未挂接步骤', allBranches.filter(unbound).length, '查看未挂接分支') : null,
-                    !structured ? h('div', null, h('div', { style: styles.itemMeta }, '旧格式流程内容'), stringList('步骤', flow.steps, true), flow.mermaid ? h('pre', { style: styles.source }, flow.mermaid) : null) : null,
-                    (flow.evidence ?? []).map((item, index) => chip(item.location ?? `证据 ${index + 1}`, () => navigate({ type: 'evidence-detail', key: evidenceIdentity(item) })))),
+                    !structured ? h('div', null, h('div', { style: styles.itemMeta }, '旧格式流程内容'), stringList('步骤', flow.steps, true), flow.mermaid ? h('pre', { style: styles.source }, flow.mermaid) : null) : null),
                   h('section', { 'aria-label': '分支阅读区', style: { flex: '3 1 460px', minWidth: 0 } },
                     step ? h('details', { key: step.step_id, style: { ...styles.card, marginBottom: 12 } }, h('summary', { style: { ...styles.itemTitle, cursor: 'pointer' } }, `${stepTitle(step.step_id)} · 步骤详情`),
                       h('div', { style: columns }, field('外部动作', step.external_action), field('内部处理', step.processing), field('状态变化', step.state_change), field('外部表现', step.external_observation)), linkedItems(step)) : null,
@@ -3235,7 +3234,7 @@ window.__ModuleLoader__.load({
                       h('summary', { style: { ...styles.itemTitle, cursor: 'pointer' } }, `${branch.branch_id} · 分支详情`),
                       h('div', { style: columns }, field('进入条件', branch.condition), field('处理', branch.processing), field('结果', branch.result), field('残留状态', branch.residual_state), field('外部表现', branch.external_observation), field('回接 / 结束', destination(branch)), field('分析状态', branch.status)),
                       branch.to_step_id && steps.some(item => item.step_id === branch.to_step_id) ? h('button', { type: 'button', style: styles.chip, onClick: () => updateReader({ step: branch.to_step_id, page: 1 }) }, `定位回接步骤 ${branch.to_step_id}`) : null,
-                      linkedItems(branch)) : null))))
+                      linkedItems(branch)) : null)) : null))
       }
 
       function renderCoverage() {
