@@ -691,7 +691,7 @@ window.__ModuleLoader__.load({
       const kindLabel = item => item.kind_label || ({ analysis: '分析记录', architecture: '图表', assistant: '讨论' }[item.kind] ?? '讨论')
       const pendingType = context?.conversationPending || (pending?.taskId === context?.taskId ? pending?.type : '')
       const busy = Boolean(pendingType)
-      const error = !busy && failure?.taskId === context?.taskId ? failure.message : ''
+      const error = !busy && context?.taskId && failure?.taskId === context.taskId ? failure.message : ''
       const taskTitle = context?.taskTitle || context?.title || '选择一个分析任务'
       const runAction = async (type, conversationId) => {
         if (!context?.taskId || busy || operationRef.current?.taskId === context.taskId) return

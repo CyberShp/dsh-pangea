@@ -56,6 +56,17 @@ async function assistantHeaderHarness(context) {
   }
 }
 
+test('assistant survives returning from a Run to an empty task context', async () => {
+  const harness = await assistantHeaderHarness({ taskId: 'run-task', taskTitle: '当前分析' })
+  assert.match(harness.render().text, /当前分析/)
+  for (const context of [null, undefined, {}]) {
+    const view = harness.render(context)
+    assert.match(view.text, /选择一个分析任务/)
+    assert.equal(view.create.props.disabled, true)
+    assert.equal(view.select.props.disabled, true)
+  }
+})
+
 test('assistant identifies the task and conversation purpose with distinct diagram names', async () => {
   const context = {
     taskId: 'cpu', taskTitle: 'CPU 使用率统计', title: '架构视图 · cpuload', phase: '图表可查看', percent: 100,
