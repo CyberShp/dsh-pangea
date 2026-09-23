@@ -1,7 +1,8 @@
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, writeFile, appendFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { diagnosticText } from './launch-log.js'
 import { summarizeRun } from './reader.js'
 import { writeTaskStoreFile } from './task-store.js'
 
@@ -49,8 +50,45 @@ async function writeView(task, viewId, changes) {
   return updated
 }
 
+export async function recordViewEvent(task, viewId, event) {
+  const folder = await viewRoot(task, viewId)
+  const entry = { ...event, at: stamp(), error: event.error?.message ?? event.error }
+  await appendFile(path.join(folder, 'events.jsonl'), JSON.stringify(entry, (_key, value) => typeof value === 'string' ? diagnosticText(value, 262144) : value) + '\n', 'utf8')
+  const view = await loadView(task, viewId)
+  if (view.status === 'stopped') return view
+  const error = entry.error || entry.error_summary || (entry.status === 'error' ? entry.stderr_summary : null)
+  return updateView(task, viewId, { launch_stage: entry.stage, last_activity_at: entry.at,
+    ...(error && view.status !== 'failed' ? { error: diagnosticText(error), failure_stage: entry.stage } : {}),
+    ...(entry.terminal ? { status: 'failed' } : {}) })
+}
+
+export async function inspectView(task, viewId) {
+  const folder = await viewRoot(task, viewId)
+  const view = await loadView(task, viewId)
+  if (['stopped', 'failed', 'ready'].includes(view.status)) return { ok: view.status === 'ready', terminal: true, error: view.error }
+  try {
+    const receipt = await readJson(path.join(folder, 'validation-receipt.json'))
+    if (receipt.ok) await readFile(path.join(folder, 'diagram.html'))
+    return receipt
+  } catch { return { ok: false, error: '尚无可读取的验证通过产物' } }
+}
+
 function scopeFlow(flow, branchIds) {
   const branches = (flow.branches ?? []).filter(b => branchIds.includes(b.branch_id))
+  const edgeBranches = branches.filter(b => Number.isInteger(b.edge_index))
+  if (edgeBranches.length) {
+    const indexes = new Set(edgeBranches.map(b => b.edge_index))
+    const ids = new Set(edgeBranches.flatMap(b => [b.from_step_id, b.to_step_id]))
+    const selected = { ...flow, branches, paths: [],
+      nodes: (flow.nodes ?? []).filter(n => ids.has(n.id)),
+      edges: (flow.edges ?? []).filter((e, i) => indexes.has(i)),
+      mainline_steps: (flow.mainline_steps ?? []).filter(n => ids.has(n.step_id)) }
+    if (flow.source_record) {
+      const { source_record, evidence, ...body } = selected
+      selected.source_record = { ...source_record, body, scoped: true }
+    }
+    return selected
+  }
   const paths = (flow.paths ?? []).filter(p => branchIds.includes(p.path_id))
   const nodeIds = new Set(paths.flatMap(p => p.node_ids ?? []))
   const pairs = new Set(paths.flatMap(p => (p.node_ids ?? []).slice(1).map((id, i) => JSON.stringify([p.node_ids[i], id]))))
@@ -69,7 +107,7 @@ function scopeFlow(flow, branchIds) {
 }
 
 function flowContext(projection, flow, branchIds) {
-  const branchCaseIds = new Set((flow.branches ?? []).flatMap(b => b.linked_test_case_ids ?? []))
+  const branchCaseIds = new Set([...(flow.branches ?? []), ...(flow.paths ?? [])].flatMap(b => b.linked_test_case_ids ?? []))
   const cases = (projection.test_cases ?? []).filter(c => branchCaseIds.has(c.test_case_id)
     || (!branchIds && (c.flow_id === flow.flow_id || c.linked_flow_ids?.includes(flow.flow_id))))
   const riskIds = new Set([...(flow.branches ?? []).flatMap(b => b.linked_risk_ids ?? []), ...cases.flatMap(c => c.linked_risk_ids ?? [])])
@@ -108,7 +146,7 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     && !(previous.logical_flow_id && previous.logical_flow_id === flow?.logical_flow_id && previous.flow_unit_id === flow?.unit_id)) throw new Error('Function diagram flow mismatch')
   const branchIds = branch_ids ?? previous?.branch_ids ?? null
   if (branchIds !== null && (!flow || !Array.isArray(branchIds) || !branchIds.length || new Set(branchIds).size !== branchIds.length
-    || branchIds.some(id => !(flow.branches ?? []).some(branch => branch.branch_id === id)))) throw new Error('Invalid architecture branch scope')
+    || branchIds.some(id => !(flow.branches ?? []).some(branch => branch.branch_id === id) && !(flow.paths ?? []).some(p => p.path_id === id)))) throw new Error('Invalid architecture branch scope')
   const scopedFlow = branchIds ? scopeFlow(flow, branchIds) : flow
   const context = flow ? flowContext(projection, scopedFlow, branchIds) : Object.fromEntries(
     ['business_flows', 'risks', 'test_cases', 'evidence', 'notes'].map(key => [key, projection[key] ?? []]))
@@ -145,7 +183,8 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     logical_flow_id: flow?.logical_flow_id ?? null, flow_unit_id: flow?.unit_id ?? null,
     source_revision: context.publication?.revision ?? null, workflow_version: context.workflow_version,
     publication: context.publication, source_records: sourceRecords, status: 'generating',
-    previous_view_id, session_id: null, job_id: null, created_at: stamp(), updated_at: stamp() }
+    previous_view_id, session_id: null, job_id: null, created_at: stamp(), updated_at: stamp(),
+    budget_ms: viewProfile === 'function_variables' ? 1800000 : 1200000, max_render_attempts: 3 }
   await writeFile(path.join(folder, 'manifest.json'), JSON.stringify(view, null, 2))
   const renderer = fileURLToPath(new URL('./architecture-render.mjs', import.meta.url))
   const quote = value => `'${value.replaceAll("'", process.platform === 'win32' ? "''" : "'\"'\"'")}'`
@@ -171,6 +210,7 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     '只核对本图相关实现；语义疑点在会话报告，不能改主 Run 的报告、投影、风险、用例、状态。',
     `唯一写入目录：${folder}。编写 candidate.json；不要修改 manifest.json。`,
     `完成后原样执行以下 ${process.platform === 'win32' ? 'PowerShell' : 'shell'} 命令，Node 可执行文件、参数及输出目录已绑定：\n\`\`\`${process.platform === 'win32' ? 'powershell' : 'sh'}\n${renderCommand}\n\`\`\``,
+    `本次生成总预算 ${view.budget_ms / 60000} 分钟，最多调用渲染命令 ${view.max_render_attempts} 次；预算或次数耗尽后保留候选图并报告准确原因，不换会话规避限制。`,
     '该命令运行 Archify deliver 并保存收据。失败只修 candidate.json，再执行同一命令；两轮诊断无改善时如实报告。渲染验证不证明源码结论正确。',
     '产物生成后在会话简要说明，不启动主分析流程。',
   ].join('\n') }
@@ -186,11 +226,12 @@ export async function listViews(task) {
       const view = await loadView(task, entry.name)
       let receipt
       try { receipt = await readJson(path.join(root, entry.name, 'validation-receipt.json')) } catch { /* pending */ }
+      const events = await readFile(path.join(root, entry.name, 'events.jsonl'), 'utf8').then(value => value.trim().split('\n').slice(-50).flatMap(line => { try { return [JSON.parse(line)] } catch { return [] } }), () => [])
       const html = await readFile(path.join(root, entry.name, 'diagram.html')).then(() => true, () => false)
       const available = Boolean(receipt?.ok && html)
       // A rejected candidate can be repaired by the live Job. Its lifecycle,
       // reconciled by architecture-list, determines whether generation failed.
-      items.push({ ...view, status: view.status === 'stopped' ? 'stopped' : available ? 'ready' : view.status, available,
+      items.push({ ...view, generation_events: events, diagnostic_path: path.join(root, entry.name, 'events.jsonl'), render_diagnostic_path: path.join(root, entry.name, 'render-history.jsonl'), render_exit_code: receipt?.exit_code, render_duration_ms: receipt?.duration_ms, status: view.status === 'stopped' ? 'stopped' : available ? 'ready' : view.status, available,
         error: available ? null : view.error,
         validation_error: receipt?.ok === false ? receipt.error || '图表尚未通过校验' : null,
         validation_diagnostics: receipt?.ok === false ? receipt.diagnostics ?? [] : [] })

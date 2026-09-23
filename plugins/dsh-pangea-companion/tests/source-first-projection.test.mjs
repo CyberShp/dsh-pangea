@@ -149,3 +149,15 @@ test('coverage purpose and valid references are counted independently', async ()
   assert.equal(coverageSummary(cases, null).linked_valid_gaps, null)
   assert.equal(coverageSummary(cases, []).linked_valid_gaps, 0)
 })
+
+test('decision edge belongs to its source node, full path does not move condition to entry', () => {
+  const flow = sourceFirstProjection([action('a', [record('flow', 'flow', {
+    nodes: [{ id: 'entry', label: 'TCP进入' }, { id: 'peek', label: '窥探首字节' }, { id: 'plain', label: '明文处理' }],
+    edges: [{ source: 'entry', target: 'peek' }, { source: 'peek', target: 'plain', condition: '首字节 != 0x16' }],
+    paths: [{ path_id: 'plain-path', node_ids: ['entry', 'peek', 'plain'], condition: '首字节 != 0x16' }]
+  })])]).business_flows[0]
+  assert.equal(flow.branches[0].condition, '')
+  assert.equal(flow.branches[1].from_step_id, 'peek')
+  assert.equal(flow.branches[1].condition, '首字节 != 0x16')
+  assert.equal(flow.paths[0].condition, '首字节 != 0x16')
+})

@@ -25,3 +25,23 @@ test('SVG export encodes font-license and CSS text as XML while preserving HTML'
   assert.match(svg, /\.node &gt; text/)
   assert.match(svg, /<text>中文<\/text>/)
 })
+
+test('renderer preserves failures and candidate while limiting actual invocations to three', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-render-fail-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const archify = path.join(root, 'archify')
+  await mkdir(path.join(archify, 'bin'), { recursive: true })
+  await writeFile(path.join(root, 'manifest.json'), JSON.stringify({ type: 'workflow', status: 'generating', created_at: new Date().toISOString(), budget_ms: 120000, max_render_attempts: 3 }))
+  await writeFile(path.join(root, 'candidate.json'), '{"preserve":true}')
+  await writeFile(path.join(archify, 'bin/archify.mjs'), `console.error('specific render failure'); process.exitCode = 7`)
+  for (let i = 0; i < 4; i++) {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL('../src/architecture-render.mjs', import.meta.url)), root, archify], { encoding: 'utf8' })
+    assert.equal(result.status, 1, result.stderr)
+  }
+  const history = (await readFile(path.join(root, 'render-history.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+  assert.equal(history.length, 3)
+  assert.equal(history[0].exit_code, 7)
+  assert.match(history[0].stderr, /specific render failure/)
+  assert.equal(JSON.parse(await readFile(path.join(root, 'validation-receipt.json'), 'utf8')).attempts_exhausted, true)
+  assert.equal(await readFile(path.join(root, 'candidate.json'), 'utf8'), '{"preserve":true}')
+})

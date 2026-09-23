@@ -122,7 +122,15 @@ export function sourceFirstProjection(artifacts) {
     } else if (kind === 'flow') {
       result.business_flows.push({ ...row, logical_flow_id: row.flow_id ?? row.display_id, text: plain(row.text), flow_id: row.projection_id,
         mainline_steps: list(row.nodes).map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind, source_evidence: node.source_evidence })),
-        branches: list(row.paths).map(p => ({ branch_id: p.path_id, from_step_id: p.node_ids?.[0], to_step_id: p.node_ids?.at(-1), condition: plain(p.condition), processing: plain(p.explanation), linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })), description: plain(row.description), entry: plain(row.entry ?? row.trigger), steps: strings(row.steps), evidence: [],
+        branches: list(row.edges).map((edge, index) => {
+          const paths = list(row.paths).filter(p => list(p.node_ids).some((id, i, ids) => id === edge.source_step_key && ids[i + 1] === edge.target_step_key))
+          // A path is not a decision edge. Never attach its condition to its entry node.
+          return { branch_id: `${row.projection_id}:edge-${index + 1}`, edge_index: index,
+            from_step_id: edge.source_step_key, to_step_id: edge.target_step_key,
+            condition: plain(edge.condition), processing: plain(edge.description ?? edge.explanation),
+            path_ids: paths.map(p => p.path_id),
+            linked_test_case_ids: resolve(row, edge.case_ids, ['case_id'], ['test_case', 'test_case_group']) }
+        }), description: plain(row.description), entry: plain(row.entry ?? row.trigger), steps: strings(row.steps), evidence: [],
         paths: list(row.paths).map(p => ({ ...p, linked_test_case_ids: resolve(row, p.case_ids, ['case_id'], ['test_case', 'test_case_group']) })),
       })
     } else if (!['evidence', 'blackbox_translation'].includes(kind)) result.notes.push(row)

@@ -79,3 +79,29 @@ test('a completed unit can repair before its slow sibling finishes, with at most
   try { await run.result; assert.equal(repairedBeforeSlow, true); assert.ok(peak <= 3) }
   finally { clearTimeout(deadline); controller.abort(); slow.resolve(); await run.dispose(); await rm(dataRoot, { recursive: true, force: true }) }
 })
+
+test('attention stores full diagnostic beyond launch log limit and keeps user message short', async t => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-diagnostic-'))
+  t.after(() => rm(dataRoot, { recursive: true, force: true }))
+  let bound, done = false
+  const events = [], detail = 'x'.repeat(20000)
+  const run = createSourceFirstAcpRun({ dataRoot, runId: 'run', cwd: dataRoot, providerId: 'test', signal: new AbortController().signal,
+    onEvent: e => events.push(e),
+    subagents: { start: async () => ({ id: 'worker', result: Promise.resolve(completed), continuePrompt: async () => completed, dispose: async () => {} }) },
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[0] === 'result-read') return { revision: 7, active_count: 0, total_count: 38 }
+      if (args[1] === 'bind') { bound = args.at(-1); return {} }
+      if (args[1] === 'settle') { done = true; return { attention_required: true, validation: { error: { code: 'IncompleteSourceFirstResult', message: '没有当前有效 records' }, details: detail } } }
+      if (args[1] === 'next') return { run_id: 'run', lifecycle_status: 'running', actions: done ? [] : [{ action_id: 'run:a', action: bound ? 'continue_agent' : 'dispatch_agent', task_id: bound, role: 'analysis', stage: 'unit_analysis' }] }
+      return {}
+    } })
+  const result = await run.result
+  assert.equal(result.attentionRequired, true)
+  assert.ok(result.diagnostic.length < 2000)
+  const event = events.find(e => e.stage === 'source_first_action_attention')
+  const saved = JSON.parse(await readFile(event.diagnostic_path, 'utf8'))
+  assert.equal(saved.settled.validation.details, detail)
+  assert.equal(saved.result_snapshot.total_count, 38)
+  await run.dispose()
+})

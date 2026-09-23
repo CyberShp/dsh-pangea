@@ -1963,7 +1963,7 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...styles.card, marginTop: 8, marginBottom: 0 } }, events.map((event, index) => h('div', {
           key: `${event.at ?? index}:${event.stage ?? 'unknown'}:${index}`,
           style: { ...styles.itemMeta, color: event.status === 'error' ? 'var(--dsw-alias-state-error-primary, #e66767)' : undefined, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
-        }, launchEventLabel(event)))))
+        }, launchEventLabel(event), event.diagnostic_path ? chip('完整诊断', () => openSidebarFile(event.diagnostic_path)) : null))))
       }
       function openProductPage(pageId, label, sessionId = scope?.sessionId) {
         const opened = ctx?.pangea?.openPage?.({ ...scope, sessionId }, pageId) === true
@@ -3055,6 +3055,12 @@ window.__ModuleLoader__.load({
               h('span', { style: styles.itemMeta }, selected.last_activity_at ? `更新于 ${formatTime(selected.last_activity_at)}` : ''),
               h('details', { style: { flexBasis: '100%' } }, h('summary', { style: { cursor: 'pointer', color: '#667085' } }, '生成记录与诊断'),
                 selected.error || selected.validation_error ? h('div', { role: 'status', style: styles.healthWarning }, selected.validation_error || selected.error) : null,
+                selected.failure_stage ? field('失败阶段', selected.failure_stage) : null,
+                selected.render_exit_code != null ? field('渲染退出码', selected.render_exit_code) : null,
+                selected.render_duration_ms != null ? field('渲染耗时(ms)', selected.render_duration_ms) : null,
+                selected.diagnostic_path ? chip('打开完整生成日志', () => openSidebarFile(selected.diagnostic_path)) : null,
+                selected.render_diagnostic_path ? chip('打开渲染历史', () => openSidebarFile(selected.render_diagnostic_path)) : null,
+                selected.generation_events?.length ? h('div', null, selected.generation_events.map((e, i) => h('p', { key: i }, `${formatTime(e.at)} · ${e.stage} · ${e.error || e.error_summary || e.message || e.stop_reason || ''}`))) : null,
                 selected.validation_diagnostics?.length ? renderReadableBody(selected.validation_diagnostics) : null,
                 selected.output ? renderReadableBody(selected.output) : h('p', { style: styles.itemMeta }, '暂无生成记录。'))),
             h('dialog', { ref: diagramDialogRef, className: 'pangea-diagram-dialog', 'aria-label': '图表全屏查看', onClose: () => setDiagramFullscreen(false) },
@@ -3194,6 +3200,7 @@ window.__ModuleLoader__.load({
                 flow.projection_warnings?.length ? h('div', { role: 'status', style: styles.notice }, '流程字段需核对：', h('ul', null, flow.projection_warnings.map((message, index) => h('li', { key: index }, message)))) : null,
                 h('div', { style: { marginBottom: 14 } }, h('div', { style: styles.itemTitle }, flow.title || '流程'), h('div', { style: styles.itemMeta }, flow.description || flow.entry), linkedItems(flow)),
                 flow.document_status === 'live_draft' ? h('div', { role: 'status', style: styles.notice }, '当前显示活文档步骤草稿；正式发布状态以阶段投影为准。') : null,
+                !pathOnly && flow.paths?.length ? h('details', { style: styles.card }, h('summary', null, '完整执行路径'), flow.paths.map((p, i) => h('div', { key: p.path_id || i }, h('strong', null, p.title || p.path_id), h('p', null, (p.node_ids ?? []).map(stepTitle).join(' → ')), h('p', null, p.condition || ''), h('p', null, p.explanation || ''), linkedItems(p)))) : null,
                 flow.text ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '模块文字流程'), h('pre', { style: { ...styles.text, whiteSpace: 'pre-wrap' } }, flow.text)) : null,
                 !steps.length && !flow.text ? h('div', { role: 'status', style: { ...styles.card, ...styles.notice } }, pathOnly ? '原文提供了业务路径，以下按原文阅读。缺少节点与连线，暂不能据此绘制流程图。' : '尚无可解析的主干步骤。请查看上方流程原文；这不表示流程没有步骤，也不表示分析已完成。') : null,
                 pathOnly ? h('section', { 'aria-label': '业务路径阅读' },
@@ -3210,7 +3217,11 @@ window.__ModuleLoader__.load({
                     !structured ? h('div', null, h('div', { style: styles.itemMeta }, '旧格式流程内容'), stringList('步骤', flow.steps, true), flow.mermaid ? h('pre', { style: styles.source }, flow.mermaid) : null) : null),
                   h('section', { 'aria-label': '分支阅读区', style: { flex: '3 1 460px', minWidth: 0 } },
                     step ? h('details', { key: step.step_id, style: { ...styles.card, marginBottom: 12 } }, h('summary', { style: { ...styles.itemTitle, cursor: 'pointer' } }, `${stepTitle(step.step_id)} · 步骤详情`),
-                      h('div', { style: columns }, field('外部动作', step.external_action), field('内部处理', step.processing), field('状态变化', step.state_change), field('外部表现', step.external_observation)), linkedItems(step)) : null,
+                      h('div', { style: columns }, field('外部动作', step.external_action), field('内部处理', step.processing || '原记录未提供说明'), field('状态变化', step.state_change), field('外部表现', step.external_observation)), linkedItems(step),
+                      h('div', null, h('strong', null, '进入条件'),
+                        allBranches.filter(b => b.to_step_id === step.step_id).map(b => h('p', { key: b.branch_id }, `${stepTitle(b.from_step_id)} → ${b.condition || '原记录未提供条件'}`))),
+                      h('div', null, h('strong', null, '后续条件与去向'),
+                        allBranches.filter(b => b.from_step_id === step.step_id).map(b => h('p', { key: b.branch_id }, `${b.condition || '原记录未提供条件'} → ${destination(b)}`)))) : null,
                     h('div', { style: styles.card },
                       h('div', { style: { ...styles.row, marginBottom: 12 } }, h('div', { style: styles.itemTitle }, reader.step === '__unbound' ? '未挂接的分支' : step ? `${step.title || step.step_id}的分支` : '全部分支'), h('span', { style: styles.badge }, `${branches.length} 条`)),
                       h('div', { style: toolbar },

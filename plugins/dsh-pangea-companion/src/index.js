@@ -1,6 +1,6 @@
 import { stopSourceFirstAcpRun } from './source-first-acp.js'
 import { interruptSourceFirstChildren } from './report-policy.js'
-import { createView, listViews, loadView, updateView, viewArtifact } from './architecture-views.js'
+import { createView, listViews, loadView, updateView, viewArtifact, recordViewEvent, inspectView } from './architecture-views.js'
 import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
@@ -792,7 +792,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
             }
             if (view.available) continue
             if (!job || job.startedAt !== view.job_started_at || ['failed', 'killed', 'completed'].includes(job.status)) {
-              Object.assign(view, await updateView(task, view.view_id, { status: !job || job.startedAt !== view.job_started_at ? 'interrupted' : job.status === 'killed' ? 'stopped' : 'failed', execution_status: job?.status ?? 'interrupted', error: !job ? '执行状态不可确认：画图 Job 已不可读取。已保留会话和输出。' : job.detail || view.validation_error || '画图执行已结束，尚无验证通过的产物。' }))
+              Object.assign(view, await updateView(task, view.view_id, { status: !job || job.startedAt !== view.job_started_at ? 'interrupted' : job.status === 'killed' ? 'stopped' : 'failed', execution_status: job?.status ?? 'interrupted', error: !job ? view.error || '执行状态不可确认：画图 Job 已不可读取。已保留会话和输出。' : view.error || job.detail || view.validation_error || '画图执行已结束，尚无验证通过的产物。' }))
             }
           } else if (view.session_id) {
             try {
@@ -811,8 +811,9 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id, branch_ids: body.branch_ids, profile: body.profile })
         try {
           const launched = await launchArchitectureSession(api, { cwd, task, prompt: prepared.prompt + (body.instruction ? `\n用户修改要求：${body.instruction}` : ''),
-            onEvent: event => updateView(task, prepared.view.view_id, { launch_stage: event.stage, last_activity_at: new Date().toISOString(),
-              ...(event.error ? { error: event.error.message ?? String(event.error) } : {}) }),
+            budgetMs: prepared.view.budget_ms,
+            inspect: () => inspectView(task, prepared.view.view_id),
+            onEvent: event => recordViewEvent(task, prepared.view.view_id, event),
             onSession: async sessionId => {
               await updateView(task, prepared.view.view_id, { session_id: sessionId })
               await tasks.addConversation(task.task_id, { sessionId, title: `架构视图 · ${task.target}`, kind: 'architecture', activate: false })

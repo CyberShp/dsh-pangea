@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, writeFile, mkdir, rm, access, symlink, rename, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createView } from '../src/architecture-views.js'
+import { createView, recordViewEvent, listViews, updateView } from '../src/architecture-views.js'
 import { writeArchitectureRun } from './architecture-source-first-fixture.mjs'
 
 async function fixture(t) {
@@ -128,4 +128,25 @@ test('direct architecture reader accepts an aliased data root without weakening 
   progress.actions[f.actionId].task_path = outsideTask
   await writeFile(progressPath, JSON.stringify(progress))
   await assert.rejects(createView({ ...f.task, data_root: alias }, {}, f.env), /不可读取/)
+})
+
+
+
+test('edge-scoped diagram keeps only selected endpoints; diagnostic text stays valid JSON and stop survives late events', async t => {
+  const f = await fixture(t)
+  const edgeId = `${f.flowId}:edge-2`
+  const created = await createView(f.task, { flow_id: f.flowId, branch_ids: [edgeId] }, f.env)
+  const value = await context(f, created), flow = value.business_flows[0]
+  assert.equal(flow.edges.length, 1)
+  assert.equal(flow.nodes.length, 2)
+  assert.equal(flow.paths.length, 0)
+  assert.equal(flow.source_record.body.edges.length, 1)
+  await recordViewEvent(f.task, created.view.view_id, { stage: 'diagram_failed', terminal: true, status: 'error', error: 'failure "quoted" ' + 'x'.repeat(270000) })
+  let view = (await listViews(f.task)).find(v => v.view_id === created.view.view_id)
+  assert.equal(view.generation_events.length, 1)
+  assert.equal(view.status, 'failed')
+  await updateView(f.task, created.view.view_id, { status: 'stopped' })
+  await recordViewEvent(f.task, created.view.view_id, { stage: 'late_failure', terminal: true, error: 'cancelled' })
+  view = (await listViews(f.task)).find(v => v.view_id === created.view.view_id)
+  assert.equal(view.status, 'stopped')
 })

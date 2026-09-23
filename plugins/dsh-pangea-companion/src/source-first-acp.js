@@ -302,14 +302,26 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     if (result.stopReason !== 'completed') throw new Error(`Worker 回合未完成：${action.action_id} ${result.stopReason} ${result.diagnostic ?? ''}`)
     const settled = await adapter('settle', action)
     await event({ stage: 'source_first_action_settled', action_id: action.action_id, validation: settled.validation?.status })
-    if (isClosure && (settled.attention_required || settled.validation?.recoverable === false)) {
-      await pause(`定向修正需要处理：${JSON.stringify(settled.validation)}`)
-      return
-    }
     if (settled.attention_required || settled.validation?.recoverable === false) {
-      return { stopReason: 'completed', attentionRequired: true,
-        diagnostic: `当前 action ${action.action_id} 需要处理：${JSON.stringify(settled.validation)}`,
-        output: text(JSON.stringify({ action_id: action.action_id, validation: settled.validation, attention_required: true })) }
+      const validation = settled.validation ?? {}
+      const reason = validation.error?.message ?? validation.repair_action?.error ?? '交付未完成'
+      const code = validation.error?.code ?? 'ACTION_ATTENTION_REQUIRED'
+      let snapshot, diagnosticPath, saveError
+      try { snapshot = await cli(['result-read', ...binding, '--view', 'compact']) }
+      catch (error) { snapshot = { diagnostic_read_error: error.message } }
+      try {
+        const folder = path.join(path.dirname(bindingsPath), 'diagnostics')
+        await mkdir(folder, { recursive: true })
+        diagnosticPath = path.join(folder, `action-${randomUUID()}.json`)
+        await writeFile(diagnosticPath, JSON.stringify({ at: new Date().toISOString(), run_id: runId,
+          action_id: action.action_id, task_id: taskId, settled, result_snapshot: snapshot }, null, 2))
+      } catch (error) { saveError = error.message; diagnosticPath = null }
+      const message = `当前 action ${action.action_id} 需要处理：${code} · ${String(reason).slice(0, 1200)}${diagnosticPath ? `；完整诊断：${diagnosticPath}` : `；诊断保存失败：${saveError}`}`
+      await event({ stage: 'source_first_action_attention', status: 'error', action_id: action.action_id,
+        error_code: code, error: reason, diagnostic_path: diagnosticPath })
+      if (isClosure) { await pause(message); return }
+      return { stopReason: 'completed', attentionRequired: true, diagnostic: message,
+        output: text(JSON.stringify({ action_id: action.action_id, error_code: code, diagnostic_path: diagnosticPath, attention_required: true })) }
     }
   }
   async function execute() {

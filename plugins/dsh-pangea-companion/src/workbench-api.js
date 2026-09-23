@@ -1,5 +1,6 @@
 import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import path from 'node:path'
+import { createDiagramRun } from './diagram-acp.js'
 import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
 import { createSourceFirstAcpRun } from './source-first-acp.js'
@@ -805,7 +806,7 @@ export async function resumeAnalysisRun({ cwd, dataRoot, runId, runner = runPang
 export { dataRootFor }
 
 // Derived sessions have no dependency on the main Run's completion state.
-export async function launchArchitectureSession(api, { cwd, task, prompt, onSession, onJob, onEvent = async () => {} }, runtime, env = process.env) {
+export async function launchArchitectureSession(api, { cwd, task, prompt, onSession, onJob, inspect, budgetMs = 1200000, onEvent = async () => {} }, runtime, env = process.env) {
   const provider = task.provider
   const model = provider ? null : await requireInternalModel(api, task.model_route)
   const sessionId = await createDshSession(api, workspaceRoot(cwd), `架构视图 · ${task.target}`)
@@ -816,6 +817,7 @@ export async function launchArchitectureSession(api, { cwd, task, prompt, onSess
     const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
     const jobId = await startAcpJob(runtime, parent, provider, prompt, `架构视图 · ${task.target}`, onEvent, {
       onTurnEvent: onEvent,
+      startRun: ({ subagents, parent, signal }) => createDiagramRun({ subagents, parent, signal, provider, prompt, agentModel: task.agent_model, onEvent, inspect, budgetMs }),
       onJobCreated: async details => {
         await onJob(details)
         // The view consumes completion. Register before releasing ACP startup so
@@ -826,6 +828,16 @@ export async function launchArchitectureSession(api, { cwd, task, prompt, onSess
     }, task.agent_model)
     return { session_id: sessionId, job_id: jobId }
   }
-  apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
+  const deadline = setTimeout(async () => {
+    try {
+      const state = await inspect?.()
+      if (state?.ok || state?.terminal) return
+      apiValue(await api.sessions.cancel(rpc({ sessionId })))
+      await onEvent({ stage: 'diagram_budget_exhausted', status: 'error', terminal: true, error: '图表生成达到执行预算；已请求停止，候选图和诊断保留' })
+    } catch (error) { await onEvent({ stage: 'diagram_cancel_failed', status: 'error', terminal: true, error: error.message }) }
+  }, budgetMs)
+  deadline.unref?.()
+  try { apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] }))) }
+  catch (error) { clearTimeout(deadline); throw error }
   return { session_id: sessionId, job_id: null }
 }
