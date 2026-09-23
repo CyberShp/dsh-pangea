@@ -251,6 +251,12 @@ function taskMatchesJob(task, value, options = {}) {
   return Boolean(findAttempt(task, ref)) || (!task.attempts.length && task.job_id === ref.jobId)
 }
 
+function runAttentionMessage(run) {
+  const completed = text(run?.lifecycle_status).toLowerCase() === 'complete' || text(run?.phase).toUpperCase() === 'COMPLETE'
+  return text(run?.error, completed && text(run?.quality_status).toUpperCase() === 'UNRESOLVED'
+    ? '分析流程已完成，仍有待确认结论（UNRESOLVED）' : 'Run 需要处理，分析未正常完成')
+}
+
 function taskStatusFromRun(run) {
   const lifecycle = text(run?.lifecycle_status).toLowerCase()
   const status = text(run?.status).toLowerCase()
@@ -744,7 +750,7 @@ export class TaskStore {
     task.run_id = runId
     if (['legacy-v1', 'source-first-v1'].includes(run?.workflow_version)) task.workflow_version = run.workflow_version
     task.status = taskStatusFromRun(run)
-    task.launch_error = task.status === 'needs_attention' ? text(run?.error, 'Run 需要处理，分析未正常完成') : null
+    task.launch_error = task.status === 'needs_attention' ? runAttentionMessage(run) : null
     task.launch_error_code = task.status === 'needs_attention' ? 'RUN_ATTENTION_REQUIRED' : null
     task.updated_at = this.now()
     await this.persistQueued()
@@ -790,10 +796,10 @@ export class TaskStore {
         && !['complete', 'failed', 'stopped', 'cancelled'].includes(text(run?.lifecycle_status).toLowerCase())) continue
       const status = taskStatusFromRun(run)
       if (status === 'running' && task.status === 'failed' && task.launch_error_code && task.launch_error_code !== 'RUN_ATTENTION_REQUIRED') continue
-      if (task.status !== status) {
+      if (task.status !== status || (status === 'needs_attention' && task.launch_error_code === 'RUN_ATTENTION_REQUIRED' && task.launch_error !== runAttentionMessage(run))) {
         task.status = status
-        if (status === 'needs_attention' && !task.launch_error) {
-          task.launch_error = text(run?.error, 'Run 需要处理，分析未正常完成')
+        if (status === 'needs_attention' && (!task.launch_error || task.launch_error_code === 'RUN_ATTENTION_REQUIRED')) {
+          task.launch_error = runAttentionMessage(run)
           task.launch_error_code = 'RUN_ATTENTION_REQUIRED'
         } else if (status !== 'needs_attention' && task.launch_error_code === 'RUN_ATTENTION_REQUIRED') {
           task.launch_error = null

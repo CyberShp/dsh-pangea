@@ -1,10 +1,10 @@
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, realpath, writeFile, appendFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
 import { diagnosticText } from './launch-log.js'
 import { summarizeRun } from './reader.js'
 import { writeTaskStoreFile } from './task-store.js'
+import { renderCandidate } from './architecture-render.mjs'
 
 export const DIAGRAM_TYPES = ['architecture', 'workflow', 'sequence', 'dataflow', 'lifecycle']
 const stamp = () => new Date().toISOString()
@@ -45,6 +45,8 @@ export async function updateView(task, viewId, changes) {
 
 async function writeView(task, viewId, changes) {
   const view = await loadView(task, viewId)
+  if (typeof changes === 'function') changes = changes(view)
+  if (!changes) return view
   const updated = { ...view, ...changes, updated_at: stamp() }
   await writeTaskStoreFile(path.join(await viewRoot(task, viewId), 'manifest.json'), JSON.stringify(updated, null, 2))
   return updated
@@ -71,6 +73,27 @@ export async function inspectView(task, viewId) {
     if (receipt.ok) await readFile(path.join(folder, 'diagram.html'))
     return receipt
   } catch { return { ok: false, error: '尚无可读取的验证通过产物' } }
+}
+
+const activeRenders = new Map()
+export function cancelViewRender(task, viewId) {
+  activeRenders.get(`${task.data_root}/${task.run_id}/${viewId}`)?.abort(new Error('停止图表验证'))
+}
+export async function validateView(task, viewId, options = {}, env = process.env) {
+  const view = await loadView(task, viewId)
+  if (!options.manual && ['stopped', 'failed'].includes(view.status)) return { ok: false, terminal: true, error: view.error || '图表已停止' }
+  const key = `${task.data_root}/${task.run_id}/${viewId}`
+  if (activeRenders.has(key)) throw new Error('当前候选正在验证')
+  const controller = new AbortController()
+  activeRenders.set(key, controller)
+  try {
+    const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal
+    const receipt = await renderCandidate(await viewRoot(task, viewId), env.PANGEA_ARCHIFY_ROOT, { ...options, signal, node: env.PANGEA_NODE || process.execPath })
+    if (signal.aborted || (await loadView(task, viewId)).status === 'stopped' && !options.manual) return { ...receipt, ok: false, terminal: true }
+    await updateView(task, viewId, current => signal.aborted || current.status === 'stopped' && !options.manual ? null :
+      { ...(receipt.ok ? { status: 'ready' } : options.manual ? { status: 'failed' } : {}), error: receipt.ok ? null : receipt.error })
+    return receipt
+  } finally { activeRenders.delete(key) }
 }
 
 function scopeFlow(flow, branchIds) {
@@ -160,11 +183,17 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   context.partial_delivery = summary?.partial_delivery ?? false
   context.source_snapshot = summary?.source_snapshot ?? { manifest_path: path.join(run, 'inputs/source/manifest.json') }
   context.reader_warnings = summary?.reader_warnings ?? []
+  context.coverage_match = summary?.coverage_match ?? null
   const sourceRecords = [...new Map(['business_flows', 'risks', 'test_cases', 'evidence', 'notes'].flatMap(key => context[key] ?? [])
     .filter(row => row.source_record).map(row => {
       const record = row.source_record
       return [`${record.action_id}/${record.record_id}`, { action_id: record.action_id, record_id: record.record_id, revision: record.revision }]
     })).values()]
+  if (viewProfile === 'function_variables') {
+    context.flow_locator = { flow_id: scopedFlow.flow_id, title: scopedFlow.title, unit_id: scopedFlow.unit_id,
+      source_evidence: scopedFlow.source_evidence ?? [] }
+    for (const key of ['business_flows', 'risks', 'test_cases', 'evidence', 'notes']) delete context[key]
+  }
   const viewId = randomUUID()
   const folder = path.join(root, viewId)
   await mkdir(folder)
@@ -186,32 +215,52 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     previous_view_id, session_id: null, job_id: null, created_at: stamp(), updated_at: stamp(),
     budget_ms: viewProfile === 'function_variables' ? 1800000 : 1200000, max_render_attempts: 3 }
   await writeFile(path.join(folder, 'manifest.json'), JSON.stringify(view, null, 2))
-  const renderer = fileURLToPath(new URL('./architecture-render.mjs', import.meta.url))
-  const quote = value => `'${value.replaceAll("'", process.platform === 'win32' ? "''" : "'\"'\"'")}'`
-  const renderCommand = `${process.platform === 'win32' ? '& ' : ''}${[env.PANGEA_NODE || process.execPath, renderer, folder, archify].map(quote).join(' ')}`
   return { view, prompt: [
     `为 ${task.target} 创建 ${type} 架构视图。${previous ? '这是关联的新画图会话；candidate.json 是旧图，必须按本次 context.json 核对更新。' : ''}`,
     ...(viewProfile === 'function_variables' ? [
-      '绘制当前业务流程的函数与变量流程图，使用 workflow schema。以真实函数为节点，label 保留准确函数名，sublabel/tag 写简短说明；完整签名、入参、返回值、关键局部或共享变量、冻结源码相对路径与行号放入对应 cards，明确关联函数名，不把长段说明塞入单行节点。',
-      '有向连线表达真实调用关系，标明调用方向、分支条件、实参到形参的传递、返回值接收和关键变量的赋值或状态变化；循环、递归和回调须忠实表达。按 schema 支持的 label、描述或详情字段组织信息，保持主图可读。',
+      '绘制 flow_locator 指向源码范围的函数调用与变量图，使用 workflow schema。主图只含真实函数和单独标记的宏节点；外部被调用函数可作为外部节点。label 保留准确符号名，sublabel/tag 写简短说明。完整签名、入参、返回值、变量与冻结源码行号放入对应 cards。',
+      '主图每条有向边只表达一个已核对的真实调用点；在 cards 写明相对路径与行号、实参到形参映射及返回值接收。函数内部判断、计算、赋值、重置和返回按执行顺序写在该函数 cards 中；未知外部调用者写入 cards。',
       '从已发布业务流程定位冻结源码，只读取该流程相关函数。逐一核对函数定义、调用点与变量读写；不得将业务步骤直接冒充函数，不得推测运行时具体值。无法确认的动态调用、外部实现、入参、返回值或变量变化明确标注“待确认”及原因。',
       '图中展示已核对范围与缺失信息；若源码不可读或没有可核对的函数，报告原因，不生成虚构图。此图为源码静态关系，不能声称运行时轨迹已验证。',
+      '业务流程只用于定位源码，不能作为函数调用边的证据。每条调用边核对冻结源码中的调用点；没有调用点的函数独立展示，并在 cards 写明调用者或调度顺序待确认。宏标为宏，函数内判断/赋值标为内部步骤，不能冒充函数调用；不为连通布局补造调用边。',
+      '逐函数在 cards 按执行顺序写出实际类型、入参、返回值接收、关键变量读取→中间计算→赋值/重置，包括整数截断、缩放、条件更新和宏对实参的写入。判断的不同结果须可区分；用户说明使用中文，代码符号保留原文。',
     ] : []),
     ...(branchIds ? [`本图是局部分支图，仅包含 ${branchIds.join('、')}。主干仅作定位和回接上下文；图题须注明“局部分支”，不得把本图表述为完整流程。`] : []),
     `先读取 ${path.join(archify, 'SKILL.md')}，按需读对应 schema/example；PANGEA 集成约定优先：不运行更新检查，不访问外网，不要求公开仓库，不读取秘密配置。`,
     ...(type === 'workflow' ? [
+      `仅作结构示例，必须用本次源码事实替换：${JSON.stringify(viewProfile === 'function_variables' ? {
+        schema_version: 2, diagram_type: 'workflow', meta: { title: '函数与变量关系', locale: 'zh-CN', quality_profile: 'showcase' },
+        lanes: [{ id: 'functions', label: '函数' }, { id: 'macro', label: '宏' }],
+        nodes: [{ id: 'caller', lane: 'functions', col: 0, type: 'backend', label: 'caller' }, { id: 'callee', lane: 'functions', col: 1, type: 'external', label: 'callee' }, { id: 'macro', lane: 'macro', col: 0, type: 'backend', label: 'MACRO', tag: '宏' }],
+        edges: [{ id: 'call', from: 'caller', to: 'callee', label: '实际调用' }],
+        cards: [{ title: 'caller 的源码证据', items: ['准确签名、调用位置与表达式、参数和返回值映射', '内部计算与变量读写按实际顺序展开'] }, { title: 'MACRO', items: ['宏的实参读写；未发现调用点，独立展示'] }],
+      } : {
+        schema_version: 2, diagram_type: 'workflow', meta: { title: '条件分支与汇合', locale: 'zh-CN', quality_profile: 'showcase' },
+        lanes: [{ id: 'main', label: '主路径' }, { id: 'other', label: '另一分支' }],
+        nodes: [{ id: 'check', lane: 'main', col: 0, type: 'decision', label: '条件判断' }, { id: 'yes', lane: 'main', col: 1, type: 'backend', label: '条件成立处理' }, { id: 'no', lane: 'other', col: 1, type: 'backend', label: '条件不成立处理' }, { id: 'join', lane: 'main', col: 2, type: 'backend', label: '更新状态' }, { id: 'return', lane: 'main', col: 3, type: 'backend', label: '返回' }],
+        edges: [{ id: 'yes', from: 'check', to: 'yes', label: '是' }, { id: 'no', from: 'check', to: 'no', label: '否' }, { id: 'yj', from: 'yes', to: 'join' }, { id: 'nj', from: 'no', to: 'join' }, { id: 'jr', from: 'join', to: 'return' }],
+      })}`,
       previous ? '保留旧 candidate.json 的 schema_version；核对语义后按诊断修改。' : 'candidate.json 已提供 schema_version: 2 的空模板；补全真实 lanes、nodes、edges，不复制示例事实。',
       'schema v2 的 col 是逻辑列，由编译器计算列距、路由和画布范围。首次排版省略 meta.viewBox、yOffset、via、channelX、channelY、labelAt、fromSide、toSide，使用自动路由；仅按具体诊断添加必要几何约束。',
+      '每个节点占据独立的 lane + col 位置。同列的不同分支使用不同 lane；同 lane 的连续步骤使用不同 col。node-overlap 诊断必须改变冲突节点的位置，缩短标签或改 width 无法解决同一位置重叠。返回节点置于实际状态重置之后。',
       '使用 semanticChecks 时，从源码核对起点与所有终止分支并完整声明 allowedTerminals；不能仅为通过校验而删除分支、调用或语义标签。',
     ] : []),
     `当前分析上下文：${path.join(folder, 'context.json')}。源码位置按其中 source_snapshot 的 repositories、manifest_path 和 index_path 读取，不猜测旧源码目录。`,
-    '保留流程 nodes、edges、paths 的分支与回接关系；原始记录是分析依据，测试步骤不能直接当作组件依赖。仅核对当前对象及必要依赖，不扩大成全仓分析。',
+    viewProfile === 'function_variables'
+      ? '函数图先在 cards 列出逐条调用证据：caller、callee、冻结文件行号和调用表达式，然后仅将这些调用绘入 edges；无调用证据的函数或宏独立展示，edges 允许为空。不要用假设的外部循环连接它们。函数内部计算只放对应 cards，不用自环表示返回或赋值。绘图前逐条核对准确签名。已发布流程与源码冲突时在 cards 说明差异，不改主 Run。'
+      : '依据冻结源码核对业务流程 nodes、edges、paths 的条件、处理结果与回接；关键判断的真假路径分别连向实际处理/结果，再汇合。普通执行顺序不标为条件分支。分别定义的函数和宏不代表它们按顺序调用；注释中的运行周期不证明外部调度连线。没有调用点或循环体证据时，各入口独立展示，调用者与调度写入 cards 的待确认说明。原文省略或存在疑点时保留准确范围和待确认说明，不为通过布局校验改变语义。用户说明使用中文，代码符号保留原文。',
+    '原始记录是分析依据，测试步骤不能直接当作组件依赖。仅核对当前对象及必要依赖，不扩大成全仓分析。',
     '遵循上下文 publication 与 partial_delivery 标识；未最终交付的图标注“当前分析视图”。无证据的关系不补画，reader_warnings 涉及的内容不得表述为已验证。',
+    'coverage_match 中的来源限制同样适用于图表说明；合成或版本未核实的数据不能标成实测未覆盖，变量边界的静态推导也不等于执行证据。',
+    'context.json 已按当前流程裁剪；其中没有某函数或用例，不能推断整个 Run 没有相关用例，更不能据此断言该函数无测试覆盖。图表说明只描述当前图和实际提供的覆盖记录。',
     '只核对本图相关实现；语义疑点在会话报告，不能改主 Run 的报告、投影、风险、用例、状态。',
     `唯一写入目录：${folder}。编写 candidate.json；不要修改 manifest.json。`,
-    `完成后原样执行以下 ${process.platform === 'win32' ? 'PowerShell' : 'shell'} 命令，Node 可执行文件、参数及输出目录已绑定：\n\`\`\`${process.platform === 'win32' ? 'powershell' : 'sh'}\n${renderCommand}\n\`\`\``,
-    `本次生成总预算 ${view.budget_ms / 60000} 分钟，最多调用渲染命令 ${view.max_render_attempts} 次；预算或次数耗尽后保留候选图并报告准确原因，不换会话规避限制。`,
-    '该命令运行 Archify deliver 并保存收据。失败只修 candidate.json，再执行同一命令；两轮诊断无改善时如实报告。渲染验证不证明源码结论正确。',
+    '本回合只编写一个 candidate.json 并结束；不要调用 Archify validate/deliver 或 architecture-render。宿主会冻结本回合最终字节并执行严格校验和交付；失败诊断由宿主续接本会话。',
+    `本次生成总预算 ${view.budget_ms / 60000} 分钟，共 ${view.max_render_attempts} 个候选（初稿和两次修复）；校验与交付计入总时间，交付不额外占候选次数。第三个候选仍由宿主验证，不换会话规避限制。`,
+    '默认省略 phases、groups、mainPath、semanticChecks、固定宽度和手工路由；仅在表达真实语义所必需时添加。渲染验证不证明源码结论正确。',
+    viewProfile === 'function_variables'
+      ? '提交渲染前逐项自查并在 cards 保留证据：nodes 只有函数、宏、外部被调用函数；edges 逐条对应源码中的调用表达式（不是函数内控制流）；无调用关系的节点保持独立。Archify 的通用主路径建议不适用于独立函数，不添加 mainPath 来串联它们。长签名、内部计算和变量变化只放 cards，节点只用短符号与简短说明。'
+      : '提交渲染前逐边核对源码依据，并核对 mainPath 中每一对相邻节点确有对应 edge；先完成状态更新，再返回。没有外部调度源码时不构造入口间的生命周期或周期循环。',
     '产物生成后在会话简要说明，不启动主分析流程。',
   ].join('\n') }
 }
@@ -228,10 +277,23 @@ export async function listViews(task) {
       try { receipt = await readJson(path.join(root, entry.name, 'validation-receipt.json')) } catch { /* pending */ }
       const events = await readFile(path.join(root, entry.name, 'events.jsonl'), 'utf8').then(value => value.trim().split('\n').slice(-50).flatMap(line => { try { return [JSON.parse(line)] } catch { return [] } }), () => [])
       const html = await readFile(path.join(root, entry.name, 'diagram.html')).then(() => true, () => false)
-      const available = Boolean(receipt?.ok && html)
+      const candidate = await readFile(path.join(root, entry.name, 'candidate.json')).catch(() => null)
+      const digest = candidate && createHash('sha256').update(candidate).digest('hex')
+      const validatedDigest = receipt?.candidate_sha256 ?? receipt?.specification?.sha256
+      const candidate_unverified = Boolean(candidate && (!validatedDigest || digest !== validatedDigest))
+      const available = Boolean(receipt?.ok && html && !candidate_unverified)
+      const draft = Boolean((receipt?.draft || receipt?.previous_draft) && await readFile(path.join(root, entry.name, 'draft.html')).then(() => true, () => false))
+      const preview_kind = receipt?.ok && html ? 'verified' : receipt?.draft && draft ? 'draft' : receipt?.previous_verified && html ? 'verified' : draft ? 'draft' : null
+      const preview_is_previous = Boolean(preview_kind && (candidate_unverified || (preview_kind === 'verified' ? !receipt?.ok : !receipt?.draft)))
+      let candidate_summary = null
+      try {
+        const spec = JSON.parse(candidate.toString('utf8'))
+        candidate_summary = { nodes: (spec.nodes ?? []).map(n => ({ id: n.id, label: n.label })),
+          edges: (spec.edges ?? []).map(e => ({ from: e.from, to: e.to, label: e.label })) }
+      } catch { /* Invalid candidates retain compiler diagnostics. */ }
       // A rejected candidate can be repaired by the live Job. Its lifecycle,
       // reconciled by architecture-list, determines whether generation failed.
-      items.push({ ...view, generation_events: events, diagnostic_path: path.join(root, entry.name, 'events.jsonl'), render_diagnostic_path: path.join(root, entry.name, 'render-history.jsonl'), render_exit_code: receipt?.exit_code, render_duration_ms: receipt?.duration_ms, status: view.status === 'stopped' ? 'stopped' : available ? 'ready' : view.status, available,
+      items.push({ ...view, generation_events: events, diagnostic_path: path.join(root, entry.name, 'events.jsonl'), render_diagnostic_path: path.join(root, entry.name, 'render-history.jsonl'), render_exit_code: receipt?.exit_code, render_duration_ms: receipt?.duration_ms, candidate_unverified, candidate_summary, preview_is_previous, preview_kind, preview_diagnostics: preview_kind === 'draft' && !receipt?.draft ? receipt?.previous_draft?.diagnostics ?? [] : receipt?.diagnostics ?? [], preview_available: Boolean(preview_kind), status: view.status === 'stopped' ? 'stopped' : available ? 'ready' : view.status, available,
         error: available ? null : view.error,
         validation_error: receipt?.ok === false ? receipt.error || '图表尚未通过校验' : null,
         validation_diagnostics: receipt?.ok === false ? receipt.diagnostics ?? [] : [] })
@@ -240,11 +302,14 @@ export async function listViews(task) {
   return items.sort((a, b) => b.created_at.localeCompare(a.created_at))
 }
 
-export async function viewArtifact(task, viewId, format) {
+export async function viewArtifact(task, viewId, format, variant = 'verified') {
   await loadView(task, viewId)
   if (!['html', 'svg'].includes(format)) throw new Error('Unsupported diagram format')
   const root = await viewRoot(task, viewId)
-  const file = await realpath(path.join(root, `diagram.${format}`))
+  if (!['verified', 'draft'].includes(variant)) throw new Error('Unsupported diagram variant')
+  const receipt = await readJson(path.join(root, 'validation-receipt.json'))
+  if (variant === 'draft' && !receipt.draft && !receipt.previous_draft || variant === 'verified' && !receipt.ok && !receipt.previous_verified) throw new Error('当前收据不包含此产物')
+  const file = await realpath(path.join(root, `${variant === 'draft' ? 'draft' : 'diagram'}.${format}`))
   if (path.dirname(file) !== root) throw new Error('Artifact outside view directory')
   return readFile(file)
 }

@@ -641,7 +641,7 @@ function sourceFirstLifecycle(progress) {
   return { lifecycle_status: lifecycleStatus, phase, terminal: lifecycleStatus !== 'running', stage }
 }
 
-export function sourceFirstStepRows(progress, runDirectory, artifacts) {
+export function sourceFirstStepRows(progress, runDirectory, artifacts, mode) {
   const life = sourceFirstLifecycle(progress)
   const currentIndex = Math.max(0, SOURCE_FIRST_STAGES.findIndex(([stage]) => stage === life.stage))
   const actionArtifacts = new Map()
@@ -688,7 +688,7 @@ export function sourceFirstStepRows(progress, runDirectory, artifacts) {
     return {
       step: String(index + 1).padStart(2, '0'),
       stage,
-      title,
+      title: stage === 'reviewing' && mode === 'speed' ? '首轮结果对照复核（速度型）' : title,
       status,
       artifacts: stageArtifacts.filter((file, position) => stageArtifacts.indexOf(file) === position),
     }
@@ -872,9 +872,10 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     completion: item.completion,
     records: item.records,
   }))
+  const steps = sourceFirstStepRows(progress, runDirectory, actionView.artifacts, contract?.analysis_settings?.mode)
   const workflow = {
-    steps: sourceFirstStepRows(progress, runDirectory, actionView.artifacts),
-    completed_steps: sourceFirstStepRows(progress, runDirectory, actionView.artifacts).filter(item => ['completed', 'skipped'].includes(item.status)).map(item => item.step),
+    steps,
+    completed_steps: steps.filter(item => ['completed', 'skipped'].includes(item.status)).map(item => item.step),
     current_step: life.stage,
     core_rules_ack: {},
     judge: { required: true, status: progress.stage === 'reviewing' || progress.stage === 'complete' ? 'running' : 'pending' },
@@ -903,7 +904,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     quality_checks: [],
     unresolved: [...(Array.isArray(progress.degradations) ? progress.degradations : []), ...(progress.blocking_reason ? [progress.blocking_reason] : [])],
     error_history: [...(Array.isArray(progress.errors) ? progress.errors : []), ...actionView.issues],
-    step_progress: { completed: sourceFirstStepRows(progress, runDirectory, actionView.artifacts).filter(item => ['completed', 'skipped'].includes(item.status)).length, total: SOURCE_FIRST_STAGES.length },
+    step_progress: { completed: steps.filter(item => ['completed', 'skipped'].includes(item.status)).length, total: SOURCE_FIRST_STAGES.length },
   }
   const summary = {
     coverage_summary: coverageOverview,
@@ -921,7 +922,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     delivery_integrity: { status: progress.partial_delivery ? 'partial' : reportAvailable ? 'complete' : 'incomplete' },
     semantic_review: { verdict: progress.quality_status ?? null, method: 'graph_review' },
     ...life,
-    phase_title: SOURCE_FIRST_STAGES.find(([stage]) => stage === life.stage)?.[1] ?? life.stage,
+    phase_title: steps.find(item => item.stage === life.stage)?.title ?? life.stage,
     target: contract?.target ?? runId,
     repository: contract?.repository ?? null,
     repositories: contract?.repositories ?? sourceSnapshot.repositories.map(item => item.repo_id).filter(Boolean),

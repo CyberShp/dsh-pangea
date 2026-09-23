@@ -111,6 +111,10 @@ test('diagram validation retries remain live until the Job ends and a later deli
   assert.deepEqual(repairing.validation_diagnostics, [diagnostic])
   assert.match(repairing.output, /Adjusting/)
 
+  // The renderer exhausts its attempts before the host Job settles.
+  const manifestPath = path.join(folder, 'manifest.json')
+  const exhausted = JSON.parse(await readFile(manifestPath, 'utf8'))
+  await writeFile(manifestPath, JSON.stringify({ ...exhausted, status: 'failed', error: 'Nodes overlap' }))
   status = 'completed'
   const failed = await list()
   assert.equal(failed.status, 'failed')

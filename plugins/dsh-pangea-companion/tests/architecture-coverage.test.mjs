@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -72,7 +73,7 @@ test('view creation and failure keep main artifacts and previous good view uncha
   const firstDir = path.join(run, '派生视图/archify', first.view.view_id)
   await writeFile(path.join(firstDir, 'candidate.json'), '{}')
   await writeFile(path.join(firstDir, 'diagram.html'), '<html>synthetic</html>')
-  await writeFile(path.join(firstDir, 'validation-receipt.json'), '{"ok":true}')
+  await writeFile(path.join(firstDir, 'validation-receipt.json'), JSON.stringify({ ok: true, candidate_sha256: createHash('sha256').update('{}').digest('hex') }))
   const second = await createView(task, { previous_view_id: first.view.view_id }, env)
   await updateView(task, second.view.view_id, { status: 'failed', error: 'synthetic failure' })
   const views = await listViews(task)
@@ -130,7 +131,9 @@ test('function diagrams persist their profile and flow across listing and revisi
   assert.match(first.prompt, /待确认/)
   assert.match(first.prompt, /相对路径与行号/)
   const folder = path.join(run, '派生视图/archify', first.view.view_id)
-  assert.deepEqual(JSON.parse(await readFile(path.join(folder, 'context.json'), 'utf8')).business_flows.map(flow => flow.flow_id), ['F1'])
+  const context = JSON.parse(await readFile(path.join(folder, 'context.json'), 'utf8'))
+  assert.equal(context.flow_locator.flow_id, 'F1')
+  assert.equal(context.business_flows, undefined)
   await writeFile(path.join(folder, 'candidate.json'), '{"title":"fixture"}')
   const revision = await createView(task, { flow_id: 'F1', previous_view_id: first.view.view_id }, env)
   assert.equal(revision.view.profile, 'function_variables')

@@ -1640,3 +1640,38 @@ test('flow reader hides nested source evidence without changing stored records o
   assert.equal(JSON.stringify(body), original)
   assert.ok(JSON.stringify(c.renderReadableBody(body)).includes('private.c'))
 })
+
+test('renderable draft has visible warning and draft exports without claiming ready', async () => {
+  const { find, render } = await diagramWorkspace([{ view_id: 'functions-v2', available: false, status: 'failed',
+    preview_available: true, preview_kind: 'draft', validation_error: 'phase overlap', validation_diagnostics: [{ code: 'workflow/phase-overlap' }] }])
+  await find('函数与变量流程图视图').props.onClick()
+  const nodes = descendants(find('函数与变量图工作区'))
+  assert.match(JSON.stringify(nodes), /草稿：仍有 1 处布局问题/)
+  assert.match(render().find(n => n.type === 'iframe').props.src, /variant=draft/)
+  const exports = nodes.filter(n => n.type === 'a' && n.props.download)
+  assert.equal(exports.length, 2)
+  assert.ok(exports.every(n => n.props.download.startsWith('draft.') && n.props.href.includes('variant=draft')))
+})
+
+test('uncompilable graph shows readable relationships without an empty iframe', async () => {
+  const { find, render } = await diagramWorkspace([{ view_id: 'functions-v2', available: false, status: 'failed',
+    preview_available: false, candidate_summary: { nodes: [{ id: 'caller', label: 'caller' }], edges: [{ from: 'caller', to: 'missing' }] },
+    validation_error: 'missing reference' }])
+  await find('函数与变量流程图视图').props.onClick()
+  assert.ok(!render().some(n => n.type === 'iframe'))
+  const text = JSON.stringify(find('函数与变量图工作区'))
+  assert.match(text, /暂未生成可预览图/)
+  assert.match(text, /caller/)
+  assert.match(text, /missing/)
+})
+
+test('unverified latest edits retain a labelled previous preview and local verification action', async () => {
+  const { find, render } = await diagramWorkspace([{ view_id: 'functions-v2', available: false, status: 'failed',
+    preview_available: true, preview_kind: 'verified', candidate_unverified: true }])
+  await find('函数与变量流程图视图').props.onClick()
+  assert.match(JSON.stringify(find('函数与变量图工作区')), /已有预览对应上次验证的候选/)
+  assert.ok(render().some(n => n.type === 'button' && n.children.includes('验证最新候选')))
+  assert.match(render().find(n => n.type === 'iframe').props.src, /variant=verified/)
+  await find('选择架构视图').props.onChange({ target: { value: 'functions-v1' } })
+  assert.match(JSON.stringify(find('函数与变量图工作区')), /历史版本：最新版本请在上方选择/)
+})

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, writeFile, mkdir, rm, access, symlink, rename, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createView, recordViewEvent, listViews, updateView } from '../src/architecture-views.js'
+import { createView, recordViewEvent, listViews, updateView, validateView } from '../src/architecture-views.js'
 import { writeArchitectureRun } from './architecture-source-first-fixture.mjs'
 
 async function fixture(t) {
@@ -58,24 +58,22 @@ test('partial diagram trims paths, edges, nodes, raw flow body and cases; revisi
   assert.equal(await readFile(path.join(f.run, '派生视图/archify', revised.view.view_id, 'candidate.json'), 'utf8'), previousCandidate)
 })
 
-test('generated command runs the bound renderer with literal spaces, quotes and shell metacharacters', async t => {
+test('host runs the bound renderer with literal spaces, quotes and shell metacharacters', async t => {
   const f = await fixture(t)
   const archify = `${f.env.PANGEA_ARCHIFY_ROOT} ' $literal &`
   await rename(f.env.PANGEA_ARCHIFY_ROOT, archify)
   await writeFile(path.join(archify, 'bin/archify.mjs'), `
     import { writeFileSync } from 'node:fs';
-    writeFileSync(process.argv[5], '<html><svg viewBox="0 0 20 20"></svg></html>');
+    if (process.argv[2] === 'deliver') writeFileSync(process.argv[5], '<html><svg viewBox="0 0 20 20"></svg></html>');
     console.log(JSON.stringify({ ok: true, args: process.argv.slice(2) }));
   `)
   const created = await createView(f.task, { flow_id: f.flowId }, { PANGEA_ARCHIFY_ROOT: archify, PANGEA_NODE: process.execPath })
-  const command = created.prompt.match(/```(?:powershell|sh)\n([^\n]+)\n```/)[1]
-  const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/sh'
-  const args = process.platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-Command', command] : ['-c', command]
-  const result = spawnSync(shell, args, { encoding: 'utf8', timeout: 15000 })
-  assert.equal(result.status, 0, result.stderr)
+  assert.match(created.prompt, /只编写一个 candidate.json 并结束/)
+  assert.doesNotMatch(created.prompt, /```powershell/)
+  await validateView(f.task, created.view.view_id, {}, { PANGEA_ARCHIFY_ROOT: archify, PANGEA_NODE: process.execPath })
   const folder = await realpath(path.join(f.run, '派生视图/archify', created.view.view_id))
   const receipt = JSON.parse(await readFile(path.join(folder, 'validation-receipt.json'), 'utf8'))
-  assert.deepEqual(receipt.args, ['deliver', 'workflow', path.join(folder, 'candidate.json'), path.join(folder, 'diagram.html'), '--quality', 'showcase', '--json'])
+  assert.deepEqual(receipt.args, ['deliver', 'workflow', path.join(folder, 'candidate-1.json'), path.join(folder, 'candidate-1.html'), '--quality', 'showcase', '--json', '--draft-output', path.join(folder, 'draft.html')])
   assert.match(await readFile(path.join(folder, 'diagram.svg'), 'utf8'), /xmlns=/)
 })
 test('stale legacy projection cannot override source-first records; absent content and stale selection are explicit', async t => {

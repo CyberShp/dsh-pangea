@@ -220,6 +220,22 @@ test('marks an attention-required Run as incomplete instead of running', async (
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+test('distinguishes completed unresolved conclusions from an interrupted analysis', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-unresolved-'))
+  try {
+    const store = createTaskStore({ storePath: path.join(root, 'tasks-v1.json'), idFactory: () => 'unresolved' })
+    await store.create({ workspace: '/workspace', input: { repository: 'repo', target: 'review' } })
+    await store.addConversation('unresolved', { sessionId: 'session', title: 'analysis', kind: 'analysis' })
+    await store.bindRunBySession('session', { run_id: 'run', lifecycle_status: 'attention_required' })
+    await store.reconcileRuns([{ run_id: 'run', lifecycle_status: 'complete', quality_status: 'UNRESOLVED' }])
+    const task = await store.getByRun('run')
+    assert.equal(task.status, 'needs_attention')
+    assert.equal(task.launch_error, '分析流程已完成，仍有待确认结论（UNRESOLVED）')
+    const bound = await store.bindRunBySession('session', { run_id: 'run', phase: 'COMPLETE', quality_status: 'UNRESOLVED' })
+    assert.equal(bound.launch_error, task.launch_error)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('looks up a Task by Run and preserves stopped as its own lifecycle state', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-task-stopped-'))
   try {

@@ -1,6 +1,6 @@
 import { stopSourceFirstAcpRun } from './source-first-acp.js'
 import { interruptSourceFirstChildren } from './report-policy.js'
-import { createView, listViews, loadView, updateView, viewArtifact, recordViewEvent, inspectView } from './architecture-views.js'
+import { createView, listViews, loadView, updateView, viewArtifact, recordViewEvent, inspectView, validateView, cancelViewRender } from './architecture-views.js'
 import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
@@ -18,7 +18,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, launchArchitectureSession, queryCoverageAsset, importCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, launchArchitectureSession, isNativeDiagramRunning, queryCoverageAsset, importCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -98,7 +98,7 @@ const PHASE_LABELS = {
   STEP_04: 'Step 04 · 深度讲解', STEP_05: 'Step 05 · 场景与风险', STEP_06: 'Step 06 · SFMEA 翻译',
   STEP_07: 'Step 07 · 测试设计', STEP_08: 'Step 08 · 独立 Judge', STEP_09: 'Step 09 · 正式交付',
   PLANNING: 'source-first · Planning 单元划分', ANALYZING: 'source-first · 源码区域分析',
-  REVIEWING: 'source-first · 盲审与同会话对照', CLOSING: 'source-first · 定向 closure',
+  REVIEWING: 'source-first · 复核', CLOSING: 'source-first · 定向 closure',
   REPORTING: 'source-first · 报告组装',
   COMPLETE: '已完成', INCOMPLETE: '未完整结束', STOPPED: '已停止', FAILED: '运行失败', UNKNOWN: '未知',
 }
@@ -673,11 +673,12 @@ export async function architectureArtifactRoute(req, res, tasks) {
     const url = new URL(req.url, 'http://localhost')
     const task = requireWorkspaceTask(await tasks.get(url.searchParams.get('task_id')), url.searchParams.get('cwd'), url.searchParams.get('task_id'))
     const format = url.searchParams.get('format') || 'html'
-    const data = await viewArtifact(task, url.searchParams.get('view_id'), format)
+    const variant = url.searchParams.get('variant') || 'verified'
+    const data = await viewArtifact(task, url.searchParams.get('view_id'), format, variant)
     res.setHeader('Content-Type', format === 'svg' ? 'image/svg+xml' : 'text/html; charset=utf-8')
     res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-downloads; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'")
     res.setHeader('X-Content-Type-Options', 'nosniff')
-    if (url.searchParams.get('download') === '1') res.setHeader('Content-Disposition', `attachment; filename="diagram.${format}"`)
+    if (url.searchParams.get('download') === '1') res.setHeader('Content-Disposition', `attachment; filename="${variant === 'draft' ? 'draft' : 'diagram'}.${format}"`)
     res.end(data)
   } catch (error) { return json(res, 400, { status: 'error', error: error.message }) }
 }
@@ -774,7 +775,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       if (!task.run_id) throw new Error('任务尚未关联 Run')
       if (body.action === 'architecture-list') {
         const views = await listViews(task)
-        for (const view of views.filter(v => ['generating', 'ready'].includes(v.status))) {
+        for (const view of views.filter(v => ['generating', 'ready'].includes(v.status) || ['starting', 'running', 'stopping'].includes(v.execution_status))) {
           if (view.available && !view.job_id) continue
           if (view.job_id) {
             const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)
@@ -794,15 +795,8 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
             if (!job || job.startedAt !== view.job_started_at || ['failed', 'killed', 'completed'].includes(job.status)) {
               Object.assign(view, await updateView(task, view.view_id, { status: !job || job.startedAt !== view.job_started_at ? 'interrupted' : job.status === 'killed' ? 'stopped' : 'failed', execution_status: job?.status ?? 'interrupted', error: !job ? view.error || '执行状态不可确认：画图 Job 已不可读取。已保留会话和输出。' : view.error || job.detail || view.validation_error || '画图执行已结束，尚无验证通过的产物。' }))
             }
-          } else if (view.session_id) {
-            try {
-            const history = apiValue(await api.sessions.history(rpc({ sessionId: view.session_id, maxMessages: 12 })))
-            const failure = sessionFailure(history)
-            const lastTurnEvent = [...(history?.events ?? [])].reverse().map(item => item.event ?? item).find(event => ['turn/start', 'turn/end'].includes(event.type ?? event.name))
-            if (failure || (lastTurnEvent?.type ?? lastTurnEvent?.name) === 'turn/end') Object.assign(view, await updateView(task, view.view_id, { status: 'failed', error: failure?.message ?? '画图回合已结束，尚无验证通过的产物。可打开会话继续处理。' }))
-            } catch (error) {
-              Object.assign(view, await updateView(task, view.view_id, { status: 'interrupted', error: `画图会话状态不可确认：${error.message}` }))
-            }
+          } else if (view.session_id && !isNativeDiagramRunning(view.session_id)) {
+            Object.assign(view, await updateView(task, view.view_id, { status: 'interrupted', error: '画图宿主已结束或重启；候选和已有产物保留，可本地验证最新候选。' }))
           }
         }
         return json(res, 200, { status: 'ok', views })
@@ -812,7 +806,8 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         try {
           const launched = await launchArchitectureSession(api, { cwd, task, prompt: prepared.prompt + (body.instruction ? `\n用户修改要求：${body.instruction}` : ''),
             budgetMs: prepared.view.budget_ms,
-            inspect: () => inspectView(task, prepared.view.view_id),
+            inspect: options => validateView(task, prepared.view.view_id, options),
+            check: () => inspectView(task, prepared.view.view_id),
             onEvent: event => recordViewEvent(task, prepared.view.view_id, event),
             onSession: async sessionId => {
               await updateView(task, prepared.view.view_id, { session_id: sessionId })
@@ -826,7 +821,14 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
           throw error
         }
       }
+      if (body.action === 'architecture-validate') {
+        const view = await loadView(task, body.view_id)
+        if (view.status === 'generating' || ['starting', 'running', 'stopping'].includes(view.execution_status)) throw new Error('请等待当前图表执行结束后验证最新候选')
+        const receipt = await validateView(task, body.view_id, { manual: true })
+        return json(res, 200, { status: 'ok', receipt, views: await listViews(task) })
+      }
       if (body.action === 'architecture-stop') {
+        cancelViewRender(task, body.view_id)
         const view = await loadView(task, body.view_id)
         if (view.job_id) {
           const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)

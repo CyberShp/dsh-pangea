@@ -147,7 +147,7 @@ window.__ModuleLoader__.load({
       return {
         workflow: current?.lifecycle_status === 'complete' ? '流程完成' : '流程未完成',
         delivery: ({ complete: '交付完整', incomplete: '交付不完整', unavailable: '交付不可读取' })[delivery?.status] ?? '交付尚未检查',
-        review: ({ graph_review: 'Graph 独立复核', independent_verified: '独立审查（宿主已核验执行）', independent_pending: '独立审查待完成', independent_declared: '独立审查（Agent 声明，宿主未核验）', self_review: '自审', unavailable: '审查记录不可读取' })[review?.method] ?? '审查方式未记录',
+        review: ({ graph_review: current?.mode === 'speed' ? '速度型对照复核（未盲审）' : 'Graph 独立复核', independent_verified: '独立审查（宿主已核验执行）', independent_pending: '独立审查待完成', independent_declared: '独立审查（Agent 声明，宿主未核验）', self_review: '自审', unavailable: '审查记录不可读取' })[review?.method] ?? '审查方式未记录',
         semantic: review?.verdict === 'PASS' ? 'PASS（审查者结论）' : review?.verdict === 'UNRESOLVED' ? 'UNRESOLVED（审查者结论）' : '未给出语义结论',
       }
     }
@@ -1661,7 +1661,7 @@ window.__ModuleLoader__.load({
           taskTitle: selectedTask.title,
           title: selectedTask.title,
           processMode: selectedTask.provider ? 'acp' : 'internal',
-          phase: activeConversation?.kind === 'architecture' ? activeDiagram?.available ? '图表可查看' : activeDiagram?.status === 'generating' && activeDiagram?.validation_error ? '正在修正布局' : activeDiagram?.error ? '需要处理' : '生成图表' : selectedCurrent ? (selectedCurrent.phase_title ?? PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
+          phase: activeConversation?.kind === 'architecture' ? activeDiagram?.status === 'generating' ? activeDiagram?.validation_error ? '正在修正布局' : '生成图表' : activeDiagram?.candidate_unverified ? '最新修改尚未验证' : activeDiagram?.preview_kind === 'draft' ? '草稿 / 布局未通过' : activeDiagram?.available ? '图表可查看' : activeDiagram?.error ? '需要处理' : '生成图表' : selectedCurrent ? (selectedCurrent.phase_title ?? PHASE[String(selectedCurrent.phase ?? '').toUpperCase()] ?? PHASE[selectedCurrent.phase] ?? selectedCurrent.phase) : '正在准备',
           percent: contextTotal > 0 ? Math.min(100, Math.round((contextCompleted / contextTotal) * 100)) : 0,
           conversations: (selectedTask.conversations ?? []).map((conversation, index) => {
             const view = diagramViews.find(item => item.session_id === conversation.session_id)
@@ -3022,9 +3022,11 @@ window.__ModuleLoader__.load({
         const functions = profile === 'function_variables'
         const views = matchingDiagrams(flow, profile)
         const selected = views.find(v => v.view_id === diagramSelection) ?? views[0]
-        const artifactUrl = (format, download = false) => '/api/pangea-companion/architecture-artifact?' + new URLSearchParams({ cwd: cwd || '', task_id: selectedTask.task_id, view_id: selected.view_id, format, ...(download ? { download: '1' } : {}) })
+        const artifactUrl = (format, download = false) => '/api/pangea-companion/architecture-artifact?' + new URLSearchParams({ cwd: cwd || '', task_id: selectedTask.task_id, view_id: selected.view_id, format, variant: selected.preview_kind || 'verified', ...(download ? { download: '1' } : {}) })
         const generating = selected?.status === 'generating'
-        const status = generating && selected.validation_error ? '正在修正布局' : DIAGRAM_STATUS[selected?.status] || '尚未生成'
+        const preview = selected?.preview_available ?? selected?.available
+        const draft = selected?.preview_kind === 'draft'
+        const status = generating ? selected.validation_error ? '正在修正布局' : '正在生成' : selected?.candidate_unverified ? '最新修改尚未验证' : draft ? '草稿 / 布局未通过' : DIAGRAM_STATUS[selected?.status] || '尚未生成'
         const newType = functions ? 'workflow' : diagramType
         const create = () => diagramAction('architecture-create', { type: newType, profile, flow_id: newType === 'architecture' ? null : flow.flow_id,
           instruction: functions ? '' : '先表达主干步骤和回接关系；分支较多时按挂接步骤及类型分组，组上保留分支数量与编号。仅使用已发布关系，不要把所有分支说明塞进一个节点。' })
@@ -3039,17 +3041,23 @@ window.__ModuleLoader__.load({
           h('div', { className: 'pangea-diagram-toolbar' },
             views.length ? h('label', { style: { display: 'flex', alignItems: 'center', gap: 8, flex: '1 1 260px', minWidth: 0 } }, h('span', { style: styles.itemMeta }, '当前图表'),
               h('select', { 'aria-label': '选择架构视图', style: { ...styles.search, flex: 1, minWidth: 0, width: 'auto', margin: 0 }, disabled: diagramBusy, value: selected?.view_id || '', onChange: e => chooseDiagram(views.find(view => view.view_id === e.target.value)) },
-                views.map(view => h('option', { key: view.view_id, value: view.view_id }, `${diagramName(view)} · ${diagramVersion(view, diagramViews)} · ${DIAGRAM_STATUS[view.status] || view.status}${view.created_at ? ` · ${formatTime(view.created_at)}` : ''}`)))) : null,
-            selected?.available ? h('button', { type: 'button', style: styles.button, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏查看') : null,
-            selected?.available ? ['html', 'svg'].map(format => h('a', { key: format, style: styles.chip, href: artifactUrl(format, true), download: `diagram.${format}` }, `导出 ${format.toUpperCase()}`)) : null,
+                views.map(view => h('option', { key: view.view_id, value: view.view_id }, `${diagramName(view)} · ${diagramVersion(view, diagramViews)} · ${view.candidate_unverified ? '最新修改未验证' : view.preview_kind === 'draft' ? '草稿' : view.available && view !== views[0] ? '上次成功版本' : DIAGRAM_STATUS[view.status] || view.status}${view.created_at ? ` · ${formatTime(view.created_at)}` : ''}`)))) : null,
+            preview ? h('button', { type: 'button', style: styles.button, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏查看') : null,
+            preview ? ['html', 'svg'].map(format => h('a', { key: format, style: styles.chip, href: artifactUrl(format, true), download: `${draft ? 'draft' : 'diagram'}.${format}` }, `导出${draft ? '草稿' : ''} ${format.toUpperCase()}`)) : null,
             h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-list') }, diagramBusy ? '正在更新…' : '刷新状态')),
           selected ? h(React.Fragment, null,
             selected.branch_ids?.length ? h('div', { className: 'pangea-diagram-caption' }, `局部分支图 · ${selected.branch_ids.length} 条分支：${selected.branch_ids.join('、')}`) : null,
             diagramIsStale(selected, current) ? h('div', { className: 'pangea-diagram-caption' }, '此图基于较早的分析版本，可重新生成。') : null,
-            selected.available ? frame(false) : h('div', { className: 'pangea-diagram-empty', role: generating ? 'status' : 'alert' },
-              h('strong', null, status), h('p', null, generating ? selected.validation_error ? '图表正在根据校验结果调整，完成后会自动显示。' : '正在整理图表并检查布局，完成后会自动显示。' : selected.error || '没有可预览的图表。可以查看生成记录，或重新生成。'),
+            selected.candidate_unverified ? h('div', { role: 'status', className: 'pangea-diagram-caption' }, '最新修改尚未验证。已有预览对应上次验证的候选。',
+              !generating ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-validate', { view_id: selected.view_id }) }, '验证最新候选') : null) : null,
+            selected.preview_is_previous && !selected.candidate_unverified ? h('div', { role: 'status', className: 'pangea-diagram-caption' }, draft ? '上次可预览草稿：最新候选编译失败，当前显示此前草稿。' : '上次成功版本：最新候选未通过校验，当前预览为上次交付。') : null,
+            draft ? h('div', { role: 'status', className: 'pangea-diagram-caption' }, `草稿：仍有 ${(selected.preview_diagnostics ?? selected.validation_diagnostics)?.length || 1} 处布局问题，详情见下方诊断。`) : null,
+            selected !== views[0] && preview ? h('div', { className: 'pangea-diagram-caption' }, '历史版本：最新版本请在上方选择。') : null,
+            preview ? frame(false) : h('div', { className: 'pangea-diagram-empty', role: generating ? 'status' : 'alert' },
+              h('strong', null, generating ? status : '暂未生成可预览图'), h('p', null, generating ? selected.validation_error ? '图表正在根据校验结果调整，完成后会自动显示。' : '正在整理图表并检查布局，完成后会自动显示。' : selected.error || '没有可预览的图表。可以查看生成记录，或重新生成。'),
+              selected.candidate_summary ? renderReadableBody(selected.candidate_summary) : null,
               generating ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止生成') : null),
-            selected.available ? h('div', { className: 'pangea-diagram-caption' }, '使用图内 + / − 缩放，放大后拖动画布；按 0 复位。') : null,
+            preview ? h('div', { className: 'pangea-diagram-caption' }, '使用图内 + / − 缩放，放大后拖动画布；按 0 复位。') : null,
             h('div', { className: 'pangea-diagram-footer' },
               selected.session_id ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => chooseDiagram(selected) }, '查看图表会话') : null,
               h('span', { style: styles.itemMeta }, selected.last_activity_at ? `更新于 ${formatTime(selected.last_activity_at)}` : ''),
@@ -3061,11 +3069,12 @@ window.__ModuleLoader__.load({
                 selected.diagnostic_path ? chip('打开完整生成日志', () => openSidebarFile(selected.diagnostic_path)) : null,
                 selected.render_diagnostic_path ? chip('打开渲染历史', () => openSidebarFile(selected.render_diagnostic_path)) : null,
                 selected.generation_events?.length ? h('div', null, selected.generation_events.map((e, i) => h('p', { key: i }, `${formatTime(e.at)} · ${e.stage} · ${e.error || e.error_summary || e.message || e.stop_reason || ''}`))) : null,
+                selected.preview_is_previous && selected.preview_diagnostics?.length ? h('details', null, h('summary', null, '此前草稿的布局诊断'), renderReadableBody(selected.preview_diagnostics)) : null,
                 selected.validation_diagnostics?.length ? renderReadableBody(selected.validation_diagnostics) : null,
                 selected.output ? renderReadableBody(selected.output) : h('p', { style: styles.itemMeta }, '暂无生成记录。'))),
             h('dialog', { ref: diagramDialogRef, className: 'pangea-diagram-dialog', 'aria-label': '图表全屏查看', onClose: () => setDiagramFullscreen(false) },
               h('div', { className: 'pangea-diagram-header' }, h('strong', null, `${diagramName(selected)} · ${diagramVersion(selected, diagramViews)}`), h('button', { type: 'button', style: styles.button, onClick: () => diagramDialogRef.current?.close() }, '返回工作台')),
-              diagramFullscreen && selected.available ? frame(true) : null)) : h('div', { className: 'pangea-diagram-empty' },
+              diagramFullscreen && preview ? frame(true) : null)) : h('div', { className: 'pangea-diagram-empty' },
               h('strong', null, '还没有图表'), h('p', null, functions ? '根据当前流程和冻结源码，生成函数调用与变量变化图。' : '选择图表类型，生成当前流程的可视化视图。')),
           h('details', { key: selected?.view_id || 'new', open: !selected, className: 'pangea-diagram-compose' },
             h('summary', null, selected ? '修改或生成新版本' : '生成图表'),
@@ -3191,7 +3200,7 @@ window.__ModuleLoader__.load({
               h('input', { style: { ...styles.search, flex: '1 1 180px', minWidth: 0, width: 'auto', margin: 0 }, value: flowQuery, 'aria-label': '搜索业务流程', placeholder: '搜索流程名称或入口…', onChange: event => setFlowQuery(event.target.value) }),
               h('select', { style: { ...styles.search, flex: '2 1 230px', minWidth: 0, maxWidth: '100%', width: 'auto', margin: 0 }, 'aria-label': '选择业务流程', value: flow?.flow_id || '', onChange: event => { setFlowSelection(event.target.value); setBranchSelection('') } }, filtered.map(item => h('option', { key: item.flow_id, value: item.flow_id }, `${item.display_id || item.flow_id} · ${item.title || '未命名流程'}`))),
               h('div', { role: 'group', 'aria-label': '流程展示方式', className: 'pangea-flow-modes' }, [['reader', '文字方案', '流程阅读视图'], ['diagram', 'Archify', '流程图视图'], ['functions', '函数与变量', '函数与变量流程图视图']].map(([view, label, aria]) => h('button', { key: view, type: 'button', 'aria-label': aria, 'aria-pressed': reader.view === view, disabled: diagramBusy, style: styles.button, onClick: () => changeFlowView(reader, view, flow) }, label)))),
-            flow ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `${steps.length ? `${steps.length} 个${flow.source_record ? '流程节点' : '主干步骤'}` : flowContentState(flow)} · ${allBranches.length} 条分支 · ${allBranches.filter(b => b.status === 'unresolved').length} 条待确认 · ${allBranches.filter(b => !b.linked_test_case_ids?.length).length} 条未关联用例`) : null),
+            flow ? h('div', { style: { ...styles.itemMeta, marginTop: 10 } }, `${steps.length ? `${steps.length} 个${flow.source_record ? '流程节点' : '主干步骤'}` : flowContentState(flow)} · ${allBranches.length} 条分支 · ${allBranches.filter(b => b.status === 'unresolved').length} 条待确认 · ${allBranches.filter(b => !b.linked_test_case_ids?.length).length} 条分支未关联用例`) : null),
           !flow ? h('div', { style: styles.empty }, query ? '没有匹配的业务流程，请调整搜索。' : collectionEmpty('business_flows', '当前 Run 没有业务流程。'))
             : reader.view === 'functions' ? renderDiagrams(flow, 'function_variables')
             : reader.view === 'diagram' ? renderDiagrams(flow)
