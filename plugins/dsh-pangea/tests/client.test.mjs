@@ -48,7 +48,8 @@ async function assistantHeaderHarness(context) {
       return {
         tree, text: text(tree),
         select: nodes.find(node => node.type === 'select'),
-        create: nodes.find(node => node.type === 'button'),
+        create: nodes.find(node => node.type === 'button' && 'data-pangea-assistant-new' in node.props),
+        analysisRecord: nodes.find(node => 'data-pangea-assistant-analysis-record' in node.props),
         feedback: nodes.find(node => 'data-pangea-assistant-feedback' in node.props),
         options: nodes.filter(node => node.type === 'option').map(text),
       }
@@ -174,6 +175,63 @@ test('assistant reflects conversation operations started from the diagram panel'
   assert.equal(calls, 1)
 })
 
+test('assistant links discussion context to real risks, source evidence and its bound analysis record', async () => {
+  const calls = []
+  const context = {
+    taskId: 'cpu', ownerSessionId: 'analysis-session', activeConversationId: 'discussion', activeConversationKind: 'assistant',
+    conversations: [
+      { conversation_id: 'analysis', session_id: 'analysis-session', kind: 'analysis', display_title: '主分析过程' },
+      { conversation_id: 'discussion', session_id: 'discussion-session', kind: 'assistant', display_title: '讨论 1' },
+    ],
+    discussionContext: {
+      runId: 'run-42', focus: { kind: 'risk', id: 'RISK-7', title: '未授权访问' },
+      relatedItems: [{ kind: 'case', id: 'CASE-3', label: 'TC-03 · 权限校验' }],
+      sources: [{ location: 'src/auth.js:27', label: 'auth.js:27' }],
+    },
+    onNavigateTo: (...args) => calls.push(['navigate', ...args]),
+    onOpenSource: location => calls.push(['source', location]),
+    onSelectConversation: id => calls.push(['select', id]),
+  }
+  const harness = await assistantHeaderHarness(context)
+  const view = harness.render()
+  assert.match(view.text, /RUN 42/)
+  assert.match(view.text, /RISK-7 · 未授权访问/)
+  const walk = node => typeof node === 'object' && node !== null ? [node, ...node.children.flatMap(walk)] : []
+  const nodes = walk(view.tree)
+  const caseLink = nodes.find(node => node.type === 'button' && node.children.includes('TC-03 · 权限校验'))
+  const sourceLink = nodes.find(node => node.type === 'button' && node.children.includes('auth.js:27'))
+  assert.ok(view.analysisRecord)
+  await caseLink.props.onClick()
+  sourceLink.props.onClick()
+  await view.analysisRecord.props.onClick()
+  assert.deepEqual(calls, [
+    ['navigate', 'case', 'CASE-3'],
+    ['source', 'src/auth.js:27'],
+    ['select', 'analysis'],
+  ])
+  const unbound = harness.render({ ...context, ownerSessionId: 'different-session' })
+  assert.equal(unbound.analysisRecord, undefined)
+})
+
+test('assistant groups multiple related cases into the reachable case list', async () => {
+  const calls = []
+  const harness = await assistantHeaderHarness({
+    taskId: 'cpu', activeConversationKind: 'assistant',
+    discussionContext: { focus: { kind: 'risk', id: 'R-01', title: '零时长边界' }, relatedItems: [
+      { kind: 'case', id: 'case-2', label: 'TC-02 · 边界验证' },
+      { kind: 'case', id: 'case-3', label: 'TC-03 · 异常验证' },
+    ] },
+    onNavigateTo: (...args) => calls.push(args),
+  })
+  const view = harness.render()
+  assert.match(view.text, /测试用例（2）/)
+  assert.doesNotMatch(view.text, /TC-02 · 边界验证/)
+  const walk = node => typeof node === 'object' && node !== null ? [node, ...node.children.flatMap(walk)] : []
+  const grouped = walk(view.tree).find(node => node.type === 'button' && node.children.includes('测试用例（2） ↗'))
+  grouped.props.onClick()
+  assert.deepEqual(calls, [['cases', '']])
+})
+
 function fakeSidebar() {
   const tabs = new Map([
     ['editor', { id: 'editor', order: 10 }],
@@ -225,6 +283,119 @@ function fakeSidebar() {
     subscribeState(listener) { stateListeners.add(listener); return () => stateListeners.delete(listener) },
   }
 }
+
+async function updateSettingsPageHarness(updateStatus, options = {}) {
+  const state = [updateStatus, options.busyAction ?? null, options.helperHandoff ?? false, options.actionError ?? '', options.blockedDismissed ?? false, 'update', { status: 'ready', connections: [], modelAvailable: false, customAvailable: true }, false]
+  let hookIndex = 0
+  const react = {
+    Fragment: Symbol('Fragment'),
+    createElement(type, props, ...children) { return { type, props: props ?? {}, children: children.flat(Infinity).filter(value => value !== null && value !== undefined && value !== false) } },
+    cloneElement(element, props) { return { ...element, props: { ...element.props, ...props } } },
+    useState(initial) { const index = hookIndex++; return [index in state ? state[index] : initial, value => { state[index] = value }] },
+    useEffect() {},
+  }
+  const calls = []
+  const bridge = {
+    getUpdateStatus: async () => updateStatus,
+    importUpdatePackage: async () => { calls.push('import'); return updateStatus },
+    installUpdate: async () => { calls.push('install'); return options.installResult ?? { helperLaunched: false } },
+    subscribeUpdateStatus: () => 1,
+    unsubscribeUpdateStatus() {},
+  }
+  const { exported } = await loadClient(react, { dshDesktop: options.bridgeMissing ? undefined : bridge })
+  const sidebar = fakeSidebar()
+  let service
+  exported.apply({
+    betterSidebar: sidebar,
+    provide(_name, value) { service = value },
+    effect(factory, label) { return label === 'dsh-pangea: product settings page' ? factory() : () => {} },
+  })
+  const page = service.getPages().find(item => item.id === 'settings')
+  hookIndex = 0
+  const wrapper = page.component({ scope: { sessionId: 'test-session' }, service })
+  const tree = wrapper.type(wrapper.props)
+  const nodes = []
+  const visit = value => {
+    if (!value || typeof value !== 'object') return
+    nodes.push(value)
+    for (const child of value.children ?? []) visit(child)
+  }
+  visit(tree)
+  const text = value => typeof value === 'object' && value !== null
+    ? (value.children ?? []).map(text).join('')
+    : String(value ?? '')
+  return { tree, nodes, text: text(tree), calls, state }
+}
+
+test('renders the update page from real update bridge states without invented progress or versions', async () => {
+  const idle = await updateSettingsPageHarness({ phase: 'idle', currentVersion: '4.2.1', manual: false })
+  assert.equal(idle.nodes.find(node => node.props?.['data-pangea-update-state'])?.props['data-pangea-update-state'], 'idle')
+  assert.match(idle.text, /4\.2\.1/)
+  assert.ok(idle.nodes.some(node => node.props?.['data-pangea-update-action'] === 'import' && node.props.disabled === false))
+  assert.equal(idle.nodes.some(node => node.props?.['data-pangea-update-action'] === 'install'), false)
+
+  const checking = await updateSettingsPageHarness({ phase: 'checking', currentVersion: '4.2.1', manual: true })
+  assert.equal(checking.nodes.find(node => node.props?.role === 'progressbar')?.props['aria-busy'], 'true')
+  assert.match(checking.text, /正在识别包类型并准备校验/)
+  assert.ok(checking.nodes.some(node => node.props?.['data-pangea-update-action'] === 'import' && node.props.disabled === true))
+
+  const verifying = await updateSettingsPageHarness({ phase: 'downloading', currentVersion: '4.2.1', percent: 62, manual: true })
+  assert.equal(verifying.nodes.find(node => node.props?.role === 'progressbar')?.props['aria-valuenow'], 62)
+  assert.match(verifying.text, /校验中62%/)
+  assert.doesNotMatch(verifying.text, /网络下载/)
+
+  const patchReady = await updateSettingsPageHarness({ phase: 'downloaded', currentVersion: '4.2.1', availableVersion: '4.3.0', packageType: 'patch', baseVersion: '4.2.1', manual: true })
+  assert.match(patchReady.text, /4\.2\.1/)
+  assert.match(patchReady.text, /4\.3\.0/)
+  assert.match(patchReady.text, /补丁基线 4\.2\.1 与当前版本一致/)
+  const install = patchReady.nodes.find(node => node.props?.['data-pangea-update-action'] === 'install')
+  assert.equal(install.props.disabled, false)
+  await install.props.onClick()
+  assert.deepEqual(patchReady.calls, ['install'])
+
+  const restarting = await updateSettingsPageHarness({ phase: 'downloaded', currentVersion: '4.2.1', availableVersion: '4.3.0', packageType: 'full', manual: true }, { busyAction: 'install' })
+  assert.match(restarting.text, /安装前检查/)
+  assert.doesNotMatch(restarting.text, /安装助手已经接管|即将退出/)
+  assert.match(restarting.text, /正在检查安装条件/)
+  assert.equal(restarting.nodes.some(node => node.props?.['data-pangea-update-action'] === 'import'), false)
+  assert.ok(restarting.nodes.some(node => node.props?.['data-pangea-update-action'] === 'install' && node.props.disabled === true))
+
+  const handoff = await updateSettingsPageHarness({ phase: 'downloaded', currentVersion: '4.2.1', availableVersion: '4.3.0', packageType: 'full', manual: true }, { helperHandoff: true })
+  assert.match(handoff.text, /安装助手已经接管接下来的版本替换/)
+  assert.match(handoff.text, /Desktop 将退出并重新启动/)
+  assert.ok(handoff.nodes.some(node => node.props?.['data-pangea-update-action'] === 'install' && node.props.disabled === true))
+
+  const blocked = await updateSettingsPageHarness({ phase: 'downloaded', currentVersion: '4.2.1', availableVersion: '4.3.0', packageType: 'full', manual: true, message: '当前仍有分析会话运行。' })
+  assert.match(blocked.text, /先完成正在运行的分析/)
+  assert.match(blocked.text, /升级包已保留。任务结束后，返回版本设置重试安装。/)
+  assert.match(blocked.text, /查看分析任务/)
+  assert.equal(blocked.nodes.some(node => node.props?.['data-pangea-update-action'] === 'install'), false)
+
+  const blockedDismissed = await updateSettingsPageHarness({ phase: 'downloaded', currentVersion: '4.2.1', availableVersion: '4.3.0', packageType: 'full', manual: true, message: '当前仍有分析会话运行。' }, { blockedDismissed: true })
+  const retryInstall = blockedDismissed.nodes.find(node => node.props?.['data-pangea-update-action'] === 'install')
+  assert.equal(retryInstall.props.disabled, false)
+  await retryInstall.props.onClick()
+  assert.equal(blockedDismissed.state[4], false)
+  assert.deepEqual(blockedDismissed.calls, ['install'])
+
+  const failed = await updateSettingsPageHarness({ phase: 'error', currentVersion: '4.2.1', manual: true, message: '签名校验失败。' })
+  assert.match(failed.text, /签名校验失败/)
+  assert.equal(failed.nodes.some(node => node.props?.['data-pangea-update-action'] === 'install'), false)
+  assert.ok(failed.nodes.some(node => node.props?.['data-pangea-update-action'] === 'import' && node.props.disabled === false))
+
+  const installFailed = await updateSettingsPageHarness({ phase: 'install-error', currentVersion: '4.2.1', availableVersion: '4.3.0', manual: true, message: '主机校验失败：启动探针退出码 7。' })
+  assert.match(installFailed.text, /主机校验失败：启动探针退出码 7。/)
+  assert.equal(installFailed.nodes.some(node => node.props?.['data-pangea-update-action'] === 'install'), false)
+
+  const missingBridge = await updateSettingsPageHarness(null, { bridgeMissing: true })
+  assert.match(missingBridge.text, /当前环境不支持应用内升级/)
+  assert.ok(missingBridge.nodes.some(node => node.props?.['data-pangea-update-action'] === 'import' && node.props.disabled === true))
+
+  const statusError = await updateSettingsPageHarness(null, { actionError: '版本状态读取失败，请重试。' })
+  assert.match(statusError.text, /暂时无法读取版本状态/)
+  assert.match(statusError.text, /版本状态读取失败/)
+  assert.ok(statusError.nodes.some(node => node.props?.['data-pangea-update-action'] === 'refresh' && node.props.disabled === false))
+})
 
 test('publishes ctx.pangea without registering a wrapper tab', async () => {
   const { exported, source } = await loadClient()
@@ -327,6 +498,42 @@ test('omits unavailable pages from the product navigation', async () => {
   assert.equal(exported.pageIsAvailable({ id: 'analysis', available: (_ctx, value) => Boolean(value?.cwd) }, scope), true)
   assert.equal(exported.pageIsAvailable({ id: 'execution', available: () => false }, scope), false)
   assert.equal(exported.pageIsAvailable({ id: 'assets' }, scope), true)
+})
+
+test('keeps core product navigation available without a session and names the recent workspace', async () => {
+  const react = {
+    createElement(type, props, ...children) { return { type, props: { ...props, children: children.flat() } } },
+    cloneElement(node, props) { return { ...node, props: { ...node.props, ...props } } },
+    useState(initial) { return [initial, () => {}] },
+    useRef(initial) { return { current: initial } },
+    useCallback(fn) { return fn }, useMemo(fn) { return fn() },
+    useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
+    useEffect() {}, useLayoutEffect() {},
+  }
+  const { exported } = await loadClient(react)
+  const sidebar = fakeSidebar()
+  const workspaces = { list: {
+    subscribe: () => () => {},
+    getSnapshot: () => ({ items: [{ workspaceId: 'workspace-1', path: 'D:/work/dperf', title: 'dperf-workspace' }], recentWorkspaceId: 'workspace-1' }),
+  } }
+  const service = exported.createPangeaService(sidebar, undefined, workspaces)
+  for (const id of ['workbench', 'analysis', 'assets']) {
+    service.registerPage({ id, title: id, available: () => false, component: () => null })
+  }
+  service.registerPage({ id: 'execution', title: '执行', available: () => false, component: () => null })
+  const scope = { sessionId: null, cwd: null }
+  const tab = { id: 'analysis-tab', type: 'dsh-pangea:analysis', meta: {} }
+  sidebar.setState({ splits: { tabs: [tab], active: tab.id }, bottomSplits: { tabs: [] } })
+  const shell = sidebar.getTab(tab.type).component({ scope, tab, visible: true })
+  const rendered = shell.type(shell.props)
+  const nodes = tree => tree && typeof tree === 'object'
+    ? [tree, ...(tree.props?.children ?? []).flatMap(nodes)] : []
+  const navButtons = nodes(rendered).filter(node => node.props?.['data-pangea-nav-button'])
+  assert.deepEqual(navButtons.map(node => node.props.key), ['workbench', 'analysis', 'assets'])
+  const header = rendered.props.children.find(node => node.type?.name === 'ProductHeader')
+  const workspace = nodes(header.type(header.props)).find(node => node.props?.['data-pangea-project'])
+  assert.equal(workspace.props['aria-label'], '当前项目：dperf-workspace')
+  assert.equal(workspace.props.children[1].props.children.join(''), 'dperf-workspace')
 })
 
 test('opens the product workbench once when a session becomes active', async () => {
@@ -561,6 +768,11 @@ test('names compact navigation, follows the visible page, and toggles tools with
     assert.equal(workspace.type, 'div', 'current workspace does not promise an unavailable switcher')
     assert.equal(workspace.props['aria-label'], '当前项目：project')
     assert.equal(workspace.props.title, scope.cwd)
+    const namedWorkspace = nodes(header.type({ ...header.props, workspaceList: { items: [
+      { path: '/another/project', title: 'Other workspace' }, { path: scope.cwd, title: 'Named workspace' },
+    ] } })).find(node => node.props?.['data-pangea-project'])
+    assert.equal(namedWorkspace.props['aria-label'], '当前项目：Named workspace')
+    assert.equal(namedWorkspace.props.title, scope.cwd)
   }
 })
 
@@ -568,7 +780,8 @@ test('routes ACP process output to the right assistant panel', async () => {
   const { exported, source } = await loadClient()
   assert.match(source, /data-pangea-assistant-process/)
   assert.match(source, /AssistantProcess/)
-  assert.match(source, /process\.output\.slice\(-12000\)/)
+  assert.match(source, /typeof process\.output === 'string'/)
+  assert.doesNotMatch(source, /process\.output\.slice\(-12000\)/)
   assert.match(source, /AssistantPortals/)
   assert.match(source, /data-pane="conversation"/)
   assert.match(source, /data-conversation-scroll/)
@@ -612,10 +825,36 @@ test('routes ACP process output to the right assistant panel', async () => {
   assert.equal(card.attributes.has('aria-disabled'), false)
 })
 
+test('assistant process retains full output and timestamped Run events', async () => {
+  const react = {
+    Fragment: Symbol('Fragment'),
+    createElement(type, props, ...children) { return { type, props: props ?? {}, children: children.flat(Infinity).filter(value => value !== null) } },
+  }
+  const { exported } = await loadClient(react)
+  const output = 'first line\n' + 'x'.repeat(13000) + '\nlast line'
+  const navigation = []
+  const tree = exported.AssistantProcess({ context: {
+    taskId: 'cpu', runId: 'run-42', activeConversationKind: 'analysis', onNavigateTo: (...args) => navigation.push(args), process: {
+      status: 'running', output,
+      events: [{ at: '2026-09-26T10:00:00.000Z', stage: 'ANALYZING', label: '正在检查访问控制', flowId: 'flow-1' }],
+    },
+  } })
+  const walk = node => typeof node === 'object' && node !== null ? [node, ...node.children.flatMap(walk)] : []
+  const nodes = walk(tree)
+  const outputNode = nodes.find(node => node.props?.['data-pangea-assistant-process-output'])
+  const runNode = nodes.find(node => node.props?.['data-pangea-assistant-process-run'])
+  const eventTime = nodes.find(node => node.type === 'time')
+  assert.equal(outputNode.children[0], output)
+  assert.equal(runNode.children[0], 'RUN 42')
+  assert.equal(eventTime.props.dateTime, '2026-09-26T10:00:00.000Z')
+  assert.ok(nodes.some(node => node.children.includes('正在检查访问控制')))
+  nodes.find(node => node.props?.['data-pangea-assistant-process-flow']).props.onClick()
+  assert.deepEqual(navigation, [['flow', 'flow-1']])
+})
+
 test('hides the readonly composer and restores it for a matching discussion session', async () => {
   const { exported, source } = await loadClient()
   assert.match(source, /\[data-composer-seat\]\[data-pangea-analysis-readonly="true"\]\s*\{\s*display: none !important;/)
-  assert.match(source, /展开“修改或生成新版本”，填写要求后选择“生成修改版”/)
   const scroll = { dataset: {} }
   const card = {
     inert: false,
@@ -669,7 +908,11 @@ test('discussion to diagram switch keeps the active assistant visible after old 
     Fragment: Symbol('Fragment'),
     createElement(type, props, ...children) { return { type, props: { ...props, children: children.length === 1 ? children[0] : children }, children } },
     cloneElement(node, props) { return { ...node, props: { ...node.props, ...props } } },
-    useState(initial) { return [rendering.stateIndex++ === 1 ? rendering.context : initial, () => {}] },
+    useState(initial) {
+      const index = rendering.stateIndex++
+      // This regression exercises an explicitly opened assistant across session switches.
+      return [index === 1 ? rendering.context : index === 2 ? true : initial, () => {}]
+    },
     useRef(initial) { return { current: initial } },
     useCallback(fn) { return fn }, useMemo(fn) { return fn() },
     useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },

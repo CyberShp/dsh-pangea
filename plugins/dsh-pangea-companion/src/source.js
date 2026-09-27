@@ -55,7 +55,7 @@ export function resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, rep
   return { ...parsed, filePath: path.resolve(cwd, parsed.source) }
 }
 
-export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout, contextLines = 3, maxLines = 160 }) {
+export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout, contextLines = 3, contextBefore = contextLines, contextAfter = contextLines, maxLines = 160 }) {
   const resolved = resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout })
   const raw = await readFile(resolved.filePath, 'utf8')
   if (raw.includes('\u0000')) throw new Error('evidence file is not readable text')
@@ -65,8 +65,8 @@ export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoo
   const targetEnd = Math.min(resolved.endLine ?? Math.min(allLines.length, 32), allLines.length)
   if (targetStart > allLines.length) throw new Error(`evidence line ${targetStart} exceeds file length ${allLines.length}`)
 
-  const windowStart = Math.max(1, targetStart - contextLines)
-  const requestedEnd = Math.min(allLines.length, targetEnd + contextLines)
+  const windowStart = Math.max(1, targetStart - contextBefore)
+  const requestedEnd = Math.min(allLines.length, targetEnd + contextAfter)
   const windowEnd = Math.min(requestedEnd, windowStart + maxLines - 1)
   const lines = allLines.slice(windowStart - 1, windowEnd).map((text, index) => ({
     number: windowStart + index,

@@ -1,12 +1,13 @@
 import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import path from 'node:path'
+import { stat } from 'node:fs/promises'
 import { createDiagramRun } from './diagram-acp.js'
 import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
 import { createSourceFirstAcpRun } from './source-first-acp.js'
 
 import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
-import { sourceFirstReportAvailable } from './reader.js'
+import { sourceFirstReportAvailable, summarizeRun } from './reader.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
@@ -111,7 +112,8 @@ export async function internalModelOptions(api) {
     apiValue(await api.settings.describe(rpc({}))),
   ])
   const namespaces = new Map((settingsValue.namespaces ?? []).map(item => [item.ns, item]))
-  const providers = (providerValue.providers ?? []).filter(item => item.declared === true && item.active === true)
+  // `declared` distinguishes adapter-known routes from hand-declared ones; it does not indicate whether a route can run.
+  const providers = (providerValue.providers ?? []).filter(item => item.active === true)
   const providerRows = providers.map(entry => {
     const namespace = namespaces.get(entry.settingsNs)
     const profile = valueAtPath(namespace?.value, entry.settingsPath)
@@ -249,11 +251,17 @@ export async function importCoverageAsset({ cwd, dataRoot, source, runner = runP
     message: detail.asset?.status === 'available' ? '覆盖率文件已解析并加入可选资产。' : '未取得可用覆盖记录，请检查文件格式和内容。' }
 }
 
-async function withSourceFirstReports(run, dataRoot) {
-  if (run?.workflow_version !== 'source-first-v1') return run
+async function withRunReports(run, dataRoot) {
+  if (!run?.run_id) return run
   const directory = path.resolve(dataRoot, 'runs', run.run_id)
   const relative = path.relative(path.resolve(dataRoot, 'runs'), directory)
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Invalid source-first Run path')
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Invalid Run path')
+  if (run.workflow_version !== 'source-first-v1') {
+    try { await stat(path.join(directory, '内部索引', '运行状态.json')) }
+    catch (error) { if (error.code === 'ENOENT') return run; throw error }
+    const legacy = await summarizeRun(dataRoot, run.run_id)
+    return { ...run, ...legacy, reports: { html: legacy.artifacts.report_html, markdown: legacy.artifacts.report_md } }
+  }
   const available = await sourceFirstReportAvailable(directory, run.lifecycle_status)
   return { ...run, report_available: available, reports: {
     html: available ? path.join(directory, 'report.html') : null,
@@ -275,7 +283,13 @@ export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limi
       cwd: root,
       args: ['runs', 'list', '--data-root', resolvedDataRoot, '--cursor', String(pageCursor), '--limit', String(pageLimit)],
     })
-    runs.items = await Promise.all((runs.items ?? []).map(run => withSourceFirstReports(run, resolvedDataRoot)))
+    runs.items = await Promise.all((runs.items ?? []).map(async run => {
+      try { return await withRunReports(run, resolvedDataRoot) }
+      catch (error) {
+        return { ...run, lifecycle_status: 'unknown', report_available: false, reports: { html: null, markdown: null },
+          reader_error: error instanceof Error ? error.message : String(error) }
+      }
+    }))
     const requestedRunId = typeof runId === 'string' ? runId.trim() : ''
     let run = null
     let runDetail = null
@@ -285,9 +299,10 @@ export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limi
           cwd: root,
           args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', requestedRunId],
         })
-        run = await withSourceFirstReports(run, resolvedDataRoot)
+        run = await withRunReports(run, resolvedDataRoot)
         runDetail = { run_id: requestedRunId, status: 'ok', error: null }
       } catch (error) {
+        run = null
         runDetail = { run_id: requestedRunId, status: 'error', error: error instanceof Error ? error.message : String(error) }
       }
     }
@@ -724,7 +739,7 @@ export async function launchAnalysisSession(
     const acpLifecycle = {
       ...lifecycle,
       launchContext,
-      inspectRun: async () => withSourceFirstReports(await runner({
+      inspectRun: async () => withRunReports(await runner({
         cwd: root,
         args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', run.run_id],
       }), resolvedDataRoot),

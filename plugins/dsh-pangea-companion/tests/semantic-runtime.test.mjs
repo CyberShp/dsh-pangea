@@ -49,7 +49,7 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     const opened = await call('pangea_task_open', binding)
     assert.equal(opened.binding.task_id, binding.task_id)
     const index = await call('pangea_source_index', binding)
-    assert.equal(index.files[0].path, 'sample.c')
+    assert.deepEqual(index.files.map(file => file.path).sort(), ['docs/usage.md', 'sample.c'])
     const saved = await call('pangea_plan_write', {
       ...binding, expected_revision: 0,
       unit: { title: 'Add', purpose: 'Interface fixture', owned_files: [{ repo_id: 'sample', path: 'sample.c' }] },

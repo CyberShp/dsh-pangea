@@ -844,7 +844,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     } catch (error) { analysisScene = null; sceneIssue = `冻结场景不可读取：${error.message}` }
     try {
       const match = await readJson(path.join(runDirectory, 'inputs', 'coverage-match-summary.json'))
-      coverageMatch = { sources: match.sources ?? [], matched: match.matched?.length ?? 0, unmatched: match.unmatched?.length ?? 0, ambiguous: match.ambiguous?.length ?? 0, unmatched_preview: (match.unmatched ?? []).slice(0, 50), ambiguous_preview: (match.ambiguous ?? []).slice(0, 50), diagnostic_path: path.join(runDirectory, 'inputs/coverage-match-summary.json'), note: match.note }
+      coverageMatch = { sources: match.sources ?? [], matched: match.matched?.length ?? 0, unmatched: match.unmatched?.length ?? 0, ambiguous: match.ambiguous?.length ?? 0, matched_preview: (match.matched ?? []).slice(0, 50), unmatched_preview: (match.unmatched ?? []).slice(0, 50), ambiguous_preview: (match.ambiguous ?? []).slice(0, 50), diagnostic_path: path.join(runDirectory, 'inputs/coverage-match-summary.json'), note: match.note }
     } catch { coverageMatch = { sources: [], note: '覆盖数据匹配诊断不可读取，不能推定没有缺口。' } }
   }
   const actionView = await sourceFirstActionArtifacts(runDirectory, progress)

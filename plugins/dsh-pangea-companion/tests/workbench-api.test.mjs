@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireInternalModel, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
 const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
 
@@ -67,20 +67,24 @@ async function workspace() {
 
 function ok(value) { return { result: { ok: true, value } } }
 
-function internalModelApi(events = []) {
+function internalModelApi(events = [], overrides = {}) {
+  const providers = overrides.providers ?? [
+    { provider: 'minimax-1', displayName: 'MiniMax', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'minimax-1'], active: true, declared: true },
+    { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [], active: true, declared: true },
+  ]
+  const groups = overrides.groups ?? [
+    { id: 'minimax-1', name: 'MiniMax', models: [{ id: 'MiniMax-M2.7-highspeed', name: 'M2.7 highspeed' }] },
+    { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'V4 Flash' }] },
+  ]
+  const namespaces = overrides.namespaces ?? [{ ns: 'llm-pi-ai', value: { providers: { 'minimax-1': { apiKeyEnv: 'MINIMAX_1_API_KEY' } } } }]
+  const credentials = overrides.credentials ?? { MINIMAX_1_API_KEY: { configured: true, writable: true } }
   return {
     llm: {
-      async providers() { return ok({ providers: [
-        { provider: 'minimax-1', displayName: 'MiniMax', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'minimax-1'], active: true, declared: true },
-        { provider: 'deepseek-official', displayName: 'DeepSeek', settingsNs: 'llm-deepseek', settingsPath: [], active: true, declared: true },
-      ] }) },
-      async models() { return ok({ groups: [
-        { id: 'minimax-1', name: 'MiniMax', models: [{ id: 'MiniMax-M2.7-highspeed', name: 'M2.7 highspeed' }] },
-        { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'V4 Flash' }] },
-      ], failures: [] }) },
+      async providers() { return ok({ providers }) },
+      async models() { return ok({ groups, failures: [] }) },
     },
-    settings: { async describe() { return ok({ namespaces: [{ ns: 'llm-pi-ai', value: { providers: { 'minimax-1': { apiKeyEnv: 'MINIMAX_1_API_KEY' } } } }] }) } },
-    credentials: { async describe() { return ok({ credentials: { MINIMAX_1_API_KEY: { configured: true, writable: true } } }) } },
+    settings: { async describe() { return ok({ namespaces }) } },
+    credentials: { async describe() { return ok({ credentials }) } },
     workspace: { async list() { throw new Error('workspace.list not configured') } },
     sessions: {
       async selectModel(value) { events.push(['select-model', value.payload]); return ok({ selected: value.payload }) },
@@ -92,6 +96,48 @@ test('offers only configured internal provider routes', async () => {
   const catalog = await internalModelOptions(internalModelApi())
   assert.deepEqual(catalog.models.map(item => `${item.provider}/${item.model}`), ['minimax-1/MiniMax-M2.7-highspeed', 'deepseek-official/deepseek-v4-flash'])
   assert.equal(catalog.models[0].credential_configured, true)
+})
+
+test('routes a configured native OpenAI model and rejects inactive, model-less, or uncredentialed routes', async () => {
+  const missingCredentialRef = 'PANGEA_TEST_MISSING_MODEL_KEY_20260927'
+  const api = internalModelApi([], {
+    providers: [
+      { provider: 'openai', displayName: 'OpenAI', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'], active: true, declared: false },
+      { provider: 'inactive-native', displayName: 'Inactive', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'inactive-native'], active: false, declared: false },
+      { provider: 'model-less-native', displayName: 'No models', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'model-less-native'], active: true, declared: false },
+      { provider: 'missing-key-native', displayName: 'Missing key', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'missing-key-native'], active: true, declared: false },
+    ],
+    groups: [
+      { id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-4.1-mini', name: 'GPT-4.1 mini' }] },
+      { id: 'inactive-native', name: 'Inactive', models: [{ id: 'inactive-model', name: 'Inactive model' }] },
+      { id: 'model-less-native', name: 'No models', models: [] },
+      { id: 'missing-key-native', name: 'Missing key', models: [{ id: 'missing-key-model', name: 'Missing key model' }] },
+    ],
+    namespaces: [{ ns: 'llm-pi-ai', value: { providers: {
+      openai: { apiKeyEnv: 'PANGEA_TEST_OPENAI_KEY_20260927' },
+      'inactive-native': { apiKeyEnv: 'PANGEA_TEST_INACTIVE_KEY_20260927' },
+      'model-less-native': { apiKeyEnv: 'PANGEA_TEST_MODELLESS_KEY_20260927' },
+      'missing-key-native': { apiKeyEnv: missingCredentialRef },
+    } } }],
+    credentials: {
+      PANGEA_TEST_OPENAI_KEY_20260927: { configured: true, writable: true },
+      PANGEA_TEST_INACTIVE_KEY_20260927: { configured: true, writable: true },
+      PANGEA_TEST_MODELLESS_KEY_20260927: { configured: true, writable: true },
+      [missingCredentialRef]: { configured: false, writable: true },
+    },
+  })
+
+  const catalog = await internalModelOptions(api)
+  assert.deepEqual(catalog.models.map(item => `${item.provider}/${item.model}`), [
+    'openai/gpt-4.1-mini',
+    'missing-key-native/missing-key-model',
+  ])
+  assert.equal(catalog.models[0].credential_configured, true)
+  assert.equal(catalog.models[1].credential_configured, false)
+  assert.deepEqual(await requireInternalModel(api, { provider: 'openai', model: 'gpt-4.1-mini' }), {
+    provider: 'openai', model: 'gpt-4.1-mini', route_class: 'configured-internal',
+  })
+  await assert.rejects(requireInternalModel(api, { provider: 'missing-key-native', model: 'missing-key-model' }), /尚未配置凭证/)
 })
 
 test('advertises NGA, CodeAgent, OpenCode, and Claude Code ACP routes', () => {
@@ -865,4 +911,49 @@ test('source-first selections reject unsupported settings before task creation',
   for (const selection of [{ mode: 'speed' }, { scenario: 'coverage-analysis' }, { coverage_input: { kind: 'file', path: 'coverage.json' } }]) {
     assert.throws(() => normalizeRunInput({ ...input, ...selection }, capabilities), /不支持/)
   }
+})
+
+test('workbench reads historical Markdown reports through the legacy reader', async () => {
+  const root = await workspace()
+  try {
+    const runId = 'legacy-report', run = path.join(root, 'runs', runId)
+    await mkdir(path.join(run, '内部索引'), { recursive: true })
+    await mkdir(path.join(run, '正式输出'), { recursive: true })
+    await writeFile(path.join(run, '内部索引/运行状态.json'), JSON.stringify({ status: 'complete', completed_steps: ['01','02','03','04','05','06','07','08','09'], publication: { state: 'final', revision: 1, step_id: '09' } }))
+    await writeFile(path.join(run, '内部索引/工作台投影.json'), JSON.stringify({ schema_version: '1.0', run_id: runId, business_flows: [], risks: [], test_cases: [], evidence: [], review_issues: [] }))
+    await writeFile(path.join(run, '正式输出/完整分析报告.md'), '# Historical report')
+    await mkdir(path.join(root, '.pangea/skill-runs', runId), { recursive: true })
+    await writeFile(path.join(root, '.pangea/skill-runs', runId, 'metadata.json'), JSON.stringify({ run_id: runId }))
+    const cliRun = { run_id: runId, lifecycle_status: 'failed', phase: 'UNKNOWN', report_available: false }
+    const result = await workbenchSnapshot({ cwd: root, dataRoot: root, runId, runner: async ({ args }) => args[0] === 'system' ? capabilities : args[1] === 'list' ? { items: [cliRun], total: 1 } : cliRun })
+    assert.equal(result.status, 'ok')
+    assert.equal(result.compatibility.compatible, true, result.compatibility.error)
+    for (const item of [result.runs.items[0], result.run]) {
+      assert.equal(item.lifecycle_status, 'complete')
+      assert.equal(item.report_available, true)
+      assert.equal(item.reports.markdown, path.join(run, '正式输出/完整分析报告.md'))
+      assert.equal(item.reports.html, null)
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('one damaged historical Run does not hide other workbench Runs or capabilities', async () => {
+  const root = await workspace()
+  try {
+    const broken = path.join(root, 'runs/broken/内部索引')
+    await mkdir(broken, { recursive: true })
+    await writeFile(path.join(broken, '运行状态.json'), '{invalid')
+    const good = { run_id: 'good', lifecycle_status: 'complete', report_available: true }
+    const bad = { run_id: 'broken', lifecycle_status: 'complete', report_available: true }
+    const result = await workbenchSnapshot({ cwd: root, dataRoot: root, runId: 'broken', runner: async ({ args }) => args[0] === 'system' ? capabilities : args[1] === 'list' ? { items: [good, bad], total: 2 } : bad })
+    assert.equal(result.compatibility.compatible, true)
+    assert.deepEqual(result.capabilities, capabilities)
+    assert.deepEqual(result.runs.items[0], good)
+    assert.equal(result.runs.items[1].lifecycle_status, 'unknown')
+    assert.equal(result.runs.items[1].report_available, false)
+    assert.ok(result.runs.items[1].reader_error)
+    assert.equal(result.run, null)
+    assert.equal(result.run_detail.run_id, 'broken')
+    assert.equal(result.run_detail.status, 'error')
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

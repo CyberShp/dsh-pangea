@@ -152,7 +152,7 @@
       required: detail.required === true,
       modelAvailable: detail.modelAvailable === true,
     }
-    if (!modelState.required) dismissed = false
+    if (modelState.modelAvailable) dismissed = false
     syncOnboarding()
   })
 

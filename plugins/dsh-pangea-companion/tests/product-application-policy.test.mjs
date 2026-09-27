@@ -9,9 +9,9 @@ const clientPath = path.resolve(here, '..', 'lib', 'client.js')
 
 test('workbench exposes analysis and test assets while environment configuration stays hidden', async () => {
   const source = await readFile(clientPath, 'utf8')
-  assert.match(source, /appCard\('analysis', '分析任务'/)
-  assert.match(source, /appCard\('assets', '资产管理'/)
-  assert.doesNotMatch(source, /appCard\('environment', '环境配置'/)
+  assert.match(source, /\['ScanLine', '分析任务', [^\]]+, 'analysis'\]/)
+  assert.match(source, /\['Library', '测试资产', [^\]]+, 'assets'\]/)
+  assert.doesNotMatch(source, /\[[^\]]*'环境配置'[^\]]*'execution'\]/)
   assert.match(source, /id: 'execution', title: \(\) => '环境配置'/)
   assert.match(source, /available: \(\) => false/)
 })

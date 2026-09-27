@@ -281,6 +281,7 @@ async function sourceRouteHandler(req, res) {
   const dataRoot = url.searchParams.get('data_root') ?? undefined
   const location = url.searchParams.get('location') ?? undefined
   const runId = url.searchParams.get('run_id') ?? undefined
+  const contextValue = name => { const value = url.searchParams.get(name); return value !== null && /^(?:0|[1-9]\d?)$/.test(value) && Number(value) <= 20 ? Number(value) : undefined }
   try {
     let snapshotRoot
     let repositoryId
@@ -310,7 +311,8 @@ async function sourceRouteHandler(req, res) {
         if (metadata.source_snapshot && candidate) snapshotRoot = candidate
       }
     }
-    const snippet = await readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout })
+    const snippet = await readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout,
+      contextBefore: contextValue('context_before'), contextAfter: contextValue('context_after') })
     json(res, 200, snippet)
   } catch (error) {
     json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })

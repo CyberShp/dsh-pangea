@@ -8,9 +8,9 @@ const progressPolicy = { readyWarnMs: 5, readyIdleMs: 20, warnMs: 5, idleMs: 20,
 const completed = { stopReason: 'completed', protocolStopReason: 'end_turn' }
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
 
-for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'disconnect']) test(`coordinator ${mode} preserves identity and results`, async () => {
+for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'disconnect']) test(`coordinator ${mode} preserves identity and results`, { timeout: 10000 }, async () => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-recovery-'))
-  const controller = new AbortController(), events = [], prompts = []
+  const controller = new AbortController(), events = [], prompts = [], lateResponse = deferred()
   let pending = deferred(), settled = false, starts = 0, turns = 0, taskId
   const worker = { id: 'worker', remoteSessionId: 'remote', result: mode === 'ready' ? pending.promise : Promise.resolve(completed),
     readDiagnostics: () => ({ activeToolCount: 0, canLoadSession: true, processExited: mode === 'disconnect' && starts === 1 && turns > 0 }),
@@ -27,7 +27,7 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
     },
   }
   const options = { dataRoot, runId: 'run', cwd: dataRoot, providerId: 'pangea-nga', signal: controller.signal, progressPolicy,
-    onEvent: async e => events.push(e), subagents: { start: async (_, request) => {
+    onEvent: async e => { events.push(e); if (e.stage === 'source_first_late_response') lateResponse.resolve() }, subagents: { start: async (_, request) => {
       starts++; if (starts > 1) assert.deepEqual(request.resume, { taskId: 'worker', remoteSessionId: 'remote' }); return worker
     } }, runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
@@ -53,7 +53,13 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
       assert.equal(turns, 1)
     }
     if (turns === 2) assert.match(prompts[1], /保留已保存内容/)
-  } finally { controller.abort(); pending.resolve(completed); await run.dispose(); await rm(dataRoot, { recursive: true, force: true }) }
+  } finally {
+    pending.resolve(completed)
+    // Releasing the test's pending response starts a real persisted-state write.
+    // Wait for its completion before removing the temporary Run directory.
+    if (mode === 'unconfirmed') await lateResponse.promise
+    controller.abort(); await run.dispose(); await rm(dataRoot, { recursive: true, force: true })
+  }
 })
 
 test('a completed unit can repair before its slow sibling finishes, with at most three workers', async () => {

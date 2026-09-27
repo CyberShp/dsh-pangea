@@ -60,3 +60,18 @@ test('short case exports include executable notes and parameter inputs with expe
     assert.ok(output.includes('connect --digest sha256'))
   }
 })
+
+test('CSV and XLSX export the whole Run including paired steps', () => {
+  const cases = Array.from({ length: 8 }, (_, index) => ({
+    display_id: `TC-${String(index + 1).padStart(2, '0')}`,
+    title: `验证目标 ${index + 1}`,
+    steps: [`设置输入 ${index + 1} → 观察结果 ${index + 1}`],
+    expected_results: [`结果 ${index + 1}`],
+  }))
+  const run = { run_id: 'run-023', workflow_version: 'source-first-v1', details: { test_cases: cases } }
+  for (const output of [buildTestCaseCsv(run), Buffer.from(buildTestCaseXlsx(run)).toString()]) {
+    for (const item of cases) assert.ok(output.includes(item.display_id), `${item.display_id} must be exported`)
+    assert.ok(output.includes('设置输入 3 → 观察结果 3'))
+    assert.ok(output.includes('结果 3'))
+  }
+})

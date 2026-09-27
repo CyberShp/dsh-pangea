@@ -4,18 +4,24 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
-const available = { asset_id: 'shared', title: '共享设计', asset_type: 'design', status: 'available', repository_ids: [], source_name: '设计.md', updated_at: '2026-09-08T00:00:00Z' }
+const available = { asset_id: 'shared', title: '共享设计', asset_type: 'design', status: 'available', repository_ids: [], source_name: '设计.md', revision: 2, updated_at: '2026-09-08T00:00:00Z' }
 const pending = { ...available, asset_id: 'pending', title: '待审缺陷', asset_type: 'historical_defect', status: 'awaiting_review' }
 const catalog = { status: 'ok', assets: [available, pending], summary: { total: 2, available: 1, review: 1 },
   pagination: { page: 1, page_size: 20, total: 2, total_pages: 1 }, methodologies: { items: [{ methodology_id: 'method', title: '恢复检查', status: 'enabled' }] } }
 
-async function mount(initialCatalog = catalog, { FileReader, fetcher } = {}) {
+async function mount(initialCatalog = catalog, { FileReader, fetcher, initialType, initialStatus, initialQuery, initialQueryDraft, initialError } = {}) {
   const slots = [], calls = [], fail = new Set()
   let cursor = 0, exported, tree
+  const initialState = new Map()
+  if (initialType !== undefined) initialState.set(9, initialType)
+  if (initialStatus !== undefined) initialState.set(10, initialStatus)
+  if (initialQuery !== undefined) initialState.set(12, initialQuery)
+  if (initialQueryDraft !== undefined) initialState.set(13, initialQueryDraft)
+  if (initialError !== undefined) initialState.set(1, initialError)
   const react = {
     createElement(type, props, ...children) { return { type, props: props ?? {}, children } },
     Fragment: Symbol('Fragment'),
-    useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = i === 0 ? initialCatalog : initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value }] },
+    useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = i === 0 ? initialCatalog : initialState.has(i) ? initialState.get(i) : initial; return [slots[i], value => { slots[i] = typeof value === 'function' ? value(slots[i]) : value }] },
     useRef(initial) { const i = cursor++; if (!(i in slots)) slots[i] = { current: initial }; return slots[i] },
     useEffect() {}, useCallback(fn) { return fn },
   }
@@ -44,13 +50,13 @@ async function mount(initialCatalog = catalog, { FileReader, fetcher } = {}) {
     function visit(value) { if (Array.isArray(value)) value.forEach(visit); else if (value?.children) { result.push(value); value.children.forEach(visit) } }
     visit(tree); return result
   }
-  const text = node => (node?.children ?? []).flat(Infinity).map(value => typeof value === 'string' ? value : text(value)).join('')
+  const text = node => (node?.children ?? []).flat(Infinity).map(value => typeof value === 'string' || typeof value === 'number' ? String(value) : text(value)).join('')
   function button(label) { const value = nodes().find(node => node.type === 'button' && text(node) === label); assert.ok(value, `missing button ${label}`); return value }
   function field(label) { const value = nodes().find(node => node.props['aria-label'] === label); assert.ok(value, `missing field ${label}`); return value }
   async function click(label) { button(label).props.onClick(); await tick(); render() }
   function change(label, value) { field(label).props.onChange({ target: { value } }); render() }
   render()
-  return { render, nodes, text: () => text(tree), click, change, field, button, calls, fail, drafts }
+  return { render, nodes, text: () => text(tree), click, change, field, button, state: index => slots[index], calls, fail, drafts }
 }
 
 test('asset navigation separates catalog, methodology, import and one asset detail', async () => {
@@ -66,11 +72,131 @@ test('asset navigation separates catalog, methodology, import and one asset deta
   assert.ok(ui.text().includes('共享设计'))
   assert.ok(!ui.text().includes('待审缺陷'))
   assert.ok(ui.text().includes('2026/9/8 08:00'))
-  await ui.click('返回列表')
+  await ui.click('返回资产库')
   await ui.click('导入资产')
   assert.ok(!ui.text().includes('共享设计'))
   assert.ok(!ui.text().includes('恢复检查'))
   assert.ok(ui.field('选择资产文件'))
+})
+
+test('asset page keeps scrolling without reserving a visible scrollbar gutter', async () => {
+  const ui = await mount()
+  const root = ui.nodes().find(node => node.props.className === 'pangea-asset-root')
+  assert.ok(root)
+  assert.equal(root.props.style.overflow, 'auto')
+  assert.equal(root.props.style.scrollbarWidth, 'none')
+})
+
+test('asset table only selects available rows and creates an analysis from the selected ids', async () => {
+  const ui = await mount()
+  const table = ui.nodes().find(node => node.props.role === 'table' && node.props['aria-label'] === '测试资产列表')
+  assert.ok(table)
+  const rows = ui.nodes().filter(node => node.props.role === 'row')
+  assert.equal(rows.length, 3, 'one heading row plus the two service-returned assets')
+  assert.equal(ui.nodes().filter(node => node.props.role === 'columnheader').length, 6)
+
+  const selector = ui.nodes().find(node => node.type === 'input' && node.props['aria-label'] === '选择资产 共享设计')
+  assert.ok(selector)
+  assert.equal(ui.nodes().some(node => node.type === 'input' && node.props['aria-label'] === '选择资产 待审缺陷'), false)
+  selector.props.onChange({ target: { checked: true } })
+  ui.render()
+  assert.equal(ui.button('用于新分析').props.disabled, false)
+  await ui.click('清空选择')
+  assert.equal(ui.button('用于新分析').props.disabled, true)
+  ui.nodes().find(node => node.type === 'input' && node.props['aria-label'] === '选择资产 共享设计').props.onChange({ target: { checked: true } })
+  ui.render()
+  ui.change('筛选资产类型', 'design')
+  assert.equal(ui.text().includes('已选择 1 个可用资产'), true, 'selection remains when filters change')
+  await ui.click('用于新分析')
+  assert.deepEqual(Array.from(ui.drafts.at(-1).assetIds), ['shared'])
+})
+
+test('new analysis receives every selected asset id in order when a selected row is filtered out', async () => {
+  const secondAvailable = { ...available, asset_id: 'shared-requirement-r4', asset_type: 'requirement', title: '共享需求', revision: 4 }
+  const multiAssetCatalog = { ...catalog, assets: [available, secondAvailable, pending], summary: { total: 3, available: 2, review: 1 }, pagination: { page: 1, page_size: 20, total: 3, total_pages: 1 } }
+  const ui = await mount(multiAssetCatalog)
+  assert.ok(ui.text().includes('共享设计'))
+  assert.ok(ui.text().includes('r2'))
+  assert.ok(ui.text().includes('共享需求'))
+  assert.ok(ui.text().includes('r4'))
+
+  for (const name of ['共享设计', '共享需求']) {
+    ui.nodes().find(node => node.type === 'input' && node.props['aria-label'] === `选择资产 ${name}`).props.onChange({ target: { checked: true } })
+    ui.render()
+  }
+  ui.change('筛选资产类型', 'design')
+  assert.ok(ui.text().includes('已选择 2 个可用资产'), 'filtering a selected row does not drop it from the draft')
+  await ui.click('用于新分析')
+  assert.deepEqual(Array.from(ui.drafts.at(-1).assetIds), ['shared', 'shared-requirement-r4'])
+})
+
+test('filtered empty state keeps the active query editable and clears only its filters', async () => {
+  const emptyFiltered = { status: 'ok', assets: [], summary: { total: 8, available: 4, review: 1, failed: 1 },
+    pagination: { page: 1, page_size: 20, total: 0, total_pages: 1, type: 'design', status: 'available', query: '认证握手' }, methodologies: { items: [] } }
+  const ui = await mount(emptyFiltered, { initialType: 'design', initialStatus: 'available', initialQuery: '认证握手', initialQueryDraft: '认证握手' })
+  const summary = ui.nodes().find(node => node.props.className === 'pangea-asset-search-summary')
+  assert.ok(summary)
+  assert.equal(ui.field('搜索测试资产').props.value, '认证握手')
+  assert.ok(ui.text().includes('设计 / 可用于分析'))
+  assert.ok(ui.nodes().some(node => node.props['aria-label'] === '清除类型和状态筛选'))
+  assert.ok(ui.text().includes('没有符合条件的资产'))
+  assert.ok(ui.text().includes('调整关键词或筛选条件，继续浏览已有资料。'))
+  assert.ok(!ui.text().includes('当前条件'))
+  assert.equal(ui.nodes().some(node => node.props.className?.startsWith('pangea-asset-selection')), false)
+  assert.equal(ui.nodes().some(node => node.props['aria-label'] === '筛选资产类型'), false)
+  await ui.click('查看全部结果')
+  assert.ok(ui.text().includes('建立可复用的分析资料库'))
+})
+
+test('first catalog load uses the notice and five-row skeleton without an empty conclusion', async () => {
+  const ui = await mount(null)
+  const loading = ui.nodes().find(node => node.props.className === 'pangea-asset-loading-state')
+  assert.ok(loading)
+  assert.equal(ui.nodes().filter(node => node.props.className === 'pangea-asset-skeleton-row').length, 5)
+  assert.ok(ui.nodes().some(node => node.props.className === 'pangea-asset-loading-note' && node.props.role === 'status'))
+  assert.ok(!ui.text().includes('建立可复用的分析资料库'))
+  assert.ok(!ui.nodes().some(node => node.props.className === 'pangea-asset-metrics'))
+})
+
+test('first catalog failure presents one retryable alert and does not imply an empty library', async () => {
+  const ui = await mount(null, { initialError: '资产服务不可用' })
+  const alerts = ui.nodes().filter(node => node.props.role === 'alert')
+  assert.equal(alerts.length, 1)
+  assert.ok(ui.text().includes('暂时无法读取资产库'))
+  assert.ok(ui.text().includes('现有文件与记录仍然保留'))
+  assert.ok(ui.button('重新读取'))
+  assert.ok(!ui.text().includes('建立可复用的分析资料库'))
+  assert.ok(!ui.text().includes('全部资料'))
+})
+
+test('empty catalog failure keeps one centered retry alert without a duplicate banner', async () => {
+  const emptyCatalog = { ...catalog, assets: [], summary: { total: 0, available: 0, review: 0 },
+    pagination: { page: 1, page_size: 20, total: 0, total_pages: 1 } }
+  const ui = await mount(emptyCatalog, { initialError: '资产服务不可用' })
+  assert.equal(ui.nodes().filter(node => node.props.role === 'alert').length, 1)
+  assert.ok(ui.text().includes('暂时无法读取资产库'))
+  assert.ok(ui.button('重新读取'))
+  assert.ok(!ui.nodes().some(node => node.type === 'button' && node.children.includes('刷新数据')))
+})
+
+test('catalog retry keeps its error action locked until a successful response arrives', async () => {
+  let resolveResponse
+  const response = new Promise(resolve => { resolveResponse = resolve })
+  const ui = await mount(null, { initialError: '资产服务不可用', fetcher: () => response })
+  assert.ok(ui.text().includes('暂时无法读取资产库'), ui.text())
+  ui.button('重新读取').props.onClick()
+  ui.render()
+  assert.ok(ui.text().includes('暂时无法读取资产库'), ui.text())
+  const pendingButton = ui.button('正在重新读取…')
+  assert.equal(pendingButton.props.disabled, true)
+  assert.equal(ui.nodes().filter(node => node.props.role === 'alert').length, 1)
+  assert.ok(ui.text().includes('现有文件与记录仍然保留'))
+  resolveResponse({ ok: true, async json() { return catalog } })
+  await tick()
+  await tick()
+  ui.render()
+  assert.equal(ui.nodes().filter(node => node.props.role === 'alert').length, 0)
+  assert.ok(ui.text().includes('共享设计'))
 })
 
 test('asset extraction requires a selected internal model and forwards its route', async () => {
@@ -109,13 +235,17 @@ test('failed import and metadata save retain the editable form', async () => {
   assert.equal(ui.field('资产标题').props.value, '我的设计')
   assert.ok(ui.text().includes('模拟保存失败'))
   assert.ok(ui.button('导入并处理'))
-  await ui.click('返回列表')
+  await ui.click('取消')
   assert.ok(!ui.text().includes('模拟保存失败'), 'import errors must not remain on the asset list')
   await ui.click('查看详情')
   await ui.click('编辑信息')
+  const dialog = ui.nodes().find(node => node.props.role === 'dialog')
+  assert.ok(dialog)
+  assert.equal(dialog.props['aria-modal'], true)
+  assert.ok(dialog.props['aria-labelledby'])
   ui.change('编辑资产标题', '已编辑标题')
   ui.fail.add('update_metadata')
-  await ui.click('保存')
+  await ui.click('保存信息')
   assert.equal(ui.field('编辑资产标题').props.value, '已编辑标题')
 })
 
@@ -135,14 +265,14 @@ test('review note edits preserve the saved decision and a failed save keeps the 
 test('asset detail exposes recoverable deletion and persists category edits', async () => {
   const ui = await mount()
   await ui.click('查看详情')
-  assert.ok(ui.button('删除（可恢复）'))
+  assert.ok(ui.button('归档'))
   await ui.click('编辑信息')
   ui.change('编辑资产分类', 'historical_defect')
-  await ui.click('保存')
+  await ui.click('保存信息')
   assert.equal(ui.calls.find(call => call.payload?.action === 'update_metadata').payload.asset_type, 'historical_defect')
-  await ui.click('删除（可恢复）')
+  await ui.click('归档')
   assert.ok(ui.calls.some(call => call.payload?.action === 'archive'))
-  assert.ok(!ui.text().includes('返回列表'))
+  assert.ok(!ui.text().includes('返回资产库'))
 })
 
 test('approved historical defect starts semantic generation directly from its detail', async () => {
@@ -151,7 +281,7 @@ test('approved historical defect starts semantic generation directly from its de
   try {
     const ui = await mount()
     // Open the historical defect's own detail, without selecting checkboxes.
-    const buttons = ui.nodes().filter(node => node.type === 'button' && node.children.includes('查看详情'))
+    const buttons = ui.nodes().filter(node => node.type === 'button' && node.props['aria-label'] === '查看详情')
     buttons[1].props.onClick()
     await tick(); ui.render()
     await ui.click('开启语义生成会话')
@@ -159,45 +289,40 @@ test('approved historical defect starts semantic generation directly from its de
   } finally { pending.status = prior }
 })
 
-test('search shows the submitted query and clearing filters preserves the current section', async () => {
+test('search submits a trimmed query and clearing filters preserves the current section', async () => {
   const ui = await mount()
   ui.change('筛选资产类型', 'design')
   ui.change('资产状态', 'extracting')
   ui.change('搜索资产', '  重试设计  ')
   ui.field('资产关键词搜索').props.onSubmit({ preventDefault() {} })
   ui.render()
-  assert.ok(ui.text().includes('搜索“重试设计”'))
-  await ui.click('刷新')
-  let params = new URL(ui.calls.at(-1).url, 'http://localhost').searchParams
-  assert.equal(params.get('q'), '重试设计')
-  assert.equal(params.get('status'), 'extracting')
+  assert.equal(ui.state(12), '重试设计', 'submitted query is trimmed before the server request state')
+  assert.ok(!ui.text().includes('找到 2 个资产'), 'the toolbar does not repeat the total shown in pagination')
   await ui.click('清除筛选')
   assert.equal(ui.field('筛选资产类型').props.value, '')
   assert.equal(ui.field('资产状态').props.value, '')
   assert.equal(ui.field('搜索资产').props.value, '')
-  assert.ok(!ui.text().includes('搜索“重试设计”'))
-  for (const [section, status] of [['待审核', 'awaiting_review'], ['已删除 / 已归档', 'archived']]) {
-    await ui.click(section)
-    ui.change('筛选资产类型', 'design')
-    ui.change('搜索资产', '草稿')
-    await ui.click('清除筛选')
-    await ui.click('刷新')
-    params = new URL(ui.calls.at(-1).url, 'http://localhost').searchParams
-    assert.equal(params.get('status'), status)
-    assert.equal(params.get('type'), null)
-    assert.equal(params.get('q'), null)
-    assert.equal(params.get('page'), '1')
-  }
+  assert.equal(ui.state(12), '')
+  await ui.click('待审核')
+  assert.equal(ui.button('待审核').props['aria-current'], 'page')
+  assert.ok(!ui.nodes().some(node => node.props['aria-label'] === '资产状态'))
+  await ui.click('已归档')
+  assert.equal(ui.button('已归档').props['aria-current'], 'page')
+  assert.ok(ui.field('搜索已归档资产'))
 })
 
-test('empty catalog offers import while a filtered empty result offers reset', async () => {
-  const ui = await mount({ ...catalog, assets: [], summary: {}, pagination: { page: 1, page_size: 20, total: 0, total_pages: 1 } })
-  assert.ok(ui.text().includes('开始建立你的资产库'))
+test('first-use empty catalog avoids irrelevant filters while a filtered empty result offers reset', async () => {
+  const empty = { ...catalog, assets: [], summary: {}, pagination: { page: 1, page_size: 20, total: 0, total_pages: 1 } }
+  const ui = await mount(empty)
+  assert.ok(ui.text().includes('建立可复用的分析资料库'))
   assert.ok(!ui.nodes().some(node => node.props['aria-label'] === '资产分页'))
-  ui.change('筛选资产类型', 'design')
-  assert.ok(ui.text().includes('没有符合条件的资产'))
-  await ui.click('查看全部结果')
-  assert.equal(ui.field('筛选资产类型').props.value, '')
+  assert.ok(!ui.nodes().some(node => node.props['aria-label'] === '筛选资产'))
+  assert.ok(!ui.nodes().some(node => node.type === 'button' && node.children.includes('刷新')))
+  const filtered = await mount(empty, { initialType: 'design' })
+  assert.ok(filtered.text().includes('没有符合条件的资产'))
+  await filtered.click('查看全部结果')
+  assert.ok(!filtered.nodes().some(node => node.props['aria-label'] === '筛选资产'))
+  assert.ok(filtered.text().includes('建立可复用的分析资料库'))
   await ui.click('导入第一个资产')
   assert.ok(ui.field('选择资产文件'))
 })
@@ -205,13 +330,45 @@ test('empty catalog offers import while a filtered empty result offers reset', a
 test('initial loading does not claim the catalog is empty and pagination is labeled', async () => {
   const loading = await mount(null)
   assert.equal(loading.field('资产列表').props['aria-busy'], true)
-  assert.ok(loading.text().includes('正在加载资产…'))
-  assert.ok(!loading.text().includes('开始建立你的资产库'))
+  assert.ok(loading.text().includes('正在读取测试资产'))
+  assert.ok(!loading.nodes().some(node => node.props['aria-label'] === '筛选资产'))
+  assert.ok(!loading.text().includes('建立可复用的分析资料库'))
   const loaded = await mount()
   assert.equal(loaded.field('资产列表').props['aria-busy'], false)
   assert.equal(loaded.field('每页资产数量').props.value, 20)
   assert.equal(loaded.button('上一页').props.disabled, true)
   assert.equal(loaded.button('下一页').props.disabled, true)
+})
+
+test('asset import uses the framed general and coverage modes and accepts dropped files', async () => {
+  const ui = await mount({ ...catalog, asset_types: ['design', 'coverage'] })
+  await ui.click('导入资产')
+  assert.ok(ui.text().includes('导入新的分析材料'))
+  assert.ok(ui.text().includes('选择要加入资产库的文件'))
+  assert.equal(ui.button('导入并处理').props.disabled, true)
+  assert.equal(ui.button('返回资产库').props.disabled, false)
+  assert.ok(!ui.nodes().some(node => node.type === 'button' && node.children.includes('返回列表')))
+  assert.equal(ui.field('资产类型').props.value, 'design')
+  assert.deepEqual(ui.field('资产类型').children.flat(Infinity).filter(node => node?.type === 'option').map(node => node.props.value), ['design'])
+  assert.equal(ui.field('选择资产文件').props.accept, '.md,.txt,.pdf,.docx,.xlsx')
+
+  await ui.click('覆盖率文件')
+  assert.equal(ui.field('资产类型').props.value, 'coverage')
+  assert.deepEqual(ui.field('资产类型').children.flat(Infinity).filter(node => node?.type === 'option').map(node => node.props.value), ['coverage'])
+  assert.equal(ui.field('选择资产文件').props.accept, '.xlsx,.json')
+  assert.ok(ui.text().includes('本机解析覆盖记录'))
+
+  await ui.click('一般资料')
+  assert.equal(ui.field('资产类型').props.value, 'design')
+  const dropzone = ui.nodes().find(node => node.props.className === 'pangea-asset-dropzone')
+  dropzone.props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: 'design.md', size: 2048 }] } })
+  ui.render()
+  assert.ok(ui.text().includes('design.md'))
+  assert.equal(ui.button('导入并处理').props.disabled, true, 'a selected design file cannot bypass a missing model')
+  ui.change('资产文件路径', '/fixtures/replacement.md')
+  assert.ok(!ui.text().includes('design.md'), 'choosing a path must clear the selected file')
+  assert.equal(ui.field('资产文件路径').props.value, '/fixtures/replacement.md')
+  assert.equal(ui.button('导入并处理').props.disabled, true)
 })
 
 test('file reading locks import and navigation before rerender and submits only once', async () => {
@@ -228,7 +385,7 @@ test('file reading locks import and navigation before rerender and submits only 
   submit(); submit(); ui.render()
   assert.equal(readers.length, 1, 'a synchronous second click must not start another read')
   assert.equal(ui.button('正在导入…').props.disabled, true)
-  assert.equal(ui.button('返回列表').props.disabled, true)
+  assert.equal(ui.button('返回资产库').props.disabled, true)
   assert.equal(ui.calls.length, 0)
   readers[0].result = 'data:application/json;base64,e30='
   readers[0].onload()
@@ -248,6 +405,7 @@ test('a FileReader error is visible and preserves the selected file and import d
     }
   } })
   await ui.click('导入资产')
+  await ui.click('覆盖率文件')
   ui.change('资产标题', '待导入资料')
   ui.field('选择资产文件').props.onChange({ target: { files: [{ name: 'design.md', size: 12 }] } })
   ui.render()
@@ -259,24 +417,24 @@ test('a FileReader error is visible and preserves the selected file and import d
   assert.equal(ui.calls.length, 0)
 })
 
-test('empty and oversized uploads are rejected before reading or calling the API', async () => {
-  for (const [size, message] of [[0, '所选文件为空'], [24 * 1024 * 1024 + 1, '超过 24 MiB 限制']]) {
+test('empty and oversized uploads are blocked before reading or calling the API', async () => {
+  for (const [size, message] of [[0, '所选文件为空'], [24 * 1024 * 1024 + 1, '文件超过上传限制']]) {
     let reads = 0
     const ui = await mount(catalog, { FileReader: class { readAsDataURL() { reads++ } } })
     await ui.click('导入资产')
+    await ui.click('覆盖率文件')
     ui.field('选择资产文件').props.onChange({ target: { files: [{ name: 'invalid.md', size }] } })
     ui.render()
-    await ui.click('导入并处理')
     assert.ok(ui.text().includes(message))
     assert.equal(reads, 0)
     assert.equal(ui.calls.length, 0)
-    assert.equal(ui.button('导入并处理').props.disabled, false)
+    assert.equal(ui.button('导入并处理').props.disabled, true)
   }
 })
 
 test('successful import opens its detail in the library and clears earlier section filters', async () => {
   const imported = { ...available, asset_id: 'fresh', title: '新覆盖率', asset_type: 'coverage' }
-  for (const origin of ['方法论', '已删除 / 已归档']) {
+  for (const origin of ['方法论', '已归档']) {
     const ui = await mount(catalog, { async fetcher(url, options) {
       const body = options.body ? { ...catalog, assets: [imported], imported_asset_id: imported.asset_id }
         : new URL(url, 'http://localhost').searchParams.has('asset_id') ? { status: 'ok', asset: imported, result: { summary: '导入完成的详细内容', items: [] } }
@@ -284,20 +442,16 @@ test('successful import opens its detail in the library and clears earlier secti
       return { ok: true, async json() { return body } }
     } })
     await ui.click(origin)
-    if (origin !== '方法论') {
-      ui.change('筛选资产类型', 'design')
-      ui.change('搜索资产', '原有筛选')
-      ui.field('资产关键词搜索').props.onSubmit({ preventDefault() {} }); ui.render()
-    }
+    if (origin === '已归档') ui.change('搜索已归档资产', '原有筛选')
     await ui.click('导入资产')
     ui.change('资产类型', 'coverage')
     ui.change('资产文件路径', '/fixtures/coverage.json')
     await ui.click('导入并处理')
     assert.equal(ui.button('资产库').props['aria-current'], 'page')
-    assert.ok(ui.field('资产列表'))
-    assert.ok(ui.text().includes('导入完成的详细内容'))
+    assert.ok(ui.field('资产详情'))
+    assert.ok(ui.text().includes('新覆盖率'))
     assert.ok(!ui.text().includes('恢复检查'))
-    await ui.click('返回列表')
+    await ui.click('返回资产库')
     assert.equal(ui.field('筛选资产类型').props.value, '')
     assert.equal(ui.field('资产状态').props.value, '')
     assert.equal(ui.field('搜索资产').props.value, '')
@@ -323,7 +477,7 @@ test('detail refresh clears stale errors, shows loading and deduplicates repeate
   await tick(); ui.render()
   assert.ok(ui.text().includes('详情已恢复'))
   assert.ok(!ui.nodes().some(node => node.props.role === 'alert'))
-  assert.equal(ui.button('刷新').props.disabled, false)
+  assert.ok(!ui.nodes().some(node => node.type === 'button' && node.children.includes('刷新')), 'retry control disappears after detail recovers')
 })
 
 test('processing settings appear only for import or detail and coverage hides model controls', async () => {
@@ -340,11 +494,11 @@ test('processing settings appear only for import or detail and coverage hides mo
   ui.change('资产类型', 'coverage')
   assert.equal(hasLabel('资产解析执行器'), false)
   assert.equal(hasLabel('资产解析模型'), false)
-  assert.ok(ui.text().includes('无需选择 Agent 或模型'))
+  assert.ok(ui.text().includes('文件由本机直接解析'))
   await ui.click('资产库')
   assert.equal(hasLabel('资产 AI 助手'), false)
   await ui.click('查看详情')
-  assert.equal(hasLabel('资产 AI 助手'), true)
+  assert.equal(hasLabel('资产 AI 助手'), false)
   assert.equal(hasLabel('资产解析执行器'), true)
   assert.equal(hasLabel('资产解析模型'), true)
   const settings = ui.nodes().find(node => node.type === 'details' && node.children.some(child => child?.type === 'summary' && child.children.includes('重新处理设置')))
@@ -368,7 +522,7 @@ test('coverage detail presents source paths and zero execution counts in a reada
   const rows = ui.nodes().filter(node => node.type === 'tr').slice(1).map(row => row.children.flat(Infinity).map(cell => cell.children.join('')))
   assert.deepEqual(rows, [
     ['函数', '/repo/src/parser.py:7', 'parse_input', '0'],
-    ['代码行', '/repo/src/parser.py:8', '—', '0'],
+    ['代码行', '/repo/src/parser.py:8', '未提供', '0'],
     ['分支', '/repo/src/parser.py:9', '块 0 · 分支 0', '真 0 / 假 0'],
   ])
   assert.ok(!ui.nodes().some(node => ['资产解析执行器', '资产解析模型'].includes(node.props['aria-label'])))
@@ -384,9 +538,20 @@ test('empty methodologies guide users to available historical defects in the lib
   assert.equal(ui.field('资产状态').props.value, 'available')
   assert.equal(ui.field('搜索资产').props.value, '')
   assert.ok(ui.field('资产列表'))
-  await ui.click('刷新')
-  const params = new URL(ui.calls.at(-1).url, 'http://localhost').searchParams
-  assert.equal(params.get('type'), 'historical_defect')
-  assert.equal(params.get('status'), 'available')
-  assert.equal(params.get('page'), '1')
+})
+
+test('detail analysis uses only its asset id and requires a frozen input revision', async () => {
+  for (const inputRevision of ['', 'design-r2-fixed']) {
+    const asset = { ...available, input_revision: inputRevision }
+    const ui = await mount(catalog, { async fetcher(url) {
+      const detail = new URL(url, 'http://localhost').searchParams.has('asset_id')
+      return { ok: true, async json() { return detail ? { status: 'ok', asset, result: { items: [] }, normalized_preview: '<tag> as text' } : catalog } }
+    } })
+    await ui.click('查看详情')
+    const use = ui.nodes().find(node => node.type === 'button' && node.children.includes('用于新分析'))
+    assert.equal(Boolean(use), Boolean(inputRevision))
+    if (use) { await ui.click('用于新分析'); assert.deepEqual(Array.from(ui.drafts.at(-1).assetIds), ['shared']) }
+    await ui.click('原始材料')
+    assert.ok(ui.text().includes('<tag> as text'))
+  }
 })

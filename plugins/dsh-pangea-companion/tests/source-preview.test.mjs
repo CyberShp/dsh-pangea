@@ -21,3 +21,21 @@ test('source-first preview selects the named frozen repository and preserves leg
     assert.throws(() => resolveEvidenceFile({ snapshotRoot: root, snapshotLayout: 'source-first', repositoryId: 'two', location: 'two:../one/same.c:2' }), /escapes/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('expanded context reads only the frozen Run copy and retains the cited line', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-source-context-'))
+  try {
+    const frozen = path.join(root, 'frozen')
+    const workspace = path.join(root, 'workspace')
+    await mkdir(path.join(frozen, 'repo'), { recursive: true })
+    await mkdir(workspace)
+    await writeFile(path.join(frozen, 'repo', 'sample.c'), Array.from({ length: 30 }, (_, index) => `frozen-${index + 1}`).join('\n'))
+    await writeFile(path.join(workspace, 'sample.c'), 'workspace-edited')
+    const snippet = await readEvidenceSnippet({ cwd: workspace, snapshotRoot: frozen, snapshotLayout: 'source-first', repositoryId: 'repo',
+      location: 'repo:sample.c:16-17', contextBefore: 8, contextAfter: 12 })
+    assert.deepEqual([snippet.visible_start, snippet.visible_end], [8, 29])
+    assert.equal(snippet.lines[0].text, 'frozen-8')
+    assert.equal(snippet.lines.find(line => line.number === 16).target, true)
+    assert.ok(snippet.lines.every(line => !line.text.includes('workspace-edited')))
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

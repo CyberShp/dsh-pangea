@@ -35,7 +35,7 @@ async function loadClient(react = fakeReact(), globals = {}) {
 test('registers a PANGEA-owned asset management page', async () => {
   const { source, exported } = await loadClient()
   for (const text of [
-    '资产管理', '导入资产', '需求', '设计', '历史缺陷', '参考资料', 'Coverage',
+    '资产管理', '导入资产', '需求', '设计', '历史缺陷', '参考资料', '覆盖率',
     '待人工审核', '审核通过', '拒绝', '未提取到可用内容', '提取请求已处理',
     '上一页', '下一页', '示例用例', '资产状态',
     '用于新分析', '提取内容', '用户方法论', '生成方法论候选', '待启用',
@@ -56,12 +56,19 @@ test('registers a PANGEA-owned asset management page', async () => {
   assert.equal(pages[0].title(), '资产管理')
 })
 
-test('uses the same product typography scale as PANGEA analysis pages', async () => {
+test('uses the approved asset prototype typography scale', async () => {
   const { source } = await loadClient()
-  assert.match(source, /"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI"/)
-  assert.match(source, /fontSize: 16/)
-  assert.match(source, /button: \{[\s\S]*fontSize: 16/)
-  assert.match(source, /meta: \{[\s\S]*fontSize: 16/)
+  assert.match(source, /fontFamily: '"Segoe UI", "Microsoft YaHei", sans-serif'/)
+  assert.match(source, /title: \{ fontSize: 27, fontWeight: 650, letterSpacing: '-\.5px'/)
+  assert.match(source, /button: \{[\s\S]*fontSize: 12/)
+  assert.match(source, /meta: \{[\s\S]*fontSize: 13/)
+  assert.match(source, /padding: '25px 31px 0'/)
+  assert.match(source, /\.pangea-asset-header-subtitle\{color:#70767d!important;font-size:12px!important;line-height:1\.8!important;margin-top:9px!important\}/)
+  assert.match(source, /\.pangea-asset-tabs button\[aria-current=page\][^{]*\{[^}]*color:#25292e/)
+  assert.match(source, /fontSize: 13, cursor: 'pointer', minHeight: 43, padding: '10px 0 14px'/)
+  assert.match(source, /fontWeight: 400, lineHeight: 'normal'/)
+  assert.match(source, /pangea-asset-empty\.is-first-use \.pangea-asset-empty-title\{font-size:20px/)
+  assert.match(source, /pangea-asset-empty-step\{[^}]*text-align:left/)
   assert.doesNotMatch(source, /fontSize: 9/)
   assert.doesNotMatch(source, /fontSize: 10/)
 })

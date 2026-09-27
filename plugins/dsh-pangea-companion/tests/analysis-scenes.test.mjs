@@ -18,7 +18,7 @@ async function fixture(t, scene) {
   const f = await writeArchitectureRun(root)
   await json(path.join(f.run, 'inputs/task-contract.json'), { workflow_version: 'source-first-v1', analysis_profile: SCENE_PROFILE, target: 'TLS', repository: 'repo', analysis_settings: { scenario: scene, mode: 'speed' } })
   await json(path.join(f.run, 'inputs/analysis-scene.json'), { id: scene, label: scene, profile: SCENE_PROFILE, format_version: 'analysis-scene-v1', presentation: { risks: ['module-analysis', 'risk-analysis'].includes(scene) } })
-  await json(path.join(f.run, 'inputs/coverage-match-summary.json'), { sources: [{ asset_id: 'cov', input_revision: 'original', status: 'partial' }], matched: [], unmatched: [{ path: 'unknown.c' }], ambiguous: [] })
+  await json(path.join(f.run, 'inputs/coverage-match-summary.json'), { sources: [{ asset_id: 'cov', input_revision: 'original', status: 'partial' }], matched: [{ coverage_id: 'cov:GAP-1', file_path: 'tls.c', matches: [{ repo_id: 'repo', path: 'tls.c', line: 1 }] }], unmatched: [{ coverage_id: 'cov:REF-2', path: 'unknown.c' }], ambiguous: [] })
   await json(path.join(f.run, 'inputs/asset-snapshots.json'), [{ asset_id: 'cov', input_revision: 'original', metadata: { title: '冻结覆盖数据', asset_type: 'coverage' }, result: {} }])
   const result = JSON.parse(await readFile(f.resultPath, 'utf8'))
   result.records.find(r => r.record_id === 'flow').body = { format_version: 'module-flow-text-v1', flow_id: 'tls-main', title: '连接流程', text: '请求→检查就绪→成功或拒绝', source_evidence: ['repo:tls.c:1'] }
@@ -61,6 +61,8 @@ test('all scenes read text-only flow; branch/coverage export no formal risk colu
     assert.deepEqual(flow.nodes, [])
     assert.ok(!flow.projection_warnings?.some(w => /节点/.test(w)))
     assert.equal(run.coverage_match.unmatched, 1)
+    assert.equal(run.coverage_match.matched, 1)
+    assert.equal(run.coverage_match.matched_preview[0].coverage_id, 'cov:GAP-1')
     assert.equal(run.coverage_match.sources[0].input_revision, 'original')
     const materials = await readInputMaterials(f.run)
     assert.equal(materials[0].title, '冻结覆盖数据')
