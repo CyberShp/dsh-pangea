@@ -6,6 +6,33 @@ import test from 'node:test'
 
 import { LaunchLogStore } from '../src/launch-log.js'
 
+test('persists native file permission paths and decisions with existing redaction and text limits', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-permission-log-'))
+  try {
+    const store = new LaunchLogStore({ root })
+    const file = await store.append('task-permission', { stage: 'source_first_file_permission', action_id: 'run:analysis:unit-1',
+      kind: 'edit', paths: ["C:\\scratch\\单位's.json"], decision: 'allow_once' })
+    await store.append('task-permission', { stage: 'source_first_file_permission', action_id: 'run:closure:unit-1',
+      kind: 'move', paths: ['C:\\other-worker\\unit.json', 'C:\\scratch\\token=fixture-secret'], decision: 'reject',
+      env: { TOKEN: 'fixture-secret' } })
+    await store.append('task-permission', { stage: 'source_first_file_permission', kind: 'edit', decision: 'reject',
+      paths: ['x'.repeat(9000), 'omitted-after-text-budget'] })
+    const disk = await readFile(file, 'utf8')
+    const events = disk.trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(events[0].action_id, 'run:analysis:unit-1')
+    assert.equal(events[0].kind, 'edit')
+    assert.equal(events[0].decision, 'allow_once')
+    assert.deepEqual(events[0].paths, ["C:\\scratch\\单位's.json"])
+    assert.equal(events[1].action_id, 'run:closure:unit-1')
+    assert.equal(events[1].kind, 'move')
+    assert.equal(events[1].decision, 'reject')
+    assert.deepEqual(events[1].paths, ['C:\\other-worker\\unit.json', 'C:\\scratch\\[credential]'])
+    assert.equal(events[1].env, undefined)
+    assert.doesNotMatch(disk, /fixture-secret/)
+    assert.deepEqual(events[2].paths, ['x'.repeat(8192)])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('retains host reviewer binding and routing history without model prompts', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-review-log-'))
   try {

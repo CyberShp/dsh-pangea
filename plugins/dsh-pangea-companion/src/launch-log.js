@@ -54,9 +54,20 @@ function compactEvent(value = {}) {
     'resolved_command', 'launcher_kind', 'launcher_command', 'cwd', 'launch_stage', 'syscall',
     'remote_session_id', 'stop_reason', 'protocol_stop_reason', 'phase', 'error_summary', 'stderr_summary',
     'review_status', 'review_request_id', 'producer_session_id', 'reviewer_session_id', 'semantic_verdict',
-    'diagnostic_path', 'state_path', 'agent_version', 'last_tool_id', 'last_tool_status', 'last_tool_name', 'action_id', 'exit_signal',
+    'diagnostic_path', 'state_path', 'agent_version', 'last_tool_id', 'last_tool_status', 'last_tool_name', 'action_id', 'exit_signal', 'kind', 'decision',
   ]) {
     if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = diagnosticText(value[key].trim())
+  }
+  if (Array.isArray(value.paths)) {
+    event.paths = []
+    let remaining = MAX_EVENT_TEXT
+    for (const item of value.paths) {
+      if (remaining <= 0) break
+      if (typeof item !== 'string') continue
+      const text = diagnosticText(item, remaining)
+      event.paths.push(text)
+      remaining -= text.length + 1
+    }
   }
   for (const key of [
     'turn', 'completed', 'message_chunks', 'tool_calls', 'tool_failures', 'turn_duration_ms',

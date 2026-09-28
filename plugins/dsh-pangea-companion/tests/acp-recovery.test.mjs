@@ -11,6 +11,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'disconnect']) test(`coordinator ${mode} preserves identity and results`, { timeout: 10000 }, async () => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-recovery-'))
   const controller = new AbortController(), events = [], prompts = [], lateResponse = deferred()
+  const scratchDirectories = []
   let pending = deferred(), settled = false, starts = 0, turns = 0, taskId
   const worker = { id: 'worker', remoteSessionId: 'remote', result: mode === 'ready' ? pending.promise : Promise.resolve(completed),
     readDiagnostics: () => ({ activeToolCount: 0, canLoadSession: true, processExited: mode === 'disconnect' && starts === 1 && turns > 0 }),
@@ -28,6 +29,9 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
   }
   const options = { dataRoot, runId: 'run', cwd: dataRoot, providerId: 'pangea-nga', signal: controller.signal, progressPolicy,
     onEvent: async e => { events.push(e); if (e.stage === 'source_first_late_response') lateResponse.resolve() }, subagents: { start: async (_, request) => {
+      scratchDirectories.push(request.scratchDirectory)
+      request.onDiagnostic({ stage: 'file_permission', lastPermissionKind: 'edit',
+        lastPermissionPaths: [path.join(request.scratchDirectory, 'unit.json')], lastPermissionDecision: 'allow_once' })
       starts++; if (starts > 1) assert.deepEqual(request.resume, { taskId: 'worker', remoteSessionId: 'remote' }); return worker
     } }, runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
@@ -42,6 +46,11 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
   try {
     const result = await run.result
     assert.equal(starts, mode === 'disconnect' ? 2 : 1)
+    assert.ok(path.isAbsolute(scratchDirectories[0]))
+    assert.equal(new Set(scratchDirectories).size, 1)
+    assert.deepEqual(events.filter(event => event.stage === 'source_first_file_permission'), scratchDirectories.map(directory => ({
+      stage: 'source_first_file_permission', action_id: 'run:a', kind: 'edit', paths: [path.join(directory, 'unit.json')], decision: 'allow_once',
+    })))
     assert.equal(turns, ['ready', 'saved', 'unconfirmed'].includes(mode) ? 1 : 2)
     assert.equal(Boolean(result.attentionRequired), ['twice', 'unconfirmed'].includes(mode))
     assert.equal(settled, !['twice', 'unconfirmed'].includes(mode))

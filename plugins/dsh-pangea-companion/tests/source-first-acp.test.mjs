@@ -1,11 +1,23 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSourceFirstAcpRun, workerPrompt } from '../src/source-first-acp.js'
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRun, runPangea } from '../src/pangea-api.js'
 import { companionSnapshot } from '../src/reader.js'
+
+test('worker prompt provides a quoted direct PowerShell CLI call and scratch JSON-file contract', () => {
+  const prompt = workerPrompt({ action: { action_id: "run:a'1", role: 'planning', stage: 'unit_planning' }, opened: { task: {} },
+    cwd: "D:\\Agent's workspace", dataRoot: "D:\\Data's root", runId: 'run', taskId: 'worker',
+    python: "D:\\Python's home\\python.exe", scratchDirectory: 'D:\\data\\runs\\run\\worker-scratch\\worker' })
+  assert.ok(prompt.includes("& 'D:\\Python''s home\\python.exe' '-m' 'pangea_agent.cli.main' '--output' 'readable' 'task-open' '--data-root' 'D:\\Data''s root' '--run-id' 'run' '--action-id' 'run:a''1' '--task-id' 'worker'"))
+  assert.match(prompt, /当前 worker 临时目录：D:\\data\\runs\\run\\worker-scratch\\worker/)
+  assert.match(prompt, /plan-write --unit-file/)
+  assert.match(prompt, /result-write\/result-repair --records-file/)
+  assert.match(prompt, /供直接阅读；程序解析使用 --output json/)
+  assert.doesNotMatch(prompt, /json\.loads 解析/)
+})
 
 test('16 and 2000 file scopes do not inflate ACP prompts, including repairs and old task views', () => {
   const make = count => {
@@ -112,7 +124,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
       ['review', 'comparison_review', 'worker-3'], ['closure', 'targeted_closure', 'worker-2'],
     ]
     let index = 0, created = 0
-    const bindings = [], prompts = [], disposed = [], events = []
+    const bindings = [], prompts = [], disposed = [], events = [], scratches = []
     const action = () => ({ action_id: `run:${index}`, role: steps[index][0], stage: steps[index][1],
       action: steps[index][2] ? 'continue_agent' : 'dispatch_agent', task_id: steps[index][2], task_path: `/run/task-${index}.json` })
     const runner = async ({ args }) => {
@@ -126,17 +138,30 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
       signal: new AbortController().signal, runner, onEvent: async event => events.push(event),
       subagents: { start: async (provider, request) => {
         assert.equal(provider, providerId); assert.equal(request.agentOptions.model, 'selected/model')
+        assert.ok(path.isAbsolute(request.scratchDirectory))
+        scratches.push(request.scratchDirectory)
         const id = `worker-${++created}`
         return { id, result: Promise.resolve({ stopReason: 'completed' }),
           readDiagnostics: () => ({ stage: 'models_received', model: 'selected/model' }),
-          continuePrompt: async value => { prompts.push([id, value[0].text]); return { stopReason: 'completed' } }, dispose: async () => disposed.push(id) }
+          continuePrompt: async value => {
+            prompts.push([id, value[0].text])
+            request.onDiagnostic({ stage: 'file_permission', lastPermissionKind: 'edit', lastPermissionPaths: [path.join(request.scratchDirectory, 'unit.json')], lastPermissionDecision: 'allow_once' })
+            request.onDiagnostic({ stage: 'tool_event', lastToolId: `${id}-tool`, lastToolStatus: 'completed' })
+            return { stopReason: 'completed' }
+          }, dispose: async () => disposed.push(id) }
       } } })
     assert.equal((await run.result).stopReason, 'completed')
     assert.equal(created, 3)
+    assert.equal(new Set(scratches).size, 3)
     const finished = events.filter(event => event.stage === 'source_first_worker_finished')
     assert.equal(finished.length, steps.length)
     assert.ok(finished.every(event => event.model === 'selected/model' && event.stop_reason === 'completed'))
     assert.deepEqual(prompts.map(p => p[0]), ['worker-1', 'worker-2', 'worker-3', 'worker-3', 'worker-2'])
+    for (const stage of ['source_first_file_permission', 'source_first_tool_event']) {
+      assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.action_id), ['run:0', 'run:1', 'run:2', 'run:3', 'run:4'])
+    }
+    assert.deepEqual(prompts.map(([, prompt]) => prompt.split('\n').find(line => line.startsWith('当前 worker 临时目录：')).split('。')[0]),
+      [scratches[0], scratches[1], scratches[2], scratches[2], scratches[1]].map(directory => `当前 worker 临时目录：${directory}`))
     for (const [step, [, prompt]] of prompts.entries()) {
       assert.doesNotMatch(prompt, /\.opencode|\.agents\/pangea|pangea_action_dispatch/)
       assert.match(prompt, /source-first-cli-worker\.md/)
@@ -173,6 +198,128 @@ test('malformed output returns to the same worker and attention does not fabrica
   assert.equal(creations, 1); assert.equal(prompts, 2)
   assert.match(result.output[0].text, /attention_required/)
   controller.abort(); await run.dispose()
+})
+
+for (const toolsOnFormalTurn of [0, 1]) {
+  test(`handshake and task never name a ready reply; a ${toolsOnFormalTurn ? 'working' : 'zero-tool'} turn ${toolsOnFormalTurn ? 'is not re-prompted' : 'gets one short same-session read directive'}`, async () => {
+    let settled = 0, toolCalls = 0, handshake
+    const prompts = []
+    const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: '/data', runId: 'ready-only', signal: new AbortController().signal,
+      runner: async ({ args }) => {
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[1] === 'next') return { run_id: 'ready-only', lifecycle_status: settled ? 'complete' : 'running',
+          actions: settled ? [] : [{ action_id: 'ready:review', role: 'review', stage: 'independent_review', action: 'dispatch_agent', task_path: '/task.json' }] }
+        if (args[1] === 'settle') settled++
+        return {}
+      },
+      subagents: { start: async (provider, request) => {
+        handshake = request.prompt[0].text
+        return { id: 'reviewer', result: Promise.resolve({ stopReason: 'completed' }), readDiagnostics: () => ({ toolCalls }),
+          continuePrompt: async value => { prompts.push(value[0].text); if (prompts.length === 1) toolCalls += toolsOnFormalTurn; return { stopReason: 'completed' } },
+          dispose: async () => {} }
+      } } })
+    assert.equal((await run.result).stopReason, 'completed')
+    assert.doesNotMatch(handshake, /就绪/)
+    assert.doesNotMatch(prompts[0], /就绪/)
+    // A second zero-tool turn falls through to the existing settlement instead of looping.
+    assert.deepEqual(prompts.slice(1), toolsOnFormalTurn ? [] : [`用 read 工具读取 ${path.join('/work', 'docs', 'source-first-cli-worker.md')}。`])
+    assert.equal(settled, 1)
+    await run.dispose()
+  })
+}
+
+for (const interruption of ['cancel', 'budget']) {
+  for (const phase of ['before-directive', 'during-directive']) {
+    test(`zero-tool recovery ${interruption} ${phase} keeps the original session and never settles`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), 'pangea-zero-tool-'))
+      const runId = 'zero-tool-interruption', controller = new AbortController()
+      const bindingPath = path.join(root, 'runs', runId, 'acp-workers.json')
+      await mkdir(path.dirname(bindingPath), { recursive: true })
+      await writeFile(bindingPath, JSON.stringify({ runId, workers: { original: { providerId: 'pangea-codeagent', remoteSessionId: 'remote-original' } } }))
+      let reached, release, finishDirective, paused = false, starts = 0, disposals = 0, settlements = 0
+      const interruptedPhase = new Promise(resolve => { reached = resolve })
+      const releaseEvent = new Promise(resolve => { release = resolve })
+      const prompts = [], events = []
+      const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: root, dataRoot: root, runId,
+        parent: {}, signal: controller.signal, ...(interruption === 'budget' ? { closureBudgetMs: 80 } : {}),
+        onEvent: async event => {
+          events.push(event)
+          if (event.stage === 'source_first_zero_tool_turn' && phase === 'before-directive') { reached(); await releaseEvent }
+        },
+        runner: async ({ args }) => {
+          if (args[0] === 'task-open') return { task: {} }
+          if (args[1] === 'next') return { run_id: runId, lifecycle_status: 'running', actions: paused ? [] : [{
+            action_id: 'original-action', role: interruption === 'budget' ? 'closure' : 'review',
+            stage: interruption === 'budget' ? 'targeted_closure' : 'independent_review', action: 'continue_agent', task_id: 'original' }] }
+          if (args[1] === 'execution' && args.includes('paused')) paused = true
+          if (args[1] === 'settle') settlements++
+          return {}
+        },
+        subagents: { start: async (_provider, request) => {
+          starts++
+          assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote-original' })
+          return { id: 'original', remoteSessionId: 'remote-original', readDiagnostics: () => ({ toolCalls: 0 }),
+            continuePrompt: async value => {
+              prompts.push(value[0].text)
+              if (prompts.length === 1) return { stopReason: 'completed' }
+              if (phase === 'during-directive') { reached(); return new Promise(resolve => { finishDirective = resolve }) }
+              return { stopReason: 'completed' }
+            },
+            dispose: async () => { disposals++; finishDirective?.({ stopReason: 'aborted' }) } }
+        } } })
+      try {
+        const result = interruption === 'cancel' ? assert.rejects(run.result, /fixture cancellation/) : run.result
+        await interruptedPhase
+        if (interruption === 'cancel') controller.abort(new Error('fixture cancellation'))
+        else assert.equal((await result).attentionRequired, true)
+        await result
+        release()
+        await new Promise(resolve => setImmediate(resolve))
+        assert.equal(prompts.length, phase === 'before-directive' ? 1 : 2)
+        assert.equal(starts, 1)
+        assert.equal(settlements, 0)
+        assert.ok(disposals >= 1)
+        assert.equal(events.filter(event => event.stage === 'source_first_zero_tool_turn').length, 1)
+        assert.equal(events.filter(event => event.stage === 'source_first_worker_started').length, 1)
+      } finally { release(); controller.abort(); await run.result.catch(() => {}); await run.dispose(); await rm(root, { recursive: true, force: true }) }
+    })
+  }
+}
+
+test('zero-tool recovery in blind and comparison review preserves one original reviewer', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'pangea-zero-tool-reviewer-'))
+  const controller = new AbortController(), runId = 'zero-tool-reviewer'
+  let stage = 0, starts = 0, toolCalls = 0
+  const prompts = [], bound = []
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: root, dataRoot: root, runId,
+    parent: {}, signal: controller.signal,
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: { version_set_id: 'version' } }
+      if (args[1] === 'next') return { run_id: runId, lifecycle_status: stage === 2 ? 'complete' : 'running', actions: stage === 2 ? [] : [{
+        action_id: `review:${stage}`, role: 'review', stage: stage ? 'comparison_review' : 'independent_review',
+        action: stage ? 'continue_agent' : 'dispatch_agent', ...(stage ? { task_id: 'original' } : {}) }] }
+      if (args[1] === 'bind') bound.push(args.at(-1))
+      if (args[1] === 'settle') stage++
+      return {}
+    },
+    subagents: { start: async () => {
+      starts++
+      return { id: 'original', remoteSessionId: 'remote-original', result: Promise.resolve({ stopReason: 'completed' }),
+        readDiagnostics: () => ({ toolCalls }), dispose: async () => {},
+        continuePrompt: async value => { prompts.push(value[0].text); if (prompts.length % 2 === 0) toolCalls++; return { stopReason: 'completed' } } }
+    } } })
+  try {
+    assert.equal((await run.result).attentionRequired, false)
+    assert.equal(starts, 1)
+    assert.equal(stage, 2)
+    assert.equal(prompts.length, 4)
+    assert.ok(bound.every(id => id === 'original'))
+    assert.match(prompts[0], /independent_review/)
+    assert.match(prompts[2], /comparison_review/)
+    assert.equal(prompts[1], prompts[3])
+    const saved = JSON.parse(await readFile(path.join(root, 'runs', runId, 'acp-workers.json'), 'utf8'))
+    assert.equal(saved.workers.original.remoteSessionId, 'remote-original')
+  } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
 test('missing original reviewer never spawns a replacement', async () => {
@@ -278,6 +425,7 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
 for (const contextError of [false, true]) test(`a ${contextError ? 'context-limited' : 'crashed'} transport is disposed and explicit continuation restores persisted identities`, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'pangea-acp-resume-'))
   let taskId, complete = false, starts = 0, disposals = 0
+  const scratchDirectories = []
   const controller = new AbortController()
   let run
   const options = { providerId: 'pangea-codeagent', agentModel: 'model', parent: {}, cwd: root, dataRoot: root, runId: 'resume', signal: controller.signal,
@@ -290,6 +438,7 @@ for (const contextError of [false, true]) test(`a ${contextError ? 'context-limi
       return {}
     }, subagents: { start: async (_provider, request) => {
       starts++
+      scratchDirectories.push(request.scratchDirectory)
       if (starts === 2) assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote-original' })
       else assert.equal(request.resume, undefined)
       return { id: 'original', remoteSessionId: 'remote-original', result: Promise.resolve({ stopReason: 'completed' }),
@@ -306,6 +455,46 @@ for (const contextError of [false, true]) test(`a ${contextError ? 'context-limi
     assert.equal((await run.result).stopReason, 'completed')
     assert.equal(taskId, 'original')
     assert.equal(starts, 2)
+    assert.equal(scratchDirectories[0], scratchDirectories[1])
+    const saved = JSON.parse(await readFile(path.join(root, 'runs', 'resume', 'acp-workers.json'), 'utf8'))
+    assert.equal(saved.workers.original.scratchDirectory, scratchDirectories[0])
+    // The host allocates a path; only a real provider creates its temporary directory.
+    await assert.rejects(stat(scratchDirectories[0]), { code: 'ENOENT' })
+  } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('an older persisted worker gets one scratch directory before restoration and keeps its original session', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'pangea-acp-old-scratch-'))
+  const bindingPath = path.join(root, 'runs', 'old', 'acp-workers.json')
+  await mkdir(path.dirname(bindingPath), { recursive: true })
+  await writeFile(bindingPath, JSON.stringify({ runId: 'old', workers: { original: { providerId: 'pangea-nga', remoteSessionId: 'remote' } } }))
+  const controller = new AbortController(), directories = []
+  let starts = 0, complete = false, run
+  const options = { providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId: 'old', signal: controller.signal,
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[1] === 'next') return { run_id: 'old', lifecycle_status: complete ? 'complete' : 'running', actions: complete ? [] : [
+        { action_id: 'old:a', role: 'analysis', stage: 'unit_analysis', action: 'continue_agent', task_id: 'original' }] }
+      if (args[1] === 'settle') complete = true
+      return {}
+    }, subagents: { start: async (_provider, request) => {
+      const saved = JSON.parse(await readFile(bindingPath, 'utf8'))
+      assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote' })
+      assert.equal(request.scratchDirectory, saved.workers.original.scratchDirectory)
+      directories.push(request.scratchDirectory)
+      if (++starts === 1) throw new Error('fixture restoration failed')
+      return { id: 'original', remoteSessionId: 'remote', result: Promise.resolve({ stopReason: 'completed' }),
+        continuePrompt: async () => ({ stopReason: 'completed' }), dispose: async () => {} }
+    } } }
+  try {
+    run = createSourceFirstAcpRun(options)
+    await assert.rejects(run.result, /fixture restoration failed/)
+    run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).attentionRequired, false)
+    assert.equal(starts, 2)
+    assert.ok(path.isAbsolute(directories[0]))
+    assert.equal(directories[0], directories[1])
+    await assert.rejects(stat(directories[0]), { code: 'ENOENT' })
   } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
