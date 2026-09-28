@@ -35,10 +35,18 @@ test('new-analysis coverage query uses literal arguments and returns acquisition
   assert.equal(result.body.acquisition.asset, null)
   assert.equal(calls.length, 1)
   assert.deepEqual(calls[0].args, ['assets', 'query-coverage', '--data-root', path.join(root, 'custom-data'),
-    '--product', 'PANGEA', '--version', ' V600R013C00 ', '--module', 'nvme tcp', '--b-version', 'B001'])
+    '--product', 'PANGEA', '--version', ' V600R013C00 ', '--scope', 'nvme tcp', '--source', 'summary', '--b-version', 'B001'])
   assert.equal((await request({ ...query, module: '' })).code, 400)
   assert.equal((await request(query, 'cross-site')).code, 403)
   assert.equal(calls.length, 1)
+  const scoped = await request({ product: query.product, c_version: query.c_version,
+    scope: 'nvmf_tcp/transxxx/tls/handshake', recursive: false, source: 'auto', b_version: 'B001' })
+  assert.equal(scoped.code, 200)
+  assert.equal(scoped.body.acquisition.status, 'no_data')
+  assert.deepEqual(calls[1].args, ['assets', 'query-coverage', '--data-root', path.join(root, 'custom-data'),
+    '--product', 'PANGEA', '--version', ' V600R013C00 ', '--scope', 'nvmf_tcp/transxxx/tls/handshake',
+    '--no-recursive', '--source', 'auto', '--b-version', 'B001'])
+  assert.equal(calls.length, 2)
 })
 
 async function fixture() {
