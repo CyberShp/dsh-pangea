@@ -4,6 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { renderCandidate } from '../src/architecture-render.mjs'
 import { validateView, cancelViewRender, updateView, listViews, viewArtifact } from '../src/architecture-views.js'
 import { createDiagramRun } from '../src/diagram-acp.js'
@@ -20,10 +21,13 @@ async function fixture(t) {
     import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
     import { createHash } from 'node:crypto';
     import path from 'node:path';
+    import { spawnSync } from 'node:child_process';
     const [command, type, input, output] = process.argv.slice(2);
     const bytes=readFileSync(input), c=JSON.parse(bytes), root=path.dirname(input);
     appendFileSync(path.join(root,'commands.jsonl'),JSON.stringify({command,input,sha:createHash('sha256').update(bytes).digest('hex')})+'\\n');
     if(c.delay){writeFileSync(path.join(root,'started'),'1'); await new Promise(r=>setTimeout(r,c.delay));}
+    if(c.descendant && command==='deliver')spawnSync(process.execPath,['-e',
+      'require("node:fs").writeFileSync(process.argv[1],String(process.pid));setTimeout(()=>{},60000)',path.join(root,'descendant.pid')],{stdio:'inherit'});
     const ok=c.n===3 || command==='deliver' && c.forceDeliver;
     const receipt={ok,error:ok?null:'fixture layout failure',diagnostics:[{code:'fixture/layout'}]};
     if(command==='deliver' && ok){writeFileSync(output,'<html><svg><text>'+c.n+'</text></svg></html>');receipt.specification={sha256:createHash('sha256').update(bytes).digest('hex')};}
@@ -94,6 +98,27 @@ test('stopping during validation aborts the compiler and never overwrites stoppe
   assert.equal(receipt.ok,false);assert.equal(receipt.terminal,true)
   const [view]=await listViews(f.task);assert.equal(view.status,'stopped');assert.equal(view.available,false)
   assert.equal(await readFile(path.join(f.folder,'diagram.html')).catch(()=>null),null)
+})
+
+for (const reason of ['cancel', 'deadline']) test(`Windows ${reason} stops the CLI renderer descendant before releasing its view lock`, { skip: process.platform !== 'win32' }, async t => {
+  const f=await fixture(t);await f.candidate({n:3,descendant:true})
+  if(reason==='deadline') {
+    const manifest=JSON.parse(await readFile(path.join(f.folder,'manifest.json')))
+    await writeFile(path.join(f.folder,'manifest.json'),JSON.stringify({...manifest,budget_ms:1500}))
+  }
+  const controller=new AbortController()
+  const pending=renderCandidate(f.folder,f.archify,{signal:controller.signal})
+  let descendant
+  t.after(()=>{if(descendant)try{execFileSync('taskkill',['/PID',String(descendant),'/T','/F'],{stdio:'ignore',windowsHide:true})}catch{}})
+  const deadline=Date.now()+5000
+  while(!descendant){descendant=Number(await readFile(path.join(f.folder,'descendant.pid'),'utf8').catch(()=>''));assert.ok(Date.now()<deadline);await new Promise(r=>setTimeout(r,10))}
+  if(reason==='cancel')controller.abort()
+  const receipt=await pending
+  assert.equal(receipt.ok,false)
+  assert.throws(()=>process.kill(descendant,0),{code:'ESRCH'})
+  assert.equal(await readFile(path.join(f.folder,'render.lock')).catch(()=>null),null)
+  assert.equal(await readFile(path.join(f.folder,'diagram.html')).catch(()=>null),null)
+  assert.equal(JSON.parse(await readFile(path.join(f.folder,'render-attempts.json'))).attempts,1)
 })
 
 test('mutated validation snapshot cannot be promoted even if the delivery command returns success', async t => {
