@@ -141,3 +141,20 @@ test('coverage file import preserves partial acquisition and literal Windows pat
   assert.deepEqual(result.missing, ['branch-data'])
   assert.equal(result.asset.input_revision, 'fixed')
 })
+
+test('coverage query forwards exact deep scope, recursion and source with legacy module compatibility', async t => {
+  const f = await fixture(t, 'coverage-analysis')
+  const { queryCoverageAsset } = await import('../src/workbench-api.js')
+  for (const query of [
+    { scope: 'nvmf_tcp/transxxx/tls/handshake', recursive: false, source: 'auto' },
+    { module: 'nvmf_tcp/transxxx/tls' },
+  ]) {
+    let args
+    await queryCoverageAsset({ cwd: f.root, query: { product: 'P', c_version: ' V1 ', ...query }, runner: async input => { args = input.args; return {} } })
+    assert.equal(args[args.indexOf('--scope') + 1], query.scope || query.module)
+    assert.equal(args[args.indexOf('--version') + 1], ' V1 ')
+    assert.equal(args.includes('--no-recursive'), query.recursive === false)
+    assert.equal(args[args.indexOf('--source') + 1], query.source || 'summary')
+    assert.ok(!args.includes('--module'))
+  }
+})

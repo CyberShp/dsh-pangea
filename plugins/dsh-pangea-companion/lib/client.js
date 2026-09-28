@@ -150,9 +150,18 @@ window.__ModuleLoader__.load({
       const stepProgress = legacy && current.workflow?.step_progress?.step === selected?.step ? current.workflow.step_progress : null
       const events = timeline.filter(event => legacy ? event.step === selected?.step : !event.stage || event.stage === selected?.stage)
         .slice().sort((a, b) => (new Date(b.time).getTime() || 0) - (new Date(a.time).getTime() || 0))
-      const startTime = task?.launch_started_at ?? current?.started_at
-      const endTime = task?.ended_at ?? current?.ended_at
-      const elapsed = startTime ? Math.max(0, (endTime ? new Date(endTime).getTime() : Date.now()) - new Date(startTime).getTime()) : null
+      const timingTask = p.identityMatched ? task : null
+      const attempt = timingTask?.attempts?.find(item => item.attempt_id === timingTask.attempt_id)
+      const startTime = current?.started_at ?? timingTask?.launch_started_at ?? attempt?.started_at
+      const timestamp = value => value == null || value === '' ? NaN : new Date(value).getTime()
+      const started = timestamp(startTime)
+      // End timestamps are persisted on the execution attempt, not the Task.
+      // Never turn a terminal or unreadable historical Run into a live clock.
+      const live = !error && !current?.terminal && !finished && (p.running || p.stopping)
+      const ended = [current?.ended_at, timingTask?.ended_at, ...(!live ? [attempt?.ended_at] : [])]
+        .map(timestamp).find(value => Number.isFinite(value) && value >= started)
+      const endTime = ended ?? (live ? Date.now() : NaN)
+      const elapsed = Number.isFinite(started) && Number.isFinite(endTime) && endTime >= started ? endTime - started : null
       const duration = elapsed == null ? '未记录' : `${String(Math.floor(elapsed / 60000)).padStart(2, '0')}:${String(Math.floor(elapsed / 1000) % 60).padStart(2, '0')}`
       const time = value => value ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '未记录'
       const details = current?.details ?? {}
@@ -1477,7 +1486,7 @@ window.__ModuleLoader__.load({
         ...(form.analysis_profile !== 'behavior-test-v2' && form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
           ? { kind: 'file', path: form.coverage_path }
           : form.coverage_kind === 'asset' ? { kind: 'asset', asset_id: form.coverage_asset_id }
-          : { kind: 'query', query: { product: form.coverage_product, c_version: form.coverage_version, b_version: form.coverage_b_version || '', module: form.coverage_module } } } : {}),
+          : { kind: 'query', query: { product: form.coverage_product, c_version: form.coverage_version, b_version: form.coverage_b_version || '', scope: form.coverage_module, recursive: form.coverage_recursive !== false, source: form.coverage_source || 'summary' } } } : {}),
         mode: form.mode || 'depth',
         provider_id: form.provider_id || null,
         model_route: form.provider_id ? null : modelRouteFromKey(form.model_route_key),
@@ -1831,7 +1840,7 @@ window.__ModuleLoader__.load({
       const [assetLabels, setAssetLabels] = React.useState({})
       const [coverageQueryBusy, setCoverageQueryBusy] = React.useState(false)
       const [coverageQueryResult, setCoverageQueryResult] = React.useState(null)
-      const coverageRequestKey = JSON.stringify([createForm.repository, createForm.coverage_product, createForm.coverage_version, createForm.coverage_module, createForm.coverage_b_version, createForm.coverage_path])
+      const coverageRequestKey = JSON.stringify([createForm.repository, createForm.coverage_product, createForm.coverage_version, createForm.coverage_module, createForm.coverage_recursive, createForm.coverage_source, createForm.coverage_b_version, createForm.coverage_path])
       const coverageRequestRef = React.useRef(coverageRequestKey)
       coverageRequestRef.current = coverageRequestKey
       React.useEffect(() => {
@@ -2719,7 +2728,7 @@ window.__ModuleLoader__.load({
       async function queryCoverageForAnalysis() {
         if (!cwd || coverageQueryBusy || creatingRun) return
         const query = { product: createForm.coverage_product, c_version: createForm.coverage_version,
-          module: createForm.coverage_module, b_version: createForm.coverage_b_version || '' }
+          scope: createForm.coverage_module, recursive: createForm.coverage_recursive !== false, source: createForm.coverage_source || 'summary', b_version: createForm.coverage_b_version || '' }
         const requestKey = coverageRequestRef.current
         const previousAsset = coverageQueryResult?.asset?.asset_id
         setCreateForm(value => ({ ...value, asset_ids: value.asset_ids.filter(id => id !== previousAsset) }))
@@ -3489,7 +3498,7 @@ window.__ModuleLoader__.load({
           h('ol', { className: 'create-plan-list' }, ['读取产品、版本与模块的覆盖记录', '形成带版本的覆盖率资产', '在运行中匹配本次冻结的源码', '识别未覆盖行为与补充用例'].map(text => h('li', { key: text }, text))), h('div', { className: 'divider' }),
           notice('路径匹配在分析时完成', '查询成功仅表示已获取数据，是否适用于本次源码将在运行中核验。'), h('p', { className: 'create-side-note' }, '覆盖率查询进行中时，创建分析暂不可用。')))
         if (step === 2 && view === 'coverage-result') context = panel(h(React.Fragment, null,
-          h('div', { className: 'create-side-title' }, '本次查询'), h('dl', { className: 'key-value' }, ['产品', createForm.coverage_product, 'C 版本', createForm.coverage_version, '模块', createForm.coverage_module, 'B 版本', createForm.coverage_b_version || '未指定', '资产状态', coverageQueryResult?.asset?.status === 'available' ? badge('可用', 'good') : '不可用'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
+          h('div', { className: 'create-side-title' }, '本次查询'), h('dl', { className: 'key-value' }, ['产品', createForm.coverage_product, 'C 版本', createForm.coverage_version, '目录范围', createForm.coverage_module, 'B 版本', createForm.coverage_b_version || '未指定', '资产状态', coverageQueryResult?.asset?.status === 'available' ? badge('可用', 'good') : '不可用'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
           h('div', { className: 'divider' }), h('strong', { className: 'small' }, '可以继续，也可以补全输入'), h('p', { className: 'create-side-note', style: { marginTop: 10 } }, coverageQueryResult?.asset?.status === 'available' ? '已生成可用资产，允许继续创建。缺失来源会保留为分析限制，不能视为完整覆盖结果。' : '当前没有可用覆盖率资产，请重新查询或补充文件。'), h('div', { style: { marginTop: 20 } }, button('补充覆盖率文件', () => go(2, 'coverage'), '', 'FileUp'))))
         if (step === 4) context = panel(h(React.Fragment, null,
           h('div', { className: 'create-side-title' }, '你将获得'), h('h3', { className: 'create-context-title' }, '可追溯的', h('br'), '分析与测试结论'),
@@ -3521,15 +3530,19 @@ window.__ModuleLoader__.load({
             view === 'coverage-result' && acquisition?.asset ? h(React.Fragment, null,
               h('div', { className: 'create-coverage-result-metrics' }, [['覆盖记录', acquisition.record_count ?? '未知', '条'], ['覆盖率资产', createForm.asset_ids.includes(acquisition.asset.asset_id) ? '1' : '0', '份已加入'], ['源码匹配', '待运行核验', '']].map(([label, value, unit]) => h('div', { key: label, className: 'create-result-metric' }, h('span', null, label), h('strong', { style: label === '源码匹配' ? { fontSize: 16, padding: '4px 0' } : undefined }, value, unit && h('span', null, ' '+unit))))),
               notice(acquisition.status === 'partial' ? '部分来源未返回' : '覆盖率数据已获取', acquisition.message || '记录仍需在运行中匹配本次源码，不能视为已确认覆盖缺口。', acquisition.status === 'partial' ? 'warn' : 'good', button('重新查询', query, '', 'RefreshCw', !queryReady)),
+              h('p', { className: 'create-copy' }, `目录：${acquisition.scope?.requested ?? createForm.coverage_module} · 实际来源：${acquisition.selected_source ?? '旧格式未指定'} · 唯一文件：${acquisition.summary?.scope_unique_file_count ?? '未记录'}`),
+              (acquisition.summary?.per_source ?? []).filter(item => item.source === acquisition.selected_source && item.branches).map((item, index) => h('p', { key: `branch-${index}`, className: 'create-copy' }, `分支：已覆盖 ${item.branches.covered} / 明确未覆盖 ${item.branches.uncovered ?? '未记录'} / 未判定 ${item.branches.indeterminate ?? '未记录'}`)),
               (acquisition.warnings ?? []).map((warning, index) => h('p', { key: index, className: 'create-copy' }, typeof warning === 'string' ? warning : JSON.stringify(warning))),
               h('div', { className: 'create-subhead' }, createForm.asset_ids.includes(acquisition.asset.asset_id) ? '已加入本次分析' : '尚未加入本次分析'),
               createForm.asset_ids.includes(acquisition.asset.asset_id) ? assetCard(acquisition.asset) : h('div', { className: 'callout row between' }, h('span', { className: 'small' }, acquisition.asset.title), button('加入本次分析', () => { setAssetLabels(labels => ({ ...labels, [acquisition.asset.asset_id]: acquisition.asset })); update('asset_ids', [...createForm.asset_ids, acquisition.asset.asset_id]) }, '', 'Plus', creatingRun || acquisition.asset.status !== 'available')),
               h('div', { className: 'create-subhead' }, '数据完整性'), h('table', null, h('thead', null, h('tr', null, ['数据来源', '获取结果', '后续处理'].map(text => h('th', { key: text }, text)))), h('tbody', null, h('tr', null, h('td', null, '覆盖记录'), h('td', null, badge(acquisition.asset.status === 'available' ? '已获取' : '不可用', acquisition.asset.status === 'available' ? 'good' : 'warn')), h('td', null, '随本次源码范围匹配')), (acquisition.missing ?? []).map((item, index) => h('tr', { key: index }, h('td', null, typeof item === 'string' ? item : JSON.stringify(item)), h('td', null, badge('未返回', 'warn')), h('td', null, '可重新查询或补充本地文件'))), h('tr', null, h('td', null, '代码路径映射'), h('td', null, badge('待核验', 'neutral')), h('td', null, '在运行中核对冻结源码')))),
               h('p', { className: 'create-copy', style: { margin: '14px 0 0' } }, `${acquisition.record_count ?? '已取得的'} 条记录不等于 ${acquisition.record_count ?? '相同数量的'} 个已确认缺口；最终结论以分析与证据核验结果为准。`)) : h(React.Fragment, null,
               h('div', { className: 'divider' }), h('div', { className: 'create-subhead', style: { marginTop: 0 } }, '从覆盖率平台查询'),
-              h('div', { className: 'form-grid' }, input('产品', 'coverage_product'), input('C 版本', 'coverage_version', '精确填写版本原文，保留空格。'), input('模块', 'coverage_module'), input('B 版本', 'coverage_b_version')),
+              h('div', { className: 'form-grid' }, input('产品', 'coverage_product'), input('C 版本', 'coverage_version', '精确填写版本原文，保留空格。'), input('目录范围', 'coverage_module', '完整路径，例如 nvmf_tcp/transxxx/tls/handshake；首段为模块名。'), input('B 版本', 'coverage_b_version'),
+                field('包含子目录', h('input', { type: 'checkbox', 'aria-label': '包含子目录', checked: createForm.coverage_recursive !== false, onChange: event => update('coverage_recursive', event.target.checked) })),
+                field('报告来源', h('select', { 'aria-label': '报告来源', value: createForm.coverage_source || 'summary', onChange: event => update('coverage_source', event.target.value) }, ...['summary', 'auto', 'llt'].map(value => h('option', { key: value, value }, value))))),
               h('div', { className: 'row between', style: { marginTop: 18 } }, h('div', { className: 'create-footer-note' }, runIcon(workbench?.capabilities?.coverage_query_skill?.available ? 'CircleCheck' : 'CircleAlert'), workbench?.capabilities?.coverage_query_skill?.available ? '查询服务已就绪' : '覆盖率查询服务尚未就绪'), button(coverageQueryBusy ? '正在查询…' : '查询并添加', query, 'primary', 'Search', !queryReady)),
-              acquisition && notice(({ error: '查询失败', no_data: '未查询到数据', partial: '查询结果不完整', success: '查询完成' })[acquisition.status] ?? acquisition.status, acquisition.message ?? '请检查输入后重试。', 'warn'),
+              acquisition && notice(({ error: '查询失败', no_data: '未查询到数据', scope_not_found: '目录范围无覆盖率文件', partial: '查询结果不完整', success: '查询完成' })[acquisition.status] ?? acquisition.status, acquisition.message ?? '请检查输入后重试。', 'warn'),
               h('div', { className: 'create-coverage-methods' }, h('div', { className: 'callout' }, h('div', { className: 'row' }, h('strong', { className: 'small' }, runIcon('FileUp'), ' 本地覆盖率文件')), h('p', { className: 'create-copy', style: { margin: '8px 0 12px' } }, '支持 XLSX 或 combined JSON。'), h('input', { 'aria-label': '覆盖率文件完整路径', placeholder: '输入覆盖率文件完整路径', style: { fontSize: 12, height: 36 }, value: createForm.coverage_path ?? '', onChange: event => update('coverage_path', event.target.value) }), h('div', { className: 'row', style: { marginTop: 10 } }, button('选择文件', async () => { try { const selected = await window.dshDesktopDirectoryPicker.pick({ purpose: 'coverage' }); if (selected) update('coverage_path', selected) } catch (error) { showActionNotice(error.message, true) } }, 'ghost', 'FolderOpen', !window.dshDesktopDirectoryPicker?.pick || coverageQueryBusy), button('解析并添加', importFile, '', null, !createForm.coverage_path?.trim() || coverageQueryBusy))), h('div', { className: 'callout' }, h('strong', { className: 'small' }, runIcon('Library'), ' 已有覆盖率资产'), h('p', { className: 'create-copy', style: { margin: '8px 0 18px' } }, '选择已解析且状态可用的覆盖率资产。其他类型的资产不能替代覆盖率输入。'), button('选择覆盖率资产', () => openAssets(true), '', 'Plus')))),
             footer(() => go(2), () => go(3), view === 'coverage-result' ? '使用当前输入并继续' : '下一步 · 执行设置', !inputsReady)), view === 'coverage-result' ? 'create-result' : 'create-coverage-panel')
         } else if (step === 3) {
@@ -4106,7 +4119,7 @@ window.__ModuleLoader__.load({
               scenario: 'coverage-analysis', mode: selectedTask.mode, provider_id: selectedTask.provider || '',
               agent_model: selectedTask.agent_model || '', model_route_key: selectedTask.model_route ? modelSelectionKey(selectedTask.model_route) : '',
               coverage_kind: 'query', coverage_product: query.product || '', coverage_version: query.c_version || '',
-              coverage_module: query.module || '', coverage_b_version: query.b_version || '' }))
+              coverage_module: query.scope || query.module || '', coverage_recursive: query.recursive !== false, coverage_source: query.source || 'summary', coverage_b_version: query.b_version || '' }))
             setScreen({ type: 'create' })
           },
           onFilter: (key, value) => setters[key](value), renderLinks: linkedItems })

@@ -230,13 +230,16 @@ export function normalizeRunInput(value, capabilities) {
 
 export async function queryCoverageAsset({ cwd, dataRoot, query, runner = runPangea }) {
   const root = workspaceRoot(cwd)
-  for (const key of ['product', 'c_version', 'module']) {
+  query = { ...query, scope: query?.scope || query?.module }
+  for (const key of ['product', 'c_version', 'scope']) {
     if (typeof query?.[key] !== 'string' || !query[key].trim()) throw new Error(`覆盖率查询缺少 ${key}`)
   }
   if (query.b_version !== undefined && typeof query.b_version !== 'string') throw new Error('b_version 必须是字符串')
   // Preserve the same literal product/version arguments as codetalks-skill.
   return runner({ cwd: root, args: ['assets', 'query-coverage', '--data-root', dataRootFor(root, dataRoot),
-    '--product', query.product, '--version', query.c_version, '--module', query.module,
+    '--product', query.product, '--version', query.c_version, '--scope', query.scope,
+    ...(query.recursive === false ? ['--no-recursive'] : []),
+    '--source', query.source || 'summary',
     ...(query.b_version ? ['--b-version', query.b_version] : [])] })
 }
 
