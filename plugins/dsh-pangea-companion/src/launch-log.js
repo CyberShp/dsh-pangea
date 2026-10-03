@@ -54,7 +54,7 @@ function compactEvent(value = {}) {
     'resolved_command', 'launcher_kind', 'launcher_command', 'cwd', 'launch_stage', 'syscall',
     'remote_session_id', 'stop_reason', 'protocol_stop_reason', 'phase', 'error_summary', 'stderr_summary',
     'review_status', 'review_request_id', 'producer_session_id', 'reviewer_session_id', 'semantic_verdict',
-    'diagnostic_path', 'state_path', 'agent_version', 'last_tool_id', 'last_tool_status', 'last_tool_name', 'action_id', 'exit_signal', 'kind', 'decision',
+    'diagnostic_path', 'state_path', 'agent_version', 'last_tool_id', 'last_tool_status', 'last_tool_name', 'action_id', 'unit_id', 'execution_id', 'action_stage', 'tool_kind', 'exit_signal', 'kind', 'decision',
   ]) {
     if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = diagnosticText(value[key].trim())
   }
@@ -70,7 +70,7 @@ function compactEvent(value = {}) {
     }
   }
   for (const key of [
-    'turn', 'completed', 'message_chunks', 'tool_calls', 'tool_failures', 'turn_duration_ms',
+    'turn', 'completed', 'message_chunks', 'tool_calls', 'tool_failures', 'turn_duration_ms', 'active_tool_count',
     'first_event_ms', 'tool_started_at_ms', 'tool_finished_at_ms', 'tool_duration_ms', 'stderr_bytes', 'duration_ms', 'file_count', 'total_bytes', 'snapshot_duration_ms', 'prompt_chars', 'prompt_bytes',
   ]) {
     if (Number.isInteger(value[key]) && value[key] >= 0) event[key] = value[key]

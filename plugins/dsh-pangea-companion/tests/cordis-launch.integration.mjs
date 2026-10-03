@@ -242,6 +242,8 @@ test('source-first dispatch uses global restrictions while report remains child-
     assert.equal(result.bound, true)
     assert.equal(started, 1)
     assert.equal(bound, 1)
-    assert.deepEqual(executionEvents, [{ cwd: root, binding: { dataRoot: root, runId: 'run', actionId: 'run:planning', childId: 'original-child' }, event: 'started' }])
+    assert.match(executionEvents[0].binding.executionId, /^[0-9a-f-]{36}$/)
+    assert.deepEqual(executionEvents.map(({ binding: { executionId, ...binding }, ...event }) => ({ ...event, binding })),
+      [{ cwd: root, binding: { dataRoot: root, runId: 'run', actionId: 'run:planning', childId: 'original-child' }, event: 'started' }])
   } finally { await child.dispose(); await context.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
 })

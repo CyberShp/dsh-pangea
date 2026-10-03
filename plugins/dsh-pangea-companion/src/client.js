@@ -170,6 +170,83 @@ window.__ModuleLoader__.load({
             button(state.pending === 'create' ? '正在创建…' : '创建并开始分析', () => onSubmit(input), true, !ready))))
     }
 
+    function executionObservation(current, task, stale = false) {
+      const view = current?.execution_view
+      if (!view || current.workflow_version !== 'source-first-v1') return null
+      const presentation = deriveRunPresentation(task, current, current.reader_health)
+      const runtime = current.runtime_observation ?? {}
+      const stage = ({ preparing: '准备输入', planning: '规划分析单元', analyzing: '源码与业务分析', reviewing: '复核结果', closing: '定向修正', reporting: '整理报告', complete: '流程结束' })[view.stage ?? current.stage] ?? current.phase_title ?? '阶段未记录'
+      const finished = current.lifecycle_status === 'complete'
+      const activity = stale ? '当前状态未知，显示上次记录'
+        : finished ? current.partial_delivery ? '已交付已有结果' : '本次流程已结束'
+          : presentation.stopping ? '正在确认执行已停止'
+            : presentation.stopped ? '运行已停止'
+              : presentation.failed ? '执行已中断'
+                : presentation.needsAttention ? '等待处理未完成事项'
+                  : runtime.activity?.label || ({ reading_source: '正在读取源码', tool_running: '正在执行工具', generating: '正在返回内容', reviewing: '正在复核', waiting_provider: '等待 Provider 响应', starting: '正在连接执行端', idle: '等待下一步执行' })[runtime.activity?.kind] || '执行活动未记录'
+      const at = value => Number.isFinite(value) && value >= 0 ? value : null
+      const last = view.last_effective_progress
+      const actions = Array.isArray(view.actions) ? view.actions : []
+      const byId = new Map(actions.map(action => [action.action_id, action]))
+      const resumed = Array.isArray(view.recovery?.resume_from) ? view.recovery.resume_from : []
+      const resumeTargets = resumed.map(item => {
+        const action = byId.get(item.action_id)
+        const operation = ({ continue_agent: '续接原执行', dispatch_agent: '开始待执行任务', settle: '接收已完成提交', settle_action: '接收已完成提交', advance_workflow: '推进至下一阶段', finalize_report: '继续整理报告' })[item.operation] ?? '继续处理'
+        return `${action?.title || action?.unit_id || '当前阶段任务'}：${operation}`
+      })
+      const recovery = finished ? '本次 Run 已结束，已有交付与未解决事项均保留。'
+        : stale ? '待重新读取当前状态后，确认是否可以继续。'
+          : presentation.canResume
+            ? [runtime.recovery?.summary, resumeTargets.length ? resumeTargets.join('；') : '按已保存检查点继续当前阶段。'].filter(Boolean).join('；')
+            : presentation.running ? '运行期间持续保存记录；继续入口在执行停止后开放。'
+              : runtime.recovery?.blocked_reason || view.recovery?.blocked_reason || presentation.resumeBlockedReason
+      return { stage, activity, stale, finished, unitCounts: view.unit_counts ?? {}, actions,
+        lastProgressAt: at(last?.at_ms), lastProgressUnit: last?.unit_id ?? null,
+        lastCommunicationAt: at(runtime.last_communication_at_ms),
+        connection: ({ connected: '已连接', connecting: '正在连接', disconnected: '已断开', interrupted: '连接已中断', blocked: '等待确认旧执行状态', idle: '当前无活动连接', unknown: '连接状态未确认' })[runtime.connection_status] ?? '连接状态未记录',
+        preserved: Array.isArray(view.preserved) ? view.preserved : [],
+        unresolved: Array.isArray(view.unresolved) ? view.unresolved : [],
+        recovery, resumeTargets, diagnostics: Array.isArray(view.diagnostics) ? view.diagnostics : [] }
+    }
+
+    function RunExecutionSummary({ current, task, stale = false, compact = false }) {
+      const info = executionObservation(current, task, stale)
+      if (!info) return null
+      const muted = { color: '#70767d', fontSize: 12, lineHeight: 1.7 }
+      const time = value => value == null ? '未记录' : new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+      const count = value => Number.isFinite(value) ? String(value) : '—'
+      const units = !Number.isFinite(info.unitCounts.total) ? '规划单元总数尚未读取'
+        : info.unitCounts.total === 0 && ['preparing', 'planning'].includes(current.execution_view.stage ?? current.stage)
+          ? '尚未生成分析单元' : `${count(info.unitCounts.completed)} / ${count(info.unitCounts.total)}`
+      const field = (label, value, note) => h('div', { key: label, style: { minWidth: 0 } }, h('dt', { style: muted }, label), h('dd', { style: { margin: '5px 0 0', fontSize: 14, lineHeight: 1.7, overflowWrap: 'anywhere' } }, value), note ? h('p', { style: { ...muted, margin: '4px 0 0' } }, note) : null)
+      const acceptance = { accepted: '已接受', delivered: '已交付', draft: '已保存草稿', seed: '继承参考' }
+      return h('section', { 'aria-label': compact ? '执行进展摘要' : '运行进展与恢复', style: { border: '1px solid #e5e7e4', borderRadius: 10, background: '#fff', padding: compact ? 18 : 22, marginBottom: 22 } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16 } }, h('h2', { style: { margin: 0, fontSize: 15, fontWeight: 600 } }, compact ? '执行进展' : '运行进展与恢复'), stale ? h('span', { style: muted }, '上次成功读取的记录') : null),
+        h('dl', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,210px),1fr))', gap: 20, margin: 0 } },
+          field('当前阶段与活动', `${info.stage} · ${info.activity}`),
+          field('最近有效进展', time(info.lastProgressAt), info.lastProgressAt == null ? '尚无结果保存时间；不据此推断执行卡住。' : `${info.lastProgressUnit ? `${info.lastProgressUnit} · ` : ''}结果已保存（北京时间）`),
+          field('业务单元提交', units, '按单元完成提交计数；复核结论单独展示。'),
+          field('最近通信', time(info.lastCommunicationAt), `${info.connection}；通信更新不代表成果增加。`)),
+        h('p', { style: { margin: '18px 0 0', fontSize: 13, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('strong', null, info.finished ? '交付状态：' : '续接位置：'), info.recovery),
+        compact ? null : h(React.Fragment, null,
+          h('p', { style: { ...muted, margin: '8px 0 0' } }, `${info.diagnostics.length ? '已读取' : '保留'} ${info.preserved.length} 份结果记录 · ${info.unresolved.length} 项执行待处理。已保存草稿与已接受结果分别标注。`),
+          info.preserved.length || info.unresolved.length ? h('details', { style: { marginTop: 15 } },
+            h('summary', { style: { cursor: 'pointer', fontSize: 13 } }, '查看保留成果与待处理任务'),
+            h('div', { role: 'region', 'aria-label': '保留成果与续接位置表', tabIndex: 0, style: { overflowX: 'auto', marginTop: 12 } },
+              h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12, textAlign: 'left' } },
+                h('thead', null, h('tr', null, ['任务', '保存内容', '状态', '继续位置'].map(label => h('th', { key: label, scope: 'col', style: { padding: '8px 10px', borderBottom: '1px solid #e5e7e4', whiteSpace: 'nowrap' } }, label)))),
+                h('tbody', null, info.actions.filter(action => info.preserved.some(item => item.action_id === action.action_id) || info.unresolved.some(item => item.action_id === action.action_id)).map(action => {
+                  const saved = info.preserved.find(item => item.action_id === action.action_id)
+                  const pending = info.unresolved.find(item => item.action_id === action.action_id)
+                  return h('tr', { key: action.action_id }, [action.title || action.unit_id || ({ source_first_plan: '分析规划', independent_review: '独立复核', comparison_review: '对照复核' })[action.stage] || '阶段任务',
+                    saved ? `${count(saved.record_count)} 条 · 版本 ${count(saved.revision)}` : '尚无已保存记录',
+                    [saved ? acceptance[saved.acceptance] || '已保存' : null, pending ? sourceFirstRecordBody(pending.reason) || '执行待处理' : null].filter(Boolean).join(' · '),
+                    info.finished ? '本次已结束' : action.resume_action === 'settle' || action.resume_action === 'settle_action' ? '接收已完成提交' : action.resume_action === 'continue_agent' ? '续接原执行' : ['settled', 'accepted'].includes(action.status) ? '保留，等待后续阶段' : action.resume_action ? '按检查点继续' : '无需继续',
+                  ].map((value, index) => h('td', { key: index, style: { padding: '10px', borderBottom: '1px solid #f0f1ef', minWidth: index ? 110 : 150, maxWidth: 360, overflowWrap: 'anywhere', verticalAlign: 'top' } }, value)))
+                }))))) : null,
+          info.diagnostics.length ? h('p', { role: 'status', style: { ...muted, marginBottom: 0 } }, '部分进展资料不可读取：', info.diagnostics.map(item => typeof item === 'string' ? item : item.message ?? item.code ?? '读取诊断').join('；')) : null))
+    }
+
     function RunWorkspace({ current, task, timeline = [], error, loading, busy, retry, navigate: onNavigate, openFile, openFlow, stop, resume, deliver, discuss, diagnostics, viewState }) {
       const [selection, setSelection] = React.useState(viewState?.selection ?? '')
       const [tab, setTab] = React.useState(viewState?.tab ?? 'activity')
@@ -210,6 +287,7 @@ window.__ModuleLoader__.load({
         finally { setPending('') }
       }
       const p = deriveRunPresentation(task, current, current?.reader_health)
+      const observation = executionObservation(current, task, Boolean(error))
       const stopBlockedReason = error ? '当前状态读取失败，请先重试读取后再停止。' : !current?.run_id ? '当前运行身份尚未读取。' : p.stopping ? '停止请求已发出，正在等待执行端确认。' : current.terminal || p.stopped || p.failed ? '当前运行已结束，无需再次停止。' : ''
       const snapshotStatus = current?.source_snapshot?.status
       const snapshotLabel = ['manifest_verified', 'frozen', 'verified'].includes(snapshotStatus) ? '已冻结' : ['corrupt', 'invalid'].includes(snapshotStatus) ? '资料损坏，待检查' : snapshotStatus === 'legacy_unavailable' ? '历史 Run 未冻结' : '尚未验证'
@@ -271,10 +349,11 @@ window.__ModuleLoader__.load({
         !current ? node('div', 'stack', !error ? h('div', { className: 'notice blue', role: 'status' }, node('div', 'notice-main', runIcon('Info'), node('div', '', h('strong', null, loading ? '正在读取当前运行' : '当前尚无运行记录'), h('p', null, '正在读取阶段状态与已保存产物。首次读取完成后显示本次运行信息。')))) : null,
           loading ? node('section', 'panel', node('div', 'skeleton large'), h('div', { className: 'skeleton', style: { width: '75%' } }), node('div', 'divider'), node('div', 'grid3', [0, 1, 2].map(i => h('div', { key: i }, h('div', { className: 'skeleton', style: { width: '60%' } }), h('div', { className: 'skeleton', style: { height: 120 } }), h('div', { className: 'skeleton', style: { width: '80%' } }))))) : null,
           node('p', 'small muted', '阶段状态尚未读取，不推断运行成功或失败。')) : h(React.Fragment, null,
-          node('div', 'hero-band', node('div', '', node('div', 'row', h('h2', null, error ? `上次记录：${current.phase_title ?? ''}` : finished ? '本次分析已完成' : p.stopped ? '本次运行已停止' : attention ? `${current.phase_title ?? '当前阶段'}需要处理` : p.failed ? '本次分析失败' : current.stage === 'analyzing' ? '正在分析源码' : `正在进行${current.phase_title ?? active?.title ?? '当前阶段'}`), badge(status, tone)),
+          node('div', 'hero-band', node('div', '', node('div', 'row', h('h2', null, error ? `上次记录：${current.phase_title ?? ''}` : finished ? '本次分析已完成' : p.stopped ? '本次运行已停止' : attention ? `${current.phase_title ?? '当前阶段'}需要处理` : p.failed ? '本次分析失败' : observation ? observation.activity : `正在进行${current.phase_title ?? active?.title ?? '当前阶段'}`), badge(status, tone)),
             h('p', null, error ? '当前状态未知，下方是最后成功读取的运行信息。' : current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : finished ? completionSummary : p.stopped ? '源码快照、已接受单元和运行记录均已保留。' : timeline.find(event => event.summary)?.summary || '分析结果会陆续保存。')),
             node('div', 'metrics', stat('阶段已完成', h(React.Fragment, null, current.workflow?.completed_steps?.length ?? 0, node('span', 'small muted', ` / ${steps.length}`))), stat('运行时长', duration), stat('用户介入', attention ? '需要' : '无需'))),
           attention && !error ? h('div', { className: 'notice warn', style: { marginBottom: 24 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, '选择接下来的处理方式'), h('p', null, !task ? '此 Run 未关联任务记录，无法继续执行或交付；可查看已有结果。' : sourceFirstRecordBody(current.blocking_reason) || '查看未解决事项，继续处理或交付已有结果。'))), node('div', 'row', button('交付已有结果', () => perform('deliver', deliver), '', !task), button('继续修正', () => perform('resume', resume), 'primary', !task?.can_resume))) : null,
+          h(RunExecutionSummary, { current, task, stale: Boolean(error) }),
           node('div', 'run-layout', node('section', 'run-stages', heading('运行阶段', node('span', 'tiny muted', `${steps.length} 个阶段`)),
             steps.map(step => h('button', { key: step.step, type: 'button', className: `stage ${step.status === 'completed' ? 'done' : ''} ${step === selected ? 'current' : ''}`, 'aria-pressed': step === selected, onClick: () => setSelection(step.step) },
               h('b', null, step.status === 'completed' ? '✓' : step.step), h('div', null, step.title, h('p', null, error && step === active ? '上次记录' : step.status === 'pending' ? '等待前序完成' : step.status === 'running' ? p.failed && step === active ? '本次执行失败' : '当前正在执行' : step.status === 'paused' ? '等待你的决定' : step.status === 'stopped' && p.canResume ? '已停止 · 可继续' : STAGE_STATUS[step.status] ?? step.status)))), node('p', 'aside-note', '选择阶段，查看对应任务与产物。')),
@@ -291,14 +370,14 @@ window.__ModuleLoader__.load({
                     (event.evidence ?? []).filter(item => typeof item === 'string').map((location, index) => h('span', { key: index, className: 'badge mono' }, location)),
                     (current.details?.business_flows ?? []).filter(flow => event.relates_to?.some(id => id === flow.flow_id || id === flow.source_record?.record_id)).map(flow => h('button', { key: flow.flow_id, className: 'link', onClick: () => openFlow(flow.flow_id, view()) }, '查看对应流程', runIcon('ArrowUpRight'))),
                     finished && i === 0 && reportPath ? h('button', { className: 'link', onClick: () => openFile(reportPath) }, '查看分析报告', runIcon('ArrowUpRight')) : null)) : node('p', 'small muted', '当前阶段暂无活动记录。')))),
-              node('div', 'run-foot', h('span', null, h('span', { className: 'status-dot' }), error || p.stopped || finished ? '结果与检查点已保存' : events[0]?.time ? `最近活动 · ${Math.max(0, Math.floor((Date.now() - new Date(events[0].time).getTime()) / 1000))} 秒前` : '等待活动记录'), h('span', null, '按发生时间排列'))),
+              node('div', 'run-foot', h('span', null, h('span', { className: 'status-dot' }), error ? '正在显示上次记录' : p.stopped || finished ? '已保存记录可查看' : events[0]?.time ? `最近活动 · ${Math.max(0, Math.floor((Date.now() - new Date(events[0].time).getTime()) / 1000))} 秒前` : '等待活动记录'), h('span', null, '按发生时间排列'))),
             node('aside', 'run-aside', h('section', null, heading('已产出', node('span', 'tiny muted', `${outputs.length} 项可查看`)), outputs.map(output => h('div', { key: output.title, className: 'file-row' }, runIcon('FileText'), h('div', null, h('div', { style: { fontSize: 13 } }, output.title), node('div', 'meta', output.caption)), button('查看', output.action, 'ghost'))), !outputs.length ? node('p', 'small muted', '当前尚无可读取产物。') : null, node('p', 'aside-note', current.publication?.state === 'final' ? '报告包含结论、源码依据与测试建议。' : '分析中的内容为草稿，复核后更新。')),
               h('section', { style: { marginTop: 28 } }, heading('本次运行'), fields([['分析方式', ({ 'module-analysis': '模块分析', 'coverage-analysis': '覆盖率分析', 'risk-analysis': '风险分析', 'branch-analysis': '分支分析' })[current.scenario] ?? current.scenario ?? '未记录'], ['运行模式', ({ depth: '标准型', speed: '速度型' })[current.mode] ?? current.mode ?? '未记录'], ['源码快照', current.source_snapshot?.file_count == null ? '未读取' : `${current.source_snapshot.file_count} 个文件 · ${snapshotLabel}`], ['分析范围', current.target ?? '未记录']]), node('div', 'divider'), node('div', 'small muted', runIcon('LockKeyhole'), ['manifest_verified', 'frozen', 'verified'].includes(snapshotStatus) ? ' 基于冻结的源码快照' : ` 源码快照${snapshotLabel}`),
                 node('details', 'run-information', h('summary', null, '运行信息'), fields([['运行编号', current.run_id], ['开始时间', time(startTime)], ['最近同步', time(current.state_read?.observed_at)], ['工作流', current.workflow_version], ['交付完整性', outcome.delivery], ['审查方式', outcome.review], ['语义结论', outcome.semantic]]), diagnostics), p.stopped && !p.canResume ? h('p', { className: 'aside-note', role: 'status' }, p.resumeBlockedReason) : null)))),
           confirmStop ? node('div', 'run-overlay', h('section', { className: 'modal', ref: dialog, role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'pangea-stop-title', onKeyDown: event => {
             if (event.key === 'Escape' && !pending) { event.preventDefault(); setConfirmStop(false) }
             if (event.key === 'Tab') { const items = [...dialog.current.querySelectorAll('button:not(:disabled)')]; if (!items.length) { event.preventDefault(); return }; const first = items[0], last = items.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() } }
-          } }, node('div', 'modal-head', h('h2', { id: 'pangea-stop-title' }, '停止本次运行？'), h('button', { type: 'button', className: 'close', disabled: Boolean(pending), onClick: () => setConfirmStop(false), 'aria-label': '关闭' }, runIcon('X'))), h('p', null, '停止后保留源码快照、已接受的结果和运行记录。当前尚未接受的单元可能需要重新执行。'), h('div', { className: 'callout', style: { marginTop: 20 } }, node('div', 'row between', h('strong', null, task?.title), badge(status, tone)), node('p', 'small', `${current?.run_id} · ${current?.phase_title} · ${current?.analysis?.completed ?? 0} / ${current?.analysis?.total ?? 0} 单元已接受`)), h('p', { className: 'small', style: { marginTop: 18 } }, '正式操作会等待执行端确认停止，再更新状态。'), stopBlockedReason ? h('p', { role: 'alert' }, stopBlockedReason) : null, actionError ? h('p', { role: 'alert' }, actionError) : null, node('div', 'modal-footer', button('继续运行', () => setConfirmStop(false)), button(pending === 'stop' ? '正在请求停止…' : '确认停止', () => perform('stop', stop), 'danger', Boolean(stopBlockedReason))))) : null)
+          } }, node('div', 'modal-head', h('h2', { id: 'pangea-stop-title' }, '停止本次运行？'), h('button', { type: 'button', className: 'close', disabled: Boolean(pending), onClick: () => setConfirmStop(false), 'aria-label': '关闭' }, runIcon('X'))), h('p', null, '停止后保留源码快照、已保存草稿、已完成提交和运行记录。确认旧执行停止后，按检查点续接未完成任务。'), h('div', { className: 'callout', style: { marginTop: 20 } }, node('div', 'row between', h('strong', null, task?.title), badge(status, tone)), node('p', 'small', `${current?.run_id} · ${current?.phase_title} · ${current?.analysis?.completed ?? 0} / ${current?.analysis?.total ?? 0} 单元已接受`)), h('p', { className: 'small', style: { marginTop: 18 } }, '正式操作会等待执行端确认停止，再更新状态。'), stopBlockedReason ? h('p', { role: 'alert' }, stopBlockedReason) : null, actionError ? h('p', { role: 'alert' }, actionError) : null, node('div', 'modal-footer', button('继续运行', () => setConfirmStop(false)), button(pending === 'stop' ? '正在请求停止…' : '确认停止', () => perform('stop', stop), 'danger', Boolean(stopBlockedReason))))) : null)
     }
 
     const inject = ['pangea', 'sessions']
@@ -4755,14 +4834,17 @@ window.__ModuleLoader__.load({
         }
         const presentation = deriveRunPresentation(selectedTask, current, health)
         const executorRuns = snapshot?.executor_runs ?? []
-        const statusTitle = presentation.running ? '正在分析源码'
+        const observation = executionObservation(current, selectedTask, Boolean(error))
+        const statusTitle = error ? '当前状态暂时无法确认'
+          : presentation.running ? observation ? `${observation.stage} · ${observation.activity}` : current.phase_title ? `正在进行${current.phase_title}` : '分析正在运行'
           : presentation.stopping ? '正在等待停止确认'
             : presentation.needsAttention ? '修正结果等待你的决定'
               : presentation.failed ? '分析未完成'
           : presentation.stopped ? '本次运行已停止'
                   : current.partial_delivery ? '部分结果已交付'
                     : '分析结果已就绪'
-        const statusHint = current.partial_delivery
+        const statusHint = error ? '正在显示上次成功读取的结果；重新读取后再确认执行状态和续接位置。'
+          : current.partial_delivery
           ? '已有结果已交付；未解决事项与未完成修正仍保留在报告中。'
           : presentation.running ? `${current.analysis?.total ?? '多个'} 个分析单元中，${current.analysis?.completed ?? 0} 个已接受。新的结果正在陆续保存。`
             : presentation.needsAttention ? (() => {
@@ -4831,8 +4913,8 @@ window.__ModuleLoader__.load({
           renderDerivationOrigin(),
           h('div', { className: 'b03-overview-hero' },
             h('div', null, h('h2', null, statusTitle,
-              h('span', { className: `b03-overview-status b03-overview-status-${presentation.needsAttention ? 'attention' : presentation.running ? 'running' : presentation.stopped ? 'stopped' : current.partial_delivery ? 'partial' : 'complete'}` },
-                presentation.needsAttention ? '需要处理' : presentation.running ? '运行中' : presentation.stopped ? '已停止' : current.partial_delivery ? '部分交付' : '已完成')),
+              h('span', { className: `b03-overview-status b03-overview-status-${error ? 'stopped' : presentation.needsAttention ? 'attention' : presentation.running ? 'running' : presentation.stopped ? 'stopped' : current.partial_delivery ? 'partial' : 'complete'}` },
+                error ? '上次记录' : presentation.needsAttention ? '需要处理' : presentation.running ? '运行中' : presentation.stopped ? '已停止' : current.partial_delivery ? '部分交付' : '已完成')),
               h('p', null, statusHint)),
             h('button', { type: 'button', className: 'b03-overview-hero-action', onClick: () => presentation.needsAttention ? jump('workflow') : reportAvailableFor(current) ? jump('report') : jump('workflow') },
               runIcon(presentation.needsAttention ? 'ArrowRight' : reportAvailableFor(current) ? 'FileText' : 'ScanLine'),
@@ -4841,6 +4923,7 @@ window.__ModuleLoader__.load({
             h('div', null, h('strong', null, unresolvedItems[0].text), h('p', null, '可继续定向修正，或保留未解决项并交付已有结果。')),
             h('button', { type: 'button', onClick: () => jump('workflow') }, '查看处理方式')) : null,
           ['warning', 'error'].includes(health?.status) ? renderHealthCard(false) : null,
+          h(RunExecutionSummary, { current, task: selectedTask, stale: Boolean(error), compact: true }),
           h('div', { className: 'b03-overview-layout' },
             h('div', { className: 'b03-overview-main' },
               h('section', { className: 'b03-overview-card' },
@@ -4891,7 +4974,7 @@ window.__ModuleLoader__.load({
                   h('dt', null, '运行时长'), h('dd', { className: 'b03-task-meta' }, durationLabel(runRecordTime(current.started_at), runRecordTime(current.ended_at)) || (presentation.running ? '进行中' : '未记录'))),
                 h('div', { className: 'b03-overview-aside-divider' }),
                 h('button', { type: 'button', className: 'b03-task-run', onClick: () => jump('workflow') }, '查看本次运行过程', runIcon('ArrowUpRight')),
-                presentation.canResume ? h('button', { type: 'button', disabled: creatingRun, className: 'b03-task-open', onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在继续…' : '继续分析') : null))))
+                presentation.canResume ? h('button', { type: 'button', disabled: creatingRun || Boolean(error), className: 'b03-task-open', onClick: () => { void startTask(selectedTask) } }, creatingRun ? '正在继续…' : '继续分析') : null))))
       }
 
       function renderReport() {
@@ -5525,6 +5608,8 @@ window.__ModuleLoader__.load({
     exports.RunDerivationDialog = RunDerivationDialog
     exports.derivationInput = derivationInput
     exports.RunWorkspace = RunWorkspace
+    exports.RunExecutionSummary = RunExecutionSummary
+    exports.executionObservation = executionObservation
     exports.inject = inject
     exports.requestSnapshot = requestSnapshot
     exports.requestSourceSnippet = requestSourceSnippet

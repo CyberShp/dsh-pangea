@@ -1,21 +1,55 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { runAdapter, runPangea } from './pangea-api.js'
 
 const budgetedChildren = new Map()
+const quiescentRuns = new Set()
+const executionCapabilities = new Map()
+const nativeRunKey = (dataRoot, runId) => JSON.stringify([resolve(dataRoot), runId])
 
-export function interruptSourceFirstChildren({ dataRoot, runId }) {
-  for (const [id, entry] of budgetedChildren) {
-    if (resolve(entry.dataRoot) !== resolve(dataRoot) || entry.runId !== runId) continue
+export function inspectSourceFirstChildren({ dataRoot, runId }) {
+  const tracked = [...budgetedChildren.values()].some(entry => nativeRunKey(entry.dataRoot, entry.runId) === nativeRunKey(dataRoot, runId))
+  if (tracked) return { known: true, quiescent: false, blocked_reason: '内部 DSH 子任务尚未确认释放；中断请求不代表工具已停止' }
+  if (quiescentRuns.has(nativeRunKey(dataRoot, runId))) return { known: true, quiescent: true, blocked_reason: null }
+  return { known: false, quiescent: false, blocked_reason: '缺少原宿主的子任务释放证据，不能推定旧执行已经停止' }
+}
+
+export async function interruptSourceFirstChildren({ dataRoot, runId }) {
+  const key = nativeRunKey(dataRoot, runId)
+  const entries = [...budgetedChildren.entries()].filter(([, entry]) => nativeRunKey(entry.dataRoot, entry.runId) === key)
+  if (!entries.length) return quiescentRuns.has(key)
+  const groups = []
+  for (const [id, entry] of entries) {
     clearTimeout(entry.timer)
-    entry.ctx.subagents.interrupt(id, { kind: 'ancestor', agent: entry.parent })
-    budgetedChildren.delete(id)
+    let group = groups.find(item => item.parent === entry.parent && item.service === entry.ctx.subagents)
+    if (!group) { group = { parent: entry.parent, service: entry.ctx.subagents, entries: [] }; groups.push(group) }
+    group.entries.push([id, entry])
   }
+  const results = await Promise.allSettled(groups.map(async group => {
+    for (const [id] of group.entries) group.service.interrupt(id, { kind: 'ancestor', agent: group.parent })
+    if (typeof group.service.drainContinuableChildren !== 'function') throw new Error('DSH 不提供确认子任务释放的 drainContinuableChildren；停止尚未确认')
+    await group.service.drainContinuableChildren(group.parent, group.entries.map(([id]) => id))
+    for (const [id, entry] of group.entries) if (budgetedChildren.get(id) === entry) budgetedChildren.delete(id)
+  }))
+  const failures = results.filter(result => result.status === 'rejected').map(result => result.reason)
+  if (failures.length) throw new AggregateError(failures, `内部 DSH 子任务停止尚未确认：${failures.map(error => error.message ?? String(error)).join('; ')}`)
+  if (![...budgetedChildren.values()].some(entry => nativeRunKey(entry.dataRoot, entry.runId) === key)) {
+    quiescentRuns.add(key)
+    return true
+  }
+  return false
 }
 
 async function recordExecution(cwd, binding, event, reason = '', budgetMs, automatic = false) {
+  const key = JSON.stringify([resolve(cwd), resolve(binding.dataRoot)])
+  if (!executionCapabilities.has(key)) executionCapabilities.set(key, runPangea({ cwd,
+    args: ['system', 'capabilities', '--data-root', binding.dataRoot],
+  }).then(value => value.source_first?.execution_recovery?.execution_ids === true).catch(error => { executionCapabilities.delete(key); throw error }))
+  const executionIds = await executionCapabilities.get(key)
   return runPangea({ cwd, args: ['runs', 'execution', '--data-root', binding.dataRoot, '--run-id', binding.runId,
     '--action-id', binding.actionId, '--task-id', binding.childId, '--event', event,
+    ...(executionIds ? ['--execution-id', binding.executionId] : []),
     ...(reason ? ['--reason', reason] : []), ...(budgetMs ? ['--budget-ms', String(budgetMs)] : []), ...(automatic ? ['--automatic'] : [])] })
 }
 
@@ -291,9 +325,44 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
   const states = new Map()
   const childScopes = new Map()
   const closureWindows = new Map()
+  const activationIds = new Map()
+  const settledMessages = new Set()
+  const markQuiescent = entry => {
+    const key = nativeRunKey(entry.dataRoot, entry.runId)
+    if (![...budgetedChildren.values()].some(item => nativeRunKey(item.dataRoot, item.runId) === key)) quiescentRuns.add(key)
+  }
+  async function finishTracked(entry) {
+    if (!entry.finishPromise) {
+      const activationId = entry.activationId
+      entry.finishPromise = (async () => {
+        clearTimeout(entry.timer)
+        const result = await execution(entry.cwd, entry, 'finished')
+        if (result?.event_ignored === true || budgetedChildren.get(entry.childId) !== entry || entry.activationId !== activationId) return result
+        const child = entry.state.activeChildren.get(entry.childId)
+        if (child?.status === 'running' && child.action.action_id === entry.actionId) child.status = 'settled'
+        const attempt = entry.state.dispatchAttempts.get(entry.actionId)
+        if (attempt?.childId === entry.childId && attempt.status === 'running') attempt.status = 'settled'
+        return result
+      })()
+    }
+    return entry.finishPromise
+  }
+  ctx.on('subagent/start', info => {
+    if (!info?.id || !info.runId) return
+    activationIds.set(info.id, info.runId)
+    const entry = budgetedChildren.get(info.id)
+    if (entry?.ctx === ctx) entry.activationId = info.runId
+  })
+  ctx.on('subagent/end', async info => {
+    const entry = budgetedChildren.get(info?.id)
+    if (!entry || entry.ctx !== ctx || entry.activationId !== info.runId || info.stopReason === 'error') return
+    const result = await finishTracked(entry)
+    if (result?.event_ignored === true) return
+    if (budgetedChildren.get(info.id) !== entry || entry.activationId !== info.runId) return
+    budgetedChildren.delete(info.id)
+    markQuiescent(entry)
+  })
   async function trackExecution(exec, state, action, childId) {
-    const binding = { dataRoot: state.dataRoot, runId: state.runId, actionId: action.action_id, childId }
-    const entry = { ...binding, ctx, parent: exec.agent, cwd: workspaceCwd(exec) }
     const isClosure = action.stage === 'targeted_closure'
     let window = closureWindows.get(action.action_id)
     if (!window) {
@@ -301,32 +370,50 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
       window = { started: Date.now(), budget: isClosure ? task.execution_budget_ms ?? 1800000 : undefined, repairs: 0, turns: 0 }
       closureWindows.set(action.action_id, window)
     }
+    const attempt = state.dispatchAttempts.get(action.action_id)
+    const exhausted = isClosure && action.pending_repair && window.repairs >= 1 && !attempt?.executionId
+    const executionId = exhausted ? window.executionId : attempt?.executionId ?? randomUUID()
+    if (attempt) attempt.executionId = executionId
+    const binding = { dataRoot: state.dataRoot, runId: state.runId, actionId: action.action_id, childId, executionId }
+    const entry = { ...binding, ctx, state, parent: exec.agent, cwd: workspaceCwd(exec), activationId: activationIds.get(childId) }
+    clearTimeout(budgetedChildren.get(childId)?.timer)
+    budgetedChildren.set(childId, entry)
+    quiescentRuns.delete(nativeRunKey(state.dataRoot, state.runId))
     const pause = async reason => {
-      await execution(entry.cwd, binding, 'paused', reason)
+      if (budgetedChildren.get(childId) !== entry) return
+      const result = await execution(entry.cwd, binding, 'paused', reason)
+      if (budgetedChildren.get(childId) !== entry || result?.event_ignored === true) return
       const active = state.activeChildren.get(childId) ?? childScopes.get(childId)
       if (active) active.status = 'paused'
       state.pendingActions.delete(action.action_id)
       state.dispatchAttempts.delete(action.action_id)
       ctx.subagents.interrupt(childId, { kind: 'ancestor', agent: exec.agent })
-      budgetedChildren.delete(childId)
     }
-    if (isClosure && action.pending_repair && window.repairs >= 1) {
+    if (exhausted) {
       await pause('原会话自动修复一次后仍未完成，等待继续或交付')
       throw new Error('定向修正已暂停，保留结果，等待继续或交付')
     }
-    const automatic = Boolean(action.pending_repair && window.turns > 0)
-    if (isClosure && automatic) window.repairs++
-    window.turns++
-    await execution(entry.cwd, binding, 'started', '', window?.budget, automatic)
+    const automatic = attempt?.automatic ?? Boolean(action.pending_repair && window.turns > 0)
+    if (!attempt?.executionCounted) {
+      if (isClosure && automatic) window.repairs++
+      window.turns++
+      if (attempt) { attempt.automatic = automatic; attempt.executionCounted = true }
+    }
+    window.executionId = executionId
+    const started = await execution(entry.cwd, binding, 'started', '', window?.budget, automatic)
+    if (started?.event_ignored === true && !(started.execution_id === executionId
+      && started.status === 'dispatched' && started.execution_finished_at_ms == null)) {
+      throw new Error('当前执行回合未获 Graph 接受；保留原任务，不重复派发')
+    }
     if (isClosure) {
       entry.timer = setTimeout(() => { void pause('定向修正达到执行预算，保留结果').catch(error => {
+        if (budgetedChildren.get(childId) !== entry) return
         ctx.subagents.interrupt(childId, { kind: 'ancestor', agent: exec.agent })
         const child = childScopes.get(childId)
         if (child) { child.status = 'paused'; child.pauseError = String(error) }
       }) }, Math.max(1, window.budget - (Date.now() - window.started)))
       entry.timer.unref?.()
     }
-    budgetedChildren.set(childId, entry)
   }
 
   ctx.tools.register({
@@ -358,11 +445,14 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
       if (!state) throw new Error('当前会话没有绑定的 source-first Run')
       const action = state.pendingActions.get(args.action_id)
       if (!action) throw new Error(`source-first action 当前不可派发：${args.action_id}`)
+      const previous = state.dispatchAttempts.get(action.action_id)
+      if (previous && ['running', 'settled'].includes(previous.status)) {
+        return { kind: 'continuable', subagent_id: previous.childId, action_id: action.action_id, bound: true }
+      }
       if (['unit_analysis', 'targeted_closure'].includes(action.stage)
         && [...state.activeChildren.values()].filter(child => child.status === 'running').length >= 3) {
         throw new Error('已有三个单元正在执行，等待其中一个结束后继续派发')
       }
-      const previous = state.dispatchAttempts.get(action.action_id)
       if (previous) {
         await adapter(workspaceCwd(exec), 'bind', {
           data_root: state.dataRoot,
@@ -378,14 +468,15 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
           ...taskScope(workspaceCwd(exec), action),
           childId: previous.childId,
         })
-        previous.status = 'running'
+        previous.status = 'bound'
         await trackExecution(exec, state, action, previous.childId)
-        await ctx.subagents.followup(
+        previous.status = 'running'
+        try { await ctx.subagents.followup(
           exec.agent,
           previous.childId,
           continuationContent(action, state, previous.childId, { initial: action.action !== 'continue_agent' }),
           { source: { kind: 'coordinator', form: 'relay', senderSessionId: exec.agent.id }, signal: exec.signal },
-        )
+        ) } catch (error) { if (previous.status === 'running') previous.status = 'bound'; throw error }
         return { kind: 'continuable', subagent_id: previous.childId, action_id: action.action_id, bound: true }
       }
 
@@ -395,7 +486,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
           throw new Error(`continue_agent 缺少原 task_id：${action.action_id}`)
         }
         childId = action.task_id
-        state.dispatchAttempts.set(action.action_id, { childId, status: 'running' })
+        state.dispatchAttempts.set(action.action_id, { childId, status: 'created' })
       } else {
         const started = await ctx.subagents.startContinuable({
           provider: 'spawn',
@@ -413,7 +504,7 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
         })
         childId = childIdFrom(started)
         if (!childId) throw new Error('DSH 未返回可续接的 subagent_id')
-        state.dispatchAttempts.set(action.action_id, { childId, status: 'running' })
+        state.dispatchAttempts.set(action.action_id, { childId, status: 'created' })
       }
 
       await adapter(workspaceCwd(exec), 'bind', {
@@ -431,14 +522,15 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
         childId,
       })
       const attempt = state.dispatchAttempts.get(action.action_id)
-      if (attempt) attempt.status = 'running'
+      if (attempt) attempt.status = 'bound'
       await trackExecution(exec, state, action, childId)
-      await ctx.subagents.followup(
+      if (attempt) attempt.status = 'running'
+      try { await ctx.subagents.followup(
         exec.agent,
         childId,
         continuationContent(action, state, childId, { initial: action.action !== 'continue_agent' }),
         { source: { kind: 'coordinator', form: 'relay', senderSessionId: exec.agent.id }, signal: exec.signal },
-      )
+      ) } catch (error) { if (attempt?.status === 'running') attempt.status = 'bound'; throw error }
       return { kind: 'continuable', subagent_id: childId, action_id: action.action_id, bound: true }
     },
   })
@@ -478,21 +570,12 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
 
   const noticeSettled = async ({ agent, message }) => {
     if (message?.source?.kind !== 'subagent-settled') return
-    const state = states.get(agent?.id)
+    const messageKey = typeof message.id === 'string' ? JSON.stringify([agent?.id, message.id]) : null
+    if (messageKey && settledMessages.has(messageKey)) return
+    if (messageKey) settledMessages.add(messageKey)
     const childId = message.source.senderSessionId
     const tracked = budgetedChildren.get(childId)
-    if (tracked) {
-      clearTimeout(tracked.timer)
-      budgetedChildren.delete(childId)
-      await execution(tracked.cwd, tracked, 'finished')
-    }
-    const child = state?.activeChildren.get(childId)
-    if (child?.status === 'running') child.status = 'settled'
-    if (!child && state) {
-      for (const attempt of state.dispatchAttempts.values()) {
-        if (attempt.childId === childId) attempt.status = 'settled'
-      }
-    }
+    if (tracked?.ctx === ctx && tracked.parent === agent) await finishTracked(tracked)
   }
   ctx.on('agent/inbox/inserted', noticeSettled)
   ctx.on('agent/inbox/claimed', noticeSettled)

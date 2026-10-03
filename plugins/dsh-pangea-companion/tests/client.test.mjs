@@ -134,10 +134,97 @@ async function loadClientExports(react = fakeReact(), fetcher = async () => { th
 
 function descendants(node) {
   if (Array.isArray(node)) return node.flatMap(descendants)
-  if (node?.type?.name === 'RunWorkspace') return descendants(node.type(node.props))
+  if (['RunWorkspace', 'RunExecutionSummary'].includes(node?.type?.name)) return descendants(node.type(node.props))
   if (!node?.children) return []
   return [node, ...node.children.flatMap(descendants)]
 }
+
+function observableRun(overrides = {}) {
+  return { run_id: 'observed-run', data_root: '/isolated/data', workflow_version: 'source-first-v1', lifecycle_status: 'running', stage: 'analyzing',
+    workflow: { steps: [], actions: [], units: [] }, execution_view: {
+      stage: 'analyzing', unit_counts: { total: 3, completed: 1, active: 1, pending: 1, paused: 0, failed: 0 },
+      last_effective_progress: { kind: 'records_saved', at_ms: 1791043200000, action_id: 'analysis-a', unit_id: 'unit-0001', revision: 3, record_count: 2 },
+      actions: [{ action_id: 'analysis-a', title: '连接恢复', unit_id: 'unit-0001', status: 'settled', saved_revision: 3, saved_record_count: 2, resume_action: 'settle' },
+        { action_id: 'analysis-b', title: '资源释放', unit_id: 'unit-0002', status: 'paused', saved_revision: 2, saved_record_count: 1, resume_action: 'continue_agent' }],
+      preserved: [{ action_id: 'analysis-a', unit_id: 'unit-0001', revision: 3, record_count: 2, acceptance: 'accepted' },
+        { action_id: 'analysis-b', unit_id: 'unit-0002', revision: 2, record_count: 1, acceptance: 'draft' }],
+      unresolved: [{ action_id: 'analysis-b', unit_id: 'unit-0002', status: 'paused', reason: '本次执行预算已用完' }],
+      recovery: { can_resume: true, resume_from: [{ action_id: 'analysis-a', operation: 'settle' }, { action_id: 'analysis-b', operation: 'continue_agent' }] }, diagnostics: [],
+    }, runtime_observation: { activity: { kind: 'waiting_provider', label: '等待 Provider 响应' }, last_communication_at_ms: 1791043500000, connection_status: 'connected' }, ...overrides }
+}
+
+test('run progress keeps real result progress separate from newer provider communication', async () => {
+  const client = await loadClientExports()
+  const current = observableRun()
+  const first = client.executionObservation(current, { run_id: current.run_id, data_root: current.data_root, status: 'running' })
+  current.runtime_observation.last_communication_at_ms += 60000
+  const second = client.executionObservation(current, { run_id: current.run_id, data_root: current.data_root, status: 'running' })
+  assert.equal(first.lastProgressAt, second.lastProgressAt)
+  assert.equal(second.lastCommunicationAt - first.lastCommunicationAt, 60000)
+  const rendered = client.RunExecutionSummary({ current })
+  const serialized = JSON.stringify(rendered)
+  assert.match(serialized, /等待 Provider 响应/)
+  assert.match(serialized, /通信更新不代表成果增加/)
+  assert.match(serialized, /按单元完成提交计数/)
+  assert.doesNotMatch(serialized, /正在读取源码|模型思考/)
+  const unknown = observableRun({ execution_view: { ...current.execution_view, last_effective_progress: null }, runtime_observation: {} })
+  assert.equal(client.executionObservation(unknown).lastProgressAt, null)
+  assert.match(JSON.stringify(client.RunExecutionSummary({ current: unknown })), /尚无结果保存时间；不据此推断执行卡住/)
+})
+
+test('stopped run exposes preserved drafts and exact settle versus continue position', async () => {
+  const client = await loadClientExports()
+  const current = observableRun({ lifecycle_status: 'stopped', terminal: true })
+  const task = { run_id: current.run_id, data_root: current.data_root, can_resume: true, status: 'stopped', execution_status: 'stopped' }
+  const rendered = client.RunExecutionSummary({ current, task })
+  const value = JSON.stringify(rendered)
+  assert.match(value, /连接恢复：接收已完成提交；资源释放：续接原执行/)
+  assert.match(value, /已保存草稿 · 本次执行预算已用完/)
+  assert.match(value, /保留 2 份结果记录 · 1 项执行待处理/)
+  assert.doesNotMatch(value, /审查 PASS|全部结果已接受/)
+  const workspace = descendants(client.RunWorkspace({ current, task, navigate() {} }))
+  assert.ok(workspace.some(node => node.props['aria-label'] === '运行进展与恢复'))
+  assert.ok(workspace.some(node => node.type === 'button' && node.children.includes('继续分析')))
+})
+
+test('stale and delivered execution views do not present old provider activity as live', async () => {
+  const client = await loadClientExports()
+  const current = observableRun()
+  const stale = client.executionObservation(current, null, true)
+  assert.equal(stale.activity, '当前状态未知，显示上次记录')
+  assert.match(stale.recovery, /重新读取当前状态/)
+  const complete = observableRun({ lifecycle_status: 'complete', partial_delivery: true, terminal: true })
+  const result = JSON.stringify(client.RunExecutionSummary({ current: complete, task: { run_id: complete.run_id, data_root: complete.data_root, can_resume: true } }))
+  assert.match(result, /已交付已有结果/)
+  assert.match(result, /本次已结束/)
+  assert.doesNotMatch(result, /等待 Provider 响应|连接恢复：接收已完成提交/)
+  assert.equal(client.RunExecutionSummary({ current: { ...current, workflow_version: 'legacy' } }), null)
+})
+
+test('recovery summary does not use continuation permission from an unrelated task', async () => {
+  const client = await loadClientExports()
+  const current = observableRun({ lifecycle_status: 'stopped', terminal: true })
+  const result = client.executionObservation(current, { run_id: 'other-run', data_root: current.data_root, can_resume: true })
+  assert.doesNotMatch(result.recovery, /连接恢复：接收已完成提交/)
+  assert.equal(result.recovery, '没有可继续的 Run')
+})
+
+test('overview loses live status and disables continuation when its current Run read fails', async () => {
+  const current = observableRun({ lifecycle_status: 'stopped', terminal: true, details: {}, counts: {} })
+  const task = { task_id: 'observed-task', run_id: current.run_id, data_root: current.data_root, title: 'TLS', target: 'TLS', repository: 'sample', can_resume: true, status: 'stopped', execution_status: 'stopped' }
+  const states = { 0: { current, data_root: current.data_root }, 1: { tasks: { items: [task] }, compatibility: { compatible: true } }, 2: 'connection lost', 4: current.run_id, 5: task.task_id, 16: { type: 'overview' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/isolated' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  assert.ok(nodes.some(node => node.type === 'h2' && node.children.includes('当前状态暂时无法确认')))
+  const resume = nodes.find(node => node.type === 'button' && node.children.includes('继续分析'))
+  assert.ok(resume)
+  assert.equal(resume.props.disabled, true)
+  assert.ok(nodes.some(node => node.props['aria-label'] === '执行进展摘要'))
+})
 
 test('incremental dialog preserves exact record identity and literal changed paths', async () => {
   const client = await loadClientExports()
@@ -1703,7 +1790,7 @@ test('unlinked Run opens a read-only record from the selected frozen snapshot', 
 test('overview status variants separate analysis quality from test execution and gate continuation', async () => {
   const variants = [
     { lifecycle_status: 'complete', terminal: true, publication: { state: 'final' }, delivery_integrity: { status: 'complete' }, report_available: true, taskStatus: 'completed', canResume: false, expected: '分析结果已就绪', report: true },
-    { lifecycle_status: 'running', terminal: false, publication: { state: 'draft' }, delivery_integrity: { status: 'incomplete' }, taskStatus: 'running', canResume: false, expected: '正在分析源码', report: false },
+    { lifecycle_status: 'running', terminal: false, publication: { state: 'draft' }, delivery_integrity: { status: 'incomplete' }, taskStatus: 'running', canResume: false, expected: '分析正在运行', report: false },
     { lifecycle_status: 'running', terminal: false, needsUser: true, executionStatus: 'paused', publication: { state: 'draft' }, delivery_integrity: { status: 'incomplete' }, taskStatus: 'needs_attention', canResume: true, expected: '修正结果等待你的决定', report: false,
       correctionActions: [{ stage: 'targeted_closure', correction_id: 'CL-01', status: 'accepted' }, { stage: 'targeted_closure', correction_id: 'CL-02', status: 'accepted' }, { stage: 'targeted_closure', correction_id: 'CL-03', status: 'paused' }] },
     { lifecycle_status: 'attention_required', terminal: true, publication: { state: 'draft' }, delivery_integrity: { status: 'incomplete' }, taskStatus: 'needs_attention', canResume: true, expected: '修正结果等待你的决定', report: false },

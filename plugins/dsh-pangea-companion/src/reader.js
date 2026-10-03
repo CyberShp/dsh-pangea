@@ -3,6 +3,7 @@ import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { sourceFirstProjection, coverageSummary } from './source-first-projection.js'
+import { readableNotesEnvelope, sourceFirstExecutionView, sourceFirstUnitRows } from './runtime-view.js'
 
 const STEP_TITLES = [
   '范围和任务契约',
@@ -698,12 +699,14 @@ export function sourceFirstStepRows(progress, runDirectory, artifacts, mode) {
 async function sourceFirstActionArtifacts(runDirectory, progress) {
   const artifacts = []
   const issues = []
+  const diagnostics = []
   let deliveryUnavailable = false
   for (const [actionId, action] of Object.entries(progress?.actions ?? {})) {
     if (!action || typeof action !== 'object') continue
     const addIssue = message => {
       issues.push(message)
-      if (action.stage === 'unit_analysis' || (action.stage === 'targeted_closure' && action.status === 'accepted')) deliveryUnavailable = true
+      diagnostics.push({ action_id: actionId, message })
+      if (action.stage === 'unit_analysis' || (action.stage === 'targeted_closure' && (action.status === 'accepted' || action.delivery_revision != null))) deliveryUnavailable = true
     }
     const recordedTaskPath = typeof action.task_path === 'string' ? path.resolve(action.task_path) : null
     const taskPath = recordedTaskPath && await pathKind(recordedTaskPath) === 'file' ? await realpath(recordedTaskPath) : recordedTaskPath
@@ -726,37 +729,60 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
         addIssue(`source-first result JSON 不可读取：${actionId}：${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    if (result && !readableNotesEnvelope(result)) {
+      addIssue(`source-first result 记录外壳不可读取：${actionId}`)
+      result = null
+    }
+    if (result) {
+      const recordedRoot = typeof result.binding?.data_root === 'string' && result.binding.data_root
+        ? path.resolve(result.binding.data_root) : null
+      const resultRoot = recordedRoot ? await realpath(recordedRoot).catch(() => recordedRoot) : null
+      // Older notes omit data_root; their exact in-Run paths and run/action/task
+      // identities remain the binding proof. An explicit foreign root is invalid.
+      if (recordedRoot && resultRoot !== path.dirname(path.dirname(runDirectory))) {
+        addIssue(`source-first result data_root 与当前 Run 不一致：${actionId}`)
+        result = null
+      }
+    }
     // Every source-first action starts with a pending shell. Host bind updates
     // progress first; the first result operation seals the shell's task ID.
-    // Only an untouched shell in a live, unaccepted action may wait here.
+    // An untouched shell may also survive an explicit pause/stop; neither
+    // lifecycle transition claims that its pending worker wrote any records.
     // Older Graph versions copied the accepted analysis into a closure seed
     // before its original worker first accessed it. It is not a published result.
     const closureSeed = action.stage === 'targeted_closure'
       && action.action === 'continue_agent' && Boolean(action.task_id)
       && task.task_type === 'source_first_closure'
       && Number.isInteger(task.base_revision) && result?.revision === task.base_revision
-      && result?.completion === null
+      && (result?.completion === null || result?.completion?.complete === false)
       && result?.receipts && Object.keys(result.receipts).length === 0
     const awaitingBinding = result?.format_version === 'pangea-notes-v1'
-      && progress.lifecycle_status === 'running'
-      && ['pending', 'dispatched'].includes(action.status)
+      && ['running', 'stopped'].includes(progress.lifecycle_status)
+      && (['pending', 'dispatched', 'paused'].includes(action.status) || (action.status === 'failed' && action.error === '用户停止 Run'))
       && result.binding?.run_id === progress.run_id
       && result.binding?.action_id === actionId
       && result.binding?.task_id === 'pending'
       && Array.isArray(result.records)
       && ((result.revision === 0 && result.records.length === 0) || closureSeed)
+      && (!result.receipts || Object.keys(result.receipts).length === 0)
       && (result.completion === null || result.completion?.complete === false)
       && !Object.hasOwn(progress.accepted_revisions ?? {}, actionId)
+      && action.delivery_revision == null
     const undeliveredSeed = progress.partial_delivery && action.status === 'paused' && closureSeed
       && result?.binding?.run_id === progress.run_id && result?.binding?.action_id === actionId
       && result?.binding?.task_id === 'pending' && action.delivery_revision == null
-    if (awaitingBinding || undeliveredSeed) result = null
+    const pendingResult = awaitingBinding || undeliveredSeed ? result : null
+    if (pendingResult) result = null
     if (result && (result.binding?.run_id !== progress.run_id || result.binding?.action_id !== actionId || (action.task_id && result.binding?.task_id !== action.task_id))) {
       addIssue(`source-first result 绑定与当前任务不一致：${actionId}`)
       result = null
     }
-    if (result && action.status === 'accepted' && Number.isInteger(progress.accepted_revisions?.[actionId]) && result.revision !== progress.accepted_revisions[actionId]) {
+    if (result && Number.isInteger(progress.accepted_revisions?.[actionId]) && result.revision !== progress.accepted_revisions[actionId]) {
       addIssue(`source-first result revision 与已接受版本不一致：${actionId}`)
+      result = null
+    }
+    if (result && Number.isInteger(action.delivery_revision) && result.revision !== action.delivery_revision) {
+      addIssue(`source-first result revision 与已交付版本不一致：${actionId}`)
       result = null
     }
     if ((!result || !Array.isArray(result.records)) && action.status === 'accepted') addIssue(`已接受结果记录不可读取：${actionId}`)
@@ -766,6 +792,7 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
       ...action,
       binding_status: undeliveredSeed ? 'not_delivered' : awaitingBinding ? 'pending' : 'bound',
       task,
+      runtime_result: pendingResult ?? result,
       task_path: taskPath,
       result_path: resultPath,
       revision: Number.isInteger(result?.revision) ? result.revision : null,
@@ -776,7 +803,7 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
       records,
     })
   }
-  return { artifacts, issues, deliveryUnavailable }
+  return { artifacts, issues, diagnostics, deliveryUnavailable }
 }
 
 async function sourceFirstSnapshot(runDirectory, progress, contract, actionArtifacts) {
@@ -831,6 +858,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   const runDirectory = await realpath(path.join(dataRoot, 'runs', runId))
   const progressPath = path.join(runDirectory, 'progress.json')
   const progress = await readJson(progressPath)
+  if (progress.run_id !== runId) throw new Error(`source-first progress run_id mismatch: expected ${runId}, received ${progress.run_id}`)
   const contractPath = path.join(runDirectory, 'inputs', 'task-contract.json')
   let contract = null
   if (await pathKind(contractPath) === 'file') {
@@ -848,6 +876,19 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     } catch { coverageMatch = { sources: [], note: '覆盖数据匹配诊断不可读取，不能推定没有缺口。' } }
   }
   const actionView = await sourceFirstActionArtifacts(runDirectory, progress)
+  let plan = null
+  const executionDiagnostics = [...actionView.diagnostics]
+  try {
+    const planPath = await realpath(path.join(runDirectory, 'inputs', 'source-first-plan.json'))
+    if (!inside(runDirectory, planPath)) throw new Error('单元计划路径越出当前 Run')
+    plan = await readJson(planPath)
+    if (!Array.isArray(plan?.units)) throw new Error('单元计划缺少 units 数组')
+  } catch (error) {
+    plan = null
+    executionDiagnostics.push({ action_id: null, message: `冻结单元计划不可读取，计划总数未知：${error.message}` })
+  }
+  const executionView = sourceFirstExecutionView({ progress, plan, artifacts: actionView.artifacts, diagnostics: executionDiagnostics })
+  const unitRows = sourceFirstUnitRows(plan, executionView, actionView.artifacts)
   const projection = sourceFirstProjection(actionView.artifacts)
   let coverageGaps = null
   try { coverageGaps = await readJson(path.join(runDirectory, 'inputs', 'coverage-gaps.json')) } catch { /* Old Runs may not have frozen coverage input. */ }
@@ -855,8 +896,6 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
 
   const life = sourceFirstLifecycle(progress)
   const sourceSnapshot = await sourceFirstSnapshot(runDirectory, progress, contract, actionView.artifacts)
-  const analysisActions = actionView.artifacts.filter(item => item.role === 'analysis')
-  const acceptedAnalysis = analysisActions.filter(item => item.status === 'accepted')
   const reportMd = path.join(runDirectory, 'report.md')
   const reportHtml = path.join(runDirectory, 'report.html')
   const reportComplete = path.join(runDirectory, 'report-complete.json')
@@ -894,13 +933,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       first_finish_revision: progress.first_finish_revisions?.[item.action_id] ?? null,
       accepted_revision: progress.accepted_revisions?.[item.action_id] ?? null,
     })),
-    units: analysisActions.map(item => ({
-      unit_id: item.task?.unit_id ?? item.action_id,
-      title: item.task?.title ?? item.task?.unit_id ?? item.action_id,
-      status: item.status,
-      owned_regions: item.task?.owned_regions ?? [],
-      context_regions: item.task?.context_regions ?? [],
-    })),
+    units: unitRows,
     quality_checks: [],
     unresolved: [...(Array.isArray(progress.degradations) ? progress.degradations : []), ...(progress.blocking_reason ? [progress.blocking_reason] : [])],
     error_history: [...(Array.isArray(progress.errors) ? progress.errors : []), ...actionView.issues],
@@ -932,15 +965,18 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     blocking_reason: progress.blocking_reason ?? null,
     first_finish_revisions: progress.first_finish_revisions ?? {},
     accepted_revisions: progress.accepted_revisions ?? {},
+    execution_view: executionView,
     attention_required: progress.needs_user === true || life.lifecycle_status === 'failed',
     completed_steps: workflow.completed_steps,
     analysis: {
-      total: analysisActions.length,
-      completed: acceptedAnalysis.length,
-      reworked: 0,
-      running: analysisActions.filter(item => ['dispatched', 'settled'].includes(item.status)).length,
-      pending: analysisActions.filter(item => item.status === 'pending').length,
-      submitted: analysisActions.filter(item => ['settled', 'accepted'].includes(item.status)).length,
+      total: executionView.unit_counts.total,
+      completed: executionView.unit_counts.completed,
+      reworked: new Set(executionView.actions.filter(item => item.role === 'closure' && ['settled', 'accepted'].includes(item.status)).map(item => item.unit_id).filter(Boolean)).size,
+      running: executionView.unit_counts.active,
+      pending: executionView.unit_counts.pending,
+      paused: executionView.unit_counts.paused,
+      failed: executionView.unit_counts.failed,
+      submitted: executionView.unit_counts.completed,
       max_parallel: 3,
     },
     counts: Object.fromEntries(['risks', 'test_cases', 'evidence', 'business_flows'].map(key => [key, projection[key].length])),
@@ -973,7 +1009,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       count_checks: {},
       collection_status: Object.fromEntries(['risks', 'test_cases', 'business_flows', 'evidence'].map(key => [key, actionView.deliveryUnavailable ? 'unavailable' : 'readable'])),
     },
-    reader_notices: [...new Set(actionView.artifacts.filter(item => item.binding_status === 'pending').map(item =>
+    reader_notices: [...new Set(actionView.artifacts.filter(item => item.binding_status === 'pending' && life.lifecycle_status === 'running' && ['pending', 'dispatched'].includes(item.status)).map(item =>
       item.stage === 'comparison_review' ? '复核准备中，正在绑定复核任务。' : '任务准备中，等待 Agent 首次访问结果。'))],
     reader_warnings: [...sourceSnapshot.issues, ...actionView.issues, ...(sceneIssue ? [sceneIssue] : [])],
     artifacts: {
