@@ -18,7 +18,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, createTaskConversation, dataRootFor, internalModelOptions, launchAnalysisSession, launchArchitectureSession, isNativeDiagramRunning, queryCoverageAsset, importCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, internalModelOptions, launchAnalysisSession, launchArchitectureSession, isNativeDiagramRunning, queryCoverageAsset, importCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -740,6 +740,20 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
     const actionDataRoot = typeof body.data_root === 'string' ? body.data_root : dataRoot
+    if (['derivation-options', 'task-derive'].includes(body.action)) {
+      const parent = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      const parentDataRoot = dataRootFor(parent.workspace, parent.data_root)
+      if (actionDataRoot && dataRootFor(parent.workspace, actionDataRoot) !== parentDataRoot) throw new Error('定向分析必须使用来源任务的数据目录')
+      const options = await analysisDerivationOptions({ task: parent, runId: body.run_id, runner })
+      if (body.action === 'derivation-options') return json(res, 200, { status: 'ok', options })
+      const input = deriveAnalysisInput(parent, body.input, options)
+      const task = await tasks.create({ workspace: parent.workspace, dataRoot: parentDataRoot, input })
+      await appendLaunchSafe(launchLogs, task.task_id, {
+        stage: 'task_derived', status: 'ok', source_task_id: parent.task_id,
+        parent_run_id: parent.run_id, message: `${input.incremental_request.mode === 'changed-files' ? '变更分析' : '定向补充'}：${parent.run_id}`,
+      })
+      return json(res, 200, { status: 'ok', task })
+    }
     if (body.action === 'coverage-query') {
       const acquisition = await queryCoverageAsset({ cwd, dataRoot: actionDataRoot, query: body.query, runner })
       return json(res, 200, { status: 'ok', acquisition })
@@ -847,6 +861,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     }
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)
+      if (body.input?.incremental_request != null) throw new Error('定向补充或变更分析请从来源任务发起')
       if (body.input?.source_task_id) requireWorkspaceTask(await tasks.get(body.input.source_task_id), cwd, body.input.source_task_id)
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
       if (providerId && !acpProviderOption(providerId)) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
@@ -861,6 +876,9 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     }
     if (body.action === 'task-start') {
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (task.incremental_request && actionDataRoot && dataRootFor(task.workspace, actionDataRoot) !== dataRootFor(task.workspace, task.data_root)) {
+        throw new Error('定向分析必须使用来源任务的数据目录')
+      }
       const resume = body.resume === true
       const resumeEligibility = deriveTaskResumeEligibility(runtime, task)
       if (task.run_id && !resume) throw new Error('task already has a Run; use resume to continue it')

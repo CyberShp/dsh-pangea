@@ -139,6 +139,65 @@ function descendants(node) {
   return [node, ...node.children.flatMap(descendants)]
 }
 
+test('incremental dialog preserves exact record identity and literal changed paths', async () => {
+  const client = await loadClientExports()
+  let input
+  let state = { title: 'TLS', run_id: 'parent-run', pending: '', error: '',
+    options: { can_derive: true, units: [], records: [
+      { action_id: 'analysis-a', record_id: 'rec-1', title: '连接失败', kind: 'test_case' },
+      { action_id: 'analysis-b', record_id: 'rec-1', title: '资源释放', kind: 'test_case' },
+    ] },
+    draft: { mode: 'changed-files', instruction: '检查删除后的清理路径', changed_paths_text: 'src\\tcp\\tls.c\n源码/删除.c\nsrc\\tcp\\tls.c', selected_unit_ids: [], selected_records: [], query: '' } }
+  const render = () => descendants(client.RunDerivationDialog({ state, onChange: draft => { state = { ...state, draft } }, onSubmit: value => { input = value }, onClose() {} }))
+  render().find(node => node.props['aria-label'] === '选择记录 资源释放').props.onChange({ target: { checked: true } })
+  assert.equal(render().find(node => node.props['aria-label'] === '选择记录 连接失败').props.checked, false)
+  render().find(node => node.children.includes('创建并开始分析')).props.onClick()
+  assert.deepEqual(JSON.parse(JSON.stringify(input)), { mode: 'changed-files', instruction: '检查删除后的清理路径',
+    changed_paths: ['src\\tcp\\tls.c', '源码/删除.c'], selected_unit_ids: [], selected_records: [{ action_id: 'analysis-b', record_id: 'rec-1' }] })
+  render().find(node => node.children.includes('定向补充')).props.onClick()
+  render().find(node => node.children.includes('创建并开始分析')).props.onClick()
+  assert.deepEqual(Array.from(input.changed_paths), [])
+})
+
+test('incremental dialog blocks incomplete input and retains request errors for retry', async () => {
+  const client = await loadClientExports()
+  const draft = { mode: 'changed-files', instruction: '检查改动', changed_paths_text: '', selected_unit_ids: [], selected_records: [] }
+  const render = value => descendants(client.RunDerivationDialog({ state: { title: 'TLS', run_id: 'parent', draft, pending: '', options: { can_derive: true }, ...value }, onChange() {}, onClose() {}, onSubmit() {}, onRetry() {} }))
+  assert.equal(render().find(node => node.children.includes('创建并开始分析')).props.disabled, true)
+  assert.equal(render({ draft: { ...draft, changed_paths_text: 'src/tls.c' } }).find(node => node.children.includes('创建并开始分析')).props.disabled, false)
+  const blocked = render({ options: { can_derive: false, blocked_reason: '原分析源码快照缺失' } })
+  assert.match(JSON.stringify(blocked), /原分析源码快照缺失/)
+  assert.equal(blocked.find(node => node.children.includes('创建并开始分析')).props.disabled, true)
+  const failed = render({ options: null, error: '暂时无法读取来源' })
+  assert.ok(failed.find(node => node.children.includes('重新读取')))
+  const creating = render({ pending: 'create' })
+  assert.equal(creating.find(node => node.props['aria-label'] === '关闭增量分析').props.disabled, true)
+  assert.equal(creating.find(node => node.children.includes('正在创建…')).props.disabled, true)
+})
+
+test('overview derivation loads only its bound Run and is disabled during execution', async () => {
+  for (const running of [false, true]) {
+    const task = { task_id: 'parent-task', run_id: 'parent-run', title: 'TLS分析', repository: 'repo', status: running ? 'running' : 'completed', execution_status: running ? 'running' : 'succeeded' }
+    const current = { run_id: task.run_id, workflow_version: 'source-first-v1', terminal: !running, lifecycle_status: running ? 'running' : 'complete', details: {}, workflow: { steps: [], units: [], actions: [] } }
+    const states = { 0: { status: 'ok', current }, 1: { compatibility: { compatible: true }, tasks: { items: [task] } }, 4: task.run_id, 5: task.task_id, 16: { type: 'overview' } }
+    let index = 0
+    const requests = []
+    const react = { ...fakeReact(), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] } }
+    const client = await loadClientExports(react, async (url, options) => { requests.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ status: 'ok', options: { can_derive: true, records: [], units: [] } }) } })
+    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const nodes = descendants(panel.type(panel.props))
+    const button = nodes.find(node => node.children.includes('补充 / 增量分析'))
+    assert.equal(button.props.disabled, running)
+    if (!running) {
+      button.props.onClick()
+      await new Promise(resolve => setImmediate(resolve))
+      assert.deepEqual(requests, [{ action: 'derivation-options', task_id: 'parent-task', run_id: 'parent-run' }])
+    }
+  }
+})
+
 test('v2 Run navigation follows risk presentation instead of populated historical risk counts', async () => {
   const client = await loadClientExports()
   for (const enabled of [true, false]) {

@@ -1,5 +1,6 @@
 import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import { runProvenance } from './runtime-provenance.js'
+import { normalizeIncrementalRequest } from './incremental-request.js'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
@@ -136,6 +137,7 @@ export async function createRun(cwd, input, runner = runPangea) {
   const root = workspaceRoot(cwd)
   const detected = await runner({ cwd: root, args: ['system', 'capabilities', '--data-root', typeof input.data_root === 'string' ? path.resolve(root, input.data_root) : path.join(root, 'pangea-data')] })
   if (supportsSourceFirst(detected)) return createSourceFirstRun(cwd, input, runner)
+  if (input.incremental_request != null) throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')
   const rejectedFields = ['focus', 'test_case_examples', 'context_scope'].filter(field => Object.hasOwn(input ?? {}, field))
   if (rejectedFields.length) throw new Error(`新建分析不支持字段：${rejectedFields.join(', ')}`)
   const pendingPath = path.join(root, PENDING_REQUEST)
@@ -233,6 +235,7 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     data_root: dataRoot,
     repository: input.repository,
     target: input.target,
+    ...(input.incremental_request != null ? { incremental_request: normalizeIncrementalRequest(input.incremental_request) } : {}),
     source_scope: normalizeSourceScope(input.source_scope, input.repository),
     ...(Array.isArray(input.context_scope) ? { context_scope: normalizeSourceScope(input.context_scope, input.repository) } : {}),
     asset_ids: input.asset_ids ?? [],
@@ -249,6 +252,7 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     args: ['system', 'capabilities', '--data-root', dataRoot],
   })
   assertSourceFirstCapabilities(capabilities)
+  if (request.incremental_request && !capabilities.source_first?.contract_fields?.includes('incremental_request')) throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')
   const options = analysisOptions(capabilities, input.analysis_profile)
   if (!options.scenarios?.includes(request.analysis_settings.scenario) || !options.modes?.includes(request.analysis_settings.mode) || (input.coverage_input != null && options.coverage_input !== true)) throw new Error('当前分析引擎不支持所选分析设置')
   if (input.analysis_profile === SCENE_PROFILE && ['analysis_profile', 'analysis_settings', 'asset_revisions'].some(field => !capabilities.source_first?.contract_fields?.includes(field))) throw new Error('引擎缺少场景或资产修订合同支持')
