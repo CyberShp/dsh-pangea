@@ -1,5 +1,8 @@
-import { stopSourceFirstAcpRun } from './source-first-acp.js'
-import { interruptSourceFirstChildren } from './report-policy.js'
+import { inspectSourceFirstAcpRecovery, stopSourceFirstAcpRun } from './source-first-acp.js'
+import { runtimeObservation } from './runtime-observation.js'
+import { inspectSourceFirstChildren, interruptSourceFirstChildren } from './report-policy.js'
+import { processPresence } from './acp-recovery.js'
+import { randomUUID } from 'node:crypto'
 import { createView, listViews, loadView, updateView, viewArtifact, recordViewEvent, inspectView, validateView, cancelViewRender } from './architecture-views.js'
 import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
@@ -33,6 +36,7 @@ const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
 const LAUNCH_LOG_API_PATH = '/api/pangea-companion/launch-log'
 const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
 const ACP_SETTINGS_API_PATH = '/api/pangea-companion/acp-settings'
+const hostInstanceId = randomUUID()
 
 function rpc(payload) {
   return { rpcId: `pangea-companion-${Date.now()}-${Math.random()}`, payload }
@@ -192,7 +196,7 @@ function textResponse(res, status, contentType, body, headers = {}) {
 // "running" because the Skill process did not get a chance to settle it.
 // Expose the stronger observed terminal state to readers immediately instead
 // of showing a red ACP error next to an apparently active analysis forever.
-export function applyTaskExecutionState(snapshot, task) {
+export function applyTaskExecutionState(snapshot, task, observation) {
   if (!snapshot?.current || !task) return snapshot
   let current = snapshot.current
   const sameRun = typeof task.run_id === 'string' && task.run_id === current.run_id
@@ -202,6 +206,10 @@ export function applyTaskExecutionState(snapshot, task) {
     ? task.attempts.find(attempt => attempt?.attempt_id === task.attempt_id)
     : null
   if (!sameRun || !sameDataRoot || !task.attempt_id || (currentAttempt && currentAttempt.attempt_id !== task.attempt_id)) return snapshot
+  if (observation) {
+    current = { ...current, runtime_observation: observation }
+    snapshot = { ...snapshot, current }
+  }
   const review = task.host_review
   if (review?.task_id === task.task_id && review.run_id === task.run_id && review.attempt_id === task.attempt_id) {
     const verified = review.status === 'complete' && review.reviewer_turn_completed_at
@@ -229,6 +237,11 @@ export function applyTaskExecutionState(snapshot, task) {
   // execution observation no longer describes the active workflow.
   if (Number.isFinite(stateUpdatedAt) && Number.isFinite(executionEndedAt) && stateUpdatedAt > executionEndedAt) return snapshot
   const message = task.terminal_error || task.launch_error || (failed ? '外部 Agent 执行失败' : 'Run 已停止')
+  if (current.workflow_version === 'source-first-v1' && current.lifecycle_status === 'complete' && current.report_available === true) {
+    return { ...snapshot, current: { ...current, external_execution: {
+      status: executionStatus || task.status, provider: task.provider ?? null, task_id: task.task_id, attempt_id: task.attempt_id, message,
+    } } }
+  }
   const error = failed && !(current.errors ?? []).some(item => item?.code === 'ACP_AGENT_FAILED')
     ? { code: 'ACP_AGENT_FAILED', message }
     : null
@@ -253,7 +266,7 @@ export function applyTaskExecutionState(snapshot, task) {
   }
 }
 
-async function stateRouteHandler(req, res, monitor, tasks) {
+async function stateRouteHandler(req, res, monitor, tasks, runtime, launchLogs) {
   if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? API_PATH, 'http://localhost')
@@ -264,7 +277,9 @@ async function stateRouteHandler(req, res, monitor, tasks) {
   try {
     const snapshot = await companionSnapshot({ cwd, dataRoot, runId, limit: 12 })
     const task = snapshot.current?.run_id ? await tasks.getByRun(snapshot.current.run_id, { dataRoot: snapshot.data_root }) : null
-    const effectiveSnapshot = applyTaskExecutionState(snapshot, task)
+    const recovery = task ? await assessTaskResumeEligibility(runtime, task) : null
+    const log = task ? await launchLogs.read(task.task_id, { limit: 200 }) : null
+    const effectiveSnapshot = applyTaskExecutionState(snapshot, task, task ? runtimeObservation(task, log?.events, recovery) : null)
     if (effectiveSnapshot.current) await monitor.observeRunSnapshot(snapshot.data_root, effectiveSnapshot.current)
     effectiveSnapshot.monitor = await monitor.snapshot({ sessionId, dataRoot: snapshot.data_root, runId: effectiveSnapshot.current?.run_id })
     json(res, 200, effectiveSnapshot)
@@ -412,9 +427,14 @@ function assertRegisteredAcpProvider(runtime, providerId) {
   return option
 }
 
-async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, now = Date.now()) {
+async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, runtime, now = Date.now()) {
   const timeoutMs = 5 * 60 * 1000
   for (const task of taskItems) {
+    if (!task.provider && task.workflow_version === 'source-first-v1' && task.execution_status === 'stopping') {
+      const recovery = await nativeRecovery(runtime, task)
+      if (recovery.can_resume) await tasks.markStopped(task.task_id)
+      continue
+    }
     if (!['preparing', 'running'].includes(task.status)) continue
     if (task.execution_status === 'stopping') continue
     if (task.job_id) continue
@@ -510,10 +530,21 @@ function readJobSnapshot(runtime, task) {
   return snapshot
 }
 
-function deriveTaskResumeEligibility(runtime, task) {
+function deriveTaskResumeEligibility(runtime, task, sourceRecovery) {
   if (!task?.run_id) return { can_resume: false, resume_blocked_reason: '没有可继续的 Run' }
+  if (task.status === 'completed') return { can_resume: false, resume_blocked_reason: '当前 Run 已交付完成' }
   if (task.host_review?.reviewer_session_id && task.host_review.status !== 'complete') {
     return { can_resume: false, resume_blocked_reason: '独立复核尚未结束；需恢复原 Producer/Reviewer 会话，不能创建替代会话' }
+  }
+  if (task.workflow_version === 'source-first-v1' && sourceRecovery) {
+    // A persisted terminal task must never override a still-running exact Job.
+    let job
+    try { job = readJobSnapshot(runtime, task) } catch { /* process facts below remain conservative */ }
+    if (job && !['completed', 'failed', 'killed'].includes(job.status)) return { can_resume: false, resume_blocked_reason: '旧执行仍未结束' }
+    if (!sourceRecovery.can_resume) return { can_resume: false, resume_blocked_reason: sourceRecovery.blocked_reason, summary: sourceRecovery.summary }
+    if (task.execution_status === 'interrupted' || (!task.provider && (sourceRecovery.after_host_restart || ['failed', 'stopped', 'needs_attention'].includes(task.status)))) {
+      return { can_resume: true, resume_blocked_reason: null, summary: sourceRecovery.summary, host_quiescent: true }
+    }
   }
   if (task.execution_status === 'interrupted') return { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' }
   if (['preparing', 'starting', 'running', 'stopping'].includes(task.execution_status)) {
@@ -544,7 +575,54 @@ function deriveTaskResumeEligibility(runtime, task) {
   if (!['completed', 'failed', 'killed'].includes(snapshot.status)) {
     return { can_resume: false, resume_blocked_reason: '旧执行仍未结束' }
   }
-  return { can_resume: true, resume_blocked_reason: null }
+  return { can_resume: true, resume_blocked_reason: null, ...(sourceRecovery?.can_resume ? { host_quiescent: true } : {}) }
+}
+
+function nativeOwnerBinding(task) {
+  const attempt = [...(task.attempts ?? [])].reverse().find(item => item.owner_session_id)
+  return { owner_session_id: task.owner_session_id ?? attempt?.owner_session_id
+    ?? [...(task.conversations ?? [])].reverse().find(item => item.kind === 'analysis')?.session_id,
+    host_process_id: task.host_process_id ?? attempt?.host_process_id,
+    runtime_instance_id: task.runtime_instance_id ?? attempt?.runtime_instance_id }
+}
+
+async function nativeRecovery(runtime, task) {
+  const binding = nativeOwnerBinding(task)
+  const blocked = reason => ({ can_resume: false, blocked_reason: reason })
+  if (!binding.owner_session_id) return { can_resume: true, summary: '尚未创建原生执行会话' }
+  const agents = runtimeService(runtime, 'agents')
+  if (!agents?.get) return blocked('无法核验原 DSH Producer 会话是否静止')
+  const owner = agents.get(binding.owner_session_id)
+  if (!owner) {
+    if (processPresence(binding.host_process_id) !== 'absent') return blocked('原 DSH 宿主或会话的结束状态尚未确认')
+    return { can_resume: true, after_host_restart: true, summary: '原宿主已退出；保留结果并恢复原 DSH 会话' }
+  }
+  if (owner.status !== 'idle' || typeof owner.whenIdle !== 'function') return blocked('原 DSH Producer 仍在运行或尚未确认静止')
+  let timer
+  try {
+    const idle = await Promise.race([Promise.resolve(owner.whenIdle()).then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 25) })])
+    if (!idle || owner.status !== 'idle') return blocked('原 DSH Producer 仍有待处理工作')
+  } catch { return blocked('无法确认原 DSH Producer 已静止') }
+  finally { clearTimeout(timer) }
+  const children = inspectSourceFirstChildren({ dataRoot: task.data_root, runId: task.run_id })
+  if (!children.quiescent) return blocked(children.blocked_reason ?? '原 DSH worker 尚未确认结束')
+  return { can_resume: true, summary: '原 Producer 与 worker 已静止；续接原 DSH 会话' }
+}
+
+export async function assessTaskResumeEligibility(runtime, task) {
+  let recovery
+  if (task?.workflow_version === 'source-first-v1' && !task.provider && task.run_id && task.status !== 'completed') {
+    recovery = await nativeRecovery(runtime, task)
+  }
+  if (task?.workflow_version === 'source-first-v1' && task.provider && task.run_id
+      && !['preparing', 'starting', 'running', 'stopping'].includes(task.execution_status)) {
+    // A launch that failed before any owner/worker existed needs no process proof.
+    if (task.job_id || task.agent_session_id || task.process_id || task.execution_status === 'interrupted') {
+      try { recovery = await inspectSourceFirstAcpRecovery({ dataRoot: task.data_root, runId: task.run_id }) }
+      catch (error) { recovery = { can_resume: false, blocked_reason: `无法核验原 ACP 执行：${error.message}` } }
+    }
+  }
+  return deriveTaskResumeEligibility(runtime, task, recovery)
 }
 
 async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea, readSnapshot = companionSnapshot) {
@@ -706,9 +784,9 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       let taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       await reconcileAcpJobs(runtime, tasks, taskItems, launchLogs)
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
-      await reconcileTaskLaunches(api, tasks, taskItems, launchLogs)
+      await reconcileTaskLaunches(api, tasks, taskItems, launchLogs, runtime)
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
-      taskItems = taskItems.map(task => ({ ...task, ...deriveTaskResumeEligibility(runtime, task) }))
+      taskItems = await Promise.all(taskItems.map(async task => ({ ...task, ...await assessTaskResumeEligibility(runtime, task) })))
       let modelRouting
       try {
         modelRouting = { status: 'ok', ...await internalModelOptions(api) }
@@ -880,7 +958,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         throw new Error('定向分析必须使用来源任务的数据目录')
       }
       const resume = body.resume === true
-      const resumeEligibility = deriveTaskResumeEligibility(runtime, task)
+      const resumeEligibility = await assessTaskResumeEligibility(runtime, task)
       if (task.run_id && !resume) throw new Error('task already has a Run; use resume to continue it')
       if (resume && !task.run_id) throw new Error('没有可继续的 Run')
       if (resume && !resumeEligibility.can_resume) throw new Error(resumeEligibility.resume_blocked_reason)
@@ -919,6 +997,8 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
           input: { ...task, provider_id: selectedProvider || null, agent_model: preparedTask.agent_model },
           model: selectedModel,
           resumeRunId: resume ? task.run_id : null,
+          hostQuiescent: resume && (resumeEligibility.host_quiescent === true || task.workflow_version === 'source-first-v1' && Boolean(selectedProvider)),
+          resumeOwnerSessionId: resume && !selectedProvider ? nativeOwnerBinding(task).owner_session_id : null,
         }, runner, session => tasks.addConversation(task.task_id, {
           sessionId: session.session_id,
           title: `${task.title} · 分析`,
@@ -926,6 +1006,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         }), async event => {
           await launchLogs.append(task.task_id, { ...event, attempt_id: preparedTask.attempt_id })
         }, runtime, process.env, {
+          attemptId: preparedTask.attempt_id,
           reviewBinding: { task_id: task.task_id, attempt_id: preparedTask.attempt_id },
           onReviewState: value => tasks.recordReview(task.task_id, value),
           onReviewWaiting: async message => {
@@ -944,6 +1025,8 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
             const bound = await tasks.bindOwnerSession(task.task_id, {
               attemptId: preparedTask.attempt_id,
               ownerSessionId,
+              runtimeInstanceId: hostInstanceId,
+              hostProcessId: process.pid,
             })
             try {
               await monitor.bindExecution(ownerSessionId, {
@@ -987,7 +1070,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         })
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id, attempt_id: preparedTask.attempt_id })
         const updatedTask = await tasks.get(task.task_id)
-        return json(res, 200, { ...launched, task: { ...updatedTask, ...deriveTaskResumeEligibility(runtime, updatedTask) } })
+        return json(res, 200, { ...launched, task: { ...updatedTask, ...await assessTaskResumeEligibility(runtime, updatedTask) } })
       } catch (error) {
         await appendLaunchSafe(launchLogs, task.task_id, {
           stage: 'launch_failed', status: 'error', error,
@@ -1097,7 +1180,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       try {
         stopped = await stopAnalysisRun({ cwd, dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
         await stopSourceFirstAcpRun({ dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
-        interruptSourceFirstChildren({ dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
+        await interruptSourceFirstChildren({ dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
       } catch (error) {
         runStopError = error instanceof Error ? error.message : String(error)
         stopped = {
@@ -1123,9 +1206,14 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         }
       }
       await tasks.reconcileRuns([stopped.run], { dataRoot: stopped.data_root })
-      const stopError = [runStopError, jobStop.error].filter(Boolean).join('；') || null
+      let stopError = [runStopError, jobStop.error].filter(Boolean).join('；') || null
       const jobBound = Boolean(task?.job_id)
-      const stopConfirmed = !jobBound && !launchLocks.has(task?.task_id) || jobStop.result === 'already-finished'
+      let stopConfirmed = !jobBound && !launchLocks.has(task?.task_id) || jobStop.result === 'already-finished'
+      if (task?.workflow_version === 'source-first-v1' && !task.provider) {
+        const recovery = await nativeRecovery(runtime, task)
+        stopConfirmed = stopConfirmed && recovery.can_resume
+        if (!recovery.can_resume) stopError = [stopError, recovery.blocked_reason].filter(Boolean).join('；')
+      }
       if (task && stopConfirmed) {
         if (jobStop.result === 'already-finished') {
           try {
@@ -1145,7 +1233,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         job_stop: jobStop,
         run_stop: runStopError ? { status: 'error', error: runStopError } : { status: 'ok', error: null },
         session_cancel: sessionCancel,
-        task: updatedTask ? { ...updatedTask, ...deriveTaskResumeEligibility(runtime, updatedTask) } : null,
+        task: updatedTask ? { ...updatedTask, ...await assessTaskResumeEligibility(runtime, updatedTask) } : null,
       })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
@@ -1588,7 +1676,7 @@ export function apply(ctx) {
     output: toolOutput(),
   }), ...sourceFirstTools(ctx)]
 
-  const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks) })
+  const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks, ctx, launchLogs) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
   const disposeExportRoute = ctx.webServer.register({ kind: 'exact', path: EXPORT_API_PATH, handler: exportRouteHandler })
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })

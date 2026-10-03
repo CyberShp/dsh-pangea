@@ -658,7 +658,7 @@ async function startAcpJob(runtime, parent, providerId, prompt, label, onEvent, 
 
 export async function launchAnalysisSession(
   api,
-  { cwd, dataRoot, input, model, resumeRunId },
+  { cwd, dataRoot, input, model, resumeRunId, hostQuiescent = false, resumeOwnerSessionId },
   runner = runPangea,
   onSession = async () => {},
   onEvent = async () => {},
@@ -688,11 +688,15 @@ export async function launchAnalysisSession(
       value => ({ provider: value.provider, model: value.model }),
     )
   const requestedResumeRunId = typeof resumeRunId === 'string' ? resumeRunId.trim() : ''
+  const executionRecovery = capabilities.source_first?.execution_recovery
+  if (semantic && requestedResumeRunId && executionRecovery?.host_quiescent_resume !== true) {
+    throw new Error('当前 PANGEA 后端不支持确认旧执行静止后的安全续跑，请升级后端；已保存结果保持不变')
+  }
   const run = await launchStep(
     onEvent,
     requestedResumeRunId ? 'run_resume' : 'run_create',
     () => requestedResumeRunId
-      ? resumeRun(root, { dataRoot: resolvedDataRoot, runId: requestedResumeRunId }, runner)
+      ? resumeRun(root, { dataRoot: resolvedDataRoot, runId: requestedResumeRunId, hostQuiescent: semantic && hostQuiescent }, runner)
       : (() => {
         const { provider_id: _providerId, agent_model: _agentModel, ...skillRequest } = request
         return createRun(root, { ...skillRequest, data_root: resolvedDataRoot, ...(semantic ? { model_id: request.agent_model ?? selectedModel?.model, effective_context_budget: input?.effective_context_budget ?? 250000 } : {}) }, runner)
@@ -708,8 +712,9 @@ export async function launchAnalysisSession(
   await lifecycle.onRunReady?.({ ...run, workflow_version: semantic ? 'source-first-v1' : run.workflow_version })
   const sessionId = await launchStep(
     onEvent,
-    'session_create',
-    () => createDshSession(api, root, `PANGEA 分析 · ${request.target}`),
+    semantic && !selectedProvider && requestedResumeRunId && resumeOwnerSessionId ? 'session_resume' : 'session_create',
+    () => semantic && !selectedProvider && requestedResumeRunId && resumeOwnerSessionId
+      ? resumeOwnerSessionId : createDshSession(api, root, `PANGEA 分析 · ${request.target}`),
     value => ({ session_id: value }),
   )
   if (!runtime || !selectedProvider) await launchStep(onEvent, 'model_select', async () => {
@@ -801,6 +806,8 @@ export async function launchAnalysisSession(
         startRun: ({ subagents, parent, signal }) => createSourceFirstAcpRun({
           subagents, parent, signal, providerId: selectedProvider, agentModel: request.agent_model,
           cwd: root, dataRoot: resolvedDataRoot, runId: run.run_id, runner, python: env.PANGEA_PYTHON, mode: request.mode,
+          attemptId: lifecycle.attemptId,
+          executionIds: executionRecovery?.execution_ids === true,
           onEvent: event => emitLaunch(onEvent, { status: 'ok', provider: selectedProvider, run_id: run.run_id, ...event }),
         }),
       } : {}),

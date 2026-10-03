@@ -174,16 +174,18 @@ export async function createRun(cwd, input, runner = runPangea) {
   }
 }
 
-export async function resumeRun(cwd, { dataRoot, runId }, runner = runPangea) {
+export async function resumeRun(cwd, { dataRoot, runId, hostQuiescent = false }, runner = runPangea) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = typeof dataRoot === 'string' && dataRoot.trim() !== ''
     ? path.resolve(root, dataRoot)
     : path.join(root, 'pangea-data')
   if (typeof runId !== 'string' || runId.trim() === '') throw new Error('run_id is required')
-  return runner({
+  const result = await runner({
     cwd: root,
-    args: ['runs', 'resume', '--data-root', resolvedDataRoot, '--run-id', runId.trim()],
+    args: ['runs', 'resume', '--data-root', resolvedDataRoot, '--run-id', runId.trim(), ...(hostQuiescent ? ['--host-quiescent'] : [])],
   })
+  if (result?.requires_host_quiescence === true) throw new Error(result.blocked_reason ?? result.execution_view?.recovery?.blocked_reason ?? '原执行尚未确认结束，不能创建新的续跑会话')
+  return result
 }
 
 export async function runSourceFirstCommand(cwd, args, runner = runPangea) {

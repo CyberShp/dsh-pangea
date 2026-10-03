@@ -1,13 +1,22 @@
 import path from 'node:path'
-import { readFile, writeFile, rename, mkdir } from 'node:fs/promises'
+import { writeFile, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { ACP_PROGRESS_DEFAULTS, AcpStalled, waitForAcpTurn } from './acp-progress.js'
+import { acpBindingsPath, inspectAcpBindings, readAcpBindings } from './acp-recovery.js'
+import { writeTaskStoreFile } from './task-store.js'
 
 // This host routes Graph identities; all content/quality decisions stay with
 // the worker. Live handles are retained on a recoverable pause so continuing
 // a reviewer or closure never silently creates a replacement session.
 const liveRuns = new Map()
+const instanceId = randomUUID()
 const text = value => [{ type: 'text', text: value }]
+
+export async function inspectSourceFirstAcpRecovery({ dataRoot, runId }) {
+  const state = liveRuns.get(JSON.stringify([path.resolve(dataRoot), runId]))
+  if (state?.busy) return { can_resume: false, blocked_reason: '当前 Run 仍由宿主执行，不能重复派发', summary: '当前执行仍在进行' }
+  return inspectAcpBindings(await readAcpBindings(dataRoot, runId), { currentInstanceId: instanceId })
+}
 
 // Inspect transport diagnostics only, never source text or semantic results.
 function contextLimitError(value) {
@@ -20,7 +29,7 @@ export async function stopSourceFirstAcpRun({ dataRoot, runId }) {
   if (!state) return false
   state.controller?.abort(new Error('用户结束当前执行'))
   await state.promise?.catch(() => {})
-  const results = await Promise.allSettled([...state.workers.values()].map(worker => worker.dispose?.()))
+  const results = await Promise.allSettled([...state.workers.values()].map(worker => state.disposeWorker?.(worker) ?? worker.dispose?.()))
   const failed = results.find(result => result.status === 'rejected')
   if (failed) throw failed.reason
   liveRuns.delete(JSON.stringify([path.resolve(dataRoot), runId]))
@@ -65,7 +74,7 @@ export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, pyt
   ].filter(Boolean).join('\n')
 }
 
-export function createSourceFirstAcpRun({ subagents, parent, providerId, agentModel, cwd, dataRoot, runId, runner, signal, onEvent = async () => {}, python, mode, closureBudgetMs, progressPolicy }) {
+export function createSourceFirstAcpRun({ subagents, parent, providerId, agentModel, cwd, dataRoot, runId, runner, signal, onEvent = async () => {}, python, mode, closureBudgetMs, progressPolicy, attemptId, executionIds = true }) {
   const key = JSON.stringify([path.resolve(dataRoot), runId])
   let state = liveRuns.get(key)
   if (state?.busy) throw new Error(`当前 Run 已由宿主执行：${runId}`)
@@ -73,47 +82,64 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   state ??= { providerId, agentModel, workers: new Map(), actionIds: new Map(), closed: new Set(), busy: false, terminal: false }
   liveRuns.set(key, state)
   state.busy = true
+  const generation = randomUUID()
   state.controller = new AbortController()
   signal = AbortSignal.any([signal, state.controller.signal])
   const closureWindows = new Map()
   const pausedReasons = []
   let current
-  const bindingsPath = path.join(path.resolve(dataRoot), 'runs', runId, 'acp-workers.json')
+  const bindingsPath = acpBindingsPath(dataRoot, runId)
   let bindings = {}
+  let owner = { pid: process.pid, instance_id: instanceId, attempt_id: attemptId ?? null, active: true, pending_starts: [] }
   let stateWrites = Promise.resolve()
   const serial = operation => {
     const result = stateWrites.then(operation)
     stateWrites = result.catch(() => {})
     return result
   }
-  const remember = (worker, scratchDirectory = bindings[String(worker.id)]?.scratchDirectory) => serial(async () => {
-    bindings[String(worker.id)] = { ...bindings[String(worker.id)], providerId, agentModel, remoteSessionId: worker.remoteSessionId, scratchDirectory }
-    if (!worker.remoteSessionId) return
-    await mkdir(path.dirname(bindingsPath), { recursive: true })
-    const temporary = `${bindingsPath}.${randomUUID()}.tmp`
-    await writeFile(temporary, JSON.stringify({ runId, workers: bindings }, null, 2))
-    await rename(temporary, bindingsPath)
+  const persist = () => writeTaskStoreFile(bindingsPath, JSON.stringify({ runId, owner, workers: bindings }, null, 2))
+  const remember = (worker, scratchDirectory = bindings[String(worker.id)]?.scratchDirectory, facts = {}) => serial(async () => {
+    const diagnostics = worker.readDiagnostics?.() ?? {}
+    bindings[String(worker.id)] = { ...bindings[String(worker.id)], providerId, agentModel,
+      remoteSessionId: worker.remoteSessionId, scratchDirectory,
+      ...(Number.isInteger(worker.processId ?? diagnostics.processId) ? { process_id: worker.processId ?? diagnostics.processId } : {}), ...facts }
+    await persist()
   })
+  const disposed = async worker => {
+    await worker.dispose?.()
+    state.closed.add(String(worker.id))
+    await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
+  }
   const check = () => { if (signal.aborted) throw signal.reason ?? new Error('执行已取消') }
   const cli = args => serial(() => { check(); return runner({ cwd, args, signal }) })
   const adapter = (operation, action, extra = []) => cli(['adapter', operation, '--data-root', dataRoot, '--run-id', runId,
     ...(action ? ['--action-id', action.action_id] : []), ...extra])
   const event = async value => { try { await onEvent(value) } catch { /* telemetry does not route actions */ } }
   const startWorker = async request => {
+    const startId = randomUUID()
+    await serial(async () => { owner.pending_starts.push(startId); await persist() })
     const controller = new AbortController()
     const startSignal = AbortSignal.any([signal, controller.signal])
     const ms = progressPolicy?.readyIdleMs ?? ACP_PROGRESS_DEFAULTS.readyIdleMs
     let timer
     const warning = setTimeout(() => { void event({ stage: 'source_first_waiting', status: 'info', message: '等待 ACP 初始化或恢复会话', duration_ms: progressPolicy?.readyWarnMs ?? ACP_PROGRESS_DEFAULTS.readyWarnMs }) }, progressPolicy?.readyWarnMs ?? ACP_PROGRESS_DEFAULTS.readyWarnMs)
-    const attempt = Promise.resolve().then(() => subagents.start(providerId, { ...request, signal: startSignal }))
+    const attempt = Promise.resolve().then(() => subagents.start(providerId, { ...request, signal: startSignal })).catch(async error => {
+      // Provider start rejects only after cleaning its own failed launch. A
+      // host crash or an unresolved timeout keeps pending_starts durable.
+      await serial(async () => { owner.pending_starts = owner.pending_starts.filter(id => id !== startId); await persist() })
+      throw error
+    })
     try {
-      return await Promise.race([attempt, new Promise((_, reject) => {
+      const worker = await Promise.race([attempt, new Promise((_, reject) => {
         timer = setTimeout(() => {
           const error = new Error('ACP 初始化或恢复会话超时，保留已有任务')
           controller.abort(error); reject(error)
-          Promise.resolve(attempt).then(worker => worker.dispose?.()).catch(() => {})
+          Promise.resolve(attempt).then(async worker => { await disposed(worker); await serial(async () => { owner.pending_starts = owner.pending_starts.filter(id => id !== startId); await persist() }) }).catch(() => {})
         }, ms)
       })])
+      await remember(worker, request.scratchDirectory, { inflight: !request.resume, quiescent: Boolean(request.resume), blocked: false })
+      await serial(async () => { owner.pending_starts = owner.pending_starts.filter(id => id !== startId); await persist() })
+      return worker
     } finally { clearTimeout(timer); clearTimeout(warning) }
   }
   async function runAction(action) {
@@ -126,8 +152,9 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     const scratchDirectory = bindings[action.task_id]?.scratchDirectory ?? path.join(path.dirname(bindingsPath), 'worker-scratch', randomUUID())
     const onDiagnostic = value => {
       const actionId = state.actionIds.get(String(worker?.id)) ?? action.action_id
-      if (value.stage === 'tool_event') void event({ stage: 'source_first_tool_event', action_id: actionId,
+      if (value.stage === 'tool_event') void event({ stage: 'source_first_tool_event', action_id: actionId, unit_id: action.unit_id,
         last_tool_id: value.lastToolId, last_tool_name: value.lastToolName, last_tool_status: value.lastToolStatus,
+        tool_kind: value.lastToolKind, active_tool_count: value.activeToolCount,
         tool_started_at_ms: value.lastToolStartedAt, tool_finished_at_ms: value.lastToolFinishedAt, tool_duration_ms: value.lastToolDurationMs })
       if (value.stage === 'file_permission') void event({ stage: 'source_first_file_permission', action_id: actionId,
         kind: value.lastPermissionKind, paths: value.lastPermissionPaths, decision: value.lastPermissionDecision })
@@ -169,8 +196,12 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     await adapter('bind', action, ['--task-id', taskId])
     await event({ stage: 'source_first_worker_bound', action_id: action.action_id, agent_session_id: taskId, remote_session_id: worker.remoteSessionId, scratch_directory: scratchDirectory, provider: providerId })
     const binding = ['--data-root', dataRoot, '--run-id', runId, '--action-id', action.action_id, '--task-id', taskId]
+    const nextExecutionId = () => `${attemptId ?? parent?.id ?? 'host'}:${action.action_id}:${randomUUID()}`
+    let executionId = nextExecutionId()
+    await remember(worker, undefined, { execution_id: executionId })
     const opened = await cli(['task-open', ...binding])
     const execution = (eventName, reason = '', budget, automatic = false) => cli(['runs', 'execution', ...binding, '--event', eventName,
+      ...(executionIds ? ['--execution-id', executionId] : []),
       ...(reason ? ['--reason', reason] : []), ...(budget ? ['--budget-ms', String(budget)] : []), ...(automatic ? ['--automatic'] : [])])
     const isClosure = action.stage === 'targeted_closure'
     const budget = isClosure ? closureBudgetMs ?? opened.task?.execution_budget_ms ?? (mode === 'speed' ? 900000 : 1800000) : null
@@ -178,7 +209,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     if (!window) { window = { started: Date.now(), repairs: 0, turns: 0 }; closureWindows.set(action.action_id, window) }
     const pause = async (reason, retain = false) => {
       await execution('paused', reason)
-      if (!retain) { await worker.dispose?.(); state.closed.add(taskId) }
+      if (!retain) await disposed(worker)
       pausedReasons.push(reason)
       await event({ stage: 'source_first_worker_paused', action_id: action.action_id, reason, message: reason })
     }
@@ -194,16 +225,17 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     const monitor = turn => waitForAcpTurn({ worker, turn, signal: turnSignal, policy: progressPolicy,
       emit: value => event({ ...value, action_id: action.action_id, agent_session_id: taskId }) })
     const stallPause = async (error, turn) => {
+      if (error.confirmed) await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
       if (!error.confirmed) {
         bindings[taskId] ??= { providerId, agentModel, remoteSessionId: worker.remoteSessionId }
         bindings[taskId].blocked = true
         await remember(worker)
         // A late real response can release the block. Sending session/cancel alone cannot.
+        const pausedExecutionId = executionId
         Promise.resolve(turn).then(async outcome => {
           const diagnostics = worker.readDiagnostics?.() ?? {}
-          if (outcome?.protocolStopReason && diagnostics.activeToolCount === 0) {
-            bindings[taskId].blocked = false
-            await remember(worker)
+          if (state.generation === generation && bindings[taskId]?.execution_id === pausedExecutionId && outcome?.protocolStopReason && diagnostics.activeToolCount === 0) {
+            await remember(worker, undefined, { blocked: false, inflight: false, quiescent: true })
             await event({ stage: 'source_first_late_response', action_id: action.action_id, message: '原回合已返回，可继续原会话' })
           }
         }).catch(() => {})
@@ -227,6 +259,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
           emit: value => event({ ...value, action_id: action.action_id, agent_session_id: taskId }) })
         check()
         if (ready.stopReason !== 'completed') throw new Error(`Worker 初始化未完成：${ready.stopReason}`)
+        await remember(worker, undefined, { inflight: false, quiescent: true })
       } catch (error) {
         if (!(error instanceof AcpStalled)) throw error
         if (!error.confirmed || !await reserveRecovery()) return stallPause(error, worker.result)
@@ -240,7 +273,15 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     if (isClosure && automatic) window.repairs++
     window.turns++
     await execution('started', '', budget, automatic)
-    await event({ stage: 'source_first_worker_started', action_id: action.action_id, budget_ms: budget })
+    await remember(worker, undefined, { execution_id: executionId, inflight: true, quiescent: false })
+    await event({ stage: 'source_first_worker_started', action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, execution_id: executionId, budget_ms: budget })
+    const startContinuation = async () => {
+      await execution('finished')
+      executionId = nextExecutionId()
+      await execution('started', '', budget, true)
+      await remember(worker, undefined, { execution_id: executionId, inflight: true, quiescent: false })
+      await event({ stage: 'source_first_worker_started', action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, execution_id: executionId, budget_ms: budget })
+    }
     let result, timer, abortTurn
     const timeout = new Error('本单元定向修正达到执行预算，保留已保存结果')
     try {
@@ -254,9 +295,13 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         let disconnected = false
         try {
           const outcome = await monitor(turn)
-          if (outcome.stopReason === 'error' && worker.readDiagnostics?.().processExited) {
+          if (outcome.stopReason === 'error' && !contextLimitError(outcome.diagnostic) && !contextLimitError(worker.readDiagnostics?.().errorSummary)) {
+            // JSON-RPC can close before child.done publishes processExited.
+            // Await this owned handle's cleanup before testing recovery; an
+            // error string or a prompt response alone is not proof of exit.
+            await disposed(worker)
             disconnected = true
-            const d = worker.readDiagnostics()
+            const d = worker.readDiagnostics?.() ?? {}
             throw new AcpStalled('ACP 连接已断开', d.canLoadSession === true && d.activeToolCount === 0)
           }
           // No action can finish without CLI calls. A turn that ended with no
@@ -265,6 +310,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
           if (outcome.stopReason === 'completed' && typeof toolsBefore === 'number' && toolCalls() === toolsBefore) {
             await event({ stage: 'source_first_zero_tool_turn', action_id: action.action_id, message: '回合未调用工具，原会话补发一次读取合同指令' })
             turnSignal.throwIfAborted()
+            await startContinuation()
             turn = worker.continuePrompt(text(`用 read 工具读取 ${cliContract(cwd)}。`))
             return await monitor(turn)
           }
@@ -281,8 +327,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
           turnSignal.throwIfAborted()
           if (disconnected) {
             const remoteSessionId = worker.remoteSessionId
-            await worker.dispose?.()
-            state.closed.add(taskId)
+            await disposed(worker)
             worker = await startWorker({ parent, resume: { taskId, remoteSessionId }, prompt: [], scratchDirectory, onDiagnostic,
               ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
             if (String(worker.id) !== taskId || worker.remoteSessionId !== remoteSessionId) {
@@ -292,6 +337,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
             state.workers.set(taskId, worker); state.closed.delete(taskId); current = worker
           }
           turnSignal.throwIfAborted()
+          await startContinuation()
           turn = worker.continuePrompt(text(`继续当前 action_id=${action.action_id}，task_id=${taskId}。CLI 绑定参数：${JSON.stringify(binding)}；Python：${python || 'python'}。先 result-read 获取当前结果与 revision，保留已保存内容，从未完成部分继续，不重复已完成工具操作。完成后 work-finish；不要询问是否继续。`))
           try {
             const result = await monitor(turn)
@@ -322,6 +368,8 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     check()
     if (result.stall) return stallPause(result.stall, result.pendingTurn)
     const diagnostics = worker.readDiagnostics?.() ?? {}
+    if (diagnostics.activeToolCount > 0) return stallPause(new AcpStalled('原回合已返回，但工具仍在执行；保留结果，等待工具结束'), Promise.resolve(result))
+    await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
     // stderrSummary may contain earlier turns; only current-turn failures can
     // pause this action (in particular after a user compacts and resumes it).
     const inputError = [result.diagnostic, diagnostics.errorSummary].find(contextLimitError)
@@ -354,13 +402,19 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }
   }
   async function execute() {
+    let claimed = false
     try {
-      if (!runId || runId === '.' || runId === '..' || /[\\/]/.test(runId)) throw new Error('无效 run_id')
-      try {
-        const saved = JSON.parse(await readFile(bindingsPath, 'utf8'))
-        if (saved.runId !== runId) throw new Error('ACP 会话记录与 Run 不一致')
+      const saved = await readAcpBindings(dataRoot, runId)
+      if (saved) {
+        const recovery = inspectAcpBindings(saved, { currentInstanceId: instanceId })
+        if (!recovery.can_resume) return { stopReason: 'completed', attentionRequired: true, diagnostic: recovery.blocked_reason }
         bindings = saved.workers
-      } catch (error) { if (error.code !== 'ENOENT') throw error }
+        for (const binding of Object.values(bindings)) Object.assign(binding, { inflight: false, quiescent: true, blocked: false })
+      }
+      state.generation = generation
+      state.disposeWorker = disposed
+      await serial(persist)
+      claimed = true
       const active = new Map(), paused = new Set()
       let attention, failure
       while (true) {
@@ -392,14 +446,11 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     } catch (error) {
       // Failed transports cannot keep child processes alive indefinitely.
       // Persisted remote IDs allow an explicit later resume; no auto restart loop.
-      const cleanup = await Promise.allSettled([...state.workers].map(async ([id, worker]) => {
-        await worker.dispose?.()
-        state.closed.add(id)
-      }))
+      const cleanup = claimed ? await Promise.allSettled([...state.workers.values()].map(disposed)) : []
       const failures = cleanup.filter(item => item.status === 'rejected')
       if (failures.length) error.message += `；进程清理失败：${failures.map(item => String(item.reason)).join('；')}`
       throw error
-    } finally { state.busy = false }
+    } finally { try { if (claimed) await serial(async () => { owner.active = false; await persist() }) } finally { state.busy = false } }
   }
   state.promise = execute()
   return {
@@ -416,7 +467,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     readDiagnostics: () => current?.readDiagnostics?.() ?? {},
     async dispose() {
       if (!state.terminal && !signal.aborted) return
-      await Promise.allSettled([...state.workers.values()].map(worker => worker.dispose?.()))
+      await Promise.allSettled([...state.workers.values()].map(disposed))
       liveRuns.delete(key)
     },
   }

@@ -4,7 +4,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import test from 'node:test'
 
-import { apply, isPangeaWorkspace } from '../src/report-policy.js'
+import { apply, inspectSourceFirstChildren, interruptSourceFirstChildren, isPangeaWorkspace } from '../src/report-policy.js'
 
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'dsh-source-first-policy-'))
@@ -44,11 +44,13 @@ function harness(execution = async () => ({})) {
   const starts = []
   const followups = []
   const binds = []
+  const drains = []
   const continuableSetups = []
   let guard
   const ctx = {
     subagents: {
       interrupt(id) { interrupts.push(id) },
+      async drainContinuableChildren(parent, childIds) { drains.push({ parent, childIds }) },
       async startContinuable(spec) {
         // The real host rejects child-local tools in the global allow list.
         assert.equal(spec.request.toolFilter.allow.includes('report'), false)
@@ -78,11 +80,14 @@ function harness(execution = async () => ({})) {
   apply(ctx, adapter, execution)
   return {
     tools,
+    ctx,
     interrupts,
+    drains,
     starts,
     followups,
     binds,
     continuableSetups,
+    emit(name, payload) { return listeners.get(name)?.(payload) },
     guard(value) { return guard(value) },
     async post(exec, value) {
       return listeners.get('tools/post-execute')(
@@ -91,9 +96,9 @@ function harness(execution = async () => ({})) {
         async () => ({ kind: 'accept', value }),
       )
     },
-    settle(owner, childId) {
+    settle(owner, childId, messageId = `settled-${childId}`) {
       const listener = listeners.get('agent/inbox/inserted')
-      listener({ agent: owner, message: { source: { kind: 'subagent-settled', senderSessionId: childId } } })
+      return listener({ agent: owner, message: { id: messageId, source: { kind: 'subagent-settled', senderSessionId: childId } } })
     },
   }
 }
@@ -184,7 +189,7 @@ test('settle merges the returned continuation and reuses the original task', asy
   const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
   const first = await h.tools.get('pangea_action_dispatch').execute(dispatch.arguments, dispatch)
   await h.post(dispatch, first)
-  h.settle(owner, 'child-1')
+  await h.settle(owner, 'child-1')
   const continuation = action(root, 'comparison', 'continue_agent', 'child-1')
   continuation.stage = 'comparison_review'
   await prepareAction(root, continuation)
@@ -268,4 +273,185 @@ test('internal dispatch limits running unit workers to three', async () => {
   const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: actions[3].action_id })
   await assert.rejects(h.tools.get('pangea_action_dispatch').execute(dispatch.arguments, dispatch), /三个单元/)
   assert.equal(h.starts.length, 3)
+})
+
+test('replaying dispatch after a lost tool result does not bind, start, or follow up twice', async () => {
+  const root = await fixture(), owner = agent(root, 'idempotent-root')
+  const current = action(root, 'analysis-replay')
+  await prepareAction(root, current)
+  const events = [], h = harness(async (_cwd, binding, event) => events.push({ binding, event }))
+  const selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
+  await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: selected.runId, data_root: selected.dataRoot, actions: [current] })
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  const first = await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch)
+  const repeated = await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch)
+  assert.deepEqual(repeated, first)
+  assert.equal(h.starts.length, 1)
+  assert.equal(h.binds.length, 1)
+  assert.equal(h.followups.length, 1)
+  assert.equal(events.length, 1)
+  assert.match(events[0].binding.executionId, /^[0-9a-f-]{36}$/)
+  await interruptSourceFirstChildren(selected)
+})
+
+test('retries a followup rejected before admission using the same execution identity', async () => {
+  const root = await fixture(), owner = agent(root, 'retry-root')
+  const current = { ...action(root, 'analysis-retry'), stage: 'targeted_closure', pending_repair: { error: 'repair' } }
+  await prepareAction(root, current)
+  const events = [], h = harness(async (_cwd, binding, event, _reason, _budget, automatic) => events.push({ binding, event, automatic }))
+  const selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
+  await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: selected.runId, data_root: selected.dataRoot, actions: [current] })
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  const followup = h.ctx.subagents.followup
+  h.ctx.subagents.followup = async () => { throw new Error('inbox admission rejected') }
+  await assert.rejects(h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch), /admission rejected/)
+  h.ctx.subagents.followup = followup
+  await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch)
+  assert.equal(h.starts.length, 1)
+  assert.equal(h.followups.length, 1)
+  assert.equal(events[0].binding.executionId, events[1].binding.executionId)
+  assert.equal(events[0].automatic, events[1].automatic)
+  await interruptSourceFirstChildren(selected)
+})
+
+test('native cancellation is confirmed only after exact tracked children finish draining', async () => {
+  const root = await fixture(), owner = agent(root, 'drain-root')
+  const current = action(root, 'analysis-drain')
+  await prepareAction(root, current)
+  const h = harness(), selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
+  assert.deepEqual(inspectSourceFirstChildren(selected), { known: false, quiescent: false, blocked_reason: '缺少原宿主的子任务释放证据，不能推定旧执行已经停止' })
+  await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: selected.runId, data_root: selected.dataRoot, actions: [current] })
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch)
+  let release
+  h.ctx.subagents.drainContinuableChildren = async (parent, ids) => {
+    assert.equal(parent, owner); assert.deepEqual(ids, ['child-1'])
+    await new Promise(resolve => { release = resolve })
+  }
+  const stopping = interruptSourceFirstChildren(selected)
+  assert.equal(inspectSourceFirstChildren(selected).quiescent, false)
+  assert.deepEqual(h.interrupts, ['child-1'])
+  release()
+  assert.equal(await stopping, true)
+  assert.deepEqual(inspectSourceFirstChildren(selected), { known: true, quiescent: true, blocked_reason: null })
+})
+
+test('a runtime without a drain API cannot turn an interrupt request into stop confirmation', async () => {
+  const root = await fixture(), owner = agent(root, 'missing-drain-root')
+  const current = action(root, 'analysis-no-drain')
+  await prepareAction(root, current)
+  const h = harness(), selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
+  await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: selected.runId, data_root: selected.dataRoot, actions: [current] })
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch)
+  const drain = h.ctx.subagents.drainContinuableChildren
+  delete h.ctx.subagents.drainContinuableChildren
+  await assert.rejects(interruptSourceFirstChildren(selected), /停止尚未确认/)
+  assert.equal(inspectSourceFirstChildren(selected).quiescent, false)
+  h.ctx.subagents.drainContinuableChildren = drain
+  await interruptSourceFirstChildren(selected)
+})
+
+test('ignored core execution events do not advance native child state or interrupt a live turn', async () => {
+  const root = await fixture(), owner = agent(root, 'ignored-root')
+  const current = { ...action(root, 'closure-ignored', 'continue_agent', 'ignored-worker'), stage: 'targeted_closure' }
+  await prepareAction(root, current)
+  await writeFile(current.task_path, JSON.stringify({ action_id: current.action_id, run_id: 'run-01', result_path: current.resultPath, execution_budget_ms: 10 }))
+  let sawPause
+  const paused = new Promise(resolve => { sawPause = resolve })
+  const h = harness(async (_cwd, _binding, event) => {
+    if (event === 'paused') sawPause()
+    return event === 'started' ? {} : { event_ignored: true }
+  })
+  const selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
+  await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: selected.runId, data_root: selected.dataRoot, actions: [current] })
+  await h.emit('subagent/start', { id: 'ignored-worker', runId: 'ignored-epoch' })
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  await h.post(dispatch, await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch))
+  const hold = setTimeout(() => {}, 1000)
+  await paused
+  clearTimeout(hold)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.interrupts, [])
+  await h.settle(owner, 'ignored-worker')
+  await h.emit('subagent/end', { id: 'ignored-worker', runId: 'ignored-epoch', stopReason: 'completed' })
+  assert.equal(inspectSourceFirstChildren(selected).quiescent, false)
+  assert.match(h.guard(execFor(owner, 'pangea_action_next', { data_root: selected.dataRoot, run_id: selected.runId })), /仍在运行/)
+  await interruptSourceFirstChildren(selected)
+})
+
+test('a rejected start for another execution identity never sends a worker followup', async () => {
+  const root = await fixture(), owner = agent(root, 'rejected-start-root')
+  const current = action(root, 'analysis-rejected-start')
+  await prepareAction(root, current)
+  const h = harness(async () => ({ event_ignored: true, reason: 'duplicate_execution', execution_id: 'another-execution', status: 'dispatched' }))
+  const selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
+  await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: selected.runId, data_root: selected.dataRoot, actions: [current] })
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  await assert.rejects(h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch), /未获 Graph 接受/)
+  assert.deepEqual(h.followups, [])
+  await interruptSourceFirstChildren(selected)
+})
+
+test('a late pause from a prior execution cannot interrupt the resumed worker', async () => {
+  const root = await fixture(), owner = agent(root, 'late-pause-root')
+  const current = { ...action(root, 'closure-race', 'continue_agent', 'original-race-worker'), stage: 'targeted_closure' }
+  await prepareAction(root, current)
+  const task = { action_id: current.action_id, run_id: 'run-01', result_path: current.resultPath, execution_budget_ms: 10 }
+  await writeFile(current.task_path, JSON.stringify(task))
+  let pauseStarted, releasePause
+  const waiting = new Promise(resolve => { pauseStarted = resolve })
+  const events = [], h = harness(async (_cwd, binding, event) => {
+    events.push({ binding, event })
+    if (event === 'paused') { pauseStarted(); await new Promise(resolve => { releasePause = resolve }) }
+  })
+  const selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
+  const response = { workflow_version: 'source-first-v1', run_id: selected.runId, data_root: selected.dataRoot, actions: [current] }
+  await h.post(execFor(owner, 'pangea_run_create', {}), response)
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  await h.post(dispatch, await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch))
+  // Keep the test event loop alive while the production budget timer is unref'd.
+  const hold = setTimeout(() => {}, 1000)
+  await waiting
+  clearTimeout(hold)
+  await writeFile(current.task_path, JSON.stringify({ ...task, execution_budget_ms: 10000 }))
+  await h.post(execFor(owner, 'pangea_run_resume', {}), response)
+  await h.post(dispatch, await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch))
+  releasePause()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.interrupts, [])
+  const starts = events.filter(event => event.event === 'started')
+  assert.notEqual(starts[0].binding.executionId, starts[1].binding.executionId)
+  assert.equal(events.find(event => event.event === 'paused').binding.executionId, starts[0].binding.executionId)
+  assert.equal(h.guard(execFor(agent(root, 'original-race-worker'), 'pangea_result_read', {
+    data_root: selected.dataRoot, run_id: selected.runId, action_id: current.action_id, task_id: 'original-race-worker',
+  })), undefined)
+  await interruptSourceFirstChildren(selected)
+})
+
+for (const ordering of ['end-first', 'notice-first']) test(`native lifecycle confirmation ignores old activation and duplicate notices (${ordering})`, async () => {
+  const root = await fixture(), owner = agent(root, 'epoch-root')
+  const current = action(root, 'analysis-epoch'), next = action(root, 'analysis-next', 'continue_agent', 'child-1')
+  await prepareAction(root, current); await prepareAction(root, next)
+  const events = [], h = harness(async (_cwd, binding, event) => events.push({ binding, event }))
+  const selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
+  const response = actions => ({ workflow_version: 'source-first-v1', run_id: selected.runId, data_root: selected.dataRoot, actions })
+  await h.post(execFor(owner, 'pangea_run_create', {}), response([current]))
+  await h.emit('subagent/start', { id: 'child-1', runId: 'epoch-one' })
+  const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+  await h.post(dispatch, await h.tools.get(dispatch.name).execute(dispatch.arguments, dispatch))
+  if (ordering === 'notice-first') await h.settle(owner, 'child-1', 'notice-one')
+  await h.emit('subagent/end', { id: 'child-1', runId: 'epoch-one', stopReason: 'completed' })
+  if (ordering === 'end-first') await h.settle(owner, 'child-1', 'notice-one')
+  assert.equal(events.filter(event => event.event === 'finished').length, 1)
+  assert.equal(inspectSourceFirstChildren(selected).quiescent, true)
+  await h.post(execFor(owner, 'pangea_action_settle', { data_root: selected.dataRoot, run_id: selected.runId, action_id: current.action_id }), response([next]))
+  await h.emit('subagent/start', { id: 'child-1', runId: 'epoch-two' })
+  const resumed = execFor(owner, 'pangea_action_dispatch', { action_id: next.action_id })
+  await h.post(resumed, await h.tools.get(resumed.name).execute(resumed.arguments, resumed))
+  await h.emit('subagent/end', { id: 'child-1', runId: 'epoch-one', stopReason: 'completed' })
+  await h.emit('agent/inbox/claimed', { agent: owner, message: { id: 'notice-one', source: { kind: 'subagent-settled', senderSessionId: 'child-1' } } })
+  assert.equal(inspectSourceFirstChildren(selected).quiescent, false)
+  assert.equal(events.filter(event => event.event === 'finished').length, 1)
+  await interruptSourceFirstChildren(selected)
 })

@@ -7,6 +7,9 @@ import { tmpdir } from 'node:os'
 import { createRun, runPangea } from '../src/pangea-api.js'
 import { companionSnapshot } from '../src/reader.js'
 
+const testDataRoot = await mkdtemp(path.join(tmpdir(), 'pangea-acp-unit-'))
+test.after(() => rm(testDataRoot, { recursive: true, force: true }))
+
 test('worker prompt provides a quoted direct PowerShell CLI call and scratch JSON-file contract', () => {
   const prompt = workerPrompt({ action: { action_id: "run:a'1", role: 'planning', stage: 'unit_planning' }, opened: { task: {} },
     cwd: "D:\\Agent's workspace", dataRoot: "D:\\Data's root", runId: 'run', taskId: 'worker',
@@ -25,7 +28,7 @@ test('16 and 2000 file scopes do not inflate ACP prompts, including repairs and 
     return workerPrompt({ action: { action_id: 'r:a', role: 'analysis', stage: 'unit_analysis', task_path: '/task.json',
       pending_repair: { error: { code: 'IncompleteSourceFirstResult', message: 'empty', details: paths }, history: paths } },
     opened: { task: { allowed_paths: paths, all_scope_paths: paths, owned_regions: paths }, prepared_source: { pages: paths } },
-    cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 't' })
+    cwd: '/work', dataRoot: testDataRoot, runId: 'r', taskId: 't' })
   }
   assert.equal(make(16), make(2000))
   assert.ok(make(2000).length < 4000)
@@ -40,7 +43,7 @@ for (const failureMode of ['throw', 'diagnostic', 'completed-with-error']) {
     const controller = new AbortController()
     const message = 'Payload Too Large: input too long, exceed max input length, max input length is 169984, current input length is 520281'
     const runId = `context-limit-${failureMode}`
-    const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', cwd: '/work', dataRoot: '/data', runId,
+    const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', cwd: '/work', dataRoot: testDataRoot, runId,
       signal: controller.signal, onEvent: async value => events.push(value),
       runner: async ({ args }) => {
         calls.push(args)
@@ -80,7 +83,7 @@ test('ACP output polling emits only new worker text, with no idle session labels
   const turn = new Promise(resolve => { releaseTurn = resolve })
   const started = new Promise(resolve => { enteredTurn = resolve })
   const controller = new AbortController()
-  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: '/data',
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: testDataRoot,
     runId: 'output-polling', signal: controller.signal,
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
@@ -134,7 +137,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
       if (args[0] === 'runs' && args[1] === 'execution') return {}
       assert.equal(args[1], 'settle'); index++; return {}
     }
-    const run = createSourceFirstAcpRun({ providerId, agentModel: 'selected/model', parent: {}, cwd: '/work', dataRoot: '/data', runId: providerId,
+    const run = createSourceFirstAcpRun({ providerId, agentModel: 'selected/model', parent: {}, cwd: '/work', dataRoot: testDataRoot, runId: providerId,
       signal: new AbortController().signal, runner, onEvent: async event => events.push(event),
       subagents: { start: async (provider, request) => {
         assert.equal(provider, providerId); assert.equal(request.agentOptions.model, 'selected/model')
@@ -184,7 +187,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
 test('malformed output returns to the same worker and attention does not fabricate completion', async () => {
   let attempts = 0, creations = 0, prompts = 0
   const controller = new AbortController()
-  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: '/data', runId: 'repair-test', signal: controller.signal,
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: testDataRoot, runId: 'repair-test', signal: controller.signal,
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
       if (args[1] === 'next') return { run_id: 'repair-test', lifecycle_status: 'running', actions: [{ action_id: 'repair:planning', role: 'planning', stage: 'planning', task_path: '/task.json',
@@ -204,7 +207,7 @@ for (const toolsOnFormalTurn of [0, 1]) {
   test(`handshake and task never name a ready reply; a ${toolsOnFormalTurn ? 'working' : 'zero-tool'} turn ${toolsOnFormalTurn ? 'is not re-prompted' : 'gets one short same-session read directive'}`, async () => {
     let settled = 0, toolCalls = 0, handshake
     const prompts = []
-    const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: '/data', runId: 'ready-only', signal: new AbortController().signal,
+    const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: testDataRoot, runId: 'ready-only', signal: new AbortController().signal,
       runner: async ({ args }) => {
         if (args[0] === 'task-open') return { task: {} }
         if (args[1] === 'next') return { run_id: 'ready-only', lifecycle_status: settled ? 'complete' : 'running',
@@ -235,7 +238,7 @@ for (const interruption of ['cancel', 'budget']) {
       const runId = 'zero-tool-interruption', controller = new AbortController()
       const bindingPath = path.join(root, 'runs', runId, 'acp-workers.json')
       await mkdir(path.dirname(bindingPath), { recursive: true })
-      await writeFile(bindingPath, JSON.stringify({ runId, workers: { original: { providerId: 'pangea-codeagent', remoteSessionId: 'remote-original' } } }))
+      await writeFile(bindingPath, JSON.stringify({ runId, workers: { original: { providerId: 'pangea-codeagent', remoteSessionId: 'remote-original', quiescent: true } } }))
       let reached, release, finishDirective, paused = false, starts = 0, disposals = 0, settlements = 0
       const interruptedPhase = new Promise(resolve => { reached = resolve })
       const releaseEvent = new Promise(resolve => { release = resolve })
@@ -280,7 +283,7 @@ for (const interruption of ['cancel', 'budget']) {
         assert.equal(settlements, 0)
         assert.ok(disposals >= 1)
         assert.equal(events.filter(event => event.stage === 'source_first_zero_tool_turn').length, 1)
-        assert.equal(events.filter(event => event.stage === 'source_first_worker_started').length, 1)
+        assert.equal(events.filter(event => event.stage === 'source_first_worker_started').length, phase === 'before-directive' ? 1 : 2)
       } finally { release(); controller.abort(); await run.result.catch(() => {}); await run.dispose(); await rm(root, { recursive: true, force: true }) }
     })
   }
@@ -324,7 +327,7 @@ test('zero-tool recovery in blind and comparison review preserves one original r
 
 test('missing original reviewer never spawns a replacement', async () => {
   const controller = new AbortController()
-  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: '/work', dataRoot: '/data', runId: 'missing-reviewer', signal: controller.signal,
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: '/work', dataRoot: testDataRoot, runId: 'missing-reviewer', signal: controller.signal,
     runner: async () => ({ run_id: 'missing-reviewer', actions: [{ action: 'continue_agent', action_id: 'comparison', task_id: 'original-reviewer' }] }),
     subagents: { start: async () => assert.fail('must not replace reviewer') } })
   await assert.rejects(run.result, /原 worker 会话不可续接/)
@@ -467,7 +470,7 @@ test('an older persisted worker gets one scratch directory before restoration an
   const root = await mkdtemp(path.join(tmpdir(), 'pangea-acp-old-scratch-'))
   const bindingPath = path.join(root, 'runs', 'old', 'acp-workers.json')
   await mkdir(path.dirname(bindingPath), { recursive: true })
-  await writeFile(bindingPath, JSON.stringify({ runId: 'old', workers: { original: { providerId: 'pangea-nga', remoteSessionId: 'remote' } } }))
+  await writeFile(bindingPath, JSON.stringify({ runId: 'old', workers: { original: { providerId: 'pangea-nga', remoteSessionId: 'remote', quiescent: true } } }))
   const controller = new AbortController(), directories = []
   let starts = 0, complete = false, run
   const options = { providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId: 'old', signal: controller.signal,
@@ -505,7 +508,7 @@ test('three analysis workers overlap, refill a free slot, and settle out of orde
   const done = new Set(), started = [], releases = new Map()
   const actions = Array.from({ length: 5 }, (_, i) => ({ action_id: `parallel:${i}`, role: 'analysis', stage: 'unit_analysis', action: 'dispatch_agent' }))
   const until = async predicate => { for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 2)) } assert.fail('worker did not progress') }
-  const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', parent: {}, cwd: '/work', dataRoot: '/data', runId: 'parallel', signal: controller.signal,
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', parent: {}, cwd: '/work', dataRoot: testDataRoot, runId: 'parallel', signal: controller.signal,
     runner: async ({ args }) => {
       writes++; assert.equal(writes, 1)
       await new Promise(resolve => setTimeout(resolve, 1))
@@ -574,7 +577,7 @@ test('closure budget pauses only its original worker, other units complete, expl
   const root = await mkdtemp(path.join(tmpdir(), 'closure-budget-'))
   const runId = 'closure-budget', controller = new AbortController()
   const actions = Array.from({ length: 4 }, (_, i) => ({ action_id: `${runId}:${i}`, role: 'closure', stage: 'targeted_closure', action: 'continue_agent', task_id: `original-${i}` }))
-  const bindings = Object.fromEntries(actions.map((a, i) => [a.task_id, { providerId: 'pangea-nga', remoteSessionId: `remote-${i}` }]))
+  const bindings = Object.fromEntries(actions.map((a, i) => [a.task_id, { providerId: 'pangea-nga', remoteSessionId: `remote-${i}`, quiescent: true }]))
   await mkdir(path.join(root, 'runs', runId), { recursive: true })
   await writeFile(path.join(root, 'runs', runId, 'acp-workers.json'), JSON.stringify({ runId, workers: bindings }))
   const done = new Set(), paused = new Set(), resumed = [], events = []
@@ -622,7 +625,7 @@ test('closure allows one mechanical repair then pauses instead of looping', asyn
   const runId = 'repair-limit', controller = new AbortController()
   let turns = 0, repairs = 0, paused = false
   await mkdir(path.join(root, 'runs', runId), { recursive: true })
-  await writeFile(path.join(root, 'runs', runId, 'acp-workers.json'), JSON.stringify({ runId, workers: { original: { providerId: 'pangea-nga', remoteSessionId: 'remote' } } }))
+  await writeFile(path.join(root, 'runs', runId, 'acp-workers.json'), JSON.stringify({ runId, workers: { original: { providerId: 'pangea-nga', remoteSessionId: 'remote', quiescent: true } } }))
   const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', cwd: root, dataRoot: root, runId, parent: {}, signal: controller.signal,
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
