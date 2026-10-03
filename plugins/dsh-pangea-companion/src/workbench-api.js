@@ -5,6 +5,7 @@ import { createDiagramRun } from './diagram-acp.js'
 import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
 import { createSourceFirstAcpRun } from './source-first-acp.js'
+import { normalizeIncrementalRequest } from './incremental-request.js'
 
 import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 import { sourceFirstReportAvailable, summarizeRun } from './reader.js'
@@ -183,6 +184,9 @@ function stringList(value) {
 
 function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   const semantic = supportsSourceFirst(capabilities)
+  if (value?.incremental_request != null && (!semantic || !capabilities.source_first?.contract_fields?.includes('incremental_request'))) {
+    throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')
+  }
   if (semantic) assertSourceFirstCapabilities(capabilities)
   else {
     assertCodetalksSkill(capabilities)
@@ -214,6 +218,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     ...(semantic ? { workflow_version: 'source-first-v1', focus: stringList(value?.focus), context_scope: stringList(value?.context_scope), test_case_examples: stringList(value?.test_case_examples), effective_context_budget: value?.effective_context_budget } : {}),
     repository,
     target,
+    ...(value?.incremental_request != null ? { incremental_request: normalizeIncrementalRequest(value.incremental_request) } : {}),
     scenario,
     mode,
     source_scope: sourceScope,
@@ -226,6 +231,50 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
 
 export function normalizeRunInput(value, capabilities) {
   return normalizeAnalysisInput(value, capabilities, false)
+}
+
+export async function analysisDerivationOptions({ task, runId, runner = runPangea }) {
+  if (!task?.run_id || runId !== task.run_id) throw new Error('来源 Run 不属于所选任务')
+  return runner({
+    cwd: task.workspace,
+    args: ['runs', 'derivation-options', '--data-root', dataRootFor(task.workspace, task.data_root), '--run-id', task.run_id],
+  })
+}
+
+export function deriveAnalysisInput(parent, input, options) {
+  if (options?.can_derive !== true) throw new Error(options?.blocked_reason || '该 Run 暂不支持定向补充或变更分析')
+  if (options.parent_run_id !== parent.run_id) throw new Error('来源 Run 的候选结果不匹配，请刷新后重试')
+  const incrementalRequest = normalizeIncrementalRequest({ ...input, parent_run_id: parent.run_id })
+  const units = new Set((options.units ?? []).map(unit => unit.unit_id))
+  const records = new Set((options.records ?? []).map(record => JSON.stringify([record.action_id, record.record_id])))
+  if (incrementalRequest.selected_unit_ids.some(id => !units.has(id))) throw new Error('所选业务单元不属于来源 Run，请刷新后重试')
+  if (incrementalRequest.selected_records.some(record => !records.has(JSON.stringify([record.action_id, record.record_id])))) {
+    throw new Error('所选记录不属于来源 Run，请刷新后重试')
+  }
+  const suffix = incrementalRequest.mode === 'changed-files' ? '变更分析' : '定向补充'
+  // Construct a fresh task contract explicitly. Runtime identities and mutable
+  // execution state from the source task must never leak into the child task.
+  return {
+    workflow_version: 'source-first-v1',
+    repository: parent.repository,
+    target: typeof input?.target === 'string' && input.target.trim() ? input.target.trim() : `${parent.target} · ${suffix}`,
+    scenario: parent.scenario,
+    mode: parent.mode,
+    analysis_profile: parent.analysis_profile,
+    asset_revisions: parent.asset_revisions,
+    source_scope: parent.source_scope,
+    context_scope: parent.context_scope,
+    asset_ids: parent.asset_ids,
+    focus: parent.focus,
+    test_case_examples: parent.test_case_examples,
+    coverage_input: parent.coverage_input,
+    effective_context_budget: parent.effective_context_budget,
+    provider_id: parent.provider,
+    agent_model: parent.agent_model,
+    model_route: parent.model_route,
+    source_task_id: parent.task_id,
+    incremental_request: incrementalRequest,
+  }
 }
 
 export async function queryCoverageAsset({ cwd, dataRoot, query, runner = runPangea }) {
