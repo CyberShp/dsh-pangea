@@ -3,7 +3,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
 import { readFile, writeFile, open, unlink, appendFile, rename } from 'node:fs/promises'
-import { execFile } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 
 export async function renderCandidate(folder, archify, { signal, manual = false, node = process.execPath } = {}) {
   const lockPath = path.join(folder, 'render.lock')
@@ -31,16 +31,34 @@ export async function renderCandidate(folder, archify, { signal, manual = false,
     const invoke = args => new Promise(resolve => {
       const remaining = deadline - Date.now()
       if (remaining <= 0 || signal?.aborted) return resolve({ ok: false, error: '图表生成执行预算已耗尽或已停止' })
-      execFile(node, [path.join(archify, 'bin/archify.mjs'), ...args], {
-        encoding: 'utf8', timeout: Math.max(1, Math.min(120000, remaining)), signal, windowsHide: true,
+      // Terminate descendants before the render lock is released.
+      // execFile's AbortSignal/timeout only kills the direct child on Windows.
+      let child, timer, finished = false
+      const stop = () => {
+        if (finished || !child?.pid) return
+        if (process.platform === 'win32') {
+          spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        } else {
+          child.kill('SIGTERM')
+        }
+      }
+      const onAbort = () => stop()
+      child = execFile(node, [path.join(archify, 'bin/archify.mjs'), ...args], {
+        encoding: 'utf8', windowsHide: true,
         maxBuffer: 4 * 1024 * 1024, env: { ...process.env, ARCHIFY_UPDATE_CHECK_DISABLED: '1' },
       }, (error, stdout, stderr) => {
+        finished = true
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
         let receipt
         try { receipt = JSON.parse(stdout) } catch { receipt = { ok: false, error: error?.message || stderr || 'Archify did not return JSON' } }
         if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) receipt = { ok: false, error: 'Archify returned an invalid receipt' }
-        if (error) receipt.ok = false
+        if (error || signal?.aborted || Date.now() > deadline) receipt.ok = false
         resolve({ ...receipt, exit_code: error?.code ?? 0, stdout, stderr })
       })
+      signal?.addEventListener('abort', onAbort, { once: true })
+      timer = setTimeout(stop, Math.max(1, Math.min(120000, remaining)))
+      if (signal?.aborted) stop()
     })
     const validation = await invoke(['validate', manifest.type, snapshot, '--quality', 'showcase', '--json'])
     const delivered = validation.ok || manifest.type === 'workflow'
