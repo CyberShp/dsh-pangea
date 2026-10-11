@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 
 const STORE_VERSION = 2
 
@@ -27,6 +28,20 @@ function normalizedDataRoot(value) {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved
 }
 
+function executionFactsKey(view) {
+  if (view?.format_version !== 'pangea-execution-view-v1') return null
+  // Clocks and transport activity are observations, not new saved work. In
+  // particular an unfinished turn's elapsed time changes on every read.
+  const actions = (view.actions ?? []).map(action => [
+    action.action_id, action.status, action.saved_revision, action.saved_record_count,
+    action.last_saved_at_ms, action.completion_declared, action.accepted_revision,
+    action.delivery_revision, action.resume_action, action.error,
+  ]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+  return createHash('sha256').update(JSON.stringify([
+    view.stage, view.lifecycle_status, view.quality_status, view.unit_counts, actions,
+  ])).digest('hex')
+}
+
 export function runIdentityKey(dataRoot, runId) {
   const root = normalizedDataRoot(dataRoot)
   const id = plainText(runId)
@@ -47,6 +62,9 @@ function normalizeStoredRun(key, value) {
     observed_at: Number.isFinite(value?.observed_at) ? value.observed_at : null,
     progress_changed_at: Number.isFinite(value?.progress_changed_at) ? value.progress_changed_at : null,
     execution_last_activity_at: Number.isFinite(value?.execution_last_activity_at) ? value.execution_last_activity_at : null,
+    last_effective_progress_at_ms: Number.isFinite(value?.last_effective_progress_at_ms) ? value.last_effective_progress_at_ms : null,
+    last_effective_progress: value?.last_effective_progress && typeof value.last_effective_progress === 'object' ? value.last_effective_progress : null,
+    execution_facts_key: plainText(value?.execution_facts_key) || null,
     state_updated_at: plainText(value?.state_updated_at) || null,
     pangea_phase: plainText(value?.pangea_phase) || null,
     pangea_progress: value?.pangea_progress && typeof value.pangea_progress === 'object' ? value.pangea_progress : null,
@@ -185,21 +203,31 @@ export class RuntimeMonitor {
 
   observePangeaSnapshot(run, summary) {
     const completed = summary?.analysis?.completed ?? 0
-    const total = summary?.analysis?.total ?? 0
+    const total = summary?.execution_view?.unit_counts
+      ? summary.execution_view.unit_counts.total ?? null : summary?.analysis?.total ?? 0
     const phase = plainText(summary?.phase, 'UNKNOWN')
     const ackCount = Object.keys(summary?.workflow?.core_rules_ack ?? {}).length
     const next = { completed, total, reworked: summary?.analysis?.reworked ?? 0, core_rules_ack: ackCount }
     const stateUpdatedAt = summary?.state_read?.updated_at ?? null
+    const factsKey = executionFactsKey(summary?.execution_view)
     const changed = run.pangea_phase !== phase
       || run.pangea_progress?.completed !== completed
       || run.pangea_progress?.total !== total
       || run.pangea_progress?.reworked !== next.reworked
       || run.pangea_progress?.core_rules_ack !== ackCount
       || run.state_updated_at !== stateUpdatedAt
+      || run.execution_facts_key !== factsKey
     const observedAt = this.now()
     run.pangea_phase = phase
     run.pangea_progress = next
     run.state_updated_at = stateUpdatedAt
+    run.execution_facts_key = factsKey
+    if (factsKey) {
+      const progress = summary.execution_view.last_effective_progress
+      const at = progress?.at_ms
+      run.last_effective_progress = Number.isFinite(at) && at > 0 ? { ...progress } : null
+      run.last_effective_progress_at_ms = run.last_effective_progress?.at_ms ?? null
+    }
     run.observed_at = observedAt
     if (changed) run.progress_changed_at = observedAt
   }

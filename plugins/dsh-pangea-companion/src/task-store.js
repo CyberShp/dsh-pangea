@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { normalizeIncrementalRequest } from './incremental-request.js'
 
 const STORE_VERSION = 1
 const WINDOWS_RENAME_RETRY_DELAYS = Object.freeze([50, 100, 200, 400, 800])
@@ -123,6 +124,7 @@ function normalizeAttempt(value) {
     provider: text(value?.provider) || null,
     owner_session_id: text(value?.owner_session_id) || null,
     runtime_instance_id: text(value?.runtime_instance_id) || null,
+    host_process_id: Number.isInteger(value?.host_process_id) && value.host_process_id > 0 ? value.host_process_id : null,
     job_started_at: Number.isFinite(value?.job_started_at) ? value.job_started_at : null,
     agent_session_id: text(value?.agent_session_id) || null,
     execution_status: executionStatus,
@@ -166,6 +168,8 @@ function normalizeTask(taskId, value) {
     data_root: text(value?.data_root) || null,
     title: text(value?.title, text(value?.target, taskId)),
     source_task_id: text(value?.source_task_id) || null,
+    incremental_request: value?.incremental_request && typeof value.incremental_request === 'object' && !Array.isArray(value.incremental_request)
+      ? structuredClone(value.incremental_request) : null,
     repository: text(value?.repository),
     target: text(value?.target),
     scenario: text(value?.scenario, 'module-analysis'),
@@ -186,6 +190,7 @@ function normalizeTask(taskId, value) {
     attempt_id: text(value?.attempt_id) || attempts.at(-1)?.attempt_id || null,
     owner_session_id: text(value?.owner_session_id) || null,
     runtime_instance_id: text(value?.runtime_instance_id) || null,
+    host_process_id: Number.isInteger(value?.host_process_id) && value.host_process_id > 0 ? value.host_process_id : null,
     job_started_at: Number.isFinite(value?.job_started_at) ? value.job_started_at : null,
     agent_session_id: text(value?.agent_session_id) || null,
     process_id: Number.isInteger(value?.process_id) && value.process_id > 0 ? value.process_id : null,
@@ -324,6 +329,7 @@ export class TaskStore {
       effective_context_budget: input?.effective_context_budget,
       focus: input?.focus,
       source_task_id: input?.source_task_id,
+      incremental_request: input?.incremental_request != null ? normalizeIncrementalRequest(input.incremental_request) : null,
       request_version: '2.0',
       repository,
       target,
@@ -470,6 +476,7 @@ export class TaskStore {
     task.job_id = null
     task.owner_session_id = null
     task.runtime_instance_id = null
+    task.host_process_id = null
     task.job_started_at = null
     task.agent_session_id = null
     task.process_id = null
@@ -497,7 +504,8 @@ export class TaskStore {
       job_id: job,
       provider,
       owner_session_id: ownerSessionId,
-      runtime_instance_id: runtimeInstanceId,
+      runtime_instance_id: runtimeInstanceId ?? previousAttempt?.runtime_instance_id,
+      host_process_id: previousAttempt?.host_process_id,
       job_started_at: jobStartedAt,
       agent_session_id: agentSessionId,
       execution_status: preservedStopping ? 'stopping' : 'running',
@@ -523,14 +531,20 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async bindOwnerSession(taskId, { ownerSessionId, attemptId }) {
+  async bindOwnerSession(taskId, { ownerSessionId, attemptId, runtimeInstanceId, hostProcessId }) {
     await this.ready
     const task = this.requireTask(taskId)
     const id = text(attemptId) || task.attempt_id
     const attempt = id ? task.attempts.find(item => item.attempt_id === id) : null
     if (!attempt || !text(ownerSessionId)) return structuredClone(task)
     attempt.owner_session_id = text(ownerSessionId)
-    if (attempt.attempt_id === task.attempt_id) task.owner_session_id = attempt.owner_session_id
+    attempt.runtime_instance_id = text(runtimeInstanceId) || attempt.runtime_instance_id
+    attempt.host_process_id = Number.isInteger(hostProcessId) && hostProcessId > 0 ? hostProcessId : attempt.host_process_id
+    if (attempt.attempt_id === task.attempt_id) {
+      task.owner_session_id = attempt.owner_session_id
+      task.runtime_instance_id = attempt.runtime_instance_id
+      task.host_process_id = attempt.host_process_id
+    }
     task.updated_at = this.now()
     await this.persistQueued()
     return structuredClone(task)

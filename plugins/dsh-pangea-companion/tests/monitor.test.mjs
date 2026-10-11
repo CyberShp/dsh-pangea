@@ -97,3 +97,52 @@ test('does not trust a v1 monitor association that lacks data root and attempt i
     assert.equal(snapshot.run, null)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('tracks real record save times separately from polling, transport activity, and elapsed clocks', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-monitor-effective-'))
+  const storePath = path.join(root, 'monitor-v1.json')
+  let now = 10000
+  try {
+    const monitor = createRuntimeMonitor({ storePath, now: () => ++now })
+    const owner = agent('owner', root, 1)
+    const dispose = monitor.start(contextWith(owner))
+    const execution = {
+      format_version: 'pangea-execution-view-v1', stage: 'analyzing', lifecycle_status: 'running',
+      unit_counts: { total: 1, completed: 0, active: 1 },
+      last_effective_progress: { kind: 'records_saved', at_ms: 2000, action_id: 'a', unit_id: 'u', revision: 1, record_count: 1 },
+      actions: [{ action_id: 'a', status: 'dispatched', saved_revision: 1, saved_record_count: 1, last_saved_at_ms: 2000,
+        completion_declared: false, accepted_revision: null, delivery_revision: null, current_turn_elapsed_ms: 200 }],
+    }
+    const summary = { run_id: 'run', phase: 'ANALYZING', analysis: { completed: 0, total: 1 }, execution_view: execution }
+    await monitor.bindExecution('owner', summary, { dataRoot: root, taskId: 'task', attemptId: 'attempt' })
+    const first = (await monitor.snapshot({ dataRoot: root, runId: 'run' })).run
+    execution.actions[0].current_turn_elapsed_ms = 900
+    await monitor.observeRunSnapshot(root, summary)
+    monitor.disposeAgent(owner)
+    const observed = (await monitor.snapshot({ dataRoot: root, runId: 'run' })).run
+    assert.ok(observed.observed_at > first.observed_at)
+    assert.ok(observed.execution_last_activity_at > first.execution_last_activity_at)
+    assert.equal(observed.progress_changed_at, first.progress_changed_at)
+    assert.equal(observed.last_effective_progress_at_ms, 2000)
+    execution.actions[0].saved_revision = 2
+    execution.actions[0].saved_record_count = 2
+    execution.actions[0].last_saved_at_ms = 3000
+    execution.last_effective_progress = { ...execution.last_effective_progress, at_ms: 3000, revision: 2, record_count: 2 }
+    await monitor.observeRunSnapshot(root, summary)
+    const saved = (await monitor.snapshot({ dataRoot: root, runId: 'run' })).run
+    assert.ok(saved.progress_changed_at > observed.progress_changed_at)
+    assert.equal(saved.last_effective_progress_at_ms, 3000)
+    assert.equal(saved.last_effective_progress.revision, 2)
+    execution.actions[0].completion_declared = true
+    await monitor.observeRunSnapshot(root, summary)
+    const submitted = (await monitor.snapshot({ dataRoot: root, runId: 'run' })).run
+    assert.ok(submitted.progress_changed_at > saved.progress_changed_at)
+    assert.equal(submitted.last_effective_progress_at_ms, 3000)
+    await dispose()
+    const restarted = createRuntimeMonitor({ storePath })
+    const restored = (await restarted.snapshot({ dataRoot: root, runId: 'run' })).run
+    assert.equal(restored.last_effective_progress_at_ms, 3000)
+    assert.equal(restored.last_effective_progress.action_id, 'a')
+    assert.equal(restored.session_live, false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
