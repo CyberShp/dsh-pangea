@@ -44,11 +44,13 @@ export async function createDiagramRun({ subagents, provider, parent, prompt, ag
       if (result.stopReason !== 'completed') throw new Error(result.diagnostic || diagnostics.errorSummary || `图表回合未正常结束：${result.stopReason}`)
       if (!inspect) return result
       const receipt = await inspect({ signal: combined, attempt: attempt + 1 })
-      if (receipt?.ok) return result
+      // A partial call graph is delivered but still gets repair rounds while they remain.
+      if (receipt?.ok && (!receipt.repairable || attempt === 2)) return result
       if (attempt === 2 || receipt?.attempts_exhausted || receipt?.terminal) throw new Error(receipt?.error || '三轮生成结束，仍无验证通过产物；已保留候选图')
       combined.throwIfAborted()
       await emit({ stage: 'diagram_repair', message: `图表尚未交付，继续原会话修正，第 ${attempt + 1} 次` })
-      turn = worker.continuePrompt([{ type: 'text', text: '当前候选未通过宿主校验。读取 validation-receipt.json 的具体诊断，仅修正 candidate.json，然后结束本回合。宿主将冻结并验证本回合最终字节；不要自行调用渲染命令，不扩大分析，不修改主 Run。' }])
+      turn = worker.continuePrompt([{ type: 'text', text: receipt?.repair_prompt ? `${receipt.repair_prompt}
+修正后结束本回合。宿主将冻结并验证本回合最终字节；不扩大分析，不修改主 Run。` : '当前候选未通过宿主校验。读取 validation-receipt.json 的具体诊断，仅修正 candidate.json，然后结束本回合。宿主将冻结并验证本回合最终字节；不要自行调用渲染命令，不扩大分析，不修改主 Run。' }])
     }
   }
   const result = Promise.race([execute(), budget]).catch(async error => {

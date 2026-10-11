@@ -880,11 +880,13 @@ export async function launchArchitectureSession(api, { cwd, task, prompt, onSess
           await new Promise(resolve => { const timer = setTimeout(resolve, 1000); timer.unref?.() })
         }
         const receipt = await inspect?.({ signal: controller.signal, attempt })
-        if (receipt?.ok || receipt?.terminal) return
+        // A partial call graph is delivered but still gets repair rounds while they remain.
+        if ((receipt?.ok && (!receipt.repairable || attempt === 3)) || receipt?.terminal) return
         if (attempt === 3 || receipt?.attempts_exhausted) throw new Error(receipt?.error || '三个候选均未通过校验')
         if ((await check?.())?.terminal) return
         controller.signal.throwIfAborted()
-        await submit('读取 validation-receipt.json 的精确诊断，仅修正 candidate.json 后结束本回合。由宿主验证，不自行调用渲染命令。')
+        await submit(receipt?.repair_prompt ? `${receipt.repair_prompt}
+修正后结束本回合，由宿主验证。` : '读取 validation-receipt.json 的精确诊断，仅修正 candidate.json 后结束本回合。由宿主验证，不自行调用渲染命令。')
       }
     } catch (error) {
       await api.sessions.cancel(rpc({ sessionId })).catch(() => {})

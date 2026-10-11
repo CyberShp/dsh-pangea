@@ -1,5 +1,6 @@
 // Project explicit Agent records into the workbench's existing collections.
 // Record bodies remain available verbatim; this layer makes no semantic judgments.
+import { normalizeFlow, normalizeFlows } from './flow-normalize.js'
 const list = value => Array.isArray(value) ? value : value == null ? [] : [value]
 const plain = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value, null, 2)
 const strings = value => list(value).map(plain)
@@ -16,37 +17,37 @@ function activeRecords(records) {
   return records.filter(record => !retired.has(record.record_id))
 }
 
-export function normalizeFlow(body) {
-  const warnings = []
-  const alias = (row, key, alternate, where) => {
-    if (row[key] != null && row[alternate] != null && row[key] !== row[alternate]) warnings.push(`${where}: ${key} 与 ${alternate} 不一致，按 ${key} 展示；原文保留`)
-    return row[key] ?? row[alternate]
-  }
-  const nodes = list(body.nodes).flatMap((node, index) => {
-    if (!node || typeof node !== 'object' || Array.isArray(node)) { warnings.push(`nodes[${index}] 不是节点对象`); return [] }
-    const id = alias(node, 'id', 'node_id', `nodes[${index}]`)
-    const label = alias(node, 'label', 'name', `nodes[${index}]`)
-    if (typeof id !== 'string' || !id.trim() || typeof label !== 'string' || !label.trim()) {
-      warnings.push(`nodes[${index}] 缺少字符串 id/node_id 或 label/name，未绘制；请查看原文`); return []
+export { normalizeFlow }
+
+export function mainlineNodes(flow) {
+  const nodes = list(flow.nodes), byId = new Map(nodes.map(node => [node.id, node]))
+  const declared = flow.paths?.[0]?.node_ids
+  if (Array.isArray(declared) && declared.length && declared.every(id => byId.has(id))) return declared.map(id => byId.get(id))
+  const selected = nodes.filter(node => ['entry', 'main', 'exit'].includes(node.kind))
+  const incoming = new Map(selected.map(node => [node.id, 0]))
+  const outgoing = new Map(selected.map(node => [node.id, []]))
+  for (const edge of list(flow.edges)) {
+    const source = edge.source_step_key, target = edge.target_step_key
+    if (outgoing.has(source) && incoming.has(target) && source !== target) {
+      outgoing.get(source).push(target)
+      incoming.set(target, incoming.get(target) + 1)
     }
-    return [{ ...node, id, label, description: alias(node, 'description', '说明', `nodes[${index}]`), source_evidence: node.source_evidence ?? node['源码依据'] }]
-  })
-  const ids = new Set(nodes.map(n => n.id))
-  const duplicate = ids.size !== nodes.length
-  if (duplicate) warnings.push('节点 ID 重复，无法可靠定位连线；请修正当前流程原记录')
-  const edges = list(body.edges).flatMap((edge, index) => {
-    if (!edge || typeof edge !== 'object' || Array.isArray(edge)) { warnings.push(`edges[${index}] 不是连线对象`); return [] }
-    const source = alias(edge, 'source_step_key', 'source', `edges[${index}]`)
-    const target = alias(edge, 'target_step_key', 'target', `edges[${index}]`)
-    if (!ids.has(source) || !ids.has(target) || duplicate) { warnings.push(`edges[${index}] 端点无法对应唯一节点，未绘制；原文保留`); return [] }
-    return [{ ...edge, source_step_key: source, target_step_key: target }]
-  })
-  for (const [index, path] of list(body.paths).entries()) {
-    if (list(path?.node_ids).some(id => !ids.has(id))) warnings.push(`paths[${index}] 引用了缺失节点；原文路径保留`)
   }
-  if (!nodes.length && !(body.format_version === 'module-flow-text-v1' && typeof body.text === 'string' && body.text.trim())) warnings.push('没有可解析的节点，请查看原文；这不代表分析已完成')
-  return { ...body, title: alias(body, 'title', '标题', 'flow'), description: alias(body, 'description', '说明', 'flow'),
-    nodes: duplicate ? [] : nodes, edges, projection_warnings: warnings }
+  const ready = selected.filter(node => incoming.get(node.id) === 0), ordered = []
+  for (let index = 0; index < ready.length; index++) {
+    const node = ready[index]
+    ordered.push(node)
+    for (const target of outgoing.get(node.id)) {
+      incoming.set(target, incoming.get(target) - 1)
+      if (incoming.get(target) === 0) ready.push(byId.get(target))
+    }
+  }
+  if (ordered.length !== selected.length) {
+    flow.projection_warnings.push('声明的主线节点包含环，无法完整拓扑排序；环内节点按原记录顺序保留。')
+    const visited = new Set(ordered.map(node => node.id))
+    ordered.push(...selected.filter(node => !visited.has(node.id)))
+  }
+  return ordered
 }
 
 export function coverageSummary(cases, gaps) {
@@ -69,17 +70,19 @@ export function sourceFirstProjection(artifacts) {
   const result = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [], notes: [] }
   const closureUnits = new Set(artifacts.filter(a => a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)).map(a => a.task?.unit_id))
   const delivery = artifacts.filter(a => (a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)) || (a.stage === 'unit_analysis' && !closureUnits.has(a.task?.unit_id)))
-  const rows = delivery.flatMap(action => activeRecords(action.records ?? []).map(record => {
-    const raw = mapping(record.body)
-    const body = record.kind === 'flow' ? normalizeFlow(raw) : raw
+  const rows = delivery.flatMap(action => activeRecords(action.records ?? []).flatMap(record => {
+    // One flow record may hold several flows ({flows:[]}); split ids stay stable by position.
+    const bodies = record.kind === 'flow' ? normalizeFlows(record.body) : [mapping(record.body)]
     const unit = action.task?.unit_id ?? action.action_id
-    const originalId = body.risk_id ?? body.case_id ?? body.test_case_id ?? body.flow_id ?? body.coverage_id ?? record.record_id
-    return {
-      ...body, unit_id: unit, display_id: plain(originalId),
-      projection_id: `${unit}/${record.record_id}`,
-      title: recordTitle(record, body),
-      source_record: { ...record, action_id: action.action_id, task_id: action.task_id, revision: action.revision, status: action.status, result_path: action.result_path },
-    }
+    return bodies.map((body, index) => {
+      const originalId = body.risk_id ?? body.case_id ?? body.test_case_id ?? body.flow_id ?? body.coverage_id ?? record.record_id
+      return {
+        ...body, unit_id: unit, display_id: plain(originalId),
+        projection_id: `${unit}/${record.record_id}${index ? `#${index + 1}` : ''}`,
+        title: recordTitle(record, body.raw_text != null && !body.title ? {} : body),
+        source_record: { ...record, action_id: action.action_id, task_id: action.task_id, revision: action.revision, status: action.status, result_path: action.result_path },
+      }
+    })
   }))
   const aliases = new Map()
   for (const row of rows) {
@@ -120,8 +123,10 @@ export function sourceFirstProjection(artifacts) {
         linked_risk_ids: resolve(row, [...list(row.linked_risk_ids), ...list(row.risk_refs), ...list(row.source_record.relates_to)], ['risk_id'], ['risk']), evidence: [],
       })
     } else if (kind === 'flow') {
+      const mainline = mainlineNodes(row)
       result.business_flows.push({ ...row, logical_flow_id: row.flow_id ?? row.display_id, text: plain(row.text), flow_id: row.projection_id,
-        mainline_steps: list(row.nodes).map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind, source_evidence: node.source_evidence })),
+        projection_warnings: [...new Set([...list(row.projection_warnings), ...list(row.normalize_notes)])],
+        mainline_steps: mainline.map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind, source_evidence: node.source_evidence })),
         branches: list(row.edges).map((edge, index) => {
           const paths = list(row.paths).filter(p => list(p.node_ids).some((id, i, ids) => id === edge.source_step_key && ids[i + 1] === edge.target_step_key))
           // A path is not a decision edge. Never attach its condition to its entry node.

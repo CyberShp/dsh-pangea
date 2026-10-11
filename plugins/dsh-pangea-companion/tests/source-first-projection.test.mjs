@@ -129,7 +129,7 @@ test('three units preserve normal records and render explicit aliases only in un
   assert.deepEqual(value.business_flows.slice(0, 2), before.business_flows)
   const flow = value.business_flows[2]
   assert.equal(flow.title, '异常单元')
-  assert.deepEqual(flow.mainline_steps.map(n => [n.step_id, n.title]), [['a', '提交请求'], ['b', '收到拒绝']])
+  assert.deepEqual(flow.nodes.map(n => [n.id, n.label]), [['a', '提交请求'], ['b', '收到拒绝']])
   assert.equal(flow.edges[0].target_step_key, 'b')
   assert.equal(flow.source_record.body, third)
 })
@@ -160,4 +160,54 @@ test('decision edge belongs to its source node, full path does not move conditio
   assert.equal(flow.branches[1].from_step_id, 'peek')
   assert.equal(flow.branches[1].condition, '首字节 != 0x16')
   assert.equal(flow.paths[0].condition, '首字节 != 0x16')
+})
+
+test('flow compatibility notes reach visible projection warnings without changing source records', () => {
+  const body = JSON.stringify({ flow: { nodes: [{ node_id: 'a', name: 'Start' }], edges: [] } })
+  const flow = sourceFirstProjection([action('a', [record('f', 'flow', body)])]).business_flows[0]
+  assert.ok(flow.normalize_notes.length)
+  for (const note of flow.normalize_notes) assert.ok(flow.projection_warnings.includes(note))
+  assert.equal(new Set(flow.projection_warnings).size, flow.projection_warnings.length)
+  assert.equal(flow.source_record.body, body)
+  const broken = sourceFirstProjection([action('a', [record('broken', 'flow', { title: 'Declared title', nodes: [] })])]).business_flows[0]
+  assert.equal(broken.title, 'Declared title')
+  assert.deepEqual(JSON.parse(broken.raw_text), broken.source_record.body)
+})
+
+const projectFlow = body => sourceFirstProjection([action('u', [record('f', 'flow', body)])]).business_flows[0]
+const branchedFlow = () => ({
+  nodes: [{ id: 'error', kind: 'error', label: 'Failure' }, { id: 'end', kind: 'exit', label: 'End' },
+    { id: 'middle', kind: 'main', label: 'Work' }, { id: 'start', kind: 'entry', label: 'Start' }],
+  edges: [{ source_step_key: 'start', target_step_key: 'middle' }, { source_step_key: 'middle', target_step_key: 'end' },
+    { source_step_key: 'middle', target_step_key: 'error' }],
+})
+
+test('mainline follows the declared first path while retaining all graph nodes and branches', () => {
+  const body = { ...branchedFlow(), paths: [{ node_ids: ['start', 'middle', 'start', 'end'] }] }
+  const before = structuredClone(body)
+  const flow = projectFlow(body)
+  assert.deepEqual(flow.mainline_steps.map(step => step.step_id), ['start', 'middle', 'start', 'end'])
+  assert.equal(flow.nodes.length, 4)
+  assert.equal(flow.branches.length, 3)
+  assert.deepEqual(body, before)
+})
+
+test('mainline without a valid first path topologically orders only declared main kinds', () => {
+  for (const paths of [[], [{ node_ids: ['start', 'missing', 'end'] }]]) {
+    const flow = projectFlow({ ...branchedFlow(), paths })
+    assert.deepEqual(flow.mainline_steps.map(step => step.step_id), ['start', 'middle', 'end'])
+    assert.equal(flow.nodes.length, 4)
+  }
+  const flow = projectFlow({ nodes: [{ id: 'a', label: 'Undeclared role' }], edges: [] })
+  assert.deepEqual(flow.mainline_steps, [])
+  assert.equal(flow.nodes.length, 1)
+})
+
+test('cyclic main nodes remain visible with an ordering notice', () => {
+  const body = branchedFlow()
+  body.edges.push({ source_step_key: 'end', target_step_key: 'middle' })
+  const flow = projectFlow(body)
+  assert.equal(flow.mainline_steps.length, 3)
+  assert.ok(flow.projection_warnings.some(note => note.includes('拓扑')))
+  assert.equal(flow.nodes.length, 4)
 })

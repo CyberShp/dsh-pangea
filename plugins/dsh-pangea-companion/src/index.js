@@ -1,6 +1,6 @@
 import { stopSourceFirstAcpRun } from './source-first-acp.js'
 import { interruptSourceFirstChildren } from './report-policy.js'
-import { createView, listViews, loadView, updateView, viewArtifact, recordViewEvent, inspectView, validateView, cancelViewRender } from './architecture-views.js'
+import { archifyExperimental, createView, listViews, loadView, updateView, viewArtifact, recordViewEvent, inspectView, validateView, cancelViewRender } from './architecture-views.js'
 import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
@@ -677,10 +677,10 @@ export async function architectureArtifactRoute(req, res, tasks) {
     const format = url.searchParams.get('format') || 'html'
     const variant = url.searchParams.get('variant') || 'verified'
     const data = await viewArtifact(task, url.searchParams.get('view_id'), format, variant)
-    res.setHeader('Content-Type', format === 'svg' ? 'image/svg+xml' : 'text/html; charset=utf-8')
+    res.setHeader('Content-Type', format === 'svg' ? 'image/svg+xml' : format === 'json' ? 'application/json; charset=utf-8' : 'text/html; charset=utf-8')
     res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-downloads; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'")
     res.setHeader('X-Content-Type-Options', 'nosniff')
-    if (url.searchParams.get('download') === '1') res.setHeader('Content-Disposition', `attachment; filename="${variant === 'draft' ? 'draft' : 'diagram'}.${format}"`)
+    if (url.searchParams.get('download') === '1') res.setHeader('Content-Disposition', `attachment; filename="${variant === 'draft' ? 'draft' : format === 'json' ? 'graph' : 'diagram'}.${format}"`)
     res.end(data)
   } catch (error) { return json(res, 400, { status: 'error', error: error.message }) }
 }
@@ -735,6 +735,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         selected_task_id: selectedTask?.task_id ?? null,
         acp_job: acpJob,
         launch_log: launchLog,
+        archify_experimental: archifyExperimental(),
       })
     }
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
@@ -801,9 +802,14 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
             Object.assign(view, await updateView(task, view.view_id, { status: 'interrupted', error: '画图宿主已结束或重启；候选和已有产物保留，可本地验证最新候选。' }))
           }
         }
-        return json(res, 200, { status: 'ok', views })
+        return json(res, 200, { status: 'ok', views, archify_experimental: archifyExperimental() })
       }
       if (body.action === 'architecture-create') {
+        if (!archifyExperimental()) {
+          const previous = !body.profile && body.previous_view_id ? await loadView(task, body.previous_view_id) : null
+          const profile = body.profile ?? (previous ? previous.profile ?? 'standard' : 'standard')
+          if (profile !== 'function_variables') throw new Error('精美导出（实验）未开启：设置 PANGEA_ARCHIFY_EXPERIMENTAL=1 后可用')
+        }
         const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id, branch_ids: body.branch_ids, profile: body.profile })
         try {
           const launched = await launchArchitectureSession(api, { cwd, task, prompt: prepared.prompt + (body.instruction ? `\n用户修改要求：${body.instruction}` : ''),

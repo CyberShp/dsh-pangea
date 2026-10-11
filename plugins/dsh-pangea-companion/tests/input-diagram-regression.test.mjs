@@ -41,6 +41,39 @@ test('material import alone does not claim consumption; explicit ranges and link
   assert.deepEqual(material.consumption.consumed_ranges, ['section 2'])
 })
 
+test('live flow documents normalize behavior graphs and wrappers while preserving malformed content', async t => {
+  const root = await fixture(t)
+  const folder = path.join(root, '活文档/流程讲解')
+  await mkdir(folder, { recursive: true })
+  const canonical = { format_version: 'behavior-flow-v1', flow_id: 'F1', title: 'Canonical', role: 'main',
+    nodes: [{ id: 'b', label: 'Finish', kind: 'exit' }, { id: 'a', label: 'Start', kind: 'entry' }],
+    edges: [{ source_step_key: 'a', target_step_key: 'b', condition: 'ready' }],
+    paths: [{ path_id: 'P1', node_ids: ['a', 'b'] }] }
+  const compatible = { flow_id: 'F2', 标题: 'Compatible', 节点: [{ node_id: 'a', 名称: 'First', 类型: 'entry' }, { node_id: 'b', 名称: 'Last', 类型: 'exit' }],
+    连线: [{ from: 'a', to: 'b', 条件: 'compatible' }] }
+  const malformed = { flow_id: 'F3', title: 'Malformed', nodes: [{ label: 'No identifier' }], edges: [] }
+  await writeFile(path.join(folder, 'flows.md'), '```pangea-flow\n' + JSON.stringify({ flows: [canonical, compatible, malformed] }) + '\n```\n')
+  const documents = await readFlowDocuments(root)
+  assert.equal(documents.length, 3)
+  const first = documents.find(item => item.flow?.flow_id === 'F1')
+  assert.equal(first.status, 'parsed')
+  assert.deepEqual(first.flow.mainline_steps.map(step => step.step_id), ['a', 'b'])
+  assert.deepEqual(first.flow.branches[0].path_ids, ['P1'])
+  const second = documents.find(item => item.flow?.flow_id === 'F2')
+  assert.equal(second.status, 'parsed')
+  assert.deepEqual(second.flow.nodes.map(node => node.id), ['a', 'b'])
+  assert.equal(second.flow.branches[0].condition, 'compatible')
+  assert.ok(second.flow.projection_warnings.some(message => message.includes('字段 from 视为 source_step_key')))
+  const third = documents.find(item => item.flow?.flow_id === 'F3')
+  assert.equal(third.status, 'unparsed')
+  assert.match(third.flow.raw_text, /No identifier/)
+  assert.deepEqual(third.flow.mainline_steps, [])
+  await writeFile(path.join(folder, 'duplicate.md'), '```pangea-flow\n' + JSON.stringify(canonical) + '\n```\n')
+  const duplicate = await readFlowDocuments(root)
+  assert.equal(duplicate.filter(item => item.status === 'ambiguous').length, 2)
+  assert.equal(duplicate.filter(item => item.flow?.flow_id === 'F1').length, 0)
+})
+
 test('background diagram conversation preserves active analysis conversation', async t => {
   const root = await fixture(t)
   const tasks = new TaskStore({ storePath: path.join(root, 'tasks.json') })

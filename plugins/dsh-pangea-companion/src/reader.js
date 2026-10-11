@@ -2,7 +2,8 @@ import { riskApplicable } from './analysis-scenes.js'
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { sourceFirstProjection, coverageSummary } from './source-first-projection.js'
+import { sourceFirstProjection, coverageSummary, mainlineNodes } from './source-first-projection.js'
+import { parseFlowText, unwrapFlows, normalizeFlows } from './flow-normalize.js'
 
 const STEP_TITLES = [
   '范围和任务契约',
@@ -349,9 +350,27 @@ export async function readFlowDocuments(runDirectory) {
     try {
       const blocks = [...text.matchAll(/^```pangea-flow\s*\n([\s\S]*?)^```\s*$/gm)]
       if (blocks.length === 1) {
-        const flow = JSON.parse(blocks[0][1])
-        if (typeof flow.flow_id === 'string' && typeof flow.title === 'string' && Array.isArray(flow.mainline_steps) && Array.isArray(flow.branches)
-          && [...flow.mainline_steps, ...flow.branches].every(row => row && typeof row === 'object' && !Array.isArray(row))) Object.assign(item, { flow, status: 'parsed' })
+        const parsed = parseFlowText(blocks[0][1])
+        if (parsed.error) throw new Error(parsed.error)
+        const { bodies } = unwrapFlows(parsed.value)
+        const flow = bodies.length === 1 ? bodies[0] : null
+        if (flow && typeof flow.flow_id === 'string' && typeof flow.title === 'string' && Array.isArray(flow.mainline_steps) && Array.isArray(flow.branches)
+          && [...flow.mainline_steps, ...flow.branches].every(row => row && typeof row === 'object' && !Array.isArray(row))) {
+          Object.assign(item, { flow, status: 'parsed' })
+        } else {
+          for (const normalized of normalizeFlows(blocks[0][1])) {
+            if (typeof normalized.flow_id !== 'string' || !normalized.flow_id.trim() || typeof normalized.title !== 'string' || !normalized.title.trim()) continue
+            const mainline = mainlineNodes(normalized)
+            const readingFlow = { ...normalized,
+              projection_warnings: [...new Set([...normalized.projection_warnings, ...normalized.normalize_notes])],
+              mainline_steps: mainline.map(node => ({ step_id: node.id, title: node.label, processing: node.description ?? '', node_kind: node.kind, source_evidence: node.source_evidence })),
+              branches: normalized.edges.map((edge, index) => ({ branch_id: `${normalized.flow_id}:edge-${index + 1}`, edge_index: index,
+                from_step_id: edge.source_step_key, to_step_id: edge.target_step_key, condition: edge.condition ?? '', processing: edge.description ?? '',
+                path_ids: normalized.paths.filter(p => p.node_ids.some((id, i, ids) => id === edge.source_step_key && ids[i + 1] === edge.target_step_key)).map(p => p.path_id) })) }
+            documents.push({ ...item, flow: readingFlow, status: normalized.raw_text == null ? 'parsed' : 'unparsed' })
+          }
+          if (documents.some(document => document.path === item.path)) continue
+        }
       }
     } catch { /* Preserve the readable document while an Agent is still writing. */ }
     documents.push(item)

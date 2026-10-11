@@ -5,8 +5,17 @@ import { diagnosticText } from './launch-log.js'
 import { summarizeRun } from './reader.js'
 import { writeTaskStoreFile } from './task-store.js'
 import { renderCandidate } from './architecture-render.mjs'
+import { CALL_GRAPH_EXAMPLE, CALL_GRAPH_FORMAT, callGraphRepairPrompt, callGraphSkeleton, validateCallGraph } from './call-graph.js'
+import { layoutCallGraph } from './flow-graph/layout.js'
+import { renderCallGraphTree, toSvgString } from './flow-graph/render.js'
+import { normalizeFlow } from './flow-normalize.js'
 
 export const DIAGRAM_TYPES = ['architecture', 'workflow', 'sequence', 'dataflow', 'lifecycle']
+/** Archify rendering is an opt-in experiment (精美导出（实验）); off unless PANGEA_ARCHIFY_EXPERIMENTAL=1. */
+export const archifyExperimental = (env = process.env) => env?.PANGEA_ARCHIFY_EXPERIMENTAL === '1'
+export const CALL_GRAPH_RENDERER = 'call-graph'
+const CALL_GRAPH_REPAIRS = 2
+const isCallGraph = view => view?.renderer === CALL_GRAPH_RENDERER
 const stamp = () => new Date().toISOString()
 const readJson = async file => JSON.parse((await readFile(file, 'utf8')).replace(/^\uFEFF/, ''))
 const safeId = id => {
@@ -70,7 +79,7 @@ export async function inspectView(task, viewId) {
   if (['stopped', 'failed', 'ready'].includes(view.status)) return { ok: view.status === 'ready', terminal: true, error: view.error }
   try {
     const receipt = await readJson(path.join(folder, 'validation-receipt.json'))
-    if (receipt.ok) await readFile(path.join(folder, 'diagram.html'))
+    if (receipt.ok) await readFile(path.join(folder, isCallGraph(view) ? 'graph.json' : 'diagram.html'))
     return receipt
   } catch { return { ok: false, error: '尚无可读取的验证通过产物' } }
 }
@@ -88,6 +97,13 @@ export async function validateView(task, viewId, options = {}, env = process.env
   activeRenders.set(key, controller)
   try {
     const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal
+    if (isCallGraph(view)) {
+      const receipt = await validateCallGraphView(await viewRoot(task, viewId), options)
+      if (signal.aborted) return { ...receipt, ok: false, terminal: true }
+      await updateView(task, viewId, current => current.status === 'stopped' && !options.manual ? null :
+        { ...(receipt.ok && !receipt.repairable ? { status: 'ready' } : !receipt.ok && (options.manual || receipt.attempts_exhausted) ? { status: 'failed' } : {}), error: receipt.ok ? null : receipt.error })
+      return receipt
+    }
     const receipt = await renderCandidate(await viewRoot(task, viewId), env.PANGEA_ARCHIFY_ROOT, { ...options, signal, node: env.PANGEA_NODE || process.execPath })
     if (signal.aborted || (await loadView(task, viewId)).status === 'stopped' && !options.manual) return { ...receipt, ok: false, terminal: true }
     await updateView(task, viewId, current => signal.aborted || current.status === 'stopped' && !options.manual ? null :
@@ -96,7 +112,35 @@ export async function validateView(task, viewId, options = {}, env = process.env
   } finally { activeRenders.delete(key) }
 }
 
-function scopeFlow(flow, branchIds) {
+/**
+ * Host validation for call-graph-v1 views. ok/partial graphs are stored as
+ * graph.json + graph.svg; partial stays repairable while repair rounds remain
+ * and is delivered as success afterwards. invalid fails after the last round.
+ */
+async function validateCallGraphView(folder, options = {}) {
+  const raw = await readFile(path.join(folder, 'candidate.json')).catch(() => null)
+  const candidate_sha256 = raw ? createHash('sha256').update(raw).digest('hex') : null
+  const result = raw ? validateCallGraph(raw.toString('utf8').replace(/^\uFEFF/, '')) : { status: 'invalid', errors: ['candidate.json 不存在'], graph: callGraphSkeleton() }
+  const attempt = Number.isInteger(options.attempt) ? options.attempt : 1
+  const lastRound = options.manual || attempt > CALL_GRAPH_REPAIRS
+  const ok = result.status !== 'invalid'
+  if (ok) {
+    await writeFile(path.join(folder, 'graph.json'), JSON.stringify(result.graph, null, 2))
+    await writeFile(path.join(folder, 'graph.svg'), toSvgString(renderCallGraphTree(layoutCallGraph(result.graph))))
+  }
+  const receipt = { ok, format_version: CALL_GRAPH_FORMAT, status: result.status, errors: result.errors, candidate_sha256,
+    attempt, repairable: result.status === 'partial' && !lastRound, attempts_exhausted: !ok && lastRound,
+    repair_prompt: callGraphRepairPrompt(result.errors, path.join(folder, 'candidate.json')),
+    error: ok ? null : `调用图未通过结构校验：${result.errors.slice(0, 3).join('；') || '没有有效函数'}`,
+    validated_at: stamp() }
+  await writeFile(path.join(folder, 'validation-receipt.json'), JSON.stringify(receipt, null, 2))
+  return receipt
+}
+
+function scopeFlow(input, branchIds) {
+  // Older projections may carry only a raw body; scope over its normalized graph.
+  const normalized = !Array.isArray(input.nodes) && input.source_record?.body ? normalizeFlow(input.source_record.body) : null
+  const flow = normalized ? { ...input, nodes: normalized.nodes, edges: normalized.edges, paths: input.paths ?? normalized.paths } : input
   const branches = (flow.branches ?? []).filter(b => branchIds.includes(b.branch_id))
   const edgeBranches = branches.filter(b => Number.isInteger(b.edge_index))
   if (edgeBranches.length) {
@@ -143,10 +187,18 @@ function flowContext(projection, flow, branchIds) {
 
 export async function createView(task, { type = 'workflow', flow_id = null, previous_view_id = null, branch_ids, profile } = {}, env = process.env) {
   if (!DIAGRAM_TYPES.includes(type)) throw new Error('Unsupported diagram type')
+  const previous = previous_view_id ? await loadView(task, previous_view_id) : null
+  const viewProfile = profile ?? previous?.profile ?? 'standard'
+  if (!['standard', 'function_variables'].includes(viewProfile)) throw new Error('Unsupported diagram profile')
+  // Call graphs are rendered by the host; only the experimental Archify profile needs the runtime.
   const archify = env.PANGEA_ARCHIFY_ROOT
-  if (!archify) throw new Error('Archify runtime unavailable')
-  await readFile(path.join(archify, 'SKILL.md'))
-  await readFile(path.join(archify, 'bin/archify.mjs'))
+  if (viewProfile !== 'function_variables') {
+    if (!archify) throw new Error('Archify runtime unavailable')
+    if (archify) {
+      await readFile(path.join(archify, 'SKILL.md'))
+      await readFile(path.join(archify, 'bin/archify.mjs'))
+    }
+  }
   const root = await viewRoot(task)
   const run = path.resolve(root, '../..')
   // Select by the Run contract, never by whether a stale legacy projection exists.
@@ -157,12 +209,9 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   const sourceFirst = progress?.workflow_version === 'source-first-v1'
   const summary = sourceFirst ? await summarizeRun(task.data_root, task.run_id, { includeDetails: true }) : null
   const projection = summary?.details ?? await readJson(path.join(run, '内部索引/工作台投影.json'))
-  const previous = previous_view_id ? await loadView(task, previous_view_id) : null
   flow_id ??= previous?.flow_id ?? null
   const flow = flow_id ? projection.business_flows?.find(item => item.flow_id === flow_id) : null
   if (flow_id && !flow) throw new Error('该流程已更新或尚未产出，请刷新后重新选择。')
-  const viewProfile = profile ?? previous?.profile ?? 'standard'
-  if (!['standard', 'function_variables'].includes(viewProfile)) throw new Error('Unsupported diagram profile')
   if (viewProfile === 'function_variables' && (!flow || type !== 'workflow')) throw new Error('Function diagram requires a flow and workflow type')
   if (previous && (previous.profile ?? 'standard') !== viewProfile) throw new Error('Diagram profile mismatch')
   if (previous && viewProfile === 'function_variables' && previous.flow_id !== flow_id
@@ -192,15 +241,21 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   if (viewProfile === 'function_variables') {
     context.flow_locator = { flow_id: scopedFlow.flow_id, title: scopedFlow.title, unit_id: scopedFlow.unit_id,
       source_evidence: scopedFlow.source_evidence ?? [] }
+    if (branchIds) context.branch_scope = { branch_ids: branchIds, nodes: scopedFlow.nodes ?? [], edges: scopedFlow.edges ?? [], paths: scopedFlow.paths ?? [] }
     for (const key of ['business_flows', 'risks', 'test_cases', 'evidence', 'notes']) delete context[key]
   }
   const viewId = randomUUID()
   const folder = path.join(root, viewId)
   await mkdir(folder)
   await writeFile(path.join(folder, 'context.json'), JSON.stringify(context, null, 2))
-  if (previous) {
+  const callGraph = viewProfile === 'function_variables'
+  // Legacy Archify function views are not call-graph-v1; revisions start from a fresh skeleton.
+  const reuseCandidate = previous && (!callGraph || isCallGraph(previous))
+  if (reuseCandidate) {
     const candidate = await readFile(path.join(await viewRoot(task, previous.view_id), 'candidate.json'))
     await writeFile(path.join(folder, 'candidate.json'), candidate)
+  } else if (callGraph) {
+    await writeFile(path.join(folder, 'candidate.json'), JSON.stringify(callGraphSkeleton(flow?.title || task.target || '函数调用图', ''), null, 2))
   } else if (type === 'workflow') {
     await writeFile(path.join(folder, 'candidate.json'), JSON.stringify({
       schema_version: 2, diagram_type: 'workflow',
@@ -213,8 +268,10 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     source_revision: context.publication?.revision ?? null, workflow_version: context.workflow_version,
     publication: context.publication, source_records: sourceRecords, status: 'generating',
     previous_view_id, session_id: null, job_id: null, created_at: stamp(), updated_at: stamp(),
-    budget_ms: viewProfile === 'function_variables' ? 1800000 : 1200000, max_render_attempts: 3 }
+    ...(callGraph ? { renderer: CALL_GRAPH_RENDERER, format_version: CALL_GRAPH_FORMAT, budget_ms: 600000 } : { budget_ms: 1200000 }),
+    max_render_attempts: 3 }
   await writeFile(path.join(folder, 'manifest.json'), JSON.stringify(view, null, 2))
+  if (callGraph) return { view, prompt: callGraphPrompt({ task, folder, previous: reuseCandidate, branchIds }) }
   return { view, prompt: [
     `为 ${task.target} 创建 ${type} 架构视图。${previous ? '这是关联的新画图会话；candidate.json 是旧图，必须按本次 context.json 核对更新。' : ''}`,
     ...(viewProfile === 'function_variables' ? [
@@ -265,6 +322,19 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   ].join('\n') }
 }
 
+function callGraphPrompt({ task, folder, previous, branchIds }) {
+  const candidate = path.join(folder, 'candidate.json')
+  return [
+    `为 ${task.target} 绘制函数调用与变量图（call-graph-v1）。${previous ? 'candidate.json 是上一版，按本次 context.json 核对后修改。' : ''}`,
+    `读取 ${path.join(folder, 'context.json')} 的 flow_locator，按 source_snapshot 定位冻结源码，只读该流程相关函数，不扩大成全仓分析。`,
+    ...(branchIds ? [`仅覆盖 context.json 中 branch_scope 指定的节点、连线条件和路径（${branchIds.join('、')}），title 注明“局部分支”。`] : []),
+    `只写 ${candidate}，格式如下（示例事实必须替换）：${JSON.stringify(CALL_GRAPH_EXAMPLE)}`,
+    'functions：真实函数、宏（kind=macro）、外部被调用函数（kind=external），id 唯一，file 写相对路径与行号。calls：每条对应一个已核对的调用点，args 写实参到形参的映射，returns 写返回值接收变量。variables：按执行顺序写关键变量的读取、计算与写入。',
+    '无法确认的动态调用、入参、返回值或变量变化写入 notes 并标注“待确认”及原因；不补造调用边，不推测运行时值。',
+    '写完 candidate.json 即结束本回合；宿主会校验结构并把逐条错误发回给你修正（最多 2 轮）。不要修改 manifest.json 或主 Run。',
+  ].join('\n')
+}
+
 export async function listViews(task) {
   if (!task?.run_id) return []
   const root = await viewRoot(task)
@@ -276,6 +346,10 @@ export async function listViews(task) {
       let receipt
       try { receipt = await readJson(path.join(root, entry.name, 'validation-receipt.json')) } catch { /* pending */ }
       const events = await readFile(path.join(root, entry.name, 'events.jsonl'), 'utf8').then(value => value.trim().split('\n').slice(-50).flatMap(line => { try { return [JSON.parse(line)] } catch { return [] } }), () => [])
+      if (isCallGraph(view)) {
+        items.push(await listCallGraphView(root, entry.name, view, receipt, events))
+        continue
+      }
       const html = await readFile(path.join(root, entry.name, 'diagram.html')).then(() => true, () => false)
       const candidate = await readFile(path.join(root, entry.name, 'candidate.json')).catch(() => null)
       const digest = candidate && createHash('sha256').update(candidate).digest('hex')
@@ -302,8 +376,38 @@ export async function listViews(task) {
   return items.sort((a, b) => b.created_at.localeCompare(a.created_at))
 }
 
+async function listCallGraphView(root, viewId, view, receipt, events) {
+  let call_graph = null
+  try { call_graph = await readJson(path.join(root, viewId, 'graph.json')) } catch { /* not yet validated */ }
+  const candidate = await readFile(path.join(root, viewId, 'candidate.json')).catch(() => null)
+  const candidate_unverified = !candidate || !receipt?.candidate_sha256 || createHash('sha256').update(candidate).digest('hex') !== receipt.candidate_sha256
+  const preview_available = Boolean(receipt?.ok && call_graph)
+  const available = preview_available && !candidate_unverified
+  return { ...view, generation_events: events, diagnostic_path: path.join(root, viewId, 'events.jsonl'),
+    call_graph, call_graph_status: preview_available ? receipt.status : null, call_graph_errors: receipt?.errors ?? [],
+    candidate_unverified, candidate_summary: null, preview_is_previous: preview_available && candidate_unverified, preview_kind: preview_available ? 'verified' : null,
+    preview_diagnostics: [], preview_available,
+    status: view.status === 'stopped' ? 'stopped' : available ? 'ready' : view.status, available,
+    error: available ? null : view.error,
+    validation_error: receipt?.ok === false ? receipt.error || '调用图尚未通过结构校验' : null,
+    validation_diagnostics: receipt?.ok === false ? receipt.errors ?? [] : [] }
+}
+
+const CALL_GRAPH_ARTIFACTS = { json: 'graph.json', svg: 'graph.svg' }
+
 export async function viewArtifact(task, viewId, format, variant = 'verified') {
-  await loadView(task, viewId)
+  const view = await loadView(task, viewId)
+  if (isCallGraph(view)) {
+    if (!CALL_GRAPH_ARTIFACTS[format] || variant !== 'verified') throw new Error('Unsupported diagram format')
+    const root = await viewRoot(task, viewId)
+    const receipt = await readJson(path.join(root, 'validation-receipt.json'))
+    if (!receipt.ok) throw new Error('当前收据不包含此产物')
+    const candidate = await readFile(path.join(root, 'candidate.json')).catch(() => null)
+    if (!candidate || createHash('sha256').update(candidate).digest('hex') !== receipt.candidate_sha256) throw new Error('当前候选已修改，尚未验证；请先验证最新候选')
+    const file = await realpath(path.join(root, CALL_GRAPH_ARTIFACTS[format]))
+    if (path.dirname(file) !== root) throw new Error('Artifact outside view directory')
+    return readFile(file)
+  }
   if (!['html', 'svg'].includes(format)) throw new Error('Unsupported diagram format')
   const root = await viewRoot(task, viewId)
   if (!['verified', 'draft'].includes(variant)) throw new Error('Unsupported diagram variant')

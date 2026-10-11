@@ -9,6 +9,839 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
+    const __flowNormalize = (() => {
+    // Lenient behavior-flow-v1 normalizer shared by the projection, the diagram
+    // scope selection and the legacy reader. It only repairs field names and
+    // wrappers; it never invents nodes or semantic content. Every repair is
+    // recorded as a note starting with "已自动兼容：" and is not an error.
+
+    const FLOW_NODE_KINDS = ['entry', 'main', 'branch', 'error', 'propagation', 'recovery', 'exit']
+    const COMPAT_PREFIX = '已自动兼容：'
+
+    const isObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    const asList = value => Array.isArray(value) ? value : value == null ? [] : [value]
+    const text = value => typeof value === 'string' ? value.trim() : ''
+
+    const FENCE = /^\s*```[\w-]*[^\S\n]*\n([\s\S]*?)\n?[^\S\n]*```\s*$/
+
+    /** Parse a flow body that may be a JSON string, optionally wrapped in a code fence. */
+    function parseFlowText(body) {
+      if (typeof body !== 'string') return { value: body, notes: [] }
+      const notes = []
+      let source = body
+      const fenced = FENCE.exec(body)
+      if (fenced) {
+        source = fenced[1]
+        notes.push(`${COMPAT_PREFIX}body 是包含代码块的字符串，已去掉代码块后解析`)
+      } else notes.push(`${COMPAT_PREFIX}body 是字符串，已按 JSON 解析`)
+      try {
+        return { value: JSON.parse(source.replace(/^﻿/, '')), notes }
+      } catch (error) {
+        return { value: null, notes: [], error: `body 不是有效 JSON：${error.message}` }
+      }
+    }
+
+    /** Split {flow:{}}, {flows:[]} or a top-level array into individual flow bodies. */
+    function unwrapFlows(value) {
+      const notes = []
+      if (Array.isArray(value)) {
+        notes.push(`${COMPAT_PREFIX}body 是流程数组，已拆分为 ${value.length} 个流程`)
+        return { bodies: value, notes }
+      }
+      if (!isObject(value)) return { bodies: [value], notes }
+      const hasOwnGraph = ['nodes', '节点', 'steps'].some(key => value[key] != null)
+      if (!hasOwnGraph && Array.isArray(value.flows)) {
+        const { flows, ...shared } = value
+        notes.push(`${COMPAT_PREFIX}flows 外壳已拆分为 ${flows.length} 个流程`)
+        const inherited = shared.format_version ? { format_version: shared.format_version } : {}
+        return { bodies: flows.map(flow => isObject(flow) ? { ...inherited, ...flow } : flow), notes }
+      }
+      if (!hasOwnGraph && isObject(value.flow)) {
+        const { flow, ...shared } = value
+        notes.push(`${COMPAT_PREFIX}flow 外壳已拆开`)
+        return { bodies: [{ ...shared, ...flow }], notes }
+      }
+      return { bodies: [value], notes }
+    }
+
+    function compatCounter() {
+      const counts = new Map()
+      return {
+        add(message) { counts.set(message, (counts.get(message) ?? 0) + 1) },
+        notes() { return [...counts].map(([message, count]) => `${COMPAT_PREFIX}${message}${count > 1 ? `（${count} 处）` : ''}`) },
+      }
+    }
+
+    // Pick key, else the first present alternate. Conflicting values keep the
+    // canonical key and add a warning; using an alternate adds a compat note.
+    function pick(row, key, alternates, where, warnings, compat, scope) {
+      const canonical = row[key]
+      for (const alternate of alternates) {
+        const other = row[alternate]
+        if (other == null) continue
+        if (canonical != null) {
+          if (canonical !== other && typeof other !== 'object') warnings.push(`${where}: ${key} 与 ${alternate} 不一致，按 ${key} 展示；原文保留`)
+          continue
+        }
+        compat.add(`${scope}字段 ${alternate} 视为 ${key}`)
+        return other
+      }
+      return canonical
+    }
+
+    function stepsToNodes(steps, compat) {
+      compat.add('steps 已按顺序转换为 nodes')
+      return steps.map((step, index) => {
+        const position = index === 0 ? 'entry' : index === steps.length - 1 ? 'exit' : 'main'
+        if (!isObject(step)) return { id: `s${index + 1}`, kind: position, label: typeof step === 'string' ? step : JSON.stringify(step) }
+        const id = [step.step_id, step.id, step.node_id].find(v => typeof v === 'string' && v.trim()) ?? `s${index + 1}`
+        const label = [step.label, step.name, step.title, step['名称']].find(v => typeof v === 'string' && v.trim()) ?? ''
+        return { ...step, id, kind: step.kind ?? position, label,
+          description: step.description ?? step.processing ?? step['说明'] ?? step['描述'] }
+      })
+    }
+
+    function normalizeOne(input, inheritedNotes = []) {
+      const warnings = []
+      const errors = []
+      const compat = compatCounter()
+      const notes = [...inheritedNotes]
+      if (!isObject(input)) {
+        const raw = typeof input === 'string' ? input : input == null ? '' : JSON.stringify(input, null, 2)
+        errors.push('body 必须是 JSON 对象，不能是字符串或代码块')
+        warnings.push('没有可解析的节点，请查看原文；这不代表分析已完成')
+        return { nodes: [], edges: [], paths: [], role: 'sub', attach_to: null, raw_text: raw,
+          projection_warnings: warnings, normalize_notes: notes, structure_errors: errors }
+      }
+      const body = input
+      const title = pick(body, 'title', ['标题', 'name', '名称'], 'flow', warnings, compat, '流程')
+      const description = pick(body, 'description', ['说明', '描述'], 'flow', warnings, compat, '流程')
+      let rawNodes = pick(body, 'nodes', ['节点'], 'flow', warnings, compat, '流程')
+      let rawEdges = pick(body, 'edges', ['连线'], 'flow', warnings, compat, '流程')
+      const rawPaths = pick(body, 'paths', ['路径'], 'flow', warnings, compat, '流程')
+      const sourceEvidence = pick(body, 'source_evidence', ['源码依据'], 'flow', warnings, compat, '流程')
+      let inferredEdges = false
+      if ((rawNodes == null || (Array.isArray(rawNodes) && !rawNodes.length)) && Array.isArray(body.steps) && body.steps.length) {
+        rawNodes = stepsToNodes(body.steps, compat)
+        if (rawEdges == null || (Array.isArray(rawEdges) && !rawEdges.length)) {
+          rawEdges = rawNodes.slice(1).map((node, index) => ({ source_step_key: rawNodes[index].id, target_step_key: node.id, condition: '' }))
+          inferredEdges = rawEdges.length > 0
+        }
+      }
+
+      const declared = []
+      const nodes = asList(rawNodes).flatMap((node, index) => {
+        if (!isObject(node)) { warnings.push(`nodes[${index}] 不是节点对象`); errors.push(`nodes[${index}] 不是对象`); return [] }
+        const where = `nodes[${index}]`
+        const id = pick(node, 'id', ['node_id', 'step_id'], where, warnings, compat, '节点')
+        const label = pick(node, 'label', ['name', 'title', '名称'], where, warnings, compat, '节点')
+        const missing = [typeof id === 'string' && id.trim() ? null : 'id', typeof label === 'string' && label.trim() ? null : 'label'].filter(Boolean)
+        if (missing.length) {
+          warnings.push(`${where} 缺少字符串 id/node_id 或 label/name，未绘制；请查看原文`)
+          for (const field of missing) errors.push(`${where} 缺少 ${field}`)
+          return []
+        }
+        declared.push({ id, index })
+        return [{ ...node, id, label,
+          kind: pick(node, 'kind', ['类型'], where, warnings, compat, '节点'),
+          description: pick(node, 'description', ['说明', '描述'], where, warnings, compat, '节点'),
+          source_evidence: pick(node, 'source_evidence', ['源码依据'], where, warnings, compat, '节点') }]
+      })
+      const positions = new Map()
+      for (const { id, index } of declared) positions.set(id, [...(positions.get(id) ?? []), index])
+      const duplicates = [...positions].filter(([, at]) => at.length > 1)
+      for (const [id, at] of duplicates) errors.push(`节点 id '${id}' 重复（${at.map(i => `nodes[${i}]`).join(', ')}）`)
+      const duplicate = duplicates.length > 0
+      if (duplicate) warnings.push('节点 ID 重复，无法可靠定位连线；请修正当前流程原记录')
+      const ids = new Set(nodes.map(n => n.id))
+      const available = [...ids].join(', ') || '无'
+      const byLabel = new Map()
+      for (const node of nodes) byLabel.set(node.label, [...(byLabel.get(node.label) ?? []), node.id])
+
+      const edges = asList(rawEdges).flatMap((edge, index) => {
+        if (!isObject(edge)) { warnings.push(`edges[${index}] 不是连线对象`); errors.push(`edges[${index}] 不是对象`); return [] }
+        const where = `edges[${index}]`
+        const ends = {}
+        for (const [key, alternates] of [['source_step_key', ['source', 'from']], ['target_step_key', ['target', 'to']]]) {
+          let value = pick(edge, key, alternates, where, warnings, compat, '连线')
+          if (!ids.has(value) && typeof value === 'string' && byLabel.has(value)) {
+            const matches = byLabel.get(value)
+            if (matches.length === 1) {
+              compat.add(`连线端点使用节点名称，已改写为节点 id`)
+              value = matches[0]
+            } else {
+              notes.push(`${COMPAT_PREFIX}${where}.${key}='${value}' 匹配多个同名节点，已丢弃该连线`)
+              return []
+            }
+          }
+          if (!ids.has(value)) errors.push(`${where}.${key}='${value ?? ''}' 不是节点 id；可用 id：${available}`)
+          ends[key] = value
+        }
+        if (!ids.has(ends.source_step_key) || !ids.has(ends.target_step_key) || duplicate) {
+          warnings.push(`edges[${index}] 端点无法对应唯一节点，未绘制；原文保留`); return []
+        }
+        return [{ ...edge, ...ends,
+          condition: pick(edge, 'condition', ['条件'], where, warnings, compat, '连线'),
+          description: pick(edge, 'description', ['说明', '描述'], where, warnings, compat, '连线') }]
+      })
+      if (inferredEdges) notes.push(`${COMPAT_PREFIX}由步骤顺序推断连线`)
+
+      const paths = asList(rawPaths).flatMap((row, index) => {
+        if (!isObject(row)) { errors.push(`paths[${index}] 不是对象`); return [] }
+        const where = `paths[${index}]`
+        const path = { ...row,
+          path_id: pick(row, 'path_id', ['id'], where, warnings, compat, '路径') ?? `P-${String(index + 1).padStart(2, '0')}`,
+          title: pick(row, 'title', ['标题', '名称', 'name'], where, warnings, compat, '路径'),
+          condition: pick(row, 'condition', ['条件'], where, warnings, compat, '路径'),
+          explanation: pick(row, 'explanation', ['说明', '描述'], where, warnings, compat, '路径'),
+          node_ids: asList(pick(row, 'node_ids', ['nodes', '节点'], where, warnings, compat, '路径')) }
+        const unknown = path.node_ids.filter(id => !ids.has(id))
+        if (unknown.length) {
+          warnings.push(`paths[${index}] 引用了缺失节点；原文路径保留`)
+          for (const id of new Set(unknown)) errors.push(`paths[${index}].node_ids 含未知 id '${id}'`)
+        }
+        return [path]
+      })
+      const textOnly = body.format_version === 'module-flow-text-v1' && typeof body.text === 'string' && body.text.trim()
+      if (!nodes.length && !textOnly) {
+        if (!asList(rawNodes).length) errors.unshift('nodes 缺失或为空')
+        warnings.push('没有可解析的节点，请查看原文；这不代表分析已完成')
+      }
+      const attach = isObject(body.attach_to) && text(body.attach_to.flow_id) ? { flow_id: body.attach_to.flow_id, node_id: text(body.attach_to.node_id) || null } : null
+      return { ...body, title, description, role: body.role === 'main' ? 'main' : 'sub', attach_to: attach,
+        nodes: duplicate ? [] : nodes, edges, paths, source_evidence: sourceEvidence,
+        ...((!nodes.length || duplicate) && !textOnly ? { raw_text: JSON.stringify(body, null, 2) } : {}),
+        projection_warnings: warnings, normalize_notes: [...notes, ...compat.notes()], structure_errors: errors }
+    }
+
+    /** Normalize a raw flow body into one or more flows (wrappers are split). */
+    function normalizeFlows(body) {
+      const parsed = parseFlowText(body)
+      if (parsed.error) {
+        const flow = normalizeOne(body)
+        return [{ ...flow, structure_errors: [parsed.error, ...flow.structure_errors.filter(e => !e.startsWith('body 必须'))] }]
+      }
+      const { bodies, notes } = unwrapFlows(parsed.value)
+      if (!bodies.length) return [normalizeOne({ nodes: [] }, [...parsed.notes, ...notes])]
+      return bodies.map(item => normalizeOne(item, [...parsed.notes, ...notes]))
+    }
+
+    /** Normalize a single flow body; wrappers resolve to their first flow. */
+    function normalizeFlow(body) {
+      return normalizeFlows(body)[0]
+    }
+
+    return { FLOW_NODE_KINDS, COMPAT_PREFIX, parseFlowText, unwrapFlows, normalizeFlows, normalizeFlow }
+    })()
+
+    const __flowLayout = (() => {
+    // Deterministic layout for behavior-flow-v1 and call-graph-v1 diagrams.
+    // Ported from pangea-agent report/flow_diagram.py (BFS layering). The same
+    // input always yields the same geometry; no node or edge is invented.
+
+    const FLOW_KIND_COLORS = {
+      entry: '#3157d5', main: '#5b6b83', branch: '#b47700', error: '#c53d4d',
+      propagation: '#8c4fb3', recovery: '#18875d', exit: '#4a667a',
+    }
+    const FLOW_KIND_LABELS = {
+      entry: '入口', main: '主线', branch: '分支', error: '异常', propagation: '传播', recovery: '恢复', exit: '出口',
+    }
+    const FLOW_COLLAPSE_THRESHOLD = 60
+
+    const BOX_W = 220
+    const BOX_H = 76
+    const COL_GAP = 48
+    const ROW_GAP = 72
+    const MARGIN_X = 40
+    const MARGIN_Y = 36
+    const BACK_CHANNEL = 14
+    const MAIN_KINDS = new Set(['entry', 'main', 'exit'])
+    const RIGHT_KINDS = new Set(['error', 'propagation'])
+
+    const listOf = value => Array.isArray(value) ? value : []
+    const charWidth = char => char.charCodeAt(0) < 128 ? 1 : 2
+
+    /** Wrap text into lines by display width (CJK counts as 2). */
+    function wrapLabel(value, limit = 26, maxLines = 3) {
+      const tokens = String(value ?? '').match(/[A-Za-z0-9_./:=<>()|+\-]+|\s+|./gu) ?? []
+      const lines = []
+      let current = ''
+      let width = 0
+      for (const token of tokens) {
+        if (/^\s+$/.test(token)) {
+          if (current && !current.endsWith(' ')) { current += ' '; width += 1 }
+          continue
+        }
+        const tokenWidth = [...token].reduce((sum, char) => sum + charWidth(char), 0)
+        if (current && '，。；：！？、）】》」』”’'.includes(token)) { current += token; width += tokenWidth; continue }
+        if (current && width + tokenWidth > limit) {
+          lines.push(current.trimEnd())
+          if (lines.length === maxLines) {
+            lines[maxLines - 1] = truncateText(lines[maxLines - 1], limit - 1) + '…'
+            return lines
+          }
+          current = ''
+          width = 0
+        }
+        current += token
+        width += tokenWidth
+      }
+      if (current && lines.length < maxLines) lines.push(current.trimEnd())
+      return lines
+    }
+
+    /** Truncate to a display width, appending an ellipsis when shortened. */
+    function truncateText(value, limit) {
+      const text = String(value ?? '')
+      let width = 0
+      let out = ''
+      for (const char of text) {
+        width += charWidth(char)
+        if (width > limit) return out
+        out += char
+      }
+      return out
+    }
+
+    function shortLabel(value, limit = 24) {
+      const text = String(value ?? '')
+      const cut = truncateText(text, limit)
+      return cut === text ? text : `${truncateText(text, limit - 1)}…`
+    }
+
+    // Validate nodes and edges the same way as the Python renderer.
+    function collectGraph(flow) {
+      const warnings = []
+      const nodes = []
+      const known = new Map()
+      for (const item of listOf(flow?.nodes)) {
+        const id = item && typeof item === 'object' ? String(item.id ?? '') : ''
+        if (!id) { warnings.push('存在缺少 id 的流程节点，已保留文字说明但未绘制该节点。'); continue }
+        if (known.has(id)) { warnings.push(`流程节点 ${id} 重复，图中只显示第一次声明。`); continue }
+        const node = { id, label: String(item.label ?? item.name ?? id), kind: item.kind ?? null, description: item.description ?? '', source_evidence: item.source_evidence ?? [] }
+        known.set(id, node)
+        nodes.push(node)
+      }
+      const edges = []
+      for (const [index, item] of listOf(flow?.edges).entries()) {
+        if (!item || typeof item !== 'object') continue
+        const source = String(item.source_step_key ?? '')
+        const target = String(item.target_step_key ?? '')
+        if (!known.has(source) || !known.has(target)) {
+          warnings.push(`流程连线 ${source || '未提供'} → ${target || '未提供'} 引用了不存在的节点，未绘制。`)
+          continue
+        }
+        edges.push({ index, source, target, condition: String(item.condition ?? '') })
+      }
+      return { nodes, edges, warnings, known }
+    }
+
+    // BFS depths: roots have no incoming edge; unreached nodes get new depths.
+    function bfsDepths(nodes, edges) {
+      const incoming = new Map(nodes.map(n => [n.id, 0]))
+      const outgoing = new Map(nodes.map(n => [n.id, []]))
+      for (const edge of edges) {
+        incoming.set(edge.target, incoming.get(edge.target) + 1)
+        outgoing.get(edge.source).push(edge.target)
+      }
+      let roots = nodes.filter(n => incoming.get(n.id) === 0).map(n => n.id)
+      if (!roots.length && nodes.length) roots = [nodes[0].id]
+      const depths = new Map(roots.map(id => [id, 0]))
+      const walk = queue => {
+        while (queue.length) {
+          const source = queue.shift()
+          for (const target of outgoing.get(source)) {
+            if (!depths.has(target)) { depths.set(target, depths.get(source) + 1); queue.push(target) }
+          }
+        }
+      }
+      walk([...roots])
+      for (const node of nodes) {
+        if (depths.has(node.id)) continue
+        depths.set(node.id, Math.max(-1, ...depths.values()) + 1)
+        walk([node.id])
+      }
+      return { depths, outgoing }
+    }
+
+    /** Determine the main path: paths[0], else entry/main/exit kinds, else a greedy chain from the first root. */
+    function mainPathOf(flow, nodes, depths, outgoing) {
+      const known = new Set(nodes.map(n => n.id))
+      const first = listOf(flow?.paths)[0]
+      const fromPath = listOf(first?.node_ids).filter(id => known.has(id))
+      if (fromPath.length) return [...new Set(fromPath)]
+      const byKind = nodes.filter(n => MAIN_KINDS.has(n.kind)).map(n => n.id)
+      if (byKind.length) return byKind.sort((a, b) => depths.get(a) - depths.get(b))
+      if (!nodes.length) return []
+      const chain = []
+      const seen = new Set()
+      let current = [...depths].sort((a, b) => a[1] - b[1])[0][0]
+      while (current && !seen.has(current)) {
+        chain.push(current)
+        seen.add(current)
+        current = (outgoing.get(current) ?? []).find(target => !seen.has(target) && depths.get(target) > depths.get(chain.at(-1)))
+      }
+      return chain
+    }
+
+    /**
+     * Lay out a behavior flow.
+     * @returns {{width:number,height:number,nodes:object[],edges:object[],warnings:string[],main_path:string[],collapsed:{count:number,ids:string[]}}}
+     */
+    function layoutFlow(flow, options = {}) {
+      const graph = collectGraph(flow)
+      if (!graph.nodes.length) {
+        return { width: 0, height: 0, nodes: [], edges: [], main_path: [], collapsed: { count: 0, ids: [] },
+          warnings: graph.warnings.length ? graph.warnings : ['当前流程没有可绘制节点。'] }
+      }
+      const full = bfsDepths(graph.nodes, graph.edges)
+      const mainPath = mainPathOf(flow, graph.nodes, full.depths, full.outgoing)
+      const mainSet = new Set(mainPath)
+      let visible = graph.nodes
+      let collapsedIds = []
+      const threshold = options.collapseThreshold ?? FLOW_COLLAPSE_THRESHOLD
+      if (!options.expandAll && graph.nodes.length > threshold) {
+        // Main path plus one layer of branches; everything else is folded.
+        const keep = new Set(mainPath)
+        for (const edge of graph.edges) {
+          if (mainSet.has(edge.source)) keep.add(edge.target)
+          if (mainSet.has(edge.target)) keep.add(edge.source)
+        }
+        visible = graph.nodes.filter(n => keep.has(n.id))
+        collapsedIds = graph.nodes.filter(n => !keep.has(n.id)).map(n => n.id)
+      }
+      const visibleIds = new Set(visible.map(n => n.id))
+      const edges = graph.edges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target))
+      const { depths } = visible === graph.nodes ? full : bfsDepths(visible, edges)
+
+      // Rows by depth; within a row: left side, main column(s), right side.
+      const rows = new Map()
+      for (const node of visible) {
+        const depth = depths.get(node.id)
+        if (!rows.has(depth)) rows.set(depth, { left: [], main: [], right: [] })
+        const row = rows.get(depth)
+        if (mainSet.has(node.id)) row.main.push(node)
+        else if (RIGHT_KINDS.has(node.kind)) row.right.push(node)
+        else if (node.kind === 'branch' || node.kind === 'recovery') row.left.push(node)
+        else (row.left.length <= row.right.length ? row.left : row.right).push(node)
+      }
+      const orderedDepths = [...rows.keys()].sort((a, b) => a - b)
+      const maxOf = side => Math.max(0, ...[...rows.values()].map(row => row[side].length))
+      const maxLeft = maxOf('left')
+      const maxRight = maxOf('right')
+      const maxMain = Math.max(1, maxOf('main'))
+      const colW = BOX_W + COL_GAP
+      const axis = MARGIN_X + maxLeft * colW + (maxMain * colW - COL_GAP) / 2
+      const placed = new Map()
+      orderedDepths.forEach((depth, rowIndex) => {
+        const row = rows.get(depth)
+        const y = MARGIN_Y + rowIndex * (BOX_H + ROW_GAP)
+        const halfMain = (maxMain - 1) / 2
+        const put = (node, cx, column) => placed.set(node.id, { ...node, x: Math.round(cx - BOX_W / 2), y, w: BOX_W, h: BOX_H, depth, column,
+          lines: wrapLabel(node.label, 26, 3), on_main: mainSet.has(node.id) })
+        row.main.forEach((node, i) => put(node, axis + (i - (row.main.length - 1) / 2) * colW, 'main'))
+        row.left.forEach((node, i) => put(node, axis - (halfMain + i + 1) * colW, 'left'))
+        row.right.forEach((node, i) => put(node, axis + (halfMain + i + 1) * colW, 'right'))
+      })
+      const contentRight = MARGIN_X + (maxLeft + maxMain + maxRight) * colW - COL_GAP
+      let backCount = 0
+      const laidEdges = edges.map(edge => {
+        const a = placed.get(edge.source)
+        const b = placed.get(edge.target)
+        const forward = b.depth > a.depth
+        const base = { ...edge, label: shortLabel(edge.condition, 22), on_main: mainSet.has(edge.source) && mainSet.has(edge.target) }
+        if (forward) {
+          const sx = a.x + a.w / 2, sy = a.y + a.h, tx = b.x + b.w / 2, ty = b.y
+          const my = (sy + ty) / 2
+          return { ...base, back: false, path: `M${sx} ${sy} C${sx} ${my} ${tx} ${my} ${tx} ${ty}`,
+            label_x: (sx + tx) / 2, label_y: my }
+        }
+        // Back-edge or same-row edge: route around the right side.
+        const outside = contentRight + 22 + backCount++ * BACK_CHANNEL
+        const sx = a.x + a.w, sy = a.y + a.h / 2 + 8, tx = b.x + b.w, ty = b.y + b.h / 2 - 8
+        return { ...base, back: true, path: `M${sx} ${sy} L${outside} ${sy} L${outside} ${ty} L${tx} ${ty}`,
+          label_x: outside + 4, label_y: (sy + ty) / 2 }
+      })
+      const height = MARGIN_Y * 2 + orderedDepths.length * (BOX_H + ROW_GAP) - ROW_GAP + (collapsedIds.length ? 56 : 0)
+      const width = Math.max(480, contentRight + MARGIN_X + (backCount ? 22 + backCount * BACK_CHANNEL + 120 : 0))
+      return { width: Math.round(width), height: Math.round(height), nodes: [...placed.values()], edges: laidEdges,
+        warnings: graph.warnings, main_path: mainPath.filter(id => visibleIds.has(id)),
+        collapsed: { count: collapsedIds.length, ids: collapsedIds } }
+    }
+
+    /** Nodes and edge indexes belonging to a path (for highlight). */
+    function pathMembers(flow, pathId) {
+      const path = listOf(flow?.paths).find(p => p?.path_id === pathId)
+      if (!path) return null
+      const ids = listOf(path.node_ids)
+      const pairs = new Set(ids.slice(1).map((id, i) => `${ids[i]}\u0000${id}`))
+      return { nodes: new Set(ids), pairs }
+    }
+
+    /**
+     * Lay out a sanitized call-graph-v1 graph: depth layers from the root, left to right.
+     * Duplicate calls between the same pair are merged with a count.
+     */
+    function layoutCallGraph(graph) {
+      const functions = listOf(graph?.functions)
+      if (!functions.length) return { width: 0, height: 0, nodes: [], edges: [], warnings: ['当前调用图没有可绘制函数。'] }
+      const ids = new Set(functions.map(f => f.id))
+      const merged = new Map()
+      for (const [index, call] of listOf(graph.calls).entries()) {
+        if (!ids.has(call.from) || !ids.has(call.to)) continue
+        const key = `${call.from}\u0000${call.to}`
+        if (!merged.has(key)) merged.set(key, { from: call.from, to: call.to, count: 0, calls: [], indexes: [] })
+        const edge = merged.get(key)
+        edge.count += 1
+        edge.calls.push(call)
+        edge.indexes.push(index)
+      }
+      const outgoing = new Map(functions.map(f => [f.id, []]))
+      for (const edge of merged.values()) outgoing.get(edge.from).push(edge.to)
+      const root = ids.has(graph.root) ? graph.root : functions[0].id
+      const depths = new Map([[root, 0]])
+      const queue = [root]
+      while (queue.length) {
+        const source = queue.shift()
+        for (const target of outgoing.get(source)) if (!depths.has(target)) { depths.set(target, depths.get(source) + 1); queue.push(target) }
+      }
+      // Functions not reachable from the root stay independent in a trailing column.
+      const unreachedDepth = Math.max(0, ...depths.values()) + 1
+      for (const fn of functions) if (!depths.has(fn.id)) depths.set(fn.id, unreachedDepth)
+      const columns = new Map()
+      for (const fn of functions) {
+        const depth = depths.get(fn.id)
+        if (!columns.has(depth)) columns.set(depth, [])
+        columns.get(depth).push(fn)
+      }
+      const order = [...columns.keys()].sort((a, b) => a - b)
+      const w = 200, h = 64, colGap = 90, rowGap = 26
+      const tallest = Math.max(...order.map(d => columns.get(d).length))
+      const contentH = tallest * (h + rowGap) - rowGap
+      const placed = new Map()
+      order.forEach((depth, columnIndex) => {
+        const column = columns.get(depth)
+        const offset = (contentH - (column.length * (h + rowGap) - rowGap)) / 2
+        column.forEach((fn, i) => placed.set(fn.id, { ...fn, x: MARGIN_X + columnIndex * (w + colGap), y: MARGIN_Y + offset + i * (h + rowGap), w, h, depth,
+          unreached: depth === unreachedDepth,
+          lines: wrapLabel(fn.label ?? fn.id, 22, 2) }))
+      })
+      let loopCount = 0
+      const edges = [...merged.values()].map(edge => {
+        const a = placed.get(edge.from), b = placed.get(edge.to)
+        const count = edge.count > 1 ? `×${edge.count}` : ''
+        if (b.x > a.x) {
+          const sx = a.x + a.w, sy = a.y + a.h / 2, tx = b.x, ty = b.y + b.h / 2, mx = (sx + tx) / 2
+          return { ...edge, back: false, label: count, path: `M${sx} ${sy} C${mx} ${sy} ${mx} ${ty} ${tx} ${ty}`, label_x: mx, label_y: (sy + ty) / 2 - 4 }
+        }
+        const below = MARGIN_Y + contentH + 18 + loopCount++ * 12
+        const sx = a.x + a.w / 2, sy = a.y + a.h, tx = b.x + b.w / 2 + (a.id === b.id ? 30 : 0), ty = b.y + b.h
+        return { ...edge, back: true, label: count, path: `M${sx} ${sy} L${sx} ${below} L${tx} ${below} L${tx} ${ty}`, label_x: (sx + tx) / 2, label_y: below - 4 }
+      })
+      const width = MARGIN_X * 2 + order.length * (w + colGap) - colGap
+      const height = MARGIN_Y * 2 + contentH + (loopCount ? 24 + loopCount * 12 : 0)
+      return { width: Math.max(360, width), height: Math.round(height), nodes: [...placed.values()], edges, root, warnings: [] }
+    }
+
+    return { FLOW_KIND_COLORS, FLOW_KIND_LABELS, FLOW_COLLAPSE_THRESHOLD, wrapLabel, truncateText, shortLabel, mainPathOf, layoutFlow, pathMembers, layoutCallGraph }
+    })()
+
+    const __flowRender = (() => {
+    // Render layouts into a framework-neutral element tree {tag, attrs, children}.
+    // The client maps the tree to React elements; the host serializes it with
+    // toSvgString to store graph.svg. No scripts or external resources are emitted.
+    const { FLOW_KIND_COLORS, FLOW_KIND_LABELS } = __flowLayout
+    const FONT = "'Microsoft YaHei UI','PingFang SC','Noto Sans CJK SC',sans-serif"
+    const NEUTRAL = '#7c8798'
+    const HIGHLIGHT = '#3157d5'
+
+    const el = (tag, attrs = {}, ...children) => ({ tag, attrs, children: children.flat().filter(c => c != null && c !== false) })
+
+    function arrowDefs(prefix) {
+      const marker = (id, color) => el('marker', { id: `${prefix}-${id}`, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' },
+        el('path', { d: 'M0 0 L10 5 L0 10 z', fill: color }))
+      return el('defs', {}, marker('arrow', NEUTRAL), marker('arrow-hi', HIGHLIGHT))
+    }
+
+    function textLines(lines, x, y, attrs = {}) {
+      const lineHeight = 17
+      const top = y - ((lines.length - 1) * lineHeight) / 2
+      return el('text', { x, 'text-anchor': 'middle', 'font-size': 13, fill: '#1f2937', ...attrs },
+        lines.map((line, index) => el('tspan', { x, y: top + index * lineHeight + 4 }, line)))
+    }
+
+    /**
+     * @param {ReturnType<import('./layout.js').layoutFlow>} layout
+     * @param {{highlight?: {nodes:Set<string>, pairs:Set<string>}|null, selected?: string|null, idPrefix?: string}} options
+     */
+    function renderFlowTree(layout, options = {}) {
+      const prefix = options.idPrefix ?? 'pf'
+      const highlight = options.highlight ?? null
+      const dimNode = id => highlight && !highlight.nodes.has(id)
+      const edgeOn = edge => highlight && highlight.pairs.has(`${edge.source}\u0000${edge.target}`)
+      const edges = layout.edges.map(edge => {
+        const on = edgeOn(edge)
+        const dim = highlight && !on
+        const condition = edge.condition
+        return el('g', { 'data-edge': `${edge.source}->${edge.target}`, opacity: dim ? 0.18 : 1 },
+          el('path', { d: edge.path, fill: 'none', stroke: on ? HIGHLIGHT : NEUTRAL, 'stroke-width': on ? 2.4 : 1.4,
+            'stroke-dasharray': edge.back ? '6 4' : null, 'marker-end': `url(#${prefix}-${on ? 'arrow-hi' : 'arrow'})` }),
+          condition ? el('g', {},
+            el('title', {}, condition),
+            el('text', { x: edge.label_x, y: edge.label_y - 4, 'text-anchor': edge.back ? 'start' : 'middle', 'font-size': 11,
+              fill: '#475569', stroke: '#ffffff', 'stroke-width': 3, 'paint-order': 'stroke' }, edge.label)) : null)
+      })
+      const nodes = layout.nodes.map(node => {
+        const color = FLOW_KIND_COLORS[node.kind] ?? NEUTRAL
+        const selected = options.selected === node.id
+        return el('g', { 'data-node-id': node.id, cursor: 'pointer', opacity: dimNode(node.id) ? 0.25 : 1 },
+          el('title', {}, `${node.label}${node.kind ? `（${FLOW_KIND_LABELS[node.kind] ?? node.kind}）` : ''}${node.description ? `\n${node.description}` : ''}`),
+          el('rect', { x: node.x, y: node.y, width: node.w, height: node.h, rx: 10, fill: '#ffffff', stroke: color,
+            'stroke-width': selected ? 3 : node.on_main ? 2 : 1.4 }),
+          el('rect', { x: node.x, y: node.y, width: 6, height: node.h, rx: 3, fill: color }),
+          node.kind ? el('text', { x: node.x + node.w - 8, y: node.y + 15, 'text-anchor': 'end', 'font-size': 10, fill: color }, FLOW_KIND_LABELS[node.kind] ?? node.kind) : null,
+          textLines(node.lines, node.x + node.w / 2 + 3, node.y + node.h / 2 + 3))
+      })
+      const extra = []
+      if (layout.collapsed?.count) {
+        extra.push(el('text', { x: layout.width / 2, y: layout.height - 22, 'text-anchor': 'middle', 'font-size': 13, fill: '#64748b', 'data-collapsed': 'true' },
+          `+${layout.collapsed.count} 个节点（已折叠）`))
+      }
+      return el('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: `0 0 ${layout.width} ${layout.height}`, width: layout.width, height: layout.height,
+        'font-family': FONT, role: 'img' },
+        arrowDefs(prefix), el('rect', { x: 0, y: 0, width: layout.width, height: layout.height, fill: '#fbfcfe' }),
+        el('g', { class: 'edges' }, edges), el('g', { class: 'nodes' }, nodes), extra)
+    }
+
+    function callNodeShape(node, stroke, width) {
+      const { x, y, w, h } = node
+      if (node.kind === 'macro') {
+        const c = 14
+        return el('polygon', { points: `${x + c},${y} ${x + w - c},${y} ${x + w},${y + h / 2} ${x + w - c},${y + h} ${x + c},${y + h} ${x},${y + h / 2}`,
+          fill: '#fff8e8', stroke, 'stroke-width': width })
+      }
+      if (node.kind === 'external') {
+        return el('rect', { x, y, width: w, height: h, rx: h / 2, fill: '#f3f4f6', stroke, 'stroke-width': width, 'stroke-dasharray': '5 3' })
+      }
+      return el('rect', { x, y, width: w, height: h, rx: 8, fill: '#ffffff', stroke, 'stroke-width': width })
+    }
+
+    const CALL_KIND_LABELS = { function: '函数', macro: '宏', external: '外部' }
+
+    /**
+     * @param {ReturnType<import('./layout.js').layoutCallGraph>} layout
+     * @param {{selected?: string|null, highlightCalls?: Set<number>|null, idPrefix?: string}} options
+     */
+    function renderCallGraphTree(layout, options = {}) {
+      const prefix = options.idPrefix ?? 'cg'
+      const highlight = options.highlightCalls ?? null
+      const edges = layout.edges.map(edge => {
+        const on = highlight && edge.indexes.some(i => highlight.has(i))
+        const dim = highlight && !on
+        const details = edge.calls.map(call => [call.file && `${call.file}${call.line ? `:${call.line}` : ''}`,
+          call.args?.length ? `参数：${call.args.join(', ')}` : '', call.returns ? `返回：${call.returns}` : ''].filter(Boolean).join(' ')).filter(Boolean)
+        return el('g', { 'data-edge': `${edge.from}->${edge.to}`, opacity: dim ? 0.15 : 1 },
+          el('title', {}, [`${edge.from} → ${edge.to}${edge.count > 1 ? `（${edge.count} 次调用）` : ''}`, ...details].join('\n')),
+          el('path', { d: edge.path, fill: 'none', stroke: on ? HIGHLIGHT : NEUTRAL, 'stroke-width': on ? 2.4 : 1.4,
+            'stroke-dasharray': edge.back ? '6 4' : null, 'marker-end': `url(#${prefix}-${on ? 'arrow-hi' : 'arrow'})` }),
+          edge.label ? el('text', { x: edge.label_x, y: edge.label_y, 'text-anchor': 'middle', 'font-size': 11, fill: '#475569',
+            stroke: '#ffffff', 'stroke-width': 3, 'paint-order': 'stroke' }, edge.label) : null)
+      })
+      const nodes = layout.nodes.map(node => {
+        const selected = options.selected === node.id
+        const isRoot = node.id === layout.root
+        const stroke = selected ? HIGHLIGHT : isRoot ? '#3157d5' : node.kind === 'macro' ? '#b47700' : node.kind === 'external' ? '#94a3b8' : '#5b6b83'
+        return el('g', { 'data-node-id': node.id, cursor: 'pointer', opacity: node.unreached ? 0.7 : 1 },
+          el('title', {}, [node.signature || node.label || node.id, node.file ? `${node.file}${node.line ? `:${node.line}` : ''}` : ''].filter(Boolean).join('\n')),
+          callNodeShape(node, stroke, selected ? 3 : isRoot ? 2.2 : 1.4),
+          el('text', { x: node.x + node.w - 10, y: node.y + 13, 'text-anchor': 'end', 'font-size': 10, fill: '#64748b' }, CALL_KIND_LABELS[node.kind] ?? ''),
+          textLines(node.lines, node.x + node.w / 2, node.y + node.h / 2 + 3, { 'font-family': `Consolas,'Cascadia Mono',${FONT}` }))
+      })
+      return el('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: `0 0 ${layout.width} ${layout.height}`, width: layout.width, height: layout.height,
+        'font-family': FONT, role: 'img' },
+        arrowDefs(prefix), el('rect', { x: 0, y: 0, width: layout.width, height: layout.height, fill: '#fbfcfe' }),
+        el('g', { class: 'edges' }, edges), el('g', { class: 'nodes' }, nodes))
+    }
+
+    const escapeXml = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
+
+    /** Serialize an element tree to standalone SVG markup. */
+    function toSvgString(tree) {
+      if (tree == null || tree === false) return ''
+      if (typeof tree !== 'object') return escapeXml(tree)
+      const attrs = Object.entries(tree.attrs ?? {})
+        .filter(([, value]) => value != null && value !== false)
+        .map(([key, value]) => ` ${key}="${escapeXml(value)}"`).join('')
+      const children = (tree.children ?? []).map(toSvgString).join('')
+      return children ? `<${tree.tag}${attrs}>${children}</${tree.tag}>` : `<${tree.tag}${attrs}/>`
+    }
+
+    return { renderFlowTree, renderCallGraphTree, toSvgString }
+    })()
+
+    const __callGraph = (() => {
+    // call-graph-v1: function call graph with per-function variable flow.
+    // Validation is structural only: it reports itemized Chinese errors, drops the
+    // broken items from the sanitized graph and never invents content.
+
+    const CALL_GRAPH_FORMAT = 'call-graph-v1'
+    const CALL_GRAPH_KINDS = ['function', 'macro', 'external']
+
+    const isObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    const str = value => typeof value === 'string' ? value.trim() : ''
+    function textField(value, where, errors) {
+      if (value != null && typeof value !== 'string') errors.push(`${where} 必须是字符串`)
+      return str(value)
+    }
+    function lineField(value, where, errors) {
+      if (value == null) return null
+      if (Number.isInteger(value) && value > 0) return value
+      errors.push(`${where} 必须是正整数或 null`)
+      return null
+    }
+    function stringList(value, where, errors, allowString = false) {
+      if (value == null) return []
+      if (allowString && typeof value === 'string') return value.trim() ? [value.trim()] : []
+      if (!Array.isArray(value)) {
+        errors.push(`${where} 必须是${allowString ? '字符串或' : ''}字符串数组`)
+        return []
+      }
+      return value.flatMap((item, index) => {
+        if (typeof item !== 'string') { errors.push(`${where}[${index}] 必须是字符串`); return [] }
+        return item.trim() ? [item.trim()] : []
+      })
+    }
+
+    /** Empty skeleton seeded into candidate.json. */
+    function callGraphSkeleton(title = '', root = '') {
+      return { format_version: CALL_GRAPH_FORMAT, title, root, functions: [], calls: [], variables: [], notes: [] }
+    }
+
+    const CALL_GRAPH_EXAMPLE = {
+      format_version: CALL_GRAPH_FORMAT,
+      title: '登录请求处理',
+      root: 'login_handler',
+      functions: [
+        { id: 'login_handler', kind: 'function', label: 'login_handler', signature: 'int login_handler(req_t *req)', file: 'src/login.c', line: 20 },
+        { id: 'check_password', kind: 'function', label: 'check_password', signature: 'bool check_password(const char *user, const char *pw)', file: 'src/auth.c', line: 41 },
+        { id: 'MAX_RETRY', kind: 'macro', label: 'MAX_RETRY', signature: '#define MAX_RETRY 5', file: 'src/auth.h', line: 8 },
+        { id: 'strcmp', kind: 'external', label: 'strcmp', signature: '', file: '', line: null },
+      ],
+      calls: [
+        { from: 'login_handler', to: 'check_password', file: 'src/login.c', line: 33, args: ['user', 'pw'], returns: 'ok' },
+        { from: 'check_password', to: 'strcmp', file: 'src/auth.c', line: 47, args: ['hash', 'stored'], returns: '' },
+      ],
+      variables: [
+        { function: 'login_handler', name: 'ok', reads: ['user', 'pw'], compute: 'check_password(user, pw)', writes: 'ok', line: 33 },
+      ],
+      notes: [],
+    }
+
+    /**
+     * Validate a call-graph-v1 candidate.
+     * @returns {{status:'ok'|'partial'|'invalid', errors:string[], graph:object}}
+     */
+    function validateCallGraph(input) {
+      const errors = []
+      let value = input
+      if (typeof value === 'string') {
+        try { value = JSON.parse(value) } catch (error) {
+          return { status: 'invalid', errors: [`不是有效 JSON：${error.message}`], graph: callGraphSkeleton() }
+        }
+      }
+      if (!isObject(value)) return { status: 'invalid', errors: ['顶层必须是 JSON 对象'], graph: callGraphSkeleton() }
+      if (value.format_version !== CALL_GRAPH_FORMAT) errors.push(`format_version 缺失或不是 ${CALL_GRAPH_FORMAT}`)
+      if (!Array.isArray(value.functions)) errors.push('functions 必须是数组')
+      for (const key of ['calls', 'variables']) if (value[key] != null && !Array.isArray(value[key])) errors.push(`${key} 必须是数组`)
+
+      const functions = []
+      const ids = new Set()
+      for (const [index, row] of (Array.isArray(value.functions) ? value.functions : []).entries()) {
+        const where = `functions[${index}]`
+        if (!isObject(row)) { errors.push(`${where} 不是对象`); continue }
+        const id = str(row.id)
+        if (!id) { errors.push(`${where} 缺少 id`); continue }
+        if (ids.has(id)) { errors.push(`${where}.id='${id}' 重复`); continue }
+        let kind = str(row.kind)
+        if (!CALL_GRAPH_KINDS.includes(kind)) {
+          errors.push(`${where}.kind='${kind}' 不是 function|macro|external，按 function 显示`)
+          kind = 'function'
+        }
+        ids.add(id)
+        functions.push({ id, kind, label: textField(row.label, `${where}.label`, errors) || id,
+          signature: textField(row.signature, `${where}.signature`, errors), file: textField(row.file, `${where}.file`, errors), line: lineField(row.line, `${where}.line`, errors) })
+      }
+      if (Array.isArray(value.functions) && !functions.length) errors.push('functions 中没有有效函数')
+
+      const calls = []
+      for (const [index, row] of (Array.isArray(value.calls) ? value.calls : []).entries()) {
+        const where = `calls[${index}]`
+        if (!isObject(row)) { errors.push(`${where} 不是对象`); continue }
+        let broken = false
+        for (const key of ['from', 'to']) {
+          const end = str(row[key])
+          if (!ids.has(end)) { errors.push(`${where}.${key}='${end}' 不在 functions 中`); broken = true }
+        }
+        if (broken) continue
+        calls.push({ from: str(row.from), to: str(row.to), file: textField(row.file, `${where}.file`, errors), line: lineField(row.line, `${where}.line`, errors),
+          args: stringList(row.args, `${where}.args`, errors, true), returns: textField(row.returns, `${where}.returns`, errors) })
+      }
+
+      const variables = []
+      for (const [index, row] of (Array.isArray(value.variables) ? value.variables : []).entries()) {
+        const where = `variables[${index}]`
+        if (!isObject(row)) { errors.push(`${where} 不是对象`); continue }
+        const fn = str(row.function)
+        const name = str(row.name)
+        if (!ids.has(fn)) { errors.push(`${where}.function='${fn}' 不在 functions 中`); continue }
+        if (!name) { errors.push(`${where} 缺少 name`); continue }
+        variables.push({ function: fn, name, reads: stringList(row.reads, `${where}.reads`, errors), compute: textField(row.compute, `${where}.compute`, errors),
+          writes: textField(row.writes, `${where}.writes`, errors), line: lineField(row.line, `${where}.line`, errors) })
+      }
+
+      let root = str(value.root)
+      if (!ids.has(root)) {
+        if (functions.length) errors.push(`root='${root}' 不在 functions 中，改用 ${functions[0].id}`)
+        root = functions[0]?.id ?? ''
+      }
+      const graph = { format_version: CALL_GRAPH_FORMAT, title: textField(value.title, 'title', errors), root, functions, calls, variables,
+        notes: stringList(value.notes, 'notes', errors) }
+      const status = !functions.length ? 'invalid' : errors.length ? 'partial' : 'ok'
+      return { status, errors, graph }
+    }
+
+    /** Repair instructions handed back to the model when validation finds errors. */
+    function callGraphRepairPrompt(errors, candidatePath = 'candidate.json') {
+      if (!errors?.length) return ''
+      return [
+        `${candidatePath} 的 call-graph-v1 结构有以下问题，请只修改该文件：`,
+        ...errors.slice(0, 40).map(error => `- ${error}`),
+        errors.length > 40 ? `- 另有 ${errors.length - 40} 条同类问题` : '',
+        '规则：calls 的 from/to 与 variables 的 function 必须是 functions 中已有的 id；不要删除已正确的内容；不要自行运行校验。',
+      ].filter(Boolean).join('\n')
+    }
+
+    /** Variable flow helper: call indexes whose args/returns mention a variable. */
+    function callsForVariable(graph, fnId, variable) {
+      const out = new Set()
+      const name = variable?.name
+      if (!name) return out
+      const patterns = [name, variable.writes].filter(Boolean).map(value => new RegExp(`(^|[^A-Za-z0-9_])${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9_]|$)`))
+      const mentions = text => typeof text === 'string' && patterns.some(pattern => pattern.test(text))
+      for (const [index, call] of (graph?.calls ?? []).entries()) {
+        if (call.from !== fnId && call.to !== fnId) continue
+        if (call.args.some(mentions) || mentions(call.returns)) out.add(index)
+      }
+      return out
+    }
+
+    return { CALL_GRAPH_FORMAT, CALL_GRAPH_KINDS, callGraphSkeleton, CALL_GRAPH_EXAMPLE, validateCallGraph, callGraphRepairPrompt, callsForVariable }
+    })()
+
+    const { normalizeFlow: sharedNormalizeFlow } = __flowNormalize
+    const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, layoutCallGraph } = __flowLayout
+    const { renderFlowTree, renderCallGraphTree, toSvgString } = __flowRender
+    const { validateCallGraph, callsForVariable } = __callGraph
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
       if (typeof body === 'string') return body
@@ -764,9 +1597,12 @@ window.__ModuleLoader__.load({
       .b03-overview-screen button { font-family: inherit; }
       .b03-overview-hero { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 6px 0 23px; border-bottom: 1px solid #e5e7e4; margin: 25px 0 26px; }
       .b03-overview-breadcrumb { display: flex; align-items: center; gap: 8px; margin: 0 0 17px; color: #70767d; font-size: 12px; line-height: 18px; }
-      .b03-overview-breadcrumb button { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+      .b03-overview-breadcrumb button { min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+      .b03-overview-breadcrumb > span:not([aria-hidden]):not([aria-current]) { min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .b03-overview-breadcrumb [aria-current="page"] { color: #4f5964; }
       .b03-overview-page-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 0 22px; }
+      .b03-overview-page-hero > div:first-child { min-width: 0; }
+      .b03-overview-page-hero h1 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
       .b03-overview-run-meta { max-width: 650px; margin-top: 9px; color: #70767d; font-size: 12px; line-height: 1.8; }
       .b03-overview-page-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
       .b03-overview-nav { display: flex !important; align-items: stretch; gap: 28px !important; margin: 0 !important; overflow-x: auto; border-bottom: 1px solid #e5e7e4; }
@@ -1683,6 +2519,259 @@ window.__ModuleLoader__.load({
       return Array.isArray(flow?.mainline_steps) && flow.mainline_steps.length ? '已有步骤' : flow?.paths?.length ? '按路径阅读' : '流程内容待补齐'
     }
 
+    // Native diagrams: element trees from flow-graph/render.js mapped to React SVG elements.
+    function svgAttrName(name) {
+      if (name === 'class') return 'className'
+      if (/^(data|aria)-/.test(name) || !name.includes('-')) return name
+      return name.replace(/-([a-z])/g, (_, char) => char.toUpperCase())
+    }
+    function svgTreeToReact(tree, key, onNode) {
+      if (tree == null || tree === false) return null
+      if (typeof tree !== 'object') return String(tree)
+      const props = { key }
+      for (const [name, value] of Object.entries(tree.attrs ?? {})) if (value != null && value !== false) props[svgAttrName(name)] = value
+      const nodeId = tree.attrs?.['data-node-id']
+      if (nodeId && onNode) {
+        props.role = 'button'
+        props.tabIndex = 0
+        props['aria-label'] = `查看节点 ${nodeId}`
+        props.onClick = () => onNode(nodeId)
+        props.onKeyDown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onNode(nodeId) } }
+      }
+      return h(tree.tag, props, ...(tree.children ?? []).map((child, index) => svgTreeToReact(child, index, onNode)))
+    }
+    /** Graph input for a flow: behavior-flow nodes, else legacy mainline steps in order plus bound branches. */
+    function flowGraphInput(flow) {
+      if (Array.isArray(flow?.nodes) && flow.nodes.length) return flow
+      const steps = (Array.isArray(flow?.mainline_steps) ? flow.mainline_steps : []).filter(step => step?.step_id)
+      const ids = new Set(steps.map(step => step.step_id))
+      const edges = steps.slice(1).map((step, index) => ({ source_step_key: steps[index].step_id, target_step_key: step.step_id, condition: '' }))
+      const seen = new Set(edges.map(edge => `${edge.source_step_key}\u0000${edge.target_step_key}`))
+      for (const branch of Array.isArray(flow?.branches) ? flow.branches : []) {
+        if (!ids.has(branch?.from_step_id) || !ids.has(branch?.to_step_id)) continue
+        const pair = `${branch.from_step_id}\u0000${branch.to_step_id}`
+        if (seen.has(pair) && !branch.condition) continue
+        seen.add(pair)
+        edges.push({ source_step_key: branch.from_step_id, target_step_key: branch.to_step_id, condition: branch.condition || '' })
+      }
+      return { ...flow, nodes: steps.map(step => ({ id: step.step_id, label: step.title || step.step_id, kind: step.node_kind ?? null,
+        description: step.processing || '', source_evidence: step.source_evidence ?? [] })), edges,
+        paths: (Array.isArray(flow?.paths) ? flow.paths : []).filter(path => Array.isArray(path?.node_ids)) }
+    }
+    /** Highlight members for a set of branch ids (projected edges or legacy branches). */
+    function branchHighlight(flow, branchIds) {
+      if (!branchIds?.length) return null
+      const wanted = new Set(branchIds)
+      const nodes = new Set()
+      const pairs = new Set()
+      for (const branch of Array.isArray(flow?.branches) ? flow.branches : []) {
+        if (!wanted.has(branch?.branch_id)) continue
+        if (branch.from_step_id) nodes.add(branch.from_step_id)
+        if (branch.to_step_id) nodes.add(branch.to_step_id)
+        if (branch.from_step_id && branch.to_step_id) pairs.add(`${branch.from_step_id}\u0000${branch.to_step_id}`)
+      }
+      return nodes.size ? { nodes, pairs } : null
+    }
+    function evidenceText(value) {
+      const list = Array.isArray(value) ? value : value ? [value] : []
+      return list.map(item => typeof item === 'string' ? item : item?.location || [item?.file ?? item?.path, item?.line].filter(Boolean).join(':')).filter(Boolean)
+    }
+    function downloadBlob(blob, name) {
+      if (typeof document === 'undefined' || typeof URL === 'undefined') return
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = name
+      link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    }
+    function exportSvgTree(tree, name, format) {
+      const markup = toSvgString(tree)
+      if (format === 'svg') return downloadBlob(new Blob([markup], { type: 'image/svg+xml' }), `${name}.svg`)
+      if (typeof Image === 'undefined' || typeof document === 'undefined') return
+      const image = new Image()
+      image.onload = () => {
+        const canvas = document.createElement('canvas')
+        canvas.width = (tree.attrs.width || 1) * 2
+        canvas.height = (tree.attrs.height || 1) * 2
+        const context = canvas.getContext('2d')
+        context.scale(2, 2)
+        context.drawImage(image, 0, 0)
+        canvas.toBlob(blob => { if (blob) downloadBlob(blob, `${name}.png`) }, 'image/png')
+      }
+      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`
+    }
+    const GRAPH_CANVAS_STYLE = { overflow: 'hidden', width: '100%', height: 'clamp(320px, 55vh, 560px)', boxSizing: 'border-box', border: '1px solid #e2e7e0', borderRadius: 8, background: '#fbfcfe', touchAction: 'none', userSelect: 'none' }
+    function useGraphZoom(label, graphWidth, graphHeight, graphKey) {
+      const canvasRef = React.useRef(null)
+      const sizeRef = React.useRef({ width: 1, height: 1 })
+      const dragRef = React.useRef(null)
+      const suppressClickRef = React.useRef(false)
+      const [size, setSize] = React.useState(sizeRef.current)
+      const [camera, setCamera] = React.useState({ scale: 1, x: 0, y: 0, fit: true })
+      const [dragging, setDragging] = React.useState(false)
+      const fitScale = bounds => Math.min(1, Math.max(1, bounds.width - 32) / Math.max(1, graphWidth), Math.max(1, bounds.height - 32) / Math.max(1, graphHeight))
+      const centered = (scale, fit) => ({ scale, fit, x: (sizeRef.current.width - graphWidth * scale) / 2, y: (sizeRef.current.height - graphHeight * scale) / 2 })
+      const zoomAt = (value, factor, x, y) => {
+        const scale = Math.max(fitScale(sizeRef.current) / 4, Math.min(4, value.scale * factor))
+        return { scale, fit: false, x: x - (x - value.x) * scale / value.scale, y: y - (y - value.y) * scale / value.scale }
+      }
+      React.useEffect(() => {
+        const canvas = canvasRef.current
+        if (!canvas) return undefined
+        let first = true
+        const measure = () => {
+          const next = { width: canvas.clientWidth, height: canvas.clientHeight }
+          if (!next.width || !next.height) return
+          const previous = sizeRef.current
+          sizeRef.current = next
+          setSize(next)
+          const reset = first
+          first = false
+          setCamera(value => reset || value.fit ? centered(fitScale(next), true) : {
+            ...value, x: value.x + (next.width - previous.width) / 2, y: value.y + (next.height - previous.height) / 2
+          })
+        }
+        const wheel = event => {
+          event.preventDefault()
+          event.stopPropagation()
+          const rect = canvas.getBoundingClientRect()
+          const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1)
+          setCamera(value => zoomAt(value, Math.exp(-Math.max(-500, Math.min(500, delta)) * 0.002), event.clientX - rect.left - canvas.clientLeft, event.clientY - rect.top - canvas.clientTop))
+        }
+        measure()
+        const observer = new ResizeObserver(measure)
+        observer.observe(canvas)
+        canvas.addEventListener('wheel', wheel, { passive: false })
+        return () => { observer.disconnect(); canvas.removeEventListener('wheel', wheel) }
+      }, [graphWidth, graphHeight, graphKey])
+      const change = factor => setCamera(value => zoomAt(value, factor, sizeRef.current.width / 2, sizeRef.current.height / 2))
+      const endDrag = event => {
+        const drag = dragRef.current
+        if (!drag || drag.pointerId !== event.pointerId) return
+        suppressClickRef.current = drag.moved
+        dragRef.current = null
+        setDragging(false)
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+      const controls = h('span', { className: 'b04-canvas-controls' },
+        h('button', { type: 'button', 'aria-label': `缩小${label}`, onClick: () => change(0.8) }, '−'),
+        h('span', { 'aria-label': `${label}缩放比例`, style: { minWidth: 42, textAlign: 'center' } }, `${Math.round(camera.scale * 100)}%`),
+        h('button', { type: 'button', 'aria-label': `放大${label}`, onClick: () => change(1.25) }, '+'),
+        h('button', { type: 'button', 'aria-label': `${label}原始大小`, onClick: () => setCamera(centered(1, false)) }, '100%'),
+        h('button', { type: 'button', 'aria-label': `适应${label}画布`, onClick: () => setCamera(centered(fitScale(sizeRef.current), true)) }, '适应画布'))
+      const panProps = { ref: canvasRef, tabIndex: 0, style: { ...GRAPH_CANVAS_STYLE, cursor: dragging ? 'grabbing' : 'grab' }, 'aria-label': `${label}画布，滚轮缩放，拖拽移动`,
+        onPointerDown: event => {
+          if (event.button !== 0 || dragRef.current) return
+          suppressClickRef.current = false
+          dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, camera, moved: false }
+        },
+        onPointerMove: event => {
+          const drag = dragRef.current
+          if (!drag || drag.pointerId !== event.pointerId) return
+          const dx = event.clientX - drag.x, dy = event.clientY - drag.y
+          if (!drag.moved && Math.hypot(dx, dy) < 4) return
+          if (!drag.moved) { drag.moved = true; event.currentTarget.setPointerCapture(event.pointerId); setDragging(true) }
+          event.preventDefault()
+          setCamera({ ...drag.camera, fit: false, x: drag.camera.x + dx, y: drag.camera.y + dy })
+        },
+        onPointerUp: endDrag, onPointerCancel: endDrag, onLostPointerCapture: endDrag,
+        onPointerLeave: event => { if (!dragRef.current?.moved) endDrag(event) },
+        onClickCapture: event => {
+          if (suppressClickRef.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation(); suppressClickRef.current = false }
+        } }
+      const sized = tree => ({ ...tree, attrs: { ...tree.attrs, width: '100%', height: '100%', viewBox: `0 0 ${size.width} ${size.height}`, preserveAspectRatio: 'none', style: { display: 'block' } },
+        children: [{ tag: 'g', attrs: { transform: `translate(${camera.x} ${camera.y}) scale(${camera.scale})` }, children: tree.children }] })
+      return { controls, panProps, sized }
+    }
+    function warningList(warnings, label) {
+      return warnings?.length ? h('ul', { 'aria-label': label, style: { color: '#8a5a00', fontSize: 12, margin: '6px 0', paddingLeft: 18 } },
+        warnings.map((warning, index) => h('li', { key: index }, warning))) : null
+    }
+
+    /** Inline behavior-flow diagram rendered locally from the flow's nodes/edges/paths. */
+    function FlowGraphView({ flow, highlightBranchIds = [], idPrefix = 'pf' }) {
+      const [pathId, setPathId] = React.useState('')
+      const [selected, setSelected] = React.useState('')
+      const [expandAll, setExpandAll] = React.useState(false)
+      const graph = flowGraphInput(flow)
+      const layout = layoutFlow(graph, { expandAll })
+      const { controls, panProps, sized } = useGraphZoom('流程图', layout.width, layout.height, flow?.flow_id)
+      if (!layout.nodes.length) {
+        return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图' },
+          h('div', { role: 'status', className: 'pangea-diagram-caption' }, '当前流程没有可绘制节点。'), warningList(layout.warnings, '流程图提示'))
+      }
+      const paths = (graph.paths ?? []).filter(path => path?.path_id)
+      const highlight = pathId ? pathMembers(graph, pathId) : branchHighlight(flow, highlightBranchIds)
+      const name = `${flow?.display_id || flow?.flow_id || 'flow'}`.replace(/[^\w.-]+/g, '_')
+      const tree = renderFlowTree(layout, { highlight, selected, idPrefix })
+      const node = layout.nodes.find(item => item.id === selected)
+      const evidence = node ? evidenceText(node.source_evidence) : []
+      return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图', style: { marginTop: 12 } },
+        h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', margin: '8px 0' } },
+          paths.length ? h('select', { 'aria-label': '高亮路径', value: pathId, onChange: event => setPathId(event.target.value) },
+            h('option', { value: '' }, highlightBranchIds.length ? '所选分支' : '全部路径'),
+            paths.map(path => h('option', { key: path.path_id, value: path.path_id }, `${path.path_id}${path.title ? ` · ${path.title}` : ''}`))) : null,
+          controls,
+          layout.collapsed.count || expandAll ? h('button', { type: 'button', onClick: () => setExpandAll(!expandAll) }, expandAll ? '折叠次要节点' : '展开全部') : null,
+          h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'svg') }, '导出 SVG'),
+          h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'png') }, '导出 PNG')),
+        warningList(layout.warnings, '流程图提示'),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } },
+          h('div', { ...panProps, style: { ...panProps.style, flex: '1 1 320px', minWidth: 0 } }, svgTreeToReact(sized(tree), 'svg', setSelected)),
+          node ? h('aside', { 'aria-label': '节点详情', style: { width: 240, flex: '0 0 240px', border: '1px solid #e2e7e0', borderRadius: 8, padding: 12, background: '#fff' } },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } }, h('strong', null, node.label),
+              h('button', { type: 'button', className: 'b04-link', style: { flexShrink: 0 }, 'aria-label': '关闭节点详情', onClick: () => setSelected('') }, '关闭')),
+            h('small', null, `${node.id}${node.kind ? ` · ${FLOW_KIND_LABELS[node.kind] ?? node.kind}` : ''}`),
+            h('p', null, node.description || '原记录未提供节点说明。'),
+            evidence.length ? h('div', null, h('small', null, '源码依据'), evidence.map(location => h('p', { key: location }, h('code', null, location)))) : null) : null))
+    }
+
+    /** call-graph-v1 view: function nodes, merged call edges (×N) and per-function variable flow. */
+    function CallGraphView({ graph, status = 'ok', errors = [], svgUrl = '' }) {
+      const [selected, setSelected] = React.useState('')
+      const [variable, setVariable] = React.useState('')
+      const layout = layoutCallGraph(graph)
+      const { controls, panProps, sized } = useGraphZoom('函数调用图', layout.width, layout.height, graph?.root)
+      const notice = status === 'partial' ? h('div', { role: 'status', 'aria-label': '调用图结构问题', style: { background: '#fff8e1', border: '1px solid #f0c36d', color: '#7a5200', borderRadius: 8, padding: '10px 12px', margin: '8px 0' } },
+        h('strong', null, `调用图部分可用：${errors.length} 处结构问题已跳过`),
+        h('ul', { style: { margin: '6px 0 0', paddingLeft: 18 } }, errors.slice(0, 20).map((error, index) => h('li', { key: index }, error)),
+          errors.length > 20 ? h('li', null, `另有 ${errors.length - 20} 处问题`) : null)) : null
+      if (!layout.nodes.length) {
+        return h('section', { className: 'pangea-call-graph', 'aria-label': '函数调用图' }, notice,
+          h('div', { role: 'status', className: 'pangea-diagram-caption' }, status === 'invalid' ? '调用图未通过结构检查。' : '当前调用图没有可绘制函数。'),
+          status === 'invalid' ? warningList(errors, '调用图结构问题') : null)
+      }
+      const fn = (graph?.functions ?? []).find(item => item.id === selected)
+      const variables = (graph?.variables ?? []).filter(item => item.function === selected)
+      const active = variables.find(item => item.name === variable)
+      const highlightCalls = active ? callsForVariable(graph, selected, active) : null
+      const tree = renderCallGraphTree(layout, { selected, highlightCalls, idPrefix: 'cg' })
+      const choose = id => { setSelected(id); setVariable('') }
+      const cell = { padding: 4, borderBottom: '1px solid #eef1ec', verticalAlign: 'top' }
+      return h('section', { className: 'pangea-call-graph', 'aria-label': '函数调用图', style: { padding: '8px 12px' } }, notice,
+        h('div', { className: 'b04-canvas-actions', style: { margin: '8px 0', flexWrap: 'wrap' } }, controls,
+          h('span', { style: { fontSize: 12, color: '#64748b' } }, '方框：函数 · 六边形：宏 · 虚线圆角：外部函数 · ×N：同一调用出现 N 次'),
+          svgUrl ? h('a', { className: 'b04-link', href: svgUrl, download: 'call-graph.svg' }, '导出 SVG')
+            : h('button', { type: 'button', onClick: () => exportSvgTree(tree, 'call-graph', 'svg') }, '导出 SVG')),
+        h('div', panProps, svgTreeToReact(sized(tree), 'svg', choose)),
+        fn ? h('div', { 'aria-label': '函数变量流', style: { marginTop: 12 } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } },
+            h('strong', null, `${fn.label}${fn.file ? ` · ${fn.file}${fn.line ? `:${fn.line}` : ''}` : ''}`),
+            h('button', { type: 'button', className: 'b04-link', onClick: () => choose('') }, '关闭')),
+          fn.signature ? h('code', { style: { display: 'block', margin: '4px 0 8px' } }, fn.signature) : null,
+          variables.length ? h('table', { 'aria-label': '变量表', style: { width: '100%', borderCollapse: 'collapse', fontSize: 12 } },
+            h('thead', null, h('tr', null, ['变量', '读取', '计算', '写入', '行号'].map(label => h('th', { key: label, style: { ...cell, textAlign: 'left' } }, label)))),
+            h('tbody', null, variables.map((item, index) => h('tr', { key: `${item.name}:${index}`, style: item.name === variable ? { background: '#eef2ff' } : null },
+              h('td', { style: cell }, h('button', { type: 'button', className: 'b04-link', 'aria-pressed': item.name === variable, 'aria-label': `高亮变量 ${item.name}`,
+                onClick: () => setVariable(item.name === variable ? '' : item.name) }, item.name)),
+              h('td', { style: cell }, item.reads.join(', ') || '—'),
+              h('td', { style: cell }, item.compute || '—'),
+              h('td', { style: cell }, item.writes || '—'),
+              h('td', { style: cell }, item.line ?? '—')))))
+            : h('p', { style: { fontSize: 12, color: '#64748b' } }, '该函数没有记录变量流。')) : null)
+    }
+
     function CoverageBrowser({ cwd, task, runId, target, revision, acquisition, gaps, flows, filters, onFilter, renderLinks, onReload, onNewQuery }) {
       gaps = Array.isArray(gaps) ? gaps : []
       const [scopeStatus, setScopeStatus] = React.useState('')
@@ -1862,7 +2951,10 @@ window.__ModuleLoader__.load({
         const poll = async () => {
           try {
             const result = await requestWorkbenchAction({ cwd, action: 'architecture-list', payload: { task_id: selectedTaskId } })
-            if (!disposed) setDiagramViews(result.views ?? [])
+            if (!disposed) {
+              setDiagramViews(result.views ?? [])
+              setArchifyFlag(Boolean(result.archify_experimental))
+            }
           } catch { /* Explicit refresh displays errors; a failed poll keeps the last snapshot. */ }
           if (!disposed) timer = window.setTimeout(poll, 3000)
         }
@@ -1896,6 +2988,10 @@ window.__ModuleLoader__.load({
       const [caseExportBusy, setCaseExportBusy] = React.useState(false)
       const [caseExportError, setCaseExportError] = React.useState('')
       const [homeRefreshed, setHomeRefreshed] = React.useState(false)
+      const [archifyFlag, setArchifyFlag] = React.useState(false)
+      const archifyOn = Boolean(workbench?.archify_experimental || archifyFlag)
+      const [flowHighlight, setFlowHighlight] = React.useState({ scope: '', ids: [] })
+      const [flowExpanded, setFlowExpanded] = React.useState({})
       const diagramDialogRef = React.useRef(null)
       const diagramFullscreenTriggerRef = React.useRef(null)
       React.useEffect(() => {
@@ -3687,6 +4783,7 @@ window.__ModuleLoader__.load({
           if (result.session_id) ctx?.pangea?.registerProductSession?.(result.session_id, 'analysis')
           const listed = await requestWorkbenchAction({ cwd, action: 'architecture-list', payload: { task_id: selectedTask.task_id } })
           setDiagramViews(listed.views ?? [])
+          if (listed.archify_experimental != null) setArchifyFlag(Boolean(listed.archify_experimental))
           if (result.view) {
             setDiagramInstruction('')
             await chooseDiagram(result.view)
@@ -3702,7 +4799,7 @@ window.__ModuleLoader__.load({
             || (profile === 'function_variables' ? view.flow_id === flow?.flow_id : (!view.flow_id || view.flow_id === flow?.flow_id))))
       }
 
-      async function chooseDiagram(view) {
+      async function chooseDiagram(view, { activateConversation = view?.renderer !== 'call-graph' } = {}) {
         if (!view) return
         setDiagramSelection(view.view_id)
         setDiagramType(view.type || 'workflow')
@@ -3711,7 +4808,7 @@ window.__ModuleLoader__.load({
         const flowId = currentFlow?.flow_id || flowSelection || businessFlows[0]?.flow_id
         setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : 'diagram', step: '', query: '', page: 1 })
         setDiagramError('')
-        if (!view.session_id || view.session_id === selectedTask?.active_conversation_id) return
+        if (!activateConversation || !view.session_id || view.session_id === selectedTask?.active_conversation_id) return
         if (conversationActionRef.current) { setDiagramError('会话正在切换，请稍后点击“查看图表会话”。'); return }
         conversationActionRef.current = true
         setConversationPending('select')
@@ -3728,7 +4825,7 @@ window.__ModuleLoader__.load({
       async function changeFlowView(reader, view, flow) {
         setFlowReader({ ...reader, view })
         setDiagramError('')
-        if (view === 'reader') return
+        if (view !== 'functions') return
         const listed = await diagramAction('architecture-list')
         if (!listed) return
         const views = matchingDiagrams(flow, view === 'functions' ? 'function_variables' : 'standard', listed)
@@ -3768,7 +4865,11 @@ window.__ModuleLoader__.load({
           void diagramAction('architecture-create', { type: selected.type, profile: selected.profile ?? profile,
             flow_id: selected.flow_id ?? null, previous_view_id: selected.view_id, instruction: diagramInstruction.trim() })
         }
-        const frame = (view, full = false) => h('iframe', { title: full ? '图表全屏预览' : `${diagramName(view)}预览`, src: artifactUrl(view, 'html'), sandbox: 'allow-scripts allow-downloads',
+        const callGraph = selected?.renderer === 'call-graph'
+        const canCreate = functions || archifyOn
+        const callGraphView = view => h(CallGraphView, { key: view.view_id, graph: view.call_graph, status: view.call_graph_status || 'ok',
+          errors: view.call_graph_errors ?? [], svgUrl: artifactUrl(view, 'svg', true) })
+        const frame = (view, full = false) => view?.renderer === 'call-graph' ? callGraphView(view) : h('iframe', { title: full ? '图表全屏预览' : `${diagramName(view)}预览`, src: artifactUrl(view, 'html'), sandbox: 'allow-scripts allow-downloads',
           style: { width: '100%', height: full ? '100%' : 467, transform: `scale(${diagramZoom / 100})`, transformOrigin: 'top left' } })
         const zoom = delta => setDiagramZoom(value => Math.max(50, Math.min(200, value + delta)))
         const panProps = { tabIndex: 0, 'aria-label': '图表画布，滚轮缩放，拖拽移动，按 0 复位',
@@ -3791,9 +4892,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'b04-canvas-actions' },
             selected ? h('span', { role: 'status', className: `pangea-diagram-status ${selected.status || ''}` }, status) : null,
             selected && !generating ? h('button', { type: 'button', onClick: () => setDiagramPanel('versions') }, '版本与修改') : null,
-            preview && wideDiagram ? h('a', { className: 'b03-task-action', href: artifactUrl(selected, 'svg', true), download: `${selected.view_id}.svg` }, '导出 SVG') : null,
-            preview && !wideDiagram ? h('button', { type: 'button', ref: diagramFullscreenTriggerRef, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏') : null,
-            !selected ? h('button', { type: 'button', disabled: diagramBusy, onClick: create }, functions ? '生成函数与变量图' : `生成${DIAGRAM_LABELS[type]}`) : null))
+            selected?.session_id && !generating && !failed ? h('button', { type: 'button', disabled: diagramBusy, onClick: () => chooseDiagram(selected, { activateConversation: true }) }, '查看图表会话') : null,
+            preview && wideDiagram && !callGraph ? h('a', { className: 'b03-task-action', href: artifactUrl(selected, 'svg', true), download: `${selected.view_id}.svg` }, '导出 SVG') : null,
+            preview && !wideDiagram && !callGraph ? h('button', { type: 'button', ref: diagramFullscreenTriggerRef, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏') : null,
+            !selected && canCreate ? h('button', { type: 'button', disabled: diagramBusy, onClick: create }, functions ? '生成函数与变量图' : `生成${DIAGRAM_LABELS[type]}（精美导出）`) : null))
         const logs = selected ? h('aside', { className: 'b04-progress-log' }, h('h3', null, failed ? '生成记录与诊断' : '生成进展'),
           failed ? h(React.Fragment, null,
             selected.failure_stage ? field('失败阶段', selected.failure_stage) : null,
@@ -3805,9 +4907,9 @@ window.__ModuleLoader__.load({
           (selected.generation_events ?? []).map((event, index) => h('div', { key: index, className: 'b04-progress-row' },
             h('span', null, '•'), h('div', null, h('strong', null, event.stage || '生成进展'),
               h('p', null, event.error || event.error_summary || event.message || event.stop_reason || (event.at ? formatTime(event.at) : '正在进行'))))),
-          selected.session_id ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => chooseDiagram(selected) }, '查看图表会话') : null) : null
+          selected.session_id ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => chooseDiagram(selected, { activateConversation: true }) }, '查看图表会话') : null) : null
         const pending = selected && (generating || failed) && !preview
-        const canvas = h('section', { className: 'b04-canvas-wrap', 'aria-label': functions ? '函数与变量图工作区' : 'Archify 图表工作区' }, top,
+        const canvas = h('section', { className: 'b04-canvas-wrap', 'aria-label': functions ? '函数与变量图工作区' : '精美导出（实验）工作区' }, top,
           diagramError ? h('div', { role: 'alert', style: { ...styles.error, padding: '12px 20px' } }, diagramError) : null,
           selected?.candidate_unverified ? h('div', { className: 'pangea-diagram-caption' }, '最新修改尚未验证；当前预览对应上次验证的候选。',
             !generating ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-validate', { view_id: selected.view_id }) }, '验证最新候选') : null) : null,
@@ -3825,6 +4927,7 @@ window.__ModuleLoader__.load({
               previous ? h('button', { type: 'button', onClick: () => select(previous) }, '查看上一版本') : null,
               generating ? h('button', { type: 'button', disabled: diagramBusy, onClick: () => diagramAction('architecture-stop', { view_id: selected.view_id }) }, '停止生成') : null,
               failed ? h('button', { type: 'button', onClick: () => setDiagramPanel('versions') }, '调整要求后重试') : null)), logs) :
+          preview && callGraph ? callGraphView(selected) :
           preview ? h('div', { className: `b04-canvas-grid${wideDiagram ? ' wide' : ''}` }, h('div', { className: 'b04-canvas', ...panProps }, frame(selected)),
             wideDiagram ? null : h('aside', { className: 'b04-canvas-aside' }, h('h3', null, '图表信息'),
               h('section', null, h('div', { style: styles.itemMeta }, '当前流程'), h('p', null, `${flow.display_id || flow.flow_id} · ${flow.title || '未命名流程'}`)),
@@ -3836,9 +4939,9 @@ window.__ModuleLoader__.load({
               h('section', null, h('strong', null, '源码依据'), h('p', null, flow.evidence?.map(item => item.location).filter(Boolean).join('、') || '见冻结输入与生成图表'),
                 flow.evidence?.[0] ? h('button', { type: 'button', className: 'b04-link', onClick: () => openFlowSource(flow.evidence[0].location, flow.title || '业务流程') }, '查看源码') : null),
               linkedItems(flow))) : h('div', { className: 'pangea-diagram-empty' }, h('strong', null, '尚未生成可预览图'),
-                h('p', null, selected?.error || '选择图表类型，为当前流程生成可视化视图。'),
-                h('button', { type: 'button', style: styles.primaryButton, disabled: diagramBusy, onClick: create }, '生成图表')),
-          h('div', { className: 'b04-canvas-foot' }, h('span', null, '滚轮缩放 · 拖拽移动 · 按 0 复位'), preview ? controls(selected, !wideDiagram) : null),
+                h('p', null, selected?.error || (canCreate ? '选择图表类型，为当前流程生成可视化视图。' : '精美导出（实验）未开启：设置 PANGEA_ARCHIFY_EXPERIMENTAL=1 后可生成。')),
+                canCreate ? h('button', { type: 'button', style: styles.primaryButton, disabled: diagramBusy, onClick: create }, '生成图表') : null),
+          callGraph ? null : h('div', { className: 'b04-canvas-foot' }, h('span', null, '滚轮缩放 · 拖拽移动 · 按 0 复位'), preview ? controls(selected, !wideDiagram) : null),
           selected && !pending ? h('details', { className: 'pangea-diagram-caption' }, h('summary', null, '生成记录与诊断'),
             selected.error || selected.validation_error ? h('p', { role: 'status' }, selected.validation_error || selected.error) : null,
             selected.diagnostic_path ? chip('打开完整生成日志', () => openSidebarFile(selected.diagnostic_path)) : null,
@@ -3853,7 +4956,7 @@ window.__ModuleLoader__.load({
             h('p', { style: styles.itemMeta }, '修改会生成新版本，已有图表与分析原文保留。')),
           h('form', { className: 'b04-version-form', onSubmit: modify },
             h('div', { style: styles.row }, h('strong', null, '你希望这张图怎样改进？'), h('span', { style: styles.badge }, selected ? `基于 ${diagramVersion(selected, views)}` : '新图')),
-            selected && preview ? h('div', { className: 'b04-canvas', style: { height: 174, minHeight: 174, marginTop: 18, overflow: 'hidden' } },
+            selected && preview && !callGraph ? h('div', { className: 'b04-canvas', style: { height: 174, minHeight: 174, marginTop: 18, overflow: 'hidden' } },
               h('iframe', { title: '当前版本缩略预览', src: artifactUrl(selected, 'html'), sandbox: 'allow-scripts allow-downloads', style: { height: 174, minHeight: 174 } })) : null,
             h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 20 } },
               field('图表类型', selected ? diagramName(selected) : DIAGRAM_LABELS[type]), field('分析范围', `${flow.display_id || flow.flow_id} · ${flow.title || '当前流程'}`)),
@@ -3862,10 +4965,10 @@ window.__ModuleLoader__.load({
               placeholder: '例如：展开分支，调整层级，标注关键变量变化。', onChange: event => setDiagramInstruction(event.target.value) }),
             h('div', { style: styles.row }, h('span', { style: styles.itemMeta }, selected ? `保留 ${diagramVersion(selected, views)}，生成新的版本` : '生成当前类型的第一版'),
               h('div', { className: 'b04-canvas-actions' }, h('button', { type: 'button', onClick: () => setDiagramPanel('canvas') }, '返回图表'),
-                h('button', { type: selected ? 'submit' : 'button', disabled: diagramBusy || generating || (selected && !diagramInstruction.trim()),
-                  onClick: selected ? undefined : create, style: { background: '#c7000b', color: '#fff', borderColor: '#c7000b' } }, selected ? '生成修改版' : '生成新图')))))
+                canCreate ? h('button', { type: selected ? 'submit' : 'button', disabled: diagramBusy || generating || (selected && !diagramInstruction.trim()),
+                  onClick: selected ? undefined : create, style: { background: '#c7000b', color: '#fff', borderColor: '#c7000b' } }, selected ? '生成修改版' : '生成新图') : null))))
         return h(React.Fragment, null, types, diagramPanel === 'versions' ? versionPanel : canvas,
-          selected && preview ? h('dialog', { ref: diagramDialogRef, className: 'pangea-diagram-dialog b04-fullscreen', 'aria-label': '图表全屏查看',
+          selected && preview && !callGraph ? h('dialog', { ref: diagramDialogRef, className: 'pangea-diagram-dialog b04-fullscreen', 'aria-label': '图表全屏查看',
             onClose: () => { setDiagramFullscreen(false); diagramFullscreenTriggerRef.current?.focus() } },
             h('div', { className: 'b04-canvas-head' }, h('div', null, h('small', null, 'PANGEA / 图表预览'), h('strong', null, `${flow.title || '当前流程'} / ${diagramVersion(selected, views)}`)),
               h('div', { className: 'b04-canvas-actions' }, h('a', { className: 'b04-link', href: artifactUrl(selected, 'svg', true), download: `${selected.view_id}.svg` }, '导出 SVG'),
@@ -3952,13 +5055,33 @@ window.__ModuleLoader__.load({
 
       function renderFlows() {
         const query = flowQuery.trim().toLowerCase()
-        const filtered = businessFlows.filter(item => !query || [item.display_id, item.flow_id, item.title, item.description, item.entry].join(' ').toLowerCase().includes(query))
+        const flowRank = item => item?.raw_text != null ? 2 : item?.role === 'main' ? 0 : 1
+        const ranked = businessFlows.map((item, order) => ({ item, order })).sort((a, b) => flowRank(a.item) - flowRank(b.item) || a.order - b.order)
+        const attached = ranked.map(entry => {
+          const { item } = entry
+          const target = item.attach_to?.flow_id
+          const parents = target ? ranked.filter(({ item: parent }) => parent !== item && flowRank(parent) !== 2 && (parent.display_id === target || parent.flow_id === target)) : []
+          const parent = parents.find(({ item: parent }) => parent.unit_id === item.unit_id) ?? parents[0]
+          const steps = parent?.item.mainline_steps ?? []
+          const nodeIndex = steps.findIndex(step => step.step_id === item.attach_to?.node_id)
+          return { ...entry, parentOrder: parent ? ranked.indexOf(parent) : -1, nodeOrder: nodeIndex < 0 ? steps.length : nodeIndex }
+        })
+        const ordered = attached.sort((a, b) => flowRank(a.item) - flowRank(b.item)
+          || (flowRank(a.item) === 1 ? Number(a.parentOrder < 0) - Number(b.parentOrder < 0) || a.parentOrder - b.parentOrder || a.nodeOrder - b.nodeOrder : 0)
+          || a.order - b.order).map(entry => entry.item)
+        const filtered = ordered.filter(item => !query || [item.display_id, item.flow_id, item.title, item.description, item.entry].join(' ').toLowerCase().includes(query))
+        const roleText = item => item?.raw_text != null ? '无法解析' : item?.role === 'main' ? '主流程'
+          : item?.attach_to?.flow_id ? `挂接到 ${item.attach_to.flow_id}${item.attach_to.node_id ? ` / 节点 ${item.attach_to.node_id}` : ''}` : '未挂接'
         const flow = filtered.find(item => item.flow_id === flowSelection) ?? filtered[0]
-        const scope = `${current?.run_id}:${flow?.flow_id}`
-        const reader = flowReader.scope === scope ? flowReader : { scope, view: 'reader', step: '', query: '', page: 1 }
-        const steps = Array.isArray(flow?.mainline_steps) ? flow.mainline_steps : []
-        const branches = Array.isArray(flow?.branches) ? flow.branches : []
-        const branch = branches.find(item => item.branch_id === flowBranchDetail || item.branch_id === branchSelection || item.branch_id === reader.query)
+        const cardScope = item => `${current?.run_id}:${item?.flow_id}`
+        const cardId = item => `pangea-flow-card-${encodeURIComponent(cardScope(item))}`
+        const selectFlow = item => {
+          const scope = cardScope(item)
+          setFlowSelection(item.flow_id); setFlowBranchDetail(''); setBranchSelection('')
+          setFlowReader({ scope, view: 'reader', step: '', query: '', page: 1 })
+          setFlowExpanded(value => ({ ...value, [scope]: true }))
+          if (typeof document !== 'undefined') window.setTimeout(() => document.getElementById(cardId(item))?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
+        }
         const evidenceLocation = item => {
           const direct = item?.source_evidence ?? item?.source_location ?? item?.location
           if (typeof direct === 'string') return direct
@@ -3967,21 +5090,40 @@ window.__ModuleLoader__.load({
         }
         const sourceButton = (item, label, origin) => { const location = evidenceLocation(item); return location ? h('button', {
           type: 'button', className: 'b04-link', onClick: () => openFlowSource(location, origin), title: location }, label) : null }
-        const unbound = item => !steps.some(step => step.step_id === item.from_step_id)
-        const filteredBranches = branches.filter(item => (!reader.step || (reader.step === '__unbound' ? unbound(item) : item.from_step_id === reader.step))
+        const readingState = flow => {
+          const scope = cardScope(flow)
+          const reader = flowReader.scope === scope ? flowReader : { scope, view: 'reader', step: '', query: '', page: 1 }
+          const steps = Array.isArray(flow?.mainline_steps) ? flow.mainline_steps : []
+          const branches = Array.isArray(flow?.branches) ? flow.branches : []
+          const unbound = item => !steps.some(step => step.step_id === item.from_step_id)
+          const filteredBranches = branches.filter(item => (!reader.step || (reader.step === '__unbound' ? unbound(item) : item.from_step_id === reader.step))
           && (!reader.query || [item.branch_id, item.condition, item.processing, item.result].join(' ').toLowerCase().includes(reader.query.toLowerCase()))
           && (!branchFilter || (branchFilter === 'no_case' ? !item.linked_test_case_ids?.length
             : branchFilter === 'unresolved' ? item.status === 'unresolved'
               : branchFilter === 'high_risk' ? (item.linked_risk_ids ?? []).some(id => ['P0', 'P1', 'critical', 'high'].includes(riskById.get(id)?.priority || riskById.get(id)?.severity)) : item.kind === branchFilter)))
-        const branchPages = Math.max(1, Math.ceil(filteredBranches.length / 12))
-        const branchPage = Math.min(reader.page, branchPages)
-        const visibleBranches = filteredBranches.slice((branchPage - 1) * 12, branchPage * 12)
+          const branchPages = Math.max(1, Math.ceil(filteredBranches.length / 12))
+          const branchPage = Math.min(reader.page, branchPages)
+          const visibleBranches = filteredBranches.slice((branchPage - 1) * 12, branchPage * 12)
+          return { scope, reader, steps, branches, unbound, filteredBranches, branchPages, branchPage, visibleBranches }
+        }
+        const { scope, reader, steps, branches } = readingState(flow)
+        const branch = branches.find(item => item.branch_id === flowBranchDetail || item.branch_id === branchSelection || item.branch_id === reader.query)
+        const overview = h('section', { className: 'b04-flow-card', 'aria-label': '流程总览', style: { marginBottom: 16 } },
+          h('h2', null, '流程总览'),
+          h('p', { className: 'b04-flow-description' }, `主流程 ${ordered.filter(item => flowRank(item) === 0).length} 个 · 子流程 ${ordered.filter(item => flowRank(item) === 1).length} 个 · 无法解析 ${ordered.filter(item => flowRank(item) === 2).length} 个`),
+          h('ul', { style: { paddingLeft: 20, margin: 0 } }, ordered.map(item => h('li', { key: item.flow_id, style: { marginTop: 8 } },
+            h('button', { type: 'button', className: 'b04-link', onClick: () => selectFlow(item), 'aria-label': `定位流程 ${item.display_id || item.flow_id}` }, `${item.display_id || item.flow_id} · ${item.title || '未命名流程'}`),
+            h('span', null, ` · ${flowRank(item) === 2 ? '无法解析' : item.role === 'main' ? '主流程' : `子流程 · ${roleText(item)}`}${item.unit_id ? ` · ${item.unit_id}` : ''}`),
+            item.description ? h('p', { style: { margin: '4px 0', color: '#64748b', fontSize: 13 } }, item.description) : null))),
+          !ordered.length ? h('p', null, '流程发布后将在这里汇总。') : null)
         const nav = h('aside', { className: 'b04-flow-nav', 'aria-label': '业务流程列表' },
           h('div', { className: 'b04-flow-nav-label' }, `业务流程 · ${businessFlows.length}`),
-          filtered.map((item, index) => h('button', { key: item.flow_id, type: 'button', className: 'b04-flow-nav-item', 'aria-current': item.flow_id === flow?.flow_id,
-            onClick: () => { setFlowSelection(item.flow_id); setFlowBranchDetail(''); setBranchSelection('') } },
-            h('strong', null, `${String(index + 1).padStart(2, '0')}  ${item.title || '未命名流程'}`),
-            h('small', null, `${item.entry || item.display_id || item.flow_id} · ${(item.mainline_steps ?? []).length} 个步骤`))),
+          filtered.map((item, index) => h(React.Fragment, { key: item.flow_id },
+            flowRank(item) === 2 && flowRank(filtered[index - 1]) !== 2 ? h('div', { className: 'b04-flow-nav-label', style: { marginTop: 12 } }, '无法解析的流程') : null,
+            h('button', { type: 'button', className: 'b04-flow-nav-item', 'aria-current': item.flow_id === flow?.flow_id,
+              onClick: () => selectFlow(item) },
+              h('strong', null, `${String(index + 1).padStart(2, '0')}  ${item.title || '未命名流程'}`),
+              h('small', null, `${item.entry || item.display_id || item.flow_id} · ${(item.mainline_steps ?? []).length} 个步骤 · ${roleText(item)}`)))),
           !filtered.length && query ? h('p', { style: styles.empty }, '没有匹配的流程。') : null,
           h('details', { className: 'b04-flow-nav-search' }, h('summary', null, '搜索流程'),
             h('input', { 'aria-label': '搜索业务流程', value: flowQuery, placeholder: '搜索流程…', onChange: event => setFlowQuery(event.target.value),
@@ -3996,56 +5138,87 @@ window.__ModuleLoader__.load({
               key: view, type: 'button', 'aria-label': aria, 'aria-pressed': reader.view === view, disabled: diagramBusy,
               onClick: () => { setFlowBranchDetail(''); return changeFlowView(reader, view, flow) },
             }, label)))) : null
-        const readerBody = flow ? h('article', { className: 'b04-flow-card', 'aria-label': '业务流程文字阅读' },
+        function renderFlowReader(flow) {
+          const { scope, reader, steps, branches, unbound, filteredBranches, branchPages, branchPage, visibleBranches } = readingState(flow)
+          const updateReader = next => { setFlowSelection(flow.flow_id); setFlowReader(next) }
+          const openBranch = id => { setFlowSelection(flow.flow_id); setFlowBranchDetail(id); setBranchSelection(id); updateReader({ ...reader, view: 'reader' }) }
+          const nodeLabel = id => steps.find(item => item.step_id === id)?.title || flow.nodes?.find(item => item.id === id)?.label || id || '—'
+          const cell = { padding: '8px 10px', textAlign: 'left', verticalAlign: 'top', borderBottom: '1px solid #e8ece6', overflowWrap: 'anywhere' }
+          return h('article', { className: 'b04-flow-card', 'aria-label': '业务流程文字阅读' },
           h('div', { className: 'b04-overline' }, `FLOW ${flow.display_id || flow.flow_id} / ${flow.unit_id || '当前单元'}`),
           h('h2', null, flow.title || '业务流程'),
-          h('p', { className: 'b04-flow-description' }, flow.description || flow.entry || '阅读主干步骤与条件分支。'),
+          h('h3', null, '概述'), h('p', { className: 'b04-flow-description' }, flow.description || flow.entry || '阅读主干步骤与条件分支。'),
           h('div', { className: 'b04-flow-badges' }, h('span', null, `${steps.length} 个主干步骤`), h('span', null, `${branches.length} 条分支`),
             flow.entry ? h('span', null, `入口 ${flow.entry}`) : null, flow.document_status === 'live_draft' ? h('span', null, '分析草稿') : null),
           linkedItems(flow),
           flow.projection_warnings?.length ? h('div', { role: 'status', style: styles.notice }, flow.projection_warnings.join('；')) : null,
-          steps.length ? h('div', { className: 'b04-flow-sequence' }, steps.map((item, index) => h('div', { key: item.step_id || index, id: `b04-flow-step-${item.step_id}`, className: 'b04-flow-step', 'aria-current': reader.step === item.step_id ? 'step' : undefined },
+          flow.structure_errors?.length ? h('section', { 'aria-label': '流程结构问题', style: { ...styles.notice, background: '#fff8e1' } },
+            h('strong', null, `结构问题 ${flow.structure_errors.length} 项（已跳过无法绘制的部分）`),
+            h('ul', { style: { margin: '6px 0 0', paddingLeft: 18 } }, flow.structure_errors.map((error, index) => h('li', { key: index }, error)))) : null,
+          flow.raw_text != null ? h('section', { 'aria-label': '流程原文' }, h('h3', null, '流程原文'),
+            h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: '12px/1.6 Consolas,monospace', background: '#fafcf8', border: '1px solid #e2e7e0', borderRadius: 8, padding: 12 } }, flow.raw_text || '（空）')) : null,
+          h('h3', null, '主干步骤'),
+          steps.length ? h('div', { className: 'b04-flow-sequence' }, steps.map((item, index) => h('div', { key: item.step_id || index, id: `${cardId(flow)}-step-${encodeURIComponent(item.step_id)}`, className: 'b04-flow-step', 'aria-current': reader.step === item.step_id ? 'step' : undefined },
             h('span', { className: 'b04-flow-step-num' }, String(index + 1).padStart(2, '0')),
             h('div', null, h('strong', null, item.title || item.step_id || `步骤 ${index + 1}`),
               h('p', null, item.processing || item.external_action || item.state_change || item.external_observation || '原记录未提供步骤说明。'),
               branches.filter(edge => edge.from_step_id === item.step_id && edge.branch_id === branches[0]?.branch_id).map(edge => h('button', { key: edge.branch_id, type: 'button', className: 'b04-branch-choice',
-                'aria-label': `打开分支 ${edge.branch_id}`, onClick: () => { setFlowBranchDetail(edge.branch_id); setBranchSelection(edge.branch_id) } },
+                'aria-label': `打开分支 ${edge.branch_id}`, onClick: () => openBranch(edge.branch_id) },
                 h('span', null, edge.branch_id), h('span', null, h('strong', null, edge.condition || '条件待确认'),
                   h('small', null, `${edge.processing || edge.result || '查看分支详情'} → ${steps.find(step => step.step_id === edge.to_step_id)?.title || edge.terminal_result || '结束待确认'}`)),
                 h('span', { style: { marginLeft: 'auto', color: '#9c8c80' } }, '›')))),
             h('div', { className: 'b04-flow-ref' }, sourceButton(item, evidenceLocation(item)?.split(/[\\/]/).at(-1) || '查看源码', `业务流程 · ${flow.title || flow.display_id} · ${item.step_id}`))))) :
-            h('section', { className: 'b04-flow-sequence', 'aria-label': '业务路径阅读' },
+            h('section', { className: 'b04-flow-sequence', 'aria-label': '主干步骤说明' },
               h('p', null, flow.paths?.length ? '原文提供业务路径，但尚无可解析节点，暂不能据此绘制流程图。' : '尚无可解析的主干步骤，分析可能仍在发布中。'),
-              flow.entry_points ? renderReadableBody(flow.entry_points, true) : null,
-              flow.text ? renderReadableBody(flow.text, true) : null,
-              flow.paths?.length ? flow.paths.map((path, index) => h('div', { key: path.path_id || index }, h('h3', null, path.title || path.path_id || `路径 ${index + 1}`), renderReadableBody(path, true), linkedItems(path))) : null),
+              flow.text ? renderReadableBody(flow.text, true) : null),
+          h('section', { 'aria-label': '分支与异常' }, h('h3', null, '分支与异常'),
+            visibleBranches.length ? h('table', { 'aria-label': '分支列表', style: { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 13 } },
+              h('thead', null, h('tr', null, ['从', '条件', '处理', '去向'].map(label => h('th', { key: label, style: cell }, label)))),
+              h('tbody', null, visibleBranches.map(item => h('tr', { key: item.branch_id },
+                h('td', { style: cell }, nodeLabel(item.from_step_id)),
+                h('td', { style: cell }, h('button', { type: 'button', className: 'b04-link', 'aria-label': `查看分支 ${item.branch_id}`, onClick: () => openBranch(item.branch_id) }, `${item.branch_id} · ${item.condition || '条件待确认'}`)),
+                h('td', { style: cell }, item.processing || item.result || '原记录未提供说明', linkedItems(item)),
+                h('td', { style: cell }, item.to_step_id ? nodeLabel(item.to_step_id) : item.terminal_result || '未记录')))))
+              : h('p', { style: styles.itemMeta }, branches.length ? '没有符合当前筛选的分支。' : '原记录未提供分支与异常。'),
           h('details', { style: { marginTop: 24 } }, h('summary', { style: { cursor: 'pointer', fontSize: 12, color: '#8b9588' } }, '查看分析原文与全部分支'),
             renderRecordBody(flow),
             h('div', { className: 'b04-canvas-actions', style: { margin: '14px 0' } },
-              h('button', { type: 'button', 'aria-label': '查看全部分支', onClick: () => setFlowReader({ ...reader, step: '', page: 1 }) }, '全部步骤'),
+              h('button', { type: 'button', 'aria-label': '查看全部分支', onClick: () => updateReader({ ...reader, step: '', page: 1 }) }, '全部步骤'),
               steps.map(item => h('button', { key: item.step_id, type: 'button', 'aria-label': `查看步骤 ${item.step_id} 的分支`,
-                onClick: () => setFlowReader({ ...reader, step: item.step_id, page: 1 }) }, item.title || item.step_id)),
+                onClick: () => updateReader({ ...reader, step: item.step_id, page: 1 }) }, item.title || item.step_id)),
               branches.some(unbound) ? h('button', { type: 'button', 'aria-label': '查看未挂接分支',
-                onClick: () => setFlowReader({ ...reader, step: '__unbound', page: 1 }) }, '未挂接分支') : null),
+                onClick: () => updateReader({ ...reader, step: '__unbound', page: 1 }) }, '未挂接分支') : null),
             h('div', { className: 'b04-canvas-actions', style: { margin: '14px 0' } },
               h('input', { 'aria-label': '搜索分支', value: reader.query, placeholder: '搜索条件、处理或回接…', style: { ...styles.search, width: 240, margin: 0 },
-                onChange: event => setFlowReader({ ...reader, query: event.target.value, page: 1 }) }),
+                onChange: event => updateReader({ ...reader, query: event.target.value, page: 1 }) }),
               h('select', { 'aria-label': '筛选分支', value: branchFilter, style: { ...styles.search, width: 150, margin: 0 },
-                onChange: event => { setBranchFilter(event.target.value); setFlowReader({ ...reader, page: 1 }) } },
+                onChange: event => { setBranchFilter(event.target.value); updateReader({ ...reader, page: 1 }) } },
                 [['', '全部分支'], ...(riskEnabled ? [['high_risk', '关联高风险']] : []), ['normal', '正常'], ['exception', '异常'], ['timeout', '超时'], ['retry', '重试'], ['recovery', '恢复'], ['concurrency', '并发'], ['unresolved', '待确认'], ['no_case', '未关联用例']]
                   .map(([value, label]) => h('option', { key: value, value }, label)))),
-            h('div', { 'aria-label': '分支列表' }, visibleBranches.map(item => h('div', { key: item.branch_id },
-              h('button', { type: 'button', className: 'b04-branch-choice',
-                'aria-label': `查看分支 ${item.branch_id}`, onClick: () => { setFlowBranchDetail(item.branch_id); setBranchSelection(item.branch_id) } },
-                `${item.branch_id} · ${item.condition || '条件待确认'}`), linkedItems(item)))),
             h('div', { className: 'b04-canvas-actions', style: { marginTop: 10 } }, h('span', { style: styles.itemMeta }, `第 ${branchPage} / ${branchPages} 页 · 共 ${filteredBranches.length} 条`),
               h('button', { type: 'button', 'aria-label': '绘制本页分支', disabled: !visibleBranches.length || diagramBusy, onClick: async () => {
-                setFlowReader({ ...reader, view: 'diagram' })
+                setFlowHighlight({ scope, ids: visibleBranches.map(item => item.branch_id) })
+                updateReader({ ...reader, view: 'diagram' })
+                if (!archifyOn) return
                 await diagramAction('architecture-create', { type: 'workflow', flow_id: flow.flow_id, branch_ids: visibleBranches.map(item => item.branch_id),
                   instruction: `绘制局部分支图：${flow.title || flow.flow_id}。本页 ${visibleBranches.length} 条，筛选结果 ${filteredBranches.length} 条，第 ${branchPage}/${branchPages} 页。分支编号：${visibleBranches.map(item => item.branch_id).join('、')}。按来源步骤排列，清楚标出回接或终止；未提供的关系标为待确认。` })
               } }, '绘制本页分支'),
-              h('button', { type: 'button', 'aria-label': '上一页分支', disabled: branchPage === 1, onClick: () => setFlowReader({ ...reader, page: branchPage - 1 }) }, '上一页'),
-              h('button', { type: 'button', 'aria-label': '下一页分支', disabled: branchPage === branchPages, onClick: () => setFlowReader({ ...reader, page: branchPage + 1 }) }, '下一页')))) : null
+              h('button', { type: 'button', 'aria-label': '上一页分支', disabled: branchPage === 1, onClick: () => updateReader({ ...reader, page: branchPage - 1 }) }, '上一页'),
+              h('button', { type: 'button', 'aria-label': '下一页分支', disabled: branchPage === branchPages, onClick: () => updateReader({ ...reader, page: branchPage + 1 }) }, '下一页')))),
+          h('section', { 'aria-label': '业务路径阅读' }, h('h3', null, '路径'),
+            flow.entry_points ? renderReadableBody(flow.entry_points, true) : null,
+            flow.paths?.length ? flow.paths.map((path, index) => h('div', { key: path.path_id || index },
+              h('h4', null, `${path.path_id || `P-${index + 1}`}${path.title ? ` · ${path.title}` : ''}`),
+              Array.isArray(path.node_ids) && path.node_ids.length ? h(React.Fragment, null,
+                h('p', null, `${path.condition ? `${path.condition} → ` : ''}${path.node_ids.map(nodeLabel).join(' → ')}`),
+                path.explanation ? h('p', null, path.explanation) : null) : renderReadableBody(path, true), linkedItems(path)))
+              : h('p', { style: styles.itemMeta }, '原记录未提供独立路径。')),
+          h('section', { 'aria-label': '流程图示' }, h('h3', null, '图示'),
+            h(FlowGraphView, { key: flow.flow_id, flow, idPrefix: `pf-${ordered.indexOf(flow)}`, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] })),
+          h('details', { 'aria-label': '流程源码依据', style: { marginTop: 20 } }, h('summary', { style: { cursor: 'pointer' } }, '源码依据'),
+            evidenceText(flow.source_evidence ?? flow.evidence).map((location, index) => h('p', { key: index }, h('button', { type: 'button', className: 'b04-link', onClick: () => openFlowSource(location, `业务流程 · ${flow.title || flow.display_id}`) }, location))),
+            !evidenceText(flow.source_evidence ?? flow.evidence).length ? h('p', { style: styles.itemMeta }, '原记录未提供流程级源码依据，可查看各步骤引用。') : null))
+        }
         const definition = (label, value) => [h('dt', { key: `${label}:label` }, label), h('dd', { key: `${label}:value` }, value || '原记录未提供说明')]
         const branchBody = branch ? h('div', { className: 'b04-branch-detail' },
           h('article', { className: 'b04-flow-card', 'aria-label': '分支详情' },
@@ -4057,7 +5230,7 @@ window.__ModuleLoader__.load({
               ...definition('进入条件', branch.condition), ...definition('内部处理', branch.processing),
               ...definition('回接步骤', branch.to_step_id ? h(React.Fragment, null,
                 `${branch.to_step_id} · ${steps.find(item => item.step_id === branch.to_step_id)?.title || '目标步骤'} `,
-                h('button', { type: 'button', className: 'b04-link', onClick: () => { setFlowBranchDetail(''); setBranchSelection(''); setFlowReader({ ...reader, view: 'reader', step: branch.to_step_id }); if (typeof document !== 'undefined') setTimeout(() => document.getElementById(`b04-flow-step-${branch.to_step_id}`)?.scrollIntoView({ block: 'center' }), 0) } }, '定位步骤')) : branch.terminal_result || '未记录'),
+                h('button', { type: 'button', className: 'b04-link', onClick: () => { setFlowBranchDetail(''); setBranchSelection(''); setFlowExpanded(value => ({ ...value, [scope]: true })); setFlowReader({ ...reader, view: 'reader', step: branch.to_step_id }); if (typeof document !== 'undefined') window.setTimeout(() => document.getElementById(`${cardId(flow)}-step-${encodeURIComponent(branch.to_step_id)}`)?.scrollIntoView({ block: 'center' }), 0) } }, '定位步骤')) : branch.terminal_result || '未记录'),
               ...definition('外部表现', branch.external_observation || branch.result)),
             h('div', { style: { borderTop: '1px solid #e8ece6', paddingTop: 16 } },
               h('span', { style: styles.itemMeta }, `源码依据 · ${evidenceLocation(branch) || evidenceLocation(flow) || '当前冻结输入'}`),
@@ -4098,10 +5271,18 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => navigate({ type: 'workflow' }) }, '查看运行过程'),
               current?.artifacts?.source_snapshot_manifest ? h('button', { type: 'button', style: styles.button,
                 onClick: () => openSidebarFile(current.artifacts.source_snapshot_manifest) }, '检查冻结输入') : null)))
-        return h(React.Fragment, null, flow ? reader.view === 'reader' && !branch
-          ? h('div', { className: 'b04-flow-layout' }, nav, h('div', { style: { minWidth: 0 } }, modebar, readerBody))
+        return h(React.Fragment, null, overview, flow ? reader.view === 'reader' && !branch
+          ? h('div', { className: 'b04-flow-layout' }, nav, h('div', { style: { minWidth: 0 } }, modebar,
+            filtered.map(item => h('details', { key: cardScope(item), id: cardId(item), 'data-flow-id': item.flow_id, 'aria-label': `流程卡片 ${item.display_id || item.flow_id}`,
+              open: flowExpanded[cardScope(item)] ?? item.role === 'main', style: { marginBottom: 16, border: '1px solid #e2e7e0', borderRadius: 10 },
+              onToggle: event => { const open = event.currentTarget.open; setFlowExpanded(value => value[cardScope(item)] === open ? value : { ...value, [cardScope(item)]: open }) } },
+              h('summary', { style: { cursor: 'pointer', padding: '14px 18px', fontWeight: 600 } }, `${item.display_id || item.flow_id} · ${item.title || '未命名流程'} · ${flowRank(item) === 2 ? '无法解析' : item.role === 'main' ? '主流程' : `子流程 · ${roleText(item)}`}`),
+              renderFlowReader(item)))))
           : h('div', null, modebar, reader.view === 'functions' ? renderDiagrams(flow, 'function_variables')
-            : reader.view === 'diagram' ? renderDiagrams(flow) : branchBody) : empty,
+            : reader.view === 'diagram' ? h('div', null,
+              h(FlowGraphView, { key: flow.flow_id, flow, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] }),
+              archifyOn || matchingDiagrams(flow, 'standard').length ? h('details', { 'aria-label': '历史图表与实验导出', style: { marginTop: 18 } },
+                h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, archifyOn ? '精美导出（实验）' : '历史图表'), renderDiagrams(flow)) : null) : branchBody) : empty,
           renderFlowSourceDrawer())
       }
 
@@ -4526,7 +5707,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 10 }, onClick: () => jump('tasks') }, '返回任务列表')))
         const overviewTargetLabel = text(selectedTask.title, text(selectedTask.target, current?.target ?? '分析任务')).replace(/\s*分析\s*$/, '')
         const overviewRunMeta = [
-          selectedTask.repository && current?.target ? `${selectedTask.repository} / ${current.target}` : selectedTask.repository ?? current?.target,
+          [selectedTask.repository || current?.repository || '当前仓库', selectedTask.source_scope?.join('、')].filter(Boolean).join(' / '),
           current?.run_id ? h('span', { className: 'mono' }, taskRunLabel(current.run_id)) : null,
           current?.started_at ? `${taskUpdatedLabel(current.started_at)} 开始` : null,
         ].filter(Boolean).flatMap((part, index) => index ? ['\u00a0 · \u00a0', part] : [part])
@@ -4539,7 +5720,10 @@ window.__ModuleLoader__.load({
         const overviewPageHero = h('section', { className: 'b03-overview-page-hero' },
           h('div', { style: { minWidth: 0 } },
             h('h1', { className: 'pangea-page-heading', style: { ...styles.homeTitle, fontSize: 27, fontWeight: 650, lineHeight: 1.4, letterSpacing: '-0.5px', color: '#25292e' } }, selectedTask.title),
-            h('div', { className: 'b03-overview-run-meta' }, overviewRunMeta)),
+            h('div', { className: 'b03-overview-run-meta' }, overviewRunMeta),
+            current?.target || selectedTask.target ? h('details', { style: { marginTop: 8, fontSize: 12, color: '#68736a' } },
+              h('summary', { style: { cursor: 'pointer' } }, '分析目标'),
+              h('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: 800 } }, current?.target || selectedTask.target)) : null),
           h('div', { className: 'b03-overview-page-actions' },
             h('button', { type: 'button', style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 6 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-assistant')) }, runIcon('Sparkles'), 'AI 助手'),
             h('button', { type: 'button', style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 6 }, onClick: () => jump('tasks') }, runIcon('ArrowLeft'), '返回任务列表')))
@@ -5259,6 +6443,12 @@ window.__ModuleLoader__.load({
       const rootClassName = `pangea-companion${screen.type === 'home' ? ' b06-home-screen' : ''}${screen.type === 'tasks' ? ' b03-task-screen' : ''}${screen.type === 'overview' || flowScreen || resultScreen ? ' b03-overview-screen' : ''}${flowScreen ? ' b04-flow-screen' : ''}${resultScreen ? ' b05-result-screen' : ''}`
       const rootStyle = screen.type === 'home' || screen.type === 'tasks' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: '"Segoe UI", "Microsoft YaHei", sans-serif', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
       const flowTargetLabel = text(selectedTask?.title, text(selectedTask?.target, '分析任务')).replace(/\s*分析\s*$/, '')
+      const resultScopeLabel = [selectedTask?.repository || current?.repository || '当前仓库',
+        selectedTask?.source_scope?.join('、')].filter(Boolean).join(' / ')
+      const resultTarget = current?.target || selectedTask?.target
+      const resultTargetDetails = resultTarget ? h('details', { style: { marginTop: 8, fontSize: 12, color: '#68736a' } },
+        h('summary', { style: { cursor: 'pointer' } }, '分析目标'),
+        h('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: 800 } }, resultTarget)) : null
       const flowGraphType = flowScreen && flowReader?.view === 'diagram' && !['workflow', ''].includes(diagramType)
       const flowHeader = flowScreen ? h(React.Fragment, null,
         h('nav', { className: 'b03-overview-breadcrumb', 'aria-label': '当前位置' },
@@ -5268,7 +6458,7 @@ window.__ModuleLoader__.load({
         h('section', { className: 'b03-overview-page-hero b04-page-hero' },
           h('div', null, h('h1', { className: 'pangea-page-heading' }, selectedTask.title),
             h('div', { className: 'b03-overview-run-meta' },
-              `${selectedTask.repository || current?.repository || '当前仓库'} / ${current?.target || selectedTask.target || '分析目标'} · ${current?.run_id ? taskRunLabel(current.run_id) : '等待运行'}`)),
+              `${resultScopeLabel} · ${current?.run_id ? taskRunLabel(current.run_id) : '等待运行'}`), resultTargetDetails),
           flowBranchDetail ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { setFlowBranchDetail(''); setBranchSelection('') } }, runIcon('ArrowLeft'), '返回流程')
           : flowGraphType ? h('div', { className: 'b03-overview-page-actions' },
             h('button', { type: 'button', className: 'b03-task-action', onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-assistant')) }, runIcon('Sparkles'), 'AI 助手'),
@@ -5283,7 +6473,7 @@ window.__ModuleLoader__.load({
           h('span', { 'aria-current': 'page' }, screen.type === 'risk' ? '风险详情' : screen.type === 'risks' ? '风险列表' : screen.type === 'case' ? '测试用例详情' : screen.type === 'coverage-cases' ? '覆盖补测' : '测试用例列表')),
         h('section', { className: 'b03-overview-page-hero b05-page-hero' },
           h('div', null, h('h1', { className: 'pangea-page-heading' }, selectedTask.title),
-            h('div', { className: 'b03-overview-run-meta' }, `${selectedTask.repository || current?.repository || '当前仓库'} / ${current?.target || selectedTask.target || '分析目标'} · ${current?.run_id ? taskRunLabel(current.run_id) : '等待运行'}`)),
+            h('div', { className: 'b03-overview-run-meta' }, `${resultScopeLabel} · ${current?.run_id ? taskRunLabel(current.run_id) : '等待运行'}`), resultTargetDetails),
           h('div', { className: 'b03-overview-page-actions' },
             ['risk', 'case', 'coverage-cases'].includes(screen.type) ? h('button', { type: 'button', className: 'b03-task-action', onClick: goBack }, runIcon('ArrowLeft'), screen.type === 'risk' ? '返回风险' : screen.type === 'case' ? '返回用例' : '返回全部用例') : null,
             screen.type === 'coverage-cases' ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportOpen(true) } }, runIcon('FileText'), '导出全部用例') : null,
@@ -5370,6 +6560,10 @@ window.__ModuleLoader__.load({
     exports.diagramIsStale = diagramIsStale
     exports.buildAnalysisRequest = buildAnalysisRequest
     exports.CoverageBrowser = CoverageBrowser
+    exports.FlowGraphView = FlowGraphView
+    exports.CallGraphView = CallGraphView
+    exports.flowGraphInput = flowGraphInput
+    exports.svgTreeToReact = svgTreeToReact
     exports.flowContentState = flowContentState
     exports.renderReadableBody = renderReadableBody
     exports.collectionWarning = collectionWarning
