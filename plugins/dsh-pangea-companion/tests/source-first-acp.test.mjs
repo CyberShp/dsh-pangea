@@ -120,6 +120,74 @@ test('ACP output polling emits only new worker text, with no idle session labels
   }
 })
 
+test('planning soft budget warns without cancelling, replacing, or repeating the saved plan', async () => {
+  const events = [], calls = []
+  let finished = false, creations = 0, turns = 0, cancellations = 0, savedPlans = 0
+  const controller = new AbortController()
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', agentModel: 'requested/model',
+    cwd: '/work', dataRoot: testDataRoot, runId: 'planning-soft-budget', attemptId: 'attempt',
+    signal: controller.signal, planningSoftBudgetMs: 5, onEvent: async event => events.push(event),
+    runner: async ({ args }) => {
+      calls.push(args)
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[1] === 'next') return { run_id: 'planning-soft-budget', lifecycle_status: finished ? 'complete' : 'running',
+        actions: finished ? [] : [{ action_id: 'planning', role: 'planning', stage: 'unit_planning', action: 'dispatch_agent' }] }
+      if (args[1] === 'settle') finished = true
+      return {}
+    }, subagents: { start: async (_provider, request) => {
+      creations++
+      return { id: 'planner', remoteSessionId: 'remote-planner', result: Promise.resolve({ stopReason: 'completed' }),
+        readDiagnostics: () => ({ model: null, firstEventMs: 3, toolCalls: savedPlans, messageChunks: 0,
+          toolOutput: 'private-source', stderrSummary: 'private-stderr' }),
+        cancelTurn: async () => { cancellations++; return { confirmed: true } }, dispose: async () => {},
+        continuePrompt: async () => {
+          turns++; savedPlans++
+          request.onDiagnostic({ stage: 'tool_event', lastToolId: 'save-plan', lastToolStatus: 'completed',
+            lastToolName: 'private command content', lastToolDurationMs: 2 })
+          await new Promise(resolve => setTimeout(resolve, 30))
+          return { stopReason: 'completed', protocolStopReason: 'end_turn' }
+        } }
+    } } })
+  try {
+    assert.equal((await run.result).attentionRequired, false)
+    assert.equal(creations, 1); assert.equal(turns, 1); assert.equal(cancellations, 0); assert.equal(savedPlans, 1)
+    assert.equal(calls.filter(args => args[1] === 'settle').length, 1)
+    assert.ok(!calls.some(args => args.includes('paused')))
+    assert.equal(events.filter(event => event.stage === 'source_first_soft_budget').length, 1)
+    const [start, end] = events.filter(event => event.stage === 'source_first_acp_request')
+    assert.equal(start.request_id, end.request_id)
+    assert.equal(end.request_kind, 'session_prompt'); assert.equal(end.model_request_timing, 'unavailable')
+    assert.equal(end.first_token_ms, null); assert.equal(end.first_event_ms, 3)
+    assert.equal(end.model, null); assert.equal(end.requested_model, 'requested/model')
+    assert.equal(end.agent_session_id, 'planner'); assert.equal(end.remote_session_id, 'remote-planner')
+    assert.equal(end.run_id, 'planning-soft-budget'); assert.equal(end.attempt_id, 'attempt')
+    assert.ok(end.duration_ms >= 20); assert.equal(end.tool_calls, 1)
+    const tool = events.find(event => event.stage === 'source_first_tool_event')
+    assert.equal(tool.request_id, end.request_id); assert.equal(tool.execution_id, end.execution_id)
+    assert.doesNotMatch(JSON.stringify(events), /private-source|private-stderr|private command content/)
+  } finally { controller.abort(); await run.dispose() }
+})
+
+test('cancellation while recording request start does not dispatch a prompt', async () => {
+  const controller = new AbortController()
+  const events = []
+  let prompts = 0
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: '/work', dataRoot: testDataRoot,
+    runId: 'timing-cancel', signal: controller.signal,
+    onEvent: async event => { events.push(event); if (event.stage === 'source_first_acp_request' && event.status === 'start') controller.abort(new Error('stop while logging')) },
+    runner: async ({ args }) => args[1] === 'next' ? { run_id: 'timing-cancel', actions: [
+      { action_id: 'planning', action: 'dispatch_agent', role: 'planning', stage: 'unit_planning' }] } : { task: {} },
+    subagents: { start: async () => ({ id: 'cancel-planner', result: Promise.resolve({ stopReason: 'completed' }),
+      readDiagnostics: () => ({ firstEventMs: 999 }),
+      continuePrompt: async () => { prompts++; return { stopReason: 'completed' } }, dispose: async () => {} }) } })
+  try {
+    await assert.rejects(run.result, /stop while logging/); assert.equal(prompts, 0)
+    const end = events.find(event => event.stage === 'source_first_acp_request' && event.status === 'error')
+    assert.equal(end.request_dispatched, false); assert.equal(end.first_event_ms, null)
+  }
+  finally { await run.dispose() }
+})
+
 for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code']) {
   test(`${providerId} executes planning, analysis, blind/comparison and closure in exact original sessions`, async () => {
     const steps = [
@@ -128,7 +196,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
     ]
     let index = 0, created = 0
     const bindings = [], prompts = [], disposed = [], events = [], scratches = []
-    const action = () => ({ action_id: `run:${index}`, role: steps[index][0], stage: steps[index][1],
+    const action = () => ({ action_id: `run:${index}`, unit_id: `unit-${index}`, role: steps[index][0], stage: steps[index][1],
       action: steps[index][2] ? 'continue_agent' : 'dispatch_agent', task_id: steps[index][2], task_path: `/run/task-${index}.json` })
     const runner = async ({ args }) => {
       if (args[0] === 'task-open') return { task: { action_id: `run:${index}`, inputs: [], version_set_id: 'comparison-version-fixture' } }
@@ -162,6 +230,13 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code'
     assert.deepEqual(prompts.map(p => p[0]), ['worker-1', 'worker-2', 'worker-3', 'worker-3', 'worker-2'])
     for (const stage of ['source_first_file_permission', 'source_first_tool_event']) {
       assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.action_id), ['run:0', 'run:1', 'run:2', 'run:3', 'run:4'])
+      assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.action_stage), steps.map(step => step[1]))
+      assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.unit_id), steps.map((_, index) => `unit-${index}`))
+      for (const event of events.filter(event => event.stage === stage)) {
+        const request = events.find(item => item.stage === 'source_first_acp_request' && item.action_id === event.action_id)
+        assert.equal(event.execution_id, request.execution_id)
+        assert.equal(event.request_id, request.request_id)
+      }
     }
     assert.deepEqual(prompts.map(([, prompt]) => prompt.split('\n').find(line => line.startsWith('当前 worker 临时目录：')).split('。')[0]),
       [scratches[0], scratches[1], scratches[2], scratches[2], scratches[1]].map(directory => `当前 worker 临时目录：${directory}`))

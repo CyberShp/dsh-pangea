@@ -367,7 +367,7 @@ window.__ModuleLoader__.load({
               selected?.stage === 'analyzing' ? h(React.Fragment, null, h('p', { className: 'meta', style: { marginTop: 8 } }, '逐个分析源码单元，整理业务路径、风险与测试依据。'), node('div', 'divider'), node('div', 'row between', h('span', null, h('strong', { style: { fontSize: 23, fontWeight: 500 } }, current.analysis?.completed ?? 0, node('span', 'small muted', ` / ${current.analysis?.total ?? 0}`)), node('span', 'small muted', ' 分析单元已接受')),
                 node('div', 'segment', units.map((unit, i) => h('span', { key: unit.unit_id ?? i, className: unit.status === 'accepted' ? 'good' : unit.status === 'dispatched' && p.running && !error ? 'active' : '' }))))) : stageDescription ? h('p', { className: 'meta', style: { marginTop: 8 } }, stageDescription) : null),
               node('div', 'tabs-mini', ['activity', 'tasks'].map(value => h('button', { type: 'button', key: value, className: value === tab ? 'active' : '', 'aria-pressed': value === tab, onClick: () => { setSelection(selected?.step ?? ''); setTab(value) } }, value === 'activity' ? '活动记录' : '阶段任务'))),
-              node('div', 'activity', tab === 'tasks' ? h(React.Fragment, null, heading(selected?.stage === 'analyzing' ? '源码分析单元' : '阶段任务', badge(legacy ? `${tasks.length} 项任务` : `${tasks.filter(item => item.status === 'accepted').length} / ${tasks.length} 已接受`, legacy ? '' : 'good')),
+              h('div', { key: `${current.run_id}:${selected?.step}:${tab}`, className: 'activity', role: 'region', tabIndex: 0, 'aria-label': `${selected?.title ?? '当前阶段'} · ${tab === 'tasks' ? '阶段任务' : '活动记录'}` }, tab === 'tasks' ? h(React.Fragment, null, heading(selected?.stage === 'analyzing' ? '源码分析单元' : '阶段任务', badge(legacy ? `${tasks.length} 项任务` : `${tasks.filter(item => item.status === 'accepted').length} / ${tasks.length} 已接受`, legacy ? '' : 'good')),
                 tasks.length ? tasks.map(item => h('div', { key: item.unit_id ?? item.action_id, className: 'list-row', style: { padding: '10px 0' } }, node('span', 'small', item.title ?? item.task_id ?? item.action_id), badge(({ accepted: '已接受', settled: '待接受', dispatched: p.stopped ? '已停止' : p.failed && selected === active ? '执行已中断' : '执行中', pending: '等待', failed: '失败', paused: '待处理' })[item.status] ?? item.status, item.status === 'accepted' ? 'good' : 'neutral'))) : node('p', 'muted small', '当前阶段暂无任务。'),
                 selected?.artifacts?.length ? node('div', 'run-information', heading('阶段产物'), selected.artifacts.map(file => h('button', { key: file, className: 'link', onClick: () => openFile(file) }, artifactLabel(file)))) : null)
                 : h(React.Fragment, null, h('div', { className: 'row between small muted', style: { marginBottom: 19 } }, h('span', null, '阶段活动'), h('span', null, runIcon('ListFilter'), ' 关键事件')),
@@ -1086,21 +1086,21 @@ window.__ModuleLoader__.load({
       .pangea-diagram-compose > summary { font-size: 14px; font-weight: 600; cursor: pointer; }
       .pangea-diagram-dialog { width: calc(100vw - 48px); max-width: none; height: calc(100vh - 48px); max-height: none; padding: 0; border: 1px solid #dfe3ea; border-radius: 14px; color: #17191d; background: white; box-shadow: 0 20px 70px #10182840; }
       .pangea-diagram-dialog::backdrop { background: #18223088; }
-      .b04-flow-layout, .b04-flow-empty { display: grid; grid-template-columns: 244px minmax(0,1fr); gap: 22px; align-items: start; }
+      .b04-flow-empty { display: grid; grid-template-columns: 244px minmax(0,1fr); gap: 22px; align-items: start; }
       .b04-flow-nav, .b04-flow-card, .b04-flow-side, .b04-version-side, .b04-version-form { background: #fff; border: 1px solid #e1e6df; border-radius: 9px; }
       .b04-flow-nav { padding: 18px; min-height: 650px; box-sizing: border-box; }
-      .b04-flow-nav-search { border-top: 1px solid #e7e9e5; padding-top: 12px; margin-top: 12px; color: #8b9588; font-size: 11px; }
-      .b04-flow-nav-search summary { cursor: pointer; }
       .b04-flow-nav-label, .b04-overline { color: #919a91; font-size: 11px; letter-spacing: .09em; }
       .b04-flow-screen .b04-page-hero { margin: 0 0 0; padding: 0 0 19px; border-bottom: 0; }
       .b04-flow-screen .b04-page-hero h1 { margin: 0; color: #25292e; font-size: 27px; font-weight: 650; line-height: 1.4; }
       .b04-flow-screen .b03-overview-nav { margin-bottom: 25px !important; }
-      .b04-flow-screen .b04-flow-layout { margin-top: 0; }
       .b04-flow-nav-label { margin: 3px 0 13px; }
-      .b04-flow-nav-item { display: block; width: 100%; border: 0; border-radius: 8px; background: transparent; text-align: left; padding: 14px 12px; margin-bottom: 7px; color: #59625d; cursor: pointer; }
-      .b04-flow-nav-item strong { display: block; font-size: 13px; margin-bottom: 7px; }
-      .b04-flow-nav-item small { display: block; color: #929a93; font-size: 11px; line-height: 1.5; }
-      .b04-flow-nav-item[aria-current="true"] { background: #faf0f0; color: #922532; }
+      .b04-flow-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 4px 2px 10px; margin-bottom: 16px; border-bottom: 1px solid #e1e6df; }
+      .b04-flow-tab { flex: 0 0 auto; max-width: 320px; padding: 12px 16px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #59625d; cursor: pointer; text-align: left; }
+      .b04-flow-tab strong { display: block; font-size: 14px; white-space: normal; overflow-wrap: anywhere; }
+      .b04-flow-tab small { display: block; margin-top: 5px; font-size: 11px; }
+      .b04-flow-tab[aria-selected="true"] { border-color: #e9c7cb; background: #faf0f0; color: #922532; }
+      .b04-flow-tab:focus-visible, .b04-flow-panel:focus-visible { outline: 2px solid #922532; outline-offset: 2px; }
+      .b04-flow-panel { min-width: 0; min-height: 320px; max-height: calc(100vh - 340px); overflow: auto; scrollbar-gutter: stable; }
       .b04-flow-nav-foot { border-top: 1px solid #e7e9e5; padding-top: 17px; margin-top: 17px; font-size: 11px; line-height: 1.75; color: #919792; }
       .b04-modebar { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 18px; }
       .b04-modebar > div:first-child { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -1168,7 +1168,7 @@ window.__ModuleLoader__.load({
       .b04-source-overlay { position: fixed; inset: 0; z-index: 110; background: #17201866; }.b04-source-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(650px, 88vw); background: #fff; box-shadow: -16px 0 50px #18201424; display: flex; flex-direction: column; }.b04-source-drawer header, .b04-source-drawer footer { padding: 20px 24px; border-bottom: 1px solid #e6ebe3; }.b04-source-drawer footer { margin-top: auto; border-top: 1px solid #e6ebe3; border-bottom: 0; }.b04-source-drawer main { padding: 22px 24px; overflow: auto; }.b04-source-drawer .b04-code { overflow: auto; border: 1px solid #e2e7e0; border-radius: 8px; background: #fafcf8; font: 12px/1.7 Consolas,monospace; }.b04-source-drawer .b04-code-line { display: grid; grid-template-columns: 48px minmax(max-content,1fr); white-space: pre; }.b04-source-drawer .b04-code-line span:first-child { color: #9da69b; text-align: right; padding-right: 12px; border-right: 1px solid #e2e7e0; }.b04-source-drawer .b04-code-line code { padding: 0 12px; }.b04-source-drawer .b04-code-line[data-target="true"] { background: #f4e9e9; }
       .pangea-diagram-dialog.b04-fullscreen[open] { display: flex; flex-direction: column; }.b04-fullscreen .b04-canvas { flex: 1; min-height: 0; }.b04-fullscreen .b04-canvas iframe { height: 100%; min-height: 0; }
       @container pangea-panel (max-width: 1060px) { .b04-branch-detail { grid-template-columns: minmax(0,1fr) 250px; }.b04-canvas-grid { grid-template-columns: minmax(0,1fr) 210px; } }
-      @container pangea-panel (max-width: 760px) { .b04-flow-layout, .b04-flow-empty, .b04-branch-detail, .b04-version-grid, .b04-progress-shell { grid-template-columns: minmax(0,1fr); }.b04-flow-nav { min-height: 0; }.b04-canvas-grid { grid-template-columns: minmax(0,1fr); }.b04-canvas-aside { border-left: 0; border-top: 1px solid #e7ebe3; } }
+      @container pangea-panel (max-width: 760px) { .b04-flow-empty, .b04-branch-detail, .b04-version-grid, .b04-progress-shell { grid-template-columns: minmax(0,1fr); }.b04-flow-nav { min-height: 0; }.b04-canvas-grid { grid-template-columns: minmax(0,1fr); }.b04-canvas-aside { border-left: 0; border-top: 1px solid #e7ebe3; } }
       @container pangea-panel (max-width: 950px) {
         .pangea-metrics { grid-template-columns: repeat(2,minmax(0,1fr)) !important; }
         .pangea-home-columns { grid-template-columns: minmax(0,1fr) !important; min-height: 0 !important; }
@@ -1937,13 +1937,15 @@ window.__ModuleLoader__.load({
       image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`
     }
     const GRAPH_CANVAS_STYLE = { overflow: 'hidden', width: '100%', height: 'clamp(320px, 55vh, 560px)', boxSizing: 'border-box', border: '1px solid #e2e7e0', borderRadius: 8, background: '#fbfcfe', touchAction: 'none', userSelect: 'none' }
-    function useGraphZoom(label, graphWidth, graphHeight, graphKey) {
+    function useGraphZoom(label, graphWidth, graphHeight, graphKey, viewport) {
       const canvasRef = React.useRef(null)
-      const sizeRef = React.useRef({ width: 1, height: 1 })
+      const sizeRef = React.useRef(viewport?.size ?? { width: 1, height: 1 })
       const dragRef = React.useRef(null)
       const suppressClickRef = React.useRef(false)
       const [size, setSize] = React.useState(sizeRef.current)
-      const [camera, setCamera] = React.useState({ scale: 1, x: 0, y: 0, fit: true })
+      const [camera, setCamera] = React.useState(viewport?.camera ?? { scale: 1, x: 0, y: 0, fit: true })
+      const cameraRef = React.useRef(camera)
+      cameraRef.current = camera
       const [dragging, setDragging] = React.useState(false)
       const fitScale = bounds => Math.min(1, Math.max(1, bounds.width - 32) / Math.max(1, graphWidth), Math.max(1, bounds.height - 32) / Math.max(1, graphHeight))
       const centered = (scale, fit) => ({ scale, fit, x: (sizeRef.current.width - graphWidth * scale) / 2, y: (sizeRef.current.height - graphHeight * scale) / 2 })
@@ -1961,7 +1963,7 @@ window.__ModuleLoader__.load({
           const previous = sizeRef.current
           sizeRef.current = next
           setSize(next)
-          const reset = first
+          const reset = first && !viewport?.camera
           first = false
           setCamera(value => reset || value.fit ? centered(fitScale(next), true) : {
             ...value, x: value.x + (next.width - previous.width) / 2, y: value.y + (next.height - previous.height) / 2
@@ -1980,6 +1982,9 @@ window.__ModuleLoader__.load({
         canvas.addEventListener('wheel', wheel, { passive: false })
         return () => { observer.disconnect(); canvas.removeEventListener('wheel', wheel) }
       }, [graphWidth, graphHeight, graphKey])
+      React.useEffect(() => () => {
+        if (viewport) { viewport.camera = cameraRef.current; viewport.size = sizeRef.current }
+      }, [viewport])
       const change = factor => setCamera(value => zoomAt(value, factor, sizeRef.current.width / 2, sizeRef.current.height / 2))
       const endDrag = event => {
         const drag = dragRef.current
@@ -2025,13 +2030,13 @@ window.__ModuleLoader__.load({
     }
 
     /** Inline behavior-flow diagram rendered locally from the flow's nodes/edges/paths. */
-    function FlowGraphView({ flow, highlightBranchIds = [], idPrefix = 'pf' }) {
+    function FlowGraphView({ flow, highlightBranchIds = [], idPrefix = 'pf', viewport }) {
       const [pathId, setPathId] = React.useState('')
       const [selected, setSelected] = React.useState('')
       const [expandAll, setExpandAll] = React.useState(false)
       const graph = flowGraphInput(flow)
       const layout = layoutFlow(graph, { expandAll })
-      const { controls, panProps, sized } = useGraphZoom('流程图', layout.width, layout.height, flow?.flow_id)
+      const { controls, panProps, sized } = useGraphZoom('流程图', layout.width, layout.height, flow?.flow_id, viewport)
       if (!layout.nodes.length) {
         return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图' },
           h('div', { role: 'status', className: 'pangea-diagram-caption' }, '当前流程没有可绘制节点。'), warningList(layout.warnings, '流程图提示'))
@@ -2326,7 +2331,8 @@ window.__ModuleLoader__.load({
       const [archifyFlag, setArchifyFlag] = React.useState(false)
       const archifyOn = Boolean(workbench?.archify_experimental || archifyFlag)
       const [flowHighlight, setFlowHighlight] = React.useState({ scope: '', ids: [] })
-      const [flowExpanded, setFlowExpanded] = React.useState({})
+      const [flowReaders, setFlowReaders] = React.useState({})
+      const flowPanelsRef = React.useRef({})
       const [derivation, setDerivation] = React.useState(null)
       const derivationRequestRef = React.useRef(0)
       const derivationSubmitRef = React.useRef(false)
@@ -3010,16 +3016,18 @@ window.__ModuleLoader__.load({
       }
       function launchEventLabel(event) {
         const status = event?.status === 'error' ? '失败' : event?.status === 'ok' ? '完成' : event?.status === 'start' ? '开始' : '信息'
-        const stage = ({ source_first_ready_wait: '等待 Agent 就绪', source_first_waiting: '等待执行器响应', source_first_cancel_requested: '正在确认取消', source_first_cancel_confirmed: '原回合已结束', source_first_recovering: '恢复原会话', source_first_recovered: '恢复回合结束', source_first_late_response: '收到延迟响应', source_first_worker_paused: '单元已暂停' })[event?.stage] ?? event?.stage ?? 'unknown'
+        const stage = ({ source_first_ready_wait: '等待 Agent 就绪', source_first_waiting: '等待执行器响应', source_first_cancel_requested: '正在确认取消', source_first_cancel_confirmed: '原回合已结束', source_first_recovering: '恢复原会话', source_first_recovered: '恢复回合结束', source_first_late_response: '收到延迟响应', source_first_worker_paused: '单元已暂停', source_first_soft_budget: '规划耗时提醒', source_first_acp_request: 'ACP 请求窗口', source_first_host_call: '宿主 CLI 阶段' })[event?.stage] ?? event?.stage ?? 'unknown'
         const time = event?.at ? formatTime(event.at) : ''
         const detail = event?.error ?? event?.detail ?? event?.message ?? event?.output ?? ''
         const context = [event?.provider, event?.requested_model ? `指定：${event.requested_model}` : null, event?.model, event?.reasoning_effort, event?.job_id, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
         const evidence = [
-          ['远端会话', event?.remote_session_id], ['Agent 版本', event?.agent_version],
+          ['远端会话', event?.remote_session_id], ['Agent 版本', event?.agent_version], ['请求编号', event?.request_id],
           ['回合', event?.turn], ['停止原因', event?.stop_reason], ['ACP 停止原因', event?.protocol_stop_reason],
           ['消息事件', event?.message_chunks], ['工具事件', event?.tool_calls], ['工具失败事件', event?.tool_failures],
           ['最近工具', event?.last_tool_id], ['工具状态', event?.last_tool_status],
           ['回合耗时(ms)', event?.turn_duration_ms], ['首个事件(ms)', event?.first_event_ms],
+          ['首 token(ms)', event?.stage === 'source_first_acp_request' ? event.first_token_ms ?? '未记录（ACP 内部不可见）' : null],
+          ['无新事件时长(ms)', event?.idle_duration_ms], ['排队耗时(ms)', event?.queue_duration_ms], ['提醒预算(ms)', event?.budget_ms],
           ['阶段耗时(ms)', event?.duration_ms], ['冻结文件', event?.file_count], ['冻结字节', event?.total_bytes],
           ['源码复制耗时(ms)', event?.snapshot_duration_ms],
           ['Run 阶段', event?.phase], ['完成步骤', event?.completed], ['状态文件', event?.state_path],
@@ -4517,12 +4525,15 @@ window.__ModuleLoader__.load({
         const flow = filtered.find(item => item.flow_id === flowSelection) ?? filtered[0]
         const cardScope = item => `${current?.run_id}:${item?.flow_id}`
         const cardId = item => `pangea-flow-card-${encodeURIComponent(cardScope(item))}`
+        const panelState = item => flowPanelsRef.current[cardScope(item)] ??= { scrollTop: 0, scrollLeft: 0, graph: {} }
         const selectFlow = item => {
+          if (item.flow_id === flow?.flow_id) return
           const scope = cardScope(item)
+          if (flow) setFlowReaders(value => ({ ...value, [cardScope(flow)]: { reader, branchFilter } }))
           setFlowSelection(item.flow_id); setFlowBranchDetail(''); setBranchSelection('')
-          setFlowReader({ scope, view: 'reader', step: '', query: '', page: 1 })
-          setFlowExpanded(value => ({ ...value, [scope]: true }))
-          if (typeof document !== 'undefined') window.setTimeout(() => document.getElementById(cardId(item))?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
+          setFlowReader(flowReaders[scope]?.reader ?? { scope, view: 'reader', step: '', query: '', page: 1 })
+          setBranchFilter(flowReaders[scope]?.branchFilter ?? '')
+          setFlowSource(null)
         }
         const evidenceLocation = item => {
           const direct = item?.source_evidence ?? item?.source_location ?? item?.location
@@ -4550,29 +4561,21 @@ window.__ModuleLoader__.load({
         }
         const { scope, reader, steps, branches } = readingState(flow)
         const branch = branches.find(item => item.branch_id === flowBranchDetail || item.branch_id === branchSelection || item.branch_id === reader.query)
-        const overview = h('section', { className: 'b04-flow-card', 'aria-label': '流程总览', style: { marginBottom: 16 } },
-          h('h2', null, '流程总览'),
-          h('p', { className: 'b04-flow-description' }, `主流程 ${ordered.filter(item => flowRank(item) === 0).length} 个 · 子流程 ${ordered.filter(item => flowRank(item) === 1).length} 个 · 无法解析 ${ordered.filter(item => flowRank(item) === 2).length} 个`),
-          h('ul', { style: { paddingLeft: 20, margin: 0 } }, ordered.map(item => h('li', { key: item.flow_id, style: { marginTop: 8 } },
-            h('button', { type: 'button', className: 'b04-link', onClick: () => selectFlow(item), 'aria-label': `定位流程 ${item.display_id || item.flow_id}` }, `${item.display_id || item.flow_id} · ${item.title || '未命名流程'}`),
-            h('span', null, ` · ${flowRank(item) === 2 ? '无法解析' : item.role === 'main' ? '主流程' : `子流程 · ${roleText(item)}`}${item.unit_id ? ` · ${item.unit_id}` : ''}`),
-            item.description ? h('p', { style: { margin: '4px 0', color: '#64748b', fontSize: 13 } }, item.description) : null))),
-          !ordered.length ? h('p', null, '流程发布后将在这里汇总。') : null)
-        const nav = h('aside', { className: 'b04-flow-nav', 'aria-label': '业务流程列表' },
-          h('div', { className: 'b04-flow-nav-label' }, `业务流程 · ${businessFlows.length}`),
-          filtered.map((item, index) => h(React.Fragment, { key: item.flow_id },
-            flowRank(item) === 2 && flowRank(filtered[index - 1]) !== 2 ? h('div', { className: 'b04-flow-nav-label', style: { marginTop: 12 } }, '无法解析的流程') : null,
-            h('button', { type: 'button', className: 'b04-flow-nav-item', 'aria-current': item.flow_id === flow?.flow_id,
-              onClick: () => selectFlow(item) },
-              h('strong', null, `${String(index + 1).padStart(2, '0')}  ${item.title || '未命名流程'}`),
-              h('small', null, `${item.entry || item.display_id || item.flow_id} · ${(item.mainline_steps ?? []).length} 个步骤 · ${roleText(item)}`)))),
-          !filtered.length && query ? h('p', { style: styles.empty }, '没有匹配的流程。') : null,
-          h('details', { className: 'b04-flow-nav-search' }, h('summary', null, '搜索流程'),
-            h('input', { 'aria-label': '搜索业务流程', value: flowQuery, placeholder: '搜索流程…', onChange: event => setFlowQuery(event.target.value),
-              style: { ...styles.search, fontSize: 12, padding: '7px 9px', marginTop: 8 } })),
-          flow ? h('div', { className: 'b04-flow-nav-foot' }, '源码范围',
-            h('div', { style: { marginTop: 7, overflowWrap: 'anywhere' } }, flow.evidence?.map(item => item.location).filter(Boolean).join('、') || flow.entry || '当前 Run 冻结输入'),
-            sourceButton(flow, '查看源码', `业务流程 · ${flow.title || flow.display_id}`)) : h('div', { className: 'b04-flow-nav-foot' }, '流程发布后，将在这里出现。'))
+        const tabs = ordered.length ? h(React.Fragment, null,
+          h('input', { 'aria-label': '搜索业务流程', value: flowQuery, placeholder: '搜索流程…', onChange: event => setFlowQuery(event.target.value),
+            style: { ...styles.search, width: 240, maxWidth: '100%', fontSize: 12, marginBottom: 10 } }),
+          h('div', { className: 'b04-flow-tabs', role: 'tablist', 'aria-label': '业务流程' },
+            filtered.map((item, index) => h('button', { key: cardScope(item), type: 'button', className: 'b04-flow-tab', role: 'tab',
+              id: `${cardId(item)}-tab`, 'aria-controls': cardId(item), 'aria-selected': item.flow_id === flow?.flow_id,
+              tabIndex: item.flow_id === flow?.flow_id ? 0 : -1, onClick: () => selectFlow(item),
+              onKeyDown: event => {
+                const next = event.key === 'ArrowRight' ? (index + 1) % filtered.length : event.key === 'ArrowLeft' ? (index - 1 + filtered.length) % filtered.length
+                  : event.key === 'Home' ? 0 : event.key === 'End' ? filtered.length - 1 : -1
+                if (next < 0) return
+                event.preventDefault(); selectFlow(filtered[next])
+                event.currentTarget.parentElement.querySelectorAll('[role="tab"]')[next]?.focus()
+              } }, h('strong', null, item.title || item.display_id || item.flow_id),
+              h('small', null, `${(item.mainline_steps ?? []).length} 个步骤 · ${roleText(item)}`))))) : null
         const modebar = flow ? h('div', { className: 'b04-modebar' },
           h('div', null, h('strong', null, flow.title || '业务流程'), h('span', { style: styles.badge }, flow.display_id || flow.flow_id)),
           h('div', { role: 'group', 'aria-label': '流程展示方式', className: 'pangea-flow-modes' },
@@ -4656,7 +4659,7 @@ window.__ModuleLoader__.load({
                 path.explanation ? h('p', null, path.explanation) : null) : renderReadableBody(path, true), linkedItems(path)))
               : h('p', { style: styles.itemMeta }, '原记录未提供独立路径。')),
           h('section', { 'aria-label': '流程图示' }, h('h3', null, '图示'),
-            h(FlowGraphView, { key: flow.flow_id, flow, idPrefix: `pf-${ordered.indexOf(flow)}`, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] })),
+            h(FlowGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).graph, idPrefix: `pf-${ordered.indexOf(flow)}`, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] })),
           h('details', { 'aria-label': '流程源码依据', style: { marginTop: 20 } }, h('summary', { style: { cursor: 'pointer' } }, '源码依据'),
             evidenceText(flow.source_evidence ?? flow.evidence).map((location, index) => h('p', { key: index }, h('button', { type: 'button', className: 'b04-link', onClick: () => openFlowSource(location, `业务流程 · ${flow.title || flow.display_id}`) }, location))),
             !evidenceText(flow.source_evidence ?? flow.evidence).length ? h('p', { style: styles.itemMeta }, '原记录未提供流程级源码依据，可查看各步骤引用。') : null))
@@ -4672,7 +4675,7 @@ window.__ModuleLoader__.load({
               ...definition('进入条件', branch.condition), ...definition('内部处理', branch.processing),
               ...definition('回接步骤', branch.to_step_id ? h(React.Fragment, null,
                 `${branch.to_step_id} · ${steps.find(item => item.step_id === branch.to_step_id)?.title || '目标步骤'} `,
-                h('button', { type: 'button', className: 'b04-link', onClick: () => { setFlowBranchDetail(''); setBranchSelection(''); setFlowExpanded(value => ({ ...value, [scope]: true })); setFlowReader({ ...reader, view: 'reader', step: branch.to_step_id }); if (typeof document !== 'undefined') window.setTimeout(() => document.getElementById(`${cardId(flow)}-step-${encodeURIComponent(branch.to_step_id)}`)?.scrollIntoView({ block: 'center' }), 0) } }, '定位步骤')) : branch.terminal_result || '未记录'),
+                h('button', { type: 'button', className: 'b04-link', onClick: () => { setFlowBranchDetail(''); setBranchSelection(''); setFlowReader({ ...reader, view: 'reader', step: branch.to_step_id }); if (typeof document !== 'undefined') window.setTimeout(() => document.getElementById(`${cardId(flow)}-step-${encodeURIComponent(branch.to_step_id)}`)?.scrollIntoView({ block: 'center' }), 0) } }, '定位步骤')) : branch.terminal_result || '未记录'),
               ...definition('外部表现', branch.external_observation || branch.result)),
             h('div', { style: { borderTop: '1px solid #e8ece6', paddingTop: 16 } },
               h('span', { style: styles.itemMeta }, `源码依据 · ${evidenceLocation(branch) || evidenceLocation(flow) || '当前冻结输入'}`),
@@ -4713,18 +4716,17 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => navigate({ type: 'workflow' }) }, '查看运行过程'),
               current?.artifacts?.source_snapshot_manifest ? h('button', { type: 'button', style: styles.button,
                 onClick: () => openSidebarFile(current.artifacts.source_snapshot_manifest) }, '检查冻结输入') : null)))
-        return h(React.Fragment, null, overview, flow ? reader.view === 'reader' && !branch
-          ? h('div', { className: 'b04-flow-layout' }, nav, h('div', { style: { minWidth: 0 } }, modebar,
-            filtered.map(item => h('details', { key: cardScope(item), id: cardId(item), 'data-flow-id': item.flow_id, 'aria-label': `流程卡片 ${item.display_id || item.flow_id}`,
-              open: flowExpanded[cardScope(item)] ?? item.role === 'main', style: { marginBottom: 16, border: '1px solid #e2e7e0', borderRadius: 10 },
-              onToggle: event => { const open = event.currentTarget.open; setFlowExpanded(value => value[cardScope(item)] === open ? value : { ...value, [cardScope(item)]: open }) } },
-              h('summary', { style: { cursor: 'pointer', padding: '14px 18px', fontWeight: 600 } }, `${item.display_id || item.flow_id} · ${item.title || '未命名流程'} · ${flowRank(item) === 2 ? '无法解析' : item.role === 'main' ? '主流程' : `子流程 · ${roleText(item)}`}`),
-              renderFlowReader(item)))))
-          : h('div', null, modebar, reader.view === 'functions' ? renderDiagrams(flow, 'function_variables')
+        return h(React.Fragment, null, tabs, flow ? h(React.Fragment, null, modebar,
+          h('section', { key: cardScope(flow), id: cardId(flow), role: 'tabpanel', tabIndex: 0, 'aria-labelledby': `${cardId(flow)}-tab`,
+            className: 'b04-flow-panel', 'data-flow-id': flow.flow_id,
+            ref: element => { if (element) { element.scrollTop = panelState(flow).scrollTop; element.scrollLeft = panelState(flow).scrollLeft } },
+            onScroll: event => { const state = panelState(flow); state.scrollTop = event.currentTarget.scrollTop; state.scrollLeft = event.currentTarget.scrollLeft } },
+            reader.view === 'reader' && !branch ? renderFlowReader(flow)
+            : reader.view === 'functions' ? renderDiagrams(flow, 'function_variables')
             : reader.view === 'diagram' ? h('div', null,
-              h(FlowGraphView, { key: flow.flow_id, flow, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] }),
+              h(FlowGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).graph, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] }),
               archifyOn || matchingDiagrams(flow, 'standard').length ? h('details', { 'aria-label': '历史图表与实验导出', style: { marginTop: 18 } },
-                h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, archifyOn ? '精美导出（实验）' : '历史图表'), renderDiagrams(flow)) : null) : branchBody) : empty,
+                h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, archifyOn ? '精美导出（实验）' : '历史图表'), renderDiagrams(flow)) : null) : branchBody)) : empty,
           renderFlowSourceDrawer())
       }
 

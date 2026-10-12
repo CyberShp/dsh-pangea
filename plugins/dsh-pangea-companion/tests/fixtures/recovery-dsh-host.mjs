@@ -1,8 +1,10 @@
 // Runs the actual Cordis Jobs registry and Desktop's patched ACP provider in a
 // disposable process so integration tests can crash the host without mocks.
 import assert from 'node:assert/strict'
+import childProcess from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { appendFile, readFile } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createSourceFirstAcpRun, inspectSourceFirstAcpRecovery } from '../../src/source-first-acp.js'
@@ -10,6 +12,16 @@ import { runPangea } from '../../src/pangea-api.js'
 
 const configPath = process.argv[2]
 const config = JSON.parse(await readFile(configPath, 'utf8'))
+const peerFixture = fileURLToPath(new URL('./recovery-acp-peer.mjs', import.meta.url))
+if (process.platform === 'win32' && config.failure === 'host-after-save') {
+  // Keep this owned peer in a separate Windows process group so it survives
+  // the deliberate host crash and exercises live-orphan recovery.
+  const spawn = childProcess.spawn
+  childProcess.spawn = (command, args, options) => spawn(command, args,
+    command === process.execPath && Array.isArray(args) && args.length === 1 && args[0] === peerFixture
+      ? { ...options, detached: true, windowsHide: true } : options)
+  syncBuiltinESMExports()
+}
 const fromApp = relative => import(pathToFileURL(path.join(process.env.PANGEA_TEST_APP_ROOT, 'node_modules', relative)).href)
 const [{ Context }, { LocalSubprocessRuntime }, { LocalJobRegistry }, acp] = await Promise.all([
   fromApp('@deepseek-ai/cordis/lib/index.js'), fromApp('@deepseek-ai/dsh-subprocess-local/lib/index.js'),
@@ -31,7 +43,7 @@ const subprocess = new LocalSubprocessRuntime(context)
 const providers = new Map()
 acp.apply({ subprocess, logger: { warn() {}, error() {} }, subagents: { registerProvider(provider) { providers.set(provider.name, provider) } } }, acp.Config({
   providerName: 'pangea-recovery-fixture', command: process.execPath,
-  args: [fileURLToPath(new URL('./recovery-acp-peer.mjs', import.meta.url))], cwd: config.cwd,
+  args: [peerFixture], cwd: config.cwd,
   env: { PANGEA_TEST_APP_ROOT: process.env.PANGEA_TEST_APP_ROOT, PANGEA_RECOVERY_FIXTURE_CONFIG: configPath,
     PANGEA_PYTHON: process.env.PANGEA_PYTHON, PYTHONPATH: process.env.PYTHONPATH ?? '' },
   disposeEofGraceMs: 100, disposeGraceMs: 100,

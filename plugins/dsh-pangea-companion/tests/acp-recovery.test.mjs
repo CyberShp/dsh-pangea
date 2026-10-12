@@ -27,7 +27,8 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
       pending = deferred(); return pending.promise
     },
   }
-  const options = { dataRoot, runId: 'run', cwd: dataRoot, providerId: 'pangea-nga', signal: controller.signal, progressPolicy,
+  const options = { dataRoot, runId: 'run', cwd: dataRoot, providerId: 'pangea-nga', agentModel: 'fixture/model',
+    attemptId: 'recovery-attempt', signal: controller.signal, progressPolicy,
     onEvent: async e => { events.push(e); if (e.stage === 'source_first_late_response') lateResponse.resolve() }, subagents: { start: async (_, request) => {
       scratchDirectories.push(request.scratchDirectory)
       request.onDiagnostic({ stage: 'file_permission', lastPermissionKind: 'edit',
@@ -48,9 +49,26 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
     assert.equal(starts, mode === 'disconnect' ? 2 : 1)
     assert.ok(path.isAbsolute(scratchDirectories[0]))
     assert.equal(new Set(scratchDirectories).size, 1)
-    assert.deepEqual(events.filter(event => event.stage === 'source_first_file_permission'), scratchDirectories.map(directory => ({
-      stage: 'source_first_file_permission', action_id: 'run:a', kind: 'edit', paths: [path.join(directory, 'unit.json')], decision: 'allow_once',
-    })))
+    const permissions = events.filter(event => event.stage === 'source_first_file_permission')
+    assert.equal(permissions.length, scratchDirectories.length)
+    for (const [index, event] of permissions.entries()) {
+      const { agent_session_id, remote_session_id, execution_id, request_id, ...permission } = event
+      assert.deepEqual(permission, {
+        run_id: 'run', attempt_id: 'recovery-attempt', provider: 'pangea-nga', requested_model: 'fixture/model',
+        stage: 'source_first_file_permission', action_id: 'run:a', action_stage: 'unit_analysis', unit_id: undefined,
+        kind: 'edit', paths: [path.join(scratchDirectories[index], 'unit.json')], decision: 'allow_once',
+      })
+      if (index === 0) {
+        // Startup diagnostics precede the first returned worker binding.
+        assert.deepEqual([agent_session_id, remote_session_id, execution_id, request_id], [undefined, undefined, undefined, undefined])
+      } else {
+        assert.equal(agent_session_id, 'worker'); assert.equal(remote_session_id, 'remote')
+        const original = events.find(item => item.stage === 'source_first_acp_request' && item.request_id === request_id)
+        assert.ok(original)
+        assert.equal(original.action_id, event.action_id); assert.equal(original.execution_id, execution_id)
+        assert.equal(original.attempt_id, event.attempt_id)
+      }
+    }
     assert.equal(turns, ['ready', 'saved', 'unconfirmed'].includes(mode) ? 1 : 2)
     assert.equal(Boolean(result.attentionRequired), ['twice', 'unconfirmed'].includes(mode))
     assert.equal(settled, !['twice', 'unconfirmed'].includes(mode))

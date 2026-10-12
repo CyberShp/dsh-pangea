@@ -74,3 +74,23 @@ test('bounds and redacts persisted diagnostic text while retaining structured fi
     assert.doesNotMatch(JSON.stringify(event), /private-(bearer|key|password|query|token)/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('persists protocol timing identities and explicit unknown model metrics', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-acp-timing-log-'))
+  try {
+    const logs = createLaunchLogStore({ root })
+    await logs.append('task', { stage: 'source_first_acp_request', status: 'ok', run_id: 'run', attempt_id: 'attempt',
+      action_id: 'planning', agent_session_id: 'worker', execution_id: 'execution', request_id: 'request',
+      request_kind: 'session_prompt', model_source: 'acp_session_config', model: null, requested_model: 'requested/model',
+      first_event_ms: null, first_token_ms: null, model_request_timing: 'unavailable', duration_ms: 12,
+      started_at_ms: 100, finished_at_ms: 112, budget_ms: 10, idle_duration_ms: 8, queue_duration_ms: 1,
+      prompt: 'private prompt', toolOutput: 'private source' })
+    const [event] = (await logs.read('task')).events
+    assert.equal(event.request_id, 'request'); assert.equal(event.request_kind, 'session_prompt')
+    assert.equal(event.model, null); assert.equal(event.first_event_ms, null); assert.equal(event.first_token_ms, null)
+    assert.equal(event.model_source, 'acp_session_config'); assert.equal(event.model_request_timing, 'unavailable')
+    assert.equal(event.started_at_ms, 100); assert.equal(event.finished_at_ms, 112); assert.equal(event.duration_ms, 12)
+    assert.equal(event.budget_ms, 10); assert.equal(event.idle_duration_ms, 8); assert.equal(event.queue_duration_ms, 1)
+    assert.doesNotMatch(JSON.stringify(event), /private prompt|private source/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

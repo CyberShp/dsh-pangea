@@ -15,21 +15,22 @@ export class AcpStalled extends Error {
 export async function waitForAcpTurn({ worker, turn, signal, ready = false, policy = {}, emit = async () => {} }) {
   const limits = { ...ACP_PROGRESS_DEFAULTS, ...policy }
   for (const value of Object.values(limits)) if (!Number.isFinite(value) || value <= 0) throw new Error('Invalid ACP progress timeout')
-  const started = Date.now()
+  const started = performance.now()
   let lastActivity = started, fingerprint, warned = false, settled = false, interval, abort
   const observed = Promise.resolve(turn).then(value => { settled = true; return value }, error => { settled = true; throw error })
   const stalled = new Promise((_, reject) => {
     interval = setInterval(() => {
       const d = worker.readDiagnostics?.() ?? {}
       const next = JSON.stringify([d.lastActivityAt, d.messageChunks, d.toolCalls, d.lastToolStatus, d.lastToolFinishedAt])
-      if (fingerprint !== undefined && fingerprint !== next) { lastActivity = Date.now(); warned = false }
+      if (fingerprint !== undefined && fingerprint !== next) { lastActivity = performance.now(); warned = false }
       fingerprint = next
-      const idle = Date.now() - lastActivity
+      const idle = performance.now() - lastActivity
       if (!warned && idle >= (ready ? limits.readyWarnMs : limits.warnMs)) {
         warned = true
-        void emit({ stage: 'source_first_waiting', status: 'info', duration_ms: idle,
+        void emit({ stage: 'source_first_waiting', status: 'info', duration_ms: Math.round(performance.now() - started), idle_duration_ms: Math.round(idle),
           message: `${ready ? '等待 Agent 就绪' : '等待执行器响应'}，已 ${Math.floor(idle / 1000)} 秒无新事件`,
-          last_tool_name: d.lastToolName, last_tool_status: d.lastToolStatus })
+          last_tool_id: d.lastToolId, last_tool_status: d.lastToolStatus, active_tool_count: d.activeToolCount,
+          model: d.model ?? null, model_request_timing: 'unavailable', first_token_ms: null })
       }
       if (idle >= (ready ? limits.readyIdleMs : limits.idleMs)) reject(new AcpStalled('执行器长时间无新事件'))
     }, limits.pollMs)

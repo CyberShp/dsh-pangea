@@ -127,9 +127,12 @@ test('real host restart blocks a live orphan, then restores its exact ACP sessio
   }, 'saved analysis checkpoint')
   original.child.kill('SIGKILL')
   assert.equal((await original.done).signal, 'SIGKILL')
+  assert.doesNotThrow(() => process.kill(checkpoint.pid, 0), 'the owned ACP peer must survive the crashed host')
   const recovery = { dataRoot: config.dataRoot, runId: config.runId }
   const blocked = await inspectSourceFirstAcpRecovery(recovery)
-  assert.equal(blocked.can_resume, false)
+  assert.equal(blocked.can_resume, false, JSON.stringify({ inspection: blocked, checkpoint,
+    bindings: await json(path.join(config.dataRoot, 'runs', config.runId, 'acp-workers.json')),
+    events: (await events(config)).slice(-12) }))
   const rejected = await launch(true).done
   assert.equal(rejected.code, 3, `${rejected.errors}\n${rejected.output}`)
   assert.equal((await events(config)).filter(event => event.event === 'new_session').length, 2)

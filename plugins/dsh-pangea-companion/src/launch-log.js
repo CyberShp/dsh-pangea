@@ -55,6 +55,7 @@ function compactEvent(value = {}) {
     'remote_session_id', 'stop_reason', 'protocol_stop_reason', 'phase', 'error_summary', 'stderr_summary',
     'review_status', 'review_request_id', 'producer_session_id', 'reviewer_session_id', 'semantic_verdict',
     'diagnostic_path', 'state_path', 'agent_version', 'last_tool_id', 'last_tool_status', 'last_tool_name', 'action_id', 'unit_id', 'execution_id', 'action_stage', 'tool_kind', 'exit_signal', 'kind', 'decision',
+    'request_id', 'host_call_id', 'request_kind', 'model_request_timing', 'model_source',
   ]) {
     if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = diagnosticText(value[key].trim())
   }
@@ -72,10 +73,14 @@ function compactEvent(value = {}) {
   for (const key of [
     'turn', 'completed', 'message_chunks', 'tool_calls', 'tool_failures', 'turn_duration_ms', 'active_tool_count',
     'first_event_ms', 'tool_started_at_ms', 'tool_finished_at_ms', 'tool_duration_ms', 'stderr_bytes', 'duration_ms', 'file_count', 'total_bytes', 'snapshot_duration_ms', 'prompt_chars', 'prompt_bytes',
+    'started_at_ms', 'finished_at_ms', 'queue_duration_ms', 'idle_duration_ms', 'budget_ms',
   ]) {
     if (Number.isInteger(value[key]) && value[key] >= 0) event[key] = value[key]
   }
-  for (const key of ['process_exited', 'stderr_truncated', 'output_truncated']) {
+  for (const key of ['model', 'requested_model', 'first_event_ms', 'first_token_ms']) {
+    if (value[key] === null) event[key] = null
+  }
+  for (const key of ['process_exited', 'stderr_truncated', 'output_truncated', 'request_dispatched']) {
     if (typeof value[key] === 'boolean') event[key] = value[key]
   }
   if (Number.isInteger(value.repository_count) && value.repository_count >= 0) event.repository_count = value.repository_count

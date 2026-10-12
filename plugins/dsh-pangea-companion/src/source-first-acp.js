@@ -74,12 +74,12 @@ export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, pyt
   ].filter(Boolean).join('\n')
 }
 
-export function createSourceFirstAcpRun({ subagents, parent, providerId, agentModel, cwd, dataRoot, runId, runner, signal, onEvent = async () => {}, python, mode, closureBudgetMs, progressPolicy, attemptId, executionIds = true }) {
+export function createSourceFirstAcpRun({ subagents, parent, providerId, agentModel, cwd, dataRoot, runId, runner, signal, onEvent = async () => {}, python, mode, closureBudgetMs, planningSoftBudgetMs = 600000, progressPolicy, attemptId, executionIds = true }) {
   const key = JSON.stringify([path.resolve(dataRoot), runId])
   let state = liveRuns.get(key)
   if (state?.busy) throw new Error(`当前 Run 已由宿主执行：${runId}`)
   if (state && (state.providerId !== providerId || state.agentModel !== agentModel)) throw new Error('续跑必须保持原执行器与模型，不能替换已绑定 worker')
-  state ??= { providerId, agentModel, workers: new Map(), actionIds: new Map(), closed: new Set(), busy: false, terminal: false }
+  state ??= { providerId, agentModel, workers: new Map(), actionContexts: new Map(), closed: new Set(), busy: false, terminal: false }
   liveRuns.set(key, state)
   state.busy = true
   const generation = randomUUID()
@@ -111,10 +111,28 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
   }
   const check = () => { if (signal.aborted) throw signal.reason ?? new Error('执行已取消') }
-  const cli = args => serial(() => { check(); return runner({ cwd, args, signal }) })
+  const cli = args => {
+    const queued = performance.now()
+    return serial(async () => {
+      check()
+      const started = performance.now()
+      const actionId = args.includes('--action-id') ? args[args.indexOf('--action-id') + 1] : undefined
+      const context = [...state.actionContexts.values()].find(item => item.action_id === actionId) ?? {}
+      const details = { ...context, action_id: actionId, host_call_id: randomUUID(),
+        phase: ['adapter', 'runs'].includes(args[0]) ? `${args[0]}/${args[1]}` : args[0],
+        queue_duration_ms: Math.round(started - queued), started_at_ms: Date.now() }
+      await event({ ...details, stage: 'source_first_host_call', status: 'start' })
+      let status = 'ok'
+      try { return await runner({ cwd, args, signal }) }
+      catch (error) { status = 'error'; throw error }
+      finally { await event({ ...details, stage: 'source_first_host_call', status,
+        finished_at_ms: Date.now(), duration_ms: Math.round(performance.now() - started) }) }
+    })
+  }
   const adapter = (operation, action, extra = []) => cli(['adapter', operation, '--data-root', dataRoot, '--run-id', runId,
     ...(action ? ['--action-id', action.action_id] : []), ...extra])
-  const event = async value => { try { await onEvent(value) } catch { /* telemetry does not route actions */ } }
+  const event = async value => { try { await onEvent({ run_id: runId, attempt_id: attemptId, provider: providerId,
+    requested_model: agentModel ?? null, ...value }) } catch { /* telemetry does not route actions */ } }
   const startWorker = async request => {
     const startId = randomUUID()
     await serial(async () => { owner.pending_starts.push(startId); await persist() })
@@ -149,14 +167,15 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }
     let readyPending = false
     let worker = action.task_id ? state.workers.get(action.task_id) : null
+    const initialContext = { action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage }
     const scratchDirectory = bindings[action.task_id]?.scratchDirectory ?? path.join(path.dirname(bindingsPath), 'worker-scratch', randomUUID())
     const onDiagnostic = value => {
-      const actionId = state.actionIds.get(String(worker?.id)) ?? action.action_id
-      if (value.stage === 'tool_event') void event({ stage: 'source_first_tool_event', action_id: actionId, unit_id: action.unit_id,
-        last_tool_id: value.lastToolId, last_tool_name: value.lastToolName, last_tool_status: value.lastToolStatus,
+      const context = state.actionContexts.get(String(worker?.id)) ?? initialContext
+      if (value.stage === 'tool_event') void event({ ...context, stage: 'source_first_tool_event',
+        last_tool_id: value.lastToolId, last_tool_status: value.lastToolStatus,
         tool_kind: value.lastToolKind, active_tool_count: value.activeToolCount,
         tool_started_at_ms: value.lastToolStartedAt, tool_finished_at_ms: value.lastToolFinishedAt, tool_duration_ms: value.lastToolDurationMs })
-      if (value.stage === 'file_permission') void event({ stage: 'source_first_file_permission', action_id: actionId,
+      if (value.stage === 'file_permission') void event({ ...context, stage: 'source_first_file_permission',
         kind: value.lastPermissionKind, paths: value.lastPermissionPaths, decision: value.lastPermissionDecision })
     }
     if (action.task_id && (!worker || state.closed.has(action.task_id))) {
@@ -191,13 +210,15 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }
     current = worker
     const taskId = String(worker.id)
-    state.actionIds.set(taskId, action.action_id)
+    const actionContext = { ...initialContext, agent_session_id: taskId, remote_session_id: worker.remoteSessionId }
+    state.actionContexts.set(taskId, actionContext)
     if (bindings[taskId]?.scratchDirectory !== scratchDirectory) await remember(worker, scratchDirectory)
     await adapter('bind', action, ['--task-id', taskId])
     await event({ stage: 'source_first_worker_bound', action_id: action.action_id, agent_session_id: taskId, remote_session_id: worker.remoteSessionId, scratch_directory: scratchDirectory, provider: providerId })
     const binding = ['--data-root', dataRoot, '--run-id', runId, '--action-id', action.action_id, '--task-id', taskId]
     const nextExecutionId = () => `${attemptId ?? parent?.id ?? 'host'}:${action.action_id}:${randomUUID()}`
     let executionId = nextExecutionId()
+    actionContext.execution_id = executionId
     await remember(worker, undefined, { execution_id: executionId })
     const opened = await cli(['task-open', ...binding])
     const execution = (eventName, reason = '', budget, automatic = false) => cli(['runs', 'execution', ...binding, '--event', eventName,
@@ -223,7 +244,29 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     const turnController = new AbortController()
     const turnSignal = AbortSignal.any([signal, turnController.signal])
     const monitor = turn => waitForAcpTurn({ worker, turn, signal: turnSignal, policy: progressPolicy,
-      emit: value => event({ ...value, action_id: action.action_id, agent_session_id: taskId }) })
+      emit: value => event({ ...actionContext, ...value }) })
+    // One ACP prompt can contain many model requests and tool calls. Its first
+    // session/update is not a first token, and the reported model may be absent.
+    const submitPrompt = async (content, phase) => {
+      const started = performance.now(), before = worker.readDiagnostics?.() ?? {}
+      actionContext.request_id = randomUUID()
+      const details = { ...actionContext, phase, request_kind: 'session_prompt', model_source: 'acp_session_config', started_at_ms: Date.now(),
+        model_request_timing: 'unavailable', first_token_ms: null }
+      await event({ ...details, stage: 'source_first_acp_request', status: 'start', model: before.model ?? null })
+      let outcome, dispatched = false, status = 'ok'
+      try { turnSignal.throwIfAborted(); dispatched = true; outcome = await worker.continuePrompt(content); return outcome }
+      catch (error) { status = 'error'; throw error }
+      finally {
+        const diagnostics = worker.readDiagnostics?.() ?? {}
+        await event({ ...details, stage: 'source_first_acp_request',
+          status: outcome?.stopReason === 'error' ? 'error' : status, finished_at_ms: Date.now(),
+          duration_ms: Math.round(performance.now() - started), request_dispatched: dispatched,
+          first_event_ms: dispatched ? diagnostics.firstEventMs ?? null : null,
+          model: diagnostics.model ?? null, stop_reason: outcome?.stopReason, protocol_stop_reason: outcome?.protocolStopReason,
+          tool_calls: Number.isInteger(before.toolCalls) && Number.isInteger(diagnostics.toolCalls) ? diagnostics.toolCalls - before.toolCalls : null,
+          message_chunks: Number.isInteger(before.messageChunks) && Number.isInteger(diagnostics.messageChunks) ? diagnostics.messageChunks - before.messageChunks : null })
+      }
+    }
     const stallPause = async (error, turn) => {
       if (error.confirmed) await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
       if (!error.confirmed) {
@@ -278,20 +321,33 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     const startContinuation = async () => {
       await execution('finished')
       executionId = nextExecutionId()
+      actionContext.execution_id = executionId
       await execution('started', '', budget, true)
       await remember(worker, undefined, { execution_id: executionId, inflight: true, quiescent: false })
       await event({ stage: 'source_first_worker_started', action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, execution_id: executionId, budget_ms: budget })
     }
-    let result, timer, abortTurn
+    let result, timer, softTimer, abortTurn
     const timeout = new Error('本单元定向修正达到执行预算，保留已保存结果')
     try {
+      if (action.role === 'planning') {
+        window.planningStarted ??= performance.now()
+        softTimer = setTimeout(() => {
+          if (window.softWarned) return
+          window.softWarned = true
+          const diagnostics = worker.readDiagnostics?.() ?? {}
+          void event({ ...actionContext, stage: 'source_first_soft_budget', status: 'info',
+            budget_ms: planningSoftBudgetMs, duration_ms: Math.round(performance.now() - window.planningStarted),
+            active_tool_count: diagnostics.activeToolCount, model: diagnostics.model ?? null,
+            message: '规划已达到耗时提醒预算，当前请求继续执行；已保存计划保留。ACP 回合内的模型请求耗时与首 token 时间未知。' })
+        }, Math.max(1, planningSoftBudgetMs - (performance.now() - window.planningStarted)))
+      }
       const prompt = workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, python, scratchDirectory })
       await event({ stage: 'source_first_prompt_ready', action_id: action.action_id,
         prompt_chars: prompt.length, prompt_bytes: Buffer.byteLength(prompt, 'utf8') })
       const runMonitored = async () => {
         const toolCalls = () => worker.readDiagnostics?.()?.toolCalls
         const toolsBefore = toolCalls()
-        let turn = worker.continuePrompt(text(prompt))
+        let turn = submitPrompt(text(prompt), 'task')
         let disconnected = false
         try {
           const outcome = await monitor(turn)
@@ -311,7 +367,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
             await event({ stage: 'source_first_zero_tool_turn', action_id: action.action_id, message: '回合未调用工具，原会话补发一次读取合同指令' })
             turnSignal.throwIfAborted()
             await startContinuation()
-            turn = worker.continuePrompt(text(`用 read 工具读取 ${cliContract(cwd)}。`))
+            turn = submitPrompt(text(`用 read 工具读取 ${cliContract(cwd)}。`), 'zero_tool_followup')
             return await monitor(turn)
           }
           return outcome
@@ -338,7 +394,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
           }
           turnSignal.throwIfAborted()
           await startContinuation()
-          turn = worker.continuePrompt(text(`继续当前 action_id=${action.action_id}，task_id=${taskId}。CLI 绑定参数：${JSON.stringify(binding)}；Python：${python || 'python'}。先 result-read 获取当前结果与 revision，保留已保存内容，从未完成部分继续，不重复已完成工具操作。完成后 work-finish；不要询问是否继续。`))
+          turn = submitPrompt(text(`继续当前 action_id=${action.action_id}，task_id=${taskId}。CLI 绑定参数：${JSON.stringify(binding)}；Python：${python || 'python'}。先 result-read 获取当前结果与 revision，保留已保存内容，从未完成部分继续，不重复已完成工具操作。完成后 work-finish；不要询问是否继续。`), 'recovery')
           try {
             const result = await monitor(turn)
             await event({ stage: 'source_first_recovered', action_id: action.action_id, message: '原会话恢复回合已结束' })
@@ -364,7 +420,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       turnController.abort(timeout)
       await pause(timeout.message)
       return
-    } finally { clearTimeout(timer); if (abortTurn) signal.removeEventListener('abort', abortTurn) }
+    } finally { clearTimeout(timer); clearTimeout(softTimer); if (abortTurn) signal.removeEventListener('abort', abortTurn) }
     check()
     if (result.stall) return stallPause(result.stall, result.pendingTurn)
     const diagnostics = worker.readDiagnostics?.() ?? {}
@@ -375,7 +431,10 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     const inputError = [result.diagnostic, diagnostics.errorSummary].find(contextLimitError)
     if (inputError) return await pauseForContext(inputError)
     await execution('finished')
-    await event({ ...diagnostics, stage: 'source_first_worker_finished', action_id: action.action_id, agent_session_id: taskId, stop_reason: result.stopReason })
+    await event({ ...actionContext, stage: 'source_first_worker_finished', model: diagnostics.model ?? null,
+      tool_calls: diagnostics.toolCalls, message_chunks: diagnostics.messageChunks, tool_failures: diagnostics.toolFailures,
+      first_event_ms: diagnostics.firstEventMs ?? null, turn_duration_ms: diagnostics.turnDurationMs,
+      stop_reason: result.stopReason, protocol_stop_reason: result.protocolStopReason })
     if (result.stopReason !== 'completed') throw new Error(`Worker 回合未完成：${action.action_id} ${result.stopReason} ${result.diagnostic ?? ''}`)
     const settled = await adapter('settle', action)
     await event({ stage: 'source_first_action_settled', action_id: action.action_id, validation: settled.validation?.status })

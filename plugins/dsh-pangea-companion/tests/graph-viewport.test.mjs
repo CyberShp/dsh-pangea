@@ -6,7 +6,7 @@ import vm from 'node:vm'
 const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
 const hookSource = source.slice(source.indexOf('    const GRAPH_CANVAS_STYLE ='), source.indexOf('    function warningList('))
 
-function viewport(graphWidth = 1000, graphHeight = 800) {
+function viewport(graphWidth = 1000, graphHeight = 800, savedViewport) {
   const hooks = [], pending = [], observers = [], listeners = new Map(), captures = new Set()
   let index = 0, view, graphKey = 'first'
   const canvas = {
@@ -40,7 +40,7 @@ function viewport(graphWidth = 1000, graphHeight = 800) {
     },
   })
   vm.runInContext(`${hookSource}\nglobalThis.useGraphZoom = useGraphZoom`, context)
-  const render = () => { index = 0; view = context.useGraphZoom('测试图', graphWidth, graphHeight, graphKey); view.panProps.ref.current = canvas; return view }
+  const render = () => { index = 0; view = context.useGraphZoom('测试图', graphWidth, graphHeight, graphKey, savedViewport); view.panProps.ref.current = canvas; return view }
   const flush = () => { render(); pending.splice(0).forEach(effect => effect()); return render() }
   flush()
   return {
@@ -167,4 +167,28 @@ test('cancelled dragging releases capture without moving on later pointer events
   graph.view.panProps.onClickCapture(keyboardClick)
   assert.equal(keyboardClick.stopped, false)
   graph.dispose()
+})
+
+test('flow graph zoom and pan survive unmounting independently for each flow', () => {
+  const firstViewport = {}, secondViewport = {}
+  const first = viewport(1000, 800, firstViewport)
+  first.click('放大测试图')
+  first.view.panProps.onPointerDown(first.event())
+  first.view.panProps.onPointerMove(first.event({ clientX: 180, clientY: 145 }))
+  first.view.panProps.onPointerUp(first.event({ clientX: 180, clientY: 145 }))
+  const firstCamera = first.camera()
+  first.dispose()
+  const second = viewport(1000, 800, secondViewport)
+  second.click('测试图原始大小')
+  const secondCamera = second.camera()
+  second.dispose()
+  assert.notEqual(firstCamera.scale, secondCamera.scale)
+  for (const [saved, expected] of [[firstViewport, firstCamera], [secondViewport, secondCamera]]) {
+    const restored = viewport(1000, 800, saved)
+    const camera = restored.camera()
+    close(camera.scale, expected.scale)
+    close(camera.x, expected.x)
+    close(camera.y, expected.y)
+    restored.dispose()
+  }
 })

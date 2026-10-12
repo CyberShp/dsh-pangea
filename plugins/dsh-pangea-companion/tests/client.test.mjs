@@ -874,6 +874,30 @@ test('keeps a previous failed attempt visible while a resumed attempt is running
   assert.match(source, /上一次尝试失败/)
 })
 
+test('launch diagnostics explain planning, ACP and host timing without treating first events as first tokens', async () => {
+  const task = { task_id: 'timing-task', run_id: 'timing-run', attempt_id: 'timing-attempt', status: 'running', execution_status: 'running' }
+  const events = [
+    { stage: 'source_first_soft_budget', budget_ms: 120000, duration_ms: 120001, message: '规划继续执行' },
+    { stage: 'source_first_acp_request', request_id: 'request-1', first_event_ms: 0, first_token_ms: null, idle_duration_ms: 2000 },
+    { stage: 'source_first_host_call', queue_duration_ms: 0, duration_ms: 30 },
+  ].map(event => ({ ...event, task_id: task.task_id, attempt_id: task.attempt_id, status: 'info' }))
+  const states = { 1: { tasks: { items: [task] }, selected_task_id: task.task_id, launch_log: { events } },
+    4: task.run_id, 5: task.task_id, 16: { type: 'overview' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    return [Object.hasOwn(states, key) ? states[key] : initial, () => {}]
+  } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const page = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const text = descendants(page.type(page.props)).flatMap(node => node.children.filter(child => typeof child === 'string')).join('\n')
+  for (const label of ['规划耗时提醒', 'ACP 请求窗口', '宿主 CLI 阶段', '请求编号: request-1',
+    '提醒预算(ms): 120000', '无新事件时长(ms): 2000', '排队耗时(ms): 0', '首个事件(ms): 0', '首 token(ms): 未记录（ACP 内部不可见）']) assert.ok(text.includes(label), label)
+  assert.doesNotMatch(text, /source_first_(soft_budget|acp_request|host_call)/)
+  assert.doesNotMatch(text, /首 token\(ms\): 0/)
+})
+
 test('returns from a run detail to its selected Run overview', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported
@@ -1419,32 +1443,27 @@ test('flow page draws natively when experimental export is off and orders main, 
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
   const render = () => { index = 0; return descendants(panel.type(panel.props)) }
   const find = label => render().find(node => node.props['aria-label'] === label)
-  const navText = render().filter(node => node.props.className === 'b04-flow-nav-item').map(node => JSON.stringify(node.children))
+  const tabs = () => render().filter(node => node.props.role === 'tab')
+  const navText = tabs().map(node => JSON.stringify(node.children))
   assert.equal(navText.length, 3)
   assert.match(navText[0], /请求主流程.*主流程/)
   assert.match(navText[1], /重试子流程.*挂接到 F1 \/ 节点 S1/)
   assert.match(navText[2], /原文流程.*无法解析/)
-  assert.ok(render().some(node => node.children?.includes?.('无法解析的流程')))
-  const overview = find('流程总览')
-  assert.ok(overview)
-  assert.match(JSON.stringify(overview), /主流程 1 个 · 子流程 1 个 · 无法解析 1 个/)
-  assert.match(JSON.stringify(overview), /重试子流程.*子流程 · 挂接到 F1 \/ 节点 S1/)
-  const cards = () => render().filter(node => node.type === 'details' && node.props['data-flow-id'])
-  assert.deepEqual(cards().map(node => node.props['data-flow-id']), ['U/F1', 'U/F2', 'U/F3'])
-  assert.deepEqual(cards().map(node => node.props.open), [true, false, false])
+  assert.equal(find('流程总览'), undefined)
+  const cards = () => render().filter(node => node.props.role === 'tabpanel')
+  assert.deepEqual(cards().map(node => node.props['data-flow-id']), ['U/F1'])
+  assert.deepEqual(tabs().map(node => node.props['aria-selected']), [true, false, false])
   const pageNodes = render()
-  assert.ok(pageNodes.findIndex(node => node.props['aria-label'] === '流程总览') < pageNodes.findIndex(node => node.props['data-flow-id']))
+  assert.ok(pageNodes.findIndex(node => node.props.role === 'tablist') < pageNodes.findIndex(node => node.props.role === 'tabpanel'))
   const reading = descendants(cards()[0])
   assert.deepEqual(reading.filter(node => node.type === 'h3').map(node => node.children[0]), ['概述', '主干步骤', '分支与异常', '路径', '图示'])
   assert.ok(reading.findIndex(node => node.props['aria-label'] === '流程图示') < reading.findIndex(node => node.props['aria-label'] === '流程源码依据'))
   assert.match(JSON.stringify(reading.find(node => node.props['aria-label'] === '业务路径阅读')), /请求合法 → 请求校验 → 持久化/)
   const graphs = render().filter(node => node.type?.name === 'FlowGraphView')
-  assert.equal(new Set(graphs.map(node => node.props.idPrefix)).size, 3)
-  find('定位流程 U/F2').props.onClick()
-  assert.equal(cards()[1].props.open, true)
-  cards()[1].props.onToggle({ currentTarget: { open: false } })
-  assert.equal(cards()[1].props.open, false)
-  find('定位流程 U/F1').props.onClick()
+  assert.equal(graphs.length, 1)
+  tabs()[1].props.onClick()
+  assert.deepEqual(cards().map(node => node.props['data-flow-id']), ['U/F2'])
+  tabs()[0].props.onClick()
   const problems = find('流程结构问题')
   assert.ok(problems)
   assert.ok(descendants(problems).some(node => node.type === 'li' && node.children.includes(main.structure_errors[0])))
@@ -1455,12 +1474,12 @@ test('flow page draws natively when experimental export is off and orders main, 
   assert.deepEqual(graph.props.highlightBranchIds, ['B1'])
   assert.equal(find('精美导出（实验）'), undefined)
   find('流程阅读视图').props.onClick()
-  render().find(node => node.type === 'button' && node.props.className === 'b04-flow-nav-item' && JSON.stringify(node.children).includes('原文流程')).props.onClick()
+  tabs()[2].props.onClick()
   const original = find('流程原文')
   assert.ok(original && descendants(original).some(node => node.type === 'pre' && node.children.includes('not json')))
 })
 
-test('flow overview, navigation and cards sort sub-flows by parent and mainline attachment while preserving ties', async () => {
+test('flow tabs sort sub-flows by parent and mainline attachment while preserving ties', async () => {
   const main = (id, unit) => ({ flow_id: `${unit}/${id}`, display_id: id, unit_id: unit, title: id, role: 'main',
     mainline_steps: [{ step_id: 'first', title: 'First' }, { step_id: 'last', title: 'Last' }], branches: [] })
   const sub = (id, parent, node) => ({ flow_id: id, title: id, role: 'sub',
@@ -1483,12 +1502,79 @@ test('flow overview, navigation and cards sort sub-flows by parent and mainline 
   index = 0
   const nodes = descendants(panel.type(panel.props))
   const expected = ['B', 'A', 'B-first', 'B-last', 'A-first', 'A-first-tie', 'A-last', 'A-unknown-node', 'unattached', 'missing-parent', 'broken']
-  const overview = nodes.find(node => node.props['aria-label'] === '流程总览')
-  assert.deepEqual(descendants(overview).filter(node => node.type === 'button').map(node => node.props['aria-label'].replace('定位流程 ', '')), expected)
-  assert.deepEqual(nodes.filter(node => node.props.className === 'b04-flow-nav-item').map(node => descendants(node).find(child => child.type === 'strong').children[0].slice(4)), expected)
-  const cards = nodes.filter(node => node.type === 'details' && node.props['data-flow-id'])
-  assert.deepEqual(cards.map(node => node.props['data-flow-id']), expected.map(id => id === 'A' ? 'u1/A' : id === 'B' ? 'u2/B' : id))
-  assert.deepEqual(cards.map(node => node.props.open), expected.map(id => id === 'A' || id === 'B'))
+  assert.deepEqual(nodes.filter(node => node.props.role === 'tab').map(node => descendants(node).find(child => child.type === 'strong').children[0]), expected)
+  const cards = nodes.filter(node => node.props.role === 'tabpanel')
+  assert.deepEqual(cards.map(node => node.props['data-flow-id']), ['u2/B'])
+})
+
+test('four flow tabs isolate content and restore each flow reader, scroll and viewport within its Run', async () => {
+  const flows = ['初始化', '采样', '计算', '复位'].map((title, index) => ({ flow_id: `F${index + 1}`, title, role: 'main',
+    description: `${title}说明`, source_evidence: [`src/flow-${index + 1}.c:10`],
+    mainline_steps: [{ step_id: `S${index + 1}`, title: `${title}步骤` }], branches: [] }))
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'complete' }
+  const states = { 0: { current: { run_id: 'run', details: { business_flows: flows } } },
+    1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
+  const refs = []
+  let index = 0, refIndex = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  }, useRef(initial) { return refs[refIndex++] ??= { current: initial } } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const page = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const render = () => { index = 0; refIndex = 0; return descendants(page.type(page.props)) }
+  const tabs = () => render().filter(node => node.props.role === 'tab')
+  const panel = () => render().find(node => node.props.role === 'tabpanel')
+  const find = label => render().find(node => node.props['aria-label'] === label)
+  const graph = () => render().find(node => node.type?.name === 'FlowGraphView')
+  assert.deepEqual(tabs().map(tab => descendants(tab).find(node => node.type === 'strong').children[0]), flows.map(flow => flow.title))
+  assert.deepEqual(tabs().map(tab => tab.props.tabIndex), [0, -1, -1, -1])
+  const savedViews = []
+  for (let i = 0; i < flows.length; i++) {
+    tabs()[i].props.onClick()
+    assert.equal(render().filter(node => node.props.role === 'tabpanel').length, 1)
+    assert.equal(panel().props['data-flow-id'], flows[i].flow_id)
+    assert.equal(panel().props['aria-labelledby'], tabs()[i].props.id)
+    const content = JSON.stringify(panel())
+    for (let j = 0; j < flows.length; j++) {
+      assert.equal(content.includes(flows[j].description), i === j)
+      assert.equal(content.includes(flows[j].mainline_steps[0].title), i === j)
+      assert.equal(content.includes(flows[j].source_evidence[0]), i === j)
+    }
+    savedViews.push(graph().props.viewport)
+    panel().props.onScroll({ currentTarget: { scrollTop: (i + 1) * 100, scrollLeft: i * 10 } })
+    find('搜索分支').props.onChange({ target: { value: `查询 ${i + 1}` } })
+  }
+  assert.equal(new Set(savedViews).size, 4)
+  for (let i = 0; i < flows.length; i++) {
+    tabs()[i].props.onClick()
+    assert.equal(find('搜索分支').props.value, `查询 ${i + 1}`)
+    assert.equal(graph().props.viewport, savedViews[i])
+    const element = {}
+    panel().props.ref(element)
+    assert.deepEqual(element, { scrollTop: (i + 1) * 100, scrollLeft: i * 10 })
+  }
+  let focused = -1, prevented = false
+  const keyboard = key => ({ key, preventDefault() { prevented = true }, currentTarget: { parentElement: {
+    querySelectorAll() { return flows.map((_, i) => ({ focus() { focused = i } })) },
+  } } })
+  tabs()[3].props.onKeyDown(keyboard('ArrowRight'))
+  assert.equal(focused, 0)
+  assert.equal(prevented, true)
+  assert.equal(panel().props['data-flow-id'], 'F1')
+  tabs()[0].props.onKeyDown(keyboard('End'))
+  assert.equal(panel().props['data-flow-id'], 'F4')
+  tabs()[3].props.onKeyDown(keyboard('Home'))
+  assert.equal(panel().props['data-flow-id'], 'F1')
+  states[0] = { current: { run_id: 'other-run', details: { business_flows: flows } } }
+  states[4] = 'other-run'
+  states[1] = { tasks: { items: [{ ...task, run_id: 'other-run' }] } }
+  assert.notEqual(graph().props.viewport, savedViews[0])
+  const element = {}
+  panel().props.ref(element)
+  assert.deepEqual(element, { scrollTop: 0, scrollLeft: 0 })
 })
 
 test('selected task overview shows loading until its workbench request settles and preserves real errors', async () => {
@@ -2194,7 +2280,7 @@ test('flow views default to text and isolate function diagrams by flow, run and 
   await new Promise(resolve => setImmediate(resolve))
   assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=standard&/)
   find('流程阅读视图').props.onClick()
-  render().find(n => n.props.className === 'b04-flow-nav-item' && JSON.stringify(n).includes('Two')).props.onClick()
+  render().find(n => n.props.role === 'tab' && JSON.stringify(n).includes('Two')).props.onClick()
   assert.equal(find('流程阅读视图').props['aria-pressed'], true)
   find('函数与变量流程图视图').props.onClick()
   await new Promise(resolve => setImmediate(resolve))
@@ -2314,7 +2400,7 @@ test('native flow view stays local while explicit historical diagram selection a
   assert.equal(selectedView(), 'archify-v1')
   expectSession('archify-session-1')
   await find('流程阅读视图').props.onClick()
-  render().find(node => node.props.className === 'b04-flow-nav-item' && JSON.stringify(node).includes('Initialization')).props.onClick()
+  render().find(node => node.props.role === 'tab' && JSON.stringify(node).includes('Initialization')).props.onClick()
   assert.equal(find('流程阅读视图').props['aria-pressed'], true)
   await find('函数与变量流程图视图').props.onClick()
   assert.equal(selectedView(), 'functions-other-flow')
@@ -2343,14 +2429,13 @@ test('native call graphs and native flow tabs never activate a session until exp
   assert.equal(opened.at(-1), 'function-session-2')
 })
 
-test('historical sub-flows start collapsed and navigation opens only the selected card', async () => {
+test('historical flows show the first flow by default and tabs select one flow at a time', async () => {
   const workspace = await diagramWorkspace()
   const { render } = workspace
   const cards = () => render().filter(node => node.props['data-flow-id'])
-  assert.ok(cards().every(node => node.props.open === false), 'legacy flows without a role follow the sub-flow default')
-  render().find(node => node.props.className === 'b04-flow-nav-item' && JSON.stringify(node).includes('Initialization')).props.onClick()
-  assert.equal(cards().find(node => node.props['data-flow-id'] === 'F2').props.open, true)
-  assert.equal(cards().find(node => node.props['data-flow-id'] === 'F1').props.open, false)
+  assert.deepEqual(cards().map(node => node.props['data-flow-id']), ['F1'])
+  render().find(node => node.props.role === 'tab' && JSON.stringify(node).includes('Initialization')).props.onClick()
+  assert.deepEqual(cards().map(node => node.props['data-flow-id']), ['F2'])
 })
 
 test('right-panel diagram conversation selection updates the left flow, profile and version', async () => {

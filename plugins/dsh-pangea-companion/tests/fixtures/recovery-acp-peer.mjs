@@ -84,10 +84,10 @@ class RecoveryPeer {
       let first = false
       try { const marker = await open(config.injectedPath, 'wx'); await marker.close(); first = true } catch (error) { if (error.code !== 'EEXIST') throw error }
       if (first) {
+        retainedOrphan = true
         await audit({ event: 'checkpoint', actionId, sessionId, revision, failure: config.failure })
         // Remain alive even after the test crashes our host. The test terminates
         // this exact owned fixture PID, proving that a live orphan blocks resume.
-        retainedOrphan = true
         await new Promise(() => {})
       }
     }
