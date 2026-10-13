@@ -2,7 +2,7 @@ import { riskApplicable } from './analysis-scenes.js'
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { sourceFirstProjection, coverageSummary, mainlineNodes } from './source-first-projection.js'
+import { sourceFirstProjection, coverageSummary, caseQualitySummary, mainlineNodes } from './source-first-projection.js'
 import { parseFlowText, unwrapFlows, normalizeFlows } from './flow-normalize.js'
 import { readableNotesEnvelope, sourceFirstExecutionView, sourceFirstUnitRows } from './runtime-view.js'
 
@@ -1000,6 +1000,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     },
     counts: Object.fromEntries(['risks', 'test_cases', 'evidence', 'business_flows'].map(key => [key, projection[key].length])),
     case_readiness: Object.fromEntries(['ready', 'needs_setup', 'unclassified'].map(key => [key, projection.test_cases.filter(item => item.readiness === key).length])),
+    case_quality_summary: caseQualitySummary(projection.test_cases),
     execution_progress: actionView.artifacts.map(item => ({
       action_id: item.action_id, unit_id: item.task?.unit_id, stage: item.stage, status: item.status,
       worker_turns: item.worker_turns ?? 0, auto_continuations: item.auto_continuations ?? 0,

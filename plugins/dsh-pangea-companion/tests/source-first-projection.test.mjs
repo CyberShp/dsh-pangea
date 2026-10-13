@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { sourceFirstProjection } from '../src/source-first-projection.js'
+import { sourceFirstProjection, coverageSummary, caseQualitySummary } from '../src/source-first-projection.js'
 const record = (id, kind, body, extra = {}) => ({ record_id: id, kind, body, ...extra })
 const action = (unit, records, extra = {}) => ({ action_id: `run:analysis:${unit}`, stage: 'unit_analysis', status: 'accepted', task: { unit_id: unit }, result_path: `/run/${unit}.json`, revision: 4, records, ...extra })
 
@@ -142,12 +142,71 @@ test('invalid or duplicate nodes are diagnosed without invented identifiers', ()
   assert.ok(flow.projection_warnings.some(x => x.includes('缺少')))
   assert.equal(flow.source_record.body, body)
 })
-test('coverage purpose and valid references are counted independently', async () => {
-  const { coverageSummary } = await import('../src/source-first-projection.js')
-  const cases = [{ purpose: 'coverage', coverage_refs: ['C1'] }, { purpose: 'branch', coverage_refs: ['C1', { coverage_id: 'C2' }] }, { purpose: 'risk', coverage_refs: ['C3', 'outside'] }]
-  assert.deepEqual(coverageSummary(cases, ['C1', 'C2', 'C3', 'C4'].map(coverage_id => ({ coverage_id }))), { valid_gaps: 4, coverage_cases: 1, linked_valid_gaps: 3, unverified_refs: 1 })
-  assert.equal(coverageSummary(cases, null).linked_valid_gaps, null)
-  assert.equal(coverageSummary(cases, []).linked_valid_gaps, 0)
+test('coverage counts cases, added cases and distinct gaps separately for reused and unverified references', () => {
+  const cases = [{ purpose: 'coverage', coverage_refs: ['C1', 'C1'] }, { purpose: 'branch', coverage_refs: ['C1', { coverage_id: 'C2' }] },
+    { purpose: 'risk', coverage_refs: ['C2', 'outside'] }, { purpose: 'coverage', coverage_refs: ['outside'] }]
+  assert.deepEqual(coverageSummary(cases, ['C1', 'C2', 'C3'].map(coverage_id => ({ coverage_id }))), {
+    valid_gaps: 3, coverage_cases: 2, linked_cases: 3, linked_coverage_cases: 1, linked_valid_gaps: 2, unverified_refs: 1,
+  })
+  assert.deepEqual(coverageSummary(cases, null), {
+    valid_gaps: null, coverage_cases: 2, linked_cases: null, linked_coverage_cases: null, linked_valid_gaps: null, unverified_refs: 3,
+  })
+  assert.deepEqual(coverageSummary(cases, []), {
+    valid_gaps: 0, coverage_cases: 2, linked_cases: 0, linked_coverage_cases: 0, linked_valid_gaps: 0, unverified_refs: 3,
+  })
+  assert.deepEqual(coverageSummary([], []), {
+    valid_gaps: 0, coverage_cases: 0, linked_cases: 0, linked_coverage_cases: 0, linked_valid_gaps: 0, unverified_refs: 0,
+  })
+})
+
+test('case quality requires ready for both blackbox and graybox and retains all auxiliary and unknown cases', () => {
+  const cases = ['business_blackbox', 'developer_assisted', 'whitebox_support', 'interface_contract', 'future_level'].flatMap(test_level =>
+    ['ready', 'needs_instrumentation', 'unknown', undefined].map(execution_readiness => ({ format_version: 'behavior-test-case-v1', test_level, execution_readiness })))
+  cases.push({ test_level: 'business_blackbox', execution_readiness: 'ready' })
+  const original = JSON.stringify(cases)
+  assert.deepEqual(caseQualitySummary(cases), {
+    total_cases: 21, business_blackbox: 4, developer_assisted: 4, ready_blackbox: 1, ready_graybox: 1, ready_cases: 2,
+    has_legacy_groups: false, ready_ratio: 2 / 21,
+  })
+  assert.equal(JSON.stringify(cases), original)
+  assert.equal(caseQualitySummary([{ format_version: 'behavior-test-case-v1', test_level: 'whitebox_support' }]).ready_ratio, 0)
+  assert.equal(caseQualitySummary([]).ready_ratio, null)
+  const legacy = caseQualitySummary([...cases, { source_record: { kind: 'test_case_group' } }])
+  assert.equal(legacy.total_cases, 22)
+  assert.equal(legacy.has_legacy_groups, true)
+  assert.equal(legacy.ready_ratio, null)
+})
+
+test('coverage display accepts explicit legacy declarations and single references without converting numeric identifiers', () => {
+  const cases = [{ purpose: 'coverage', coverage_refs: ['G1'] },
+    { format_version: 'behavior-test-case-v1', purpose: 'branch', coverage_refs: 'G1' },
+    { purpose: 'coverage', coverage_refs: { coverage_id: 'G2' } }]
+  assert.deepEqual(coverageSummary(cases, [{ coverage_id: 'G1' }, { coverage_id: 'G2' }]), {
+    valid_gaps: 2, coverage_cases: 2, linked_cases: 3, linked_coverage_cases: 2, linked_valid_gaps: 2, unverified_refs: 0,
+  })
+  assert.deepEqual(coverageSummary([{ purpose: 'coverage', coverage_refs: ['7', 7, { coverage_id: 7 }] },
+    { purpose: 'branch', coverage_refs: ['G1'] }], [{ coverage_id: 'G1' }, { coverage_id: 7 }, { coverage_id: '' }]), {
+    valid_gaps: 1, coverage_cases: 1, linked_cases: 1, linked_coverage_cases: 0, linked_valid_gaps: 1, unverified_refs: 1,
+  })
+})
+
+test('risk display maps explicit historical aliases while retaining canonical values and original bodies', () => {
+  for (const format_version of ['pangea-risk-v1', 'risk-v1', 'behavior-risk-v1']) {
+    const body = { format_version, title: 'Risk', result: 'Declared system result', observed: 'Declared observation', test_case_refs: ['TC-1'], body: 'Original prose remains intact' }
+    const original = JSON.stringify(body)
+    const value = sourceFirstProjection([action('u', [record('r', 'risk', original), record('c', 'test_case', { case_id: 'TC-1' })])])
+    assert.equal(value.risks[0].system_result, body.result)
+    assert.equal(value.risks[0].external_observation, body.observed)
+    assert.deepEqual(value.risks[0].linked_test_case_ids, ['u/c'])
+    assert.equal(value.risks[0].source_record.body, original)
+    assert.equal(value.risks[0].trigger, '')
+    const canonical = { ...body, system_result: 'Canonical result', external_observation: 'Canonical observation', linked_test_case_ids: [] }
+    const preferred = sourceFirstProjection([action('u', [record('r', 'risk', canonical), record('c', 'test_case', { case_id: 'TC-1' })])]).risks[0]
+    assert.equal(preferred.system_result, 'Canonical result')
+    assert.equal(preferred.external_observation, 'Canonical observation')
+    assert.deepEqual(preferred.linked_test_case_ids, [])
+    assert.equal(preferred.source_record.body, canonical)
+  }
 })
 
 test('decision edge belongs to its source node, full path does not move condition to entry', () => {

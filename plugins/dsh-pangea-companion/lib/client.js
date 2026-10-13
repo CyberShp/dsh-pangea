@@ -6403,6 +6403,7 @@ window.__ModuleLoader__.load({
         const allSelected = selectableIds.length > 0 && selectedVisible.length === selectableIds.length
         const linkedCases = testCases.filter(item => (item.linked_risk_ids?.length ?? 0) > 0).length
         const readiness = current?.case_readiness ?? { ready: testCases.filter(item => item.readiness === 'ready').length, needs_setup: testCases.filter(item => item.readiness === 'needs_setup').length, unclassified: testCases.filter(item => !['ready', 'needs_setup'].includes(item.readiness)).length }
+        const quality = current?.case_quality_summary
         const unitCount = new Set(testCases.map(item => item.unit_id).filter(hasText)).size
         const coverageAvailable = current?.scenario === 'coverage-analysis' || current?.coverage_match || current?.coverage_summary?.valid_gaps != null
         const metric = (label, value, note) => h('div', { className: 'b05-metric' }, h('small', null, label), h('strong', null, value), h('span', null, note))
@@ -6415,6 +6416,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'b05-metrics' },
             metric('全部测试用例', testCases.length, `分布在 ${unitCount} 个分析单元`), metric('具备执行条件', readiness.ready ?? '未知', '条件来自用例分析记录'),
             metric('待补执行条件', readiness.needs_setup ?? '未知', '需核对执行准备条件'), metric('关联风险的用例', linkedCases, '按用例去重计数')),
+          quality ? h('section', { className: 'b05-card', 'aria-label': '黑盒与灰盒可实施性' }, h('h3', null, '黑盒与灰盒可实施性'),
+            h('p', null, `业务黑盒 ${quality.business_blackbox} 条（具备执行条件 ${quality.ready_blackbox} 条） · 业务灰盒 ${quality.developer_assisted} 条（具备执行条件 ${quality.ready_graybox} 条）`),
+            h('p', null, quality.has_legacy_groups ? '包含旧用例组，独立用例比例待复核。' : quality.ready_ratio == null ? '无可统计用例。' : `可实施黑盒与灰盒：${quality.ready_cases}/${quality.total_cases}（${(quality.ready_ratio * 100).toFixed(1)}%）；目标 ≥70%。`),
+            h('p', { className: 'b05-subtle' }, '全部正式、辅助及未分类用例均计入分母。比例按作者声明汇总，具备执行条件不代表实测通过。')) : null,
           h('div', { className: 'b05-toolbar' }, h('input', { value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例、验证目标、业务路径…', onChange: event => setCaseQuery(event.target.value) }),
             h('span', { className: 'b05-subtle' }, `显示 ${filtered.length} 条 · 按分析单元排序`)),
           h('div', { className: 'b05-table-scroll' }, h('table', { className: 'b05-case-table' },
@@ -6463,30 +6468,29 @@ window.__ModuleLoader__.load({
         const summary = current?.coverage_summary
         const match = current?.coverage_match
         const gaps = Array.isArray(details.coverage_gaps) ? details.coverage_gaps : []
-        const coverageCases = testCases.filter(item => item.purpose === 'coverage')
         const value = number => number == null ? '未知' : number
         const metric = (label, number, note) => h('div', { className: 'b05-metric' }, h('small', null, label), h('strong', null, value(number)), h('span', null, note))
-        const caseLinks = ids => ids.map(id => { const item = caseById.get(id); return h('button', { key: id, type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'case', id }) }, `${item?.display_id || id} · ${item?.title || '查看用例'}`) })
+        const caseLinks = ids => ids.map(id => { const item = caseById.get(id); return h('button', { key: id, type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'case', id }) }, `${item?.display_id || id} · ${item?.title || '查看用例'} · ${{ coverage: '新增补测', branch: '复用分支用例', risk: '复用风险用例' }[item?.purpose] || '关联用例'}`) })
         return h(React.Fragment, null,
-          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '覆盖输入驱动的补测用例'), h('p', null, '核对缺口来源、源码匹配与补测目标之间的关系。')),
+          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '关联覆盖缺口的测试用例'), h('p', null, '核对缺口来源、源码匹配与测试目标之间的关系。')),
             h('span', { className: 'b05-readiness' }, '覆盖补测场景')),
           h('div', { className: 'b05-coverage-notice' }, h('strong', null, '源码位置匹配，不等于已完成实测覆盖'),
             h('p', null, '匹配仅表示输入与源码位置对应；用例关联、覆盖结果和数据版本适用性需要分别核实。')),
           h('div', { className: 'b05-metrics' }, metric('有效缺口', summary?.valid_gaps, '已定位到本次源码'),
-            metric('补测用例', summary?.coverage_cases, '独立验证目标'), metric('已关联有效缺口', summary?.linked_valid_gaps, '按缺口去重计数'),
-            metric('待核实引用', summary?.unverified_refs, '尚未匹配源码位置')),
+            metric('关联有效缺口的用例', summary?.linked_cases, '按用例计数，含复用用例'), metric('其中新增补测用例', summary?.linked_coverage_cases, '关联用例中的新增补测'),
+            metric('已关联有效缺口', summary?.linked_valid_gaps, '按缺口去重计数')),
           h('div', { className: 'b05-coverage-grid' },
-            h('section', { className: 'b05-card' }, h('div', { className: 'b05-section-head' }, h('h3', null, '补测目标与来源'), h('span', { className: 'b05-subtle' }, `${coverageCases.length} 条用例`)),
-              gaps.length ? gaps.map(gap => { const id = gap.coverage_id || gap.gap_id; const linked = coverageCases.filter(item => (item.coverage_refs ?? []).some(ref => (typeof ref === 'string' ? ref : ref?.coverage_id) === id)); const matched = (match?.matched_preview ?? []).some(row => row.coverage_id === id); return h('div', { key: id, className: 'b05-gap-row' },
+            h('section', { className: 'b05-card' }, h('div', { className: 'b05-section-head' }, h('h3', null, '测试目标与缺口来源'), h('span', { className: 'b05-subtle' }, `${value(summary?.linked_cases)} 条关联用例`)),
+              gaps.length ? gaps.map(gap => { const id = gap.coverage_id || gap.gap_id; const linked = testCases.filter(item => (Array.isArray(item.coverage_refs) ? item.coverage_refs : [item.coverage_refs]).some(ref => (typeof ref === 'string' ? ref : ref?.coverage_id) === id)); const matched = (match?.matched_preview ?? []).some(row => row.coverage_id === id); return h('div', { key: id, className: 'b05-gap-row' },
                 h('div', null, h('strong', null, id), h('small', null, matched ? '已匹配' : gap.file_path ? '源码已定位' : '匹配待核实')),
                 h('div', null, h('strong', null, gap.title || gap.description || gap.kind || '覆盖缺口'), h('small', null, gap.file_path ? `${gap.file_path}${gap.line ? ` · L${gap.line}` : ''}` : text(gap.location, '源码位置未记录'))),
                 h('div', null, linked.length ? caseLinks(linked.map(item => item.test_case_id).filter(hasText)) : h('span', { className: 'b05-subtle' }, '暂无关联用例')),
-                h('span', { className: 'b05-subtle' }, linked.some(item => item.readiness === 'needs_setup') ? '待补条件' : linked.length ? '具备条件' : '待关联')) }) : h('p', { className: 'b05-subtle' }, summary?.valid_gaps == null ? '有效缺口输入不可读取，不能推定为零。' : '当前无有效缺口记录。'),
+                h('span', { className: 'b05-subtle' }, linked.length ? linked.every(item => item.readiness === 'ready') ? '具备条件' : '待核对执行条件' : '待关联')) }) : h('p', { className: 'b05-subtle' }, summary?.valid_gaps == null ? '有效缺口输入不可读取，不能推定为零。' : '当前无有效缺口记录。'),
               (match?.unmatched_preview ?? []).map((row, index) => h('div', { key: index, className: 'b05-gap-row' },
                 h('div', null, h('strong', null, row.coverage_id || row.ref_id || `引用 ${index + 1}`), h('small', null, '未匹配')),
                 h('div', null, h('strong', null, row.title || row.description || row.file_path || '覆盖输入引用'), h('small', null, row.reason || row.location || '不在当前源码匹配范围内')),
                 h('span', { className: 'b05-subtle' }, '尚未形成有效关联'))),
-              h('p', { className: 'b05-subtle' }, `补测用例是当前 ${testCases.length} 条用例中的子集。未匹配引用不计入有效缺口。`)),
+              h('p', { className: 'b05-subtle' }, `全部新增补测用例：${value(summary?.coverage_cases)}；待核实引用：${value(summary?.unverified_refs)}。当前共 ${testCases.length} 条用例，未匹配引用不计入有效缺口。`)),
             h('section', { className: 'b05-card' }, h('h3', null, '覆盖数据与匹配诊断'),
               (match?.sources ?? []).map((source, index) => h('div', { key: index, className: 'b05-coverage-source' }, h('strong', null, source.name || source.path || source.file_path || `输入来源 ${index + 1}`))),
               h('dl', { className: 'b05-case-kv' },
@@ -6603,8 +6607,8 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => addToConversation('case', item, 'executable') }, '与 AI 讨论'))),
           h('div', { className: 'b05-case-layout' },
             h('main', null,
-              item.readiness !== 'ready' ? h('div', { className: 'b05-case-notice', role: 'status' }, h('strong', null, readiness),
-                h('p', null, (item.missing_execution_conditions ?? []).join('；') || '当前记录未提供完整执行条件，需先核对输入和环境。')) : null,
+              h('div', { className: 'b05-case-notice', role: 'status' }, h('strong', null, readiness),
+                h('p', null, sourceFirstRecordBody(item.readiness_reason) || (item.missing_execution_conditions ?? []).join('；') || '当前记录未提供执行条件依据。')),
               h('section', { className: 'b05-card' }, h('h3', null, '前置条件'), values(item.preconditions, '原文未记录前置条件。')),
               h('section', { className: 'b05-card' }, h('h3', null, '操作步骤与逐步预期'), pairs.length
                 ? h('div', { className: 'b05-table-scroll' }, h('table', { className: 'b05-case-table b05-step-table' },

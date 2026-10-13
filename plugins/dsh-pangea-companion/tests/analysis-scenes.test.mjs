@@ -35,6 +35,25 @@ test('capability negotiation keeps old module-only options separate from v2', ()
   assert.throws(() => analysisOptions({ analysis_options: legacy }, SCENE_PROFILE))
 })
 
+test('source-first read model exposes coverage case counts and declared readiness without changing Run status', async t => {
+  const f = await fixture(t, 'coverage-analysis')
+  const cases = [
+    { purpose: 'branch', test_level: 'business_blackbox', execution_readiness: 'ready', readiness_reason: 'CLI entry exists', coverage_refs: ['C1', 'C2'] },
+    { purpose: 'coverage', test_level: 'developer_assisted', execution_readiness: 'unknown', coverage_refs: [{ coverage_id: 'C1' }] },
+    { purpose: 'risk', test_level: 'whitebox_support', execution_readiness: 'ready', coverage_refs: ['unverified'] },
+  ]
+  f.result.records = cases.map((body, index) => ({ record_id: `c${index}`, kind: 'test_case', body: { format_version: 'behavior-test-case-v1', ...body } }))
+  await json(f.resultPath, f.result)
+  await json(path.join(f.run, 'inputs/coverage-gaps.json'), [{ coverage_id: 'C1' }, { coverage_id: 'C2' }])
+  const before = await readFile(f.resultPath, 'utf8')
+  const run = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
+  assert.deepEqual(run.coverage_summary, { valid_gaps: 2, coverage_cases: 1, linked_cases: 2, linked_coverage_cases: 1, linked_valid_gaps: 2, unverified_refs: 1 })
+  assert.deepEqual(run.case_quality_summary, { total_cases: 3, business_blackbox: 1, developer_assisted: 1, ready_blackbox: 1, ready_graybox: 0, ready_cases: 1, has_legacy_groups: false, ready_ratio: 1 / 3 })
+  assert.equal(run.details.test_cases[0].readiness_reason, 'CLI entry exists')
+  assert.equal(run.lifecycle_status, 'complete')
+  assert.equal(await readFile(f.resultPath, 'utf8'), before)
+})
+
 test('review stage label follows the frozen speed/depth contract', async t => {
   const f = await fixture(t, 'coverage-analysis')
   const progressPath = path.join(f.run, 'progress.json')

@@ -52,10 +52,23 @@ export function mainlineNodes(flow) {
 
 export function coverageSummary(cases, gaps) {
   const known = Array.isArray(gaps) ? new Set(gaps.map(row => row?.coverage_id).filter(id => typeof id === 'string' && id)) : null
-  const refs = new Set(cases.flatMap(row => list(row.coverage_refs).map(ref => typeof ref === 'string' ? ref : ref?.coverage_id)).filter(id => typeof id === 'string' && id))
+  const caseRefs = row => list(row.coverage_refs).map(ref => typeof ref === 'string' ? ref : ref?.coverage_id).filter(id => typeof id === 'string' && id)
+  const refs = new Set(cases.flatMap(caseRefs))
+  const linked = known ? cases.filter(row => caseRefs(row).some(id => known.has(id))) : null
   return { valid_gaps: known ? known.size : null, coverage_cases: cases.filter(row => row.purpose === 'coverage').length,
+    linked_cases: linked ? linked.length : null, linked_coverage_cases: linked ? linked.filter(row => row.purpose === 'coverage').length : null,
     linked_valid_gaps: known ? [...refs].filter(id => known.has(id)).length : null,
     unverified_refs: known ? [...refs].filter(id => !known.has(id)).length : refs.size }
+}
+
+export function caseQualitySummary(cases) {
+  const level = row => row.format_version === 'behavior-test-case-v1' ? row.test_level : null
+  const count = (value, ready = false) => cases.filter(row => level(row) === value && (!ready || row.execution_readiness === 'ready')).length
+  const readyBlackbox = count('business_blackbox', true), readyGraybox = count('developer_assisted', true)
+  const hasLegacyGroups = cases.some(row => row.source_record?.kind === 'test_case_group')
+  return { total_cases: cases.length, business_blackbox: count('business_blackbox'), developer_assisted: count('developer_assisted'),
+    ready_blackbox: readyBlackbox, ready_graybox: readyGraybox, ready_cases: readyBlackbox + readyGraybox,
+    has_legacy_groups: hasLegacyGroups, ready_ratio: cases.length && !hasLegacyGroups ? (readyBlackbox + readyGraybox) / cases.length : null }
 }
 
 export function recordTitle(record, body = mapping(record.body)) {
@@ -102,9 +115,9 @@ export function sourceFirstProjection(artifacts) {
     if (kind === 'risk') {
       result.risks.push({ ...row, risk_id: row.projection_id, severity: plain(row.severity) || undefined,
         narrative: plain(row.narrative ?? row.description), impact: plain(row.impact), expectation: plain(row.expectation ?? row.correct_expectation), current_behavior: plain(row.current_behavior),
-        dfx: strings(row.dfx), trigger: plain(row.trigger), system_result: plain(row.system_result ?? row.behavior),
-        external_observation: plain(row.external_observation ?? row.user_impact), exclusion_condition: plain(row.exclusion_condition),
-        linked_test_case_ids: resolve(row, [...list(row.linked_test_case_ids), ...list(row.related_case_ids), ...list(row.case_ids), ...list(row.source_record.relates_to)], ['case_id', 'test_case_id'], ['test_case', 'test_case_group']), evidence: [],
+        dfx: strings(row.dfx), trigger: plain(row.trigger), system_result: plain(row.system_result ?? row.result ?? row.behavior),
+        external_observation: plain(row.external_observation ?? row.observed ?? row.user_impact), exclusion_condition: plain(row.exclusion_condition),
+        linked_test_case_ids: resolve(row, [...list(row.linked_test_case_ids ?? row.test_case_refs), ...list(row.related_case_ids), ...list(row.case_ids), ...list(row.source_record.relates_to)], ['case_id', 'test_case_id'], ['test_case', 'test_case_group']), evidence: [],
       })
     } else if (['test_case', 'test_case_group'].includes(kind)) {
       const pairedSteps = list(row.steps ?? row.test_steps).map(step =>

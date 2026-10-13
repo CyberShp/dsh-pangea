@@ -2143,6 +2143,72 @@ test('path-only flow renders complete entry and path content without inventing g
   assert.ok(JSON.stringify(nodes).includes('暂不能据此绘制流程图'))
 })
 
+async function caseMetricsView(records, gaps, screen) {
+  const { sourceFirstProjection, coverageSummary, caseQualitySummary } = await import('../src/source-first-projection.js')
+  const details = sourceFirstProjection([{ stage: 'unit_analysis', status: 'accepted', task: { unit_id: 'u' }, records }])
+  details.coverage_gaps = gaps
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'complete' }
+  const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', scenario: 'coverage-analysis', lifecycle_status: 'complete', terminal: true, details,
+    coverage_summary: coverageSummary(details.test_cases, gaps), case_quality_summary: caseQualitySummary(details.test_cases) }
+  const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: screen }
+  const before = JSON.stringify(states)
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  assert.equal(JSON.stringify(states), before)
+  return nodes
+}
+
+test('built coverage view shows reused branch and risk cases with separate case and gap metrics', async () => {
+  const records = [
+    { record_id: 'branch', kind: 'test_case', body: { title: 'Branch reuse', purpose: 'branch', coverage_refs: ['C1', 'C2'] } },
+    { record_id: 'risk', kind: 'test_case', body: { title: 'Risk reuse', purpose: 'risk', coverage_refs: [{ coverage_id: 'C1' }] } },
+    { record_id: 'new', kind: 'test_case', body: { title: 'Added case', purpose: 'coverage', coverage_refs: ['C1'] } },
+    { record_id: 'unverified', kind: 'test_case', body: { purpose: 'coverage', coverage_refs: ['outside'] } },
+  ]
+  const nodes = await caseMetricsView(records, [{ coverage_id: 'C1' }, { coverage_id: 'C2' }], { type: 'coverage-cases' })
+  const metrics = nodes.filter(node => node.props.className === 'b05-metric')
+  for (const [label, count] of [['关联有效缺口的用例', 3], ['其中新增补测用例', 1], ['已关联有效缺口', 2]]) {
+    const metric = metrics.find(node => metricsText(node).startsWith(label))
+    assert.equal(descendants(metric).find(node => node.type === 'strong').children[0], count)
+  }
+  const rows = nodes.filter(node => node.props.className === 'b05-gap-row')
+  assert.match(metricsText(rows[0]), /Branch reuse.*复用分支用例/)
+  assert.match(metricsText(rows[0]), /Risk reuse.*复用风险用例/)
+  assert.match(metricsText(rows[0]), /Added case.*新增补测/)
+  assert.match(metricsText(rows[1]), /Branch reuse/)
+  assert.match(metricsText(nodes), /全部新增补测用例：2；待核实引用：1/)
+  const unknown = await caseMetricsView(records, null, { type: 'coverage-cases' })
+  const unknownMetric = unknown.find(node => node.props.className === 'b05-metric' && metricsText(node).startsWith('关联有效缺口的用例'))
+  assert.equal(descendants(unknownMetric).find(node => node.type === 'strong').children[0], '未知')
+})
+
+test('built case view shows declared ready ratio and the reason for a ready case', async () => {
+  const body = { format_version: 'behavior-test-case-v1', test_level: 'business_blackbox', execution_readiness: 'ready', readiness_reason: '已核实 CLI 与观测日志' }
+  const records = [
+    { record_id: 'ready', kind: 'test_case', body },
+    { record_id: 'blackbox-unknown', kind: 'test_case', body: { ...body, execution_readiness: 'unknown' } },
+    { record_id: 'graybox-unknown', kind: 'test_case', body: { ...body, test_level: 'developer_assisted', execution_readiness: 'unknown' } },
+    { record_id: 'aux', kind: 'test_case', body: { ...body, test_level: 'whitebox_support' } },
+  ]
+  const overview = await caseMetricsView(records, [], { type: 'cases' })
+  const section = overview.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')
+  assert.match(metricsText(section), /业务黑盒 2 条（具备执行条件 1 条）/)
+  assert.match(metricsText(section), /1\/4（25.0%）/)
+  const detail = await caseMetricsView(records, [], { type: 'case', id: 'u/ready' })
+  const notice = detail.find(node => node.props.className === 'b05-case-notice')
+  assert.match(metricsText(notice), /具备执行条件.*已核实 CLI 与观测日志/)
+  const empty = await caseMetricsView([], [], { type: 'cases' })
+  assert.match(metricsText(empty.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')), /无可统计用例/)
+  const legacy = await caseMetricsView([...records, { record_id: 'group', kind: 'test_case_group', body: 'Historical group' }], [], { type: 'cases' })
+  const legacySection = legacy.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')
+  assert.match(metricsText(legacySection), /包含旧用例组，独立用例比例待复核/)
+  assert.doesNotMatch(metricsText(legacySection), /20.0%/)
+})
+
 test('closure diagnostics remain available and delivery has one primary control', async () => {
   const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'running' }
   const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', stage: 'closing', lifecycle_status: 'running', needs_user: true, analysis: { total: 1, completed: 1 }, details: {}, execution_progress: [{ action_id: 'closure-u', unit_id: 'u', stage: 'targeted_closure', status: 'paused', elapsed_ms: 900000, worker_turns: 2, auto_continuations: 1, finding_count: 4, modified_records: 3 }] }
