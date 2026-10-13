@@ -1456,7 +1456,7 @@ test('flow page draws natively when experimental export is off and orders main, 
   const pageNodes = render()
   assert.ok(pageNodes.findIndex(node => node.props.role === 'tablist') < pageNodes.findIndex(node => node.props.role === 'tabpanel'))
   const reading = descendants(cards()[0])
-  assert.deepEqual(reading.filter(node => node.type === 'h3').map(node => node.children[0]), ['概述', '主干步骤', '分支与异常', '路径', '图示'])
+  assert.deepEqual(reading.filter(node => node.type === 'h3').map(node => node.children[0]), ['概述', '节点与流转', '分支与异常', '路径', '图示'])
   assert.ok(reading.findIndex(node => node.props['aria-label'] === '流程图示') < reading.findIndex(node => node.props['aria-label'] === '流程源码依据'))
   assert.match(JSON.stringify(reading.find(node => node.props['aria-label'] === '业务路径阅读')), /请求合法 → 请求校验 → 持久化/)
   const graphs = render().filter(node => node.type?.name === 'FlowGraphView')
@@ -2735,4 +2735,52 @@ test('creation wizard resolves selected asset IDs without opening the asset pick
   assert.match(text, /输入版本 r3/)
   assert.match(text, /输入版本 r2/)
   assert.doesNotMatch(text, /正在读取资产详情|待读取/)
+})
+
+test('graph text follows explicit edges despite node ordering, flattened mainline and stale paths', async () => {
+  const nodes = [
+    { id: 'process', label: '处理协商消息', kind: 'entry' },
+    { id: 'failure1', label: '标记失败', kind: 'exception' },
+    { id: 'judge', label: '协商结果判定', kind: 'decision' },
+    { id: 'auth', label: '后续认证', kind: 'main' },
+    { id: 'exit', label: '结束协商', kind: 'exit' },
+    { id: 'unknown', label: '待确认节点' },
+  ]
+  const pairs = [['process', 'judge', ''], ['judge', 'auth', '成功'], ['judge', 'failure1', '失败'],
+    ['failure1', 'exit', ''], ['auth', 'judge', '重试'], ['auth', 'exit', ''], ['judge', 'exit', '']]
+  const edges = pairs.map(([source_step_key, target_step_key, condition]) => ({ source_step_key, target_step_key, condition }))
+  const flow = { flow_id: 'F1', title: '协商', nodes, edges,
+    mainline_steps: nodes.map(node => ({ step_id: node.id, title: node.label })),
+    branches: pairs.map(([from_step_id, to_step_id, condition], edge_index) => ({ branch_id: `B${edge_index}`, edge_index, from_step_id, to_step_id, condition })),
+    paths: [{ path_id: 'stale', node_ids: ['process', 'failure1', 'exit'] }, { path_id: 'retry', node_ids: ['process', 'judge', 'auth', 'judge', 'failure1', 'exit'] }] }
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'complete' }
+  const current = { run_id: 'run', data_root: '/data', details: { business_flows: [flow] } }
+  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const render = () => { index = 0; return descendants(panel.type(panel.props)) }
+  const routes = rendered => Object.fromEntries(rendered.filter(n => n.props['aria-label']?.match(/^节点 .* 的去向$/)).map(n => [n.props['aria-label'], JSON.stringify(n)]))
+  const initial = render(), result = routes(initial)
+  assert.match(result['节点 process 的去向'], /后续 → 协商结果判定/)
+  assert.doesNotMatch(result['节点 process 的去向'], /标记失败/)
+  assert.match(result['节点 judge 的去向'], /成功 → 后续认证/)
+  assert.match(result['节点 judge 的去向'], /失败 → 标记失败/)
+  assert.match(result['节点 judge 的去向'], /分支条件未明确 → 结束协商/)
+  assert.match(result['节点 auth 的去向'], /重试 → 协商结果判定/)
+  assert.match(result['节点 failure1 的去向'], /后续 → 结束协商/)
+  assert.equal(result['节点 exit 的去向'], undefined)
+  assert.ok(initial.some(n => n.children.includes('结束当前流程。')))
+  assert.ok(initial.some(n => n.children.includes('未记录后续连线，不推断下一步。')))
+  assert.equal(initial.filter(n => n.props.className === 'b04-flow-step').length, nodes.length)
+  assert.equal(initial.filter(n => n.props.className === 'b04-flow-step-num').length, 0)
+  const paths = JSON.stringify(initial.find(n => n.props['aria-label'] === '业务路径阅读'))
+  assert.doesNotMatch(paths, /处理协商消息 → 标记失败/)
+  assert.match(paths, /路径与节点连线不一致/)
+  assert.match(paths, /后续认证 → 协商结果判定/)
+  flow.nodes = [...nodes].reverse()
+  flow.mainline_steps = []
+  assert.deepEqual(routes(render()), result)
 })

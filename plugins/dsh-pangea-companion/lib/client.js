@@ -1941,7 +1941,7 @@ window.__ModuleLoader__.load({
       .b04-flow-sequence { border-top: 1px solid #e8ece6; margin-top: 20px; padding-top: 23px; }
       .b04-flow-step { display: grid; grid-template-columns: 34px minmax(0,1fr) minmax(82px,112px); gap: 13px; position: relative; padding-bottom: 23px; }
       .b04-flow-step[aria-current="step"] { border-radius: 8px; background: #f8f3ed; }
-      .b04-flow-step:not(:last-child)::before { content: ''; position: absolute; left: 15px; top: 31px; bottom: 1px; width: 1px; background: #e1e6df; }
+      .b04-flow-step { grid-template-columns: minmax(0,1fr) minmax(82px,112px); border-bottom: 1px solid #e8ece6; margin-bottom: 16px; }
       .b04-flow-step-num { display: grid; place-items: center; width: 31px; height: 31px; border: 1px solid #dfe5df; border-radius: 50%; background: #f8faf6; color: #66705f; font: 11px Consolas,monospace; z-index: 1; }
       .b04-flow-step strong { font-size: 13px; line-height: 31px; }
       .b04-flow-step p { margin: 1px 0 5px; color: #828981; font-size: 12px; line-height: 1.75; }
@@ -5374,7 +5374,10 @@ window.__ModuleLoader__.load({
         const readingState = flow => {
           const scope = cardScope(flow)
           const reader = flowReader.scope === scope ? flowReader : { scope, view: 'reader', step: '', query: '', page: 1 }
-          const steps = Array.isArray(flow?.mainline_steps) ? flow.mainline_steps : []
+          // Graph-backed records must never use a flattened mainline as execution order.
+          const steps = flow?.nodes?.length ? flow.nodes.map(node => ({ step_id: node.id, title: node.label,
+            processing: node.description, node_kind: node.kind, source_evidence: node.source_evidence }))
+            : Array.isArray(flow?.mainline_steps) ? flow.mainline_steps : []
           const branches = Array.isArray(flow?.branches) ? flow.branches : []
           const unbound = item => !steps.some(step => step.step_id === item.from_step_id)
           const filteredBranches = branches.filter(item => (!reader.step || (reader.step === '__unbound' ? unbound(item) : item.from_step_id === reader.step))
@@ -5403,7 +5406,7 @@ window.__ModuleLoader__.load({
                 event.preventDefault(); selectFlow(filtered[next])
                 event.currentTarget.parentElement.querySelectorAll('[role="tab"]')[next]?.focus()
               } }, h('strong', null, item.title || item.display_id || item.flow_id),
-              h('small', null, `${(item.mainline_steps ?? []).length} 个步骤 · ${roleText(item)}`))))) : null
+              h('small', null, `${(item.nodes ?? item.mainline_steps ?? []).length} 个节点 · ${roleText(item)}`))))) : null
         const modebar = flow ? h('div', { className: 'b04-modebar' },
           h('div', null, h('strong', null, flow.title || '业务流程'), h('span', { style: styles.badge }, flow.display_id || flow.flow_id)),
           h('div', { role: 'group', 'aria-label': '流程展示方式', className: 'pangea-flow-modes' },
@@ -5415,13 +5418,19 @@ window.__ModuleLoader__.load({
           const { scope, reader, steps, branches, unbound, filteredBranches, branchPages, branchPage, visibleBranches } = readingState(flow)
           const updateReader = next => { setFlowSelection(flow.flow_id); setFlowReader(next) }
           const openBranch = id => { setFlowSelection(flow.flow_id); setFlowBranchDetail(id); setBranchSelection(id); updateReader({ ...reader, view: 'reader' }) }
+          const graphBacked = Boolean(flow.nodes?.length)
+          const transitions = graphBacked ? (flow.edges ?? []).map((edge, index) => ({
+            from_step_id: edge.source_step_key, to_step_id: edge.target_step_key, condition: edge.condition,
+            processing: edge.description, branch_id: branches.find(branch => branch.edge_index === index)?.branch_id,
+          })) : branches
+          const outgoing = id => transitions.filter(edge => edge.from_step_id === id)
           const nodeLabel = id => steps.find(item => item.step_id === id)?.title || flow.nodes?.find(item => item.id === id)?.label || id || '—'
           const cell = { padding: '8px 10px', textAlign: 'left', verticalAlign: 'top', borderBottom: '1px solid #e8ece6', overflowWrap: 'anywhere' }
           return h('article', { className: 'b04-flow-card', 'aria-label': '业务流程文字阅读' },
           h('div', { className: 'b04-overline' }, `FLOW ${flow.display_id || flow.flow_id} / ${flow.unit_id || '当前单元'}`),
           h('h2', null, flow.title || '业务流程'),
-          h('h3', null, '概述'), h('p', { className: 'b04-flow-description' }, flow.description || flow.entry || '阅读主干步骤与条件分支。'),
-          h('div', { className: 'b04-flow-badges' }, h('span', null, `${steps.length} 个主干步骤`), h('span', null, `${branches.length} 条分支`),
+          h('h3', null, '概述'), h('p', { className: 'b04-flow-description' }, flow.description || flow.entry || '按节点的入口、条件和去向阅读业务流程。'),
+          h('div', { className: 'b04-flow-badges' }, h('span', null, `${steps.length} 个流程节点`), h('span', null, `${branches.length} 条分支`),
             flow.entry ? h('span', null, `入口 ${flow.entry}`) : null, flow.document_status === 'live_draft' ? h('span', null, '分析草稿') : null),
           linkedItems(flow),
           flow.projection_warnings?.length ? h('div', { role: 'status', style: styles.notice }, flow.projection_warnings.join('；')) : null,
@@ -5430,16 +5439,18 @@ window.__ModuleLoader__.load({
             h('ul', { style: { margin: '6px 0 0', paddingLeft: 18 } }, flow.structure_errors.map((error, index) => h('li', { key: index }, error)))) : null,
           flow.raw_text != null ? h('section', { 'aria-label': '流程原文' }, h('h3', null, '流程原文'),
             h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: '12px/1.6 Consolas,monospace', background: '#fafcf8', border: '1px solid #e2e7e0', borderRadius: 8, padding: 12 } }, flow.raw_text || '（空）')) : null,
-          h('h3', null, '主干步骤'),
+          h('h3', null, '节点与流转'),
+          h('p', { style: styles.itemMeta }, '节点按记录顺序陈列，不代表执行先后；执行关系以入口、条件和去向为准。'),
           steps.length ? h('div', { className: 'b04-flow-sequence' }, steps.map((item, index) => h('div', { key: item.step_id || index, id: `${cardId(flow)}-step-${encodeURIComponent(item.step_id)}`, className: 'b04-flow-step', 'aria-current': reader.step === item.step_id ? 'step' : undefined },
-            h('span', { className: 'b04-flow-step-num' }, String(index + 1).padStart(2, '0')),
             h('div', null, h('strong', null, item.title || item.step_id || `步骤 ${index + 1}`),
               h('p', null, item.processing || item.external_action || item.state_change || item.external_observation || '原记录未提供步骤说明。'),
-              branches.filter(edge => edge.from_step_id === item.step_id && edge.branch_id === branches[0]?.branch_id).map(edge => h('button', { key: edge.branch_id, type: 'button', className: 'b04-branch-choice',
-                'aria-label': `打开分支 ${edge.branch_id}`, onClick: () => openBranch(edge.branch_id) },
-                h('span', null, edge.branch_id), h('span', null, h('strong', null, edge.condition || '条件待确认'),
-                  h('small', null, `${edge.processing || edge.result || '查看分支详情'} → ${steps.find(step => step.step_id === edge.to_step_id)?.title || edge.terminal_result || '结束待确认'}`)),
-                h('span', { style: { marginLeft: 'auto', color: '#9c8c80' } }, '›')))),
+              h('small', null, `节点 ${item.step_id}${item.node_kind ? ` · ${FLOW_KIND_LABELS[item.node_kind] || item.node_kind}` : ''}`),
+              h('p', null, `入口：${transitions.filter(edge => edge.to_step_id === item.step_id).map(edge => `${nodeLabel(edge.from_step_id)}${edge.condition ? `（${edge.condition}）` : ''}`).join('；') || (item.node_kind === 'entry' ? '流程入口' : '未记录入口连线')}`),
+              outgoing(item.step_id).length ? h('ul', { 'aria-label': `节点 ${item.step_id} 的去向` }, outgoing(item.step_id).map((edge, edgeIndex) => h('li', { key: edgeIndex },
+                h('span', null, `${edge.condition || (outgoing(item.step_id).length > 1 || ['decision', 'condition'].includes(item.node_kind) ? '分支条件未明确' : '后续')} → ${edge.to_step_id ? nodeLabel(edge.to_step_id) : edge.terminal_result || '去向未记录'}`),
+                edge.processing ? h('p', null, edge.processing) : null,
+                edge.branch_id ? h('button', { type: 'button', className: 'b04-link', 'aria-label': `打开分支 ${edge.branch_id}`, onClick: () => openBranch(edge.branch_id) }, '查看详情') : null)))
+                : h('p', null, item.node_kind === 'exit' ? '结束当前流程。' : '未记录后续连线，不推断下一步。')),
             h('div', { className: 'b04-flow-ref' }, sourceButton(item, evidenceLocation(item)?.split(/[\\/]/).at(-1) || '查看源码', `业务流程 · ${flow.title || flow.display_id} · ${item.step_id}`))))) :
             h('section', { className: 'b04-flow-sequence', 'aria-label': '主干步骤说明' },
               h('p', null, flow.paths?.length ? '原文提供业务路径，但尚无可解析节点，暂不能据此绘制流程图。' : '尚无可解析的主干步骤，分析可能仍在发布中。'),
@@ -5482,9 +5493,9 @@ window.__ModuleLoader__.load({
             flow.entry_points ? renderReadableBody(flow.entry_points, true) : null,
             flow.paths?.length ? flow.paths.map((path, index) => h('div', { key: path.path_id || index },
               h('h4', null, `${path.path_id || `P-${index + 1}`}${path.title ? ` · ${path.title}` : ''}`),
-              Array.isArray(path.node_ids) && path.node_ids.length ? h(React.Fragment, null,
+              Array.isArray(path.node_ids) && path.node_ids.length && (!graphBacked || path.node_ids.every((id, i, ids) => steps.some(step => step.step_id === id) && (!i || transitions.some(edge => edge.from_step_id === ids[i - 1] && edge.to_step_id === id)))) ? h(React.Fragment, null,
                 h('p', null, `${path.condition ? `${path.condition} → ` : ''}${path.node_ids.map(nodeLabel).join(' → ')}`),
-                path.explanation ? h('p', null, path.explanation) : null) : renderReadableBody(path, true), linkedItems(path)))
+                path.explanation ? h('p', null, path.explanation) : null) : graphBacked ? h('p', { role: 'status' }, '路径与节点连线不一致或缺少节点，暂不展示执行顺序。') : renderReadableBody(path, true), linkedItems(path)))
               : h('p', { style: styles.itemMeta }, '原记录未提供独立路径。')),
           h('section', { 'aria-label': '流程图示' }, h('h3', null, '图示'),
             h(FlowGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).graph, idPrefix: `pf-${ordered.indexOf(flow)}`, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] })),
