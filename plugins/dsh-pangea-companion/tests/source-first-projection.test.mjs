@@ -191,7 +191,7 @@ test('coverage display accepts explicit legacy declarations and single reference
 })
 
 test('risk display maps explicit historical aliases while retaining canonical values and original bodies', () => {
-  for (const format_version of ['pangea-risk-v1', 'risk-v1', 'behavior-risk-v1']) {
+  for (const format_version of ['pangea-risk-v1', 'risk-v1', 'behavior-risk-v1', 'behavior-risk-v2']) {
     const body = { format_version, title: 'Risk', result: 'Declared system result', observed: 'Declared observation', test_case_refs: ['TC-1'], body: 'Original prose remains intact' }
     const original = JSON.stringify(body)
     const value = sourceFirstProjection([action('u', [record('r', 'risk', original), record('c', 'test_case', { case_id: 'TC-1' })])])
@@ -207,6 +207,19 @@ test('risk display maps explicit historical aliases while retaining canonical va
     assert.deepEqual(preferred.linked_test_case_ids, [])
     assert.equal(preferred.source_record.body, canonical)
   }
+})
+
+test('inspection ledger stays separate from notes, aliases and case exports; risk quotes retain locations', () => {
+  const body = { format_version: 'behavior-risk-v2', risk_id: 'R1', source_evidence: ['r:a.c:2'], evidence_quotes: [{ ref: 'r:a.c:2', snippet: ' * original comment' }] }
+  const check = { check_id: 'C1', risk_id: 'R1', risk_ids: ['R1'], sites: ['r:a.c:2'] }
+  const value = sourceFirstProjection([action('u', [record('r', 'risk', body), record('c', 'check', check), record('t', 'test_case', { case_id: 'T1', risk_refs: ['R1'] })])])
+  assert.equal(value.checks.length, 1)
+  assert.equal(value.notes.length, 0)
+  assert.equal(value.test_cases[0].unit_notes.length, 0)
+  assert.deepEqual(value.test_cases[0].linked_risk_ids, ['u/r'])
+  assert.equal(value.risks[0].evidence[0].location, 'r:a.c:2')
+  assert.equal(value.risks[0].evidence[0].quote, ' * original comment')
+  assert.equal(value.evidence.some(e => !e.location), false)
 })
 
 test('decision edge belongs to its source node, full path does not move condition to entry', () => {

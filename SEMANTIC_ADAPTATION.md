@@ -82,3 +82,5 @@ Desktop 提供启动时的应用版本与入口指纹，Agent 创建 Run 时加�
 `correct_expectation` / `case_ids` 字段变体已加入回归样本。空壳只在运行中的待绑定
 comparison action、revision 0、无记录且未接受时显示准备状态；任务、Run 或 action
 身份冲突和已提交内容仍然报警。
+
+风险方法 v1：独立只读检查账本、风险原样引文及外部观测；空 narrative 继续展示 trigger。检查记录不进入用例说明/导出，comparison 复核记录保持阶段隔离。

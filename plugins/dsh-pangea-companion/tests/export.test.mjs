@@ -2,6 +2,23 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { buildTestCaseCsv, buildTestCaseXlsx, csvCell } from '../src/export.js'
+import { sourceFirstProjection } from '../src/source-first-projection.js'
+
+test('inspection checks and comparison review notes stay out of exported unit notes', () => {
+  const details = sourceFirstProjection([
+    { action_id: 'analysis', stage: 'unit_analysis', task: { unit_id: 'u' }, records: [
+      { record_id: 'c', kind: 'check', body: { check_id: 'C1', object: 'ledger-only-text' } },
+      { record_id: 't', kind: 'test_case', body: { case_id: 'T1', title: 'case' } },
+      { record_id: 'n', kind: 'note', body: 'unit-note-text' },
+    ] },
+    { action_id: 'comparison', stage: 'comparison_review', task: { unit_id: 'u' }, records: [
+      { record_id: 'review', kind: 'note', body: { format_version: 'behavior-review-check-v1', summary: 'review-only-text' } },
+    ] },
+  ])
+  const csv = buildTestCaseCsv({ workflow_version: 'source-first-v1', details })
+  assert.match(csv, /unit-note-text/)
+  assert.doesNotMatch(csv, /ledger-only-text|review-only-text/)
+})
 
 test('escapes CSV cells and preserves multi-line test steps', () => {
   assert.equal(csvCell('a,b'), '"a,b"')

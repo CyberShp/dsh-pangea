@@ -72,6 +72,7 @@ export function caseQualitySummary(cases) {
 }
 
 export function recordTitle(record, body = mapping(record.body)) {
+  if (record.kind === 'check') return `检查记录 · ${body.check_id ?? record.record_id}`
   if (record.kind === 'flow' && typeof body.title !== 'string' && typeof body['标题'] === 'string') return body['标题']
   if (typeof body.title === 'string' && body.title.trim()) return body.title.trim()
   const first = typeof record.body === 'string' && !Object.keys(body).length ? record.body.trim().split('\n')[0].trim() : ''
@@ -80,7 +81,7 @@ export function recordTitle(record, body = mapping(record.body)) {
 }
 
 export function sourceFirstProjection(artifacts) {
-  const result = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [], notes: [] }
+  const result = { risks: [], test_cases: [], evidence: [], business_flows: [], review_issues: [], notes: [], checks: [] }
   const closureUnits = new Set(artifacts.filter(a => a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)).map(a => a.task?.unit_id))
   const delivery = artifacts.filter(a => (a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)) || (a.stage === 'unit_analysis' && !closureUnits.has(a.task?.unit_id)))
   const rows = delivery.flatMap(action => activeRecords(action.records ?? []).flatMap(record => {
@@ -88,7 +89,7 @@ export function sourceFirstProjection(artifacts) {
     const bodies = record.kind === 'flow' ? normalizeFlows(record.body) : [mapping(record.body)]
     const unit = action.task?.unit_id ?? action.action_id
     return bodies.map((body, index) => {
-      const originalId = body.risk_id ?? body.case_id ?? body.test_case_id ?? body.flow_id ?? body.coverage_id ?? record.record_id
+      const originalId = record.kind === 'check' ? body.check_id ?? record.record_id : body.risk_id ?? body.case_id ?? body.test_case_id ?? body.flow_id ?? body.coverage_id ?? record.record_id
       return {
         ...body, unit_id: unit, display_id: plain(originalId),
         projection_id: `${unit}/${record.record_id}${index ? `#${index + 1}` : ''}`,
@@ -99,6 +100,7 @@ export function sourceFirstProjection(artifacts) {
   }))
   const aliases = new Map()
   for (const row of rows) {
+    if (row.source_record.kind === 'check') continue
     for (const id of new Set([row.display_id, row.source_record.record_id])) {
       const key = JSON.stringify([row.unit_id, id])
       aliases.set(key, aliases.has(key) ? null : row)
@@ -112,7 +114,8 @@ export function sourceFirstProjection(artifacts) {
   }))]
   for (const row of rows) {
     const kind = row.source_record.kind
-    if (kind === 'risk') {
+    if (kind === 'check') result.checks.push(row)
+    else if (kind === 'risk') {
       result.risks.push({ ...row, risk_id: row.projection_id, severity: plain(row.severity) || undefined,
         narrative: plain(row.narrative ?? row.description), impact: plain(row.impact), expectation: plain(row.expectation ?? row.correct_expectation), current_behavior: plain(row.current_behavior),
         dfx: strings(row.dfx), trigger: plain(row.trigger), system_result: plain(row.system_result ?? row.result ?? row.behavior),
@@ -169,6 +172,7 @@ export function sourceFirstProjection(artifacts) {
     }
   }
   for (const row of rows) {
+    if (row.source_record.kind === 'check') continue
     const owner = [...result.risks, ...result.test_cases, ...result.business_flows].find(item => item.projection_id === row.projection_id)
     const refs = [...list(row.source_record.evidence), ...list(row.evidence), ...list(row.source_evidence)]
     if (['evidence', 'blackbox_translation'].includes(row.source_record.kind)) refs.unshift({ location: row.location, observation: row.observation ?? plain(row.source_record.body) })
@@ -180,6 +184,7 @@ export function sourceFirstProjection(artifacts) {
       if (seen.has(signature)) continue
       seen.add(signature)
       const item = { ...row, chunk_id: `${row.projection_id}/evidence-${seen.size}`, location, observation: observation || row.title,
+        ...(row.source_record.kind === 'risk' ? { quote: list(row.evidence_quotes).filter(q => q?.ref === location && typeof q.snippet === 'string').map(q => q.snippet).join('\n') } : {}),
         risk_ids: owner?.risk_id ? [owner.risk_id] : owner?.linked_risk_ids ?? resolve(row, [...list(row.risk_ids), ...list(row.risk_refs), ...list(row.source_record.relates_to)], ['risk_id'], ['risk']),
       }
       result.evidence.push(item)

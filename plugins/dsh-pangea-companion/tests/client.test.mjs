@@ -2245,6 +2245,33 @@ async function executionMetricsView(metrics, { detailRunId = 'run', screen = 'wo
 const metricsText = node => typeof node === 'string' || typeof node === 'number' ? String(node)
   : (Array.isArray(node) ? node : node?.children ?? []).map(metricsText).join('')
 
+test('risk method UI shows external observations, literal quotes, ledger and empty-narrative findings', async () => {
+  const risk = { risk_id: 'u/r', display_id: 'R1', title: 'Declared risk', narrative: '', trigger: 'Declared trigger', external_observation: 'Visible external observation', evidence: [{ location: 'r:a.c:2', quote: ' * literal source comment' }] }
+  for (const screen of [{ type: 'risk', id: 'u/r' }, { type: 'report' }, { type: 'risks' }]) {
+    const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', analysis_profile: 'behavior-test-v2',
+      analysis_scene: { presentation: { risks: true, check_ledger: true } }, artifacts: { report_md: '/data/report.md' }, report_available: true,
+      details: { risks: [risk], checks: [{ projection_id: 'u/c', check_id: 'C1', lens: 'boundary', object: 'Declared object', conclusion: 'excluded', sites: ['r:a.c:2'] }] } }
+    const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'completed' }
+    const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: screen }
+    let index = 0
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+    const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const nodes = descendants(panel.type(panel.props)), rendered = metricsText(nodes)
+    if (screen.type === 'risk') {
+      assert.match(rendered, /Visible external observation/)
+      assert.ok(nodes.some(node => node.type === 'pre' && metricsText(node).includes(' * literal source comment')))
+    } else if (screen.type === 'report') {
+      assert.match(rendered, /Declared trigger/)
+      assert.doesNotMatch(rendered, /本次分析没有形成风险记录/)
+    } else {
+      assert.match(rendered, /检查账本/)
+      assert.match(rendered, /Declared object/)
+    }
+  }
+})
+
 test('workflow execution metrics preserve recorded zero, missing counters and per-stage coverage', async () => {
   const stages = [
     { stage: 'unit_analysis', action_count: 2, timed_action_count: 1, unfinished_timed_action_count: 1, worker_elapsed_ms: 60000,

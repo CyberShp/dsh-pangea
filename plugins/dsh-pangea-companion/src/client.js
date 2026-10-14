@@ -405,7 +405,7 @@ window.__ModuleLoader__.load({
 
     const STAGE_STATUS = { pending: '未开始', running: '执行中', completed: '已完成', paused: '待继续', skipped: '无需执行', failed: '失败', stopped: '已停止' }
     const CASE_READINESS = { ready: '具备执行条件（未代表实测通过）', needs_setup: '待补执行条件', unclassified: '执行条件未标注' }
-    const RECORD_LABELS = { note: '分析说明', summary: '分析总结', unresolved: '待确认事项', flow: '业务流程', test_case: '测试用例', test_case_group: '用例组', risk: '风险', evidence: '源码依据', unit_plan: '单元计划', review_finding: '复核发现', review_decision: '复核结论' }
+    const RECORD_LABELS = { check: '检查记录', note: '分析说明', summary: '分析总结', unresolved: '待确认事项', flow: '业务流程', test_case: '测试用例', test_case_group: '用例组', risk: '风险', evidence: '源码依据', unit_plan: '单元计划', review_finding: '复核发现', review_decision: '复核结论' }
     const DIAGRAM_LABELS = { workflow: '业务流程图', architecture: '模块架构图', sequence: '时序图', lifecycle: '生命周期图', dataflow: '数据流图' }
     const DIAGRAM_STATUS = { generating: '正在生成', ready: '已生成', failed: '生成失败', stopped: '已停止', interrupted: '执行已中断' }
     function diagramName(view) {
@@ -430,7 +430,8 @@ window.__ModuleLoader__.load({
       if (Array.isArray(body)) return h('ul', { className: 'pangea-reader' }, body.map((item, i) => h('li', { key: i }, renderReadableBody(item, hideSourceEvidence))))
       if (body && typeof body === 'object') {
         const labels = { entry_points: '业务入口', paths: '业务路径', path_id: '路径编号', condition: '触发条件', node_ids: '节点顺序', case_ids: '关联用例', explanation: '路径说明', candidate_id: '条目编号', asset_id: '资产编号', asset_title: '资产名称', item_id: '原文条目编号', item_type: '资料类型', topic: '主题', inputs: '输入', outputs: '输出', constraints: '适用条件与约束', acceptance_criteria: '验收标准', modules: '适用模块', interfaces: '接口', states: '状态', main_flows: '主要场景', branch_flows: '分支场景', error_flows: '异常场景', recovery_flows: '恢复场景', symptom: '问题表现', trigger: '触发条件', root_cause: '问题原因', propagation: '影响过程', defect_mechanism: '问题机理', exclusion_conditions: '排除条件', applicable_modules: '适用模块', key_facts: '关键事实', expected_results: '预期结果', related_problems: '相关问题', source_references: '原文出处', location: '位置', path: '文件', title: '标题', content: '说明', description: '说明', summary: '总结', gap: '缺口', reason: '原因', scope: '分析范围', source_evidence: '源码依据', what_is_known: '已确认事实', missing_to_resolve: '待补条件', recommended_action: '建议', preconditions: '前置条件', steps: '操作步骤', action: '操作', expected: '预期', cleanup: '清理恢复' }
-        return h('dl', { className: 'pangea-reader' }, Object.entries(body).filter(([key]) => !hideSourceEvidence || !['source_evidence', '源码依据'].includes(key)).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, renderReadableBody(value, hideSourceEvidence)))))
+        Object.assign(labels, { evidence_quotes: '源码引文', ref: '位置', snippet: '原样引文', check_id: '检查编号', lens: '检查镜头', object: '检查对象', hypothesis: '假设', conclusion: '结论', reasoning: '依据', sites: '位置', signal_ids: '关联信号', risk_ids: '关联风险', system_result: '系统结果', external_observation: '外部观测', exclusion_condition: '排除条件' })
+        return h('dl', { className: 'pangea-reader' }, Object.entries(body).filter(([key]) => !hideSourceEvidence || !['source_evidence', '源码依据'].includes(key)).map(([key, value]) => h(React.Fragment, { key }, h('dt', { style: { fontWeight: 600, marginTop: 8 } }, labels[key] ?? key), h('dd', { style: { marginLeft: 0 } }, key === 'snippet' ? h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, String(value ?? '')) : renderReadableBody(value, hideSourceEvidence)))))
       }
       const lines = String(body ?? '').split(/\r?\n/), nodes = []
       const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
@@ -5377,7 +5378,7 @@ window.__ModuleLoader__.load({
           return typeof body === 'string' ? body : text(body?.summary, text(body?.text, text(body?.content, '')))
         }
         const reportFindings = [
-          ...risks.map((risk, index) => ({ key: riskKeyByItem.get(risk) ?? index, body: risk.narrative ?? risk.trigger ?? risk.residual_effect })),
+          ...risks.map((risk, index) => ({ key: riskKeyByItem.get(risk) ?? index, body: risk.narrative || risk.trigger || risk.residual_effect })),
           ...findingNotes.map((item, index) => ({ key: item.source_record?.record_id ?? item.record_id ?? `note-${index}`, body: findingNoteText(item) })),
         ].filter(item => hasText(item.body))
         const inputCount = current.input_materials?.length ?? 0
@@ -5465,7 +5466,14 @@ window.__ModuleLoader__.load({
         const metric = (label, value, note) => h('div', { className: 'b05-metric' }, h('small', null, label), h('strong', null, value), h('span', null, note))
         const isComplete = current?.lifecycle_status === 'complete' || current?.status === 'completed'
         const riskReadError = collectionWarning(health, 'risks')
+        const ledger = current?.analysis_scene?.presentation?.check_ledger === true ? h('section', { className: 'b05-card' },
+          h('h3', null, '检查账本'), h('p', null, '实际检查对象及作者结论；待确认项和排除理由见完整报告。'),
+          h('div', { style: { overflowX: 'auto' } }, h('table', { className: 'pangea-reader-table' },
+            h('thead', null, h('tr', null, ['单元', '镜头', '对象', '结论', '位置'].map(label => h('th', { key: label }, label)))),
+            h('tbody', null, (details.checks ?? []).map(check => h('tr', { key: check.projection_id },
+              [check.unit_id, check.lens, check.object, check.conclusion, (Array.isArray(check.sites) ? check.sites : []).join('、')].map((value, i) => h('td', { key: i }, text(value, '未提供'))))))))) : null
         if (!risks.length && !riskQuery && riskSeverity === '全部') return h(React.Fragment, null,
+          ledger,
           h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '独立风险记录'), h('p', null, riskReadError ? '当前风险资料读取异常，需要恢复读取后确认结果。' : isComplete ? '当前 Run 已结束，查看本轮实际形成的分析结论。' : '分析进行中，独立风险记录尚未发布。')), h('span', { style: styles.badge }, riskReadError ? '暂不可读取' : '0 条记录')),
           h('div', { className: 'b05-card', style: { textAlign: 'center', padding: '42px 28px 30px' } },
             h('div', { className: 'b04-progress-icon', style: { margin: '0 auto 20px' } }, runIcon('ScanSearch')),
@@ -5486,6 +5494,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('cases') }, '测试用例')),
             h('section', { className: 'b05-card' }, h('h3', null, '如何阅读这个结果'), h('p', null, '风险记录为空描述的是分析产物，不是整体安全保证。'), h('p', null, '调用方、构建条件和运行环境可能超出当前输入范围。'))))
         return h(React.Fragment, null,
+          ledger,
           h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '需要关注的实现风险'), h('p', null, '从触发条件到代码依据，再到验证路径。')), h('span', { style: styles.badge }, `${risks.length} 条独立风险记录`)),
           h('div', { className: 'b05-metrics' }, metric('高风险', counts.High, '优先验证触发条件'), metric('中风险', counts.Medium, '核对业务影响'),
             metric('关联测试用例', linkedCases.size, `对应 ${risks.length} 条风险`), metric('有直接源码依据', `${risks.filter(risk => risk.evidence?.length).length} / ${risks.length}`, '位置可追溯')),
@@ -5542,6 +5551,7 @@ window.__ModuleLoader__.load({
             h('section', { className: 'b05-card' }, h('div', { className: 'b05-step-label' }, '02 / TRIGGER'), h('h3', null, '触发条件'),
               h('div', { className: 'b05-source-context' }, text(risk.trigger, '触发条件未提供。')),
               hasText(risk.system_result) ? h('div', { className: 'b05-source-context' }, risk.system_result) : null,
+              hasText(risk.external_observation) ? h('div', null, h('h4', null, '外部观测'), h('p', null, risk.external_observation)) : null,
               h('h4', null, '排除条件'), h('p', null, text(risk.exclusion_condition, '尚未给出足以排除该风险的证据。')),
               (risk.linked_flow_ids ?? []).length ? h('button', { type: 'button', className: 'b04-link', onClick: () => jump('flows') }, '查看相关业务路径 ↗') : null),
             h('section', { className: 'b05-card' }, h('div', { className: 'b05-step-label' }, '03 / EVIDENCE'), h('h3', null, '直接源码依据'),
@@ -5549,6 +5559,7 @@ window.__ModuleLoader__.load({
                 key: evidenceIdentity(evidenceItem), type: 'button', 'aria-pressed': evidenceIdentity(evidenceItem) === evidenceIdentity(previewEvidence),
                 onClick: () => setRiskEvidenceSelection({ riskKey: riskScreenKey, evidenceKey: evidenceIdentity(evidenceItem) }) }, `证据 ${index + 1}`))) : null,
               h('p', null, previewEvidence?.location ? displayEvidenceLocation(previewEvidence.location) : '当前风险没有可读取的源码位置。'),
+              hasText(previewEvidence?.quote) ? h('pre', { className: 'b05-source-code', style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, previewEvidence.quote) : null,
               snippet ? h('div', { className: 'b05-source-code', style: { maxHeight: 225 } }, snippet.lines.map(line => h('div', {
                 key: line.number, className: 'b05-source-code-line', 'data-target': line.target ? 'true' : undefined }, h('span', null, line.number), h('code', null, line.text || ' ')))) : null,
               preview.status === 'error' ? h('p', { role: 'alert' }, `源码暂不可读：${preview.error}`) : null,
