@@ -1,13 +1,32 @@
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { appendFile, mkdir, open, readFile, readdir, realpath, stat } from 'node:fs/promises'
+import { appendFile, lstat, mkdir, open, readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { writeTaskStoreFile } from './task-store.js'
 
 const MAX_EVENT_BYTES = 256 * 1024
 const MAX_PAGE_BYTES = 1024 * 1024
 const queues = new Map()
 const recordingErrors = new Map()
-const inside = (root, value) => value === root || value.startsWith(`${root}${path.sep}`)
+export function isAgentSessionPathInside(root, value, pathApi = path) {
+  // Windows realpath may change drive/directory casing. Use the platform's
+  // path semantics while retaining case-sensitive comparisons on POSIX.
+  const relative = pathApi.relative(root, value)
+  return relative === '' || relative !== '..' && !relative.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(relative)
+}
+const inside = isAgentSessionPathInside
+
+async function recordedPath(file) {
+  try { return await realpath(file) } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+    // ENOENT can also mean a dangling symlink. Do not let a later append
+    // follow that link and create a file outside the checked directory.
+    const entry = await lstat(file).catch(cause => { if (cause.code === 'ENOENT') return null; throw cause })
+    if (entry) throw new Error('Agent 会话路径包含无法解析的链接')
+    const parent = path.dirname(file)
+    if (parent === file) throw error
+    return path.join(await recordedPath(parent), path.basename(file))
+  }
+}
 const present = value => typeof value === 'string' && value.length > 0
 const safeRunId = value => {
   if (!present(value) || value === '.' || value === '..' || /[\\/\0]/.test(value)) throw new Error('无效 run_id')
@@ -74,11 +93,11 @@ export class AgentSessionStore {
     // read-only API into an arbitrary local-file reader.
     const dataRoot = await realpath(this.dataRoot)
     const runRoot = await realpath(this.runRoot)
-    if (runRoot !== path.join(dataRoot, 'runs', this.runId)) throw new Error('Agent 会话目录越出当前 Run')
-    if (create) await mkdir(this.root, { recursive: true })
-    const root = await realpath(this.root).catch(error => { if (error.code === 'ENOENT') return this.root; throw error })
+    if (path.relative(path.join(dataRoot, 'runs', this.runId), runRoot) !== '') throw new Error('Agent 会话目录越出当前 Run')
+    const root = await recordedPath(this.root)
     if (!inside(runRoot, root)) throw new Error('Agent 会话目录越出当前 Run')
-    const target = await realpath(file).catch(error => { if (error.code === 'ENOENT') return path.resolve(file); throw error })
+    if (create) await mkdir(root, { recursive: true })
+    const target = await recordedPath(file)
     if (!inside(root, target)) throw new Error('Agent 会话文件越出当前 Run')
     return target
   }
@@ -144,7 +163,7 @@ export class AgentSessionStore {
   async legacySessions() {
     const read = async filename => {
       const file = path.join(this.runRoot, filename)
-      const canonical = await realpath(file).catch(error => { if (error.code === 'ENOENT') return file; throw error })
+      const canonical = await recordedPath(file)
       const root = await realpath(this.runRoot)
       if (!inside(root, canonical)) throw new Error('Agent 会话来源越出当前 Run')
       return boundedJson(canonical)
