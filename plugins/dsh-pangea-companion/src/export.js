@@ -1,4 +1,5 @@
 import { riskApplicable } from './analysis-scenes.js'
+import { caseDesignCounts, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } from './behavior-coverage.js'
 function cell(value) {
   if (Array.isArray(value)) return value.map(item => cell(item)).join('；')
   if (value === null || value === undefined) return ''
@@ -9,6 +10,10 @@ function cell(value) {
 function testCaseRows(run) {
   const risk = riskApplicable(run)
   const v2 = run?.analysis_profile === 'behavior-test-v2'
+  const sourceFirst = run?.workflow_version === 'source-first-v1'
+  const cases = run?.details?.test_cases ?? []
+  const designCounts = caseDesignCounts(cases)
+  const ledgers = run?.details?.behavior_coverage ?? behaviorCoverageProjection(run?.details?.notes ?? run?.notes, cases)
   const rows = [
     ['Run', run?.run_id],
     ['结果状态', run?.publication?.state ?? 'pending'],
@@ -23,12 +28,16 @@ function testCaseRows(run) {
     [],
     ['用例 ID', '标题', '类型', '状态', ...(risk ? ['关联风险'] : []), '前置条件', '执行步骤', '预期结果', '观察点', '清理动作'],
   ]
-  if (run?.workflow_version === 'source-first-v1') rows.at(-1).push('分析单元', '原始记录', '分析原文', '测试入口', '参数变体', '本分析单元说明', '执行条件', '待补执行条件')
+  if (sourceFirst) {
+    rows.splice(rows.length - 2, 0, ['用例记录数', designCounts.cases], ['已设计参数组合数', designCounts.variants], ['统计说明', '参数组合不重复计为独立用例；已设计不代表具备执行条件或实测通过。'])
+    rows.at(-1).push('分析单元', '原始记录', '分析原文', '测试入口', '参数变体', '参数组合数', '本分析单元说明', '执行条件', '待补执行条件')
+  }
   if (v2) {
     rows.splice(1, 0, ['分析场景', run.analysis_scene?.label ?? run.scenario], ['规则版本', run.analysis_scene?.format_version ?? run.analysis_profile])
     rows.at(-1).push('流程/路径引用', 'Coverage引用', '源码依据', '覆盖数据来源与匹配')
   }
-  for (const item of run?.details?.test_cases ?? []) {
+  if (ledgers.length) rows.at(-1).push('业务行为项关联')
+  for (const item of cases) {
     rows.push([
       item.display_id ?? item.test_case_id,
       item.title,
@@ -40,9 +49,24 @@ function testCaseRows(run) {
       item.expected_results,
       item.observability,
       item.cleanup,
-      ...(item.source_record ? [item.unit_id, item.source_record.record_id, item.source_record.body, item.entry, item.variants, item.unit_notes?.map(note => note.source_record.body), ({ ready: '具备执行条件', needs_setup: '待补执行条件', unclassified: '未标注' })[item.readiness] ?? '未标注', item.missing_execution_conditions] : []),
+      ...(sourceFirst ? [item.unit_id, item.source_record?.record_id, item.source_record?.body, item.entry, item.variants, Array.isArray(item.variants) ? item.variants.length : 0,
+        item.unit_notes?.map(note => note.source_record.body), ({ ready: '具备执行条件', needs_setup: '待补执行条件', unclassified: '未标注' })[item.readiness] ?? '未标注', item.missing_execution_conditions] : []),
       ...(v2 ? [item.flow_refs ?? item.linked_flow_ids, item.coverage_refs, item.source_evidence ?? item.evidence, run.coverage_match] : []),
+      ...(ledgers.length ? [behaviorCoverageForCase(ledgers, item)] : []),
     ])
+  }
+  if (ledgers.length) {
+    rows.push([], ['业务行为覆盖清单', '状态来自分析声明；用例关联不代表已执行或实测代码覆盖率。'],
+      ['行为项 ID', '分析单元', '业务操作', '条件', '约束', '预期行为', '声明状态', '依据 / 未覆盖原因', '用例 / 变体引用', '关联诊断', '来源依据', '行为项原文'])
+    for (const ledger of ledgers) {
+      rows.push(['清单范围', ledger.unit_id, ledger.scope], ['组合选择依据', ledger.combination_strategy], ['未决依赖', ledger.unresolved_dependencies])
+      for (const item of ledger.items ?? []) rows.push([item.item_id, ledger.unit_id, item.operation, item.conditions, item.constraints,
+        item.expected_behavior, BEHAVIOR_STATUS_LABELS[item.status] ?? item.status ?? '未标注', item.reason, item.case_refs,
+        [...(item.projection_warnings ?? []), ...(item.case_links ?? []).filter(link => link.issue).map(link => ({ case_id: link.case_id, variant_id: link.variant_id, issue: link.issue }))],
+        item.source_evidence, item.source_item])
+      if (ledger.projection_warnings?.length) rows.push(['清单提示', ledger.projection_warnings])
+      rows.push(['清单原文', ledger.source_record?.body])
+    }
   }
   return rows
 }

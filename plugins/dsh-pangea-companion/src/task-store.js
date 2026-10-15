@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { normalizeIncrementalRequest } from './incremental-request.js'
+import { normalizeFlowBaseline } from './flow-baseline.js'
 
 const STORE_VERSION = 1
 const WINDOWS_RENAME_RETRY_DELAYS = Object.freeze([50, 100, 200, 400, 800])
@@ -169,6 +170,7 @@ function normalizeTask(taskId, value) {
     data_root: text(value?.data_root) || null,
     title: text(value?.title, text(value?.target, taskId)),
     source_task_id: text(value?.source_task_id) || null,
+    flow_baseline: value?.flow_baseline && typeof value.flow_baseline === 'object' ? structuredClone(value.flow_baseline) : null,
     incremental_request: value?.incremental_request && typeof value.incremental_request === 'object' && !Array.isArray(value.incremental_request)
       ? structuredClone(value.incremental_request) : null,
     repository: text(value?.repository),
@@ -332,6 +334,7 @@ export class TaskStore {
       effective_context_budget: input?.effective_context_budget,
       focus: input?.focus,
       source_task_id: input?.source_task_id,
+      flow_baseline: normalizeFlowBaseline(input?.flow_baseline),
       incremental_request: input?.incremental_request != null ? normalizeIncrementalRequest(input.incremental_request) : null,
       request_version: '2.0',
       repository,

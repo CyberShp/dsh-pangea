@@ -1,4 +1,5 @@
 import { riskApplicable } from './analysis-scenes.js'
+import { readFlowMetadata } from './flow-baseline.js'
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
@@ -919,6 +920,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   const reportHtml = path.join(runDirectory, 'report.html')
   const reportComplete = path.join(runDirectory, 'report-complete.json')
   const reportAvailable = await sourceFirstReportAvailable(runDirectory, life.lifecycle_status)
+  const { warnings: flowWarnings, ...flowMetadata } = await readFlowMetadata(runDirectory, runId, { ...progress, ...life })
   const records = actionView.artifacts.map(item => ({
     action_id: item.action_id,
     action: item.action,
@@ -959,6 +961,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     step_progress: { completed: steps.filter(item => ['completed', 'skipped'].includes(item.status)).length, total: SOURCE_FIRST_STAGES.length },
   }
   const summary = {
+    ...flowMetadata,
     coverage_summary: coverageOverview,
     coverage_match: coverageMatch,
     analysis_profile: contract?.analysis_profile ?? null,
@@ -1031,7 +1034,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     },
     reader_notices: [...new Set(actionView.artifacts.filter(item => item.binding_status === 'pending' && life.lifecycle_status === 'running' && ['pending', 'dispatched'].includes(item.status)).map(item =>
       item.stage === 'comparison_review' ? '复核准备中，正在绑定复核任务。' : '任务准备中，等待 Agent 首次访问结果。'))],
-    reader_warnings: [...sourceSnapshot.issues, ...actionView.issues, ...(sceneIssue ? [sceneIssue] : [])],
+    reader_warnings: [...sourceSnapshot.issues, ...actionView.issues, ...(sceneIssue ? [sceneIssue] : []), ...flowWarnings],
     artifacts: {
       run_directory: runDirectory,
       request: await pathKind(contractPath) === 'file' ? contractPath : null,

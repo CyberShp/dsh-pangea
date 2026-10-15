@@ -23,33 +23,67 @@ function textLines(lines, x, y, attrs = {}) {
 }
 
 /**
+ * Render exact edge identities, visible condition badges and an accessible hit
+ * region. Pointer handlers are attached by the client only to the edge group.
  * @param {ReturnType<import('./layout.js').layoutFlow>} layout
- * @param {{highlight?: {nodes:Set<string>, pairs:Set<string>}|null, selected?: string|null, idPrefix?: string}} options
+ * @param {{highlight?: object|null, selected?: string|null, focusedEdgeId?: string|null, idPrefix?: string}} options
  */
 export function renderFlowTree(layout, options = {}) {
   const prefix = options.idPrefix ?? 'pf'
   const highlight = options.highlight ?? null
-  const dimNode = id => highlight && !highlight.nodes.has(id)
-  const edgeOn = edge => highlight && highlight.pairs.has(`${edge.source}\u0000${edge.target}`)
+  const focusedId = options.focusedEdgeId ?? options.hoverEdge ?? options.selectedEdge ?? null
+  const focused = layout.edges.find(edge => edge.edge_id === focusedId)
+  const focusNodes = new Set(focused ? [focused.source, focused.target] : [])
+  const pairCounts = new Map()
+  for (const edge of layout.edges) {
+    const key = `${edge.source}\u0000${edge.target}`
+    pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1)
+  }
+  const edgeOn = edge => {
+    if (edge.edge_id === focusedId) return true
+    if (!highlight) return false
+    if (highlight.edge_ids instanceof Set) return highlight.edge_ids.has(edge.edge_id)
+    // Compatibility for old branch highlights: an ambiguous pair must not
+    // accidentally light every parallel condition edge.
+    const pair = `${edge.source}\u0000${edge.target}`
+    return pairCounts.get(pair) === 1 && Boolean(highlight.pairs?.has(pair))
+  }
+  const nodeOn = id => focusNodes.has(id) || Boolean(highlight?.nodes?.has(id))
+  const hasHighlight = Boolean(highlight || focused)
   const edges = layout.edges.map(edge => {
-    const on = edgeOn(edge)
-    const dim = highlight && !on
+    const on = edgeOn(edge), focusedEdge = edge.edge_id === focusedId
+    const dim = hasHighlight && !on
+    const color = on ? HIGHLIGHT : NEUTRAL
     const condition = edge.condition
-    return el('g', { 'data-edge': `${edge.source}->${edge.target}`, opacity: dim ? 0.18 : 1 },
-      el('path', { d: edge.path, fill: 'none', stroke: on ? HIGHLIGHT : NEUTRAL, 'stroke-width': on ? 2.4 : 1.4,
+    const box = edge.label_box
+    const leader = edge.label_leader
+    return el('g', { 'data-edge': `${edge.source}->${edge.target}`, 'data-edge-id': edge.edge_id,
+      'data-highlighted': on ? 'true' : 'false', 'data-focused': focusedEdge ? 'true' : 'false',
+      'aria-label': `${edge.source} → ${edge.target}${condition ? `：${condition}` : ''}`,
+      cursor: 'pointer', opacity: dim ? 0.16 : 1 },
+      el('title', {}, `${edge.source} → ${edge.target}${condition ? `：${condition}` : ''}`),
+      el('path', { d: edge.path, fill: 'none', stroke: 'transparent', 'stroke-width': 14, 'pointer-events': 'stroke', 'data-edge-hit': 'true' }),
+      el('path', { d: edge.path, fill: 'none', stroke: color, 'stroke-width': focusedEdge ? 3.6 : on ? 2.8 : 1.4,
         'stroke-dasharray': edge.back ? '6 4' : null, 'marker-end': `url(#${prefix}-${on ? 'arrow-hi' : 'arrow'})` }),
-      condition ? el('g', {},
-        el('title', {}, condition),
-        el('text', { x: edge.label_x, y: edge.label_y - 4, 'text-anchor': edge.back ? 'start' : 'middle', 'font-size': 11,
-          fill: '#475569', stroke: '#ffffff', 'stroke-width': 3, 'paint-order': 'stroke' }, edge.label)) : null)
+      condition ? el('g', { 'data-edge-label': edge.edge_id },
+        leader ? el('path', { d: `M${leader.from.x} ${leader.from.y} L${leader.to.x} ${leader.to.y}`, fill: 'none', stroke: color,
+          'stroke-width': on ? 1.5 : 1, 'stroke-dasharray': '2 2', 'pointer-events': 'none' }) : null,
+        leader ? el('circle', { cx: leader.from.x, cy: leader.from.y, r: on ? 3 : 2, fill: color, 'pointer-events': 'none' }) : null,
+        box ? el('rect', { x: box.x, y: box.y, width: box.w, height: box.h, rx: 4,
+          fill: on ? '#eff6ff' : '#ffffff', stroke: on ? HIGHLIGHT : '#cbd5e1', 'stroke-width': on ? 1.4 : 1 }) : null,
+        el('text', { x: edge.label_x, 'text-anchor': 'middle', 'font-size': 11, fill: on ? '#1e40af' : '#334155', 'font-weight': on ? 600 : 400 },
+          (edge.label_lines ?? [edge.label]).map((line, index, lines) => el('tspan', {
+            x: edge.label_x, y: edge.label_y - ((lines.length - 1) * 15) / 2 + index * 15 + 4 }, line)))) : null)
   })
   const nodes = layout.nodes.map(node => {
-    const color = FLOW_KIND_COLORS[node.kind] ?? NEUTRAL
+    const on = nodeOn(node.id)
+    const color = on ? HIGHLIGHT : FLOW_KIND_COLORS[node.kind] ?? NEUTRAL
     const selected = options.selected === node.id
-    return el('g', { 'data-node-id': node.id, cursor: 'pointer', opacity: dimNode(node.id) ? 0.25 : 1 },
+    return el('g', { 'data-node-id': node.id, 'data-highlighted': on ? 'true' : 'false', 'data-selected': selected ? 'true' : 'false',
+      cursor: 'pointer', opacity: hasHighlight && !on ? 0.25 : 1 },
       el('title', {}, `${node.label}${node.kind ? `（${FLOW_KIND_LABELS[node.kind] ?? node.kind}）` : ''}${node.description ? `\n${node.description}` : ''}`),
-      el('rect', { x: node.x, y: node.y, width: node.w, height: node.h, rx: 10, fill: '#ffffff', stroke: color,
-        'stroke-width': selected ? 3 : node.on_main ? 2 : 1.4 }),
+      el('rect', { x: node.x, y: node.y, width: node.w, height: node.h, rx: 10, fill: on ? '#eff6ff' : '#ffffff', stroke: color,
+        'stroke-width': selected || focusNodes.has(node.id) ? 3 : on ? 2.6 : node.on_main ? 2 : 1.4 }),
       el('rect', { x: node.x, y: node.y, width: 6, height: node.h, rx: 3, fill: color }),
       node.kind ? el('text', { x: node.x + node.w - 8, y: node.y + 15, 'text-anchor': 'end', 'font-size': 10, fill: color }, FLOW_KIND_LABELS[node.kind] ?? node.kind) : null,
       textLines(node.lines, node.x + node.w / 2 + 3, node.y + node.h / 2 + 3))
@@ -60,7 +94,7 @@ export function renderFlowTree(layout, options = {}) {
       `+${layout.collapsed.count} 个节点（已折叠）`))
   }
   return el('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: `0 0 ${layout.width} ${layout.height}`, width: layout.width, height: layout.height,
-    'font-family': FONT, role: 'img' },
+    'font-family': FONT, role: 'img', 'data-layout-version': layout.layout_version ?? 'legacy' },
     arrowDefs(prefix), el('rect', { x: 0, y: 0, width: layout.width, height: layout.height, fill: '#fbfcfe' }),
     el('g', { class: 'edges' }, edges), el('g', { class: 'nodes' }, nodes), extra)
 }

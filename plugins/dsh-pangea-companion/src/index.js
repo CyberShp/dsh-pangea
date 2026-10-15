@@ -1215,8 +1215,8 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     }
     if (body.action === 'task-start') {
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
-      if (task.incremental_request && actionDataRoot && dataRootFor(task.workspace, actionDataRoot) !== dataRootFor(task.workspace, task.data_root)) {
-        throw new Error('定向分析必须使用来源任务的数据目录')
+      if ((task.incremental_request || task.flow_baseline) && actionDataRoot && dataRootFor(task.workspace, actionDataRoot) !== dataRootFor(task.workspace, task.data_root)) {
+        throw new Error(task.flow_baseline ? '流程基线必须使用选择该版本时的数据目录' : '定向分析必须使用来源任务的数据目录')
       }
       const resume = body.resume === true
       const resumeEligibility = await assessTaskResumeEligibility(runtime, task)

@@ -9,6 +9,94 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
+    const __behaviorCoverage = (() => {
+    // Display only explicit behavior coverage declarations. Never infer coverage
+    // from case names, source positions, path reachability or execution readiness.
+    const BEHAVIOR_COVERAGE_FORMAT = 'behavior-coverage-v1'
+    const BEHAVIOR_STATUS_LABELS = {
+      designed: '已设计', missing: '待补用例', unresolved: '待确认', not_applicable: '不适用',
+    }
+    const array = value => Array.isArray(value) ? value : []
+    const object = value => value && typeof value === 'object' && !Array.isArray(value)
+    const valueText = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value)
+    function bodyOf(note) {
+      const body = note?.source_record?.body ?? note?.body
+      if (object(body)) return body
+      if (typeof body === 'string') {
+        try { const parsed = JSON.parse(body); return object(parsed) ? parsed : {} } catch { return {} }
+      }
+      return note?.format_version ? note : {}
+    }
+
+    function caseDesignCounts(cases) {
+      const rows = array(cases)
+      return { cases: rows.length, variants: rows.reduce((total, item) => total + array(item?.variants).length, 0),
+        has_legacy_groups: rows.some(item => item?.source_record?.kind === 'test_case_group') }
+    }
+
+    function caseSearchText(item) {
+      return [item?.display_id, item?.test_case_id, item?.title, item?.case_type, item?.verification_goal,
+        ...array(item?.linked_flow_ids), ...array(item?.linked_gap_ids), ...array(item?.linked_risk_ids),
+        ...array(item?.variants).flatMap(variant => object(variant)
+          ? [variant.variant_id, variant.input, variant.expected] : [variant])].map(valueText).join(' ').toLowerCase()
+    }
+
+    function caseVariantLines(item) {
+      return array(item?.variants).map((variant, index) => object(variant)
+        ? `参数组合 ${variant.variant_id || index + 1}：${valueText(variant.input) || '输入未提供'} → ${valueText(variant.expected) || '预期未提供'}`
+        : `参数组合 ${index + 1}：${valueText(variant)}`)
+    }
+
+    function behaviorCoverageProjection(notes, cases) {
+      return array(notes).flatMap((note, noteIndex) => {
+        const body = bodyOf(note)
+        if (body.format_version !== BEHAVIOR_COVERAGE_FORMAT) return []
+        const unitId = note.unit_id ?? body.unit_id
+        const warnings = []
+        if (!Array.isArray(body.items)) warnings.push('行为清单 items 不是数组，原文已保留。')
+        if (note.unit_id && body.unit_id && note.unit_id !== body.unit_id) warnings.push('声明的分析单元与记录所属单元不一致，关联按记录所属单元展示。')
+        const items = array(body.items).map((item, itemIndex) => {
+          const row = object(item) ? item : {}
+          const itemWarnings = []
+          if (!object(item)) itemWarnings.push('该行为项不是对象，原文已保留。')
+          if (!Array.isArray(row.case_refs)) itemWarnings.push('未提供可解析的用例关联。')
+          const caseLinks = array(row.case_refs).map(ref => {
+            if (!object(ref) || typeof ref.case_id !== 'string' || !ref.case_id.trim()) return { reference: ref, issue: '关联未提供 case_id。' }
+            const matches = array(cases).filter(testCase => typeof unitId === 'string' && unitId && testCase.unit_id === unitId
+              && [testCase.case_id, testCase.display_id, testCase.test_case_id].includes(ref.case_id))
+            const link = { ...ref, reference: ref, target_case_id: null }
+            if (matches.length !== 1) return { ...link, issue: matches.length ? '用例编号不唯一。' : '当前单元中未找到该用例。' }
+            const testCase = matches[0]
+            link.target_case_id = testCase.test_case_id ?? testCase.projection_id
+            if (ref.variant_id != null) {
+              if (typeof ref.variant_id !== 'string' || !ref.variant_id.trim()) return { ...link, issue: '参数变体关联未提供有效 variant_id。' }
+              const variants = array(testCase.variants).map((variant, index) => ({ variant, index }))
+                .filter(({ variant }) => object(variant) && variant.variant_id === ref.variant_id)
+              if (variants.length !== 1) return { ...link, issue: variants.length ? '参数变体编号不唯一。' : '该用例中未找到声明的参数变体。' }
+              link.variant_index = variants[0].index
+              link.variant = variants[0].variant
+            }
+            return link
+          })
+          return { ...row, source_item: item, display_key: `${note.projection_id ?? noteIndex}/item-${itemIndex}`,
+            case_links: caseLinks, projection_warnings: itemWarnings }
+        })
+        const counts = Object.fromEntries(Object.keys(BEHAVIOR_STATUS_LABELS).map(status => [status, items.filter(item => item.status === status).length]))
+        return [{ ...body, unit_id: unitId, projection_id: note.projection_id ?? `coverage-note-${noteIndex}`,
+          source_record: note.source_record, items, declared_counts: { ...counts, unclassified: items.filter(item => !Object.hasOwn(BEHAVIOR_STATUS_LABELS, item.status)).length },
+          projection_warnings: warnings }]
+      })
+    }
+
+    function behaviorCoverageForCase(ledgers, testCase) {
+      return array(ledgers).flatMap(ledger => array(ledger.items).filter(item => array(item.case_links).some(link => link.target_case_id === testCase.test_case_id))
+        .map(item => ({ unit_id: ledger.unit_id, item_id: item.item_id, operation: item.operation, status: item.status,
+          case_refs: array(item.case_refs).filter(ref => [testCase.case_id, testCase.display_id, testCase.test_case_id].includes(ref?.case_id)) })))
+    }
+
+    return { BEHAVIOR_COVERAGE_FORMAT, BEHAVIOR_STATUS_LABELS, caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase }
+    })()
+
     const __flowNormalize = (() => {
     // Lenient behavior-flow-v1 normalizer shared by the projection, the diagram
     // scope selection and the legacy reader. It only repairs field names and
@@ -254,7 +342,7 @@ window.__ModuleLoader__.load({
     const ROW_GAP = 72
     const MARGIN_X = 40
     const MARGIN_Y = 36
-    const BACK_CHANNEL = 14
+    const LABEL_GAP = 12
     const MAIN_KINDS = new Set(['entry', 'main', 'exit'])
     const RIGHT_KINDS = new Set(['error', 'propagation'])
 
@@ -309,7 +397,19 @@ window.__ModuleLoader__.load({
       return cut === text ? text : `${truncateText(text, limit - 1)}…`
     }
 
-    // Validate nodes and edges the same way as the Python renderer.
+    const compareText = (a, b) => String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0
+    const nodeOrder = (a, b) => compareText(a.semantic_key || a.id, b.semantic_key || b.id) || compareText(a.id, b.id)
+    const stableMode = flow => flow?.layout_version === 'stable-v1' || Array.isArray(flow?.main_path_ids)
+    const pairKey = (source, target) => `${source}\u0000${target}`
+
+    // Old reports do not have edge IDs. This identity survives array reordering and
+    // distinguishes parallel conditions without changing the persisted source graph.
+    function hashIdentity(value) {
+      let hash = 0x811c9dc5
+      for (let i = 0; i < value.length; i += 1) hash = Math.imul(hash ^ value.charCodeAt(i), 0x01000193) >>> 0
+      return hash.toString(16).padStart(8, '0')
+    }
+
     function collectGraph(flow) {
       const warnings = []
       const nodes = []
@@ -318,7 +418,7 @@ window.__ModuleLoader__.load({
         const id = item && typeof item === 'object' ? String(item.id ?? '') : ''
         if (!id) { warnings.push('存在缺少 id 的流程节点，已保留文字说明但未绘制该节点。'); continue }
         if (known.has(id)) { warnings.push(`流程节点 ${id} 重复，图中只显示第一次声明。`); continue }
-        const node = { id, label: String(item.label ?? item.name ?? id), kind: item.kind ?? null, description: item.description ?? '', source_evidence: item.source_evidence ?? [] }
+        const node = { id, semantic_key: String(item.semantic_key ?? ''), label: String(item.label ?? item.name ?? id), kind: item.kind ?? null, description: item.description ?? '', source_evidence: item.source_evidence ?? [] }
         known.set(id, node)
         nodes.push(node)
       }
@@ -331,32 +431,62 @@ window.__ModuleLoader__.load({
           warnings.push(`流程连线 ${source || '未提供'} → ${target || '未提供'} 引用了不存在的节点，未绘制。`)
           continue
         }
-        edges.push({ index, source, target, condition: String(item.condition ?? '') })
+        edges.push({ source, target, condition: String(item.condition ?? ''), declared_id: String(item.edge_id ?? ''), index })
       }
-      return { nodes, edges, warnings, known }
+      edges.sort((a, b) => nodeOrder(known.get(a.source), known.get(b.source)) || nodeOrder(known.get(a.target), known.get(b.target)) || compareText(a.condition, b.condition) || compareText(a.declared_id, b.declared_id))
+      const used = new Set(edges.map(e => e.declared_id).filter(Boolean))
+      const declared = new Map()
+      for (const edge of edges) if (edge.declared_id) declared.set(edge.declared_id, (declared.get(edge.declared_id) ?? 0) + 1)
+      const duplicateWarnings = new Set()
+      const collected = []
+      for (const edge of edges) {
+        let edgeId = edge.declared_id
+        if (edgeId && declared.get(edgeId) > 1) {
+          if (!duplicateWarnings.has(edgeId)) warnings.push(`流程连线 ID ${edgeId} 重复；重名连线使用临时身份，原路径引用无法唯一定位。`)
+          duplicateWarnings.add(edgeId)
+          edgeId = ''
+        }
+        if (!edgeId) {
+          const source = known.get(edge.source), target = known.get(edge.target)
+          const base = `legacy-${hashIdentity(JSON.stringify([source.semantic_key || source.id, target.semantic_key || target.id, edge.condition]))}`
+          edgeId = base
+          let suffix = 2
+          while (used.has(edgeId)) edgeId = `${base}-${suffix++}`
+        }
+        used.add(edgeId)
+        const { declared_id, ...rest } = edge
+        // Preserve the source index for legacy branch->edge references. Geometry and
+        // route selection use stable edge_id, never this declaration-order field.
+        collected.push({ ...rest, edge_id: edgeId })
+      }
+      return { nodes, edges: collected, warnings, known }
     }
 
-    // BFS depths: roots have no incoming edge; unreached nodes get new depths.
+    // BFS depths are independent of declaration order. Explicit entry nodes remain
+    // roots even when a recovery edge loops back into the entry.
     function bfsDepths(nodes, edges) {
-      const incoming = new Map(nodes.map(n => [n.id, 0]))
-      const outgoing = new Map(nodes.map(n => [n.id, []]))
+      const ordered = [...nodes].sort(nodeOrder)
+      const incoming = new Map(ordered.map(n => [n.id, 0]))
+      const outgoing = new Map(ordered.map(n => [n.id, []]))
       for (const edge of edges) {
         incoming.set(edge.target, incoming.get(edge.target) + 1)
         outgoing.get(edge.source).push(edge.target)
       }
-      let roots = nodes.filter(n => incoming.get(n.id) === 0).map(n => n.id)
-      if (!roots.length && nodes.length) roots = [nodes[0].id]
+      const known = new Map(ordered.map(n => [n.id, n]))
+      for (const targets of outgoing.values()) targets.sort((a, b) => nodeOrder(known.get(a), known.get(b)))
+      let roots = ordered.filter(n => incoming.get(n.id) === 0 || n.kind === 'entry').map(n => n.id)
+      if (!roots.length && ordered.length) roots = [ordered[0].id]
       const depths = new Map(roots.map(id => [id, 0]))
       const walk = queue => {
-        while (queue.length) {
-          const source = queue.shift()
+        for (let i = 0; i < queue.length; i += 1) {
+          const source = queue[i]
           for (const target of outgoing.get(source)) {
             if (!depths.has(target)) { depths.set(target, depths.get(source) + 1); queue.push(target) }
           }
         }
       }
       walk([...roots])
-      for (const node of nodes) {
+      for (const node of ordered) {
         if (depths.has(node.id)) continue
         depths.set(node.id, Math.max(-1, ...depths.values()) + 1)
         walk([node.id])
@@ -364,14 +494,78 @@ window.__ModuleLoader__.load({
       return { depths, outgoing }
     }
 
-    /** Determine the main path: paths[0], else entry/main/exit kinds, else a greedy chain from the first root. */
+    // A shortcut must not pull a declared main-path terminal ahead of its own
+    // prerequisite steps. Rank main-path constraints first, then layer side nodes
+    // from those anchors. Loop closures are routes, not new ordering constraints.
+    function declaredMainDepths(flow, graph, fallback) {
+      if (!stableMode(flow)) return fallback
+      const mainIds = new Set(listOf(flow?.main_path_ids))
+      const paths = listOf(flow?.paths).filter(path => mainIds.has(path?.path_id))
+      const nodes = new Set(paths.flatMap(path => listOf(path.node_ids)).filter(id => graph.known.has(id)))
+      if (!nodes.size) return fallback
+      const outgoing = new Map([...nodes].map(id => [id, new Set()]))
+      const incoming = new Map([...nodes].map(id => [id, 0]))
+      const actualPairs = new Set(graph.edges.map(edge => pairKey(edge.source, edge.target)))
+      for (const path of paths) {
+        const ids = listOf(path.node_ids), seen = new Set(ids.slice(0, 1))
+        for (let i = 1; i < ids.length; i += 1) {
+          const source = ids[i - 1], target = ids[i]
+          if (nodes.has(source) && nodes.has(target) && !seen.has(target) && actualPairs.has(pairKey(source, target)) && !outgoing.get(source).has(target)) {
+            outgoing.get(source).add(target)
+            incoming.set(target, incoming.get(target) + 1)
+          }
+          seen.add(target)
+        }
+      }
+      const order = (a, b) => nodeOrder(graph.known.get(a), graph.known.get(b))
+      const ready = [...nodes].filter(id => incoming.get(id) === 0).sort(order)
+      const depths = new Map([...nodes].map(id => [id, 0]))
+      let processed = 0
+      while (ready.length) {
+        const source = ready.shift(); processed += 1
+        for (const target of [...outgoing.get(source)].sort(order)) {
+          depths.set(target, Math.max(depths.get(target), depths.get(source) + 1))
+          incoming.set(target, incoming.get(target) - 1)
+          if (incoming.get(target) === 0) { ready.push(target); ready.sort(order) }
+        }
+      }
+      if (processed !== nodes.size) {
+        graph.warnings.push('多个主路径的节点先后关系存在循环冲突；已使用中性层次排版，请核对主路径声明。')
+        return fallback
+      }
+      const allIncoming = new Set(graph.edges.map(edge => edge.target))
+      for (const node of graph.nodes) if (!nodes.has(node.id) && (!allIncoming.has(node.id) || node.kind === 'entry')) depths.set(node.id, 0)
+      const walk = queue => {
+        while (queue.length) {
+          queue.sort((a, b) => depths.get(a) - depths.get(b) || order(a, b))
+          const source = queue.shift()
+          for (const target of fallback.outgoing.get(source)) {
+            if (nodes.has(target)) continue
+            const depth = depths.get(source) + 1
+            if (!depths.has(target) || depth < depths.get(target)) { depths.set(target, depth); queue.push(target) }
+          }
+        }
+      }
+      walk([...depths.keys()])
+      for (const node of [...graph.nodes].sort(nodeOrder)) if (!depths.has(node.id)) {
+        depths.set(node.id, Math.max(-1, ...depths.values()) + 1)
+        walk([node.id])
+      }
+      return { depths, outgoing: fallback.outgoing }
+    }
+
+    /** Stable-v1 only uses declared main paths; older reports retain their main-path convention. */
     function mainPathOf(flow, nodes, depths, outgoing) {
-      const known = new Set(nodes.map(n => n.id))
-      const first = listOf(flow?.paths)[0]
-      const fromPath = listOf(first?.node_ids).filter(id => known.has(id))
+      const known = new Map(nodes.map(n => [n.id, n]))
+      if (stableMode(flow)) {
+        const mainIds = new Set(listOf(flow?.main_path_ids))
+        const members = new Set(listOf(flow?.paths).filter(p => mainIds.has(p?.path_id)).flatMap(p => listOf(p.node_ids)).filter(id => known.has(id)))
+        return [...members].sort((a, b) => depths.get(a) - depths.get(b) || nodeOrder(known.get(a), known.get(b)))
+      }
+      const fromPath = listOf(listOf(flow?.paths)[0]?.node_ids).filter(id => known.has(id))
       if (fromPath.length) return [...new Set(fromPath)]
       const byKind = nodes.filter(n => MAIN_KINDS.has(n.kind)).map(n => n.id)
-      if (byKind.length) return byKind.sort((a, b) => depths.get(a) - depths.get(b))
+      if (byKind.length) return byKind.sort((a, b) => depths.get(a) - depths.get(b) || nodeOrder(known.get(a), known.get(b)))
       if (!nodes.length) return []
       const chain = []
       const seen = new Set()
@@ -384,37 +578,197 @@ window.__ModuleLoader__.load({
       return chain
     }
 
-    /**
-     * Lay out a behavior flow.
-     * @returns {{width:number,height:number,nodes:object[],edges:object[],warnings:string[],main_path:string[],collapsed:{count:number,ids:string[]}}}
-     */
+    /** Declared routes through a node. This never invents a route from reachability. */
+    function pathsForNode(flow, nodeId) {
+      return listOf(flow?.paths).filter(path => listOf(path?.node_ids).includes(nodeId))
+        .sort((a, b) => compareText(a.path_id, b.path_id))
+    }
+
+    function membersForGraph(flow, pathId, graph) {
+      const path = listOf(flow?.paths).find(p => p?.path_id === pathId)
+      if (!path) return null
+      const ids = listOf(path.node_ids).map(String)
+      const warnings = []
+      const pairs = new Set()
+      const edgeIds = new Set()
+      const ambiguous = []
+      const byId = new Map(graph.edges.map(edge => [edge.edge_id, edge]))
+      const byPair = new Map()
+      for (const edge of graph.edges) {
+        const key = pairKey(edge.source, edge.target)
+        if (!byPair.has(key)) byPair.set(key, [])
+        byPair.get(key).push(edge)
+      }
+      const explicit = Array.isArray(path.edge_ids)
+      if (explicit && path.edge_ids.length !== Math.max(0, ids.length - 1)) {
+        warnings.push(`路径 ${pathId} 的 edge_ids 与节点步数不一致；未匹配的连线不会高亮。`)
+      }
+      for (let i = 1; i < ids.length; i += 1) {
+        const key = pairKey(ids[i - 1], ids[i])
+        if (explicit) {
+          const edge = byId.get(String(path.edge_ids[i - 1] ?? ''))
+          if (edge?.source === ids[i - 1] && edge?.target === ids[i]) { edgeIds.add(edge.edge_id); pairs.add(key) }
+          else warnings.push(`路径 ${pathId} 的第 ${i} 条连线与节点顺序不符或不存在，未高亮。`)
+        } else {
+          const candidates = byPair.get(key) ?? []
+          if (candidates.length === 1) { edgeIds.add(candidates[0].edge_id); pairs.add(key) }
+          else if (candidates.length > 1) {
+            ambiguous.push(key)
+            warnings.push(`路径 ${pathId} 在 ${ids[i - 1]} → ${ids[i]} 存在多条条件连线，缺少 edge_ids，无法唯一确定路线。`)
+          } else warnings.push(`路径 ${pathId} 的 ${ids[i - 1]} → ${ids[i]} 没有声明连线，未补画。`)
+        }
+      }
+      for (const id of ids) if (!graph.known.has(id)) warnings.push(`路径 ${pathId} 引用了不存在的节点 ${id}。`)
+      return { nodes: new Set(ids.filter(id => graph.known.has(id))), pairs, edge_ids: edgeIds, ambiguous_pairs: ambiguous, warnings }
+    }
+
+    /** Exact declared edge membership; legacy parallel edges are reported, never guessed. */
+    function pathMembers(flow, pathId) {
+      return membersForGraph(flow, pathId, collectGraph(flow))
+    }
+
+    // Condition text is fully wrapped, including long single ASCII tokens. Fixed font
+    // metrics deliberately overestimate width so badges remain safe across CJK fonts.
+    function conditionLabel(text) {
+      const lines = []
+      let current = '', width = 0
+      const tokens = String(text).match(/[A-Za-z0-9_./:=<>()|+\-]+|[^\S\r\n]+|\r\n|\n|./gu) ?? []
+      const finishLine = () => { lines.push(current); current = ''; width = 0 }
+      for (const token of tokens) {
+        if (token === '\n' || token === '\r\n') { finishLine(); continue }
+        const tokenWidth = [...token].reduce((sum, char) => sum + charWidth(char), 0)
+        if (tokenWidth <= 30) {
+          if (current && width + tokenWidth > 30) finishLine()
+          current += token; width += tokenWidth
+          continue
+        }
+        // Split only a token longer than the entire badge, never a normal algorithm
+        // or group name just because it happens to start near the end of a line.
+        for (const char of token) {
+          const next = charWidth(char)
+          if (current && width + next > 30) finishLine()
+          current += char; width += next
+        }
+      }
+      if (current || !lines.length) lines.push(current)
+      const measured = Math.max(...lines.map(line => [...line].reduce((sum, char) => sum + charWidth(char) * 6, 0)))
+      return { lines, w: measured + 16, h: lines.length * 15 + 12 }
+    }
+
+    const rectOverlap = (a, b, padding = 0) => a.x < b.x + b.w + padding && a.x + a.w + padding > b.x && a.y < b.y + b.h + padding && a.y + a.h + padding > b.y
+    function segmentHitsRect(a, b, box, padding = 3) {
+      const rect = { x: box.x - padding, y: box.y - padding, w: box.w + padding * 2, h: box.h + padding * 2 }
+      let lo = 0, hi = 1
+      const dx = b.x - a.x, dy = b.y - a.y
+      for (const [p, q] of [[-dx, a.x - rect.x], [dx, rect.x + rect.w - a.x], [-dy, a.y - rect.y], [dy, rect.y + rect.h - a.y]]) {
+        if (!p) { if (q < 0) return false; continue }
+        const r = q / p
+        if (p < 0) lo = Math.max(lo, r)
+        else hi = Math.min(hi, r)
+        if (lo > hi) return false
+      }
+      return true
+    }
+    function curvePoints(sx, sy, tx, ty, midY) {
+      return Array.from({ length: 33 }, (_, index) => {
+        const t = index / 32, u = 1 - t
+        return { x: u ** 3 * sx + 3 * u * u * t * sx + 3 * u * t * t * tx + t ** 3 * tx,
+          y: u ** 3 * sy + 3 * u * u * t * midY + 3 * u * t * t * midY + t ** 3 * ty }
+      })
+    }
+
+    function placeEdgeLabels(edges, nodes, contentRight, contentBottom) {
+      const occupied = []
+      const labelEdges = edges.filter(edge => edge.condition)
+      const fieldRight = Math.max(contentRight, ...edges.flatMap(edge => edge.points.map(p => p.x)))
+      let fallbackY = MARGIN_Y
+      for (const edge of labelEdges) {
+        const size = conditionLabel(edge.condition)
+        const candidates = []
+        const push = (cx, cy, anchor) => candidates.push({ x: cx - size.w / 2, y: cy - size.h / 2, w: size.w, h: size.h, anchor })
+        if (edge.routed) {
+          const low = Math.min(edge.route_top, edge.route_bottom), high = Math.max(edge.route_top, edge.route_bottom)
+          const center = (low + high) / 2
+          const spacing = size.h + LABEL_GAP
+          const count = Math.ceil((high - low) / spacing)
+          for (let offset = 0; offset <= count; offset += 1) {
+            for (const sign of offset ? [-1, 1] : [0]) {
+              const y = center + offset * sign * spacing
+              if (y - size.h / 2 < low + 4 || y + size.h / 2 > high - 4) continue
+              push(edge.lane_x + LABEL_GAP + size.w / 2, y, { x: edge.lane_x, y })
+            }
+          }
+        } else {
+          for (const index of [16, 12, 20, 8, 24]) {
+            const anchor = edge.points[index]
+            for (const dy of [0, -(size.h / 2 + 8), size.h / 2 + 8, -(size.h + 16), size.h + 16]) {
+              for (const dx of [0, -(size.w / 2 + 12), size.w / 2 + 12]) push(anchor.x + dx, anchor.y + dy, anchor)
+            }
+          }
+        }
+        const fits = box => box.x >= 12 && box.y >= 12
+          && !nodes.some(node => rectOverlap(box, node, 7))
+          && !occupied.some(label => rectOverlap(box, label, 7))
+          && !edges.some(other => other !== edge && other.points.slice(1).some((point, index) => segmentHitsRect(other.points[index], point, box)))
+        let box = candidates.find(fits)
+        if (!box) {
+          // Dense crossings can leave no safe local position. An outside callout is
+          // preferable to placing a condition on an unrelated edge or truncating it.
+          const anchor = edge.routed ? { x: edge.lane_x, y: (edge.route_top + edge.route_bottom) / 2 } : edge.points[16]
+          box = { x: fieldRight + 32, y: fallbackY, w: size.w, h: size.h, anchor }
+          while (!fits(box)) box.y += size.h + LABEL_GAP
+          fallbackY = box.y + size.h + LABEL_GAP
+        }
+        const { anchor, ...rect } = box
+        const end = { x: Math.min(Math.max(anchor.x, rect.x), rect.x + rect.w), y: Math.min(Math.max(anchor.y, rect.y), rect.y + rect.h) }
+        const displaced = Math.hypot(end.x - anchor.x, end.y - anchor.y) > 2
+        Object.assign(edge, { label: edge.condition, label_lines: size.lines, label_box: rect,
+          label_x: rect.x + rect.w / 2, label_y: rect.y + rect.h / 2,
+          label_leader: displaced ? { from: anchor, to: end } : null })
+        occupied.push(rect)
+      }
+      return { right: Math.max(contentRight, fieldRight + 12, ...occupied.map(r => r.x + r.w)), bottom: Math.max(contentBottom, ...occupied.map(r => r.y + r.h)) }
+    }
+
+    /** Stable business-flow geometry and exact identities; no graph edges are inferred. */
     function layoutFlow(flow, options = {}) {
       const graph = collectGraph(flow)
+      const version = stableMode(flow) ? 'stable-v1' : 'legacy'
       if (!graph.nodes.length) {
-        return { width: 0, height: 0, nodes: [], edges: [], main_path: [], collapsed: { count: 0, ids: [] },
+        return { width: 0, height: 0, nodes: [], edges: [], main_path: [], layout_version: version, collapsed: { count: 0, ids: [] },
           warnings: graph.warnings.length ? graph.warnings : ['当前流程没有可绘制节点。'] }
       }
-      const full = bfsDepths(graph.nodes, graph.edges)
+      const full = declaredMainDepths(flow, graph, bfsDepths(graph.nodes, graph.edges))
       const mainPath = mainPathOf(flow, graph.nodes, full.depths, full.outgoing)
       const mainSet = new Set(mainPath)
-      let visible = graph.nodes
+      const mainEdges = new Set()
+      const mainIds = stableMode(flow) ? listOf(flow?.main_path_ids) : listOf(flow?.paths).slice(0, 1).map(path => path.path_id)
+      const knownPaths = new Set(listOf(flow?.paths).map(path => path?.path_id))
+      for (const id of mainIds) if (!knownPaths.has(id)) graph.warnings.push(`声明的主路径 ${id} 不存在，未推断替代主路径。`)
+      for (const path of listOf(flow?.paths)) {
+        const members = membersForGraph(flow, path.path_id, graph)
+        graph.warnings.push(...members.warnings)
+        if (mainIds.includes(path.path_id)) for (const id of members.edge_ids) mainEdges.add(id)
+      }
+      const activeMembers = options.activePathId ? membersForGraph(flow, options.activePathId, graph) : null
+      const orderedNodes = [...graph.nodes].sort(nodeOrder)
+      let visible = orderedNodes
       let collapsedIds = []
       const threshold = options.collapseThreshold ?? FLOW_COLLAPSE_THRESHOLD
-      if (!options.expandAll && graph.nodes.length > threshold) {
-        // Main path plus one layer of branches; everything else is folded.
-        const keep = new Set(mainPath)
+      if (!options.expandAll && mainPath.length && graph.nodes.length > threshold) {
+        const keep = new Set([...mainPath, ...listOf(options.keepNodeIds), ...(activeMembers?.nodes ?? [])])
         for (const edge of graph.edges) {
           if (mainSet.has(edge.source)) keep.add(edge.target)
           if (mainSet.has(edge.target)) keep.add(edge.source)
         }
-        visible = graph.nodes.filter(n => keep.has(n.id))
-        collapsedIds = graph.nodes.filter(n => !keep.has(n.id)).map(n => n.id)
+        visible = orderedNodes.filter(n => keep.has(n.id))
+        collapsedIds = orderedNodes.filter(n => !keep.has(n.id)).map(n => n.id)
       }
       const visibleIds = new Set(visible.map(n => n.id))
       const edges = graph.edges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target))
-      const { depths } = visible === graph.nodes ? full : bfsDepths(visible, edges)
-
-      // Rows by depth; within a row: left side, main column(s), right side.
+      // Keep full graph depths while folding so selecting a route does not reshuffle
+      // existing rows or change whether one of its edges is a return edge.
+      const { depths } = full
       const rows = new Map()
       for (const node of visible) {
         const depth = depths.get(node.id)
@@ -423,19 +777,35 @@ window.__ModuleLoader__.load({
         if (mainSet.has(node.id)) row.main.push(node)
         else if (RIGHT_KINDS.has(node.kind)) row.right.push(node)
         else if (node.kind === 'branch' || node.kind === 'recovery') row.left.push(node)
+        else if (!mainSet.size) row.main.push(node) // neutral centered layout, not a semantic main path
         else (row.left.length <= row.right.length ? row.left : row.right).push(node)
       }
       const orderedDepths = [...rows.keys()].sort((a, b) => a - b)
       const maxOf = side => Math.max(0, ...[...rows.values()].map(row => row[side].length))
-      const maxLeft = maxOf('left')
-      const maxRight = maxOf('right')
-      const maxMain = Math.max(1, maxOf('main'))
+      const maxLeft = maxOf('left'), maxRight = maxOf('right'), maxMain = Math.max(1, maxOf('main'))
       const colW = BOX_W + COL_GAP
       const axis = MARGIN_X + maxLeft * colW + (maxMain * colW - COL_GAP) / 2
+      const groups = new Map()
+      for (const edge of edges) {
+        const key = pairKey(edge.source, edge.target)
+        if (!groups.has(key)) groups.set(key, [])
+        groups.get(key).push(edge.edge_id)
+      }
+      const needsLane = edge => depths.get(edge.target) !== depths.get(edge.source) + 1 || groups.get(pairKey(edge.source, edge.target)).length > 1
+      const outgoingRails = new Map(), incomingRails = new Map()
+      for (const edge of edges.filter(needsLane)) {
+        for (const [rails, depth] of [[outgoingRails, depths.get(edge.source)], [incomingRails, depths.get(edge.target)]]) {
+          if (!rails.has(depth)) rails.set(depth, [])
+          rails.get(depth).push(edge.edge_id)
+        }
+      }
+      const maxRails = Math.max(0, ...[...outgoingRails.values(), ...incomingRails.values()].map(ids => ids.length))
+      const largestLabel = Math.max(0, ...edges.filter(e => e.condition).map(e => conditionLabel(e.condition).h))
+      const rowGap = Math.max(ROW_GAP, largestLabel + 32 + maxRails * 24)
+      const topMargin = Math.max(MARGIN_Y, maxRails * 12 + 18)
       const placed = new Map()
       orderedDepths.forEach((depth, rowIndex) => {
-        const row = rows.get(depth)
-        const y = MARGIN_Y + rowIndex * (BOX_H + ROW_GAP)
+        const row = rows.get(depth), y = topMargin + rowIndex * (BOX_H + rowGap)
         const halfMain = (maxMain - 1) / 2
         const put = (node, cx, column) => placed.set(node.id, { ...node, x: Math.round(cx - BOX_W / 2), y, w: BOX_W, h: BOX_H, depth, column,
           lines: wrapLabel(node.label, 26, 3), on_main: mainSet.has(node.id) })
@@ -443,39 +813,40 @@ window.__ModuleLoader__.load({
         row.left.forEach((node, i) => put(node, axis - (halfMain + i + 1) * colW, 'left'))
         row.right.forEach((node, i) => put(node, axis + (halfMain + i + 1) * colW, 'right'))
       })
-      const contentRight = MARGIN_X + (maxLeft + maxMain + maxRight) * colW - COL_GAP
-      let backCount = 0
+      const contentRight = Math.max(...[...placed.values()].map(node => node.x + node.w))
+      const contentBottom = Math.max(...[...placed.values()].map(node => node.y + node.h))
+      let nextLane = contentRight + 36
       const laidEdges = edges.map(edge => {
-        const a = placed.get(edge.source)
-        const b = placed.get(edge.target)
+        const a = placed.get(edge.source), b = placed.get(edge.target)
+        const parallels = groups.get(pairKey(edge.source, edge.target))
+        const portOffset = (parallels.indexOf(edge.edge_id) - (parallels.length - 1) / 2) * Math.min(22, 120 / parallels.length)
         const forward = b.depth > a.depth
-        const base = { ...edge, label: shortLabel(edge.condition, 22), on_main: mainSet.has(edge.source) && mainSet.has(edge.target) }
-        if (forward) {
-          const sx = a.x + a.w / 2, sy = a.y + a.h, tx = b.x + b.w / 2, ty = b.y
+        const base = { ...edge, label: edge.condition, on_main: mainEdges.has(edge.edge_id) }
+        if (!needsLane(edge)) {
+          const sx = a.x + a.w / 2 + portOffset, sy = a.y + a.h, tx = b.x + b.w / 2 + portOffset, ty = b.y
           const my = (sy + ty) / 2
-          return { ...base, back: false, path: `M${sx} ${sy} C${sx} ${my} ${tx} ${my} ${tx} ${ty}`,
-            label_x: (sx + tx) / 2, label_y: my }
+          return { ...base, back: false, routed: false, path: `M${sx} ${sy} C${sx} ${my} ${tx} ${my} ${tx} ${ty}`,
+            points: curvePoints(sx, sy, tx, ty, my), label_x: (sx + tx) / 2, label_y: my }
         }
-        // Back-edge or same-row edge: route around the right side.
-        const outside = contentRight + 22 + backCount++ * BACK_CHANNEL
-        const sx = a.x + a.w, sy = a.y + a.h / 2 + 8, tx = b.x + b.w, ty = b.y + b.h / 2 - 8
-        return { ...base, back: true, path: `M${sx} ${sy} L${outside} ${sy} L${outside} ${ty} L${tx} ${ty}`,
-          label_x: outside + 4, label_y: (sy + ty) / 2 }
+        // Return, same-row, self, and skipped-layer edges use gutters outside nodes.
+        // Each lane reserves the full measured condition width, not a fixed 14px.
+        const outside = nextLane
+        nextLane += (edge.condition ? conditionLabel(edge.condition).w : 0) + 36
+        const sx = a.x + a.w / 2 + portOffset, sy = a.y + a.h
+        const tx = b.x + b.w / 2 + portOffset, ty = b.y
+        const bottom = sy + 12 + outgoingRails.get(a.depth).indexOf(edge.edge_id) * 12
+        const top = ty - 12 - incomingRails.get(b.depth).indexOf(edge.edge_id) * 12
+        const points = [{ x: sx, y: sy }, { x: sx, y: bottom }, { x: outside, y: bottom }, { x: outside, y: top }, { x: tx, y: top }, { x: tx, y: ty }]
+        return { ...base, back: !forward, routed: true, lane_x: outside, route_top: top, route_bottom: bottom,
+          path: points.map((point, i) => `${i ? 'L' : 'M'}${point.x} ${point.y}`).join(' '), points,
+          label_x: outside + LABEL_GAP, label_y: (bottom + top) / 2 }
       })
-      const height = MARGIN_Y * 2 + orderedDepths.length * (BOX_H + ROW_GAP) - ROW_GAP + (collapsedIds.length ? 56 : 0)
-      const width = Math.max(480, contentRight + MARGIN_X + (backCount ? 22 + backCount * BACK_CHANNEL + 120 : 0))
-      return { width: Math.round(width), height: Math.round(height), nodes: [...placed.values()], edges: laidEdges,
-        warnings: graph.warnings, main_path: mainPath.filter(id => visibleIds.has(id)),
+      const extent = placeEdgeLabels(laidEdges, [...placed.values()], contentRight, Math.max(contentBottom, ...laidEdges.flatMap(edge => edge.points.map(point => point.y))))
+      const height = extent.bottom + MARGIN_Y + (collapsedIds.length ? 56 : 0)
+      const width = Math.max(480, extent.right + MARGIN_X)
+      return { width: Math.ceil(width), height: Math.ceil(height), nodes: [...placed.values()], edges: laidEdges,
+        warnings: [...new Set(graph.warnings)], layout_version: version, main_path: mainPath.filter(id => visibleIds.has(id)),
         collapsed: { count: collapsedIds.length, ids: collapsedIds } }
-    }
-
-    /** Nodes and edge indexes belonging to a path (for highlight). */
-    function pathMembers(flow, pathId) {
-      const path = listOf(flow?.paths).find(p => p?.path_id === pathId)
-      if (!path) return null
-      const ids = listOf(path.node_ids)
-      const pairs = new Set(ids.slice(1).map((id, i) => `${ids[i]}\u0000${id}`))
-      return { nodes: new Set(ids), pairs }
     }
 
     /**
@@ -543,7 +914,7 @@ window.__ModuleLoader__.load({
       return { width: Math.max(360, width), height: Math.round(height), nodes: [...placed.values()], edges, root, warnings: [] }
     }
 
-    return { FLOW_KIND_COLORS, FLOW_KIND_LABELS, FLOW_COLLAPSE_THRESHOLD, wrapLabel, truncateText, shortLabel, mainPathOf, layoutFlow, pathMembers, layoutCallGraph }
+    return { FLOW_KIND_COLORS, FLOW_KIND_LABELS, FLOW_COLLAPSE_THRESHOLD, wrapLabel, truncateText, shortLabel, mainPathOf, pathsForNode, pathMembers, layoutFlow, layoutCallGraph }
     })()
 
     const __flowRender = (() => {
@@ -571,33 +942,67 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Render exact edge identities, visible condition badges and an accessible hit
+     * region. Pointer handlers are attached by the client only to the edge group.
      * @param {ReturnType<import('./layout.js').layoutFlow>} layout
-     * @param {{highlight?: {nodes:Set<string>, pairs:Set<string>}|null, selected?: string|null, idPrefix?: string}} options
+     * @param {{highlight?: object|null, selected?: string|null, focusedEdgeId?: string|null, idPrefix?: string}} options
      */
     function renderFlowTree(layout, options = {}) {
       const prefix = options.idPrefix ?? 'pf'
       const highlight = options.highlight ?? null
-      const dimNode = id => highlight && !highlight.nodes.has(id)
-      const edgeOn = edge => highlight && highlight.pairs.has(`${edge.source}\u0000${edge.target}`)
+      const focusedId = options.focusedEdgeId ?? options.hoverEdge ?? options.selectedEdge ?? null
+      const focused = layout.edges.find(edge => edge.edge_id === focusedId)
+      const focusNodes = new Set(focused ? [focused.source, focused.target] : [])
+      const pairCounts = new Map()
+      for (const edge of layout.edges) {
+        const key = `${edge.source}\u0000${edge.target}`
+        pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1)
+      }
+      const edgeOn = edge => {
+        if (edge.edge_id === focusedId) return true
+        if (!highlight) return false
+        if (highlight.edge_ids instanceof Set) return highlight.edge_ids.has(edge.edge_id)
+        // Compatibility for old branch highlights: an ambiguous pair must not
+        // accidentally light every parallel condition edge.
+        const pair = `${edge.source}\u0000${edge.target}`
+        return pairCounts.get(pair) === 1 && Boolean(highlight.pairs?.has(pair))
+      }
+      const nodeOn = id => focusNodes.has(id) || Boolean(highlight?.nodes?.has(id))
+      const hasHighlight = Boolean(highlight || focused)
       const edges = layout.edges.map(edge => {
-        const on = edgeOn(edge)
-        const dim = highlight && !on
+        const on = edgeOn(edge), focusedEdge = edge.edge_id === focusedId
+        const dim = hasHighlight && !on
+        const color = on ? HIGHLIGHT : NEUTRAL
         const condition = edge.condition
-        return el('g', { 'data-edge': `${edge.source}->${edge.target}`, opacity: dim ? 0.18 : 1 },
-          el('path', { d: edge.path, fill: 'none', stroke: on ? HIGHLIGHT : NEUTRAL, 'stroke-width': on ? 2.4 : 1.4,
+        const box = edge.label_box
+        const leader = edge.label_leader
+        return el('g', { 'data-edge': `${edge.source}->${edge.target}`, 'data-edge-id': edge.edge_id,
+          'data-highlighted': on ? 'true' : 'false', 'data-focused': focusedEdge ? 'true' : 'false',
+          'aria-label': `${edge.source} → ${edge.target}${condition ? `：${condition}` : ''}`,
+          cursor: 'pointer', opacity: dim ? 0.16 : 1 },
+          el('title', {}, `${edge.source} → ${edge.target}${condition ? `：${condition}` : ''}`),
+          el('path', { d: edge.path, fill: 'none', stroke: 'transparent', 'stroke-width': 14, 'pointer-events': 'stroke', 'data-edge-hit': 'true' }),
+          el('path', { d: edge.path, fill: 'none', stroke: color, 'stroke-width': focusedEdge ? 3.6 : on ? 2.8 : 1.4,
             'stroke-dasharray': edge.back ? '6 4' : null, 'marker-end': `url(#${prefix}-${on ? 'arrow-hi' : 'arrow'})` }),
-          condition ? el('g', {},
-            el('title', {}, condition),
-            el('text', { x: edge.label_x, y: edge.label_y - 4, 'text-anchor': edge.back ? 'start' : 'middle', 'font-size': 11,
-              fill: '#475569', stroke: '#ffffff', 'stroke-width': 3, 'paint-order': 'stroke' }, edge.label)) : null)
+          condition ? el('g', { 'data-edge-label': edge.edge_id },
+            leader ? el('path', { d: `M${leader.from.x} ${leader.from.y} L${leader.to.x} ${leader.to.y}`, fill: 'none', stroke: color,
+              'stroke-width': on ? 1.5 : 1, 'stroke-dasharray': '2 2', 'pointer-events': 'none' }) : null,
+            leader ? el('circle', { cx: leader.from.x, cy: leader.from.y, r: on ? 3 : 2, fill: color, 'pointer-events': 'none' }) : null,
+            box ? el('rect', { x: box.x, y: box.y, width: box.w, height: box.h, rx: 4,
+              fill: on ? '#eff6ff' : '#ffffff', stroke: on ? HIGHLIGHT : '#cbd5e1', 'stroke-width': on ? 1.4 : 1 }) : null,
+            el('text', { x: edge.label_x, 'text-anchor': 'middle', 'font-size': 11, fill: on ? '#1e40af' : '#334155', 'font-weight': on ? 600 : 400 },
+              (edge.label_lines ?? [edge.label]).map((line, index, lines) => el('tspan', {
+                x: edge.label_x, y: edge.label_y - ((lines.length - 1) * 15) / 2 + index * 15 + 4 }, line)))) : null)
       })
       const nodes = layout.nodes.map(node => {
-        const color = FLOW_KIND_COLORS[node.kind] ?? NEUTRAL
+        const on = nodeOn(node.id)
+        const color = on ? HIGHLIGHT : FLOW_KIND_COLORS[node.kind] ?? NEUTRAL
         const selected = options.selected === node.id
-        return el('g', { 'data-node-id': node.id, cursor: 'pointer', opacity: dimNode(node.id) ? 0.25 : 1 },
+        return el('g', { 'data-node-id': node.id, 'data-highlighted': on ? 'true' : 'false', 'data-selected': selected ? 'true' : 'false',
+          cursor: 'pointer', opacity: hasHighlight && !on ? 0.25 : 1 },
           el('title', {}, `${node.label}${node.kind ? `（${FLOW_KIND_LABELS[node.kind] ?? node.kind}）` : ''}${node.description ? `\n${node.description}` : ''}`),
-          el('rect', { x: node.x, y: node.y, width: node.w, height: node.h, rx: 10, fill: '#ffffff', stroke: color,
-            'stroke-width': selected ? 3 : node.on_main ? 2 : 1.4 }),
+          el('rect', { x: node.x, y: node.y, width: node.w, height: node.h, rx: 10, fill: on ? '#eff6ff' : '#ffffff', stroke: color,
+            'stroke-width': selected || focusNodes.has(node.id) ? 3 : on ? 2.6 : node.on_main ? 2 : 1.4 }),
           el('rect', { x: node.x, y: node.y, width: 6, height: node.h, rx: 3, fill: color }),
           node.kind ? el('text', { x: node.x + node.w - 8, y: node.y + 15, 'text-anchor': 'end', 'font-size': 10, fill: color }, FLOW_KIND_LABELS[node.kind] ?? node.kind) : null,
           textLines(node.lines, node.x + node.w / 2 + 3, node.y + node.h / 2 + 3))
@@ -608,7 +1013,7 @@ window.__ModuleLoader__.load({
           `+${layout.collapsed.count} 个节点（已折叠）`))
       }
       return el('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: `0 0 ${layout.width} ${layout.height}`, width: layout.width, height: layout.height,
-        'font-family': FONT, role: 'img' },
+        'font-family': FONT, role: 'img', 'data-layout-version': layout.layout_version ?? 'legacy' },
         arrowDefs(prefix), el('rect', { x: 0, y: 0, width: layout.width, height: layout.height, fill: '#fbfcfe' }),
         el('g', { class: 'edges' }, edges), el('g', { class: 'nodes' }, nodes), extra)
     }
@@ -839,9 +1244,10 @@ window.__ModuleLoader__.load({
     })()
 
     const { normalizeFlow: sharedNormalizeFlow } = __flowNormalize
-    const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, layoutCallGraph } = __flowLayout
+    const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, pathsForNode, layoutCallGraph } = __flowLayout
     const { renderFlowTree, renderCallGraphTree, toSvgString } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
+    const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
       if (typeof body === 'string') return body
@@ -2730,6 +3136,7 @@ window.__ModuleLoader__.load({
       return {
         request_version: '2.0',
         ...(form.source_task_id ? { source_task_id: form.source_task_id } : {}),
+        ...(form.flow_baseline ? { flow_baseline: { ...form.flow_baseline } } : {}),
         repository: form.repository,
         target: form.target,
         source_scope: String(form.source_scope_text ?? '').split(/[\n,]/).map(value => value.trim()).filter(Boolean),
@@ -2943,7 +3350,7 @@ window.__ModuleLoader__.load({
       if (/^(data|aria)-/.test(name) || !name.includes('-')) return name
       return name.replace(/-([a-z])/g, (_, char) => char.toUpperCase())
     }
-    function svgTreeToReact(tree, key, onNode) {
+    function svgTreeToReact(tree, key, onNode, onEdge) {
       if (tree == null || tree === false) return null
       if (typeof tree !== 'object') return String(tree)
       const props = { key }
@@ -2956,7 +3363,19 @@ window.__ModuleLoader__.load({
         props.onClick = () => onNode(nodeId)
         props.onKeyDown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onNode(nodeId) } }
       }
-      return h(tree.tag, props, ...(tree.children ?? []).map((child, index) => svgTreeToReact(child, index, onNode)))
+      const edgeId = tree.attrs?.['data-edge-id']
+      if (tree.tag === 'g' && edgeId && onEdge) {
+        props.role = 'button'
+        props.tabIndex = 0
+        props['aria-label'] = tree.attrs?.['aria-label'] || `查看连线 ${edgeId}`
+        props.onPointerEnter = () => onEdge.hover(edgeId)
+        props.onPointerLeave = () => onEdge.hover('')
+        props.onFocus = () => onEdge.hover(edgeId)
+        props.onBlur = () => onEdge.hover('')
+        props.onClick = event => { event?.stopPropagation?.(); onEdge.select(edgeId) }
+        props.onKeyDown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation?.(); onEdge.select(edgeId) } }
+      }
+      return h(tree.tag, props, ...(tree.children ?? []).map((child, index) => svgTreeToReact(child, index, onNode, onEdge)))
     }
     /** Graph input for a flow: behavior-flow nodes, else legacy mainline steps in order plus bound branches. */
     function flowGraphInput(flow) {
@@ -2977,18 +3396,22 @@ window.__ModuleLoader__.load({
         paths: (Array.isArray(flow?.paths) ? flow.paths : []).filter(path => Array.isArray(path?.node_ids)) }
     }
     /** Highlight members for a set of branch ids (projected edges or legacy branches). */
-    function branchHighlight(flow, branchIds) {
+    function branchHighlight(flow, branchIds, layout) {
       if (!branchIds?.length) return null
       const wanted = new Set(branchIds)
       const nodes = new Set()
       const pairs = new Set()
+      const edgeIds = new Set()
       for (const branch of Array.isArray(flow?.branches) ? flow.branches : []) {
         if (!wanted.has(branch?.branch_id)) continue
         if (branch.from_step_id) nodes.add(branch.from_step_id)
         if (branch.to_step_id) nodes.add(branch.to_step_id)
         if (branch.from_step_id && branch.to_step_id) pairs.add(`${branch.from_step_id}\u0000${branch.to_step_id}`)
+        const matches = (layout?.edges ?? []).filter(edge => branch.edge_id ? edge.edge_id === branch.edge_id
+          : edge.source === branch.from_step_id && edge.target === branch.to_step_id && edge.condition === (branch.condition || ''))
+        if (matches.length === 1) edgeIds.add(matches[0].edge_id)
       }
-      return nodes.size ? { nodes, pairs } : null
+      return nodes.size ? { nodes, pairs, edge_ids: edgeIds } : null
     }
     function evidenceText(value) {
       const list = Array.isArray(value) ? value : value ? [value] : []
@@ -3112,39 +3535,143 @@ window.__ModuleLoader__.load({
         warnings.map((warning, index) => h('li', { key: index }, warning))) : null
     }
 
+    function BehaviorCoverageView({ ledgers = [], onCase }) {
+      const show = value => sourceFirstRecordBody(value) || '未提供'
+      const lines = values => Array.isArray(values) && values.length ? values.map((value, index) => h('p', { key: index }, show(value))) : h('p', { className: 'b05-subtle' }, '未提供')
+      return h('section', { className: 'b05-card', 'aria-label': '业务行为覆盖清单' },
+        h('h3', null, '业务行为覆盖清单'),
+        h('p', { className: 'b05-subtle' }, '状态来自本次分析声明；用例关联不代表已执行，也不代表实测代码覆盖率。'),
+        !ledgers.length ? h('p', null, '本次记录未提供业务行为清单；已有用例与分析原文仍可查看。') : ledgers.map(ledger => h('details', { key: ledger.projection_id, open: true },
+          h('summary', null, `${ledger.unit_id || '未提供分析单元'} · ${show(ledger.scope)}`),
+          h('p', null, `组合选择依据：${show(ledger.combination_strategy)}`),
+          h('p', { className: 'b05-subtle' }, Object.entries(ledger.declared_counts ?? {}).map(([status, count]) => `${BEHAVIOR_STATUS_LABELS[status] || '未标注'} ${count}`).join(' · ')),
+          warningList(ledger.projection_warnings, '行为清单提示'),
+          Array.isArray(ledger.unresolved_dependencies) && ledger.unresolved_dependencies.length
+            ? h('div', { role: 'status' }, h('strong', null, '未决依赖'), lines(ledger.unresolved_dependencies)) : null,
+          h('div', { className: 'b05-table-scroll' }, h('table', { className: 'b05-case-table' },
+            h('thead', null, h('tr', null, ['业务行为', '条件与约束', '预期行为', '关联用例 / 参数组合', '状态与依据'].map(label => h('th', { key: label }, label)))),
+            h('tbody', null, (ledger.items ?? []).map(item => h('tr', { key: item.display_key },
+              h('td', null, h('strong', null, show(item.item_id)), h('p', null, show(item.operation)),
+                Array.isArray(item.source_evidence) && item.source_evidence.length ? h('details', null, h('summary', null, '来源依据'), lines(item.source_evidence)) : null),
+              h('td', null, h('strong', null, '条件'), lines(item.conditions), h('strong', null, '约束'), lines(item.constraints)),
+              h('td', null, show(item.expected_behavior)),
+              h('td', null, item.case_links?.length ? item.case_links.map((link, index) => h('p', { key: index },
+                link.target_case_id && onCase ? h('button', { type: 'button', className: 'b05-text-link', onClick: () => onCase(link) }, `${link.case_id}${link.variant_id != null ? ` / ${link.variant_id}` : ''}`)
+                  : show(link.case_id ?? link.reference),
+                link.issue ? h('small', { className: 'b05-subtle' }, ` · ${link.issue}`) : null)) : h('span', { className: 'b05-subtle' }, '未关联')),
+              h('td', null, h('strong', null, BEHAVIOR_STATUS_LABELS[item.status] || `未标注${item.status ? `（${item.status}）` : ''}`),
+                h('p', null, show(item.reason)), warningList(item.projection_warnings, '行为项提示'),
+                item.projection_warnings?.length ? h('details', null, h('summary', null, '行为项原文'), h('pre', null, show(item.source_item))) : null)))))))))
+    }
+
+    function FlowComparisonView({ stability, comparison, baseline, onUseBaseline }) {
+      if (!stability && !comparison && !baseline) return null
+      const dimensions = { source: '源码', scope: '分析范围', assets: '资料与示例', methodology: '方法论', model: '模型及已声明设置', objective: '目标与执行设置' }
+      const statuses = { same: '相同', changed: '有变更', unknown: '待确认', unchanged: '结构相同', added: '新增流程', removed: '移除流程', unresolved: '对应关系待确认' }
+      const comparable = { comparable: '已记录输入一致', different_inputs: '输入有变更', unknown: '输入可比性待确认' }
+      return h('section', { className: 'b05-card', 'aria-label': '流程版本与差异' },
+        h('h3', null, '流程版本与差异'),
+        baseline?.run_id && baseline?.version_id ? h('div', null,
+          h('p', null, `本次已审核流程版本：${baseline.version_id}`),
+          onUseBaseline ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => onUseBaseline(baseline) }, '以此流程为基线新建分析') : null) : null,
+        stability ? h('details', null, h('summary', null, '本次冻结输入指纹'),
+          h('p', { className: 'b05-mono', style: { overflowWrap: 'anywhere' } }, stability.fingerprint || '未提供'),
+          h('dl', { className: 'b05-case-kv' }, Object.entries(stability.dimension_hashes ?? {}).flatMap(([key, value]) => [h('dt', { key: `${key}-label` }, dimensions[key] || key), h('dd', { key, style: { overflowWrap: 'anywhere' } }, value)])),
+          h('p', null, `模型设置记录：${({ declared: '已声明', partial: '仅部分已知', unknown: '未知' })[stability.model?.metadata_status] || '未知'}`),
+          h('p', { className: 'b05-subtle' }, stability.note || '输入指纹不保证模型输出完全一致。')) : null,
+        comparison ? h('div', null,
+          h('p', null, `对照基线：${comparison.baseline?.run_id || '未提供'} · ${comparison.baseline?.version_id || '未提供'}`),
+          h('p', { role: 'status' }, comparable[comparison.comparability?.status] || '输入可比性未记录'),
+          h('p', { className: 'b05-subtle' }, comparison.comparison_scope === 'delivery'
+            ? '当前显示最终交付版本的结构差异；结构对照未作语义裁决，不能据此判定变更正确。'
+            : '当前显示对照复核输入版本的结构差异；正确性以复核依据为准。'),
+          h('dl', { className: 'b05-case-kv' }, Object.entries(comparison.comparability?.dimensions ?? {}).flatMap(([key, value]) => [h('dt', { key: `${key}-label` }, dimensions[key] || key), h('dd', { key }, statuses[value] || value)])),
+          warningList([...(comparison.warnings ?? []), ...(comparison.comparability?.notes ?? [])], '流程对照说明'),
+          (comparison.flows ?? []).map((flow, index) => h('details', { key: `${flow.flow_id}:${index}` },
+            h('summary', null, `${flow.flow_id || '未提供流程编号'} · ${statuses[flow.status] || flow.status || '未标注'}${flow.content_changed ? ' · 文字/依据变化待核实' : ''}`),
+            ...['nodes', 'edges', 'paths'].map(key => flow[key] ? h('p', { key }, `${({ nodes: '节点', edges: '连线', paths: '路径' })[key]}：新增 ${flow[key].added?.length ?? 0}，移除 ${flow[key].removed?.length ?? 0}，变更 ${flow[key].changed?.length ?? 0}`) : null),
+            flow.main_paths_changed ? h('p', null, '主路径声明有变更。') : null,
+            flow.attachment_changed ? h('p', null, '主/子流程挂接有变更。') : null,
+            flow.presentation_changed ? h('p', null, '展示内容有变更。') : null,
+            flow.content_changed ? h('details', { open: true }, h('summary', null, '文字与依据变更（完整前后内容）'),
+              h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(flow.content_changes))) : null,
+            warningList(flow.warnings, '流程差异提示'),
+            h('details', null, h('summary', null, '查看差异原文'), h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(flow))))))
+          : h('p', { className: 'b05-subtle' }, '本次尚无可展示的流程对照结果。'))
+    }
+
     /** Inline behavior-flow diagram rendered locally from the flow's nodes/edges/paths. */
     function FlowGraphView({ flow, highlightBranchIds = [], idPrefix = 'pf', viewport }) {
-      const [pathId, setPathId] = React.useState('')
-      const [selected, setSelected] = React.useState('')
-      const [expandAll, setExpandAll] = React.useState(false)
       const graph = flowGraphInput(flow)
-      const layout = layoutFlow(graph, { expandAll })
+      const identity = JSON.stringify([flow?.unit_id, flow?.flow_id, flow?.source_record?.action_id,
+        flow?.source_record?.record_id, flow?.source_record?.revision, flow?.revision,
+        graph.nodes, graph.edges, graph.paths, graph.layout_version, graph.main_path_ids])
+      const [selection, setSelection] = React.useState({ key: '', node: '', path: '', edge: '' })
+      const [hover, setHover] = React.useState({ key: '', edge: '' })
+      const [expandedKey, setExpandedKey] = React.useState('')
+      // A changed flow/revision never inherits a stale route or edge selection.
+      const active = selection.key === identity ? selection : { node: '', path: '', edge: '' }
+      const selected = active.node, pathId = active.path, expandAll = expandedKey === identity
+      const layout = layoutFlow(graph, { expandAll, activePathId: pathId })
       const { controls, panProps, sized } = useGraphZoom('流程图', layout.width, layout.height, flow?.flow_id, viewport)
       if (!layout.nodes.length) {
         return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图' },
           h('div', { role: 'status', className: 'pangea-diagram-caption' }, '当前流程没有可绘制节点。'), warningList(layout.warnings, '流程图提示'))
       }
       const paths = (graph.paths ?? []).filter(path => path?.path_id)
-      const highlight = pathId ? pathMembers(graph, pathId) : branchHighlight(flow, highlightBranchIds)
+      const highlight = pathId ? pathMembers(graph, pathId) : selected ? null : branchHighlight(flow, highlightBranchIds, layout)
+      const candidates = selected ? pathsForNode(graph, selected) : []
+      const chooseNode = id => {
+        const routes = pathsForNode(graph, id)
+        const nextPath = routes.some(path => path.path_id === pathId) ? pathId : routes.length === 1 ? routes[0].path_id : ''
+        setSelection({ key: identity, node: id, path: nextPath, edge: '' })
+        setHover({ key: identity, edge: '' })
+      }
+      const choosePath = id => {
+        const route = paths.find(path => path.path_id === id)
+        setSelection({ key: identity, node: route?.node_ids?.includes(selected) ? selected : '', path: id, edge: '' })
+        setHover({ key: identity, edge: '' })
+      }
+      const focusedEdgeId = hover.key === identity && hover.edge ? hover.edge : active.edge
+      const focusedEdge = layout.edges.find(edge => edge.edge_id === focusedEdgeId)
       const name = `${flow?.display_id || flow?.flow_id || 'flow'}`.replace(/[^\w.-]+/g, '_')
-      const tree = renderFlowTree(layout, { highlight, selected, idPrefix })
+      const tree = renderFlowTree(layout, { highlight, selected, focusedEdgeId, idPrefix })
       const node = layout.nodes.find(item => item.id === selected)
       const evidence = node ? evidenceText(node.source_evidence) : []
+      const selectedPath = paths.find(path => path.path_id === pathId)
+      const routeLabel = path => `${path.path_id}${path.title ? ` · ${path.title}` : ''}`
       return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图', style: { marginTop: 12 } },
         h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', margin: '8px 0' } },
-          paths.length ? h('select', { 'aria-label': '高亮路径', value: pathId, onChange: event => setPathId(event.target.value) },
+          paths.length ? h('select', { 'aria-label': '高亮路径', value: pathId, onChange: event => choosePath(event.target.value) },
             h('option', { value: '' }, highlightBranchIds.length ? '所选分支' : '全部路径'),
-            paths.map(path => h('option', { key: path.path_id, value: path.path_id }, `${path.path_id}${path.title ? ` · ${path.title}` : ''}`))) : null,
+            paths.map(path => h('option', { key: path.path_id, value: path.path_id }, routeLabel(path)))) : null,
           controls,
-          layout.collapsed.count || expandAll ? h('button', { type: 'button', onClick: () => setExpandAll(!expandAll) }, expandAll ? '折叠次要节点' : '展开全部') : null,
+          layout.collapsed.count || expandAll ? h('button', { type: 'button', onClick: () => setExpandedKey(expandAll ? '' : identity) }, expandAll ? '折叠次要节点' : '展开全部') : null,
+          selected || pathId || active.edge ? h('button', { type: 'button', onClick: () => { setSelection({ key: identity, node: '', path: '', edge: '' }); setHover({ key: identity, edge: '' }) } }, '清除选择') : null,
           h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'svg') }, '导出 SVG'),
           h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'png') }, '导出 PNG')),
-        warningList(layout.warnings, '流程图提示'),
+        warningList([...layout.warnings, ...(highlight?.warnings ?? [])], '流程图提示'),
+        selected ? h('div', { className: 'pangea-diagram-caption', role: 'status', 'aria-label': '节点路径选择' },
+          candidates.length === 0 ? '该节点没有已声明路径；当前只显示节点，不推断完整路线。'
+            : candidates.length > 1 ? `该节点属于 ${candidates.length} 条已声明路径${pathId ? '，当前高亮所选路径。' : '，请选择需要查看的一条。'}`
+              : '已高亮经过该节点的唯一声明路径。',
+          candidates.length > 1 ? h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', marginTop: 6 } }, candidates.map(path => h('button', {
+            key: path.path_id, type: 'button', 'aria-pressed': pathId === path.path_id, onClick: () => choosePath(path.path_id),
+          }, routeLabel(path)))) : null) : null,
+        selectedPath ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '所选路径步骤' },
+          h('strong', null, routeLabel(selectedPath)), h('p', null, (selectedPath.node_ids ?? []).map((id, index) =>
+            `${index + 1}. ${graph.nodes?.find(item => item.id === id)?.label || id}`).join(' → '))) : null,
+        focusedEdge ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '连线详情' },
+          h('strong', null, `${layout.nodes.find(item => item.id === focusedEdge.source)?.label || focusedEdge.source} → ${layout.nodes.find(item => item.id === focusedEdge.target)?.label || focusedEdge.target}`),
+          h('p', null, focusedEdge.condition || '原记录未提供条件。'), h('small', null, focusedEdge.edge_id)) : null,
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } },
-          h('div', { ...panProps, style: { ...panProps.style, flex: '1 1 320px', minWidth: 0 } }, svgTreeToReact(sized(tree), 'svg', setSelected)),
+          h('div', { ...panProps, style: { ...panProps.style, flex: '1 1 320px', minWidth: 0 } }, svgTreeToReact(sized(tree), 'svg', chooseNode, {
+            hover: edge => setHover({ key: identity, edge }),
+            select: edge => setSelection({ key: identity, node: '', path: pathId, edge }),
+          })),
           node ? h('aside', { 'aria-label': '节点详情', style: { width: 240, flex: '0 0 240px', border: '1px solid #e2e7e0', borderRadius: 8, padding: 12, background: '#fff' } },
             h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } }, h('strong', null, node.label),
-              h('button', { type: 'button', className: 'b04-link', style: { flexShrink: 0 }, 'aria-label': '关闭节点详情', onClick: () => setSelected('') }, '关闭')),
+              h('button', { type: 'button', className: 'b04-link', style: { flexShrink: 0 }, 'aria-label': '关闭节点详情', onClick: () => setSelection({ key: identity, node: '', path: pathId, edge: active.edge }) }, '关闭')),
             h('small', null, `${node.id}${node.kind ? ` · ${FLOW_KIND_LABELS[node.kind] ?? node.kind}` : ''}`),
             h('p', null, node.description || '原记录未提供节点说明。'),
             evidence.length ? h('div', null, h('small', null, '源码依据'), evidence.map(location => h('p', { key: location }, h('code', null, location)))) : null) : null))
@@ -4824,6 +5351,7 @@ window.__ModuleLoader__.load({
           `整体预期：${Array.isArray(item.expected_results) ? item.expected_results.join('；') : text(item.expected_results, '未记录')}`,
           `观察点：${Array.isArray(item.observability) ? item.observability.join('；') : text(item.observability, '未记录')}`,
           `清理：${Array.isArray(item.cleanup) ? item.cleanup.join('；') : text(item.cleanup, '未记录')}`,
+          ...caseVariantLines(item),
         ].join('\n')).join('\n\n')
         try {
           if (!globalThis.navigator?.clipboard?.writeText) throw new Error('当前环境不支持剪贴板写入')
@@ -5254,7 +5782,7 @@ window.__ModuleLoader__.load({
         const scenes = {
           'module-analysis': ['模块分析', 'ScanSearch', '业务分支、轻量风险与可选覆盖补测。', '模块流程、关键分支、轻量风险与测试用例'],
           'risk-analysis': ['风险分析', 'ShieldAlert', '聚焦有依据的失效风险及验证用例。', '有源码依据的失效风险、触发条件与验证用例'],
-          'branch-analysis': ['分支分析', 'GitBranch', '聚焦正常、边界、异常与恢复路径。', '正常、边界、异常与恢复路径的测试设计'],
+          'branch-analysis': ['分支分析', 'GitBranch', '分析业务条件、配置组合、状态与操作顺序。', '业务行为清单、独立用例与参数组合及未决缺口'],
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
@@ -5265,7 +5793,12 @@ window.__ModuleLoader__.load({
           if (next > 1 && !targetReady || next > 2 && !inputsReady || next > 3 && !executionReady) { showActionNotice(submitBlockReason || '请先完成前面的设置。', true); return }
           setScreen(value => ({ ...value, createStep: next, createView: nextView }))
         }
-        const update = (key, value) => setCreateForm(form => ({ ...form, [key]: value }))
+        const update = (key, value) => setCreateForm(form => ({ ...form, [key]: value,
+          ...(key === 'repository' && value !== form.repository ? { flow_baseline: null } : {}) }))
+        const baselineKey = value => value?.run_id && value?.version_id ? JSON.stringify([value.run_id, value.version_id]) : ''
+        const baselineOptions = (Array.isArray(workbench?.flow_baseline_options) ? workbench.flow_baseline_options : [])
+          .filter(item => baselineKey(item) && (!createForm.repository || item.repository === createForm.repository))
+        const chosenBaseline = baselineKey(createForm.flow_baseline)
         const button = (text, onClick, variant = '', iconName, disabled = false) => h('button', { type: 'button', className: `btn ${variant}`, onClick, disabled: creatingRun || disabled }, iconName && runIcon(iconName), text)
         const badge = (text, kind = '') => h('span', { className: `badge ${kind}` }, text)
         const field = (label, control, hint) => h('label', { className: 'field' }, h('span', null, label), control, hint && h('span', { className: 'hint' }, hint))
@@ -5300,6 +5833,14 @@ window.__ModuleLoader__.load({
           h('div', { className: 'create-subhead' }, '分析场景 ', h('span', { className: 'small muted', style: { fontWeight: 400 } }, '选择本次分析的重点')),
           h('div', { className: 'choice-grid create-scenes', role: 'group', 'aria-label': '分析场景' }, Object.entries(scenes).map(([id, item]) => h('button', { key: id, type: 'button', className: `choice create-option ${createForm.scenario === id ? 'selected' : ''}`, 'aria-pressed': createForm.scenario === id, disabled: !supported('scenarios', id), 'data-scenario': id, onClick: () => update('scenario', id) }, runIcon(item[1]), h('div', null, h('strong', null, item[0]), h('p', null, item[2])), h('span', { className: 'create-scene-check' }, runIcon('CircleCheck'))))),
           h('div', { className: 'form-grid create-scope', style: { marginTop: 22 } }, input('源码冻结范围', 'source_scope_text', '相对仓库根目录，每行一个文件或目录；「.」代表整个仓库。', true), input('参考源码范围', 'context_scope_text', '辅助理解的相关实现、文档或测试文件。', true)),
+          field('流程基线（可选）', h('select', { 'aria-label': '流程基线', value: chosenBaseline, disabled: creatingRun, onChange: event => {
+            const choice = baselineOptions.find(item => baselineKey(item) === event.target.value)
+            update('flow_baseline', choice ? { run_id: choice.run_id, version_id: choice.version_id } : null)
+          } }, h('option', { value: '' }, '不选择 · 独立分析'),
+            chosenBaseline && !baselineOptions.some(item => baselineKey(item) === chosenBaseline)
+              ? h('option', { value: chosenBaseline }, `已选 ${createForm.flow_baseline.run_id} · ${createForm.flow_baseline.version_id}`) : null,
+            baselineOptions.map(item => h('option', { key: baselineKey(item), value: baselineKey(item) }, `${item.target || item.run_id} · ${item.run_id} · ${item.version_id}`))),
+          '选择已审核流程，用于对照本次分析的差异。候选来自当前已加载记录，不会自动选择最近一次结果。'),
           footer(() => navigate({ type: 'tasks' }), () => go(2), '下一步 · 输入资料', !targetReady)), 'create-target-panel')
         else if (step === 2 && view === 'inputs') content = panel(h(React.Fragment, null,
           h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '让分析理解更多上下文'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '选择与目标相关的需求、设计或已有测试资料。')), button('选择资产', () => openAssets(), '', 'Plus')),
@@ -5345,7 +5886,9 @@ window.__ModuleLoader__.load({
         } else {
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
-            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), `${sourceScope.length} 项待冻结范围`, 1), row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProvider?.label ?? '内置 API Agent', createForm.provider_id ? createForm.agent_model || '使用 Agent 默认模型与推理配置' : `${selectedModelOption?.provider_name ?? selectedModel?.provider} · ${selectedModelOption?.model_name ?? selectedModel?.model} · 推理级别：${selectedModelOption?.reasoning?.efforts?.find(item => item.id === selectedModel?.reasoning_effort)?.name ?? selectedModel?.reasoning_effort ?? '默认'}`, 3),
+            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), `${sourceScope.length} 项待冻结范围`, 1),
+            row('流程基线', createForm.flow_baseline?.run_id || '未选择', createForm.flow_baseline?.version_id || '独立分析，不与历史流程自动合并。', 1),
+            row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProvider?.label ?? '内置 API Agent', createForm.provider_id ? createForm.agent_model || '使用 Agent 默认模型与推理配置' : `${selectedModelOption?.provider_name ?? selectedModel?.provider} · ${selectedModelOption?.model_name ?? selectedModel?.model} · 推理级别：${selectedModelOption?.reasoning?.efforts?.find(item => item.id === selectedModel?.reasoning_effort)?.name ?? selectedModel?.reasoning_effort ?? '默认'}`, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
         return h('section', { className: 'pangea-ui pangea-create-workspace', 'aria-label': '新建分析' },
@@ -5746,6 +6289,21 @@ window.__ModuleLoader__.load({
               snippet?.file_path ? h('button', { type: 'button', style: styles.button, onClick: () => openSidebarFile(snippet.file_path) }, '打开完整文件') : null)))
       }
 
+      function renderFlowVersions() {
+        return h(FlowComparisonView, { stability: current?.flow_stability, comparison: current?.flow_comparison,
+          baseline: current?.flow_baseline, onUseBaseline: baseline => {
+            if (!baseline?.run_id || !baseline?.version_id) return
+            setCreateForm(value => ({ ...value, source_task_id: selectedTask?.task_id,
+              repository: current?.repository || selectedTask?.repository || baseline.repository || '',
+              target: current?.target || selectedTask?.target || baseline.target || '',
+              source_scope_text: (selectedTask?.source_scope ?? current?.source_scope ?? []).join('\n'),
+              context_scope_text: (selectedTask?.context_scope ?? []).join('\n'), asset_ids: [],
+              scenario: current?.scenario || baseline.scenario || 'branch-analysis',
+              flow_baseline: { run_id: baseline.run_id, version_id: baseline.version_id } }))
+            setScreen({ type: 'create', createStep: 1 })
+          } })
+      }
+
       function renderFlows() {
         const query = flowQuery.trim().toLowerCase()
         const flowRank = item => item?.raw_text != null ? 2 : item?.role === 'main' ? 0 : 1
@@ -5970,7 +6528,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => navigate({ type: 'workflow' }) }, '查看运行过程'),
               current?.artifacts?.source_snapshot_manifest ? h('button', { type: 'button', style: styles.button,
                 onClick: () => openSidebarFile(current.artifacts.source_snapshot_manifest) }, '检查冻结输入') : null)))
-        return h(React.Fragment, null, tabs, flow ? h(React.Fragment, null, modebar,
+        return h(React.Fragment, null, renderFlowVersions(), tabs, flow ? h(React.Fragment, null, modebar,
           h('section', { key: cardScope(flow), id: cardId(flow), role: 'tabpanel', tabIndex: 0, 'aria-labelledby': `${cardId(flow)}-tab`,
             className: 'b04-flow-panel', 'data-flow-id': flow.flow_id,
             ref: element => { if (element) { element.scrollTop = panelState(flow).scrollTop; element.scrollLeft = panelState(flow).scrollLeft } },
@@ -6662,6 +7220,7 @@ window.__ModuleLoader__.load({
             key: target, type: 'button', 'aria-current': target === 'overview' ? 'page' : undefined,
             onClick: () => jump(target),
           }, label, key ? h('small', null, displayCount(key, ({ business_flows: businessFlows, risks, test_cases: testCases })[key]?.length ?? 0)) : null))),
+          renderFlowVersions(),
           h('div', { className: 'b03-report-layout' },
             h('article', { className: 'b03-report-document' },
               h('div', { className: 'b03-report-head' },
@@ -6831,7 +7390,9 @@ window.__ModuleLoader__.load({
 
       function renderCases() {
         const query = caseQuery.trim().toLowerCase()
-        const filtered = testCases.filter(item => !query || [item.display_id, item.test_case_id, item.title, item.case_type, item.verification_goal, ...idList(item.linked_flow_ids), ...idList(item.linked_gap_ids), ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
+        const filtered = testCases.filter(item => !query || caseSearchText(item).includes(query))
+        const designCounts = caseDesignCounts(testCases)
+        const behaviorLedgers = current?.details?.behavior_coverage ?? behaviorCoverageProjection(current?.details?.notes ?? current?.notes, testCases)
         const selectableIds = filtered.map(item => item.test_case_id).filter(hasText)
         const selectedVisible = selectableIds.filter(id => selectedCaseIds.includes(id))
         const allSelected = selectableIds.length > 0 && selectedVisible.length === selectableIds.length
@@ -6844,17 +7405,19 @@ window.__ModuleLoader__.load({
         const readinessLabel = item => item.readiness === 'ready' ? '具备执行条件' : item.readiness === 'needs_setup' ? '待补执行条件' : '执行条件未标注'
         const formatRisk = item => (item.linked_risk_ids ?? []).map(id => riskById.get(id)?.display_id || id)
         return h(React.Fragment, null,
-          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '从分析发现到可验证步骤'), h('p', null, `${testCases.length} 条独立验证目标，保留前置条件、操作与预期结果。`)),
+          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '从分析发现到可验证步骤'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '独立验证目标'} · ${designCounts.variants} 项已设计参数组合，保留前置条件、操作与预期结果。`)),
             h('div', { className: 'b05-head-actions' }, coverageAvailable ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => navigate({ type: 'coverage-cases' }) }, '覆盖补测视图') : null,
               h('button', { type: 'button', className: 'b03-task-action primary', disabled: !current?.run_id, onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportOpen(true) } }, '导出全部用例'))),
           h('div', { className: 'b05-metrics' },
             metric('全部测试用例', testCases.length, `分布在 ${unitCount} 个分析单元`), metric('具备执行条件', readiness.ready ?? '未知', '条件来自用例分析记录'),
-            metric('待补执行条件', readiness.needs_setup ?? '未知', '需核对执行准备条件'), metric('关联风险的用例', linkedCases, '按用例去重计数')),
+            metric('待补执行条件', readiness.needs_setup ?? '未知', '需核对执行准备条件'), riskEnabled ? metric('关联风险的用例', linkedCases, '按用例去重计数') : metric('已设计参数组合', designCounts.variants, '按变体记录计数，不计入独立用例数')),
           quality ? h('section', { className: 'b05-card', 'aria-label': '黑盒与灰盒可实施性' }, h('h3', null, '黑盒与灰盒可实施性'),
             h('p', null, `业务黑盒 ${quality.business_blackbox} 条（具备执行条件 ${quality.ready_blackbox} 条） · 业务灰盒 ${quality.developer_assisted} 条（具备执行条件 ${quality.ready_graybox} 条）`),
             h('p', null, quality.has_legacy_groups ? '包含旧用例组，独立用例比例待复核。' : quality.ready_ratio == null ? '无可统计用例。' : `可实施黑盒与灰盒：${quality.ready_cases}/${quality.total_cases}（${(quality.ready_ratio * 100).toFixed(1)}%）；目标 ≥70%。`),
             h('p', { className: 'b05-subtle' }, '全部正式、辅助及未分类用例均计入分母。比例按作者声明汇总，具备执行条件不代表实测通过。')) : null,
-          h('div', { className: 'b05-toolbar' }, h('input', { value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例、验证目标、业务路径…', onChange: event => setCaseQuery(event.target.value) }),
+          behaviorLedgers.length || current?.scenario === 'branch-analysis' ? h(BehaviorCoverageView, { ledgers: behaviorLedgers,
+            onCase: link => navigate({ type: 'case', id: link.target_case_id, ...(link.variant_id != null ? { variant_id: link.variant_id } : {}) }) }) : null,
+          h('div', { className: 'b05-toolbar' }, h('input', { value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例、业务路径、参数输入或预期…', onChange: event => setCaseQuery(event.target.value) }),
             h('span', { className: 'b05-subtle' }, `显示 ${filtered.length} 条 · 按分析单元排序`)),
           h('div', { className: 'b05-table-scroll' }, h('table', { className: 'b05-case-table' },
             h('thead', null, h('tr', null,
@@ -6864,7 +7427,9 @@ window.__ModuleLoader__.load({
               h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(item.test_case_id), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(item.test_case_id) })),
               h('td', { className: 'b05-mono' }, item.display_id || item.test_case_id || '待编号'),
               h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'case', id: key }) }, text(item.title, '未命名用例')),
-                h('small', null, text(item.verification_goal, '验证目标未记录'))),
+                h('small', null, text(item.verification_goal, '验证目标未记录')),
+                item.variants?.length ? h('details', { className: 'b05-variant-preview' }, h('summary', null, `${item.variants.length} 项参数组合`),
+                  item.variants.map((variant, index) => h('p', { key: index }, `${variant.variant_id ? `${variant.variant_id} · ` : ''}${variant.input || '输入未提供'} → ${variant.expected || '预期未提供'}`))) : null),
               h('td', null, text(item.case_type, '未标注')),
               h('td', null, linked.length ? linked.map(id => h('span', { key: id, className: 'b05-risk-chip' }, id)) : '—'),
               h('td', null, h('span', { className: `b05-readiness ${item.readiness === 'ready' ? 'good' : 'warn'}` }, readinessLabel(item))),
@@ -7030,6 +7595,7 @@ window.__ModuleLoader__.load({
         const unit = unitById.get(item.unit_id)
         const flowIds = idList(item.linked_flow_ids)
         const linkedRisks = idList(item.linked_risk_ids)
+        const behaviorItems = behaviorCoverageForCase(current?.details?.behavior_coverage ?? behaviorCoverageProjection(current?.details?.notes ?? current?.notes, testCases), item)
         const values = (values, empty) => Array.isArray(values) && values.length ? values.map((value, index) => h('div', { key: index, className: 'b05-bullet' }, '✓', h('span', null, text(value, empty)))) : h('p', { className: 'b05-subtle' }, empty)
         const copyCase = () => { void copySingleCase(item) }
         return h(React.Fragment, null,
@@ -7054,7 +7620,13 @@ window.__ModuleLoader__.load({
               h('section', { className: 'b05-card' }, h('h3', null, '清理动作'), values(item.cleanup, '未记录清理动作。')),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.unit_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '本分析单元说明'), item.unit_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('p', null, sourceFirstRecordBody(note.source_record?.body))))) : null,
-              item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, '参数变体'), item.variants.map((variant, index) => h('p', { key: index }, `${variant.input || '输入未提供'} → ${variant.expected || '预期未提供'}`))) : null),
+              item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
+                h('p', { className: 'b05-subtle' }, '以下为已设计参数组合，不单独计为独立用例，也不代表各组合已实测通过。'),
+                item.variants.map((variant, index) => h('p', { key: index, 'data-variant-id': variant.variant_id,
+                  'aria-current': screen.variant_id != null && screen.variant_id === variant.variant_id ? 'true' : undefined,
+                  style: screen.variant_id != null && screen.variant_id === variant.variant_id ? { borderLeft: '3px solid #3157d5', paddingLeft: 10, background: '#eef3ff' } : undefined },
+                  `${variant.variant_id ? `${variant.variant_id} · ` : ''}${variant.input || '输入未提供'} → ${variant.expected || '预期未提供'}`))) : null,
+              behaviorItems.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联业务行为'), behaviorItems.map((behavior, index) => h('p', { key: index }, `${behavior.item_id || '未编号'} · ${behavior.operation || '未提供业务操作'} · ${BEHAVIOR_STATUS_LABELS[behavior.status] || '未标注'}`))) : null),
             h('aside', null,
               h('section', { className: 'b05-card' }, h('h3', null, '关联上下文'), h('dl', { className: 'b05-case-kv' },
                 h('dt', null, '分析单元'), h('dd', null, unit ? `${unit.unit_id} · ${unit.title || '未命名'}` : text(item.unit_id, '未记录')),
@@ -7071,7 +7643,7 @@ window.__ModuleLoader__.load({
 
       async function copySingleCase(item) {
         const pairs = Array.isArray(item.step_pairs) && item.step_pairs.length ? item.step_pairs.map((step, index) => `${index + 1}. ${step.action || '未提供操作'} → ${step.expected || '未提供逐步预期'}`) : (Array.isArray(item.steps) ? item.steps : []).map((step, index) => `${index + 1}. ${step}`)
-        const content = [`${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`, `验证目标：${text(item.verification_goal, '未记录')}`, `前置条件：${(item.preconditions ?? []).join('；') || '未记录'}`, ...pairs, `整体预期：${(item.expected_results ?? []).join('；') || '未记录'}`, `观察点：${(item.observability ?? []).join('；') || '未记录'}`, `清理：${(item.cleanup ?? []).join('；') || '未记录'}`].join('\n')
+        const content = [`${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`, `验证目标：${text(item.verification_goal, '未记录')}`, `前置条件：${(item.preconditions ?? []).join('；') || '未记录'}`, ...pairs, `整体预期：${(item.expected_results ?? []).join('；') || '未记录'}`, `观察点：${(item.observability ?? []).join('；') || '未记录'}`, `清理：${(item.cleanup ?? []).join('；') || '未记录'}`, ...caseVariantLines(item)].join('\n')
         try { await globalThis.navigator.clipboard.writeText(content); showActionNotice('已复制完整测试用例。') }
         catch (reason) { showActionNotice(`复制失败：${reason instanceof Error ? reason.message : String(reason)}`, true) }
       }
@@ -7306,6 +7878,8 @@ window.__ModuleLoader__.load({
     exports.buildAnalysisRequest = buildAnalysisRequest
     exports.CoverageBrowser = CoverageBrowser
     exports.FlowGraphView = FlowGraphView
+    exports.BehaviorCoverageView = BehaviorCoverageView
+    exports.FlowComparisonView = FlowComparisonView
     exports.CallGraphView = CallGraphView
     exports.flowGraphInput = flowGraphInput
     exports.svgTreeToReact = svgTreeToReact

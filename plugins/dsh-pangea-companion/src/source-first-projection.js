@@ -1,6 +1,7 @@
 // Project explicit Agent records into the workbench's existing collections.
 // Record bodies remain available verbatim; this layer makes no semantic judgments.
 import { normalizeFlow, normalizeFlows } from './flow-normalize.js'
+import { behaviorCoverageProjection } from './behavior-coverage.js'
 const list = value => Array.isArray(value) ? value : value == null ? [] : [value]
 const plain = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value, null, 2)
 const strings = value => list(value).map(plain)
@@ -21,6 +22,14 @@ export { normalizeFlow }
 
 export function mainlineNodes(flow) {
   const nodes = list(flow.nodes), byId = new Map(nodes.map(node => [node.id, node]))
+  if (flow.layout_version === 'stable-v1' || Array.isArray(flow.main_path_ids)) {
+    const mainIds = list(flow.main_path_ids)
+    // Several main paths are separate alternatives, not a single ordered chain.
+    if (mainIds.length !== 1) return []
+    const paths = list(flow.paths).filter(item => item.path_id === mainIds[0])
+    const ids = paths.length === 1 ? paths[0].node_ids : null
+    return Array.isArray(ids) && ids.length && ids.every(id => byId.has(id)) ? ids.map(id => byId.get(id)) : []
+  }
   const declared = flow.paths?.[0]?.node_ids
   if (Array.isArray(declared) && declared.length && declared.every(id => byId.has(id))) return declared.map(id => byId.get(id))
   const selected = nodes.filter(node => ['entry', 'main', 'exit'].includes(node.kind))
@@ -140,13 +149,30 @@ export function sourceFirstProjection(artifacts) {
       })
     } else if (kind === 'flow') {
       const mainline = mainlineNodes(row)
+      const associationWarnings = []
+      const pathEdges = new Map(list(row.paths).map(path => {
+        const members = new Set(), ids = list(path.node_ids)
+        if (Array.isArray(path.edge_ids)) {
+          if (path.edge_ids.length !== Math.max(0, ids.length - 1)) associationWarnings.push(`路径 ${path.path_id} 的连线数量与节点顺序不一致；未猜测缺失连线。`)
+          path.edge_ids.forEach((id, position) => {
+            const matches = list(row.edges).filter(edge => edge.edge_id === id)
+            if (matches.length === 1 && matches[0].source_step_key === ids[position] && matches[0].target_step_key === ids[position + 1]) members.add(matches[0])
+            else associationWarnings.push(`路径 ${path.path_id} 的连线 ${id} 缺失、不唯一或与节点顺序不一致；未建立该连线关联。`)
+          })
+        } else ids.slice(0, -1).forEach((id, position) => {
+          const matches = list(row.edges).filter(edge => edge.source_step_key === id && edge.target_step_key === ids[position + 1])
+          if (matches.length === 1) members.add(matches[0])
+          else if (matches.length > 1) associationWarnings.push(`路径 ${path.path_id} 在 ${id} → ${ids[position + 1]} 存在多条连线且未声明 edge_ids；未猜测对应连线。`)
+        })
+        return [path, members]
+      }))
       result.business_flows.push({ ...row, logical_flow_id: row.flow_id ?? row.display_id, text: plain(row.text), flow_id: row.projection_id,
-        projection_warnings: [...new Set([...list(row.projection_warnings), ...list(row.normalize_notes)])],
+        projection_warnings: [...new Set([...list(row.projection_warnings), ...list(row.normalize_notes), ...associationWarnings])],
         mainline_steps: mainline.map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind, source_evidence: node.source_evidence })),
         branches: list(row.edges).map((edge, index) => {
-          const paths = list(row.paths).filter(p => list(p.node_ids).some((id, i, ids) => id === edge.source_step_key && ids[i + 1] === edge.target_step_key))
+          const paths = list(row.paths).filter(path => pathEdges.get(path).has(edge))
           // A path is not a decision edge. Never attach its condition to its entry node.
-          return { branch_id: `${row.projection_id}:edge-${index + 1}`, edge_index: index,
+          return { branch_id: `${row.projection_id}:edge-${index + 1}`, edge_index: index, ...(edge.edge_id ? { edge_id: edge.edge_id } : {}),
             from_step_id: edge.source_step_key, to_step_id: edge.target_step_key,
             condition: plain(edge.condition), processing: plain(edge.description ?? edge.explanation),
             path_ids: paths.map(p => p.path_id),
@@ -192,5 +218,6 @@ export function sourceFirstProjection(artifacts) {
       else for (const risk of result.risks) if (item.risk_ids.includes(risk.risk_id)) risk.evidence.push(item)
     }
   }
+  result.behavior_coverage = behaviorCoverageProjection(result.notes, result.test_cases)
   return result
 }

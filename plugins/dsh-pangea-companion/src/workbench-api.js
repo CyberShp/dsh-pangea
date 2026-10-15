@@ -6,6 +6,7 @@ import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
 import { createSourceFirstAcpRun } from './source-first-acp.js'
 import { normalizeIncrementalRequest } from './incremental-request.js'
+import { normalizeFlowBaseline, readFlowMetadata, flowBaselineOptions } from './flow-baseline.js'
 
 import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 import { sourceFirstReportAvailable, summarizeRun } from './reader.js'
@@ -185,6 +186,10 @@ function stringList(value) {
 
 function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   const semantic = supportsSourceFirst(capabilities)
+  if (value?.flow_baseline != null && (!semantic || !capabilities.source_first?.contract_fields?.includes('flow_baseline'))) {
+    throw new Error('当前分析引擎不支持流程基线，请更新配套组件')
+  }
+  if (value?.flow_baseline != null && value.analysis_profile !== SCENE_PROFILE) throw new Error('流程基线仅支持当前业务分析场景版本，请新建分析')
   if (value?.incremental_request != null && (!semantic || !capabilities.source_first?.contract_fields?.includes('incremental_request'))) {
     throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')
   }
@@ -220,6 +225,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     repository,
     target,
     ...(value?.incremental_request != null ? { incremental_request: normalizeIncrementalRequest(value.incremental_request) } : {}),
+    ...(value?.flow_baseline != null ? { flow_baseline: normalizeFlowBaseline(value.flow_baseline) } : {}),
     scenario,
     mode,
     source_scope: sourceScope,
@@ -316,7 +322,8 @@ async function withRunReports(run, dataRoot) {
     return { ...run, ...legacy, reports: { html: legacy.artifacts.report_html, markdown: legacy.artifacts.report_md } }
   }
   const available = await sourceFirstReportAvailable(directory, run.lifecycle_status)
-  return { ...run, report_available: available, reports: {
+  const { warnings, ...flowMetadata } = await readFlowMetadata(directory, run.run_id, run)
+  return { ...run, ...flowMetadata, reader_warnings: [...(run.reader_warnings ?? []), ...warnings], report_available: available, reports: {
     html: available ? path.join(directory, 'report.html') : null,
     markdown: available ? path.join(directory, 'report.md') : null,
   } }
@@ -523,6 +530,7 @@ export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limi
       capabilities,
       runs,
       run,
+      flow_baseline_options: flowBaselineOptions([...(runs.items ?? []), run]),
       run_detail: runDetail,
       pagination: { cursor: pageCursor, limit: pageLimit },
     }
@@ -866,7 +874,12 @@ export async function launchAnalysisSession(
       ? resumeRun(root, { dataRoot: resolvedDataRoot, runId: requestedResumeRunId, hostQuiescent: semantic && hostQuiescent }, runner)
       : (() => {
         const { provider_id: _providerId, agent_model: _agentModel, ...skillRequest } = request
-        return createRun(root, { ...skillRequest, data_root: resolvedDataRoot, ...(semantic ? { model_id: request.agent_model ?? selectedModel?.model, effective_context_budget: input?.effective_context_budget ?? 250000 } : {}) }, runner)
+        return createRun(root, { ...skillRequest, data_root: resolvedDataRoot, ...(semantic ? {
+          model_id: selectedProvider ? request.agent_model : selectedModel?.model,
+          model_settings: { provider: selectedProvider ?? selectedModel?.provider,
+            ...(selectedModel?.reasoning_effort ? { reasoning_effort: selectedModel.reasoning_effort } : {}) },
+          effective_context_budget: input?.effective_context_budget ?? 250000,
+        } : {}) }, runner)
       })(),
     value => ({
       run_id: value.run_id,

@@ -11,9 +11,10 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     /* @inline-shared-modules */
     const { normalizeFlow: sharedNormalizeFlow } = __flowNormalize
-    const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, layoutCallGraph } = __flowLayout
+    const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, pathsForNode, layoutCallGraph } = __flowLayout
     const { renderFlowTree, renderCallGraphTree, toSvgString } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
+    const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
       if (typeof body === 'string') return body
@@ -1902,6 +1903,7 @@ window.__ModuleLoader__.load({
       return {
         request_version: '2.0',
         ...(form.source_task_id ? { source_task_id: form.source_task_id } : {}),
+        ...(form.flow_baseline ? { flow_baseline: { ...form.flow_baseline } } : {}),
         repository: form.repository,
         target: form.target,
         source_scope: String(form.source_scope_text ?? '').split(/[\n,]/).map(value => value.trim()).filter(Boolean),
@@ -2115,7 +2117,7 @@ window.__ModuleLoader__.load({
       if (/^(data|aria)-/.test(name) || !name.includes('-')) return name
       return name.replace(/-([a-z])/g, (_, char) => char.toUpperCase())
     }
-    function svgTreeToReact(tree, key, onNode) {
+    function svgTreeToReact(tree, key, onNode, onEdge) {
       if (tree == null || tree === false) return null
       if (typeof tree !== 'object') return String(tree)
       const props = { key }
@@ -2128,7 +2130,19 @@ window.__ModuleLoader__.load({
         props.onClick = () => onNode(nodeId)
         props.onKeyDown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onNode(nodeId) } }
       }
-      return h(tree.tag, props, ...(tree.children ?? []).map((child, index) => svgTreeToReact(child, index, onNode)))
+      const edgeId = tree.attrs?.['data-edge-id']
+      if (tree.tag === 'g' && edgeId && onEdge) {
+        props.role = 'button'
+        props.tabIndex = 0
+        props['aria-label'] = tree.attrs?.['aria-label'] || `查看连线 ${edgeId}`
+        props.onPointerEnter = () => onEdge.hover(edgeId)
+        props.onPointerLeave = () => onEdge.hover('')
+        props.onFocus = () => onEdge.hover(edgeId)
+        props.onBlur = () => onEdge.hover('')
+        props.onClick = event => { event?.stopPropagation?.(); onEdge.select(edgeId) }
+        props.onKeyDown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation?.(); onEdge.select(edgeId) } }
+      }
+      return h(tree.tag, props, ...(tree.children ?? []).map((child, index) => svgTreeToReact(child, index, onNode, onEdge)))
     }
     /** Graph input for a flow: behavior-flow nodes, else legacy mainline steps in order plus bound branches. */
     function flowGraphInput(flow) {
@@ -2149,18 +2163,22 @@ window.__ModuleLoader__.load({
         paths: (Array.isArray(flow?.paths) ? flow.paths : []).filter(path => Array.isArray(path?.node_ids)) }
     }
     /** Highlight members for a set of branch ids (projected edges or legacy branches). */
-    function branchHighlight(flow, branchIds) {
+    function branchHighlight(flow, branchIds, layout) {
       if (!branchIds?.length) return null
       const wanted = new Set(branchIds)
       const nodes = new Set()
       const pairs = new Set()
+      const edgeIds = new Set()
       for (const branch of Array.isArray(flow?.branches) ? flow.branches : []) {
         if (!wanted.has(branch?.branch_id)) continue
         if (branch.from_step_id) nodes.add(branch.from_step_id)
         if (branch.to_step_id) nodes.add(branch.to_step_id)
         if (branch.from_step_id && branch.to_step_id) pairs.add(`${branch.from_step_id}\u0000${branch.to_step_id}`)
+        const matches = (layout?.edges ?? []).filter(edge => branch.edge_id ? edge.edge_id === branch.edge_id
+          : edge.source === branch.from_step_id && edge.target === branch.to_step_id && edge.condition === (branch.condition || ''))
+        if (matches.length === 1) edgeIds.add(matches[0].edge_id)
       }
-      return nodes.size ? { nodes, pairs } : null
+      return nodes.size ? { nodes, pairs, edge_ids: edgeIds } : null
     }
     function evidenceText(value) {
       const list = Array.isArray(value) ? value : value ? [value] : []
@@ -2284,39 +2302,143 @@ window.__ModuleLoader__.load({
         warnings.map((warning, index) => h('li', { key: index }, warning))) : null
     }
 
+    function BehaviorCoverageView({ ledgers = [], onCase }) {
+      const show = value => sourceFirstRecordBody(value) || '未提供'
+      const lines = values => Array.isArray(values) && values.length ? values.map((value, index) => h('p', { key: index }, show(value))) : h('p', { className: 'b05-subtle' }, '未提供')
+      return h('section', { className: 'b05-card', 'aria-label': '业务行为覆盖清单' },
+        h('h3', null, '业务行为覆盖清单'),
+        h('p', { className: 'b05-subtle' }, '状态来自本次分析声明；用例关联不代表已执行，也不代表实测代码覆盖率。'),
+        !ledgers.length ? h('p', null, '本次记录未提供业务行为清单；已有用例与分析原文仍可查看。') : ledgers.map(ledger => h('details', { key: ledger.projection_id, open: true },
+          h('summary', null, `${ledger.unit_id || '未提供分析单元'} · ${show(ledger.scope)}`),
+          h('p', null, `组合选择依据：${show(ledger.combination_strategy)}`),
+          h('p', { className: 'b05-subtle' }, Object.entries(ledger.declared_counts ?? {}).map(([status, count]) => `${BEHAVIOR_STATUS_LABELS[status] || '未标注'} ${count}`).join(' · ')),
+          warningList(ledger.projection_warnings, '行为清单提示'),
+          Array.isArray(ledger.unresolved_dependencies) && ledger.unresolved_dependencies.length
+            ? h('div', { role: 'status' }, h('strong', null, '未决依赖'), lines(ledger.unresolved_dependencies)) : null,
+          h('div', { className: 'b05-table-scroll' }, h('table', { className: 'b05-case-table' },
+            h('thead', null, h('tr', null, ['业务行为', '条件与约束', '预期行为', '关联用例 / 参数组合', '状态与依据'].map(label => h('th', { key: label }, label)))),
+            h('tbody', null, (ledger.items ?? []).map(item => h('tr', { key: item.display_key },
+              h('td', null, h('strong', null, show(item.item_id)), h('p', null, show(item.operation)),
+                Array.isArray(item.source_evidence) && item.source_evidence.length ? h('details', null, h('summary', null, '来源依据'), lines(item.source_evidence)) : null),
+              h('td', null, h('strong', null, '条件'), lines(item.conditions), h('strong', null, '约束'), lines(item.constraints)),
+              h('td', null, show(item.expected_behavior)),
+              h('td', null, item.case_links?.length ? item.case_links.map((link, index) => h('p', { key: index },
+                link.target_case_id && onCase ? h('button', { type: 'button', className: 'b05-text-link', onClick: () => onCase(link) }, `${link.case_id}${link.variant_id != null ? ` / ${link.variant_id}` : ''}`)
+                  : show(link.case_id ?? link.reference),
+                link.issue ? h('small', { className: 'b05-subtle' }, ` · ${link.issue}`) : null)) : h('span', { className: 'b05-subtle' }, '未关联')),
+              h('td', null, h('strong', null, BEHAVIOR_STATUS_LABELS[item.status] || `未标注${item.status ? `（${item.status}）` : ''}`),
+                h('p', null, show(item.reason)), warningList(item.projection_warnings, '行为项提示'),
+                item.projection_warnings?.length ? h('details', null, h('summary', null, '行为项原文'), h('pre', null, show(item.source_item))) : null)))))))))
+    }
+
+    function FlowComparisonView({ stability, comparison, baseline, onUseBaseline }) {
+      if (!stability && !comparison && !baseline) return null
+      const dimensions = { source: '源码', scope: '分析范围', assets: '资料与示例', methodology: '方法论', model: '模型及已声明设置', objective: '目标与执行设置' }
+      const statuses = { same: '相同', changed: '有变更', unknown: '待确认', unchanged: '结构相同', added: '新增流程', removed: '移除流程', unresolved: '对应关系待确认' }
+      const comparable = { comparable: '已记录输入一致', different_inputs: '输入有变更', unknown: '输入可比性待确认' }
+      return h('section', { className: 'b05-card', 'aria-label': '流程版本与差异' },
+        h('h3', null, '流程版本与差异'),
+        baseline?.run_id && baseline?.version_id ? h('div', null,
+          h('p', null, `本次已审核流程版本：${baseline.version_id}`),
+          onUseBaseline ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => onUseBaseline(baseline) }, '以此流程为基线新建分析') : null) : null,
+        stability ? h('details', null, h('summary', null, '本次冻结输入指纹'),
+          h('p', { className: 'b05-mono', style: { overflowWrap: 'anywhere' } }, stability.fingerprint || '未提供'),
+          h('dl', { className: 'b05-case-kv' }, Object.entries(stability.dimension_hashes ?? {}).flatMap(([key, value]) => [h('dt', { key: `${key}-label` }, dimensions[key] || key), h('dd', { key, style: { overflowWrap: 'anywhere' } }, value)])),
+          h('p', null, `模型设置记录：${({ declared: '已声明', partial: '仅部分已知', unknown: '未知' })[stability.model?.metadata_status] || '未知'}`),
+          h('p', { className: 'b05-subtle' }, stability.note || '输入指纹不保证模型输出完全一致。')) : null,
+        comparison ? h('div', null,
+          h('p', null, `对照基线：${comparison.baseline?.run_id || '未提供'} · ${comparison.baseline?.version_id || '未提供'}`),
+          h('p', { role: 'status' }, comparable[comparison.comparability?.status] || '输入可比性未记录'),
+          h('p', { className: 'b05-subtle' }, comparison.comparison_scope === 'delivery'
+            ? '当前显示最终交付版本的结构差异；结构对照未作语义裁决，不能据此判定变更正确。'
+            : '当前显示对照复核输入版本的结构差异；正确性以复核依据为准。'),
+          h('dl', { className: 'b05-case-kv' }, Object.entries(comparison.comparability?.dimensions ?? {}).flatMap(([key, value]) => [h('dt', { key: `${key}-label` }, dimensions[key] || key), h('dd', { key }, statuses[value] || value)])),
+          warningList([...(comparison.warnings ?? []), ...(comparison.comparability?.notes ?? [])], '流程对照说明'),
+          (comparison.flows ?? []).map((flow, index) => h('details', { key: `${flow.flow_id}:${index}` },
+            h('summary', null, `${flow.flow_id || '未提供流程编号'} · ${statuses[flow.status] || flow.status || '未标注'}${flow.content_changed ? ' · 文字/依据变化待核实' : ''}`),
+            ...['nodes', 'edges', 'paths'].map(key => flow[key] ? h('p', { key }, `${({ nodes: '节点', edges: '连线', paths: '路径' })[key]}：新增 ${flow[key].added?.length ?? 0}，移除 ${flow[key].removed?.length ?? 0}，变更 ${flow[key].changed?.length ?? 0}`) : null),
+            flow.main_paths_changed ? h('p', null, '主路径声明有变更。') : null,
+            flow.attachment_changed ? h('p', null, '主/子流程挂接有变更。') : null,
+            flow.presentation_changed ? h('p', null, '展示内容有变更。') : null,
+            flow.content_changed ? h('details', { open: true }, h('summary', null, '文字与依据变更（完整前后内容）'),
+              h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(flow.content_changes))) : null,
+            warningList(flow.warnings, '流程差异提示'),
+            h('details', null, h('summary', null, '查看差异原文'), h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, sourceFirstRecordBody(flow))))))
+          : h('p', { className: 'b05-subtle' }, '本次尚无可展示的流程对照结果。'))
+    }
+
     /** Inline behavior-flow diagram rendered locally from the flow's nodes/edges/paths. */
     function FlowGraphView({ flow, highlightBranchIds = [], idPrefix = 'pf', viewport }) {
-      const [pathId, setPathId] = React.useState('')
-      const [selected, setSelected] = React.useState('')
-      const [expandAll, setExpandAll] = React.useState(false)
       const graph = flowGraphInput(flow)
-      const layout = layoutFlow(graph, { expandAll })
+      const identity = JSON.stringify([flow?.unit_id, flow?.flow_id, flow?.source_record?.action_id,
+        flow?.source_record?.record_id, flow?.source_record?.revision, flow?.revision,
+        graph.nodes, graph.edges, graph.paths, graph.layout_version, graph.main_path_ids])
+      const [selection, setSelection] = React.useState({ key: '', node: '', path: '', edge: '' })
+      const [hover, setHover] = React.useState({ key: '', edge: '' })
+      const [expandedKey, setExpandedKey] = React.useState('')
+      // A changed flow/revision never inherits a stale route or edge selection.
+      const active = selection.key === identity ? selection : { node: '', path: '', edge: '' }
+      const selected = active.node, pathId = active.path, expandAll = expandedKey === identity
+      const layout = layoutFlow(graph, { expandAll, activePathId: pathId })
       const { controls, panProps, sized } = useGraphZoom('流程图', layout.width, layout.height, flow?.flow_id, viewport)
       if (!layout.nodes.length) {
         return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图' },
           h('div', { role: 'status', className: 'pangea-diagram-caption' }, '当前流程没有可绘制节点。'), warningList(layout.warnings, '流程图提示'))
       }
       const paths = (graph.paths ?? []).filter(path => path?.path_id)
-      const highlight = pathId ? pathMembers(graph, pathId) : branchHighlight(flow, highlightBranchIds)
+      const highlight = pathId ? pathMembers(graph, pathId) : selected ? null : branchHighlight(flow, highlightBranchIds, layout)
+      const candidates = selected ? pathsForNode(graph, selected) : []
+      const chooseNode = id => {
+        const routes = pathsForNode(graph, id)
+        const nextPath = routes.some(path => path.path_id === pathId) ? pathId : routes.length === 1 ? routes[0].path_id : ''
+        setSelection({ key: identity, node: id, path: nextPath, edge: '' })
+        setHover({ key: identity, edge: '' })
+      }
+      const choosePath = id => {
+        const route = paths.find(path => path.path_id === id)
+        setSelection({ key: identity, node: route?.node_ids?.includes(selected) ? selected : '', path: id, edge: '' })
+        setHover({ key: identity, edge: '' })
+      }
+      const focusedEdgeId = hover.key === identity && hover.edge ? hover.edge : active.edge
+      const focusedEdge = layout.edges.find(edge => edge.edge_id === focusedEdgeId)
       const name = `${flow?.display_id || flow?.flow_id || 'flow'}`.replace(/[^\w.-]+/g, '_')
-      const tree = renderFlowTree(layout, { highlight, selected, idPrefix })
+      const tree = renderFlowTree(layout, { highlight, selected, focusedEdgeId, idPrefix })
       const node = layout.nodes.find(item => item.id === selected)
       const evidence = node ? evidenceText(node.source_evidence) : []
+      const selectedPath = paths.find(path => path.path_id === pathId)
+      const routeLabel = path => `${path.path_id}${path.title ? ` · ${path.title}` : ''}`
       return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图', style: { marginTop: 12 } },
         h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', margin: '8px 0' } },
-          paths.length ? h('select', { 'aria-label': '高亮路径', value: pathId, onChange: event => setPathId(event.target.value) },
+          paths.length ? h('select', { 'aria-label': '高亮路径', value: pathId, onChange: event => choosePath(event.target.value) },
             h('option', { value: '' }, highlightBranchIds.length ? '所选分支' : '全部路径'),
-            paths.map(path => h('option', { key: path.path_id, value: path.path_id }, `${path.path_id}${path.title ? ` · ${path.title}` : ''}`))) : null,
+            paths.map(path => h('option', { key: path.path_id, value: path.path_id }, routeLabel(path)))) : null,
           controls,
-          layout.collapsed.count || expandAll ? h('button', { type: 'button', onClick: () => setExpandAll(!expandAll) }, expandAll ? '折叠次要节点' : '展开全部') : null,
+          layout.collapsed.count || expandAll ? h('button', { type: 'button', onClick: () => setExpandedKey(expandAll ? '' : identity) }, expandAll ? '折叠次要节点' : '展开全部') : null,
+          selected || pathId || active.edge ? h('button', { type: 'button', onClick: () => { setSelection({ key: identity, node: '', path: '', edge: '' }); setHover({ key: identity, edge: '' }) } }, '清除选择') : null,
           h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'svg') }, '导出 SVG'),
           h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'png') }, '导出 PNG')),
-        warningList(layout.warnings, '流程图提示'),
+        warningList([...layout.warnings, ...(highlight?.warnings ?? [])], '流程图提示'),
+        selected ? h('div', { className: 'pangea-diagram-caption', role: 'status', 'aria-label': '节点路径选择' },
+          candidates.length === 0 ? '该节点没有已声明路径；当前只显示节点，不推断完整路线。'
+            : candidates.length > 1 ? `该节点属于 ${candidates.length} 条已声明路径${pathId ? '，当前高亮所选路径。' : '，请选择需要查看的一条。'}`
+              : '已高亮经过该节点的唯一声明路径。',
+          candidates.length > 1 ? h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', marginTop: 6 } }, candidates.map(path => h('button', {
+            key: path.path_id, type: 'button', 'aria-pressed': pathId === path.path_id, onClick: () => choosePath(path.path_id),
+          }, routeLabel(path)))) : null) : null,
+        selectedPath ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '所选路径步骤' },
+          h('strong', null, routeLabel(selectedPath)), h('p', null, (selectedPath.node_ids ?? []).map((id, index) =>
+            `${index + 1}. ${graph.nodes?.find(item => item.id === id)?.label || id}`).join(' → '))) : null,
+        focusedEdge ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '连线详情' },
+          h('strong', null, `${layout.nodes.find(item => item.id === focusedEdge.source)?.label || focusedEdge.source} → ${layout.nodes.find(item => item.id === focusedEdge.target)?.label || focusedEdge.target}`),
+          h('p', null, focusedEdge.condition || '原记录未提供条件。'), h('small', null, focusedEdge.edge_id)) : null,
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } },
-          h('div', { ...panProps, style: { ...panProps.style, flex: '1 1 320px', minWidth: 0 } }, svgTreeToReact(sized(tree), 'svg', setSelected)),
+          h('div', { ...panProps, style: { ...panProps.style, flex: '1 1 320px', minWidth: 0 } }, svgTreeToReact(sized(tree), 'svg', chooseNode, {
+            hover: edge => setHover({ key: identity, edge }),
+            select: edge => setSelection({ key: identity, node: '', path: pathId, edge }),
+          })),
           node ? h('aside', { 'aria-label': '节点详情', style: { width: 240, flex: '0 0 240px', border: '1px solid #e2e7e0', borderRadius: 8, padding: 12, background: '#fff' } },
             h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } }, h('strong', null, node.label),
-              h('button', { type: 'button', className: 'b04-link', style: { flexShrink: 0 }, 'aria-label': '关闭节点详情', onClick: () => setSelected('') }, '关闭')),
+              h('button', { type: 'button', className: 'b04-link', style: { flexShrink: 0 }, 'aria-label': '关闭节点详情', onClick: () => setSelection({ key: identity, node: '', path: pathId, edge: active.edge }) }, '关闭')),
             h('small', null, `${node.id}${node.kind ? ` · ${FLOW_KIND_LABELS[node.kind] ?? node.kind}` : ''}`),
             h('p', null, node.description || '原记录未提供节点说明。'),
             evidence.length ? h('div', null, h('small', null, '源码依据'), evidence.map(location => h('p', { key: location }, h('code', null, location)))) : null) : null))
@@ -3996,6 +4118,7 @@ window.__ModuleLoader__.load({
           `整体预期：${Array.isArray(item.expected_results) ? item.expected_results.join('；') : text(item.expected_results, '未记录')}`,
           `观察点：${Array.isArray(item.observability) ? item.observability.join('；') : text(item.observability, '未记录')}`,
           `清理：${Array.isArray(item.cleanup) ? item.cleanup.join('；') : text(item.cleanup, '未记录')}`,
+          ...caseVariantLines(item),
         ].join('\n')).join('\n\n')
         try {
           if (!globalThis.navigator?.clipboard?.writeText) throw new Error('当前环境不支持剪贴板写入')
@@ -4426,7 +4549,7 @@ window.__ModuleLoader__.load({
         const scenes = {
           'module-analysis': ['模块分析', 'ScanSearch', '业务分支、轻量风险与可选覆盖补测。', '模块流程、关键分支、轻量风险与测试用例'],
           'risk-analysis': ['风险分析', 'ShieldAlert', '聚焦有依据的失效风险及验证用例。', '有源码依据的失效风险、触发条件与验证用例'],
-          'branch-analysis': ['分支分析', 'GitBranch', '聚焦正常、边界、异常与恢复路径。', '正常、边界、异常与恢复路径的测试设计'],
+          'branch-analysis': ['分支分析', 'GitBranch', '分析业务条件、配置组合、状态与操作顺序。', '业务行为清单、独立用例与参数组合及未决缺口'],
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
@@ -4437,7 +4560,12 @@ window.__ModuleLoader__.load({
           if (next > 1 && !targetReady || next > 2 && !inputsReady || next > 3 && !executionReady) { showActionNotice(submitBlockReason || '请先完成前面的设置。', true); return }
           setScreen(value => ({ ...value, createStep: next, createView: nextView }))
         }
-        const update = (key, value) => setCreateForm(form => ({ ...form, [key]: value }))
+        const update = (key, value) => setCreateForm(form => ({ ...form, [key]: value,
+          ...(key === 'repository' && value !== form.repository ? { flow_baseline: null } : {}) }))
+        const baselineKey = value => value?.run_id && value?.version_id ? JSON.stringify([value.run_id, value.version_id]) : ''
+        const baselineOptions = (Array.isArray(workbench?.flow_baseline_options) ? workbench.flow_baseline_options : [])
+          .filter(item => baselineKey(item) && (!createForm.repository || item.repository === createForm.repository))
+        const chosenBaseline = baselineKey(createForm.flow_baseline)
         const button = (text, onClick, variant = '', iconName, disabled = false) => h('button', { type: 'button', className: `btn ${variant}`, onClick, disabled: creatingRun || disabled }, iconName && runIcon(iconName), text)
         const badge = (text, kind = '') => h('span', { className: `badge ${kind}` }, text)
         const field = (label, control, hint) => h('label', { className: 'field' }, h('span', null, label), control, hint && h('span', { className: 'hint' }, hint))
@@ -4472,6 +4600,14 @@ window.__ModuleLoader__.load({
           h('div', { className: 'create-subhead' }, '分析场景 ', h('span', { className: 'small muted', style: { fontWeight: 400 } }, '选择本次分析的重点')),
           h('div', { className: 'choice-grid create-scenes', role: 'group', 'aria-label': '分析场景' }, Object.entries(scenes).map(([id, item]) => h('button', { key: id, type: 'button', className: `choice create-option ${createForm.scenario === id ? 'selected' : ''}`, 'aria-pressed': createForm.scenario === id, disabled: !supported('scenarios', id), 'data-scenario': id, onClick: () => update('scenario', id) }, runIcon(item[1]), h('div', null, h('strong', null, item[0]), h('p', null, item[2])), h('span', { className: 'create-scene-check' }, runIcon('CircleCheck'))))),
           h('div', { className: 'form-grid create-scope', style: { marginTop: 22 } }, input('源码冻结范围', 'source_scope_text', '相对仓库根目录，每行一个文件或目录；「.」代表整个仓库。', true), input('参考源码范围', 'context_scope_text', '辅助理解的相关实现、文档或测试文件。', true)),
+          field('流程基线（可选）', h('select', { 'aria-label': '流程基线', value: chosenBaseline, disabled: creatingRun, onChange: event => {
+            const choice = baselineOptions.find(item => baselineKey(item) === event.target.value)
+            update('flow_baseline', choice ? { run_id: choice.run_id, version_id: choice.version_id } : null)
+          } }, h('option', { value: '' }, '不选择 · 独立分析'),
+            chosenBaseline && !baselineOptions.some(item => baselineKey(item) === chosenBaseline)
+              ? h('option', { value: chosenBaseline }, `已选 ${createForm.flow_baseline.run_id} · ${createForm.flow_baseline.version_id}`) : null,
+            baselineOptions.map(item => h('option', { key: baselineKey(item), value: baselineKey(item) }, `${item.target || item.run_id} · ${item.run_id} · ${item.version_id}`))),
+          '选择已审核流程，用于对照本次分析的差异。候选来自当前已加载记录，不会自动选择最近一次结果。'),
           footer(() => navigate({ type: 'tasks' }), () => go(2), '下一步 · 输入资料', !targetReady)), 'create-target-panel')
         else if (step === 2 && view === 'inputs') content = panel(h(React.Fragment, null,
           h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '让分析理解更多上下文'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '选择与目标相关的需求、设计或已有测试资料。')), button('选择资产', () => openAssets(), '', 'Plus')),
@@ -4517,7 +4653,9 @@ window.__ModuleLoader__.load({
         } else {
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
-            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), `${sourceScope.length} 项待冻结范围`, 1), row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProvider?.label ?? '内置 API Agent', createForm.provider_id ? createForm.agent_model || '使用 Agent 默认模型与推理配置' : `${selectedModelOption?.provider_name ?? selectedModel?.provider} · ${selectedModelOption?.model_name ?? selectedModel?.model} · 推理级别：${selectedModelOption?.reasoning?.efforts?.find(item => item.id === selectedModel?.reasoning_effort)?.name ?? selectedModel?.reasoning_effort ?? '默认'}`, 3),
+            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), `${sourceScope.length} 项待冻结范围`, 1),
+            row('流程基线', createForm.flow_baseline?.run_id || '未选择', createForm.flow_baseline?.version_id || '独立分析，不与历史流程自动合并。', 1),
+            row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProvider?.label ?? '内置 API Agent', createForm.provider_id ? createForm.agent_model || '使用 Agent 默认模型与推理配置' : `${selectedModelOption?.provider_name ?? selectedModel?.provider} · ${selectedModelOption?.model_name ?? selectedModel?.model} · 推理级别：${selectedModelOption?.reasoning?.efforts?.find(item => item.id === selectedModel?.reasoning_effort)?.name ?? selectedModel?.reasoning_effort ?? '默认'}`, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
         return h('section', { className: 'pangea-ui pangea-create-workspace', 'aria-label': '新建分析' },
@@ -4918,6 +5056,21 @@ window.__ModuleLoader__.load({
               snippet?.file_path ? h('button', { type: 'button', style: styles.button, onClick: () => openSidebarFile(snippet.file_path) }, '打开完整文件') : null)))
       }
 
+      function renderFlowVersions() {
+        return h(FlowComparisonView, { stability: current?.flow_stability, comparison: current?.flow_comparison,
+          baseline: current?.flow_baseline, onUseBaseline: baseline => {
+            if (!baseline?.run_id || !baseline?.version_id) return
+            setCreateForm(value => ({ ...value, source_task_id: selectedTask?.task_id,
+              repository: current?.repository || selectedTask?.repository || baseline.repository || '',
+              target: current?.target || selectedTask?.target || baseline.target || '',
+              source_scope_text: (selectedTask?.source_scope ?? current?.source_scope ?? []).join('\n'),
+              context_scope_text: (selectedTask?.context_scope ?? []).join('\n'), asset_ids: [],
+              scenario: current?.scenario || baseline.scenario || 'branch-analysis',
+              flow_baseline: { run_id: baseline.run_id, version_id: baseline.version_id } }))
+            setScreen({ type: 'create', createStep: 1 })
+          } })
+      }
+
       function renderFlows() {
         const query = flowQuery.trim().toLowerCase()
         const flowRank = item => item?.raw_text != null ? 2 : item?.role === 'main' ? 0 : 1
@@ -5142,7 +5295,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => navigate({ type: 'workflow' }) }, '查看运行过程'),
               current?.artifacts?.source_snapshot_manifest ? h('button', { type: 'button', style: styles.button,
                 onClick: () => openSidebarFile(current.artifacts.source_snapshot_manifest) }, '检查冻结输入') : null)))
-        return h(React.Fragment, null, tabs, flow ? h(React.Fragment, null, modebar,
+        return h(React.Fragment, null, renderFlowVersions(), tabs, flow ? h(React.Fragment, null, modebar,
           h('section', { key: cardScope(flow), id: cardId(flow), role: 'tabpanel', tabIndex: 0, 'aria-labelledby': `${cardId(flow)}-tab`,
             className: 'b04-flow-panel', 'data-flow-id': flow.flow_id,
             ref: element => { if (element) { element.scrollTop = panelState(flow).scrollTop; element.scrollLeft = panelState(flow).scrollLeft } },
@@ -5834,6 +5987,7 @@ window.__ModuleLoader__.load({
             key: target, type: 'button', 'aria-current': target === 'overview' ? 'page' : undefined,
             onClick: () => jump(target),
           }, label, key ? h('small', null, displayCount(key, ({ business_flows: businessFlows, risks, test_cases: testCases })[key]?.length ?? 0)) : null))),
+          renderFlowVersions(),
           h('div', { className: 'b03-report-layout' },
             h('article', { className: 'b03-report-document' },
               h('div', { className: 'b03-report-head' },
@@ -6003,7 +6157,9 @@ window.__ModuleLoader__.load({
 
       function renderCases() {
         const query = caseQuery.trim().toLowerCase()
-        const filtered = testCases.filter(item => !query || [item.display_id, item.test_case_id, item.title, item.case_type, item.verification_goal, ...idList(item.linked_flow_ids), ...idList(item.linked_gap_ids), ...(item.linked_risk_ids ?? [])].join(' ').toLowerCase().includes(query))
+        const filtered = testCases.filter(item => !query || caseSearchText(item).includes(query))
+        const designCounts = caseDesignCounts(testCases)
+        const behaviorLedgers = current?.details?.behavior_coverage ?? behaviorCoverageProjection(current?.details?.notes ?? current?.notes, testCases)
         const selectableIds = filtered.map(item => item.test_case_id).filter(hasText)
         const selectedVisible = selectableIds.filter(id => selectedCaseIds.includes(id))
         const allSelected = selectableIds.length > 0 && selectedVisible.length === selectableIds.length
@@ -6016,17 +6172,19 @@ window.__ModuleLoader__.load({
         const readinessLabel = item => item.readiness === 'ready' ? '具备执行条件' : item.readiness === 'needs_setup' ? '待补执行条件' : '执行条件未标注'
         const formatRisk = item => (item.linked_risk_ids ?? []).map(id => riskById.get(id)?.display_id || id)
         return h(React.Fragment, null,
-          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '从分析发现到可验证步骤'), h('p', null, `${testCases.length} 条独立验证目标，保留前置条件、操作与预期结果。`)),
+          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '从分析发现到可验证步骤'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '独立验证目标'} · ${designCounts.variants} 项已设计参数组合，保留前置条件、操作与预期结果。`)),
             h('div', { className: 'b05-head-actions' }, coverageAvailable ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => navigate({ type: 'coverage-cases' }) }, '覆盖补测视图') : null,
               h('button', { type: 'button', className: 'b03-task-action primary', disabled: !current?.run_id, onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportOpen(true) } }, '导出全部用例'))),
           h('div', { className: 'b05-metrics' },
             metric('全部测试用例', testCases.length, `分布在 ${unitCount} 个分析单元`), metric('具备执行条件', readiness.ready ?? '未知', '条件来自用例分析记录'),
-            metric('待补执行条件', readiness.needs_setup ?? '未知', '需核对执行准备条件'), metric('关联风险的用例', linkedCases, '按用例去重计数')),
+            metric('待补执行条件', readiness.needs_setup ?? '未知', '需核对执行准备条件'), riskEnabled ? metric('关联风险的用例', linkedCases, '按用例去重计数') : metric('已设计参数组合', designCounts.variants, '按变体记录计数，不计入独立用例数')),
           quality ? h('section', { className: 'b05-card', 'aria-label': '黑盒与灰盒可实施性' }, h('h3', null, '黑盒与灰盒可实施性'),
             h('p', null, `业务黑盒 ${quality.business_blackbox} 条（具备执行条件 ${quality.ready_blackbox} 条） · 业务灰盒 ${quality.developer_assisted} 条（具备执行条件 ${quality.ready_graybox} 条）`),
             h('p', null, quality.has_legacy_groups ? '包含旧用例组，独立用例比例待复核。' : quality.ready_ratio == null ? '无可统计用例。' : `可实施黑盒与灰盒：${quality.ready_cases}/${quality.total_cases}（${(quality.ready_ratio * 100).toFixed(1)}%）；目标 ≥70%。`),
             h('p', { className: 'b05-subtle' }, '全部正式、辅助及未分类用例均计入分母。比例按作者声明汇总，具备执行条件不代表实测通过。')) : null,
-          h('div', { className: 'b05-toolbar' }, h('input', { value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例、验证目标、业务路径…', onChange: event => setCaseQuery(event.target.value) }),
+          behaviorLedgers.length || current?.scenario === 'branch-analysis' ? h(BehaviorCoverageView, { ledgers: behaviorLedgers,
+            onCase: link => navigate({ type: 'case', id: link.target_case_id, ...(link.variant_id != null ? { variant_id: link.variant_id } : {}) }) }) : null,
+          h('div', { className: 'b05-toolbar' }, h('input', { value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例、业务路径、参数输入或预期…', onChange: event => setCaseQuery(event.target.value) }),
             h('span', { className: 'b05-subtle' }, `显示 ${filtered.length} 条 · 按分析单元排序`)),
           h('div', { className: 'b05-table-scroll' }, h('table', { className: 'b05-case-table' },
             h('thead', null, h('tr', null,
@@ -6036,7 +6194,9 @@ window.__ModuleLoader__.load({
               h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(item.test_case_id), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(item.test_case_id) })),
               h('td', { className: 'b05-mono' }, item.display_id || item.test_case_id || '待编号'),
               h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'case', id: key }) }, text(item.title, '未命名用例')),
-                h('small', null, text(item.verification_goal, '验证目标未记录'))),
+                h('small', null, text(item.verification_goal, '验证目标未记录')),
+                item.variants?.length ? h('details', { className: 'b05-variant-preview' }, h('summary', null, `${item.variants.length} 项参数组合`),
+                  item.variants.map((variant, index) => h('p', { key: index }, `${variant.variant_id ? `${variant.variant_id} · ` : ''}${variant.input || '输入未提供'} → ${variant.expected || '预期未提供'}`))) : null),
               h('td', null, text(item.case_type, '未标注')),
               h('td', null, linked.length ? linked.map(id => h('span', { key: id, className: 'b05-risk-chip' }, id)) : '—'),
               h('td', null, h('span', { className: `b05-readiness ${item.readiness === 'ready' ? 'good' : 'warn'}` }, readinessLabel(item))),
@@ -6202,6 +6362,7 @@ window.__ModuleLoader__.load({
         const unit = unitById.get(item.unit_id)
         const flowIds = idList(item.linked_flow_ids)
         const linkedRisks = idList(item.linked_risk_ids)
+        const behaviorItems = behaviorCoverageForCase(current?.details?.behavior_coverage ?? behaviorCoverageProjection(current?.details?.notes ?? current?.notes, testCases), item)
         const values = (values, empty) => Array.isArray(values) && values.length ? values.map((value, index) => h('div', { key: index, className: 'b05-bullet' }, '✓', h('span', null, text(value, empty)))) : h('p', { className: 'b05-subtle' }, empty)
         const copyCase = () => { void copySingleCase(item) }
         return h(React.Fragment, null,
@@ -6226,7 +6387,13 @@ window.__ModuleLoader__.load({
               h('section', { className: 'b05-card' }, h('h3', null, '清理动作'), values(item.cleanup, '未记录清理动作。')),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.unit_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '本分析单元说明'), item.unit_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('p', null, sourceFirstRecordBody(note.source_record?.body))))) : null,
-              item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, '参数变体'), item.variants.map((variant, index) => h('p', { key: index }, `${variant.input || '输入未提供'} → ${variant.expected || '预期未提供'}`))) : null),
+              item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
+                h('p', { className: 'b05-subtle' }, '以下为已设计参数组合，不单独计为独立用例，也不代表各组合已实测通过。'),
+                item.variants.map((variant, index) => h('p', { key: index, 'data-variant-id': variant.variant_id,
+                  'aria-current': screen.variant_id != null && screen.variant_id === variant.variant_id ? 'true' : undefined,
+                  style: screen.variant_id != null && screen.variant_id === variant.variant_id ? { borderLeft: '3px solid #3157d5', paddingLeft: 10, background: '#eef3ff' } : undefined },
+                  `${variant.variant_id ? `${variant.variant_id} · ` : ''}${variant.input || '输入未提供'} → ${variant.expected || '预期未提供'}`))) : null,
+              behaviorItems.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联业务行为'), behaviorItems.map((behavior, index) => h('p', { key: index }, `${behavior.item_id || '未编号'} · ${behavior.operation || '未提供业务操作'} · ${BEHAVIOR_STATUS_LABELS[behavior.status] || '未标注'}`))) : null),
             h('aside', null,
               h('section', { className: 'b05-card' }, h('h3', null, '关联上下文'), h('dl', { className: 'b05-case-kv' },
                 h('dt', null, '分析单元'), h('dd', null, unit ? `${unit.unit_id} · ${unit.title || '未命名'}` : text(item.unit_id, '未记录')),
@@ -6243,7 +6410,7 @@ window.__ModuleLoader__.load({
 
       async function copySingleCase(item) {
         const pairs = Array.isArray(item.step_pairs) && item.step_pairs.length ? item.step_pairs.map((step, index) => `${index + 1}. ${step.action || '未提供操作'} → ${step.expected || '未提供逐步预期'}`) : (Array.isArray(item.steps) ? item.steps : []).map((step, index) => `${index + 1}. ${step}`)
-        const content = [`${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`, `验证目标：${text(item.verification_goal, '未记录')}`, `前置条件：${(item.preconditions ?? []).join('；') || '未记录'}`, ...pairs, `整体预期：${(item.expected_results ?? []).join('；') || '未记录'}`, `观察点：${(item.observability ?? []).join('；') || '未记录'}`, `清理：${(item.cleanup ?? []).join('；') || '未记录'}`].join('\n')
+        const content = [`${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`, `验证目标：${text(item.verification_goal, '未记录')}`, `前置条件：${(item.preconditions ?? []).join('；') || '未记录'}`, ...pairs, `整体预期：${(item.expected_results ?? []).join('；') || '未记录'}`, `观察点：${(item.observability ?? []).join('；') || '未记录'}`, `清理：${(item.cleanup ?? []).join('；') || '未记录'}`, ...caseVariantLines(item)].join('\n')
         try { await globalThis.navigator.clipboard.writeText(content); showActionNotice('已复制完整测试用例。') }
         catch (reason) { showActionNotice(`复制失败：${reason instanceof Error ? reason.message : String(reason)}`, true) }
       }
@@ -6478,6 +6645,8 @@ window.__ModuleLoader__.load({
     exports.buildAnalysisRequest = buildAnalysisRequest
     exports.CoverageBrowser = CoverageBrowser
     exports.FlowGraphView = FlowGraphView
+    exports.BehaviorCoverageView = BehaviorCoverageView
+    exports.FlowComparisonView = FlowComparisonView
     exports.CallGraphView = CallGraphView
     exports.flowGraphInput = flowGraphInput
     exports.svgTreeToReact = svgTreeToReact

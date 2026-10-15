@@ -10,6 +10,7 @@ const outputPath = path.join(root, 'lib', 'client.js')
 // Each module becomes an IIFE so local names never collide with client.js.
 const MARKER = '/* @inline-shared-modules */'
 const SHARED = [
+  ['__behaviorCoverage', 'src/behavior-coverage.js'],
   ['__flowNormalize', 'src/flow-normalize.js'],
   ['__flowLayout', 'src/flow-graph/layout.js'],
   ['__flowRender', 'src/flow-graph/render.js'],
