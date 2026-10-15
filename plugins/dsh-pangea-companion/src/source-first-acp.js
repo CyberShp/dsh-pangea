@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { ACP_PROGRESS_DEFAULTS, AcpStalled, hasUnconfirmedAcpTools, waitForAcpTurn } from './acp-progress.js'
 import { acpBindingsPath, inspectAcpBindings, readAcpBindings } from './acp-recovery.js'
 import { writeTaskStoreFile } from './task-store.js'
+import { createAgentSessionRecorder } from './agent-sessions.js'
 
 // This host routes Graph identities; all content/quality decisions stay with
 // the worker. Live handles are retained on a recoverable pause so continuing
@@ -81,6 +82,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   if (state && (state.providerId !== providerId || state.agentModel !== agentModel)) throw new Error('续跑必须保持原执行器与模型，不能替换已绑定 worker')
   state ??= { providerId, agentModel, workers: new Map(), actionContexts: new Map(), closed: new Set(), busy: false, terminal: false }
   state.blockedReconciliations ??= new Map()
+  state.sessionRequestContexts ??= new Map()
   liveRuns.set(key, state)
   state.busy = true
   const generation = randomUUID()
@@ -89,6 +91,10 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   const closureWindows = new Map()
   const pausedReasons = []
   let current
+  const sessionRecorder = createAgentSessionRecorder({ dataRoot, runId })
+  const sessionMeta = context => ({ provider: providerId, model: agentModel ?? null, owner_instance_id: instanceId,
+    owner_session_id: parent?.id, attempt_id: attemptId, ...context,
+    stage: context.action_stage ?? context.stage })
   const bindingsPath = acpBindingsPath(dataRoot, runId)
   let bindings = {}
   let owner = { pid: process.pid, instance_id: instanceId, attempt_id: attemptId ?? null, active: true, pending_starts: [] }
@@ -133,8 +139,15 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   }
   const adapter = (operation, action, extra = []) => cli(['adapter', operation, '--data-root', dataRoot, '--run-id', runId,
     ...(action ? ['--action-id', action.action_id] : []), ...extra])
-  const event = async value => { try { await onEvent({ run_id: runId, attempt_id: attemptId, provider: providerId,
-    requested_model: agentModel ?? null, ...value }) } catch { /* telemetry does not route actions */ } }
+  const event = async value => {
+    const context = value.agent_session_id ? state.actionContexts.get(value.agent_session_id)
+      : [...state.actionContexts.values()].find(item => item.action_id === value.action_id)
+    const details = { ...context, ...value }
+    if (details.agent_session_id) void sessionRecorder.record(sessionMeta(details), { ...details, type: 'host_event' })
+    const { role: _sessionRole, ...launchValue } = value
+    try { await onEvent({ run_id: runId, attempt_id: attemptId, provider: providerId,
+      requested_model: agentModel ?? null, ...launchValue }) } catch { /* telemetry does not route actions */ }
+  }
   const startWorker = async request => {
     const startId = randomUUID()
     await serial(async () => { owner.pending_starts.push(startId); await persist() })
@@ -169,7 +182,19 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }
     let readyPending = false
     let worker = action.task_id ? state.workers.get(action.task_id) : null
-    const initialContext = { action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage }
+    const initialContext = { action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, role: action.role, attempt_id: attemptId }
+    const onSessionEvent = value => {
+      const currentContext = state.actionContexts.get(String(worker?.id)) ?? initialContext
+      const requestKey = value.request_id && JSON.stringify([value.remote_session_id ?? worker?.remoteSessionId, value.request_id])
+      if (requestKey && !state.sessionRequestContexts.has(requestKey)) state.sessionRequestContexts.set(requestKey, { ...currentContext })
+      const context = value.replay === true ? { action_id: null, execution_id: null, request_id: null, action_stage: 'history_replay' }
+        : requestKey ? state.sessionRequestContexts.get(requestKey) : currentContext
+      const meta = sessionMeta({ ...context, agent_session_id: value.agent_session_id ?? worker?.id,
+        remote_session_id: value.remote_session_id ?? worker?.remoteSessionId })
+      // Driver request IDs remain distinct from the host prompt window ID.
+      void sessionRecorder.record(meta, { ...value, driver_request_id: value.request_id,
+        host_request_id: context.request_id, action_id: context.action_id, execution_id: context.execution_id })
+    }
     const scratchDirectory = bindings[action.task_id]?.scratchDirectory ?? path.join(path.dirname(bindingsPath), 'worker-scratch', randomUUID())
     const onDiagnostic = value => {
       const context = state.actionContexts.get(String(worker?.id)) ?? initialContext
@@ -185,7 +210,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       const binding = bindings[action.task_id]
       if (!binding || binding.providerId !== providerId || binding.agentModel !== agentModel) throw new Error(`原 worker 会话不可续接：${action.task_id}；没有匹配的持久 ACP 身份，保留结果`)
       if (!binding.scratchDirectory) await remember({ id: action.task_id, remoteSessionId: binding.remoteSessionId }, scratchDirectory)
-      worker = await startWorker({ parent, signal, scratchDirectory, onDiagnostic,
+      worker = await startWorker({ parent, signal, scratchDirectory, onDiagnostic, onSessionEvent,
         resume: { taskId: action.task_id, remoteSessionId: binding.remoteSessionId },
         prompt: [], ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
       if (String(worker.id) !== action.task_id || worker.remoteSessionId !== binding.remoteSessionId) {
@@ -197,7 +222,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }
     if (!worker) {
       if (action.action === 'continue_agent') throw new Error(`续接 action 缺少原 task_id：${action.action_id}`)
-      worker = await startWorker({ parent, signal, scratchDirectory, onDiagnostic,
+      worker = await startWorker({ parent, signal, scratchDirectory, onDiagnostic, onSessionEvent,
         label: `PANGEA · ${action.role} · ${action.action_id}`,
         prompt: text('本条消息仅用于创建会话。本回合不调用工具，直接结束；下一条消息是正式任务。'),
         ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
@@ -428,7 +453,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
           if (disconnected) {
             const remoteSessionId = worker.remoteSessionId
             await disposed(worker)
-            worker = await startWorker({ parent, resume: { taskId, remoteSessionId }, prompt: [], scratchDirectory, onDiagnostic,
+            worker = await startWorker({ parent, resume: { taskId, remoteSessionId }, prompt: [], scratchDirectory, onDiagnostic, onSessionEvent,
               ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
             if (String(worker.id) !== taskId || worker.remoteSessionId !== remoteSessionId) {
               await worker.dispose?.()
@@ -553,7 +578,10 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       const failures = cleanup.filter(item => item.status === 'rejected')
       if (failures.length) error.message += `；进程清理失败：${failures.map(item => String(item.reason)).join('；')}`
       throw error
-    } finally { try { if (claimed) await serial(async () => { owner.active = false; await persist() }) } finally { state.busy = false } }
+    } finally {
+      try { if (claimed) await serial(async () => { owner.active = false; await persist() }) }
+      finally { await sessionRecorder.flush(); state.busy = false }
+    }
   }
   state.promise = execute()
   return {
@@ -572,6 +600,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     async dispose() {
       if (!state.terminal && !signal.aborted) return { retained: true }
       await Promise.allSettled([...state.workers.values()].map(disposed))
+      await sessionRecorder.flush()
       liveRuns.delete(key)
       return { retained: false }
     },

@@ -288,7 +288,201 @@ window.__ModuleLoader__.load({
               state.busy ? deleting ? taskCanStop(state.task) ? '正在停止并删除…' : '正在删除…' : '正在请求停止…' : state.error ? deleting ? '重试删除' : '重试停止' : deleting ? '确认删除' : '确认停止'))))
     }
 
-    function RunWorkspace({ current, task, timeline = [], error, loading, busy, retry, navigate: onNavigate, openFile, openFlow, stop, resume, deliver, discuss, diagnostics, viewState }) {
+    function agentSessionContent(content) {
+      if (content == null) return ''
+      if (typeof content === 'string') return content
+      if (Array.isArray(content)) return content.map(agentSessionContent).filter(Boolean).join('\n')
+      if (content.type === 'text' || typeof content.text === 'string') return content.text ?? ''
+      if (content.type === 'content') return agentSessionContent(content.content)
+      if (content.type === 'resource' && content.resource) return content.resource.text ?? `[资源] ${content.resource.uri ?? '未记录地址'}`
+      if (['image', 'audio'].includes(content.type)) return `[${content.type === 'image' ? '图片' : '音频'}内容：${content.mimeType ?? '未记录类型'}]`
+      return sourceFirstRecordBody(content)
+    }
+
+    function mergeAgentSessionEvents(previous = [], incoming = []) {
+      const events = new Map(previous.map(event => [event.seq, event]))
+      for (const event of incoming) if (event && event.seq != null) events.set(event.seq, event)
+      return [...events.values()].sort((a, b) => Number(a.seq) - Number(b.seq))
+    }
+
+    function agentSessionTranscript(events = []) {
+      const rows = [], tools = new Map()
+      for (const event of events) {
+        const update = event.update ?? {}, kind = update.sessionUpdate ?? update.type
+        const context = `${event.replay ? 'replay' : 'live'}:${event.execution_id ?? ''}:${event.action_id ?? ''}`
+        if (event.type === 'session_update' && ['agent_message_chunk', 'agent_thought_chunk', 'user_message_chunk'].includes(kind)) {
+          const text = agentSessionContent(update.content)
+          if (!text) continue
+          const role = kind === 'agent_thought_chunk' ? 'thought' : kind === 'user_message_chunk' ? 'user' : 'agent'
+          const last = rows.at(-1)
+          if (last?.type === 'text' && last.role === role && last.context === context) { last.text += text; last.last_at = event.at }
+          else rows.push({ type: 'text', key: `text-${event.seq}`, at: event.at, context, role, text, replay: Boolean(event.replay) })
+        } else if (event.type === 'session_update' && ['tool_call', 'tool_call_update'].includes(kind)) {
+          const id = update.toolCallId ?? update.tool_call_id ?? `unknown-${event.seq}`
+          const key = `${event.replay ? 'replay' : 'live'}:${event.execution_id ?? ''}:${id}`
+          let tool = tools.get(key)
+          if (!tool) { tool = { type: 'tool', key: `tool-${event.seq}`, at: event.at, id, title: id, status: 'unknown', replay: Boolean(event.replay), updates: [] }; tools.set(key, tool); rows.push(tool) }
+          for (const field of ['title', 'status', 'rawInput', 'rawOutput', 'content', 'locations']) if (Object.hasOwn(update, field) && update[field] != null) tool[field] = update[field]
+          tool.updates.push({ at: event.at, seq: event.seq, ...update })
+          tool.last_at = event.at
+        } else rows.push({ ...event, key: `event-${event.seq}` })
+      }
+      return rows
+    }
+
+    // One read-only reader owns each Run window. Selection tokens also reject
+    // responses from servers that finish after their AbortSignal was cancelled.
+    function createAgentSessionReader({ cwd, dataRoot, runId, onChange, request = requestWorkbench, pollMs = 2000, schedule = setTimeout, cancelSchedule = clearTimeout }) {
+      const scope = `${cwd}\u0000${dataRoot ?? ''}\u0000${runId}`
+      let state = { scope, items: [], selectedId: '', session: null, events: [], cursor: 0, hasMore: false, historyStatus: '', listLoading: true, detailLoading: false, listError: '', detailError: '', listRecordingError: '', detailRecordingError: '', listTruncated: false, detailTruncated: false, updatedAt: '' }
+      let disposed = false, selectionVersion = 0, listBusy = false, detailBusy = false, timer
+      const controllers = new Set()
+      const emit = patch => { if (!disposed) { state = { ...state, ...patch }; onChange(state) } }
+      async function query(args) {
+        const controller = new AbortController(); controllers.add(controller)
+        try { return await request({ cwd, dataRoot, runId, ...args, signal: controller.signal }) }
+        finally { controllers.delete(controller) }
+      }
+      async function loadEvents() {
+        if (disposed || detailBusy || !state.selectedId) return
+        const selectedId = state.selectedId, version = selectionVersion
+        detailBusy = true; emit({ detailLoading: true })
+        try {
+          const result = await query({ view: 'agent-session', sessionId: selectedId, cursor: state.cursor, limit: 100 })
+          if (disposed || version !== selectionVersion) return
+          if (result.run_id && result.run_id !== runId) throw new Error('会话响应不属于当前 Run，已忽略。')
+          if (result.session?.session_id && result.session.session_id !== selectedId) throw new Error('会话响应身份不匹配，已忽略。')
+          if (result.next_cursor == null) throw new Error('会话分页位置缺失，请重试读取。')
+          emit({ session: result.session ?? state.session, events: mergeAgentSessionEvents(state.events, result.events), cursor: result.next_cursor,
+            hasMore: Boolean(result.has_more), detailRecordingError: result.recording_error ?? '', detailTruncated: Boolean(result.truncated), historyStatus: result.history_status ?? result.session?.history_status ?? '', detailError: '', updatedAt: new Date().toLocaleTimeString() })
+        } catch (error) {
+          if (!disposed && version === selectionVersion && error?.name !== 'AbortError') emit({ detailError: error?.message ?? String(error) })
+        } finally {
+          if (!disposed && version === selectionVersion) { detailBusy = false; emit({ detailLoading: false }) }
+        }
+      }
+      function select(sessionId) {
+        if (disposed || sessionId === state.selectedId) return
+        selectionVersion++; detailBusy = false
+        emit({ selectedId: sessionId, session: state.items.find(item => item.session_id === sessionId) ?? null, events: [], cursor: 0, hasMore: false, historyStatus: '', detailError: '', detailRecordingError: '', detailTruncated: false, detailLoading: Boolean(sessionId) })
+        if (sessionId) void loadEvents()
+      }
+      async function loadList() {
+        if (disposed || listBusy) return
+        listBusy = true
+        try {
+          const result = await query({ view: 'agent-sessions' })
+          if (disposed) return
+          if (result.run_id && result.run_id !== runId) throw new Error('会话列表不属于当前 Run，已忽略。')
+          const items = Array.isArray(result.items) ? result.items : []
+          emit({ items, listLoading: false, listError: '', listRecordingError: result.recording_error ?? '', listTruncated: Boolean(result.truncated), session: items.find(item => item.session_id === state.selectedId) ?? state.session })
+          if (!items.some(item => item.session_id === state.selectedId)) select(items[0]?.session_id ?? '')
+        } catch (error) {
+          if (!disposed && error?.name !== 'AbortError') emit({ listLoading: false, listError: error?.message ?? String(error) })
+        } finally { listBusy = false }
+      }
+      async function tick() {
+        await Promise.allSettled([loadList(), !state.hasMore ? loadEvents() : Promise.resolve()])
+        if (!disposed) timer = schedule(tick, pollMs)
+      }
+      return {
+        start() { emit({}); void tick() }, select,
+        refresh() { if (!disposed) { void loadList(); void loadEvents() } },
+        loadMore: loadEvents,
+        dispose() { disposed = true; selectionVersion++; cancelSchedule(timer); for (const controller of controllers) controller.abort(); controllers.clear() },
+      }
+    }
+
+    function agentSessionRole(session) {
+      const role = session?.role ?? session?.stage ?? ''
+      if (/plan/i.test(role)) return 'Planning · 规划'
+      if (/review|comparison/i.test(role)) return 'Review · 复核'
+      if (/clos|repair/i.test(role)) return 'Work · 修正'
+      if (/work|analy|worker/i.test(role)) return 'Work · 分析'
+      return role || '阶段未记录'
+    }
+    function agentSessionStatus(value) {
+      return ({ ready: '准备就绪', idle: '空闲', exited: '进程已退出', awaiting_tool: '等待工具确认', pending: '等待执行', in_progress: '执行中', running: '运行中', completed: '已完成', failed: '失败', cancelled: '已取消', aborted: '已中止', paused: '已暂停', interrupted: '已中断', ended: '已结束', unknown: '状态未知', bound: '已绑定', stopped: '已停止' })[value] ?? value ?? '未记录'
+    }
+
+    function AgentSessionTranscript({ events = [] }) {
+      const rows = agentSessionTranscript(events)
+      const time = at => at ? new Date(at).toLocaleString() : '时间未记录'
+      const pre = (value, props = {}) => h('pre', props, agentSessionContent(value))
+      const details = (label, value, open = false) => value == null ? null : h('details', { open }, h('summary', null, label), pre(value))
+      return h('div', { className: 'agent-session-transcript' }, rows.map(row => {
+        const head = label => h(React.Fragment, null, h('div', { className: 'agent-event-head' }, h('strong', null, label), h('time', null, time(row.at))), row.replay ? h('p', { className: 'agent-session-muted' }, '恢复时执行器回放 · 原始回合时间未知；此处时间为采集时间。') : null)
+        if (row.type === 'text') return h('article', { key: row.key, className: `agent-event agent-${row.role}` }, head(row.role === 'agent' ? 'Agent' : row.role === 'user' ? '用户消息' : 'Agent 思考记录'), row.role === 'thought' ? details('查看执行器返回的思考记录', row.text) : pre(row.text))
+        if (row.type === 'tool') return h('article', { key: row.key, className: 'agent-event agent-tool' },
+          head(`工具 · ${row.title}`), h('div', { className: 'agent-tool-state' }, h('span', { className: 'badge', 'data-tool-status': row.status }, agentSessionStatus(row.status)), h('code', null, row.id)),
+          details('调用输入', row.rawInput, true), details('执行输出', row.rawOutput, true), details('工具返回内容', row.content, true),
+          row.rawOutput == null && !row.content?.length ? h('p', { className: 'agent-session-muted' }, ['pending', 'in_progress', 'unknown'].includes(row.status) ? '尚未收到工具执行结果，不能据此确认工具已经结束。' : '执行器未返回输出正文。') : null,
+          h('details', null, h('summary', null, `状态与更新记录（${row.updates.length}）`), row.updates.map(update => h('div', { key: update.seq, className: 'agent-tool-update' }, h('div', null, `${time(update.at)} · ${agentSessionStatus(update.status)}`), pre(update)))))
+        const labels = { prompt: '发送给 Agent 的指令', session_bound: '原会话已绑定', turn_end: '回合结束', error: '执行错误', recording_error: '会话记录异常', process_exit: '进程退出', permission: '权限请求与结果', host_event: '宿主状态记录', host: '宿主状态记录' }
+        return h('article', { key: row.key, className: `agent-event agent-${row.type}` }, head(labels[row.type] ?? '会话事件'),
+          ['prompt', 'turn_end'].includes(row.type) && row.action_id ? h('p', { className: 'agent-session-muted', style: { overflowWrap: 'anywhere' } }, `关联动作：${row.action_id}`) : null,
+          row.type === 'prompt' ? details('查看完整指令', row.prompt ?? row.content ?? row, true)
+            : row.type === 'turn_end' ? h(React.Fragment, null, row.response_received === false || row.protocol_stop_reason == null ? h('p', { className: 'agent-session-alert' }, '尚未收到 ACP 的回合结束确认；本地等待已结束不代表工具已完成。') : null, h('dl', null, h('dt', null, '宿主停止原因'), h('dd', null, row.stop_reason ?? '未记录'), h('dt', null, 'ACP 停止原因'), h('dd', null, row.protocol_stop_reason ?? '未记录')), details('完整结束记录', row))
+              : ['host_event', 'host'].includes(row.type) ? h(React.Fragment, null, pre([row.stage, row.message, row.status].filter(Boolean).join('\n')), details('完整宿主记录', row))
+                : ['error', 'recording_error'].includes(row.type) ? pre(row.error ?? row.message ?? row) : details('查看事件详情', row, row.type === 'permission'))
+      }))
+    }
+
+    function AgentSessionsDialog({ cwd, dataRoot, runId, onClose, request = requestWorkbench }) {
+      const scope = `${cwd}\u0000${dataRoot ?? ''}\u0000${runId}`
+      const [snapshot, setSnapshot] = React.useState(null)
+      const reader = React.useRef(null), dialog = React.useRef(null)
+      React.useEffect(() => {
+        const controller = createAgentSessionReader({ cwd, dataRoot, runId, request, onChange: setSnapshot })
+        reader.current = controller; controller.start()
+        return () => { controller.dispose(); if (reader.current === controller) reader.current = null }
+      }, [cwd, dataRoot, runId, request])
+      React.useEffect(() => {
+        const previous = document.activeElement
+        dialog.current?.querySelector('button')?.focus()
+        return () => { if (previous?.isConnected) previous.focus() }
+      }, [])
+      const state = snapshot?.scope === scope ? snapshot : { items: [], events: [], listLoading: true }
+      const session = state.session
+      const keyDown = event => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
+        if (event.key !== 'Tab') return
+        const buttons = [...(dialog.current?.querySelectorAll('button:not(:disabled), summary, [tabindex="0"]') ?? [])]
+        const first = buttons[0], last = buttons.at(-1)
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+      }
+      return h('div', { className: 'agent-sessions-overlay', onKeyDown: keyDown },
+        h('style', null, `.agent-sessions-overlay{position:fixed;inset:0;z-index:1200;background:#13202a70;display:flex;align-items:center;justify-content:center;padding:24px}.agent-sessions-dialog{width:min(1320px,100%);height:88vh;max-height:960px;background:#fbfbf8;color:#25392f;border:1px solid #d8dfd8;border-radius:16px;box-shadow:0 28px 80px #17221d33;display:flex;flex-direction:column;overflow:hidden;text-align:left}.agent-sessions-head{display:flex;justify-content:space-between;gap:20px;padding:20px 24px;border-bottom:1px solid #dce2dc}.agent-sessions-head h2{margin:0 0 6px;font-size:21px}.agent-sessions-head p{margin:0;color:#66716a;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.agent-sessions-actions{display:flex;gap:8px;align-items:flex-start;flex-shrink:0}.agent-sessions-dialog button{font:inherit;cursor:pointer}.agent-sessions-dialog button:disabled{cursor:default;opacity:.55}.agent-sessions-dialog button:focus-visible,.agent-sessions-dialog summary:focus-visible{outline:2px solid #347b61;outline-offset:2px}.agent-sessions-body{display:grid;grid-template-columns:285px minmax(0,1fr);min-height:0;flex:1}.agent-sessions-list{padding:16px 12px;overflow:auto;border-right:1px solid #dce2dc;background:#f3f5f1}.agent-sessions-list>h3{font-size:12px;color:#67736c;margin:0 10px 12px}.agent-session-option{display:flex;flex-direction:column;gap:7px;text-align:left;width:100%;border:1px solid transparent;border-radius:10px;padding:13px;background:transparent;color:inherit;margin-bottom:8px;overflow-wrap:anywhere}.agent-session-option[aria-pressed=true]{background:#fff;border-color:#87ac9a;box-shadow:0 3px 12px #23433008}.agent-session-option span,.agent-session-option small{font-size:12px;line-height:1.5}.agent-session-option small{color:#68746c}.agent-session-main{overflow:auto;min-width:0;padding:22px 24px}.agent-session-meta{padding-bottom:18px;border-bottom:1px solid #dce2dc;margin-bottom:18px}.agent-session-meta h3{margin:0 0 10px}.agent-session-meta dl,.agent-event dl{display:grid;grid-template-columns:110px minmax(0,1fr);font-size:12px;gap:7px;margin:12px 0}.agent-session-meta dt,.agent-event dt{color:#758075}.agent-session-meta dd,.agent-event dd{margin:0;overflow-wrap:anywhere}.agent-session-muted{font-size:12px;line-height:1.8;color:#6d786e}.agent-session-alert{padding:12px 14px;margin:12px 0;border:1px solid #e0c4a0;background:#fff5e7;border-radius:8px;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.agent-event{border:1px solid #dce2dc;background:#fff;padding:15px 17px;border-radius:10px;margin-bottom:14px;min-width:0}.agent-event-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;line-height:1.6;margin-bottom:8px;overflow-wrap:anywhere}.agent-event-head strong{font-size:13px;min-width:0}.agent-event-head time{font-size:11px;color:#7a847c;flex-shrink:0}.agent-event pre{font:12px/1.85 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;margin:9px 0}.agent-event summary{font-size:12px;cursor:pointer;margin:10px 0;color:#47765b}.agent-event details+details{border-top:1px solid #eef1ed;padding-top:1px}.agent-event.agent-error,.agent-event.agent-turn_end{border-left:3px solid #b47b46}.agent-tool-state{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}.agent-tool-state code{overflow-wrap:anywhere}.agent-tool-update{padding:10px;background:#f5f6f3;margin-top:6px}.agent-tool-update>div{font-size:11px;color:#71806f}.agent-session-footer{padding:14px 24px;border-top:1px solid #dce2dc;font-size:12px;color:#6d786e;display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap}.agent-sessions-dialog .agent-button{border:1px solid #ced8ce;background:#fff;color:#365340;padding:8px 12px;border-radius:7px;white-space:nowrap}.agent-sessions-empty{padding:32px 16px;color:#68756c;font-size:13px;line-height:1.9}@media(max-width:760px){.agent-sessions-overlay{padding:8px}.agent-sessions-dialog{height:94vh}.agent-sessions-head{padding:16px;gap:8px}.agent-sessions-actions{flex-wrap:wrap;justify-content:flex-end}.agent-sessions-body{grid-template-columns:210px minmax(0,1fr)}.agent-session-main{padding:14px}.agent-event-head{flex-direction:column;gap:3px}.agent-session-meta dl{grid-template-columns:1fr}.agent-sessions-head h2{font-size:18px}}`),
+        h('section', { ref: dialog, className: 'agent-sessions-dialog', role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'agent-sessions-title' },
+          h('header', { className: 'agent-sessions-head' }, h('div', null, h('h2', { id: 'agent-sessions-title' }, 'Agent 会话管理'), h('p', null, '查看本次分析的原 Agent 会话 · 只读 · 每 2 秒同步'), h('p', null, `Run：${runId}`)),
+            h('div', { className: 'agent-sessions-actions' }, h('button', { type: 'button', className: 'agent-button', onClick: () => reader.current?.refresh() }, '刷新记录'), h('button', { type: 'button', className: 'agent-button', 'aria-label': '关闭 Agent 会话管理', onClick: onClose }, '关闭'))),
+          h('div', { className: 'agent-sessions-body' },
+            h('aside', { className: 'agent-sessions-list', 'aria-label': '本次 Run 的 Agent 会话' }, h('h3', null, `原 Agent 会话 · ${state.items.length}`),
+              state.listError ? h('div', { className: 'agent-session-alert', role: 'alert' }, `会话列表读取失败：${state.listError}`) : null,
+              state.listRecordingError ? h('div', { className: 'agent-session-alert', role: 'alert' }, `会话索引记录不完整：${agentSessionContent(state.listRecordingError)}`) : null,
+              state.listTruncated ? h('div', { className: 'agent-session-alert' }, '会话列表记录已截断。') : null,
+              state.listLoading ? h('p', { className: 'agent-sessions-empty', role: 'status' }, '正在读取会话列表…') : null,
+              !state.listLoading && !state.items.length && !state.listError ? h('p', { className: 'agent-sessions-empty' }, '此 Run 暂无 Agent 会话记录。历史版本的会话可能只有运行日志，无法还原未记录的会话正文。') : null,
+              state.items.map(item => h('button', { type: 'button', key: item.session_id, className: 'agent-session-option', 'aria-pressed': item.session_id === state.selectedId, onClick: () => reader.current?.select(item.session_id) },
+                h('strong', null, agentSessionRole(item)), h('span', null, item.unit_id || item.action_ids?.join(' · ') || item.stage || '待关联任务'),
+                h('span', null, item.provider || '执行器未记录'), h('small', null, item.model || '模型未记录'), h('small', null, `${agentSessionStatus(item.status)} · ${item.event_count ?? 0} 条事件`), item.history_status === 'metadata_only' ? h('small', null, '历史会话 · 仅元数据') : null))),
+            h('main', { className: 'agent-session-main', 'aria-label': 'Agent 会话内容', tabIndex: 0 },
+              !session ? h('p', { className: 'agent-sessions-empty' }, '选择左侧会话，查看指令、回复与工具执行详情。') : h(React.Fragment, null,
+                h('div', { className: 'agent-session-meta' }, h('h3', null, agentSessionRole(session)), h('span', { className: 'badge' }, agentSessionStatus(session.status)),
+                  h('dl', null, [['执行器 / 模型', [session.provider, session.model].filter(Boolean).join(' / ') || '未记录'], ['原 Agent 会话', session.remote_session_id || session.agent_session_id || '尚未绑定'], ['本地会话', session.session_id], ['关联任务', session.action_ids?.join('、') || session.unit_id || '未记录'], ['最近工具', session.last_tool_id ? `${session.last_tool_id} · ${agentSessionStatus(session.last_tool_status)}` : '未记录']].map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value))))),
+                (state.detailRecordingError || session.recording_error) ? h('div', { role: 'alert', className: 'agent-session-alert' }, `会话记录不完整：${agentSessionContent(state.detailRecordingError || session.recording_error)}`) : null,
+                state.detailTruncated || session.truncated ? h('div', { role: 'status', className: 'agent-session-alert' }, '部分记录已截断，以下内容不代表完整会话。') : null,
+                session.history_message ? h('div', { className: 'agent-session-alert', role: 'status' }, agentSessionContent(session.history_message)) : (state.historyStatus || session.history_status) === 'metadata_only' ? h('div', { className: 'agent-session-alert' }, '此历史会话仅保留身份与运行状态，没有采集指令、Agent 回复和工具输入输出；无法补回此前未记录的内容。') : null,
+                state.detailError ? h('div', { role: 'alert', className: 'agent-session-alert' }, `会话内容读取失败：${state.detailError}。已读取的内容仍保留，可点击“刷新记录”重试。`) : null,
+                h(AgentSessionTranscript, { events: state.events }),
+                !state.events.length && !state.detailLoading && !state.detailError && (state.historyStatus || session.history_status) !== 'metadata_only' ? h('p', { className: 'agent-sessions-empty' }, '会话已关联，尚未收到可显示的事件；这不表示 Agent 已完成。') : null,
+                state.detailLoading ? h('p', { role: 'status', className: 'agent-session-muted' }, '正在读取会话事件…') : null,
+                state.hasMore ? h('button', { type: 'button', className: 'agent-button', disabled: state.detailLoading, onClick: () => reader.current?.loadMore() }, state.detailLoading ? '正在加载…' : '加载更多会话事件') : null))),
+          h('footer', { className: 'agent-session-footer' }, h('span', null, '只读查看，不向 Agent 发送消息或重复执行工具。'), h('span', { role: 'status' }, state.hasMore ? '还有后续记录 · 加载更多后继续实时同步' : state.updatedAt ? `最近同步 ${state.updatedAt}` : '等待首次同步'))))
+    }
+
+    function RunWorkspace({ current, task, timeline = [], error, loading, busy, retry, navigate: onNavigate, openFile, openFlow, stop, resume, deliver, discuss, diagnostics, viewState, cwd, dataRoot }) {
       const [selection, setSelection] = React.useState(viewState?.selection ?? '')
       const [tab, setTab] = React.useState(viewState?.tab ?? 'activity')
       const view = () => ({ selection, tab, scrollY: window.scrollY })
@@ -301,6 +495,7 @@ window.__ModuleLoader__.load({
       const [confirmStop, setConfirmStop] = React.useState(false)
       const [pending, setPending] = React.useState('')
       const [actionError, setActionError] = React.useState('')
+      const [sessionsOpen, setSessionsOpen] = React.useState(false)
       const dialog = React.useRef(null)
       const stopTrigger = React.useRef(null)
       React.useEffect(() => {
@@ -375,9 +570,10 @@ window.__ModuleLoader__.load({
       ]
       const notices = error ? h('div', { className: 'notice warn', role: 'alert', style: { marginBottom: 22 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, current ? '同步失败，正在显示上次结果' : '无法读取当前运行'), h('p', null, current ? `最后成功读取于 ${time(current.state_read?.observed_at)}。当前执行状态暂时未知，已显示的结果仍保留。` : error))), button('重试读取', retry)) : null
       return node('section', 'pangea-ui pangea-run-workspace',
+        sessionsOpen && current?.run_id ? h(AgentSessionsDialog, { key: `${cwd}:${dataRoot}:${current.run_id}`, cwd, dataRoot, runId: current.run_id, onClose: () => setSessionsOpen(false) }) : null,
         node('div', 'breadcrumb', h('button', { className: 'link', style: { color: 'inherit' }, onClick: () => navigate('tasks') }, 'PANGEA 分析'), runIcon('ChevronRight'), h('span', null, task?.target ?? task?.title ?? '分析任务'), runIcon('ChevronRight'), h('span', null, '运行过程')),
         node('div', 'page-head', node('div', '', h('h1', null, task?.title ?? '运行过程'), node('p', 'subtitle', [task?.repository && `${task.repository} / ${task.target ?? ''}`, (current?.run_id ?? task?.run_id) && h('span', { className: 'mono', key: 'run' }, current?.run_id ?? task.run_id), startTime ? `${new Date(startTime).toLocaleDateString() === new Date().toLocaleDateString() ? '今天 ' : ''}${time(startTime).slice(0,5)} 开始` : null].filter(Boolean).flatMap((part, index) => index ? [' \u00a0 · \u00a0 ', part] : [part]))),
-          node('div', 'page-actions', error ? button('重试读取', retry) : h(React.Fragment, null, button('AI 助手', () => perform('discuss', discuss), '', !task), button('返回任务列表', () => navigate('tasks'))),
+          node('div', 'page-actions', h('button', { type: 'button', className: 'btn primary', disabled: !current?.run_id || !cwd, onClick: () => setSessionsOpen(true) }, runIcon('SquareTerminal'), 'Agent 会话管理'), error ? button('重试读取', retry) : h(React.Fragment, null, button('AI 助手', () => perform('discuss', discuss), '', !task), button('返回任务列表', () => navigate('tasks'))),
             !error && current && !current.terminal && !finished && !p.stopped ? button(p.stopping ? '等待停止确认' : '停止', () => setConfirmStop(true), 'danger', p.stopping, { ref: stopTrigger, style: confirmStop ? { display: 'none' } : undefined }) : null,
             !error && p.canResume ? button('继续分析', () => perform('resume', resume), 'primary') : null,
             !error && reportPath ? button('查看报告', () => openFile(reportPath), 'primary') : null)),
@@ -724,9 +920,10 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestWorkbench({ cwd, runId, taskId, sessionId, view, cursor = 0, limit = 20, signal, fetcher = fetch }) {
+    async function requestWorkbench({ cwd, dataRoot, runId, taskId, sessionId, view, cursor = 0, limit = 20, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd, cursor: String(cursor), limit: String(limit) })
       if (view) query.set('view', view)
+      if (dataRoot) query.set('data_root', dataRoot)
       if (runId !== undefined) query.set('run_id', runId ?? '')
       if (taskId) query.set('task_id', taskId)
       if (sessionId) query.set('session_id', sessionId)
@@ -4679,7 +4876,7 @@ window.__ModuleLoader__.load({
       }
 
       function renderSourceFirstWorkflow() {
-        return h(RunWorkspace, { key: `${selectedTask?.task_id}:${current?.run_id}`, current, task: selectedTask,
+        return h(RunWorkspace, { key: `${selectedTask?.task_id}:${current?.run_id}`, current, task: selectedTask, cwd: scope?.cwd, dataRoot: current?.data_root ?? snapshot?.data_root,
           timeline: workflowEvents(current, taskLaunchEvents(selectedTask, workbench)),
           error, loading, busy: creatingRun, retry: () => load({ foreground: true }),
           viewState: screen.view,
@@ -6228,6 +6425,12 @@ window.__ModuleLoader__.load({
     exports.taskCanStop = taskCanStop
     exports.RunDerivationDialog = RunDerivationDialog
     exports.derivationInput = derivationInput
+    exports.AgentSessionsDialog = AgentSessionsDialog
+    exports.AgentSessionTranscript = AgentSessionTranscript
+    exports.createAgentSessionReader = createAgentSessionReader
+    exports.agentSessionTranscript = agentSessionTranscript
+    exports.agentSessionContent = agentSessionContent
+    exports.mergeAgentSessionEvents = mergeAgentSessionEvents
     exports.RunWorkspace = RunWorkspace
     exports.RunExecutionSummary = RunExecutionSummary
     exports.executionObservation = executionObservation

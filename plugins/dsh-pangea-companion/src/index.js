@@ -1,4 +1,5 @@
 import { inspectSourceFirstAcpRecovery, stopSourceFirstAcpRun } from './source-first-acp.js'
+import { AgentSessionStore } from './agent-sessions.js'
 import { runtimeObservation } from './runtime-observation.js'
 import { inspectSourceFirstChildren, interruptSourceFirstChildren } from './report-policy.js'
 import { processPresence } from './acp-recovery.js'
@@ -1005,6 +1006,15 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
   const sessionId = url.searchParams.get('session_id') ?? undefined
   try {
     if (req.method === 'GET') {
+      if (['agent-sessions', 'agent-session'].includes(url.searchParams.get('view'))) {
+        if (!runId) throw new Error('Agent 会话读取必须指定 run_id')
+        const root = await discoverPangeaDataRoot({ cwd, dataRoot })
+        const sessions = new AgentSessionStore({ dataRoot: root, runId })
+        const result = url.searchParams.get('view') === 'agent-session'
+          ? await sessions.read(sessionId, { cursor: url.searchParams.get('cursor') ?? 0, limit: url.searchParams.get('limit') ?? 100 })
+          : await sessions.list()
+        return json(res, 200, result)
+      }
       if (url.searchParams.get('view') === 'home') {
         const taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
         const snapshot = await homeSnapshot({

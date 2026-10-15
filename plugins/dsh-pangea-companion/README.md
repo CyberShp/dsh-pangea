@@ -9,7 +9,7 @@
 - 自动从当前 DSH workspace 向上发现 `pangea-data/runs/`。
 - `pangea_status`：读取当前或指定 Run 的阶段、质量状态、分析进度、风险/用例/证据数量和读取健康状态，模型侧输出中文。
 - 自动选择最新的非终态 Run；没有活动 Run 时回退到最新 Run。用户点选历史 Run 时按明确 `run_id` 读取，不会回退到当前最新任务。
-- 将当前 DSH 会话与 PANGEA Run 做最小只读关联，只记录 Run、工作区、关联会话和 PANGEA 阶段/分析进度；DSH 自己负责展示 Agent、工具、子 Agent 和工作流轨迹。
+- 将当前 DSH 会话与 PANGEA Run 做最小只读关联；外部 ACP worker 另按 Run 保存可回看的 Agent 会话记录。
 - 会话删除后仍按 Run 保留最小关联摘要；历史 Run 不依赖原 DSH 会话继续存在。
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
 - 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止；停止时即使 ACP 或 PANGEA API 一侧不可用，也会保留错误并继续尝试其余取消动作。
@@ -61,7 +61,7 @@ Companion 在 PANGEA 产品导航中注册工作台、分析、环境配置和 A
 - 总览显示后端兼容性、完整 Run 分页、当前 Run 进度和停止入口；“新建分析”表单接受仓库、目标、资产、执行 Agent、模型和 effort。
 - “流程”页显示冻结 Skill 的 Step 01–09 生命周期、Markdown 产物、核心规则 ACK、独立 Judge 和未解决事项；不显示已删除的 analysis action/bind/validate/settle 状态机。
 - “业务流”页展示结构化步骤、证据和 Mermaid 文本，支持搜索。
-- Companion 不重复展示 DSH 已有的 Agent / Tool / Subagent / Workflow 轨迹；总览只聚焦 PANGEA 阶段、进度、质量、风险、用例、证据和复核。
+- “运行过程 → Agent 会话”查看当前 Run 的外部 ACP 会话，覆盖 planning、单元分析、review 与原 worker 的定向修正。内置 DSH 会话仍由原生会话页面展示。
 - 即使原 DSH 会话已删除，历史 Run 的风险、用例、证据、复核和报告仍可查看；Companion 不保存 DSH 执行时间线。
 - 详情页固定提供 `← 返回`，使用页面栈按真实访问路径退回；例如 `风险 → 用例 → 风险` 可以逐级返回，不会钻进死胡同。
 - 总览顶部显示 Reader 数据状态、数据源和报告对账结果。
@@ -98,7 +98,20 @@ $DSH_HOME/dsh-pangea-companion/monitor-v1.json
 
 不会保存 Agent 运行/空闲变化、工具调用、子 Agent 或工作流成员轨迹；这些信息由 DSH 原生轨迹负责。
 
-不保存提示词、工具参数、工具结果全文、源码或证据内容，也不写入 `pangea-data`。因此删除 DSH 会话不会删除 PANGEA Run；只能失去 DSH 自己未被摘要记录的完整会话内容。
+上述 `monitor-v1.json` 摘要不保存提示词、工具参数、工具结果全文、源码或证据内容。外部 ACP 会话使用下述独立记录，不依赖 DSH 主会话继续存在。
+
+## 外部 Agent 会话查看
+
+`source-first-v1` Run 的“运行过程”提供 Agent 会话入口。会话列表按当前 Run 展示执行器、模型、角色、阶段、单元、真实远端会话 ID 和最近工具状态；选中会话后可查看宿主发送的指令、Agent 消息、工具输入与输出、权限处理及请求结束原因。工具更新按 `toolCallId` 关联，消息流按顺序展示。窗口只读，打开或刷新不会派发 Prompt；停止与继续仍由原有 Run 控制负责。
+
+- NGA、OpenCode、CodeAgent 共用 ACP 事件通路；只记录执行器实际发送的事件，不能展示执行器未上报的内部调用。
+- 原会话续接追加同一会话历史，review 的盲审和对照阶段、worker 的定向修正保留 action 关联。
+- 记录在当前 Run 本地保存。凭据字段脱敏；写入错误、截断和历史缺失明确显示，不改变 Agent 执行或分析结论。
+- 旧 Run 没有正文时显示元信息与“无历史记录”，不以 launch log 摘要代替全文。恢复原会话时若执行器提供历史回放，则明确标记为回放、原始回合时间未知；未采集且执行器未回放的内容无法补回。
+- 查看使用分页读取并定时刷新。切换 Run 或会话后，迟到响应不能覆盖当前会话。
+- `turn_end` 的协议停止原因与宿主暂停事件分开显示；`cancelled` 只证明本次请求已取消，尚未结束的工具仍保持待确认状态。
+
+只读接口均位于 `GET /api/pangea-companion/workbench`，要求明确的 `cwd`、`data_root`、`run_id`：`view=agent-sessions` 返回会话列表；`view=agent-session&session_id=...` 返回该会话事件分页。`cursor` 是服务端返回的不透明游标，调用方不得用消息数量代替。
 
 ## 边界
 
