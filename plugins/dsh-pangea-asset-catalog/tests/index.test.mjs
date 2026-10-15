@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { apply, listOptions } from '../src/index.js'
+import { apply, extractionJobs, importAndExtract, listOptions } from '../src/index.js'
 
 test('normalizes asset pagination filters for the public API', () => {
   assert.deepEqual(
@@ -69,4 +69,30 @@ test('interrupted extraction appears in failed filter while preserving asset sta
   assert.equal(result.summary.failed, 1)
   assert.equal(result.items[0].asset_id, 'working')
   assert.equal(result.items[0].status, 'extracting')
+})
+
+test('lightweight progress is keyed by asset and reads queue state without starting Python', () => {
+  const calls = []
+  const jobs = { a: { status: 'running', output: 'A 日志' }, b: { status: 'waiting', output: '', queue_position: 1 } }
+  const value = extractionJobs({ dataRoot: '/tmp/asset-job-test', assetIds: ['b', 'a', 'b'], runtime: {
+    job() { throw new Error('the queue must take precedence') },
+    queue: { job(root, id) { calls.push([root, id]); return jobs[id] } },
+  } })
+  assert.deepEqual(value, { status: 'ok', jobs: { b: jobs.b, a: jobs.a } })
+  assert.equal(calls.length, 2)
+  assert.throws(() => extractionJobs({ assetIds: Array(101).fill('a'), runtime: {} }), /100/)
+  assert.throws(() => extractionJobs({ assetIds: [''], runtime: {} }), /有效资产编号/)
+})
+
+test('batch import returns after enqueue rather than waiting for a model start', async () => {
+  const calls = []
+  const asset = await importAndExtract({ cwd: '/fixture', dataRoot: '/fixture/data', sourcePath: '/input/design.md',
+    body: { asset_type: 'design', provider_id: 'configured', agent_model: 'selected' },
+    runner: async ({ args }) => { calls.push(args); return { asset: { asset_id: 'asset-1' } } },
+    runtime: { start() { throw new Error('must enqueue') }, queue: { start(params) { calls.push(params); return { queued: true } } } },
+  })
+  assert.equal(asset.asset_id, 'asset-1')
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1].assetId, 'asset-1')
+  assert.equal(calls[1].agentModel, 'selected')
 })

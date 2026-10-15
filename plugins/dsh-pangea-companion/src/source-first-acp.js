@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { writeFile, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { ACP_PROGRESS_DEFAULTS, AcpStalled, waitForAcpTurn } from './acp-progress.js'
+import { ACP_PROGRESS_DEFAULTS, AcpStalled, hasUnconfirmedAcpTools, waitForAcpTurn } from './acp-progress.js'
 import { acpBindingsPath, inspectAcpBindings, readAcpBindings } from './acp-recovery.js'
 import { writeTaskStoreFile } from './task-store.js'
 
@@ -80,6 +80,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   if (state?.busy) throw new Error(`当前 Run 已由宿主执行：${runId}`)
   if (state && (state.providerId !== providerId || state.agentModel !== agentModel)) throw new Error('续跑必须保持原执行器与模型，不能替换已绑定 worker')
   state ??= { providerId, agentModel, workers: new Map(), actionContexts: new Map(), closed: new Set(), busy: false, terminal: false }
+  state.blockedReconciliations ??= new Map()
   liveRuns.set(key, state)
   state.busy = true
   const generation = randomUUID()
@@ -107,6 +108,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   })
   const disposed = async worker => {
     await worker.dispose?.()
+    state.blockedReconciliations.delete(String(worker.id))
     state.closed.add(String(worker.id))
     await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
   }
@@ -175,6 +177,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         last_tool_id: value.lastToolId, last_tool_status: value.lastToolStatus,
         tool_kind: value.lastToolKind, active_tool_count: value.activeToolCount,
         tool_started_at_ms: value.lastToolStartedAt, tool_finished_at_ms: value.lastToolFinishedAt, tool_duration_ms: value.lastToolDurationMs })
+      if (value.stage === 'tool_event') void state.blockedReconciliations.get(String(worker?.id))?.().catch(() => {})
       if (value.stage === 'file_permission') void event({ ...context, stage: 'source_first_file_permission',
         kind: value.lastPermissionKind, paths: value.lastPermissionPaths, decision: value.lastPermissionDecision })
     }
@@ -210,6 +213,8 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }
     current = worker
     const taskId = String(worker.id)
+    state.blockedReconciliations.delete(taskId)
+    const resumeQuiescent = action.action === 'continue_agent' && bindings[taskId]?.quiescent === true && worker.readDiagnostics?.()?.activeToolCount === 0
     const actionContext = { ...initialContext, agent_session_id: taskId, remote_session_id: worker.remoteSessionId }
     state.actionContexts.set(taskId, actionContext)
     if (bindings[taskId]?.scratchDirectory !== scratchDirectory) await remember(worker, scratchDirectory)
@@ -267,21 +272,54 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
           message_chunks: Number.isInteger(before.messageChunks) && Number.isInteger(diagnostics.messageChunks) ? diagnostics.messageChunks - before.messageChunks : null })
       }
     }
+    const readSavedCompletion = async () => {
+      let saved
+      try { saved = await cli(['result-read', ...binding, '--view', 'compact']) }
+      catch (readError) {
+        check()
+        await event({ ...actionContext, stage: 'source_first_saved_result_checked', status: 'error', error: readError.message,
+          message: '暂时无法读取已保存结果；保留原会话，未重复工具操作' })
+        return null
+      }
+      const complete = saved?.completion_complete === true && Number.isInteger(saved.revision) && saved.completion_declared_revision === saved.revision
+      await event({ ...actionContext, stage: 'source_first_saved_result_checked', status: 'info',
+        phase: complete ? 'saved_complete' : 'saved_incomplete',
+        message: complete ? '当前 revision 已有完成声明，保留已保存结果；仍需确认原请求和工具结束' : '已检查当前保存结果，尚无匹配当前 revision 的完成声明；保留已有内容' })
+      return complete
+    }
     const stallPause = async (error, turn) => {
+      if (!error.savedCompletionChecked) await readSavedCompletion()
       if (error.confirmed) await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
       if (!error.confirmed) {
         bindings[taskId] ??= { providerId, agentModel, remoteSessionId: worker.remoteSessionId }
         bindings[taskId].blocked = true
         await remember(worker)
-        // A late real response can release the block. Sending session/cancel alone cannot.
+        // The prompt and final tool update may arrive in either order. Reconcile
+        // both without sending a new prompt or inventing a tool completion.
         const pausedExecutionId = executionId
-        Promise.resolve(turn).then(async outcome => {
+        let response = error.outcome, releasing
+        const releaseBlocked = () => {
+          if (releasing) return releasing
           const diagnostics = worker.readDiagnostics?.() ?? {}
-          if (state.generation === generation && bindings[taskId]?.execution_id === pausedExecutionId && outcome?.protocolStopReason && diagnostics.activeToolCount === 0) {
-            await remember(worker, undefined, { blocked: false, inflight: false, quiescent: true })
-            await event({ stage: 'source_first_late_response', action_id: action.action_id, message: '原回合已返回，可继续原会话' })
-          }
-        }).catch(() => {})
+          if (state.generation !== generation || bindings[taskId]?.execution_id !== pausedExecutionId || !bindings[taskId]?.blocked || !response?.protocolStopReason || diagnostics.activeToolCount !== 0) return Promise.resolve()
+          releasing = (async () => {
+            const released = await serial(async () => {
+              if (state.generation !== generation || bindings[taskId]?.execution_id !== pausedExecutionId || !bindings[taskId]?.blocked || worker.readDiagnostics?.()?.activeToolCount !== 0) return false
+              Object.assign(bindings[taskId], { blocked: false, inflight: false, quiescent: true })
+              await persist()
+              return true
+            })
+            if (released) {
+              if (state.blockedReconciliations.get(taskId) === releaseBlocked) state.blockedReconciliations.delete(taskId)
+              await event({ ...actionContext, stage: 'source_first_late_response', active_tool_count: 0,
+                message: '原回合与工具均已确认结束，可继续原会话；未自动重复发送' })
+            }
+          })().finally(() => { releasing = null })
+          return releasing
+        }
+        state.blockedReconciliations.set(taskId, releaseBlocked)
+        await releaseBlocked()
+        Promise.resolve(turn).then(outcome => { response = outcome; return releaseBlocked() }).catch(() => {})
       }
       await pause(error.message, true)
       return { stopReason: 'completed', attentionRequired: true, diagnostic: error.message }
@@ -345,6 +383,9 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       await event({ stage: 'source_first_prompt_ready', action_id: action.action_id,
         prompt_chars: prompt.length, prompt_bytes: Buffer.byteLength(prompt, 'utf8') })
       const runMonitored = async () => {
+        // A late tool completion can unlock an explicitly resumed action after
+        // its result was already saved. Reconcile it before another model turn.
+        if (resumeQuiescent && await readSavedCompletion() === true) return { stopReason: 'completed' }
         const toolCalls = () => worker.readDiagnostics?.()?.toolCalls
         const toolsBefore = toolCalls()
         let turn = submitPrompt(text(prompt), 'task')
@@ -374,11 +415,14 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         }
         catch (error) {
           if (!(error instanceof AcpStalled)) throw error
-          if (!error.confirmed) return { stall: error, pendingTurn: turn }
           // Read saved completion before sending another model request. Settlement
-          // remains the existing authority; this does not invent a completion.
-          const saved = await cli(['result-read', ...binding, '--view', 'compact'])
-          if (saved?.completion_complete && saved.completion_declared_revision === saved.revision) return { stopReason: 'completed' }
+          // still requires a real prompt response and no unresolved tools.
+          const savedComplete = await readSavedCompletion()
+          error.savedCompletionChecked = true
+          if (savedComplete === null) return { stall: error, pendingTurn: turn }
+          if (!error.confirmed && error.outcome?.protocolStopReason && worker.readDiagnostics?.()?.activeToolCount === 0) error.confirmed = true
+          if (!error.confirmed) return { stall: error, pendingTurn: turn }
+          if (savedComplete) return { stopReason: 'completed' }
           if (!await reserveRecovery()) return { stall: new AcpStalled('已自动恢复一次，再次停滞；保留结果，等待继续', true), pendingTurn: turn }
           turnSignal.throwIfAborted()
           if (disconnected) {
@@ -424,7 +468,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     check()
     if (result.stall) return stallPause(result.stall, result.pendingTurn)
     const diagnostics = worker.readDiagnostics?.() ?? {}
-    if (diagnostics.activeToolCount > 0) return stallPause(new AcpStalled('原回合已返回，但工具仍在执行；保留结果，等待工具结束'), Promise.resolve(result))
+    if (hasUnconfirmedAcpTools(diagnostics)) return stallPause(new AcpStalled('原回合已返回，但工具仍在执行；保留结果，等待工具结束', false, result), Promise.resolve(result))
     await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
     // stderrSummary may contain earlier turns; only current-turn failures can
     // pause this action (in particular after a user compacts and resumes it).
@@ -516,6 +560,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     // The coordinator is the real DSH owner session; worker identities are
     // emitted separately at bind. Do not invent an external session ID.
     id: parent?.id,
+    kind: 'source_first_coordinator',
     result: state.promise,
     readOutput: () => [...state.workers.entries()].map(([id, worker]) => {
       // ACP readOutput drains new text. An idle poll must stay empty or the
@@ -525,9 +570,10 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }).filter(Boolean).join(''),
     readDiagnostics: () => current?.readDiagnostics?.() ?? {},
     async dispose() {
-      if (!state.terminal && !signal.aborted) return
+      if (!state.terminal && !signal.aborted) return { retained: true }
       await Promise.allSettled([...state.workers.values()].map(disposed))
       liveRuns.delete(key)
+      return { retained: false }
     },
   }
 }

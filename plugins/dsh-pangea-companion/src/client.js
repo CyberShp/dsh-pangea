@@ -252,6 +252,42 @@ window.__ModuleLoader__.load({
           info.diagnostics.length ? h('p', { role: 'status', style: { ...muted, marginBottom: 0 } }, '部分进展资料不可读取：', info.diagnostics.map(item => typeof item === 'string' ? item : item.message ?? item.code ?? '读取诊断').join('；')) : null))
     }
 
+    function taskCanStop(task) {
+      return ['preparing', 'starting', 'running', 'stopping'].includes(task?.execution_status)
+        || ['preparing', 'starting', 'running', 'stopping', 'needs_attention', 'failed'].includes(task?.status)
+    }
+
+    function TaskLifecycleDialog({ state, onClose, onConfirm }) {
+      const dialog = React.useRef(null)
+      React.useEffect(() => {
+        const trigger = document.activeElement
+        dialog.current?.querySelector('button')?.focus()
+        return () => { if (trigger?.isConnected) trigger.focus?.({ preventScroll: true }) }
+      }, [])
+      const deleting = state.action === 'task-delete'
+      const title = deleting ? '删除分析任务？' : '停止分析任务？'
+      const keyDown = event => {
+        if (event.key === 'Escape' && !state.busy) { event.preventDefault(); event.stopPropagation(); onClose() }
+        if (event.key !== 'Tab') return
+        const controls = [...dialog.current.querySelectorAll('button:not(:disabled)')]
+        const first = controls[0], last = controls.at(-1)
+        if (!first) { event.preventDefault(); return }
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+      }
+      return h('div', { className: 'pangea-task-action-overlay', onKeyDown: keyDown },
+        h('section', { className: 'pangea-task-action-dialog', ref: dialog, role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'pangea-task-action-title' },
+          h('h2', { id: 'pangea-task-action-title' }, title),
+          h('p', { style: { fontWeight: 600, overflowWrap: 'anywhere' } }, state.task.title || state.task.task_id),
+          h('p', null, deleting ? '仅从分析任务列表移除；Run、报告、会话和日志仍保留。' : '停止当前分析执行，保留已保存的结果、报告、会话和日志。'),
+          deleting && taskCanStop(state.task) ? h('p', null, '此任务尚未确认停止。会先停止执行，确认结束后才移除；停止失败时任务仍保留，可重试。') : null,
+          state.error ? h('p', { role: 'alert', style: { color: '#a14035' } }, state.error) : null,
+          h('div', { className: 'pangea-task-action-footer' },
+            h('button', { type: 'button', style: styles.button, disabled: state.busy, onClick: onClose }, '取消'),
+            h('button', { type: 'button', style: { ...styles.button, color: '#a14035', borderColor: '#e4b8b1' }, disabled: state.busy, onClick: onConfirm },
+              state.busy ? deleting ? taskCanStop(state.task) ? '正在停止并删除…' : '正在删除…' : '正在请求停止…' : state.error ? deleting ? '重试删除' : '重试停止' : deleting ? '确认删除' : '确认停止'))))
+    }
+
     function RunWorkspace({ current, task, timeline = [], error, loading, busy, retry, navigate: onNavigate, openFile, openFlow, stop, resume, deliver, discuss, diagnostics, viewState }) {
       const [selection, setSelection] = React.useState(viewState?.selection ?? '')
       const [tab, setTab] = React.useState(viewState?.tab ?? 'activity')
@@ -369,7 +405,9 @@ window.__ModuleLoader__.load({
               node('div', 'tabs-mini', ['activity', 'tasks'].map(value => h('button', { type: 'button', key: value, className: value === tab ? 'active' : '', 'aria-pressed': value === tab, onClick: () => { setSelection(selected?.step ?? ''); setTab(value) } }, value === 'activity' ? '活动记录' : '阶段任务'))),
               h('div', { key: `${current.run_id}:${selected?.step}:${tab}`, className: 'activity', role: 'region', tabIndex: 0, 'aria-label': `${selected?.title ?? '当前阶段'} · ${tab === 'tasks' ? '阶段任务' : '活动记录'}` }, tab === 'tasks' ? h(React.Fragment, null, heading(selected?.stage === 'analyzing' ? '源码分析单元' : '阶段任务', badge(legacy ? `${tasks.length} 项任务` : `${tasks.filter(item => item.status === 'accepted').length} / ${tasks.length} 已接受`, legacy ? '' : 'good')),
                 tasks.length ? tasks.map(item => h('div', { key: item.unit_id ?? item.action_id, className: 'list-row', style: { padding: '10px 0' } }, node('span', 'small', item.title ?? item.task_id ?? item.action_id), badge(({ accepted: '已接受', settled: '待接受', dispatched: p.stopped ? '已停止' : p.failed && selected === active ? '执行已中断' : '执行中', pending: '等待', failed: '失败', paused: '待处理' })[item.status] ?? item.status, item.status === 'accepted' ? 'good' : 'neutral'))) : node('p', 'muted small', '当前阶段暂无任务。'),
-                selected?.artifacts?.length ? node('div', 'run-information', heading('阶段产物'), selected.artifacts.map(file => h('button', { key: file, className: 'link', onClick: () => openFile(file) }, artifactLabel(file)))) : null)
+                selected?.artifacts?.length ? node('div', 'run-information', heading('阶段产物'), h('ul', { className: 'stage-artifact-list', 'aria-label': '阶段产物', role: 'list' }, selected.artifacts.map(file => h('li', { key: file },
+                  h('button', { type: 'button', className: 'stage-artifact-link', title: file, 'aria-label': `打开${artifactLabel(file)}：${file}`, onClick: () => openFile(file) }, runIcon('FileText'),
+                    node('span', 'stage-artifact-copy', node('span', 'stage-artifact-title', artifactLabel(file)), node('span', 'stage-artifact-name', file.split(/[\\/]/).pop())), node('span', 'stage-artifact-open', '打开')))))) : null)
                 : h(React.Fragment, null, h('div', { className: 'row between small muted', style: { marginBottom: 19 } }, h('span', null, '阶段活动'), h('span', null, runIcon('ListFilter'), ' 关键事件')),
                   node('div', 'timeline', events.length ? events.map((event, i) => h('div', { key: event.key ?? i, className: `event ${i === 0 && p.running && !error ? 'pending' : ''}` }, h('time', null, time(event.time)), h('strong', null, event.title), event.detail ? h('p', null, event.detail) : null,
                     (event.evidence ?? []).filter(item => typeof item === 'string').map((location, index) => h('span', { key: index, className: 'badge mono' }, location)),
@@ -475,6 +513,17 @@ window.__ModuleLoader__.load({
 
     function snapshotFingerprint(value) {
       try { return JSON.stringify(value) } catch { return null }
+    }
+
+    function latestMonitorPersistence(...values) {
+      const timestamp = value => Math.max(0, ...['last_success_at_ms', 'last_failure_at_ms', 'recovered_at_ms']
+        .map(key => Number.isFinite(value?.[key]) ? value[key] : 0))
+      return values.filter(value => ['healthy', 'degraded'].includes(value?.status)).reduce((latest, value) => {
+        if (!latest || timestamp(value) > timestamp(latest)) return value
+        // Independent requests can complete out of order. A stale healthy
+        // response must not hide a newer failure; equal timestamps stay cautious.
+        return timestamp(value) === timestamp(latest) && value.status === 'degraded' ? value : latest
+      }, null)
     }
 
     function normalizedPathIdentity(value) {
@@ -675,8 +724,9 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestWorkbench({ cwd, runId, taskId, sessionId, cursor = 0, limit = 20, signal, fetcher = fetch }) {
+    async function requestWorkbench({ cwd, runId, taskId, sessionId, view, cursor = 0, limit = 20, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd, cursor: String(cursor), limit: String(limit) })
+      if (view) query.set('view', view)
       if (runId !== undefined) query.set('run_id', runId ?? '')
       if (taskId) query.set('task_id', taskId)
       if (sessionId) query.set('session_id', sessionId)
@@ -691,7 +741,8 @@ window.__ModuleLoader__.load({
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...payload }),
       })
       const body = await response.json()
-      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      const accepted = body.status === 'ok' || (['stop', 'task-delete'].includes(action) && body.status === 'stopping')
+      if (!response.ok || !accepted) throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
     }
 
@@ -858,6 +909,12 @@ window.__ModuleLoader__.load({
       .b03-task-table th { height: 50px; padding: 0 13px; border-bottom: 1px solid #e5e7e4; background: #f3f4f2; color: #70767d; font-size: 12px; font-weight: 500; line-height: 1.8; white-space: nowrap; }
       .b03-task-table td { padding: 14px 13px; border-bottom: 1px solid #e5e7e4; color: #25292e; line-height: 1.8; vertical-align: top; }
       .b03-task-table tbody tr:last-child td { border-bottom: 0; }
+      .pangea-task-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 92px; }
+      .pangea-task-row-actions button { white-space: nowrap; }
+      .pangea-task-action-overlay { position: fixed; inset: 0; z-index: 120; padding: 24px; display: flex; align-items: center; justify-content: center; background: rgba(24, 28, 32, .35); }
+      .pangea-task-action-dialog { box-sizing: border-box; width: min(480px, 100%); max-height: calc(100vh - 48px); overflow: auto; padding: 24px; background: #fff; border: 1px solid #e5e7e4; border-radius: 12px; box-shadow: 0 12px 40px rgba(20, 25, 30, .16); font-size: 14px; line-height: 1.7; }
+      .pangea-task-action-dialog h2 { margin: 0 0 16px; font-size: 20px; }
+      .pangea-task-action-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
       .b03-task-first-cell { display: flex; align-items: center; gap: 12px; min-width: 220px; }
       .b03-task-first-cell .b03-task-subtitle { margin-top: 0; line-height: 1.8; }
       .b03-task-icon { display: grid; width: 37px; height: 37px; flex: 0 0 37px; place-items: center; border: 1px solid #e5e7e4; border-radius: 8px; background: #fff; color: #70767d; }
@@ -1640,7 +1697,7 @@ window.__ModuleLoader__.load({
 
     function analysisBackTarget(screenType, { pageMode = 'analysis', selectedTaskId, hasHistory = false, initialScreen = 'tasks' } = {}) {
       if (hasHistory) return 'history'
-      if (pageMode === 'analysis' && selectedTaskId && !['tasks', 'create', 'overview'].includes(screenType)) return 'overview'
+      if (pageMode === 'analysis' && selectedTaskId && !['tasks', 'create', 'overview', 'repository-import'].includes(screenType)) return 'overview'
       return initialScreen
     }
 
@@ -2212,7 +2269,9 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState(undefined)
       const [workbenchError, setWorkbenchError] = React.useState(undefined)
       const [selectedRun, setSelectedRun] = React.useState(undefined)
-      const [selectedTaskId, setSelectedTaskId] = React.useState(ctx?.pangea?.getSelectedTaskId?.())
+      const [selectedTaskId, setSelectedTaskId] = React.useState(pageMode === 'analysis' ? ctx?.pangea?.getSelectedTaskId?.() : undefined)
+      const taskActionPendingRef = React.useRef(new Map())
+      const taskActionScopeRef = React.useRef(null)
       const [taskQuery, setTaskQuery] = React.useState('')
       const [taskStatus, setTaskStatus] = React.useState('全部')
       const [loading, setLoading] = React.useState(false)
@@ -2224,6 +2283,11 @@ window.__ModuleLoader__.load({
       const [repositoryError, setRepositoryError] = React.useState('')
       const [runCursor, setRunCursor] = React.useState(0)
       const [screen, setScreen] = React.useState({ type: initialScreen })
+      const needsRunSnapshot = pageMode === 'analysis'
+      const panelScopeRef = React.useRef({ cwd, pageMode, screen })
+      panelScopeRef.current = { cwd, pageMode, screen }
+      const repositoryRequestRef = React.useRef(0)
+      const repositoryImportRef = React.useRef(0)
       const [history, setHistory] = React.useState([])
       const [riskQuery, setRiskQuery] = React.useState('')
       const [riskSeverity, setRiskSeverity] = React.useState('全部')
@@ -2335,6 +2399,8 @@ window.__ModuleLoader__.load({
       const [flowReaders, setFlowReaders] = React.useState({})
       const flowPanelsRef = React.useRef({})
       const [derivation, setDerivation] = React.useState(null)
+      const [taskActionDialog, setTaskActionDialog] = React.useState(null)
+      const [taskActions, setTaskActions] = React.useState({})
       const derivationRequestRef = React.useRef(0)
       const derivationSubmitRef = React.useRef(false)
       const derivationScopeRef = React.useRef('')
@@ -2357,6 +2423,12 @@ window.__ModuleLoader__.load({
       const assetWorkspaceRef = React.useRef(cwd)
       const taskItems = workbench?.tasks?.items ?? []
       const selectedTask = taskItems.find(item => item.task_id === selectedTaskId)
+      taskActionScopeRef.current = { cwd, pageMode, visible, selectedTaskId, screen: screen.type }
+      React.useEffect(() => {
+        setTaskActionDialog(null)
+        setTaskActions({})
+      }, [cwd, pageMode])
+      React.useEffect(() => { if (!visible) setTaskActionDialog(null) }, [visible])
       React.useEffect(() => {
         ++derivationRequestRef.current
         setDerivation(null)
@@ -2414,6 +2486,9 @@ window.__ModuleLoader__.load({
         }
       }, [cwd, selectedDataRoot, selectedRun, selectedTask?.run_id, scope?.sessionId])
 
+      const workbenchRunId = pageMode === 'home' ? undefined : selectedRun === undefined ? snapshot?.current?.run_id : selectedRun
+      const workbenchTaskId = pageMode === 'analysis' ? selectedTaskId : undefined
+      const workbenchSessionId = pageMode === 'analysis' ? scope?.sessionId : undefined
       const loadWorkbench = React.useCallback(async ({ background = false } = {}) => {
         if (!cwd || pageMode === 'execution') return
         const sequence = ++workbenchRequestRef.current.sequence
@@ -2424,14 +2499,15 @@ window.__ModuleLoader__.load({
         try {
           const body = await requestWorkbench({
             cwd,
-            runId: selectedRun === undefined ? snapshot?.current?.run_id : selectedRun,
-            taskId: selectedTaskId,
-            sessionId: scope?.sessionId,
+            view: pageMode === 'home' ? 'home' : undefined,
+            runId: workbenchRunId,
+            taskId: workbenchTaskId,
+            sessionId: workbenchSessionId,
             cursor: runCursor,
             limit: 20,
             signal: controller.signal,
           })
-          if (sequence !== workbenchRequestRef.current.sequence) return
+          if (controller.signal.aborted || sequence !== workbenchRequestRef.current.sequence) return
           setWorkbench({ ...body, __clientSyncedAt: new Date().toISOString() })
           setWorkbenchError(undefined)
           return body
@@ -2443,7 +2519,10 @@ window.__ModuleLoader__.load({
         } finally {
           if (sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
         }
-      }, [cwd, pageMode, runCursor, scope?.sessionId, selectedRun, selectedTaskId, snapshot?.current?.run_id])
+      }, [cwd, pageMode, runCursor, workbenchSessionId, workbenchRunId, workbenchTaskId])
+
+      const latestTaskRefreshRef = React.useRef(null)
+      latestTaskRefreshRef.current = { load, loadWorkbench }
 
       const loadEnvironments = React.useCallback(async () => {
         try {
@@ -2457,18 +2536,21 @@ window.__ModuleLoader__.load({
 
       const loadRepositories = React.useCallback(async () => {
         if (!cwd || pageMode !== 'home') return undefined
+        const sequence = ++repositoryRequestRef.current
+        const stillCurrent = () => sequence === repositoryRequestRef.current && panelScopeRef.current.cwd === cwd
         setRepositoryLoading(true)
         try {
           const value = await requestRepositoryStatus({ cwd })
+          if (!stillCurrent()) return undefined
           setRepositoryState(value)
           setRepositoryError('')
           return value
         } catch (reason) {
           const message = reason instanceof Error ? reason.message : String(reason)
-          setRepositoryError(message)
+          if (stillCurrent()) setRepositoryError(message)
           return undefined
         } finally {
-          setRepositoryLoading(false)
+          if (stillCurrent()) setRepositoryLoading(false)
         }
       }, [cwd, pageMode])
 
@@ -2476,11 +2558,23 @@ window.__ModuleLoader__.load({
         snapshotRef.current = undefined
         snapshotFingerprintRef.current = ''
         setSnapshot(undefined)
+        ++workbenchRequestRef.current.sequence
+        workbenchRequestRef.current.controller?.abort()
+        setWorkbench(undefined)
+        setWorkbenchError(undefined)
+        setWorkbenchLoading(false)
         setSelectedRun(undefined)
         setSelectedTaskId(undefined)
         setScreen({ type: initialScreen })
         setHistory([])
         setSelectedCaseIds([])
+        ++repositoryRequestRef.current
+        ++repositoryImportRef.current
+        setRepositoryState(undefined)
+        setRepositoryLoading(false)
+        setRepositoryForm({ sourcePath: '', repositoryName: '' })
+        setRepositoryImporting(false)
+        setRepositoryError('')
       }, [cwd, initialScreen])
       React.useEffect(() => {
         requestRef.current.sequence += 1
@@ -2505,19 +2599,20 @@ window.__ModuleLoader__.load({
         return ctx?.pangea?.subscribeTaskSelection?.(sync)
       }, [ctx?.pangea, pageMode])
       React.useEffect(() => {
-        if (pageMode !== 'analysis' || selectedTaskId || selectedRun !== undefined || !workbench?.selected_task_id) return
+        if (pageMode !== 'analysis' || ['create', 'repository-import'].includes(screen.type) || selectedTaskId || selectedRun !== undefined || !workbench?.selected_task_id) return
         setSelectedTaskId(workbench.selected_task_id)
         const task = workbench?.tasks?.items?.find(item => item.task_id === workbench.selected_task_id)
         setSelectedRun(task?.run_id ?? undefined)
         setScreen({ type: 'overview' })
         setHistory([])
-      }, [pageMode, selectedRun, selectedTaskId, workbench?.selected_task_id, workbench?.tasks?.items])
+      }, [pageMode, screen.type, selectedRun, selectedTaskId, workbench?.selected_task_id, workbench?.tasks?.items])
       React.useEffect(() => {
+        if (pageMode !== 'analysis' || ['tasks', 'create', 'repository-import'].includes(screen.type)) return
         const task = workbench?.tasks?.items?.find(item => item.task_id === selectedTaskId)
         if (!task) return
         const taskRun = task.run_id ?? null
         if (taskRun !== selectedRun) { setSelectedRun(taskRun); setScreen({ type: 'overview' }); setHistory([]) }
-      }, [selectedRun, selectedTaskId, workbench?.tasks?.items])
+      }, [pageMode, screen.type, selectedRun, selectedTaskId, workbench?.tasks?.items])
       React.useEffect(() => () => { if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current) }, [])
       React.useEffect(() => {
         const sync = () => setRunDraft(ctx?.pangea?.getRunDraft?.() ?? { requestId: 0, assetIds: [] })
@@ -2527,6 +2622,14 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (pageMode !== 'analysis' || !runDraft?.requestId || runDraft.requestId === handledRunDraftRequest.current) return
         handledRunDraftRequest.current = runDraft.requestId
+        if (runDraft.intent === 'select-task' && runDraft.taskId) {
+          ctx?.pangea?.selectTask?.(runDraft.taskId)
+          setSelectedTaskId(runDraft.taskId)
+          setSelectedRun(runDraft.runId ?? null)
+          setScreen({ type: 'overview' })
+          setHistory([])
+          return
+        }
         if (runDraft.intent === 'select-run' && runDraft.runId) {
           const task = workbench?.tasks?.items?.find(item => item.run_id === runDraft.runId)
           ctx?.pangea?.selectTask?.(task?.task_id)
@@ -2539,7 +2642,7 @@ window.__ModuleLoader__.load({
         setCreateForm(value => ({ ...value, asset_ids: [...new Set(runDraft.assetIds ?? [])] }))
         setScreen({ type: 'create' })
         setHistory([])
-      }, [ctx?.pangea, pageMode, runDraft?.assetIds, runDraft?.intent, runDraft?.requestId, runDraft?.runId, workbench?.tasks?.items])
+      }, [ctx?.pangea, pageMode, runDraft?.assetIds, runDraft?.intent, runDraft?.requestId, runDraft?.runId, runDraft?.taskId, workbench?.tasks?.items])
       React.useEffect(() => {
         const repositories = workbench?.capabilities?.repositories ?? []
         if (repositories.length > 0) setCreateForm(value => value.repository ? value : { ...value, repository: repositories[0] })
@@ -2632,7 +2735,7 @@ window.__ModuleLoader__.load({
         return () => controller.abort()
       }, [cwd, visible, pageMode, screen.type, selectedAssetIdsKey])
       React.useEffect(() => {
-        if (!visible || pageMode === 'execution') {
+        if (!visible || !needsRunSnapshot) {
           requestRef.current.controller?.abort()
           return undefined
         }
@@ -2665,7 +2768,7 @@ window.__ModuleLoader__.load({
           requestRef.current.controller?.abort()
           document.removeEventListener('visibilitychange', onVisibilityChange)
         }
-      }, [load, pageMode, visible])
+      }, [load, needsRunSnapshot, visible])
       React.useEffect(() => {
         if (!visible || pageMode === 'execution') return undefined
         void loadWorkbench()
@@ -2680,8 +2783,13 @@ window.__ModuleLoader__.load({
         dataRoot: selectedDataRoot,
         task: selectedTask,
       }) ? snapshotCurrent : null
+      const monitorPersistence = pageMode === 'home' ? workbench?.monitor_persistence
+        : latestMonitorPersistence(workbench?.monitor_persistence, snapshot?.monitor?.persistence)
+      const monitorPersistenceDegraded = monitorPersistence?.status === 'degraded'
+      const needsWorkbenchPolling = taskItems.some(task => ['preparing', 'running'].includes(task.status))
+        || (pageMode === 'home' && monitorPersistenceDegraded)
       React.useEffect(() => {
-        if (!visible || pageMode === 'execution' || !taskItems.some(task => ['preparing', 'running'].includes(task.status))) return undefined
+        if (!visible || pageMode === 'execution' || !needsWorkbenchPolling) return undefined
         let stopped = false
         let timer
         const poll = async () => {
@@ -2692,9 +2800,12 @@ window.__ModuleLoader__.load({
               ? WORKBENCH_BACKGROUND_POLL_INTERVAL_MS : WORKBENCH_ACTIVE_POLL_INTERVAL_MS)
           }
         }
-        timer = window.setTimeout(poll, 0)
+        // The foreground effect already loaded this selection. A newly observed
+        // running task must not immediately abort/repeat that first request.
+        timer = window.setTimeout(poll, document.visibilityState === 'hidden'
+          ? WORKBENCH_BACKGROUND_POLL_INTERVAL_MS : WORKBENCH_ACTIVE_POLL_INTERVAL_MS)
         return () => { stopped = true; window.clearTimeout(timer) }
-      }, [loadWorkbench, pageMode, taskItems.some(task => ['preparing', 'running'].includes(task.status)), visible])
+      }, [loadWorkbench, pageMode, needsWorkbenchPolling, visible])
       const monitor = snapshot?.monitor
       const monitoredSession = monitor?.session
       const monitoredRun = monitor?.run
@@ -2731,6 +2842,7 @@ window.__ModuleLoader__.load({
         if (!visible) return
         const systemState = workbenchError || workbench?.compatibility?.compatible === false
           ? { state: 'error', label: '系统异常' }
+          : monitorPersistenceDegraded ? { state: 'error', label: '监控保存异常' }
           : workbench?.compatibility?.compatible === true
               ? { state: 'ok', label: '系统正常' }
               : { state: 'checking', label: '系统检查中' }
@@ -2829,7 +2941,7 @@ window.__ModuleLoader__.load({
           },
           onOpenSource: location => openSidebarFile(location, '源码依据'),
         } : null }))
-      }, [current, error, health?.status, pageMode, screen.id, screen.type, selectedTask, visible, diagramViews, conversationPending, workbench?.compatibility?.compatible, workbench?.launch_log?.events, workbenchError])
+      }, [current, error, health?.status, monitorPersistenceDegraded, pageMode, screen.id, screen.type, selectedTask, visible, diagramViews, conversationPending, workbench?.compatibility?.compatible, workbench?.launch_log?.events, workbenchError])
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
       const methodologyDetailError = workbench?.run_detail?.run_id === current?.run_id && workbench?.run_detail?.status === 'error'
         ? workbench.run_detail.error : ''
@@ -2920,9 +3032,11 @@ window.__ModuleLoader__.load({
 
       function openTaskFromWorkbench(task) {
         if (!task) return
+        // Explicit navigation also handles re-opening the already-selected task
+        // after its analysis page has moved to a draft or a result detail.
+        ctx?.pangea?.updateRunDraft?.({ intent: 'select-task', taskId: task.task_id, runId: task.run_id ?? null,
+          requestId: (ctx?.pangea?.getRunDraft?.()?.requestId ?? 0) + 1 })
         ctx?.pangea?.selectTask?.(task.task_id)
-        setSelectedTaskId(task.task_id)
-        setSelectedRun(task.run_id ?? null)
         const activeConversation = task.conversations?.find(item => item.conversation_id === task.active_conversation_id)
           ?? task.conversations?.[0]
         if (activeConversation?.session_id) {
@@ -2930,6 +3044,100 @@ window.__ModuleLoader__.load({
           ctx?.sessions?.open?.(activeConversation.session_id)
         }
         openProductPage('analysis', '分析任务', activeConversation?.session_id)
+      }
+
+      function openTaskAction(task, action, event) {
+        event?.preventDefault?.()
+        event?.stopPropagation?.()
+        if (!task || taskActionPendingRef.current.has(JSON.stringify([cwd, task.task_id]))) return
+        setTaskActionDialog({ task: { ...task }, action, cwd, busy: false, error: '' })
+      }
+
+      async function confirmTaskAction() {
+        const operation = taskActionDialog
+        if (!operation || operation.busy) return
+        const { task, action } = operation
+        const key = JSON.stringify([operation.cwd, task.task_id])
+        if (taskActionPendingRef.current.has(key)) return
+        const token = {}
+        taskActionPendingRef.current.set(key, token)
+        const inWorkspace = () => taskActionScopeRef.current?.cwd === operation.cwd && taskActionScopeRef.current?.pageMode === 'analysis'
+        const updateDialog = patch => setTaskActionDialog(value => value && value.cwd === operation.cwd && value.task.task_id === task.task_id && value.action === action ? { ...value, ...patch } : value)
+        updateDialog({ busy: true, error: '' })
+        setTaskActions(value => ({ ...value, [task.task_id]: { action, busy: true } }))
+        try {
+          const result = await requestWorkbenchAction({ cwd: operation.cwd, action, payload: {
+            task_id: task.task_id, run_id: task.run_id, data_root: task.data_root, attempt_id: task.attempt_id,
+          } })
+          if (!inWorkspace()) return
+          // An older polling response must not put a deleted task back or
+          // replace the authoritative stopping state returned by this action.
+          workbenchRequestRef.current.controller?.abort()
+          ++workbenchRequestRef.current.sequence
+          setWorkbenchLoading(false)
+          if (result.deleted === true) {
+            setWorkbench(value => value ? { ...value,
+              selected_task_id: value.selected_task_id === task.task_id ? undefined : value.selected_task_id,
+              tasks: { ...value.tasks, items: (value.tasks?.items ?? []).filter(item => item.task_id !== task.task_id),
+                total: Math.max(0, (value.tasks?.total ?? value.tasks?.items?.length ?? 0) - ((value.tasks?.items ?? []).some(item => item.task_id === task.task_id) ? 1 : 0)) },
+            } : value)
+            setTaskActionDialog(value => value?.task.task_id === task.task_id && value.cwd === operation.cwd ? null : value)
+            if (taskActionScopeRef.current.selectedTaskId === task.task_id) {
+              requestRef.current.controller?.abort()
+              ++requestRef.current.sequence
+              snapshotRef.current = undefined
+              snapshotFingerprintRef.current = ''
+              setSnapshot(undefined)
+              setLoading(false)
+              setError(undefined)
+              ctx?.pangea?.selectTask?.(undefined)
+              setSelectedTaskId(undefined)
+              setSelectedRun(null)
+              setScreen({ type: 'tasks' })
+              setHistory([])
+            } else await latestTaskRefreshRef.current.loadWorkbench({ background: true })
+            return
+          }
+          if (result.task) setWorkbench(value => value ? { ...value, tasks: { ...value.tasks,
+            items: (value.tasks?.items ?? []).map(item => item.task_id === task.task_id ? result.task : item) } } : value)
+          const errors = [result.run_stop, result.session_cancel, result.job_stop].filter(item => item?.status === 'error').map(item => item.error).filter(Boolean)
+          if (action === 'task-delete' || result.stop_confirmed !== true || errors.length) {
+            const message = result.error || errors.join('；') || '已请求停止，执行端尚未确认结束。任务仍保留，请稍后重试确认。'
+            updateDialog({ error: message })
+            setTaskActions(value => ({ ...value, [task.task_id]: { action, busy: false, error: message } }))
+          } else {
+            setTaskActionDialog(value => value?.task.task_id === task.task_id && value.cwd === operation.cwd ? null : value)
+            setTaskActions(value => ({ ...value, [task.task_id]: { action, busy: false } }))
+          }
+          const refresh = latestTaskRefreshRef.current
+          await Promise.all([refresh.loadWorkbench({ background: true }), taskActionScopeRef.current.selectedTaskId === task.task_id ? refresh.load() : undefined])
+        } catch (reason) {
+          if (!inWorkspace()) return
+          const message = `${action === 'task-delete' ? '删除' : '停止'}未完成：${reason instanceof Error ? reason.message : String(reason)}`
+          updateDialog({ error: message })
+          setTaskActions(value => ({ ...value, [task.task_id]: { action, busy: false, error: message } }))
+          await latestTaskRefreshRef.current.loadWorkbench({ background: true })
+        } finally {
+          if (taskActionPendingRef.current.get(key) === token) taskActionPendingRef.current.delete(key)
+          if (inWorkspace()) {
+            updateDialog({ busy: false })
+            setTaskActions(value => value[task.task_id] ? { ...value, [task.task_id]: { ...value[task.task_id], busy: false } } : value)
+          }
+        }
+      }
+
+      function taskActionButtons(task) {
+        const state = taskActions[task.task_id]
+        const busy = Boolean(state?.busy)
+        const stopping = task.execution_status === 'stopping' || task.status === 'stopping'
+        return h(React.Fragment, null,
+          taskCanStop(task) ? h('button', { type: 'button', className: 'b03-task-open', disabled: busy,
+            onClick: event => openTaskAction(task, 'stop', event), 'aria-label': '停止任务 ' + (task.title || task.task_id),
+            title: stopping ? '执行端尚未确认结束，可再次确认停止' : undefined }, runIcon('Square'),
+            busy ? '正在停止…' : state?.error && state.action === 'stop' ? '重试停止' : stopping ? '正在停止…' : '停止') : null,
+          h('button', { type: 'button', className: 'b03-task-open', disabled: busy, style: { color: '#a14035' },
+            onClick: event => openTaskAction(task, 'task-delete', event), 'aria-label': '删除任务 ' + (task.title || task.task_id) },
+            busy && state.action === 'task-delete' ? '正在删除…' : state?.error && state.action === 'task-delete' ? '重试删除' : '删除'))
       }
 
       async function startTask(task, propagate = false, guardSelection) {
@@ -3017,7 +3225,7 @@ window.__ModuleLoader__.load({
       }
       function launchEventLabel(event) {
         const status = event?.status === 'error' ? '失败' : event?.status === 'ok' ? '完成' : event?.status === 'start' ? '开始' : '信息'
-        const stage = ({ source_first_ready_wait: '等待 Agent 就绪', source_first_waiting: '等待执行器响应', source_first_cancel_requested: '正在确认取消', source_first_cancel_confirmed: '原回合已结束', source_first_recovering: '恢复原会话', source_first_recovered: '恢复回合结束', source_first_late_response: '收到延迟响应', source_first_worker_paused: '单元已暂停', source_first_soft_budget: '规划耗时提醒', source_first_acp_request: 'ACP 请求窗口', source_first_host_call: '宿主 CLI 阶段' })[event?.stage] ?? event?.stage ?? 'unknown'
+        const stage = ({ task_stop: '停止分析任务', task_deleted: '删除分析任务', source_first_ready_wait: '等待 Agent 就绪', source_first_waiting: '等待执行器响应', source_first_cancel_requested: '正在确认取消', source_first_cancel_confirmed: '原回合已结束', source_first_recovering: '恢复原会话', source_first_recovered: '恢复回合结束', source_first_late_response: '收到延迟响应', source_first_worker_paused: '单元已暂停', source_first_soft_budget: '规划耗时提醒', source_first_acp_request: 'ACP 请求窗口', source_first_host_call: '宿主 CLI 阶段', source_first_saved_result_checked: '检查已保存结果', acp_turn_finished: 'ACP 回合结束', acp_coordinator_finished: '宿主调度结束', acp_workers_retained: '保留原会话', acp_process_cleanup: 'ACP 进程清理' })[event?.stage] ?? event?.stage ?? 'unknown'
         const time = event?.at ? formatTime(event.at) : ''
         const detail = event?.error ?? event?.detail ?? event?.message ?? event?.output ?? ''
         const context = [event?.provider, event?.requested_model ? `指定：${event.requested_model}` : null, event?.model, event?.reasoning_effort, event?.job_id, event?.session_id, event?.run_id].filter(Boolean).join(' · ')
@@ -3025,7 +3233,7 @@ window.__ModuleLoader__.load({
           ['远端会话', event?.remote_session_id], ['Agent 版本', event?.agent_version], ['请求编号', event?.request_id],
           ['回合', event?.turn], ['停止原因', event?.stop_reason], ['ACP 停止原因', event?.protocol_stop_reason],
           ['消息事件', event?.message_chunks], ['工具事件', event?.tool_calls], ['工具失败事件', event?.tool_failures],
-          ['最近工具', event?.last_tool_id], ['工具状态', event?.last_tool_status],
+          ['最近工具', event?.last_tool_id], ['工具状态', event?.last_tool_status], ['未结束工具数', event?.active_tool_count],
           ['回合耗时(ms)', event?.turn_duration_ms], ['首个事件(ms)', event?.first_event_ms],
           ['首 token(ms)', event?.stage === 'source_first_acp_request' ? event.first_token_ms ?? '未记录（ACP 内部不可见）' : null],
           ['无新事件时长(ms)', event?.idle_duration_ms], ['排队耗时(ms)', event?.queue_duration_ms], ['提醒预算(ms)', event?.budget_ms],
@@ -3126,10 +3334,9 @@ window.__ModuleLoader__.load({
         if (!opened) showActionNotice(`${label}当前不可用，请检查对应插件是否已加载。`, true)
       }
       function openAnalysisCreate() {
-        // The workbench already owns the analysis form state.  Move directly
-        // into it instead of sending the user through the task list first.
-        setScreen({ type: 'create' })
-        setHistory([])
+        if (ctx?.pangea?.requestRunCreation?.(scope) !== true) {
+          showActionNotice('分析任务当前不可用，请检查对应插件是否已加载。', true)
+        }
       }
       function openAnalysisRun(run) {
         const task = taskItems.find(item => item.run_id === run?.run_id)
@@ -3248,7 +3455,15 @@ window.__ModuleLoader__.load({
       }
       async function submitRepositoryImport() {
         if (!cwd || repositoryImporting || !repositoryForm.sourcePath || !repositoryForm.repositoryName.trim()) return
+        const originScreen = screen
+        const returnTo = history.at(-1) ?? { type: initialScreen }
+        const sequence = ++repositoryImportRef.current
+        ++repositoryRequestRef.current
+        const ownsImport = () => sequence === repositoryImportRef.current && panelScopeRef.current.cwd === cwd
+          && panelScopeRef.current.pageMode === pageMode
+        const stillCurrent = () => ownsImport() && panelScopeRef.current.screen === originScreen
         setRepositoryImporting(true)
+        setRepositoryLoading(false)
         setRepositoryError('')
         try {
           const result = await requestRepositoryImport({
@@ -3256,20 +3471,21 @@ window.__ModuleLoader__.load({
             sourcePath: repositoryForm.sourcePath,
             repositoryName: repositoryForm.repositoryName,
           })
+          if (!stillCurrent()) return
           const nextState = await requestRepositoryStatus({ cwd })
+          if (!stillCurrent()) return
+          ++repositoryRequestRef.current
           setRepositoryState(nextState)
+          setRepositoryLoading(false)
           setRepositoryForm({ sourcePath: '', repositoryName: '' })
-          const returnTo = history.at(-1)
-          if (returnTo?.type === 'create') {
+          if (pageMode === 'analysis' && returnTo.type === 'create') {
             setCreateForm(form => ({ ...form, repository: result.repository.name }))
-            setScreen(returnTo)
-            setHistory(value => value.slice(0, -1))
-          } else {
-            setScreen({ type: 'home' })
-            setHistory([])
           }
+          setScreen(pageMode === 'home' ? { type: 'home' } : returnTo)
+          setHistory(value => value.slice(0, -1))
+          setRepositoryImporting(false)
           showActionNotice(`源码仓库“${result.repository.name}”已加入 PANGEA。`)
-          await Promise.all([load(), loadWorkbench()])
+          await loadWorkbench()
         } catch (reason) {
           const raw = reason instanceof Error ? reason.message : String(reason)
           const message = raw.includes('repository already exists')
@@ -3277,9 +3493,9 @@ window.__ModuleLoader__.load({
             : raw.includes('outside the PANGEA data directory')
               ? '请选择 pangea-data 目录之外的源码仓库。'
               : raw
-          setRepositoryError(message)
+          if (stillCurrent()) setRepositoryError(message)
         } finally {
-          setRepositoryImporting(false)
+          if (ownsImport()) setRepositoryImporting(false)
         }
       }
       function openRepositoryImport() {
@@ -3288,7 +3504,7 @@ window.__ModuleLoader__.load({
         navigate({ type: 'repository-import' })
       }
       async function submitNewRun() {
-        if (!cwd || creatingRun || coverageQueryBusy || workbench?.compatibility?.compatible !== true) return
+        if (pageMode !== 'analysis' || !cwd || creatingRun || coverageQueryBusy || workbench?.compatibility?.compatible !== true) return
         setCreatingRun(true)
         let createdTask
         try {
@@ -3430,21 +3646,20 @@ window.__ModuleLoader__.load({
       async function stopCurrentRun(propagate = false) {
         if (!cwd || !current || current.terminal) return
         try {
-          const stopped = await requestWorkbenchAction({ cwd, action: 'stop', payload: { task_id: selectedTask?.task_id, run_id: current.run_id, data_root: snapshot?.data_root } })
+          const stopped = await requestWorkbenchAction({ cwd, action: 'stop', payload: { task_id: selectedTask?.task_id, run_id: current.run_id, data_root: snapshot?.data_root, attempt_id: selectedTask?.attempt_id } })
           const stopErrors = [stopped.run_stop, stopped.session_cancel, stopped.job_stop].filter(item => item?.status === 'error').map(item => item.error)
-          if (propagate && stopErrors.length) {
+          if (propagate && (stopErrors.length || stopped.stop_confirmed === false)) {
             await Promise.all([load(), loadWorkbench()])
-            throw new Error(stopErrors.join('；'))
+            throw new Error(stopErrors.join('；') || stopped.error || '已请求停止，执行端尚未确认结束，请稍后重试。')
           }
-          setPendingStopRun('')
           if (stopped.run_stop?.status === 'error') {
             showActionNotice(`Agent 已停止，但 PANGEA 状态同步失败：${stopped.run_stop.error}`, true)
           } else if (stopped.session_cancel?.status === 'error') {
             showActionNotice(`Run 已停止；DSH 会话取消失败：${stopped.session_cancel.error}`, true)
           } else if (stopped.job_stop?.status === 'error') {
             showActionNotice(`Run 已停止；ACP Agent 停止失败：${stopped.job_stop.error}`, true)
-          } else if (stopped.job_stop?.result === 'requested') {
-            showActionNotice(`已请求停止 ${current.run_id}，等待 ACP Job 确认`)
+          } else if (stopped.stop_confirmed === false || stopped.job_stop?.result === 'requested') {
+            showActionNotice(`已请求停止 ${current.run_id}，等待执行端确认`, true)
           } else {
             showActionNotice(`已停止 ${current.run_id}`)
           }
@@ -3775,7 +3990,9 @@ window.__ModuleLoader__.load({
           disabled: refreshBusy,
           'aria-busy': refreshBusy,
           style: { ...styles.button, ...(refreshBusy ? styles.buttonDisabled : {}) },
-          onClick: () => { void (pageMode === 'execution' ? loadEnvironments() : Promise.all([load({ foreground: true }), loadWorkbench()])) },
+          onClick: () => { void (pageMode === 'execution' ? loadEnvironments()
+            : pageMode === 'home' ? Promise.all([loadWorkbench(), loadRepositories()])
+              : Promise.all([load({ foreground: true }), loadWorkbench()])) },
         }, refreshBusy ? '刷新中…' : '刷新')
       }
 
@@ -3859,7 +4076,7 @@ window.__ModuleLoader__.load({
         const stateHint = liveForRun
           ? `当前 DSH 会话已关联 ${current.run_id}，页面每 4 秒同步 PANGEA 产物。`
           : historicalRun
-            ? monitoredRun ? '原 DSH 会话可以被删除；这份最小运行摘要与 PANGEA Run 独立保留。' : '这个 Run 早于监控功能或未在当前设备记录；PANGEA 产物仍可完整浏览。'
+            ? monitoredRun ? monitorPersistenceDegraded ? '这份最小运行摘要与 PANGEA Run 分别记录；监控记录保存状态见上方提示。' : '原 DSH 会话可以被删除；这份最小运行摘要与 PANGEA Run 独立保留。' : '这个 Run 早于监控功能或未在当前设备记录；PANGEA 产物仍可完整浏览。'
             : '当前还没有捕获到可显示的运行事件。'
         const activeTools = liveForRun ? monitoredSession?.active_tools ?? [] : []
         const activeSubagents = liveForRun ? monitoredSession?.active_subagents ?? [] : []
@@ -4773,8 +4990,8 @@ window.__ModuleLoader__.load({
           const path = value => h('div', { className: 'create-import-path mono', title: value === target ? `${dataRoot}/repositories/${name}` : value, style: { overflowWrap: 'anywhere' } }, value)
           const phase = (number, title, copy, kind) => h('div', { className: `create-import-phase ${kind}` }, h('span', null, number), h('div', null, h('strong', null, title), h('p', null, copy)))
           return h('section', { className: 'pangea-ui pangea-create-workspace', 'aria-label': '添加源码仓库' },
-            h('div', { className: 'breadcrumb' }, h('span', null, 'PANGEA 分析'), runIcon('ChevronRight'), h('span', null, history.at(-1)?.type === 'create' ? '新建分析' : '添加源码仓库')),
-            h('div', { className: 'page-head' }, h('div', null, h('h1', null, '添加源码仓库'), h('p', { className: 'subtitle' }, repositoryImporting ? '正在准备本地分析工作区。' : '连接本地源码，让分析拥有清晰、独立的工作范围。')), button('返回分析任务', () => navigate({ type: 'tasks' }), 'ghost', 'ArrowLeft')),
+            h('div', { className: 'breadcrumb' }, h('span', null, pageMode === 'home' ? '工作台' : 'PANGEA 分析'), runIcon('ChevronRight'), h('span', null, history.at(-1)?.type === 'create' ? '新建分析' : '添加源码仓库')),
+            h('div', { className: 'page-head' }, h('div', null, h('h1', null, '添加源码仓库'), h('p', { className: 'subtitle' }, repositoryImporting ? '正在准备本地分析工作区。' : '连接本地源码，让分析拥有清晰、独立的工作范围。')), button(pageMode === 'home' ? '返回工作台' : history.at(-1)?.type === 'create' ? '返回新建分析' : '返回分析任务', goBack, 'ghost', 'ArrowLeft')),
             h('div', { className: 'create-import-shell' }, h('div', { className: 'cols' },
               h('section', { className: 'panel' },
                 h('div', { className: 'create-import-hero' }, h('div', { className: 'create-import-symbol', style: repositoryImporting ? { color: '#497ba4', background: '#f2f6fb', borderColor: '#dce7f0' } : undefined }, runIcon(repositoryImporting ? 'Copy' : 'FolderGit2')), h('div', null, h('div', { className: 'create-focus-label', style: repositoryImporting ? { color: '#497ba4' } : undefined }, repositoryImporting ? 'IMPORT IN PROGRESS' : 'SOURCE REPOSITORY'), h('h2', { className: 'create-heading', style: { margin: '7px 0 0' } }, repositoryImporting ? `正在复制 ${name}` : '把源码加入 PANGEA'))),
@@ -4816,7 +5033,7 @@ window.__ModuleLoader__.load({
 
       function renderHome() {
         if (repositoryState?.onboarding_required) return renderRepositoryImport(true)
-        const loadingHome = !workbench && workbenchLoading && !workbenchError
+        const loadingHome = !workbench && !workbenchError
         const failedHome = !workbench && Boolean(workbenchError)
         const staleHome = Boolean(workbench && workbenchError)
         const incompatibleHome = workbench?.compatibility?.compatible === false
@@ -4831,7 +5048,11 @@ window.__ModuleLoader__.load({
         const emptyTasks = available && tasks.length === 0
         const repository = workbench?.capabilities?.repositories?.[0] ?? workbench?.repositories?.items?.[0]?.repository_id
           ?? repositoryState?.repositories?.[0]?.name
-        const refresh = () => { setHomeRefreshed(false); void loadWorkbench().then(result => { if (result) setHomeRefreshed(true) }) }
+        const refresh = () => {
+          setHomeRefreshed(false)
+          void loadRepositories()
+          void loadWorkbench().then(result => { if (result) setHomeRefreshed(true) })
+        }
         const button = (label, action, primary = false, disabled = false, iconName, busy = false) => h('button', { type: 'button', className: `b06-button${primary ? ' primary' : ''}`, disabled, 'aria-busy': busy, onClick: action }, iconName && runIcon(iconName), label)
         const section = (title, extra, body) => h('section', { className: 'b06-panel' }, h('div', { className: 'b06-section-head' }, h('h2', null, title), extra), body)
         const muted = value => h('div', { className: 'b06-muted', role: 'status' }, value)
@@ -4869,7 +5090,9 @@ window.__ModuleLoader__.load({
                 loadingHome ? skeleton(158) : !available ? muted('报告列表暂不可用。') : !reports.length ? muted(emptyTasks ? '分析生成报告后，可从这里继续阅读。' : '分析尚未生成报告，已保存结果可在任务中查看。')
                   : reports.map(run => h('button', { key: run.run_id, type: 'button', className: 'b06-report', onClick: () => openAnalysisRun(run) }, h('span', { className: 'b06-icon', style: { width: 36, height: 36, flexBasis: 36 } }, reportGlyph()), h('span', null, h('strong', null, reportTitle(run)), h('span', { className: 'b06-meta' }, `${taskRunLabel(run.run_id)} · ${taskUpdatedLabel(run.completed_at ?? run.updated_at)}`)), '›'))),
               section('源码仓库', null, h(React.Fragment, null,
-                repository ? h('div', { className: 'b06-repo' }, h('div', { className: 'b06-row' }, runIcon('FolderGit2'), h('strong', null, repository)), h('span', { className: 'b06-badge green' }, '已就绪')) : muted('当前没有可用的源码仓库。'),
+                repositoryError ? h('div', { role: 'alert' }, h('p', null, `源码仓库状态读取失败：${repositoryError}`), button('重试检查仓库', () => { void loadRepositories() }, false, repositoryLoading))
+                  : repository ? h('div', { className: 'b06-repo' }, h('div', { className: 'b06-row' }, runIcon('FolderGit2'), h('strong', null, repository)), h('span', { className: 'b06-badge green' }, '已就绪'))
+                    : repositoryState === undefined ? muted('正在检查源码仓库…') : muted('当前没有可用的源码仓库。'),
                 h('p', { className: 'b06-repo-note' }, '分析时冻结选定源码，资产与报告保存在当前工作区。'), h('div', { className: 'b06-divider' }), h('button', { type: 'button', className: 'b06-link', onClick: openRepositoryImport }, '添加源码仓库 ↗'))))))
       }
 
@@ -4981,7 +5204,9 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', className: 'b03-task-run', onClick: () => chooseRun(task.run_id), 'aria-label': '打开 ' + taskRunLabel(task.run_id) + ' 运行过程' }, '运行过程', runIcon('ArrowUpRight')))
               : h('span', { className: 'b03-task-meta' }, '未关联运行')),
             h('td', { className: 'b03-task-meta' }, taskUpdatedLabel(task.updated_at ?? linkedRun?.updated_at)),
-            h('td', null, h('button', { type: 'button', className: 'b03-task-open', onClick: () => chooseTask(task), 'aria-label': '打开任务 ' + task.title }, runIcon('ArrowRight'), '打开')))
+            h('td', null, h('div', { className: 'pangea-task-row-actions' },
+              h('button', { type: 'button', className: 'b03-task-open', onClick: () => chooseTask(task), 'aria-label': '打开任务 ' + task.title }, runIcon('ArrowRight'), '打开'),
+              taskActionButtons(task))))
         })
         const unlinkedRunRows = unlinkedRuns.map(run => h('div', { key: run.run_id, className: 'b03-unlinked-row' },
           h('div', { style: { minWidth: 0 } },
@@ -4994,14 +5219,14 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'pangea-empty-state', role: workbenchError ? 'alert' : 'status' }, workbenchError ? '任务列表暂不可用，请重试同步。' : '正在读取分析任务…')
           : taskItems.length && filtered.length
             ? h('div', { className: 'b03-task-table-wrap' }, h('table', { className: 'b03-task-table', 'aria-label': '分析任务' },
-              h('colgroup', null, [40, 12.4, 10, 17.6, 10.3, 9.7].map((width, index) => h('col', { key: index, style: { width: `${width}%` } }))),
+              h('colgroup', null, [33, 12.4, 10, 17.6, 10, 17].map((width, index) => h('col', { key: index, style: { width: `${width}%` } }))),
               h('thead', null, h('tr', null,
                 h('th', { scope: 'col' }, '分析任务'),
                 h('th', { scope: 'col' }, '仓库 / 范围'),
                 h('th', { scope: 'col' }, '状态'),
                 h('th', { scope: 'col' }, 'Run / 运行过程'),
                 h('th', { scope: 'col' }, '更新时间'),
-                h('th', { scope: 'col', 'aria-label': '打开任务' }))),
+                h('th', { scope: 'col' }, '操作'))),
               h('tbody', null, rows)))
             : taskItems.length
               ? h('div', { className: 'b03-task-filter-empty-content', role: 'status' },
@@ -5022,7 +5247,7 @@ window.__ModuleLoader__.load({
           ? h('details', { className: 'b03-unlinked-runs' }, h('summary', null, '未关联任务的运行 · ' + unlinkedRuns.length), h('div', null, unlinkedRunRows))
           : null
         const standardActions = h('div', { className: 'b03-task-actions' },
-          h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('repository-import') }, runIcon('FolderPlus'), '添加仓库'),
+          h('button', { type: 'button', className: 'b03-task-action', onClick: openRepositoryImport }, runIcon('FolderPlus'), '添加仓库'),
           h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, className: 'b03-task-action b03-task-action-primary', onClick: () => jump('create') }, runIcon('Plus'), '新建分析'))
         const simpleAction = h('div', { className: 'b03-task-actions' },
           h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, className: 'b03-task-action b03-task-action-primary', onClick: () => jump('create') }, runIcon('Plus'), '新建分析'))
@@ -5182,6 +5407,7 @@ window.__ModuleLoader__.load({
               h('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: 800 } }, current?.target || selectedTask.target)) : null),
           h('div', { className: 'b03-overview-page-actions' },
             derivationButton(),
+            taskActionButtons(selectedTask),
             h('button', { type: 'button', style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 6 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-assistant')) }, runIcon('Sparkles'), 'AI 助手'),
             h('button', { type: 'button', style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 6 }, onClick: () => jump('tasks') }, runIcon('ArrowLeft'), '返回任务列表')))
         if (!current) {
@@ -5903,17 +6129,18 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...styles.error, marginTop: 6 } }, error),
         h('button', { type: 'button', style: { ...styles.button, marginTop: 8 }, onClick: () => { void load({ foreground: true }) } }, '重试')) : null
       const initialLoading = requiresSnapshot && loading && snapshot === undefined
-      const repositoryGate = pageMode === 'home' && repositoryState === undefined
-        ? h('div', { style: styles.onboardingShell }, h('div', { style: { ...styles.onboardingCard, textAlign: 'center' }, role: repositoryError ? 'alert' : 'status' },
-          h('div', { style: styles.onboardingEyebrow }, 'PANGEA DESKTOP'),
-          h('div', { style: { ...styles.onboardingTitle, fontSize: 24 } }, repositoryError ? '无法检查工作区状态' : '正在初始化 PANGEA'),
-          h('div', { style: styles.onboardingLead }, repositoryError || '正在确认本地数据目录与源码仓库，请稍候…'),
-          repositoryError ? h('button', { type: 'button', disabled: repositoryLoading, style: { ...styles.redButton, marginTop: 20 }, onClick: () => { void loadRepositories() } }, repositoryLoading ? '正在重试…' : '重试') : null))
-        : null
-      const contentBody = repositoryGate ?? (initialLoading
+      const contentBody = initialLoading
         ? h('div', { style: styles.card, role: 'status' }, h('div', { style: styles.empty }, '正在读取当前 Run…'))
-        : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body))
+        : requiresSnapshot && snapshot === undefined && error && workbench?.compatibility?.compatible !== false ? null : h(React.Fragment, null, healthAlert, body)
       const actionFeedback = actionNotice?.scopeKey === noticeScopeKey ? h('div', { style: { ...styles.card, ...(actionNotice.isError ? styles.healthError : styles.healthOk) }, role: actionNotice.isError ? 'alert' : 'status' }, h('div', { style: actionNotice.isError ? styles.error : styles.success }, actionNotice.message)) : null
+      const monitorPersistenceNotice = pageMode !== 'execution' && monitorPersistenceDegraded
+        ? h('div', { style: { ...styles.card, ...styles.healthWarning }, role: 'alert', 'aria-label': '监控记录保存异常' },
+          h('div', { style: styles.itemTitle }, '运行观察记录暂未保存'),
+          h('p', { style: { ...styles.text, margin: '6px 0 0' } }, '监控记录暂时无法写入磁盘，部分运行观察历史可能在重启后丢失。分析结果和测试用例的状态仍以各自产物为准。'),
+          monitorPersistence.error?.message ? h('details', { style: { ...styles.itemMeta, marginTop: 8 } },
+            h('summary', { style: { cursor: 'pointer' } }, '保存错误详情'),
+            h('div', { style: { marginTop: 6, overflowWrap: 'anywhere' } }, [monitorPersistence.error.code, monitorPersistence.error.message].filter(Boolean).join('：'))) : null)
+        : null
       const flowScreen = screen.type === 'flows' && pageMode === 'analysis' && selectedTask
       const resultScreen = ['risks', 'risk', 'cases', 'case', 'coverage-cases'].includes(screen.type) && pageMode === 'analysis' && selectedTask
       const rootClassName = `pangea-companion${screen.type === 'home' ? ' b06-home-screen' : ''}${screen.type === 'tasks' ? ' b03-task-screen' : ''}${screen.type === 'overview' || flowScreen || resultScreen ? ' b03-overview-screen' : ''}${flowScreen ? ' b04-flow-screen' : ''}${resultScreen ? ' b05-result-screen' : ''}`
@@ -5956,9 +6183,11 @@ window.__ModuleLoader__.load({
             screen.type === 'coverage-cases' ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportOpen(true) } }, runIcon('FileText'), '导出全部用例') : null,
             screen.type !== 'coverage-cases' ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('report') }, runIcon('FileText'), '查看分析原文') : null)),
         navigation) : null
-      if (screen.type === 'workflow') return h('div', { className: 'pangea-companion', style: styles.root }, renderSourceFirstWorkflow())
-      return h('div', { className: rootClassName, style: rootStyle, role: 'region', 'aria-label': 'PANGEA 测试工作台' },
+      if (screen.type === 'workflow') return h('div', { className: 'pangea-companion', style: styles.root }, monitorPersistenceNotice, renderSourceFirstWorkflow())
+      return h('div', { className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : 'PANGEA 执行环境' },
         h('style', null, panelCss),
+        taskActionDialog ? h(TaskLifecycleDialog, { state: taskActionDialog,
+          onClose: () => { if (!taskActionDialog.busy) setTaskActionDialog(null) }, onConfirm: () => { void confirmTaskAction() } }) : null,
         derivation ? h(RunDerivationDialog, { state: derivation, onChange: draft => setDerivation(value => value && ({ ...value, draft })),
           onClose: closeDerivation, onSubmit: input => { void submitDerivation(input) }, onRetry: () => { void openDerivation(null, derivation) } }) : null,
         ['home', 'tasks', 'create', 'repository-import', 'report'].includes(screen.type) || (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? null : header,
@@ -5966,7 +6195,7 @@ window.__ModuleLoader__.load({
             : screen.type === 'tasks' ? { padding: '25px 31px 27px', maxWidth: 'none', margin: 0 }
               : (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? { padding: '24px 31px 27px', maxWidth: 'none', margin: 0 }
               : screen.type === 'report' ? { padding: '25px 31px 27px', maxWidth: 'none', margin: 0 }
-                : ['environment', 'repository-import', 'create'].includes(screen.type) ? { padding: 0 } : styles.content }, flowHeader, resultHeader, actionFeedback, errorNotice, contentBody))
+                : ['environment', 'repository-import', 'create'].includes(screen.type) ? { padding: 0 } : styles.content }, monitorPersistenceNotice, flowHeader, resultHeader, actionFeedback, errorNotice, contentBody))
     }
 
     function apply(ctx) {
@@ -5995,6 +6224,8 @@ window.__ModuleLoader__.load({
     }
 
     exports.CreateAssetPicker = CreateAssetPicker
+    exports.TaskLifecycleDialog = TaskLifecycleDialog
+    exports.taskCanStop = taskCanStop
     exports.RunDerivationDialog = RunDerivationDialog
     exports.derivationInput = derivationInput
     exports.RunWorkspace = RunWorkspace

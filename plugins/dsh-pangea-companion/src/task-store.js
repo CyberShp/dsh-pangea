@@ -16,10 +16,10 @@ function errorCode(error) {
   return typeof error?.code === 'string' && error.code ? error.code : 'UNKNOWN'
 }
 
-function taskStoreWriteError(stage, storePath, temporary, error, attempts = 1) {
+function taskStoreWriteError(stage, storePath, temporary, error, attempts = 1, label = '任务存储发布失败') {
   const code = errorCode(error)
   return Object.assign(new Error(
-    `任务存储发布失败：stage=${stage}，code=${code}，attempts=${attempts}，target=${storePath}，temporary=${temporary}：${error instanceof Error ? error.message : String(error)}`,
+    `${label}：stage=${stage}，code=${code}，attempts=${attempts}，target=${storePath}，temporary=${temporary}：${error instanceof Error ? error.message : String(error)}`,
     { cause: error }
   ), { code })
 }
@@ -29,6 +29,7 @@ export async function writeTaskStoreFile(storePath, content, options = {}) {
   const platform = options.platform ?? process.platform
   const retryDelays = options.retryDelays ?? WINDOWS_RENAME_RETRY_DELAYS
   const pause = options.wait ?? wait
+  const errorLabel = options.errorLabel ?? '任务存储发布失败'
   const temporary = `${storePath}.${process.pid}.${randomUUID()}.tmp`
   let stage = 'mkdir'
   let attempts = 0
@@ -46,14 +47,14 @@ export async function writeTaskStoreFile(storePath, content, options = {}) {
         const retryable = platform === 'win32'
           && ['EPERM', 'EBUSY', 'EACCES'].includes(errorCode(error))
           && attempts <= retryDelays.length
-        if (!retryable) throw taskStoreWriteError(stage, storePath, temporary, error, attempts)
+        if (!retryable) throw taskStoreWriteError(stage, storePath, temporary, error, attempts, errorLabel)
         await pause(retryDelays[attempts - 1])
       }
     }
   } catch (error) {
     let failure = error
-    if (!(error instanceof Error) || !error.message.startsWith('任务存储发布失败：')) {
-      failure = taskStoreWriteError(stage, storePath, temporary, error, Math.max(attempts, 1))
+    if (!(error instanceof Error) || !error.message.startsWith(`${errorLabel}：`)) {
+      failure = taskStoreWriteError(stage, storePath, temporary, error, Math.max(attempts, 1), errorLabel)
     }
     try {
       await operations.rm(temporary, { force: true })
@@ -214,6 +215,8 @@ function normalizeTask(taskId, value) {
     active_conversation_id: text(value?.active_conversation_id) || conversations[0]?.conversation_id || null,
     created_at: Number.isFinite(value?.created_at) ? value.created_at : null,
     updated_at: Number.isFinite(value?.updated_at) ? value.updated_at : null,
+    deleted_at: Number.isFinite(value?.deleted_at) ? value.deleted_at : null,
+    stop_confirmed_at: Number.isFinite(value?.stop_confirmed_at) ? value.stop_confirmed_at : null,
   }
 }
 
@@ -359,11 +362,11 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async list({ workspace } = {}) {
+  async list({ workspace, includeDeleted = false } = {}) {
     await this.ready
     const root = text(workspace)
     return Object.values(this.store.tasks)
-      .filter(task => !root || task.workspace === root)
+      .filter(task => (includeDeleted || task.deleted_at === null) && (!root || task.workspace === root))
       .sort((left, right) => (right.updated_at ?? 0) - (left.updated_at ?? 0))
       .map(task => structuredClone(task))
   }
@@ -372,6 +375,25 @@ export class TaskStore {
     await this.ready
     const task = this.store.tasks[text(taskId)]
     return task ? structuredClone(task) : null
+  }
+
+  async softDelete(taskId) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    if (task.deleted_at !== null) return structuredClone(task)
+    if (!Number.isFinite(task.stop_confirmed_at) || ['starting', 'running', 'stopping'].includes(task.execution_status)) {
+      throw new Error('任务执行尚未确认停止，不能删除')
+    }
+    const previousUpdatedAt = task.updated_at
+    task.deleted_at = this.now()
+    task.updated_at = task.deleted_at
+    try { await this.persistQueued() }
+    catch (error) {
+      task.deleted_at = null
+      task.updated_at = previousUpdatedAt
+      throw error
+    }
+    return structuredClone(task)
   }
 
   async getBySession(sessionId) {
@@ -462,6 +484,7 @@ export class TaskStore {
   }
 
   prepareAttempt(task, provider) {
+    if (task.deleted_at !== null) throw new Error('任务已删除，不能重新启动')
     const now = this.now()
     const attemptId = text(this.attemptIdFactory()) || `attempt-${randomUUID()}`
     const attempt = normalizeAttempt({
@@ -485,6 +508,7 @@ export class TaskStore {
     task.last_output = null
     task.last_activity_at = now
     task.status = 'preparing'
+    task.stop_confirmed_at = null
     return attempt
   }
 
@@ -666,11 +690,12 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async markStopping(taskId, error = null) {
+  async markStopping(taskId, error = null, { force = false } = {}) {
     await this.ready
     const task = this.requireTask(taskId)
-    if (['completed', 'failed', 'stopped', 'interrupted'].includes(task.execution_status)) return structuredClone(task)
+    if (!force && ['completed', 'failed', 'stopped', 'interrupted'].includes(task.execution_status)) return structuredClone(task)
     task.execution_status = 'stopping'
+    task.stop_confirmed_at = null
     if (error) task.launch_error = text(error)
     const attempt = task.attempts.find(item => item.attempt_id === task.attempt_id)
     if (attempt && !['completed', 'failed', 'stopped', 'interrupted'].includes(attempt.execution_status)) {
@@ -684,17 +709,19 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async markStopped(taskId, error = null) {
+  async markStopped(taskId, error = null, { force = false } = {}) {
     await this.ready
     const task = this.requireTask(taskId)
-    if (['completed', 'failed', 'interrupted', 'stopped'].includes(task.execution_status)) return structuredClone(task)
-    task.status = 'stopped'
-    task.execution_status = 'stopped'
+    if (!force && ['completed', 'failed', 'interrupted', 'stopped'].includes(task.execution_status)) return structuredClone(task)
+    const completed = task.status === 'completed'
+    task.status = completed ? 'completed' : 'stopped'
+    task.execution_status = completed ? 'completed' : 'stopped'
+    task.stop_confirmed_at = error ? null : this.now()
     task.launch_error = text(error) || null
     task.launch_error_code = text(error) ? 'STOP_FAILED' : null
     const attempt = task.attempts.find(item => item.attempt_id === task.attempt_id)
     if (attempt) {
-      attempt.execution_status = 'stopped'
+      attempt.execution_status = completed ? 'completed' : 'stopped'
       attempt.terminal_error = text(error) || null
       attempt.ended_at = this.now()
       attempt.last_activity_at = attempt.ended_at

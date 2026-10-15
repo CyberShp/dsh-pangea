@@ -1,7 +1,8 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { writeTaskStoreFile } from './task-store.js'
 
 const STORE_VERSION = 2
 
@@ -72,7 +73,7 @@ function normalizeStoredRun(key, value) {
 }
 
 export class RuntimeMonitor {
-  constructor({ storePath = defaultStorePath(), now = () => Date.now() } = {}) {
+  constructor({ storePath = defaultStorePath(), now = () => Date.now(), writeOptions = {}, logger = console, saveDelayMs = 250 } = {}) {
     this.storePath = storePath
     this.now = now
     this.store = emptyStore()
@@ -80,6 +81,19 @@ export class RuntimeMonitor {
     this.agents = new WeakMap()
     this.saveTimer = undefined
     this.saveQueue = Promise.resolve()
+    this.saveInFlight = false
+    this.saveRequested = false
+    this.savingRevision = 0
+    this.lastAttemptedRevision = 0
+    this.saveRevision = 0
+    this.persistedRevision = 0
+    this.writeOptions = writeOptions
+    this.logger = logger
+    this.saveDelayMs = saveDelayMs
+    this.persistence = {
+      status: 'healthy', last_success_at_ms: null, last_failure_at_ms: null,
+      consecutive_failures: 0, error: null, recovered_at_ms: null,
+    }
     this.ready = this.load()
   }
 
@@ -259,32 +273,108 @@ export class RuntimeMonitor {
         bound_run_id: session.bound_run_key ? this.store.runs[session.bound_run_key]?.run_id ?? null : null,
       } : null,
       run: run ? { ...run, last_seen: run.progress_changed_at, session_live: ownerSession?.live === true } : null,
+      persistence: this.getPersistenceStatus(),
+    }
+  }
+
+  getPersistenceStatus() {
+    return {
+      ...this.persistence,
+      pending: this.saveRevision > this.persistedRevision,
+      error: this.persistence.error ? { ...this.persistence.error } : null,
     }
   }
 
   scheduleSave() {
+    this.saveRevision += 1
     if (this.saveTimer !== undefined) return
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined
-      this.saveQueue = this.saveQueue.then(() => this.persist(), () => this.persist())
-    }, 250)
+      this.enqueueSave()
+    }, this.saveDelayMs)
   }
 
-  async persist() {
-    await mkdir(path.dirname(this.storePath), { recursive: true })
-    const temporary = `${this.storePath}.tmp`
-    await writeFile(temporary, `${JSON.stringify(this.store, null, 2)}\n`, 'utf8')
-    await rename(temporary, this.storePath)
+  enqueueSave() {
+    if (this.saveInFlight) {
+      // Timers can run faster than Windows releases a sharing lock. Keep only
+      // one request for the latest state, not an ever-growing promise chain.
+      if (this.saveRevision > this.savingRevision) this.saveRequested = true
+      return this.saveQueue
+    }
+    if (this.saveRevision <= this.persistedRevision) return Promise.resolve(this.getPersistenceStatus())
+    const revision = this.saveRevision
+    this.saveInFlight = true
+    this.saveRequested = false
+    this.savingRevision = revision
+    // Install the rejection handler when creating the promise, not at the next
+    // poll/flush. An observation cache must never crash Harness between saves.
+    this.saveQueue = this.persist(revision)
+      .catch(error => this.recordPersistenceFailure(error))
+      .then(status => {
+        this.lastAttemptedRevision = revision
+        this.saveInFlight = false
+        if (this.saveRequested) this.enqueueSave()
+        return status
+      })
+    return this.saveQueue
+  }
+
+  logPersistence(level, message) {
+    // A host logger may itself be disposing during shutdown.
+    try { this.logger?.[level]?.(message) } catch {}
+  }
+
+  recordPersistenceFailure(error) {
+    const firstFailure = this.persistence.status !== 'degraded'
+    this.persistence = {
+      ...this.persistence,
+      status: 'degraded',
+      last_failure_at_ms: this.now(),
+      consecutive_failures: this.persistence.consecutive_failures + 1,
+      error: { code: plainText(error?.code, 'UNKNOWN'), message: error instanceof Error ? error.message : String(error) },
+    }
+    if (firstFailure) this.logPersistence('warn', `[dsh-pangea-companion] 运行观察缓存保存失败，当前观察保留在内存中，重启后可能丢失；后续观测或关闭时将重试。${this.persistence.error.message}`)
+    return this.getPersistenceStatus()
+  }
+
+  async persist(revision = this.saveRevision) {
+    await this.ready
+    if (revision <= this.persistedRevision) return this.getPersistenceStatus()
+    try {
+      await writeTaskStoreFile(this.storePath, `${JSON.stringify(this.store, null, 2)}\n`, {
+        ...this.writeOptions, errorLabel: '运行观察缓存保存失败',
+      })
+      this.persistedRevision = revision
+      const recovered = this.persistence.status === 'degraded'
+      const savedAt = this.now()
+      this.persistence = {
+        ...this.persistence, status: 'healthy', last_success_at_ms: savedAt,
+        consecutive_failures: 0, error: null,
+        recovered_at_ms: recovered ? savedAt : this.persistence.recovered_at_ms,
+      }
+      if (recovered) this.logPersistence('info', '[dsh-pangea-companion] 运行观察缓存保存已恢复。')
+      return this.getPersistenceStatus()
+    } catch (error) {
+      // This file is disposable observation history. Keep pending in-memory
+      // revisions for the next observation/explicit flush; do not claim saved.
+      return this.recordPersistenceFailure(error)
+    }
   }
 
   async flush() {
     await this.ready
+    const revision = this.saveRevision
     if (this.saveTimer !== undefined) {
       clearTimeout(this.saveTimer)
       this.saveTimer = undefined
-      this.saveQueue = this.saveQueue.then(() => this.persist(), () => this.persist())
     }
-    await this.saveQueue
+    if (revision > this.persistedRevision) {
+      await this.enqueueSave()
+      // A flush waits for an attempt covering the state at its call, rather
+      // than waiting indefinitely for observations arriving after that call.
+      while (this.lastAttemptedRevision < revision) await this.enqueueSave()
+    }
+    return this.getPersistenceStatus()
   }
 }
 

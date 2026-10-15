@@ -21,7 +21,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, internalModelOptions, launchAnalysisSession, launchArchitectureSession, isNativeDiagramRunning, queryCoverageAsset, importCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, internalModelOptions, launchAnalysisSession, launchArchitectureSession, isNativeDiagramRunning, queryCoverageAsset, importCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -37,6 +37,17 @@ const LAUNCH_LOG_API_PATH = '/api/pangea-companion/launch-log'
 const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
 const ACP_SETTINGS_API_PATH = '/api/pangea-companion/acp-settings'
 const hostInstanceId = randomUUID()
+// Shared by requests for one store, never by task IDs from another workspace.
+const taskOperationStates = new WeakMap()
+function taskOperationState(tasks) {
+  let state = taskOperationStates.get(tasks)
+  if (!state) { state = { launches: new Map(), stops: new Map(), deletions: new Map() }; taskOperationStates.set(tasks, state) }
+  return state
+}
+
+function launchStoppedError() {
+  return Object.assign(new Error('PANGEA 分析已请求停止，尚未放行的执行已取消'), { code: 'PANGEA_STOP_REQUESTED' })
+}
 
 function rpc(payload) {
   return { rpcId: `pangea-companion-${Date.now()}-${Math.random()}`, payload }
@@ -388,9 +399,10 @@ async function executionRouteHandler(req, res, store, api) {
   }
 }
 
-function requireWorkspaceTask(task, cwd, taskId) {
+function requireWorkspaceTask(task, cwd, taskId, { allowDeleted = false } = {}) {
   if (!task) throw new Error(`task not found: ${taskId}`)
   if (task.workspace !== workspaceRoot(cwd)) throw new Error(`task does not belong to current workspace: ${taskId}`)
+  if (!allowDeleted && Number.isFinite(task.deleted_at)) throw new Error('任务已删除')
   return task
 }
 
@@ -530,6 +542,36 @@ function readJobSnapshot(runtime, task) {
   return snapshot
 }
 
+// Home only checks in-memory ownership. It must not consume output, persist
+// reconciliation or start Python just to paint a status card. Lost ownership
+// is shown as unverified rather than presenting an old running flag as live.
+function homeRuntimeTask(runtime, task) {
+  if (!['starting', 'running', 'stopping'].includes(task.execution_status)) return task
+  const uncertain = message => ({ ...task, runtime_issue: message })
+  if (task.job_id) {
+    let snapshot
+    try { snapshot = readJobSnapshot(runtime, task) }
+    catch (error) { return uncertain(error instanceof Error ? error.message : String(error)) }
+    const issue = jobIdentityIssue(task, snapshot)
+    if (issue) return uncertain(issue)
+    if (['failed', 'killed'].includes(snapshot.status)) {
+      return uncertain(snapshot.detail || '执行已结束，请打开任务检查结果和停止状态')
+    }
+    if (snapshot.status === 'completed') {
+      // Completion still requires the current Run's verified report metadata.
+      return { ...task, status: 'needs_attention', execution_status: 'completed' }
+    }
+    return task
+  }
+  if (!task.provider && task.workflow_version === 'source-first-v1') {
+    const binding = nativeOwnerBinding(task)
+    if (binding.owner_session_id && !runtimeService(runtime, 'agents')?.get?.(binding.owner_session_id)) {
+      return uncertain('原执行会话当前不可用，请打开任务核验执行状态')
+    }
+  }
+  return task
+}
+
 function deriveTaskResumeEligibility(runtime, task, sourceRecovery) {
   if (!task?.run_id) return { can_resume: false, resume_blocked_reason: '没有可继续的 Run' }
   if (task.status === 'completed') return { can_resume: false, resume_blocked_reason: '当前 Run 已交付完成' }
@@ -623,6 +665,196 @@ export async function assessTaskResumeEligibility(runtime, task) {
     }
   }
   return deriveTaskResumeEligibility(runtime, task, recovery)
+}
+
+async function taskStopEvidence(runtime, task, launchLocks, sourceDrained, launch, previouslyConfirmed = false) {
+  const blocked = reason => ({ confirmed: false, reason })
+  if (launchLocks.has(task.task_id)) return blocked('启动请求尚未结束，正在等待取消确认')
+  if (task.job_id) {
+    let job
+    try { job = readJobSnapshot(runtime, task) }
+    catch (error) { return blocked(error.message) }
+    if (job) {
+      const issue = jobIdentityIssue(task, job)
+      if (issue) return blocked(issue)
+      if (!['completed', 'failed', 'killed'].includes(job.status)) return blocked('原 ACP Job 尚未确认结束')
+    } else if (!sourceDrained && !previouslyConfirmed) {
+      if (task.workflow_version !== 'source-first-v1') {
+        if (processPresence(task.process_id) !== 'absent') return blocked('原 ACP Job 已不可读取，进程结束尚未确认')
+      }
+    }
+  }
+  if (task.provider) {
+    if (task.workflow_version !== 'source-first-v1' && (task.job_id || task.agent_session_id || task.process_id)
+      && !previouslyConfirmed && processPresence(task.process_id) !== 'absent') {
+      return blocked('原 ACP Job 已结束，但执行进程释放尚未确认；保留任务供重试')
+    }
+    if (task.workflow_version === 'source-first-v1' && task.run_id && (task.job_id || task.agent_session_id || task.process_id)) {
+      if (!sourceDrained && !previouslyConfirmed) {
+        try {
+          const evidence = await inspectSourceFirstAcpRecovery({ dataRoot: task.data_root, runId: task.run_id })
+          if (!evidence.can_resume) return blocked(evidence.blocked_reason)
+        } catch (error) { return blocked(`无法核验 ACP worker 是否停止：${error.message}`) }
+      }
+    } else if (!task.job_id && (task.agent_session_id || task.process_id) && processPresence(task.process_id) !== 'absent') {
+      return blocked('原 ACP 执行进程结束尚未确认')
+    }
+    return { confirmed: true }
+  }
+  const binding = nativeOwnerBinding(task)
+  if (!binding.owner_session_id || launch?.submitted === false) return { confirmed: true }
+  if (previouslyConfirmed && !runtimeService(runtime, 'agents')?.get?.(binding.owner_session_id)) return { confirmed: true }
+  if (task.workflow_version === 'source-first-v1') {
+    const evidence = await nativeRecovery(runtime, task)
+    return evidence.can_resume ? { confirmed: true } : blocked(evidence.blocked_reason)
+  }
+  const owner = runtimeService(runtime, 'agents')?.get?.(binding.owner_session_id)
+  if (!owner) return processPresence(binding.host_process_id) === 'absent'
+    ? { confirmed: true } : blocked('原 DSH 会话结束尚未确认')
+  if (owner.status !== 'idle' || typeof owner.whenIdle !== 'function') return blocked('原 DSH 会话尚未静止')
+  let timer
+  try {
+    const idle = await Promise.race([Promise.resolve(owner.whenIdle()).then(() => true), new Promise(resolve => { timer = setTimeout(() => resolve(false), 25) })])
+    return idle && owner.status === 'idle' ? { confirmed: true } : blocked('原 DSH 会话仍有待处理工作')
+  } catch { return blocked('无法确认原 DSH 会话已静止') }
+  finally { clearTimeout(timer) }
+}
+
+async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, runtime, runner }) {
+  const state = taskOperationState(tasks)
+  const launch = state.launches.get(task.task_id)
+  if (launch) launch.cancelled = true
+  const errors = []
+  const recordFailure = (stage, error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    errors.push(message)
+    return appendLaunchSafe(launchLogs, task.task_id, { stage, status: 'error', error: message })
+  }
+  const wasCompleted = task.status === 'completed'
+  const previouslyConfirmed = Number.isFinite(task.stop_confirmed_at)
+  try { task = await tasks.markStopping(task.task_id, null, { force: true }) }
+  catch (error) {
+    // Persistence can be temporarily locked on Windows. Still send exact
+    // cancellation, but do not report a durable stop or allow deletion.
+    await recordFailure('task_stop_persist', error)
+    task = await tasks.get(task.task_id) ?? task
+  }
+  let stopped = { data_root: task.data_root, run: null }
+  let runStop = { status: 'not_bound', error: null }
+  if (task.run_id && !wasCompleted && !previouslyConfirmed) {
+    try {
+      stopped = await stopAnalysisRun({ cwd: task.workspace, dataRoot: task.data_root, runId: task.run_id, runner })
+      runStop = { status: 'ok', error: null }
+    } catch (error) {
+      // A formally completed Run can still be shown as needs_attention (for
+      // example UNRESOLVED quality). Its immutable terminal state rejects
+      // runs stop; verify that state instead of treating any CLI error as OK.
+      let current
+      try { current = await runner({ cwd: task.workspace, args: ['runs', 'get', '--data-root', task.data_root, '--run-id', task.run_id] }) }
+      catch { /* Preserve the original stop failure below. */ }
+      if (current?.run_id === task.run_id && current.lifecycle_status === 'complete') {
+        stopped = { data_root: task.data_root, run: current }
+        runStop = { status: 'ok', result: 'already-complete', error: null }
+      } else {
+        runStop = { status: 'error', error: error.message ?? String(error) }
+        await recordFailure('run_stop_sync', error)
+      }
+    }
+  }
+  // Close admission in the Run first, then cancel each exact execution. Failed
+  // cancellation must not fabricate a stopped Run or hide its task record.
+  let jobStop = { status: 'not_bound', job_id: task.job_id, error: null }
+  if (task.job_id) {
+    try {
+      const jobs = runtimeService(runtime, 'jobs')
+      const owner = jobOwner(runtime, task)
+      const job = readJobSnapshot(runtime, task)
+      if (job) {
+        const issue = jobIdentityIssue(task, job)
+        if (issue) throw new Error(issue)
+        if (!['completed', 'failed', 'killed'].includes(job.status)) {
+          if (!owner || typeof jobs?.kill !== 'function') throw new Error('原 ACP Job 所有者不可用，停止尚未确认')
+          const result = await jobs.kill(task.job_id, owner, '用户请求停止 PANGEA 分析')
+          jobStop = { status: 'requested', job_id: task.job_id, result, error: null }
+        } else jobStop = { status: 'ok', job_id: task.job_id, result: 'already-finished', error: null }
+      } else jobStop = { status: 'unavailable', job_id: task.job_id, error: null }
+    } catch (error) {
+      jobStop = { status: 'error', job_id: task.job_id, error: error.message ?? String(error) }
+      await recordFailure('acp_job_stop', error)
+    }
+  }
+  let sourceDrained = false
+  if (task.run_id) {
+    try { sourceDrained = await stopSourceFirstAcpRun({ dataRoot: task.data_root, runId: task.run_id }) }
+    catch (error) { await recordFailure('acp_children_stop', error) }
+    try { await interruptSourceFirstChildren({ dataRoot: task.data_root, runId: task.run_id }) }
+    catch (error) { await recordFailure('native_children_stop', error) }
+  }
+  const sessionId = nativeOwnerBinding(task).owner_session_id
+  let sessionCancel = { status: 'not_bound', session_id: null, error: null }
+  if (sessionId) {
+    try {
+      const owner = runtimeService(runtime, 'agents')?.get?.(sessionId)
+      let quiescent = !owner && (previouslyConfirmed || processPresence(nativeOwnerBinding(task).host_process_id) === 'absent')
+      if (owner?.status === 'idle' && typeof owner.whenIdle === 'function') {
+        let timer
+        try {
+          quiescent = await Promise.race([Promise.resolve(owner.whenIdle()).then(() => owner.status === 'idle'),
+            new Promise(resolve => { timer = setTimeout(() => resolve(false), 25) })])
+        } finally { clearTimeout(timer) }
+      }
+      if (!quiescent) apiValue(await api.sessions.cancel(rpc({ sessionId })))
+      sessionCancel = { status: 'ok', session_id: sessionId, result: quiescent ? 'already-idle' : 'requested', error: null }
+    } catch (error) {
+      sessionCancel = { status: 'error', session_id: sessionId, error: error.message ?? String(error) }
+      await recordFailure('session_stop', error)
+    }
+  }
+  task = await tasks.get(task.task_id)
+  const evidence = await taskStopEvidence(runtime, task, launchLocks, sourceDrained, launch, previouslyConfirmed)
+  if (!evidence.confirmed) errors.push(evidence.reason)
+  let confirmed = evidence.confirmed && errors.length === 0
+  let error = [...new Set(errors.filter(Boolean))].join('；') || null
+  let updated
+  try {
+    updated = confirmed
+      ? await tasks.markStopped(task.task_id, null, { force: true })
+      : await tasks.markStopping(task.task_id, error, { force: true })
+  } catch (failure) {
+    await recordFailure('task_stop_persist', failure)
+    confirmed = false
+    error = [...new Set(errors.filter(Boolean))].join('；')
+    // markStopped updates memory before publishing. Keep later GETs and retry
+    // decisions conservative when that final durable write failed as well.
+    try { await tasks.markStopping(task.task_id, error, { force: true }) }
+    catch { /* The in-memory stopping state remains visible until a retry. */ }
+    updated = { ...await tasks.get(task.task_id), execution_status: 'stopping', stop_confirmed_at: null,
+      launch_error: error, launch_error_code: 'STOP_PERSIST_FAILED' }
+  }
+  await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_stop', status: confirmed ? 'ok' : 'info', message: error ?? '原执行已确认停止' })
+  return { ...stopped, status: confirmed ? 'ok' : 'stopping', stop_confirmed: confirmed,
+    stopping: !confirmed, error, job_stop: jobStop, run_stop: runStop, session_cancel: sessionCancel, task: updated }
+}
+
+function requestTaskStop(options) {
+  const state = taskOperationState(options.tasks)
+  const id = options.task.task_id
+  let operation = state.stops.get(id)
+  if (!operation) {
+    operation = stopTaskExecution(options)
+    state.stops.set(id, operation)
+    void operation.finally(() => { if (state.stops.get(id) === operation) state.stops.delete(id) }).catch(() => {})
+  }
+  return operation
+}
+
+async function waitForTaskStop(operation, tasks, taskId) {
+  let timer
+  try {
+    const result = await Promise.race([operation, new Promise(resolve => { timer = setTimeout(() => resolve(null), 3000) })])
+    return result ?? { status: 'stopping', stopping: true, stop_confirmed: false,
+      error: '已请求停止，正在等待原执行和工具释放；可稍后重试确认', task: await tasks.get(taskId) }
+  } finally { clearTimeout(timer) }
 }
 
 async function settleAcpTask(runtime, tasks, launchLogs, snapshot, owner, runner = runPangea, readSnapshot = companionSnapshot) {
@@ -773,12 +1005,24 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
   const sessionId = url.searchParams.get('session_id') ?? undefined
   try {
     if (req.method === 'GET') {
+      if (url.searchParams.get('view') === 'home') {
+        const taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+        const snapshot = await homeSnapshot({
+          cwd,
+          dataRoot,
+          cursor: url.searchParams.get('cursor') ?? 0,
+          limit: url.searchParams.get('limit') ?? 20,
+          tasks: taskItems.map(task => homeRuntimeTask(runtime, task)),
+        })
+        return json(res, 200, { ...snapshot, monitor_persistence: monitor?.getPersistenceStatus?.() ?? null })
+      }
       const snapshot = await workbenchSnapshot({
         cwd,
         dataRoot,
         runId,
         cursor: url.searchParams.get('cursor') ?? 0,
         limit: url.searchParams.get('limit') ?? 20,
+        runner,
       })
       await tasks.reconcileRuns(snapshot.runs?.items, { dataRoot: snapshot.data_root })
       let taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
@@ -804,6 +1048,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       }
       return json(res, 200, {
         ...snapshot,
+        monitor_persistence: monitor?.getPersistenceStatus?.() ?? null,
         tasks: { items: taskItems, total: taskItems.length },
         model_routing: modelRouting,
         acp_providers: acpProviderOptions().map(provider => ({
@@ -968,8 +1213,15 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       if (task.run_id && !resume) throw new Error('task already has a Run; use resume to continue it')
       if (resume && !task.run_id) throw new Error('没有可继续的 Run')
       if (resume && !resumeEligibility.can_resume) throw new Error(resumeEligibility.resume_blocked_reason)
+      const latest = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
+      if (latest.attempt_id !== task.attempt_id || latest.execution_status !== task.execution_status) throw new Error('任务执行状态已变化，请刷新后重试')
+      const operationState = taskOperationState(tasks)
+      if (operationState.stops.has(task.task_id) || operationState.deletions.has(task.task_id)) throw new Error('任务正在停止或删除，请等待操作完成')
       if (launchLocks.has(task.task_id)) throw new Error('task launch is already in progress')
       launchLocks.add(task.task_id)
+      const launch = { cancelled: false, submitted: false }
+      operationState.launches.set(task.task_id, launch)
+      const assertLaunchAllowed = () => { if (launch.cancelled) throw launchStoppedError() }
       await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `${resume ? '继续分析' : '启动'}尝试 ${task.launch_attempts + 1}` })
       let preparedTask = task
       try {
@@ -986,6 +1238,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
                 ? 'windows-batch'
                 : 'direct'),
           })
+          assertLaunchAllowed()
           preparedTask = await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
         } else {
           await appendLaunchSafe(launchLogs, task.task_id, { stage: 'model_route_resolve', status: 'start' })
@@ -993,9 +1246,11 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
           await appendLaunchSafe(launchLogs, task.task_id, {
             stage: 'model_route_resolve', status: 'ok', provider: selectedModel.provider, model: selectedModel.model,
           })
+          assertLaunchAllowed()
           preparedTask = await tasks.prepareLaunch(task.task_id, selectedModel)
         }
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_prepare', status: 'ok' })
+        assertLaunchAllowed()
         let launchedRun = null
         const launched = await launchAnalysisSession(api, {
           cwd,
@@ -1005,13 +1260,14 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
           resumeRunId: resume ? task.run_id : null,
           hostQuiescent: resume && (resumeEligibility.host_quiescent === true || task.workflow_version === 'source-first-v1' && Boolean(selectedProvider)),
           resumeOwnerSessionId: resume && !selectedProvider ? nativeOwnerBinding(task).owner_session_id : null,
-        }, runner, session => tasks.addConversation(task.task_id, {
-          sessionId: session.session_id,
-          title: `${task.title} · 分析`,
-          kind: 'analysis',
-        }), async event => {
+        }, runner, async session => {
+          await tasks.addConversation(task.task_id, { sessionId: session.session_id, title: `${task.title} · 分析`, kind: 'analysis' })
+          assertLaunchAllowed()
+        }, async event => {
           await launchLogs.append(task.task_id, { ...event, attempt_id: preparedTask.attempt_id })
         }, runtime, process.env, {
+          assertLaunchAllowed,
+          onSubmitted: () => { launch.submitted = true },
           attemptId: preparedTask.attempt_id,
           reviewBinding: { task_id: task.task_id, attempt_id: preparedTask.attempt_id },
           onReviewState: value => tasks.recordReview(task.task_id, value),
@@ -1022,6 +1278,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
           onRunReady: async run => {
             launchedRun = run
             const bound = await tasks.bindRun(task.task_id, run.run_id, run.workflow_version)
+            assertLaunchAllowed()
             if (!resume && selectedProvider && supportsHostReview(bound)) await tasks.recordReview(task.task_id, {
               task_id: task.task_id, attempt_id: preparedTask.attempt_id, run_id: run.run_id, data_root: bound.data_root, status: 'pending',
             })
@@ -1034,6 +1291,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
               runtimeInstanceId: hostInstanceId,
               hostProcessId: process.pid,
             })
+            assertLaunchAllowed()
             try {
               await monitor.bindExecution(ownerSessionId, {
                 run_id: launchedRun?.run_id ?? bound.run_id,
@@ -1061,7 +1319,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
               attemptId: preparedTask.attempt_id,
               jobStartedAt,
             })
-            if (bound.execution_status === 'stopping') {
+            if (launch.cancelled || bound.execution_status === 'stopping') {
               const error = new Error('PANGEA 分析已请求停止，ACP 尚未放行')
               error.code = 'PANGEA_STOP_REQUESTED'
               throw error
@@ -1074,6 +1332,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
             processId: pid,
           }),
         })
+        assertLaunchAllowed()
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'session_launch_complete', status: 'ok', session_id: launched.session_id, attempt_id: preparedTask.attempt_id })
         const updatedTask = await tasks.get(task.task_id)
         return json(res, 200, { ...launched, task: { ...updatedTask, ...await assessTaskResumeEligibility(runtime, updatedTask) } })
@@ -1084,8 +1343,14 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
           attempt_id: preparedTask.attempt_id,
         })
         const latest = await tasks.get(task.task_id)
-        if (latest?.execution_status === 'stopping' || error?.code === 'PANGEA_STOP_REQUESTED') {
-          await tasks.markStopped(task.task_id, error?.code === 'PANGEA_STOP_REQUESTED' ? null : error)
+        if (launch.cancelled || latest?.execution_status === 'stopping' || error?.code === 'PANGEA_STOP_REQUESTED') {
+          // Any creation/prompt RPC that was already in flight has now returned.
+          // Release its gate before rechecking the exact executions, so a stop
+          // issued before the Run/session existed cannot be lost.
+          launchLocks.delete(task.task_id)
+          const previousStop = operationState.stops.get(task.task_id)
+          if (previousStop) await previousStop.catch(() => {})
+          await requestTaskStop({ api, tasks, task: await tasks.get(task.task_id), launchLocks, launchLogs, runtime, runner })
         } else {
           await tasks.markLaunchFailed(
             task.task_id,
@@ -1096,6 +1361,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         throw error
       } finally {
         launchLocks.delete(task.task_id)
+        if (operationState.launches.get(task.task_id) === launch) operationState.launches.delete(task.task_id)
       }
     }
     if (body.action === 'task-conversation-create') {
@@ -1136,111 +1402,53 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       await tasks.reconcileRuns([run], { dataRoot: task.data_root })
       return json(res, 200, { status: 'ok', run, task: await tasks.get(task.task_id) })
     }
-    if (body.action === 'stop') {
-      // Legacy ordering contract: const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })
-      const currentWorkspace = workspaceRoot(cwd)
-      const storedTask = body.task_id ? await tasks.get(body.task_id) : null
-      if (body.task_id && !storedTask) throw new Error(`task not found: ${body.task_id}`)
-      const runId = body.run_id ?? storedTask?.run_id
-      if (!runId) throw new Error('run_id or task_id is required')
-      let requestedTask = storedTask
-      // The UI can retain a task selection while the user changes workspace
-      // (or after a portable install moves the repository).  Do not reject an
-      // explicit, exact task+Run stop; rebind only that task so its history is
-      // visible in the current workspace.  A task-only request remains strict.
-      if (requestedTask && requestedTask.workspace !== currentWorkspace) {
-        if (!body.run_id || requestedTask.run_id !== runId) {
-          throw new Error(`task does not belong to current workspace: ${body.task_id}`)
+    if (body.action === 'stop' || body.action === 'task-delete') {
+      let requestedTask = body.task_id ? await tasks.get(body.task_id) : null
+      const pendingDeletion = body.task_id ? taskOperationState(tasks).deletions.get(body.task_id) : null
+      if (pendingDeletion) {
+        await pendingDeletion
+        requestedTask = await tasks.get(body.task_id)
+      }
+      if (!body.task_id && body.action === 'stop' && body.run_id) {
+        const root = dataRootFor(workspaceRoot(cwd), actionDataRoot)
+        requestedTask = await tasks.getByRun(body.run_id, { dataRoot: root })
+        if (!requestedTask) {
+          // Historical Runs may predate task records. Keep their explicit
+          // stop operation, without guessing an owner session or inventing a
+          // task/terminal execution record from the Run's lifecycle flag.
+          const stopped = await stopAnalysisRun({ cwd, dataRoot: root, runId: body.run_id, runner })
+          const drained = await stopSourceFirstAcpRun({ dataRoot: root, runId: body.run_id })
+          await interruptSourceFirstChildren({ dataRoot: root, runId: body.run_id })
+          return json(res, 200, { ...stopped, status: drained ? 'ok' : 'stopping', stop_confirmed: drained,
+            stopping: !drained, task: null, run_stop: { status: 'ok', error: null },
+            error: drained ? null : 'Run 已停止接收结果，但没有关联任务可核验原执行状态；未宣称会话或工具已停止' })
         }
-        requestedTask = await tasks.rebindWorkspace(requestedTask.task_id, currentWorkspace)
-        await appendLaunchSafe(launchLogs, requestedTask.task_id, {
-          stage: 'workspace_rebind', status: 'ok', previous_workspace: storedTask.workspace, workspace: currentWorkspace,
-        })
       }
-      const stopJobs = runtimeService(runtime, 'jobs')
-      if (requestedTask && ['preparing', 'starting', 'running'].includes(requestedTask.execution_status ?? (requestedTask.status === 'running' ? 'running' : ''))) {
-        requestedTask = await tasks.markStopping(requestedTask.task_id)
+      if (!body.task_id && !requestedTask) throw new Error('task_id is required')
+      const task = requireWorkspaceTask(requestedTask, cwd, body.task_id ?? requestedTask?.task_id, { allowDeleted: body.action === 'task-delete' })
+      if (body.run_id != null && body.run_id !== task.run_id) throw new Error('停止/删除请求与当前任务 Run 不一致')
+      if (body.attempt_id != null && body.attempt_id !== task.attempt_id) throw new Error('任务已进入新的执行代次，请刷新后重新操作')
+      if (actionDataRoot && dataRootFor(task.workspace, actionDataRoot) !== dataRootFor(task.workspace, task.data_root)) {
+        throw new Error('停止/删除请求与当前任务的数据目录不一致')
       }
-      let jobStop = { status: 'not_bound', job_id: requestedTask?.job_id ?? null, error: null }
-      if (requestedTask?.job_id && stopJobs?.kill) {
-        const owner = runtimeService(runtime, 'agents')?.get?.(requestedTask.owner_session_id)
+      const preserved = ['runs', 'reports', 'conversations', 'logs']
+      if (Number.isFinite(task.deleted_at)) return json(res, 200, { status: 'ok', deleted: true, task_id: task.task_id, task, preserved })
+      const result = await waitForTaskStop(requestTaskStop({ api, tasks, task, launchLocks, launchLogs, runtime, runner }), tasks, task.task_id)
+      if (body.action === 'task-delete') {
+        if (!result.stop_confirmed) return json(res, 200, { ...result, deleted: false, task_id: task.task_id })
+        // No await between checking the launch gate and starting the durable
+        // tombstone: task-start also checks the mutation gate below.
+        const state = taskOperationState(tasks)
+        if (launchLocks.has(task.task_id)) throw new Error('任务已重新启动，请刷新后再次删除')
+        const deletion = state.deletions.get(task.task_id) ?? tasks.softDelete(task.task_id)
+        state.deletions.set(task.task_id, deletion)
         try {
-          const identityIssue = jobIdentityIssue(requestedTask, stopJobs.get?.(requestedTask.job_id, owner))
-          if (identityIssue) throw new Error(identityIssue)
-          const result = await stopJobs.kill(requestedTask.job_id, owner, '用户请求停止 PANGEA 分析')
-          jobStop = { status: 'ok', job_id: requestedTask.job_id, result, error: null }
-          await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'ok', job_id: requestedTask.job_id, result })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          jobStop = { status: 'error', job_id: requestedTask.job_id, error: message }
-          // A dead/unavailable ACP service must not prevent the local Run and
-          // DSH session cancellation from being attempted.  Keep the precise
-          // error in launch diagnostics and in the response instead.
-          await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'acp_job_stop', status: 'error', job_id: requestedTask.job_id, error: message })
-        }
+          const removed = await deletion
+          await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_deleted', status: 'ok', message: '任务已从列表移除；Run、报告、会话和日志已保留' })
+          return json(res, 200, { ...result, status: 'ok', deleted: true, task_id: task.task_id, task: removed, preserved })
+        } finally { if (state.deletions.get(task.task_id) === deletion) state.deletions.delete(task.task_id) }
       }
-      // Resolve the data root from the task record. This prevents a stale UI
-      // selection from stopping a run in another workspace/data directory.
-      let stopped
-      let runStopError = null
-      try {
-        stopped = await stopAnalysisRun({ cwd, dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
-        await stopSourceFirstAcpRun({ dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
-        await interruptSourceFirstChildren({ dataRoot: requestedTask?.data_root ?? actionDataRoot, runId })
-      } catch (error) {
-        runStopError = error instanceof Error ? error.message : String(error)
-        stopped = {
-          status: 'partial',
-          data_root: requestedTask?.data_root ?? actionDataRoot,
-          run: { run_id: runId, lifecycle_status: 'stopped', status: 'stopped' },
-        }
-        if (requestedTask) await appendLaunchSafe(launchLogs, requestedTask.task_id, { stage: 'run_stop_sync', status: 'error', error: runStopError })
-      }
-      const task = requestedTask ?? await tasks.getByRun(runId, { dataRoot: stopped.data_root })
-      const analysis = task ? [...task.conversations].reverse().find(item => item.kind === 'analysis') : null
-      let sessionCancel = { status: 'not_bound', session_id: null, error: null }
-      if (analysis) {
-        try {
-          apiValue(await api.sessions.cancel(rpc({ sessionId: analysis.session_id })))
-          sessionCancel = { status: 'ok', session_id: analysis.session_id, error: null }
-        } catch (error) {
-          sessionCancel = {
-            status: 'error',
-            session_id: analysis.session_id,
-            error: error instanceof Error ? error.message : String(error),
-          }
-        }
-      }
-      await tasks.reconcileRuns([stopped.run], { dataRoot: stopped.data_root })
-      let stopError = [runStopError, jobStop.error].filter(Boolean).join('；') || null
-      const jobBound = Boolean(task?.job_id)
-      let stopConfirmed = !jobBound && !launchLocks.has(task?.task_id) || jobStop.result === 'already-finished'
-      if (task?.workflow_version === 'source-first-v1' && !task.provider) {
-        const recovery = await nativeRecovery(runtime, task)
-        stopConfirmed = stopConfirmed && recovery.can_resume
-        if (!recovery.can_resume) stopError = [stopError, recovery.blocked_reason].filter(Boolean).join('；')
-      }
-      if (task && stopConfirmed) {
-        if (jobStop.result === 'already-finished') {
-          try {
-            const snapshot = readJobSnapshot(runtime, task)
-            if (['completed', 'failed', 'killed'].includes(snapshot?.status)) {
-              await settleAcpTask(runtime, tasks, launchLogs, snapshot, jobOwner(runtime, task))
-            }
-          } catch { /* the stop response still reports the exact confirmation state */ }
-        }
-        await tasks.markStopped(task.task_id, stopError)
-      } else if (task && stopError) {
-        await tasks.markStopping(task.task_id, stopError)
-      }
-      const updatedTask = task ? await tasks.get(task.task_id) : null
-      return json(res, 200, {
-        ...stopped,
-        job_stop: jobStop,
-        run_stop: runStopError ? { status: 'error', error: runStopError } : { status: 'ok', error: null },
-        session_cancel: sessionCancel,
-        task: updatedTask ? { ...updatedTask, ...await assessTaskResumeEligibility(runtime, updatedTask) } : null,
-      })
+      return json(res, 200, { ...result, task: { ...result.task, ...await assessTaskResumeEligibility(runtime, result.task) } })
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
   } catch (error) {

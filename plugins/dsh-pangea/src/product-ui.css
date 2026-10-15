@@ -183,6 +183,15 @@ body:has(:is(.pangea-run-workspace,.pangea-create-workspace,.pangea-settings-wor
 .pangea-ui .file-row>svg.lucide{width:22px;height:22px}
 .pangea-ui .run-focus .section-head h2{font-size:14px}
 .pangea-ui .run-information summary{line-height:normal;cursor:pointer}
+.pangea-ui .stage-artifact-list{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.pangea-ui .stage-artifact-list>li{min-width:0}
+.pangea-ui .stage-artifact-link{display:grid;grid-template-columns:17px minmax(0,1fr) auto;align-items:center;gap:12px;width:100%;min-width:0;padding:12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);text-align:left;font-size:12px;line-height:1.6}
+.pangea-ui .stage-artifact-link:hover{background:var(--soft)}
+.pangea-ui .stage-artifact-copy{min-width:0;overflow-wrap:anywhere;white-space:normal}
+.pangea-ui .stage-artifact-title,.pangea-ui .stage-artifact-name{display:block}
+.pangea-ui .stage-artifact-title{color:var(--text);font-weight:500}
+.pangea-ui .stage-artifact-name{margin-top:3px;color:var(--muted);font-size:11px}
+.pangea-ui .stage-artifact-open{color:var(--blue);white-space:nowrap}
 
 [data-pangea-shell]{line-height:normal}
 [data-pangea-nav-list]{margin-top:4px}

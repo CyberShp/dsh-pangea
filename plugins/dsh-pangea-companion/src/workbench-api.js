@@ -1,6 +1,6 @@
 import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import path from 'node:path'
-import { stat } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { createDiagramRun } from './diagram-acp.js'
 import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
@@ -9,6 +9,7 @@ import { normalizeIncrementalRequest } from './incremental-request.js'
 
 import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 import { sourceFirstReportAvailable, summarizeRun } from './reader.js'
+import { taskStatusFromRun } from './task-store.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
@@ -108,10 +109,10 @@ function modelRoute(value) {
 
 export async function internalModelOptions(api) {
   const [providerValue, modelValue, settingsValue] = await Promise.all([
-    apiValue(await api.llm.providers(rpc({}))),
-    apiValue(await api.llm.models(rpc({}))),
-    apiValue(await api.settings.describe(rpc({}))),
-  ])
+    api.llm.providers(rpc({})),
+    api.llm.models(rpc({})),
+    api.settings.describe(rpc({})),
+  ]).then(values => values.map(apiValue))
   const namespaces = new Map((settingsValue.namespaces ?? []).map(item => [item.ns, item]))
   // `declared` distinguishes adapter-known routes from hand-declared ones; it does not indicate whether a route can run.
   const providers = (providerValue.providers ?? []).filter(item => item.active === true)
@@ -321,6 +322,163 @@ async function withRunReports(run, dataRoot) {
   } }
 }
 
+async function homeJson(filename) {
+  let source
+  try { source = await readFile(filename, 'utf8') }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  const value = JSON.parse(source.replace(/^\uFEFF/, ''))
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid metadata object: ${filename}`)
+  return value
+}
+
+async function homeDirectories(directory) {
+  try { return (await readdir(directory, { withFileTypes: true })).filter(item => item.isDirectory()).map(item => item.name) }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error }
+}
+
+async function homeFile(filename) {
+  try { return (await stat(filename)).isFile() }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error }
+}
+
+// Read only lifecycle metadata and report existence. The home page never needs
+// result records, source snapshots, plans, tool output or a Python subprocess.
+async function homeRun(dataRoot, runId) {
+  try {
+    if (typeof runId !== 'string' || !runId || /[\\/]/.test(runId) || ['.', '..'].includes(runId)) throw new Error('Invalid Run path')
+    const directory = path.join(dataRoot, 'runs', runId)
+    const progress = await homeJson(path.join(directory, 'progress.json'))
+    if (progress?.run_id && progress.run_id !== runId) throw new Error(`Run metadata identity mismatch: ${runId}`)
+    let summary
+    if (progress?.workflow_version === 'source-first-v1') {
+      const lifecycle = progress.lifecycle_status ?? 'running'
+      if (!['running', 'complete', 'stopped', 'failed'].includes(lifecycle)) throw new Error(`Unknown Run lifecycle: ${lifecycle}`)
+      summary = {
+        run_id: runId, workflow_version: progress.workflow_version,
+        lifecycle_status: lifecycle, stage: progress.stage ?? 'preparing',
+        phase: lifecycle === 'complete' ? 'COMPLETE' : lifecycle === 'stopped' ? 'STOPPED' : lifecycle === 'failed' ? 'FAILED' : String(progress.stage ?? 'preparing').toUpperCase(),
+        quality_status: progress.quality_status ?? null,
+        errors: Array.isArray(progress.errors) ? progress.errors : [],
+        attention_required: progress.needs_user === true || lifecycle === 'failed',
+        needs_user: progress.needs_user === true, blocking_reason: progress.blocking_reason ?? null,
+        updated_at: progress.updated_at ?? null, completed_at: progress.completed_at ?? null,
+        report_available: await sourceFirstReportAvailable(directory, lifecycle),
+      }
+    } else {
+      const metadata = await homeJson(path.join(dataRoot, '.pangea', 'skill-runs', runId, 'metadata.json'))
+      if (metadata) {
+        if (metadata.run_id && metadata.run_id !== runId) throw new Error(`Run metadata identity mismatch: ${runId}`)
+        const state = await homeJson(path.join(directory, '内部索引', '运行状态.json'))
+        const lifecycle = metadata.status === 'stopped' ? 'stopped' : !state ? 'preparing'
+          : state.status === 'complete' ? 'complete' : state.status === 'validation_failed' ? 'attention_required' : 'running'
+        summary = {
+          run_id: runId, workflow_version: 'legacy-v1', lifecycle_status: lifecycle,
+          phase: lifecycle === 'complete' ? 'COMPLETE' : lifecycle === 'stopped' ? 'STOPPED' : lifecycle === 'attention_required' ? 'INCOMPLETE' : !state ? 'PREPARING' : `STEP_${state.current_step || 'BOOTSTRAP'}`,
+          quality_status: state?.verdict ?? null,
+          errors: state?.validation?.status === 'failed' ? state.validation.errors ?? [] : [],
+          attention_required: lifecycle === 'attention_required',
+          updated_at: state?.updated_at ?? metadata.updated_at ?? null, completed_at: state?.completed_at ?? null,
+          report_available: lifecycle === 'complete' && await homeFile(path.join(directory, '正式输出', '完整分析报告.md')),
+        }
+      } else {
+        if (!progress) throw new Error(`Run metadata is missing: ${runId}`)
+        if (!progress.lifecycle_status && !progress.phase && !progress.stage) throw new Error(`Run lifecycle is missing: ${runId}`)
+        if (progress.workflow_version && progress.workflow_version !== 'legacy-v1') throw new Error(`Unsupported Run workflow: ${progress.workflow_version}`)
+        const phase = String(progress.phase ?? progress.stage ?? 'UNKNOWN')
+        const lifecycle = progress.lifecycle_status ?? (phase === 'COMPLETE' || phase === 'INCOMPLETE' ? 'complete' : phase === 'STOPPED' ? 'stopped' : 'running')
+        if (!['running', 'complete', 'stopped', 'cancelled', 'failed', 'attention_required'].includes(lifecycle)) throw new Error(`Unknown Run lifecycle: ${lifecycle}`)
+        let reportAvailable = false
+        if (lifecycle === 'complete') {
+          const marker = await homeJson(path.join(directory, 'report-complete.json'))
+          reportAvailable = JSON.stringify(marker?.files) === JSON.stringify(['report.md', 'report.html'])
+            && (await Promise.all(['report.md', 'report.html'].map(name => homeFile(path.join(directory, name))))).every(Boolean)
+        }
+        summary = { run_id: runId, workflow_version: progress.workflow_version ?? null, lifecycle_status: lifecycle, phase,
+          quality_status: progress.quality_status ?? null, errors: Array.isArray(progress.errors) ? progress.errors : [],
+          attention_required: progress.needs_user === true, needs_user: progress.needs_user === true,
+          blocking_reason: progress.blocking_reason ?? null, updated_at: progress.updated_at ?? null,
+          completed_at: progress.completed_at ?? null, report_available: reportAvailable }
+      }
+    }
+    return summary
+  } catch (error) {
+    return { run_id: runId, lifecycle_status: 'unknown', report_available: false,
+      reader_error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function homeTask(task, run) {
+  // Match TaskStore.reconcileRuns precedence without mutating persisted tasks.
+  let status = task.status
+  let executionStatus = task.execution_status
+  const pendingReview = task.host_review && task.host_review.status !== 'complete'
+    && !(run?.workflow_version === 'source-first-v1' && task.host_review.status === 'pending' && !task.host_review.reviewer_session_id)
+  const activeProvider = task.provider && ['starting', 'running', 'stopping'].includes(task.execution_status)
+  const strongerTerminal = ['failed', 'stopped', 'interrupted'].includes(task.execution_status)
+    && !['complete', 'failed', 'stopped', 'cancelled'].includes(run?.lifecycle_status)
+  if (task.runtime_issue) status = 'needs_attention'
+  else if (run?.reader_error && !strongerTerminal && !activeProvider && !pendingReview) status = 'needs_attention'
+  else if (run && !pendingReview && !activeProvider && !strongerTerminal) {
+    const next = taskStatusFromRun(run)
+    if (!(next === 'running' && task.status === 'failed' && task.launch_error_code && task.launch_error_code !== 'RUN_ATTENTION_REQUIRED')) status = next
+  }
+  if (!task.runtime_issue && !pendingReview && !activeProvider) {
+    if (run && !run.reader_error) {
+      const terminal = { complete: 'completed', failed: 'failed', stopped: 'stopped', cancelled: 'stopped' }[run.lifecycle_status]
+      if (terminal) executionStatus = terminal
+    }
+    // A worker finishing is not proof of formal delivery. Keep an interrupted
+    // handoff visible until the same Run has its completed report available.
+    if (executionStatus === 'completed' && (run?.lifecycle_status !== 'complete' || run?.report_available !== true)) status = 'needs_attention'
+  }
+  const fields = ['task_id', 'workspace', 'data_root', 'title', 'repository', 'target', 'scenario', 'run_id',
+    'workflow_version', 'execution_status', 'provider', 'active_conversation_id', 'conversations',
+    'created_at', 'updated_at', 'launch_error', 'launch_error_code', 'terminal_error']
+  return { ...Object.fromEntries(fields.filter(key => Object.hasOwn(task, key)).map(key => [key, task[key]])), status,
+    ...(executionStatus !== undefined ? { execution_status: executionStatus } : {}),
+    ...(run?.workflow_version ? { workflow_version: run.workflow_version } : {}),
+    ...(task.runtime_issue ? { runtime_issue: task.runtime_issue, execution_status: 'interrupted' } : {}),
+    ...(task.runtime_issue ? { needs_user_reason: task.runtime_issue }
+      : run?.reader_error ? { reader_error: run.reader_error, needs_user_reason: `无法读取最新运行状态：${run.reader_error}` }
+      : run?.blocking_reason ? { needs_user_reason: run.blocking_reason } : {}) }
+}
+
+export async function homeSnapshot({ cwd, dataRoot, tasks = [], cursor = 0, limit = DEFAULT_PAGE_SIZE }) {
+  const root = workspaceRoot(cwd)
+  const resolvedDataRoot = dataRootFor(root, dataRoot)
+  const pageCursor = boundedInteger(cursor, 0, 0, Number.MAX_SAFE_INTEGER)
+  const pageLimit = boundedInteger(limit, DEFAULT_PAGE_SIZE, 1, 100)
+  const [runIds, repositoryIds] = await Promise.all([
+    homeDirectories(path.join(resolvedDataRoot, 'runs')),
+    homeDirectories(path.join(resolvedDataRoot, 'repositories')),
+  ])
+  runIds.sort().reverse()
+  const page = runIds.slice(pageCursor, pageCursor + pageLimit)
+  const localTask = task => task.workspace === root && task.data_root && path.resolve(task.data_root) === resolvedDataRoot
+  const requested = [...new Set([...page, ...tasks.filter(localTask).map(task => task.run_id).filter(Boolean)])]
+  const summaries = new Map()
+  // Bound filesystem fan-out for workspaces with many historical tasks.
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(16, requested.length) }, async () => {
+    while (next < requested.length) {
+      const runId = requested[next++]
+      summaries.set(runId, await homeRun(resolvedDataRoot, runId))
+    }
+  }))
+  const items = tasks.filter(task => task.workspace === root).map(task => homeTask(task, localTask(task) ? summaries.get(task.run_id) : null))
+  const nextCursor = pageCursor + page.length
+  return {
+    status: 'ok', view: 'home', data_root: resolvedDataRoot,
+    // This read-only projection does not probe Python/API compatibility. Analysis
+    // still performs that check before exposing model choices or starting work.
+    compatibility: { compatible: null, api_version: null, checked: false, source: 'local-metadata' },
+    capabilities: { repositories: repositoryIds.filter(id => !id.startsWith('.pangea-import-')).sort() },
+    runs: { items: page.map(id => summaries.get(id)), next_cursor: nextCursor < runIds.length ? nextCursor : null, total: runIds.length },
+    tasks: { items, total: items.length }, run: null, run_detail: null,
+    pagination: { cursor: pageCursor, limit: pageLimit },
+  }
+}
+
 export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limit = DEFAULT_PAGE_SIZE, runner = runPangea }) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
@@ -478,6 +636,7 @@ function acpRunDiagnostics(run) {
     agent_version: value.agentVersion,
     last_tool_id: value.lastToolId,
     last_tool_status: value.lastToolStatus,
+    active_tool_count: value.activeToolCount,
     turn_duration_ms: value.turnDurationMs,
     first_event_ms: value.firstEventMs,
     stderr_bytes: value.stderrBytes,
@@ -500,9 +659,12 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
     let turn = 1
     while (true) {
       await lifecycle.onTurnEvent?.({
-        stage: 'acp_turn_finished', status: result.stopReason === 'error' ? 'error' : 'info', turn,
-        stop_reason: result.stopReason, protocol_stop_reason: result.protocolStopReason,
-        ...acpRunDiagnostics(run),
+        stage: run.kind === 'source_first_coordinator' ? 'acp_coordinator_finished' : 'acp_turn_finished',
+        status: result.stopReason === 'error' ? 'error' : 'info', turn,
+        stop_reason: run.kind === 'source_first_coordinator' && result.attentionRequired ? 'paused' : result.stopReason,
+        protocol_stop_reason: result.protocolStopReason,
+        ...(run.kind === 'source_first_coordinator' ? { message: result.attentionRequired ? '宿主调度已暂停；各 ACP 请求结果见对应请求记录' : '宿主调度已结束；各 ACP 请求结果见对应请求记录' } : {}),
+        ...(run.kind === 'source_first_coordinator' ? {} : acpRunDiagnostics(run)),
       })
       output += (result.output ?? [])
         .filter(item => item?.type === 'text')
@@ -560,7 +722,12 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
       Promise.resolve().then(() => run?.dispose?.()),
     ])
     try {
-      if (run) await lifecycle.onTurnEvent?.({ stage: 'acp_process_cleanup', status: cleanup.some(item => item.status === 'rejected') ? 'error' : 'info', ...acpRunDiagnostics(run) })
+      if (run) await lifecycle.onTurnEvent?.({
+        stage: cleanup[1]?.value?.retained === true ? 'acp_workers_retained' : 'acp_process_cleanup',
+        status: cleanup.some(item => item.status === 'rejected') ? 'error' : 'info',
+        ...(cleanup[1]?.value?.retained === true ? { message: '已保留暂停 worker 的原会话与进程，等待工具确认或手动停止' } : {}),
+        ...(run.kind === 'source_first_coordinator' ? {} : acpRunDiagnostics(run)),
+      })
     } catch { /* job settlement retains the failure */ }
   }
 }
@@ -710,6 +877,7 @@ export async function launchAnalysisSession(
     }),
   )
   await lifecycle.onRunReady?.({ ...run, workflow_version: semantic ? 'source-first-v1' : run.workflow_version })
+  lifecycle.assertLaunchAllowed?.()
   const sessionId = await launchStep(
     onEvent,
     semantic && !selectedProvider && requestedResumeRunId && resumeOwnerSessionId ? 'session_resume' : 'session_create',
@@ -733,6 +901,7 @@ export async function launchAnalysisSession(
     run,
   }), () => ({ session_id: sessionId }))
   await lifecycle.onOwnerReady?.({ ownerSessionId: sessionId })
+  lifecycle.assertLaunchAllowed?.()
   const managedReview = Boolean(!semantic && selectedProvider && supportsHostReview(request) && lifecycle.reviewBinding && !requestedResumeRunId)
   const legacyPrompt = [
     requestedResumeRunId
@@ -836,11 +1005,17 @@ export async function launchAnalysisSession(
         },
       })
     }
-    const jobId = await launchStep(onEvent, 'acp_job_create', () => startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, acpLifecycle, request.agent_model), value => ({ job_id: value, provider: selectedProvider, requested_model: request.agent_model }))
+    const jobId = await launchStep(onEvent, 'acp_job_create', () => {
+      lifecycle.assertLaunchAllowed?.()
+      lifecycle.onSubmitted?.()
+      return startAcpJob(runtime, parent, selectedProvider, prompt, `PANGEA · ${request.target} · ${selectedProvider}`, onEvent, acpLifecycle, request.agent_model)
+    }, value => ({ job_id: value, provider: selectedProvider, requested_model: request.agent_model }))
     await emitLaunch(onEvent, { stage: 'skill_started', status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, run_id: run.run_id, message: 'Codetalks Skill ACP 分析已启动。' })
     return { status: 'ok', session_id: sessionId, job_id: jobId, provider: selectedProvider, input: request, data_root: resolvedDataRoot, model: selectedModel, run }
   }
   await launchStep(onEvent, 'prompt_submit', async () => {
+    lifecycle.assertLaunchAllowed?.()
+    lifecycle.onSubmitted?.()
     apiValue(await api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }] })))
   }, () => ({ session_id: sessionId }))
   await emitLaunch(onEvent, { stage: semantic ? 'source_first_started' : 'skill_started', status: 'ok', session_id: sessionId, run_id: run.run_id, message: 'PANGEA source-first 分析会话已启动。' })

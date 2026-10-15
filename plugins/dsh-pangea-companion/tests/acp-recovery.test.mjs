@@ -3,10 +3,85 @@ import test from 'node:test'
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { createSourceFirstAcpRun } from '../src/source-first-acp.js'
+import { createSourceFirstAcpRun, inspectSourceFirstAcpRecovery } from '../src/source-first-acp.js'
 const progressPolicy = { readyWarnMs: 5, readyIdleMs: 20, warnMs: 5, idleMs: 20, cancelMs: 10, pollMs: 2 }
 const completed = { stopReason: 'completed', protocolStopReason: 'end_turn' }
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
+
+for (const mode of ['late-tool', 'repeat-late-tool', 'unconfirmed-prompt', 'saved-read-failed']) test(`pending tool safety and saved result reconciliation (${mode})`, { timeout: 10000 }, async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-late-tool-'))
+  const controller = new AbortController(), events = []
+  let pending = deferred(), released = deferred()
+  let diagnostic, activeToolCount = 0, taskId, settled = false, prompts = 0, reads = 0
+  const worker = { id: 'late-worker', remoteSessionId: 'late-remote', result: Promise.resolve(completed),
+    readDiagnostics: () => ({ activeToolCount }), dispose: async () => {},
+    continuePrompt: async () => { prompts++; activeToolCount = 1; return pending.promise },
+    cancelTurn: async () => {
+      if (mode === 'unconfirmed-prompt') return new Promise(() => {})
+      const outcome = { stopReason: 'aborted', protocolStopReason: 'cancelled' }
+      pending.resolve(outcome)
+      return { confirmed: true, outcome }
+    },
+  }
+  const options = { dataRoot, cwd: dataRoot, runId: 'late-run', providerId: 'fixture', signal: controller.signal, progressPolicy,
+    onEvent: event => { events.push(event); if (event.stage === 'source_first_late_response') released.resolve() },
+    subagents: { start: async (_, request) => { diagnostic = request.onDiagnostic; return worker } },
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[0] === 'result-read') {
+        reads++
+        if (mode === 'saved-read-failed') throw new Error('fixture result read failed')
+        return { revision: 3, completion_complete: mode !== 'repeat-late-tool' || prompts >= 2, completion_declared_revision: 3 }
+      }
+      if (args[1] === 'bind') taskId = args.at(-1)
+      if (args[1] === 'settle') { settled = true; return {} }
+      if (args[1] === 'next') return { run_id: 'late-run', lifecycle_status: settled ? 'complete' : 'running', actions: settled ? [] : [
+        { action_id: 'late:a', action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId, role: 'analysis', stage: 'unit_analysis' },
+      ] }
+      return {}
+    },
+  }
+  const run = createSourceFirstAcpRun(options)
+  try {
+    assert.equal((await run.result).attentionRequired, true)
+    assert.equal(prompts, 1); assert.equal(reads, 1); assert.equal(settled, false)
+    assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, false)
+    assert.equal((await run.dispose()).retained, true)
+    activeToolCount = 0
+    diagnostic({ stage: 'tool_event', lastToolId: 'pending-tool', lastToolStatus: 'completed', activeToolCount: 0 })
+    if (mode === 'unconfirmed-prompt') {
+      assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, false)
+      pending.resolve({ stopReason: 'aborted', protocolStopReason: 'cancelled' })
+    }
+    await released.promise
+    assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, true)
+    assert.equal(prompts, 1)
+    if (mode === 'repeat-late-tool') {
+      pending = deferred(); released = deferred()
+      const repeated = createSourceFirstAcpRun(options)
+      assert.equal((await repeated.result).attentionRequired, true)
+      assert.equal(prompts, 2)
+      assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, false)
+      activeToolCount = 0
+      // The callback was bound when the original worker was created, before
+      // this second execution installed its own reconciliation handler.
+      diagnostic({ stage: 'tool_event', lastToolId: 'second-tool', lastToolStatus: 'completed', activeToolCount: 0 })
+      await released.promise
+      assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, true)
+      await repeated.dispose()
+    }
+    if (['late-tool', 'repeat-late-tool'].includes(mode)) {
+      const continued = createSourceFirstAcpRun(options)
+      assert.equal((await continued.result).attentionRequired, false)
+      assert.equal(settled, true); assert.equal(prompts, mode === 'repeat-late-tool' ? 2 : 1)
+      await continued.dispose()
+    }
+    assert.ok(events.some(event => event.stage === 'source_first_saved_result_checked' && event.status === (mode === 'saved-read-failed' ? 'error' : 'info')))
+  } finally {
+    pending.resolve(completed); controller.abort(); await run.dispose()
+    await rm(dataRoot, { recursive: true, force: true })
+  }
+})
 
 for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'disconnect']) test(`coordinator ${mode} preserves identity and results`, { timeout: 10000 }, async () => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-recovery-'))

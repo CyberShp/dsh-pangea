@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { acpProviderOptions, createTaskConversation, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireInternalModel, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { acpProviderOptions, createTaskConversation, homeSnapshot, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireInternalModel, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
 const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
 
@@ -96,6 +96,159 @@ test('offers only configured internal provider routes', async () => {
   const catalog = await internalModelOptions(internalModelApi())
   assert.deepEqual(catalog.models.map(item => `${item.provider}/${item.model}`), ['minimax-1/MiniMax-M2.7-highspeed', 'deepseek-official/deepseek-v4-flash'])
   assert.equal(catalog.models[0].credential_configured, true)
+})
+
+test('starts independent model catalog RPCs together instead of waiting for each response', async () => {
+  const started = [], pending = new Map()
+  const request = (name, value) => { started.push(name); return new Promise(resolve => pending.set(name, () => resolve(ok(value)))) }
+  const catalog = internalModelOptions({
+    llm: { providers: () => request('providers', { providers: [] }), models: () => request('models', { groups: [], failures: [] }) },
+    settings: { describe: () => request('settings', { namespaces: [] }) },
+  })
+  try { assert.deepEqual(started, ['providers', 'models', 'settings']) }
+  finally { for (const release of pending.values()) release() }
+  assert.deepEqual(await catalog, { models: [], failures: [] })
+})
+
+async function homeRunFixture(root, runId, progress, files = {}) {
+  const directory = path.join(root, 'pangea-data', 'runs', runId)
+  await mkdir(directory, { recursive: true })
+  if (progress !== null) await writeFile(path.join(directory, 'progress.json'), typeof progress === 'string' ? progress : JSON.stringify(progress))
+  for (const [name, contents] of Object.entries(files)) {
+    await mkdir(path.dirname(path.join(directory, name)), { recursive: true })
+    await writeFile(path.join(directory, name), contents)
+  }
+  return directory
+}
+
+function homeTaskFixture(root, runId, overrides = {}) {
+  return { task_id: `task-${runId}`, workspace: root, data_root: path.join(root, 'pangea-data'), run_id: runId,
+    title: runId, status: 'running', execution_status: null, conversations: [{ conversation_id: 'conversation', session_id: 'session' }],
+    active_conversation_id: 'conversation', ...overrides }
+}
+
+test('home reads only lifecycle metadata and reports without Python, assets or result projections', async () => {
+  const root = await workspace()
+  try {
+    await mkdir(path.join(root, 'pangea-data', 'repositories', 'repo'), { recursive: true })
+    await mkdir(path.join(root, 'pangea-data', 'repositories', '.pangea-import-pending'), { recursive: true })
+    const directory = await homeRunFixture(root, 'run-z', { workflow_version: 'source-first-v1', run_id: 'run-z', lifecycle_status: 'complete', quality_status: 'PASS' }, {
+      'report.md': 'delivered', 'report.html': 'delivered', 'report-complete.json': '{}',
+      'inputs/task-contract.json': '{broken and deliberately irrelevant', 'results/records.json': '{broken',
+    })
+    const tasks = [homeTaskFixture(root, 'run-z', { attempts: [{ last_output: 'large output' }], last_output: 'large output' })]
+    const before = JSON.stringify(tasks)
+    const snapshot = await homeSnapshot({ cwd: root, tasks })
+    assert.deepEqual(snapshot.compatibility, { compatible: null, api_version: null, checked: false, source: 'local-metadata' })
+    assert.deepEqual(snapshot.capabilities.repositories, ['repo'])
+    assert.equal(snapshot.runs.items[0].report_available, true)
+    assert.equal(snapshot.tasks.items[0].status, 'completed')
+    assert.deepEqual(snapshot.tasks.items[0].conversations, tasks[0].conversations)
+    assert.equal(Object.hasOwn(snapshot.tasks.items[0], 'attempts'), false)
+    assert.equal(Object.hasOwn(snapshot.tasks.items[0], 'last_output'), false)
+    assert.equal(JSON.stringify(tasks), before)
+    assert.equal(await readFile(path.join(directory, 'inputs', 'task-contract.json'), 'utf8'), '{broken and deliberately irrelevant')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('home refreshes bound tasks outside the report page and preserves runtime stop and active provider precedence', async () => {
+  const root = await workspace()
+  try {
+    for (const [runId, lifecycle] of [['run-z', 'running'], ['run-a', 'complete']]) {
+      await homeRunFixture(root, runId, { workflow_version: 'source-first-v1', run_id: runId, lifecycle_status: lifecycle },
+        lifecycle === 'complete' ? { 'report.md': 'delivered', 'report.html': 'delivered', 'report-complete.json': '{}' } : {})
+    }
+    const tasks = [homeTaskFixture(root, 'run-a'),
+      homeTaskFixture(root, 'run-a', { task_id: 'active-acp', provider: 'pangea-nga', execution_status: 'running' }),
+      homeTaskFixture(root, 'run-a', { task_id: 'lost-acp', provider: 'pangea-nga', execution_status: 'running', runtime_issue: '原执行身份无法确认' }),
+      homeTaskFixture(root, 'run-z', { task_id: 'stopped', execution_status: 'stopped', status: 'stopped' }),
+      homeTaskFixture(root, 'run-z', { task_id: 'launch-failed', status: 'failed', launch_error_code: 'LAUNCH_FAILED' }),
+      homeTaskFixture(root, 'run-a', { task_id: 'different-root', data_root: path.join(root, 'other-data') }),
+      homeTaskFixture(root, 'run-a', { task_id: 'different-workspace', workspace: path.dirname(root) })]
+    const snapshot = await homeSnapshot({ cwd: root, tasks, limit: 1 })
+    assert.deepEqual(snapshot.runs.items.map(item => item.run_id), ['run-z'])
+    assert.equal(snapshot.runs.next_cursor, 1)
+    assert.equal(snapshot.runs.total, 2)
+    assert.deepEqual(snapshot.tasks.items.map(item => [item.task_id, item.status]), [
+      ['task-run-a', 'completed'], ['active-acp', 'running'], ['lost-acp', 'needs_attention'], ['stopped', 'stopped'], ['launch-failed', 'failed'], ['different-root', 'running'],
+    ])
+    assert.equal(snapshot.tasks.items.length, 6)
+    assert.equal(snapshot.tasks.items[2].execution_status, 'interrupted')
+    assert.equal(snapshot.tasks.items[2].needs_user_reason, '原执行身份无法确认')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('home requires formal delivery after a worker completes and projects terminal states without double counting active tasks', async () => {
+  const root = await workspace()
+  try {
+    const delivered = { 'report.md': 'delivered', 'report.html': 'delivered', 'report-complete.json': '{}' }
+    for (const [runId, lifecycle, files] of [['running', 'running', {}], ['missing-report', 'complete', {}],
+      ['delivered', 'complete', delivered], ['failed', 'failed', {}], ['stopped', 'stopped', {}]]) {
+      await homeRunFixture(root, runId, { run_id: runId, workflow_version: 'source-first-v1', lifecycle_status: lifecycle }, files)
+    }
+    const tasks = [
+      homeTaskFixture(root, 'running', { task_id: 'worker-ended', provider: 'pangea-nga', status: 'needs_attention', execution_status: 'completed' }),
+      homeTaskFixture(root, 'missing-report', { provider: 'pangea-nga', execution_status: 'completed' }),
+      homeTaskFixture(root, 'delivered', { provider: 'pangea-nga', status: 'needs_attention', execution_status: 'completed' }),
+      homeTaskFixture(root, 'delivered', { task_id: 'native-ended', execution_status: 'running' }),
+      homeTaskFixture(root, 'failed', { execution_status: 'running' }),
+      homeTaskFixture(root, 'stopped', { execution_status: 'stopping' }),
+      homeTaskFixture(root, 'delivered', { task_id: 'review-pending', execution_status: 'running', host_review: { status: 'running', reviewer_session_id: 'reviewer' } }),
+    ]
+    const unchanged = JSON.stringify(tasks)
+    const snapshot = await homeSnapshot({ cwd: root, tasks })
+    assert.deepEqual(snapshot.tasks.items.map(task => [task.task_id, task.status, task.execution_status]), [
+      ['worker-ended', 'needs_attention', 'completed'], ['task-missing-report', 'needs_attention', 'completed'],
+      ['task-delivered', 'completed', 'completed'], ['native-ended', 'completed', 'completed'],
+      ['task-failed', 'failed', 'failed'], ['task-stopped', 'stopped', 'stopped'], ['review-pending', 'running', 'running'],
+    ])
+    assert.equal(JSON.stringify(tasks), unchanged)
+    assert.equal(snapshot.tasks.items.filter(task => task.status === 'completed' && ['starting', 'running', 'stopping'].includes(task.execution_status)).length, 0)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('home shows corrupt, missing and unsupported run metadata as unreadable instead of completed', async () => {
+  const root = await workspace()
+  try {
+    await homeRunFixture(root, 'broken', '{')
+    await homeRunFixture(root, 'wrong-id', { run_id: 'other', workflow_version: 'source-first-v1', lifecycle_status: 'complete' })
+    await homeRunFixture(root, 'unsupported', { workflow_version: 'future-v9', lifecycle_status: 'complete' })
+    await homeRunFixture(root, 'empty', {})
+    const tasks = ['broken', 'wrong-id', 'unsupported', 'empty', 'missing', '../escape'].map(id => homeTaskFixture(root, id, { status: 'completed' }))
+    tasks.push(homeTaskFixture(root, 'broken', { task_id: 'stopped', status: 'stopped', execution_status: 'stopped' }))
+    const snapshot = await homeSnapshot({ cwd: root, tasks })
+    assert.ok(snapshot.runs.items.every(run => run.lifecycle_status === 'unknown' && run.reader_error && !run.report_available))
+    assert.ok(snapshot.tasks.items.slice(0, 6).every(task => task.status === 'needs_attention' && task.reader_error))
+    assert.equal(snapshot.tasks.items.at(-1).status, 'stopped')
+    assert.match(snapshot.tasks.items.at(-1).reader_error, /JSON/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('home keeps needs-user and unresolved quality visible and requires all report files', async () => {
+  const root = await workspace()
+  try {
+    await homeRunFixture(root, 'needs-user', { workflow_version: 'source-first-v1', run_id: 'needs-user', lifecycle_status: 'running', needs_user: true, blocking_reason: '等待用户授权' })
+    await homeRunFixture(root, 'unresolved', { workflow_version: 'source-first-v1', run_id: 'unresolved', lifecycle_status: 'complete', quality_status: 'UNRESOLVED' }, { 'report.md': 'partial', 'report-complete.json': '{}' })
+    const snapshot = await homeSnapshot({ cwd: root, tasks: ['needs-user', 'unresolved'].map(id => homeTaskFixture(root, id)) })
+    assert.ok(snapshot.tasks.items.every(task => task.status === 'needs_attention'))
+    assert.equal(snapshot.tasks.items[0].needs_user_reason, '等待用户授权')
+    assert.equal(snapshot.runs.items.find(run => run.run_id === 'unresolved').report_available, false)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('home reads legacy skill lifecycle and formal report without parsing document contents', async () => {
+  const root = await workspace()
+  try {
+    const metadataDirectory = path.join(root, 'pangea-data', '.pangea', 'skill-runs', 'legacy')
+    await mkdir(metadataDirectory, { recursive: true })
+    await writeFile(path.join(metadataDirectory, 'metadata.json'), JSON.stringify({ run_id: 'legacy' }))
+    await homeRunFixture(root, 'legacy', null, { '内部索引/运行状态.json': JSON.stringify({ status: 'complete', verdict: 'PASS' }),
+      '正式输出/完整分析报告.md': 'legacy delivered', '内部索引/工作台投影.json': '{irrelevant' })
+    const snapshot = await homeSnapshot({ cwd: root, tasks: [homeTaskFixture(root, 'legacy')] })
+    assert.equal(snapshot.runs.items[0].workflow_version, 'legacy-v1')
+    assert.equal(snapshot.runs.items[0].report_available, true)
+    assert.equal(snapshot.tasks.items[0].status, 'completed')
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 test('routes a configured native OpenAI model and rejects inactive, model-less, or uncredentialed routes', async () => {

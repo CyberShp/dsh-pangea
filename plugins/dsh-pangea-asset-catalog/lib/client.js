@@ -20,6 +20,16 @@ window.__ModuleLoader__.load({
       available: '可用于分析', no_items: '未提取到可用内容', rejected: '已拒绝',
       failed: '失败', archived: '已归档',
     }
+    const ACTIVE_JOB_STATUSES = new Set(['waiting', 'preparing', 'queued', 'running', 'repairing', 'finalizing', 'stopping'])
+    function isExtracting(asset) {
+      if (!asset || asset.status === 'archived') return false
+      return asset.extraction_job?.status ? ACTIVE_JOB_STATUSES.has(asset.extraction_job.status) : asset.status === 'extracting'
+    }
+    function elapsedTime(start, end = Date.now()) {
+      const seconds = Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 1000))
+      if (!Number.isFinite(seconds)) return '未记录'
+      return seconds < 60 ? `${seconds} 秒` : seconds < 3600 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分`
+    }
     const STATUS_FILTERS = [
       ['', '全部状态'], ['imported', '等待处理'], ['extracting', '提取中'], ['awaiting_review', '待人工审核'],
       ['available', '可用于分析'], ['no_items', '无结构化条目'], ['rejected', '已拒绝'],
@@ -65,6 +75,15 @@ window.__ModuleLoader__.load({
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
       return body
+    }
+
+    async function requestJobs({ cwd, assetIds, signal, fetcher = fetch }) {
+      const params = new URLSearchParams({ cwd, jobs_only: '1' })
+      assetIds.forEach(assetId => params.append('asset_id', assetId))
+      const response = await fetcher(`${API_PATH}?${params}`, { cache: 'no-store', signal })
+      const body = await response.json()
+      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
+      return body.jobs ?? {}
     }
 
     async function requestMethodologyDetail({ cwd, methodologyId, signal, fetcher = fetch }) {
@@ -206,11 +225,29 @@ window.__ModuleLoader__.load({
       const [query, setQuery] = React.useState('')
       const [queryDraft, setQueryDraft] = React.useState('')
       const [activeAsset, setActiveAsset] = React.useState(null)
+      const navigation = React.useRef({ cwd, version: 0, assetId: '' })
+      const loadSequence = React.useRef(0)
+      if (navigation.current.cwd !== cwd) navigation.current = { cwd, version: navigation.current.version + 1, assetId: '' }
+      function selectAsset(asset) {
+        navigation.current = { cwd, version: navigation.current.version + 1, assetId: asset?.asset_id ?? '' }
+        detailPending.current = ''
+        setDetailLoading(false)
+        setActiveAsset(asset)
+      }
+      function currentView(view) {
+        return navigation.current.cwd === view.cwd && navigation.current.version === view.version
+      }
+      React.useEffect(() => {
+        setState(null); setActiveAsset(null); setDetails({}); setSelectedAssets({}); setImportBatch([]); setImportOpen(false); setImportFile(null); setImportPath(''); setImportTitle(''); setError(''); setNotice('')
+      }, [cwd])
       const [detailTab, setDetailTab] = React.useState('content')
       const [details, setDetails] = React.useState({})
       const [reviewDrafts, setReviewDrafts] = React.useState({})
       const [importPath, setImportPath] = React.useState('')
-      const [importFile, setImportFile] = React.useState(null)
+      const [importFiles, setImportFiles] = React.useState([])
+      const importFile = importFiles[0] ?? null
+      function setImportFile(file) { setImportFiles(file ? [file] : []) }
+      const [importBatch, setImportBatch] = React.useState([])
       const importFileInput = React.useRef(null)
       const [importOpen, setImportOpen] = React.useState(false)
       const [importType, setImportType] = React.useState('design')
@@ -307,13 +344,24 @@ window.__ModuleLoader__.load({
 
       const load = React.useCallback(async signal => {
         if (!cwd) return
+        const view = navigation.current
+        const sequence = ++loadSequence.current
+        const isCurrent = () => !signal?.aborted && currentView(view) && sequence === loadSequence.current
         setLoading(true)
         try {
           const value = await requestState({ cwd, page, pageSize, type, status, kind, query, signal })
-          if (!signal?.aborted) { setError(''); setState(value); if (activeAsset && detailPending.current !== activeAsset.asset_id) { const fresh = await requestAssetDetail({ cwd, assetId: activeAsset.asset_id, signal }); if (!signal?.aborted) { setDetails(current => ({ ...current, [activeAsset.asset_id]: fresh })); setActiveAsset(fresh.asset) } } }
+          if (!isCurrent()) return
+          setError(''); setState(value)
+          if (view.assetId && detailPending.current !== view.assetId) {
+            const fresh = await requestAssetDetail({ cwd, assetId: view.assetId, signal })
+            if (isCurrent()) {
+              setDetails(current => ({ ...current, [view.assetId]: fresh }))
+              setActiveAsset(current => current?.asset_id === view.assetId ? fresh.asset : current)
+            }
+          }
         } catch (value) {
-          if (value?.name !== 'AbortError') setError(value instanceof Error ? value.message : String(value))
-        } finally { if (!signal?.aborted) setLoading(false) }
+          if (isCurrent() && value?.name !== 'AbortError') setError(value instanceof Error ? value.message : String(value))
+        } finally { if (sequence === loadSequence.current && !signal?.aborted) setLoading(false) }
       }, [cwd, page, pageSize, type, status, kind, query, activeAsset?.asset_id])
 
       React.useEffect(() => {
@@ -324,14 +372,37 @@ window.__ModuleLoader__.load({
       }, [visible, cwd, load])
 
       const active = Boolean(
-        state?.assets?.some(asset => ['preparing', 'queued', 'running', 'repairing', 'finalizing'].includes(asset.extraction_job?.status))
+        state?.assets?.some(isExtracting) || isExtracting(activeAsset)
         || ['queued', 'running', 'finalizing'].includes(state?.methodologies?.generation_job?.status)
       )
+      const pollingAssetIds = [...new Set([...(isExtracting(activeAsset) ? [activeAsset.asset_id] : []), ...assetsForPolling(state)])].slice(0, 100).sort().join('|')
+      function assetsForPolling(value) { return (value?.assets ?? []).filter(isExtracting).map(asset => asset.asset_id) }
       React.useEffect(() => {
         if (!active || visible === false) return undefined
-        const timer = setInterval(() => { void load() }, 1500)
-        return () => clearInterval(timer)
-      }, [active, visible, load])
+        const controller = new AbortController()
+        let pending = false
+        const poll = async () => {
+          if (pending) return
+          pending = true
+          const view = navigation.current
+          const sequence = loadSequence.current
+          try {
+            const assetIds = pollingAssetIds.split('|').filter(Boolean)
+            if (!assetIds.length) { await load(controller.signal); return }
+            const jobs = await requestJobs({ cwd, assetIds, signal: controller.signal })
+            if (controller.signal.aborted || !currentView(view) || sequence !== loadSequence.current) return
+            const merge = asset => Object.hasOwn(jobs, asset.asset_id) ? { ...asset, extraction_job: jobs[asset.asset_id] } : asset
+            setState(current => current ? { ...current, assets: (current.assets ?? []).map(merge) } : current)
+            setActiveAsset(current => current?.asset_id === view.assetId ? merge(current) : current)
+            if (assetIds.some(assetId => !jobs[assetId] || !ACTIVE_JOB_STATUSES.has(jobs[assetId].status))
+              || ['queued', 'running', 'finalizing'].includes(state?.methodologies?.generation_job?.status)) await load()
+          } catch (value) {
+            if (!controller.signal.aborted && currentView(view)) setError(value instanceof Error ? value.message : String(value))
+          } finally { pending = false }
+        }
+        const timer = setInterval(() => { void poll() }, 1500)
+        return () => { controller.abort(); clearInterval(timer) }
+      }, [active, visible, load, pollingAssetIds])
 
       const sourceIds = section === 'methodologies'
         ? (state?.methodologies?.generation_job?.source_asset_ids ?? methodologyDetails[expandedMethodology]?.source_asset_ids ?? state?.methodologies?.items?.find(item => item.methodology_id === expandedMethodology)?.source_asset_ids ?? [])
@@ -349,6 +420,7 @@ window.__ModuleLoader__.load({
       }, [cwd, sourceIds.join('|')])
 
       async function act(action, payload = {}) {
+        const view = navigation.current
         setBusy(true); setError(''); setNotice('')
         try {
           if (action === 'extract' || action === 'import') {
@@ -361,20 +433,33 @@ window.__ModuleLoader__.load({
             }
           }
           const value = await requestAction({ cwd, action, payload, page, pageSize, type, status, kind, query })
-          setState(value)
-          if (value.imported_asset_id) { const detail = await requestAssetDetail({ cwd, assetId: value.imported_asset_id }); setDetails(current => ({ ...current, [value.imported_asset_id]: detail })); setActiveAsset(detail.asset) }
+          if (!currentView(view)) return false
+          ++loadSequence.current
+          if (action === 'stop') {
+            const merge = asset => asset.asset_id === payload.asset_id ? { ...asset, extraction_job: value.job } : asset
+            setState(current => current ? { ...current, assets: (current.assets ?? []).map(merge) } : current)
+            setActiveAsset(current => current ? merge(current) : current)
+            await load()
+            if (!currentView(view)) return false
+          } else setState(value)
+          if (value.imported_asset_id) {
+            const detail = await requestAssetDetail({ cwd, assetId: value.imported_asset_id })
+            if (!currentView(view)) return false
+            setDetails(current => ({ ...current, [value.imported_asset_id]: detail })); selectAsset(detail.asset)
+          }
           if (action === 'archive' && payload.asset_id) setSelectedAssets(values => {
             const next = { ...values }; delete next[payload.asset_id]; return next
           })
-          if (payload.asset_id) setDetails(current => {
+          if (payload.asset_id && action !== 'stop') setDetails(current => {
             const next = { ...current }; delete next[payload.asset_id]; return next
           })
-          if (action === 'archive' || action === 'restore') { setActiveAsset(null); setEditingAssetId('') }
-          if (!['archive', 'restore'].includes(action) && payload.asset_id && activeAsset?.asset_id === payload.asset_id) {
+          if (action === 'archive' || action === 'restore') { selectAsset(null); setEditingAssetId('') }
+          if (!['archive', 'restore', 'stop'].includes(action) && payload.asset_id && activeAsset?.asset_id === payload.asset_id) {
             try {
               const detail = await requestAssetDetail({ cwd, assetId: payload.asset_id })
+              if (!currentView(view)) return false
               setDetails(current => ({ ...current, [payload.asset_id]: detail }))
-              setActiveAsset(detail.asset)
+              setActiveAsset(current => current?.asset_id === payload.asset_id ? detail.asset : current)
               setSelectedAssets(current => {
                 if (!current[payload.asset_id]) return current
                 const next = { ...current }
@@ -382,7 +467,7 @@ window.__ModuleLoader__.load({
                 else delete next[payload.asset_id]
                 return next
               })
-            } catch (error) { setError(`操作已保存，但详情刷新失败：${error instanceof Error ? error.message : String(error)}`) }
+            } catch (error) { if (currentView(view)) setError(`操作已保存，但详情刷新失败：${error instanceof Error ? error.message : String(error)}`) }
           }
           if (action === 'generate_methodology' && value.methodologies?.generation_job?.session_id) {
             setSection('methodologies')
@@ -391,7 +476,8 @@ window.__ModuleLoader__.load({
           } else {
             setNotice(action === 'import' ? '文件已导入，可在详情中查看处理记录和提取内容。'
               : action === 'extract' ? '提取请求已处理，请查看资产状态；结构化提取完成后即可审核或选用。'
-                : action === 'review' || action === 'review_items' ? '审核结果已保存。'
+                : action === 'stop' ? value.completed === true || value.job?.status === 'completed' ? '提取已完成，结果已保存。' : '提取已停止，原始材料和已有结果已保留。可稍后重新处理。'
+                  : action === 'review' || action === 'review_items' ? '审核结果已保存。'
                   : action === 'enable_methodology' ? '方法论已启用，后续新 Run 可以冻结引用。'
                     : action === 'disable_methodology' ? '方法论已停用，后续新 Run 不再引用。'
                       : action === 'restore' ? '资产已恢复。'
@@ -399,7 +485,7 @@ window.__ModuleLoader__.load({
                           : state?.features?.restore === false ? '资产已归档。' : '资产已移出资产库，可在“已删除 / 已归档”中恢复。')
           }
           return true
-        } catch (value) { setError(value instanceof Error ? value.message : String(value)); return false }
+        } catch (value) { if (currentView(view)) setError(value instanceof Error ? value.message : String(value)); return false }
         finally { setBusy(false) }
       }
 
@@ -412,13 +498,13 @@ window.__ModuleLoader__.load({
         })
       }
 
-      async function importSourcePayload() {
-        const payload = { asset_type: importType, title: importTitle.trim() }
-        if (importFile) {
-          if (importFile.size === 0) throw new Error('所选文件为空，请选择有内容的文件。')
-          if (importFile.size > 24 * 1024 * 1024) throw new Error('导入文件超过 24 MiB 限制，请选择较小的文件。')
-          payload.file_name = importFile.name
-          payload.file_data = await fileAsBase64(importFile)
+      async function importSourcePayload(file = importFile) {
+        const payload = { asset_type: importType, title: importFiles.length > 1 ? '' : importTitle.trim() }
+        if (file) {
+          if (file.size === 0) throw new Error('所选文件为空，请选择有内容的文件。')
+          if (file.size > 24 * 1024 * 1024) throw new Error('导入文件超过 24 MiB 限制，请选择较小的文件。')
+          payload.file_name = file.name
+          payload.file_data = await fileAsBase64(file)
         } else {
           payload.path = importPath.trim()
         }
@@ -428,13 +514,45 @@ window.__ModuleLoader__.load({
       async function submitImport() {
         if (importPending.current || busy || (!importFile && !importPath.trim()) || importFileIssue || !importEnvironmentReady) return
         importPending.current = true
+        const view = navigation.current
         setBusy(true); setError(''); setNotice('')
         try {
-          const saved = await act('import', await importSourcePayload())
+          if (importFiles.length > 1) {
+            const files = [...importFiles]
+            let results = files.map(file => ({ name: file.name, status: 'pending' }))
+            const update = (index, value) => {
+              results = results.map((result, current) => current === index ? { ...result, ...value } : result)
+              if (currentView(view)) setImportBatch(results)
+            }
+            setImportBatch(results)
+            const execution = importType === 'coverage' ? {} : { provider_id: executor,
+              ...(executor ? { agent_model: selectedModel || undefined } : { model_route: JSON.parse(selectedModel) }) }
+            for (let index = 0; index < files.length; index++) {
+              if (!currentView(view)) break
+              update(index, { status: 'uploading' })
+              try {
+                const payload = { ...await importSourcePayload(files[index]), ...execution, batch: true }
+                if (!currentView(view)) break
+                const value = await requestAction({ cwd, action: 'import', payload })
+                update(index, { status: 'submitted', asset_id: value.imported_asset_id })
+              } catch (value) { update(index, { status: 'failed', error: value instanceof Error ? value.message : String(value) }) }
+            }
+            if (!currentView(view)) return
+            const submitted = results.filter(result => result.status === 'submitted').length
+            const failed = results.filter(result => result.status === 'failed').length
+            setNotice(`已提交 ${submitted} / ${files.length} 个文件${failed ? `，${failed} 个导入失败，可查看下方原因并重新选择文件` : ''}。提取在后台排队执行，可继续使用资产库。`)
+            setSection('library'); setPage(1); setType(''); setStatus(''); setKind(''); setQuery(''); setQueryDraft('')
+            setImportPath(''); setImportFile(null); setImportTitle(''); setImportOpen(false)
+            await load()
+            return
+          }
+          const payload = await importSourcePayload()
+          if (!currentView(view)) return
+          const saved = await act('import', payload)
           if (!saved) return
           setSection('library'); setPage(1); setType(''); setStatus(''); setKind(''); setQuery(''); setQueryDraft('')
           setImportPath(''); setImportFile(null); setImportTitle(''); setImportOpen(false)
-        } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
+        } catch (value) { if (currentView(view)) setError(value instanceof Error ? value.message : String(value)) }
         finally { importPending.current = false; setBusy(false) }
       }
 
@@ -493,7 +611,8 @@ window.__ModuleLoader__.load({
       async function toggle(assetId, refresh = false) {
         if (detailPending.current === assetId) return
         setError('')
-        setActiveAsset(details[assetId]?.asset ?? assets.find(item => item.asset_id === assetId) ?? { asset_id: assetId, title: '正在加载资产…' })
+        selectAsset(details[assetId]?.asset ?? assets.find(item => item.asset_id === assetId) ?? { asset_id: assetId, title: '正在加载资产…' })
+        const view = navigation.current
         if (!refresh) setDetailTab('content')
         setEditingAssetId('')
         if (details[assetId] && !refresh) return
@@ -501,10 +620,11 @@ window.__ModuleLoader__.load({
         setDetailLoading(true)
         try {
           const value = await requestAssetDetail({ cwd, assetId })
+          if (!currentView(view)) return
           setDetails(current => ({ ...current, [assetId]: value }))
           setActiveAsset(current => current?.asset_id === assetId ? value.asset : current)
-        } catch (value) { setError(value instanceof Error ? value.message : String(value)) }
-        finally { if (detailPending.current === assetId) { detailPending.current = ''; setDetailLoading(false) } }
+        } catch (value) { if (currentView(view)) setError(value instanceof Error ? value.message : String(value)) }
+        finally { if (currentView(view) && detailPending.current === assetId) { detailPending.current = ''; setDetailLoading(false) } }
       }
 
       function reviewItemsFor(assetId, detail) {
@@ -573,34 +693,55 @@ window.__ModuleLoader__.load({
         setStatus(section === 'review' ? 'awaiting_review' : section === 'archived' ? 'archived' : '')
       }
       function navigate(value) {
-        setSection(value); setActiveAsset(null); setImportOpen(false); setEditingAssetId('')
+        setSection(value); selectAsset(null); setImportOpen(false); setEditingAssetId('')
         setPage(1); setQuery(''); setQueryDraft(''); setType(''); setKind('')
         setStatus(value === 'review' ? 'awaiting_review' : value === 'archived' ? 'archived' : '')
         setError(''); setNotice('')
       }
-      const assistantAsset = importOpen ? null : activeAsset ?? state?.assets?.find(item => item.extraction_job)
+      const assistantAsset = importOpen ? null : activeAsset
       const job = assistantAsset?.extraction_job
-      const jobLabel = { preparing: '准备中', queued: '等待处理', running: '正在提取', finalizing: '保存结果', repairing: '修正类型', needs_attention: '需要处理', completed: '已完成', failed: '处理失败', interrupted: '处理已中断' }
+      const jobLabel = { waiting: '等待空闲执行位', preparing: '准备中', queued: '排队中', running: '正在提取', finalizing: '保存结果', repairing: '修正类型', stopping: '正在停止', needs_attention: '需要处理', completed: '已完成', failed: '处理失败', interrupted: '已停止 / 中断', stopped: '已停止' }
       const modelLabel = job?.model ? typeof job.model === 'string' ? job.model : `${job.model.provider} / ${job.model.model}` : ''
+      function jobProgress(value) {
+        if (!value) return null
+        const active = ACTIVE_JOB_STATUSES.has(value.status)
+        const elapsed = Number.isFinite(value.elapsed_ms) ? elapsedTime(0, value.elapsed_ms) : value.started_at || value.queued_at ? elapsedTime(value.started_at || value.queued_at, value.completed_at || Date.now()) : ''
+        const activity = value.last_activity_at || value.events?.at(-1)?.at
+        const idle = Number.isFinite(value.idle_ms) ? elapsedTime(0, value.idle_ms) : activity ? elapsedTime(activity, value.completed_at || Date.now()) : ''
+        return h('div', { 'aria-label': '提取进度', style: { ...styles.meta, marginBottom: 12 } },
+          h('div', null, `${value.phase_label || jobLabel[value.status] || '等待处理'}${value.queue_position ? ` · 队列第 ${value.queue_position} 个` : ''}${elapsed ? ` · 已用时 ${elapsed}` : ''}`),
+          active && idle ? h('div', null, `最近活动距今 ${idle}${value.diagnostics?.toolCalls ? ` · 已调用工具 ${value.diagnostics.toolCalls} 次` : ''}`) : null,
+          value.warning ? h('p', { role: 'status', style: { color: '#875400' } }, value.warning) : null)
+      }
+      function jobEmptyText(value) {
+        if (value.status === 'completed') return '处理结果已保存，可在资产详情中查看。'
+        if (['stopped', 'interrupted'].includes(value.status)) return '提取已停止，原始材料和已有结果已保留。'
+        if (value.status === 'failed') return '本次提取未完成，请查看错误信息后重新处理。'
+        if (value.status === 'needs_attention') return '提取结果需要处理，可继续修正或重新提取。'
+        if (['waiting', 'queued'].includes(value.status)) return '任务已进入队列，轮到后会自动开始；可以返回资产库继续导入。'
+        return '尚未收到文字处理记录。阶段与最近活动时间会持续更新，可以返回资产库或手动停止。'
+      }
       const renderJob = value => h(React.Fragment, null,
         value.error ? h('p', { role: 'alert', style: styles.error }, value.error) : null,
+        jobProgress(value),
         h('ol', { style: { paddingLeft: 24, lineHeight: 1.8 } }, (value.events ?? []).map((event, index) => h('li', { key: index }, event.label))),
-        value.output ? h('pre', { style: { ...styles.pre, maxHeight: '48vh', fontFamily: 'inherit', lineHeight: 1.75 } }, value.output) : h('p', { style: styles.meta }, value.status === 'completed' ? '处理结果已保存，可在资产详情中查看。' : '等待 Agent 输出处理记录…'))
+        value.output ? h('pre', { style: { ...styles.pre, maxHeight: '48vh', fontFamily: 'inherit', lineHeight: 1.75 } }, value.output) : h('p', { style: styles.meta }, jobEmptyText(value)))
+
       const coverageOnly = (importOpen ? importType : activeAsset?.asset_type) === 'coverage'
       const importTypes = TYPES.filter(([value]) => value && (!state?.asset_types?.length || state.asset_types.includes(value)))
       const generalImportTypes = importTypes.filter(([value]) => value !== 'coverage')
       const defaultGeneralType = generalImportTypes.find(([value]) => value === 'design')?.[0] ?? generalImportTypes[0]?.[0] ?? ''
-      const importFileIssue = importFile?.size === 0 ? '所选文件为空，请选择有内容的文件。'
+      const importFileIssue = importFiles.length > 1 ? '' : importFile?.size === 0 ? '所选文件为空，请选择有内容的文件。'
         : importFile?.size > 24 * 1024 * 1024 ? `当前文件为 ${(importFile.size / (1024 * 1024)).toFixed(1)} MiB；请选择不超过 24 MiB 的文件。` : ''
       const importEnvironmentReady = coverageOnly || (!modelLoading && !modelError
         && (!executor || executorOptions.some(item => item.id === executor && item.registered && item.available !== false))
         && (executor ? !modelOptions.length || Boolean(selectedModel) : Boolean(selectedModel)))
       function openImport() {
-        setActiveAsset(null); setImportOpen(true); setNotice(''); setError('')
+        selectAsset(null); setImportOpen(true); setImportBatch([]); setNotice(''); setError('')
         setImportType(current => importTypes.some(([value]) => value === current) ? current : defaultGeneralType || importTypes[0]?.[0] || '')
       }
       function closeImport() {
-        setActiveAsset(null); setImportOpen(false); setEditingAssetId(''); setError(''); setNotice('')
+        selectAsset(null); setImportOpen(false); setEditingAssetId(''); setError(''); setNotice('')
       }
       const designedDetail = activeAsset && ['design', 'requirement', 'reference', 'test_case_example', 'coverage'].includes(activeAsset.asset_type)
       const detailHeaderActions = designedDetail && activeAsset.asset_type === 'design' && activeAsset.status === 'available' && !activeAsset.result_stale && (!activeAsset.extraction_job || activeAsset.extraction_job.status === 'completed')
@@ -637,7 +778,7 @@ window.__ModuleLoader__.load({
           h('p', { style: styles.meta }, `${job.provider_id ? executorOptions.find(item => item.id === job.provider_id)?.label ?? job.provider_id : modelLabel ? '内置 API' : '文件解析'}${modelLabel ? ` · ${modelLabel}` : ''}`),
           renderJob(job),
           job.status === 'needs_attention' ? h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => { void act('extract', { asset_id: assistantAsset.asset_id, provider_id: job.provider_id, ...(job.provider_id ? { agent_model: job.model } : { model_route: job.model }) }) } }, '原会话继续修正') : null,
-          ['failed', 'interrupted', 'needs_attention'].includes(job.status) ? h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, disabled: busy, onClick: () => { void act('extract', { asset_id: assistantAsset.asset_id, restart: true }) } }, '重新处理资产') : null,
+          ['failed', 'interrupted', 'stopped', 'needs_attention'].includes(job.status) ? h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, disabled: busy, onClick: () => { void act('extract', { asset_id: assistantAsset.asset_id, restart: true }) } }, '重新处理资产') : null,
           (job.history ?? []).map((past, index) => h('details', { key: index, style: { marginTop: 20 } }, h('summary', { style: styles.itemTitle }, `历史处理 · ${assetTime(past.started_at)}`), renderJob(past))))
           : !importOpen ? h('p', { style: { ...styles.meta, marginTop: 20 } }, '处理结果保存在左侧详情中。') : null) : null
       function detailPairs(rows) {
@@ -645,9 +786,11 @@ window.__ModuleLoader__.load({
       }
       function detailLog(record) {
         const events = record?.events ?? []
-        return events.length ? h('ol', { className: 'pangea-asset-detail-log' }, events.map((event, index) => h('li', { key: index },
-          event.at || event.timestamp ? h('time', null, assetTime(event.at ?? event.timestamp)) : null,
-          event.label ?? event.message ?? '处理事件'))) : h('p', { style: styles.meta }, '尚无处理事件。')
+        return h(React.Fragment, null, jobProgress(record),
+          events.length ? h('ol', { className: 'pangea-asset-detail-log' }, events.map((event, index) => h('li', { key: index },
+            event.at || event.timestamp ? h('time', null, assetTime(event.at ?? event.timestamp)) : null,
+            event.label ?? event.message ?? '处理事件'))) : null,
+          record?.output ? h('pre', { style: { ...styles.pre, fontFamily: 'inherit' } }, record.output) : h('p', { style: styles.meta }, record ? jobEmptyText(record) : '尚无处理事件。'))
       }
       function detailItems(result) {
         const items = structuredItems(result)
@@ -697,9 +840,9 @@ window.__ModuleLoader__.load({
       function detailView(asset, detail) {
         const assetJob = asset.extraction_job
         const stale = Boolean(asset.result_stale)
-        const processing = ['preparing', 'queued', 'running', 'repairing', 'finalizing'].includes(assetJob?.status) || asset.status === 'extracting'
+        const processing = isExtracting(asset)
         const attention = assetJob?.status === 'needs_attention'
-        const failed = asset.status === 'failed' || ['failed', 'interrupted'].includes(assetJob?.status)
+        const failed = asset.status === 'failed' || ['failed', 'interrupted', 'stopped'].includes(assetJob?.status)
         const noItems = asset.status === 'no_items'
         const processState = processing || attention || failed || noItems
         const items = structuredItems(detail?.result)
@@ -721,7 +864,7 @@ window.__ModuleLoader__.load({
               h('p', { style: styles.meta }, noItems ? '当前分类未提取出可用内容。核对原文与资料分类后可重新处理。' : '提取成功后，可在详情中核对内容。历史缺陷经审核后才能进入新分析。'),
               noItems && state?.features?.metadata !== false ? h('button', { type: 'button', style: styles.button, onClick: event => startEdit(asset, event) }, '编辑资料分类') : null)))
         const title = failed ? '处理未完成，原材料已保留' : attention ? '提取结果需要修正' : noItems ? '这份材料未提取出可用内容' : '正在提取资料中的可用内容'
-        const processCopy = failed ? '本次提取未能完整保存结果。可以查看失败记录，调整处理设置后重新尝试。' : attention ? '提取内容与资料分类尚未一致。可在原会话继续修正，或发起新的处理。' : noItems ? '核对原文与资料分类后，可以调整信息并重新处理；原始材料仍然保留。' : '原始材料已经保存。正在整理可用内容并保留出处。'
+        const processCopy = failed ? '本次提取未能完整保存结果。可以查看失败记录，调整处理设置后重新尝试。' : attention ? '提取内容与资料分类尚未一致。可在原会话继续修正，或发起新的处理。' : noItems ? '核对原文与资料分类后，可以调整信息并重新处理；原始材料仍然保留。' : '原始材料已经保存。提取将在后台继续，可返回资产库导入其他文件；也可以手动停止。'
         const processMain = h('div', null,
           h('section', { className: 'pangea-asset-process-hero' },
             h('div', { style: styles.row },
@@ -744,9 +887,9 @@ window.__ModuleLoader__.load({
           (assetJob?.history ?? []).map((record, index) => h('details', { key: index, open: index === 0, style: { marginTop: 24, borderTop: '1px solid #e5e7e4', paddingTop: 18 } },
             h('summary', null, `${assetTime(record.started_at)} · 历史处理`),
             h('div', { className: 'pangea-asset-history-record' },
-              h('div', { style: styles.row }, h('strong', null, ['failed', 'interrupted'].includes(record.status) ? '处理未完成' : jobLabel[record.status] ?? record.status),
-                h('span', { className: 'pangea-asset-detail-badges' }, h('span', { className: ['failed', 'interrupted'].includes(record.status) ? 'is-warn' : '' }, record.error || jobLabel[record.status] || record.status))),
-              h('p', null, ['failed', 'interrupted'].includes(record.status) ? '本次处理记录已保留，完成前未保存新的提取结果。' : '本次处理记录已保留，可与当前结果核对。')))))),
+              h('div', { style: styles.row }, h('strong', null, ['failed', 'interrupted', 'stopped'].includes(record.status) ? '处理未完成' : jobLabel[record.status] ?? record.status),
+                h('span', { className: 'pangea-asset-detail-badges' }, h('span', { className: ['failed', 'interrupted', 'stopped'].includes(record.status) ? 'is-warn' : '' }, record.error || jobLabel[record.status] || record.status))),
+              h('p', null, ['failed', 'interrupted', 'stopped'].includes(record.status) ? '本次处理记录已保留，完成前未保存新的提取结果。' : '本次处理记录已保留，可与当前结果核对。')))))),
           h('aside', { className: 'pangea-asset-detail-side' }, side('记录与修订', h(React.Fragment, null, h('p', { style: styles.meta }, '这里展示每次提取的处理记录。当前可用内容以最新结果为准。'), h('button', { type: 'button', style: styles.button, onClick: () => setDetailTab('content') }, '查看当前提取内容')))))
         if (!processState && !stale && detailTab === 'content' && ['requirement', 'reference', 'test_case_example'].includes(asset.asset_type)) {
           const sourceNote = item => item.source_references ? h('div', { className: 'pangea-asset-detail-source-note' }, `原文出处 · ${readable(item.source_references)}`) : null
@@ -1135,26 +1278,27 @@ window.__ModuleLoader__.load({
               h('div', { className: 'pangea-asset-header-actions', style: styles.wrap },
                 importOpen ? h('button', { type: 'button', className: 'pangea-asset-return', disabled: busy, style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 7 }, onClick: closeImport }, h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'm14 18-6-6 6-6M8 12h13' })), '返回资产库')
                 : activeAsset ? h('div', { style: styles.wrap },
-                    h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { setActiveAsset(null); setEditingAssetId(''); setError(''); setNotice('') } }, '返回资产库'),
+                    h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { selectAsset(null); setEditingAssetId(''); setError(''); setNotice('') } }, '返回资产库'),
                     designedDetail && (error || detailLoading) ? h('button', { type: 'button', disabled: detailLoading, style: styles.button, onClick: () => { void toggle(activeAsset.asset_id, true) } }, detailLoading ? '刷新中…' : '刷新') : null,
                     detailHeaderActions && detailTab !== 'source' && detailTab !== 'history' && state?.features?.metadata !== false ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: event => startEdit(activeAsset, event) }, '编辑信息') : null,
-                    detailHeaderActions && detailTab === 'content' ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('archive', { asset_id: activeAsset.asset_id }) } }, '归档') : null)
+                    isExtracting(activeAsset) ? h('button', { type: 'button', disabled: busy || activeAsset.extraction_job?.status === 'stopping' && !activeAsset.extraction_job?.error && !activeAsset.extraction_job?.stop_error, style: styles.button, onClick: () => { void act('stop', { asset_id: activeAsset.asset_id }) } }, activeAsset.extraction_job?.status === 'stopping' ? activeAsset.extraction_job.error || activeAsset.extraction_job.stop_error ? '重试停止' : '正在停止…' : '停止提取') : null,
+                    activeAsset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, title: state?.features?.restore === false ? '停止提取后归档，原始材料与已有结果保留' : isExtracting(activeAsset) ? '停止提取后移入已删除 / 已归档，原始材料与已有结果可恢复' : '移入已删除 / 已归档，可恢复', style: styles.button, onClick: () => { void act('archive', { asset_id: activeAsset.asset_id }) } }, state?.features?.restore === false ? '归档' : '删除（可恢复）') : null)
                 : waitingForAssets ? h('span', { role: 'status', style: styles.meta }, '刷新中') : null,
               !importOpen && !activeAsset && !waitingForAssets && !loading ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary, display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 400, lineHeight: 'normal' }, onClick: openImport }, plusIcon(), '导入资产') : null)),
           h('nav', { className: 'pangea-asset-tabs', 'aria-label': '资产管理导航' },
-            [['library', '资产库'], ['review', '待审核'], ['methodologies', '方法论'], ['archived', '已归档']].map(([value, label]) =>
+            [['library', '资产库'], ['review', '待审核'], ['methodologies', '方法论'], ['archived', '已删除 / 已归档']].map(([value, label]) =>
               h('button', { key: value, type: 'button', disabled: busy, 'aria-current': section === value ? 'page' : undefined,
                 style: { fontFamily: 'inherit', fontSize: 13, cursor: 'pointer', minHeight: 43, padding: '10px 0 14px' }, onClick: () => navigate(value) }, label)))),
         h('div', { className: 'pangea-asset-content', style: styles.content },
           b08Mode ? b08View() : null,
-          activeAsset && !importOpen && !designedDetail && !b08Mode ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, marginBottom: 12 }, onClick: () => { setActiveAsset(null); setImportOpen(false); setEditingAssetId(''); setError(''); setNotice('') } }, '返回列表') : null,
+          activeAsset && !importOpen && !designedDetail && !b08Mode ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, marginBottom: 12 }, onClick: () => { selectAsset(null); setImportOpen(false); setEditingAssetId(''); setError(''); setNotice('') } }, '返回列表') : null,
           designedDetail && !importOpen && !b08Mode ? detailView(activeAsset, details[activeAsset.asset_id]) : null,
           showLibrary && !activeAsset && state && assets.length ? h('div', { className: 'pangea-asset-metrics', 'aria-label': '资产统计' },
             [['全部资料', summary.total ?? pagination.total, '材料与提取内容'], ['可用于分析', summary.available ?? 0, '已完成处理'], ['待人工审核', summary.review ?? 0, '历史缺陷资料'], ['需要处理', summary.failed ?? 0, '可查看失败记录']].map(([label, count, hint]) =>
               h('div', { key: label, className: 'pangea-asset-metric' }, h('div', { className: 'pangea-asset-metric-label' }, label), h('div', { className: 'pangea-asset-metric-value' }, count), h('div', { className: 'pangea-asset-metric-label' }, hint)))) : null,
           importOpen ? h('section', { className: `pangea-asset-import-card${importFile ? ' has-file' : ''}`, style: styles.card, 'aria-label': '导入新资产', 'aria-busy': busy },
             h('div', { className: 'pangea-asset-import-intro' },
-              h('div', null, h('h2', { style: { ...styles.itemTitle, margin: 0 } }, '导入新的分析材料'), h('p', { style: styles.meta }, '选择资料 → 提取内容 → 核对后用于分析')),
+              h('div', null, h('h2', { style: { ...styles.itemTitle, margin: 0 } }, '导入新的分析材料'), h('p', { style: styles.meta }, '可一次选择多个同类文件，提交后自动排队提取，无需逐个等待。')),
               h('span', { className: 'pangea-asset-import-badge' }, coverageOnly ? '覆盖率输入' : '原始材料')),
             h('div', { className: 'pangea-asset-import-modes', role: 'group', 'aria-label': '导入资料类别' },
               h('button', { type: 'button', disabled: busy || !generalImportTypes.length, 'aria-pressed': !coverageOnly, onClick: () => { setImportFile(null); setImportPath(''); setError(''); setImportType(defaultGeneralType) } }, assetFileIcon('design'), '一般资料'),
@@ -1164,17 +1308,19 @@ window.__ModuleLoader__.load({
                 h('select', { 'aria-label': '资产类型', disabled: busy, style: { ...styles.input, width: '100%' }, value: importType, onChange: event => { if ((event.target.value === 'coverage') !== coverageOnly) { setImportFile(null); setImportPath('') } setImportType(event.target.value) } },
                   (coverageOnly ? importTypes.filter(([value]) => value === 'coverage') : generalImportTypes).map(([value, label]) => h('option', { key: value, value }, label)))),
               h('label', { style: styles.field }, h('span', { style: styles.label }, '资产标题', h('small', null, '可选')),
-                h('input', { 'aria-label': '资产标题', disabled: busy, placeholder: '留空时使用文件名', style: styles.input, value: importTitle, onChange: event => setImportTitle(event.target.value) }))),
+                h('input', { 'aria-label': '资产标题', disabled: busy || importFiles.length > 1, placeholder: importFiles.length > 1 ? '批量导入使用各文件名' : '留空时使用文件名', style: styles.input, value: importTitle, onChange: event => setImportTitle(event.target.value) }))),
             importFile ? h('div', { className: 'pangea-asset-file-selected', role: 'status' },
               h('span', { className: 'pangea-asset-file-mark' }, assetFileIcon(importType)),
-              h('div', null, h('strong', null, importFile.name), h('p', null, `${importFile.size >= 1024 * 1024 ? `${(importFile.size / (1024 * 1024)).toFixed(1)} MiB` : `${(importFile.size / 1024).toFixed(1)} KB`}${importFileIssue ? ' · 超出文件限制' : ''}`)),
+              h('div', null, h('strong', null, importFiles.length > 1 ? `已选择 ${importFiles.length} 个文件` : importFile.name), h('p', null, `${importFile.size >= 1024 * 1024 ? `${(importFile.size / (1024 * 1024)).toFixed(1)} MiB` : `${(importFile.size / 1024).toFixed(1)} KB`}${importFiles.length > 1 ? ' · 逐个上传，后台提取' : importFileIssue ? ' · 文件不可导入' : ''}`)),
               h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => importFileInput.current?.click() }, '重新选择'))
-              : h('div', { className: 'pangea-asset-dropzone', onDragOver: event => event.preventDefault(), onDrop: event => { event.preventDefault(); const file = event.dataTransfer?.files?.[0]; if (file) { setImportFile(file); setImportPath(''); setError('') } } },
+              : h('div', { className: 'pangea-asset-dropzone', onDragOver: event => event.preventDefault(), onDrop: event => { event.preventDefault(); const files = Array.from(event.dataTransfer?.files ?? []); if (!busy && files.length) { setImportFiles(files); setImportPath(''); setError('') } } },
                 h('svg', { className: 'pangea-asset-dropzone-icon', width: 28, height: 28, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'M12 16V4m0 0L7 9m5-5 5 5M4 16v4h16v-4' })),
                 h('h3', null, '选择要加入资产库的文件'),
-                h('p', null, coverageOnly ? 'Excel 工作簿或覆盖率 combined JSON' : 'Markdown、TXT、PDF、Word、Excel', h('br'), '单文件最大 24 MiB'),
+                h('p', null, coverageOnly ? 'Excel 工作簿或覆盖率 combined JSON' : 'Markdown、TXT、PDF、Word、Excel', h('br'), '支持多选，单文件最大 24 MiB'),
                 h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => importFileInput.current?.click() }, '选择文件')),
-            h('input', { ref: importFileInput, className: 'pangea-asset-sr-only', type: 'file', 'aria-label': '选择资产文件', disabled: busy, accept: coverageOnly ? '.xlsx,.json' : '.md,.txt,.pdf,.docx,.xlsx', onChange: event => { setImportFile(event.target.files?.[0] ?? null); setImportPath(''); setError('') } }),
+            h('input', { ref: importFileInput, className: 'pangea-asset-sr-only', type: 'file', 'aria-label': '选择资产文件', multiple: true, disabled: busy, accept: coverageOnly ? '.xlsx,.json' : '.md,.txt,.pdf,.docx,.xlsx', onChange: event => { setImportFiles(Array.from(event.target.files ?? [])); setImportBatch([]); setImportPath(''); setError('') } }),
+            importFiles.length > 1 && !importBatch.length ? h('div', { style: { maxHeight: 220, overflow: 'auto', marginBottom: 14 }, 'aria-label': '待导入文件' },
+              importFiles.map((file, index) => h('div', { key: index, style: styles.meta }, `${index + 1}. ${file.name} · ${(file.size / 1024).toFixed(1)} KB${file.size === 0 ? ' · 空文件，将跳过' : file.size > 24 * 1024 * 1024 ? ' · 超过 24 MiB，将跳过' : ''}`))) : null,
             h('details', { className: 'pangea-asset-local-path', open: Boolean(importPath || importFile) }, h('summary', null, '使用本机文件路径'),
               h('input', { 'aria-label': '资产文件路径', disabled: busy, placeholder: '文件完整路径', style: { ...styles.input, width: '100%', minHeight: importFile ? 40 : 38, marginTop: importFile ? 13 : 10 }, value: importPath, onChange: event => { setImportPath(event.target.value); setError(''); if (event.target.value) setImportFile(null) } })),
             importFileIssue || error ? h('div', { className: 'pangea-asset-callout is-error', role: 'alert' },
@@ -1185,7 +1331,12 @@ window.__ModuleLoader__.load({
                 : importType === 'historical_defect' ? '历史缺陷提取后需人工审核，通过后才可用于分析。' : '需求、设计、参考资料与用例示例会形成可核对的内容条目。历史缺陷提取后需人工审核。'),
             h('div', { className: 'pangea-asset-import-footer' },
               h('button', { type: 'button', className: 'pangea-asset-cancel', disabled: busy, style: styles.button, onClick: closeImport }, '取消'),
-              h('button', { type: 'button', disabled: busy || (!importFile && !importPath.trim()) || Boolean(importFileIssue) || !importEnvironmentReady, style: { ...styles.button, ...styles.primary }, onClick: () => { void submitImport() } }, busy ? '正在导入…' : '导入并处理'))) : null,
+              h('button', { type: 'button', disabled: busy || (!importFile && !importPath.trim()) || Boolean(importFileIssue) || !importEnvironmentReady, style: { ...styles.button, ...styles.primary }, onClick: () => { void submitImport() } }, busy ? importFiles.length > 1 ? '正在逐个提交…' : '正在导入…' : importFiles.length > 1 ? `导入并处理 ${importFiles.length} 个文件` : '导入并处理'))) : null,
+          importBatch.length && !activeAsset ? h('section', { 'aria-label': '批量导入进度', style: styles.card },
+            h('div', { style: styles.row }, h('h2', { style: styles.itemTitle }, `批量提交 · ${importBatch.filter(item => ['submitted', 'failed'].includes(item.status)).length} / ${importBatch.length}`),
+              !busy ? h('button', { type: 'button', style: styles.button, onClick: () => setImportBatch([]) }, '收起记录') : null),
+            h('p', { style: styles.meta }, '这里记录文件提交结果；提取状态和停止操作在下方资产列表中更新。'),
+            h('ol', { style: { maxHeight: 260, overflow: 'auto', paddingLeft: 22, lineHeight: 1.8 } }, importBatch.map((item, index) => h('li', { key: index }, `${item.name} · ${{ pending: '待提交', uploading: '正在导入', submitted: '已提交处理', failed: '导入失败' }[item.status]}`, item.error ? h('span', { style: styles.error }, `：${item.error}`) : null)))) : null,
           notice ? h('div', { style: { ...styles.card, ...styles.notice }, role: 'status' }, notice) : null,
           error && !importOpen && !emptyCatalogError && (state || activeAsset) ? h('div', { style: { ...styles.card, ...styles.error }, role: 'alert' },
             h('div', null, error), h('button', { type: 'button', disabled: busy || loading, style: { ...styles.button, marginTop: 12 }, onClick: () => { void load() } }, '刷新数据')) : null,
@@ -1247,19 +1398,16 @@ window.__ModuleLoader__.load({
                   h('tr', { role: 'row' },
                     h('th', { role: 'columnheader', scope: 'col', 'aria-label': '选择' }), h('th', { role: 'columnheader', scope: 'col' }, '资产与原始材料'), h('th', { role: 'columnheader', scope: 'col' }, '类型'), h('th', { role: 'columnheader', scope: 'col' }, '处理状态'), h('th', { role: 'columnheader', scope: 'col' }, '修订 / 提取结果'), h('th', { role: 'columnheader', scope: 'col', 'aria-label': '操作' }))),
                 h('tbody', null, displayAssets.map(asset => {
-                const statusClass = ['failed', 'interrupted', 'needs_attention'].includes(asset.extraction_job?.status) || asset.status === 'failed' ? 'is-error'
-                  : asset.status === 'available' ? 'is-available' : asset.status === 'extracting' ? 'is-processing' : asset.status === 'awaiting_review' ? 'is-pending' : ''
-                  const statusLabel = asset.status === 'awaiting_review' ? '待审核'
-                    : asset.status === 'extracting' ? '正在提取'
-                      : asset.status === 'no_items' ? '无可用内容'
-                        : asset.status !== 'archived' && ['failed', 'interrupted', 'needs_attention'].includes(asset.extraction_job?.status)
-                          ? jobLabel[asset.extraction_job.status] : STATUS[asset.status] ?? asset.status
+                const statusClass = ['failed', 'interrupted', 'stopped', 'needs_attention'].includes(asset.extraction_job?.status) || asset.status === 'failed' ? 'is-error'
+                  : isExtracting(asset) ? 'is-processing' : asset.status === 'available' ? 'is-available' : asset.status === 'awaiting_review' ? 'is-pending' : ''
+                  const statusLabel = asset.status !== 'archived' && asset.extraction_job && asset.extraction_job.status !== 'completed'
+                    ? jobLabel[asset.extraction_job.status] ?? STATUS[asset.status] ?? asset.status
+                    : asset.status === 'awaiting_review' ? '待审核' : asset.status === 'no_items' ? '无可用内容' : STATUS[asset.status] ?? asset.status
                   const fileName = asset.source_name || asset.source_path?.split(/[\\/]/).pop() || '未提供文件名'
                   const itemCount = Number(asset.structured_item_count ?? 0)
-                  const revisionSummary = asset.status === 'awaiting_review' ? `${itemCount} 条待审核`
-                    : asset.status === 'extracting' ? '内容生成中'
-                      : asset.status === 'failed' ? `保留原有 ${itemCount} 条`
-                        : `${itemCount} 条${asset.asset_type === 'coverage' ? '记录' : '内容'}`
+                  const revisionSummary = isExtracting(asset) ? '内容处理中' : asset.status === 'awaiting_review' ? `${itemCount} 条待审核`
+                    : ['failed', 'stopped', 'interrupted'].includes(asset.extraction_job?.status) || asset.status === 'failed' ? `保留原有 ${itemCount} 条`
+                      : `${itemCount} 条${asset.asset_type === 'coverage' ? '记录' : '内容'}`
                   const actionLabel = asset.status === 'awaiting_review' ? '查看并审核' : '查看详情'
                 return h('tr', { key: asset.asset_id, className: 'pangea-asset-list-row', role: 'row' },
                   h('td', { role: 'cell' }, asset.status === 'available' ? h('input', { type: 'checkbox', checked: selectedAssetIds.includes(asset.asset_id), 'aria-label': `选择资产 ${asset.title}`, onChange: () => toggleSelectedAsset(asset.asset_id) }) : null),
@@ -1270,11 +1418,13 @@ window.__ModuleLoader__.load({
                         h('svg', { width: 17, height: 17, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.65, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'M7 17 17 7' }), h('path', { d: 'M7 7h10v10' }))),
                       h('div', { className: 'pangea-asset-filepath', title: asset.source_path }, `${fileName} · ${(asset.repository_ids ?? []).join('、') || '未限定仓库'}`)))),
                   h('td', { role: 'cell' }, h('span', { className: 'pangea-asset-row-badge' }, TYPES.find(([value]) => value === asset.asset_type)?.[1] ?? asset.asset_type)),
-                  h('td', { role: 'cell' }, h('span', { className: `pangea-asset-row-badge ${statusClass}` }, statusLabel)),
+                  h('td', { role: 'cell' }, h('span', { className: `pangea-asset-row-badge ${statusClass}` }, statusLabel), isExtracting(asset) ? jobProgress(asset.extraction_job) : null),
                   h('td', { role: 'cell', className: 'pangea-asset-row-revision' }, h('span', { className: 'pangea-asset-revision-code' }, `r${asset.revision ?? 1}`), h('div', { className: 'pangea-asset-row-count' }, revisionSummary)),
                   h('td', { role: 'cell', className: 'pangea-asset-row-action' }, h('button', { type: 'button', 'aria-label': actionLabel, onClick: () => { void toggle(asset.asset_id) } },
                     h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'm9 18 6-6-6-6' })),
-                    '查看', h('span', { className: 'pangea-asset-sr-only' }, actionLabel === '查看并审核' ? '并审核' : '详情')))
+                    '查看', h('span', { className: 'pangea-asset-sr-only' }, actionLabel === '查看并审核' ? '并审核' : '详情')),
+                    isExtracting(asset) ? h('button', { type: 'button', disabled: busy || asset.extraction_job?.status === 'stopping' && !asset.extraction_job?.error && !asset.extraction_job?.stop_error, 'aria-label': `停止提取 ${asset.title}`, onClick: () => { void act('stop', { asset_id: asset.asset_id }) } }, asset.extraction_job?.status === 'stopping' && (asset.extraction_job.error || asset.extraction_job.stop_error) ? '重试停止' : '停止') : null,
+                    asset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, 'aria-label': `${state?.features?.restore === false ? '归档' : '删除'}资产 ${asset.title}`, title: state?.features?.restore === false ? '停止提取并归档，原始材料与已有结果保留' : '停止提取并移入已删除 / 已归档，可恢复', onClick: () => { void act('archive', { asset_id: asset.asset_id }) } }, state?.features?.restore === false ? '归档' : '删除') : null)
                 )}))))) : null,
           showLibrary && (!designedDetail && activeAsset || !displayAssets.length) ? h('section', { 'aria-label': '资产列表', 'aria-busy': loading || waitingForAssets || detailLoading }, displayAssets.length ? displayAssets.map(asset => {
             const detail = details[asset.asset_id]
@@ -1286,11 +1436,11 @@ window.__ModuleLoader__.load({
                   h('div', { style: { minWidth: 0 } }, h('div', { style: styles.itemTitle }, asset.title), h('div', { title: asset.source_path, style: styles.meta }, `${asset.source_name || asset.source_path?.split(/[\\/]/).pop() || '未提供文件名'} · ${(asset.repository_ids ?? []).join('、') || '未限定仓库'}`))),
                 h('div', { style: { ...styles.wrap, justifyContent: 'flex-end' } },
                   h('span', { style: styles.chip }, TYPES.find(([value]) => value === asset.asset_type)?.[1] ?? asset.asset_type),
-                  h('span', { style: { ...styles.chip, ...(['failed', 'interrupted', 'needs_attention'].includes(asset.extraction_job?.status) || asset.status === 'failed' ? { background: '#fff0f1', color: '#a6000a' } : asset.status === 'available' ? { background: '#edf8f2', color: '#176548' } : ['extracting', 'awaiting_review'].includes(asset.status) ? { background: '#fff7e6', color: '#875400' } : {}) } }, asset.status !== 'archived' && ['failed', 'interrupted', 'needs_attention'].includes(asset.extraction_job?.status) ? jobLabel[asset.extraction_job.status] : STATUS[asset.status] ?? asset.status),
+                  h('span', { style: { ...styles.chip, ...(['failed', 'interrupted', 'stopped', 'needs_attention'].includes(asset.extraction_job?.status) || asset.status === 'failed' ? { background: '#fff0f1', color: '#a6000a' } : asset.status === 'available' ? { background: '#edf8f2', color: '#176548' } : ['extracting', 'awaiting_review'].includes(asset.status) ? { background: '#fff7e6', color: '#875400' } : {}) } }, asset.status !== 'archived' && ['failed', 'interrupted', 'stopped', 'needs_attention'].includes(asset.extraction_job?.status) ? jobLabel[asset.extraction_job.status] : STATUS[asset.status] ?? asset.status),
                   !isExpanded ? h('button', { type: 'button', style: styles.button, onClick: () => { void toggle(asset.asset_id) } }, asset.status === 'awaiting_review' ? '查看并审核' : '查看详情') : null)),
               h('div', { style: styles.meta }, `修订 ${asset.revision ?? 1} · ${asset.asset_type === 'coverage' ? `覆盖记录 ${asset.structured_item_count ?? 0}` : `提取条目 ${asset.structured_item_count ?? 0}`} · 更新于 ${assetTime(asset.updated_at)}（UTC+8）`),
               isExpanded ? h('div', { style: { ...styles.wrap, marginTop: 8 } },
-                (['imported', 'available', 'no_items', 'rejected', 'failed'].includes(asset.status) || ['failed', 'interrupted', 'needs_attention'].includes(asset.extraction_job?.status))
+                (['imported', 'available', 'no_items', 'rejected', 'failed'].includes(asset.status) || ['failed', 'interrupted', 'stopped', 'needs_attention'].includes(asset.extraction_job?.status))
                   ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { void act('extract', { asset_id: asset.asset_id, restart: true }) } }, '重新处理') : null,
                 asset.status === 'awaiting_review' ? h(React.Fragment, null,
                   h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('review', { asset_id: asset.asset_id, decision: 'approve' }) } }, '审核通过'),
@@ -1410,6 +1560,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     exports.requestState = requestState
     exports.requestAssetDetail = requestAssetDetail
+    exports.requestJobs = requestJobs
     exports.requestMethodologyDetail = requestMethodologyDetail
     exports.requestAction = requestAction
     exports.openAnalysisSession = openAnalysisSession

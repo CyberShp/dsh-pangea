@@ -265,12 +265,12 @@ test('review note edits preserve the saved decision and a failed save keeps the 
 test('asset detail exposes recoverable deletion and persists category edits', async () => {
   const ui = await mount()
   await ui.click('查看详情')
-  assert.ok(ui.button('归档'))
+  assert.ok(ui.button('删除（可恢复）'))
   await ui.click('编辑信息')
   ui.change('编辑资产分类', 'historical_defect')
   await ui.click('保存信息')
   assert.equal(ui.calls.find(call => call.payload?.action === 'update_metadata').payload.asset_type, 'historical_defect')
-  await ui.click('归档')
+  await ui.click('删除（可恢复）')
   assert.ok(ui.calls.some(call => call.payload?.action === 'archive'))
   assert.ok(!ui.text().includes('返回资产库'))
 })
@@ -306,8 +306,8 @@ test('search submits a trimmed query and clearing filters preserves the current 
   await ui.click('待审核')
   assert.equal(ui.button('待审核').props['aria-current'], 'page')
   assert.ok(!ui.nodes().some(node => node.props['aria-label'] === '资产状态'))
-  await ui.click('已归档')
-  assert.equal(ui.button('已归档').props['aria-current'], 'page')
+  await ui.click('已删除 / 已归档')
+  assert.equal(ui.button('已删除 / 已归档').props['aria-current'], 'page')
   assert.ok(ui.field('搜索已归档资产'))
 })
 
@@ -434,7 +434,7 @@ test('empty and oversized uploads are blocked before reading or calling the API'
 
 test('successful import opens its detail in the library and clears earlier section filters', async () => {
   const imported = { ...available, asset_id: 'fresh', title: '新覆盖率', asset_type: 'coverage' }
-  for (const origin of ['方法论', '已归档']) {
+  for (const origin of ['方法论', '已删除 / 已归档']) {
     const ui = await mount(catalog, { async fetcher(url, options) {
       const body = options.body ? { ...catalog, assets: [imported], imported_asset_id: imported.asset_id }
         : new URL(url, 'http://localhost').searchParams.has('asset_id') ? { status: 'ok', asset: imported, result: { summary: '导入完成的详细内容', items: [] } }
@@ -442,7 +442,7 @@ test('successful import opens its detail in the library and clears earlier secti
       return { ok: true, async json() { return body } }
     } })
     await ui.click(origin)
-    if (origin === '已归档') ui.change('搜索已归档资产', '原有筛选')
+    if (origin === '已删除 / 已归档') ui.change('搜索已归档资产', '原有筛选')
     await ui.click('导入资产')
     ui.change('资产类型', 'coverage')
     ui.change('资产文件路径', '/fixtures/coverage.json')

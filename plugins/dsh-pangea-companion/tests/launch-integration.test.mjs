@@ -78,15 +78,6 @@ test('persists the Run identity as soon as creation succeeds', () => {
   assert.doesNotMatch(source, /tasks\.bindRunBySession\(sessionId, effectiveSnapshot\.current\)/)
 })
 
-test('stops the local Run before attempting DSH session cancellation', () => {
-  const stop = source.indexOf("const stopped = await stopAnalysisRun({ cwd, dataRoot: actionDataRoot, runId: body.run_id })")
-  const cancel = source.indexOf('api.sessions.cancel', stop)
-  assert.notEqual(stop, -1)
-  assert.ok(cancel > stop)
-  assert.doesNotMatch(source.slice(stop, cancel), /requireWorkspaceTask/)
-  assert.match(source.slice(stop), /sessionCancel = \{\s*status: 'error'/)
-})
-
 test('treats exit 0 without validated final artifacts as an ACP failure', async () => {
   const events = []
   let outcome

@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
 import { MethodologyCandidateRuntime } from './methodology-runtime.js'
+import { AssetExtractionQueue } from './extraction-queue.js'
 
 export const name = 'dsh-pangea-asset-catalog'
 export const inject = ['tools', 'webServer', 'apiProxy', 'agents', 'subagents']
@@ -14,6 +15,16 @@ const PAGE_SIZES = new Set([20, 50, 100])
 const ASSET_TYPES = new Set(['requirement', 'design', 'historical_defect', 'reference', 'coverage', 'test_case_example'])
 const ASSET_STATUSES = new Set(['imported', 'extracting', 'awaiting_review', 'available', 'no_items', 'rejected', 'failed', 'archived'])
 const KNOWLEDGE_KINDS = new Set(['semantic', 'evidence'])
+
+function extractionRuntime(runtime) { return runtime.queue ?? runtime }
+
+export function extractionJobs({ cwd, dataRoot, assetIds, runtime }) {
+  if (assetIds.length > 100 || assetIds.some(id => typeof id !== 'string' || !id.trim() || id.length > 200)) {
+    throw new Error('处理记录查询最多支持 100 个有效资产编号')
+  }
+  const resolvedDataRoot = dataRootFor(cwd, dataRoot)
+  return { status: 'ok', jobs: Object.fromEntries([...new Set(assetIds)].map(id => [id, extractionRuntime(runtime).job(resolvedDataRoot, id)])) }
+}
 
 function workspaceCwd(exec) {
   const cwd = exec?.agent?.session?.header?.cwd
@@ -111,7 +122,7 @@ export async function semanticAssetList({ cwd, dataRoot, options, runtime, runne
     items.push(...page.items)
     cursor = page.next_cursor
   } while (cursor !== null && cursor !== undefined)
-  const displayStatus = item => item.status !== 'archived' && ['failed', 'interrupted', 'needs_attention'].includes(runtime?.job(dataRoot, item.asset_id)?.status) ? 'failed' : item.status
+  const displayStatus = item => item.status !== 'archived' && ['failed', 'interrupted', 'needs_attention'].includes(runtime && extractionRuntime(runtime).job(dataRoot, item.asset_id)?.status) ? 'failed' : item.status
   const filtered = items.filter(item => (options.status ? displayStatus(item) === options.status : item.status !== 'archived')
     && (!options.type || item.asset_type === options.type)
     && (!options.query || [item.asset_id, item.title, item.source_path].join(' ').toLowerCase().includes(options.query.toLowerCase())))
@@ -150,7 +161,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
     asset_types: capabilities.asset_types ?? [],
     assets: result.items.map(asset => ({
       ...asset,
-      extraction_job: runtime.job(resolvedDataRoot, asset.asset_id),
+      extraction_job: extractionRuntime(runtime).job(resolvedDataRoot, asset.asset_id),
     })),
     summary: result.summary ?? {},
     methodologies: {
@@ -175,7 +186,7 @@ async function assetDetail({ cwd, dataRoot, runtime, assetId }) {
   })
   return {
     status: 'ok', data_root: resolvedDataRoot,
-    asset: { ...detail.asset, extraction_job: runtime.job(resolvedDataRoot, assetId) },
+    asset: { ...detail.asset, extraction_job: extractionRuntime(runtime).job(resolvedDataRoot, assetId) },
     result: detail.result,
     normalized_preview: detail.normalized_preview ?? null,
     integrity: detail.integrity ?? null,
@@ -202,6 +213,7 @@ async function routeHandler(req, res, runtime) {
   try {
     if (req.method === 'GET') {
       if (url.searchParams.get('execution_options') === '1') return json(res, 200, { status: 'ok', ...await runtime.executionOptions() })
+      if (url.searchParams.get('jobs_only') === '1') return json(res, 200, extractionJobs({ cwd, dataRoot, runtime, assetIds: url.searchParams.getAll('asset_id') }))
       const assetId = url.searchParams.get('asset_id')
       const methodologyId = url.searchParams.get('methodology_id')
       const value = methodologyId
@@ -214,6 +226,11 @@ async function routeHandler(req, res, runtime) {
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await readBody(req)
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
+    // Cancellation must not wait for capability discovery or a full catalogue read.
+    if (body.action === 'stop') {
+      const result = await extractionRuntime(runtime).stop({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id })
+      return json(res, 200, { status: 'ok', ...result })
+    }
     const capabilities = await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] })
     const features = assetFeatures(capabilities)
     const semantic = !features.preview
@@ -238,9 +255,11 @@ async function routeHandler(req, res, runtime) {
       try {
         imported = await importAndExtract({ cwd, dataRoot: resolvedDataRoot, body, sourcePath: source.path, runtime })
       } finally { await source.cleanup() }
+      if (body.batch === true) return json(res, 200, { status: 'ok', imported_asset_id: imported.asset_id, asset: imported,
+        extraction_job: extractionRuntime(runtime).job(resolvedDataRoot, imported.asset_id) })
       return json(res, 200, { ...await listState({ cwd, dataRoot: resolvedDataRoot, runtime, options }), imported_asset_id: imported.asset_id })
     } else if (body.action === 'extract') {
-      await runtime.start({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id,
+      await extractionRuntime(runtime).start({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id,
         providerId: body.provider_id, model: body.model_route, agentModel: body.agent_model, restart: body.restart === true })
     } else if (body.action === 'review') {
       await runPangea({
@@ -270,15 +289,19 @@ async function routeHandler(req, res, runtime) {
         await rm(temporaryRoot, { recursive: true, force: true })
       }
     } else if (body.action === 'archive') {
-      await runPangea({
+      const params = { cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id }
+      const archive = () => runPangea({
         cwd,
         args: ['assets', 'archive', '--data-root', resolvedDataRoot, '--asset-id', body.asset_id],
       })
+      if (runtime.queue) await runtime.queue.archive(params, archive)
+      else { await runtime.stop(params); await archive() }
     } else if (body.action === 'restore') {
       await runPangea({
         cwd,
         args: ['assets', 'restore', '--data-root', resolvedDataRoot, '--asset-id', body.asset_id],
       })
+      runtime.queue?.restored({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id })
     } else if (body.action === 'update_metadata') {
       if (typeof body.title !== 'string' || body.title.trim() === '') throw new Error('资产标题不能为空')
       for (const field of ['repository_ids', 'module_tags', 'language_tags']) {
@@ -321,7 +344,7 @@ export async function importAndExtract({ cwd, dataRoot, body, sourcePath, runtim
   const asset = result.asset ?? result
   if (!asset.asset_id) throw new Error('导入结果未返回资产编号')
   try {
-    await runtime.start({ cwd, dataRoot, assetId: asset.asset_id, providerId: body.provider_id,
+    await extractionRuntime(runtime).start({ cwd, dataRoot, assetId: asset.asset_id, providerId: body.provider_id,
       model: body.model_route, agentModel: body.agent_model })
   } catch { /* The imported file and the persisted failed job remain visible for retry. */ }
   return asset
@@ -329,6 +352,7 @@ export async function importAndExtract({ cwd, dataRoot, body, sourcePath, runtim
 
 export async function apply(ctx) {
   const runtime = new AssetActionRuntime(ctx.apiProxy, runPangea, { agents: ctx.agents, subagents: ctx.subagents })
+  runtime.queue = new AssetExtractionQueue(runtime, { concurrency: 2 })
   runtime.methodologies = new MethodologyCandidateRuntime(ctx.apiProxy)
   ctx.on('session/event', (session, event) => runtime.handleSessionEvent(session, event))
   ctx.on('agent/status', ({ agent, status }) => { runtime.handleAgentStatus(agent, status); runtime.methodologies.handleAgentStatus(agent, status) })
@@ -356,6 +380,7 @@ export async function apply(ctx) {
   })]
   const disposeRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => routeHandler(req, res, runtime) })
   ctx.effect?.(() => () => {
+    runtime.queue.dispose()
     disposeRoute()
     for (const dispose of toolDisposers) dispose()
   }, 'dsh-pangea-asset-catalog: PANGEA Asset Management 2.0 API')

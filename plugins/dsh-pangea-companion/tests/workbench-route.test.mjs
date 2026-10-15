@@ -12,6 +12,101 @@ import { createTaskStore } from '../src/task-store.js'
 
 function ok(value) { return { result: { ok: true, value } } }
 
+test('home GET returns fresh workspace summaries without CLI, model RPCs, reconciliation or task details', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'home-route-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  let sequence = 0
+  const store = createTaskStore({ storePath: path.join(root, 'tasks.json'), idFactory: () => `home-${++sequence}` })
+  const input = { repository: 'repo-one', target: '首页摘要', source_scope: ['src'] }
+  await store.create({ workspace: root, dataRoot: path.join(root, 'pangea-data'), input })
+  await store.create({ workspace: path.join(root, 'other'), dataRoot: path.join(root, 'other/pangea-data'), input })
+  let listCalls = 0
+  let persistence = { status: 'degraded', pending: true, error: { code: 'EPERM', message: 'monitor save blocked' } }
+  const monitor = { getPersistenceStatus() { return persistence } }
+  const unexpected = new Proxy({}, { get(_target, key) { throw new Error(`home must not access ${String(key)}`) } })
+  const tasks = { async list(options) { listCalls += 1; return store.list(options) } }
+  async function request(origin = 'same-origin') {
+    const req = Readable.from([])
+    req.method = 'GET'
+    req.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: root, view: 'home', run_id: 'unrelated', session_id: 'unrelated' })}`
+    req.headers = { 'sec-fetch-site': origin }
+    const response = {}
+    await workbenchRouteHandler(req, {
+      writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) },
+    }, unexpected, tasks, unexpected, unexpected, unexpected, monitor, async () => { throw new Error('home must not start Python') })
+    return response
+  }
+  const first = await request()
+  assert.equal(first.code, 200, JSON.stringify(first.body))
+  assert.equal(first.body.view, 'home')
+  assert.equal(first.body.tasks.total, 1)
+  assert.equal(first.body.tasks.items[0].workspace, root)
+  assert.equal(first.body.compatibility.checked, false)
+  assert.equal(first.body.compatibility.compatible, null)
+  assert.equal(first.body.model_routing, undefined)
+  assert.equal(first.body.launch_log, undefined)
+  assert.equal(first.body.run, null)
+  assert.deepEqual(first.body.monitor_persistence, persistence)
+  await store.create({ workspace: root, dataRoot: path.join(root, 'pangea-data'), input: { ...input, target: '新增任务' } })
+  persistence = { status: 'healthy', pending: false, error: null }
+  const refreshed = await request()
+  assert.deepEqual(refreshed.body.monitor_persistence, persistence)
+  assert.equal(refreshed.body.tasks.total, 2, 'a subsequent read must observe new tasks, without a stale response cache')
+  assert.equal(listCalls, 2)
+  assert.equal((await request('cross-site')).code, 403)
+  assert.equal(listCalls, 2)
+})
+
+test('home checks exact runtime ownership without draining jobs or claiming lost executions are still running', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'home-runtime-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  const dataRoot = path.join(root, 'pangea-data')
+  for (const runId of ['complete', 'unfinished']) {
+    const folder = path.join(dataRoot, 'runs', runId)
+    await mkdir(folder, { recursive: true })
+    await writeFile(path.join(folder, 'progress.json'), JSON.stringify({
+      run_id: runId, workflow_version: 'source-first-v1', lifecycle_status: runId === 'complete' ? 'complete' : 'running',
+    }))
+    if (runId === 'complete') {
+      for (const filename of ['report.md', 'report.html', 'report-complete.json']) await writeFile(path.join(folder, filename), '{}')
+    }
+  }
+  const items = ['lost', 'mismatch', 'live', 'done', 'unfinished', 'native-lost'].map(id => ({
+    task_id: id, workspace: root, data_root: dataRoot, run_id: id === 'unfinished' ? 'unfinished' : 'complete',
+    workflow_version: 'source-first-v1', status: 'running', execution_status: 'running',
+    provider: id === 'native-lost' ? null : 'external', job_id: id === 'native-lost' ? null : id,
+    job_started_at: 123, owner_session_id: 'owner', conversations: [],
+  }))
+  const runtime = {
+    agents: { get() { return undefined } },
+    jobs: {
+      get(id) { return id === 'lost' ? null : { id, startedAt: id === 'mismatch' ? 456 : 123, status: ['done', 'unfinished'].includes(id) ? 'completed' : 'running' } },
+      read() { throw new Error('home must not consume job output') },
+    },
+  }
+  const req = Readable.from([])
+  req.method = 'GET'
+  req.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: root, view: 'home' })}`
+  req.headers = { 'sec-fetch-site': 'same-origin' }
+  let response
+  await workbenchRouteHandler(req, { writeHead(code) { assert.equal(code, 200) }, end(body) { response = JSON.parse(body) } },
+    {}, { async list() { return items } }, new Set(), {}, runtime, {}, async () => { throw new Error('home must not start Python') })
+  const byId = new Map(response.tasks.items.map(task => [task.task_id, task]))
+  for (const id of ['lost', 'mismatch', 'native-lost']) {
+    assert.equal(byId.get(id).status, 'needs_attention', id)
+    assert.equal(byId.get(id).execution_status, 'interrupted', id)
+    assert.ok(byId.get(id).needs_user_reason, id)
+  }
+  assert.equal(byId.get('live').status, 'running')
+  assert.equal(byId.get('done').status, 'completed')
+  assert.equal(byId.get('unfinished').status, 'needs_attention')
+  assert.ok(items.every(task => task.status === 'running'), 'home projection must not mutate stored task states')
+})
+
 test('new-analysis coverage query uses literal arguments and returns acquisition state without starting a Run', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'query-route-'))
   t.after(() => rm(root, { recursive: true, force: true }))

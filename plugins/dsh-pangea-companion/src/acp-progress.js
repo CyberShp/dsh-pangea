@@ -5,11 +5,18 @@ export const ACP_PROGRESS_DEFAULTS = Object.freeze({
 })
 
 export class AcpStalled extends Error {
-  constructor(message, confirmed = false) {
+  constructor(message, confirmed = false, outcome) {
     super(message)
     this.name = 'AcpStalled'
     this.confirmed = confirmed
+    // A real prompt response proves only that the prompt ended. Tool execution
+    // must be confirmed separately before a continuation is safe.
+    this.outcome = outcome
   }
+}
+
+export function hasUnconfirmedAcpTools(diagnostics = {}) {
+  return diagnostics.activeToolCount > 0 || (diagnostics.activeToolCount === undefined && ['pending', 'in_progress'].includes(diagnostics.lastToolStatus))
 }
 
 export async function waitForAcpTurn({ worker, turn, signal, ready = false, policy = {}, emit = async () => {} }) {
@@ -61,8 +68,8 @@ export async function waitForAcpTurn({ worker, turn, signal, ready = false, poli
         await emit({ stage: 'source_first_cancel_confirmed', status: 'ok', message: '原 ACP 回合已结束' })
         if (acknowledgement.outcome?.stopReason === 'completed') return acknowledgement.outcome
         const d = worker.readDiagnostics?.() ?? {}
-        if (d.activeToolCount > 0 || (d.activeToolCount === undefined && ['pending', 'in_progress'].includes(d.lastToolStatus))) {
-          throw new AcpStalled('原回合已结束，但工具执行状态未确认；已暂停，未重复工具操作')
+        if (hasUnconfirmedAcpTools(d)) {
+          throw new AcpStalled('原回合已结束，但工具执行状态未确认；已暂停，未重复工具操作', false, acknowledgement.outcome)
         }
         throw new AcpStalled('原回合已确认取消，可以续接原会话', true)
       } catch (error) {
