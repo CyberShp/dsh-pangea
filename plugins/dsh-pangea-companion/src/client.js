@@ -2390,10 +2390,10 @@ window.__ModuleLoader__.load({
     function BehaviorCoverageView({ ledgers = [], onCase }) {
       const show = value => sourceFirstRecordBody(value) || '未提供'
       const lines = values => Array.isArray(values) && values.length ? values.map((value, index) => h('p', { key: index }, show(value))) : h('p', { className: 'b05-subtle' }, '未提供')
-      return h('section', { className: 'b05-card', 'aria-label': '业务行为覆盖清单' },
-        h('h3', null, '业务行为覆盖清单'),
+      return h('details', { className: 'b05-card', 'aria-label': '业务行为覆盖清单', 'data-view-key': 'behavior-coverage' },
+        h('summary', { style: { cursor: 'pointer', fontSize: 15, fontWeight: 600 } }, '业务行为覆盖清单'),
         h('p', { className: 'b05-subtle' }, '状态来自本次分析声明；用例关联不代表已执行，也不代表实测代码覆盖率。'),
-        !ledgers.length ? h('p', null, '本次记录未提供业务行为清单；已有用例与分析原文仍可查看。') : ledgers.map(ledger => h('details', { key: ledger.projection_id, open: true },
+        !ledgers.length ? h('p', null, '本次记录未提供业务行为清单；已有用例与分析原文仍可查看。') : ledgers.map(ledger => h('details', { key: ledger.projection_id, 'data-view-key': `behavior-ledger:${ledger.projection_id}`, open: true },
           h('summary', null, `${ledger.unit_id || '未提供分析单元'} · ${show(ledger.scope)}`),
           h('p', null, `组合选择依据：${show(ledger.combination_strategy)}`),
           h('p', { className: 'b05-subtle' }, Object.entries(ledger.declared_counts ?? {}).map(([status, count]) => `${BEHAVIOR_STATUS_LABELS[status] || '未标注'} ${count}`).join(' · ')),
@@ -2666,6 +2666,43 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', style: styles.button, disabled: !page || page.next_cursor == null, onClick: () => setPosition({ key: filterKey, cursor: page.next_cursor }) }, '下一页')) : null)
     }
 
+    function panelScrollElements(root) {
+      const elements = new Set()
+      for (let element = root; element; element = element.parentElement) elements.add(element)
+      if (root?.ownerDocument?.scrollingElement) elements.add(root.ownerDocument.scrollingElement)
+      return [...elements]
+    }
+    function capturePanelViewport(root) {
+      if (!root) return null
+      const position = element => ({ element, top: element.scrollTop, left: element.scrollLeft })
+      return {
+        scroll: panelScrollElements(root).map(position),
+        details: [...root.querySelectorAll('details')].map((element, index) => ({
+          key: element.getAttribute('data-view-key') || `details:${index}`, open: element.open,
+        })),
+        localScroll: [...root.querySelectorAll('[data-scroll-key]')].map(element => ({
+          key: element.getAttribute('data-scroll-key'), top: element.scrollTop, left: element.scrollLeft,
+        })),
+      }
+    }
+    function restorePanelViewport(root, viewport) {
+      if (!root || !viewport) return
+      // Restore expanded content first, otherwise the shorter page clamps scrollTop.
+      const details = new Map(viewport.details.map(item => [item.key, item.open]))
+      ;[...root.querySelectorAll('details')].forEach((element, index) => {
+        const key = element.getAttribute('data-view-key') || `details:${index}`
+        if (details.has(key)) element.open = details.get(key)
+      })
+      const localScroll = new Map(viewport.localScroll.map(item => [item.key, item]))
+      for (const element of root.querySelectorAll('[data-scroll-key]')) {
+        const saved = localScroll.get(element.getAttribute('data-scroll-key'))
+        if (saved) { element.scrollTop = saved.top; element.scrollLeft = saved.left }
+      }
+      for (const { element, top, left } of viewport.scroll) {
+        if (element.isConnected !== false) { element.scrollTop = top; element.scrollLeft = left }
+      }
+    }
+
     function PangeaPanel({ ctx, scope, visible, initialScreen = 'overview', pageMode = 'analysis' }) {
       const cwd = scope?.cwd
       const [snapshot, setSnapshot] = React.useState(undefined)
@@ -2687,6 +2724,8 @@ window.__ModuleLoader__.load({
       const [repositoryError, setRepositoryError] = React.useState('')
       const [runCursor, setRunCursor] = React.useState(0)
       const [screen, setScreen] = React.useState({ type: initialScreen })
+      const panelRootRef = React.useRef(null)
+      const pendingViewportRef = React.useRef(null)
       const needsRunSnapshot = pageMode === 'analysis'
       const panelScopeRef = React.useRef({ cwd, pageMode, screen })
       panelScopeRef.current = { cwd, pageMode, screen }
@@ -3398,13 +3437,34 @@ window.__ModuleLoader__.load({
         return () => controller.abort()
       }, [visible, cwd, snapshot?.data_root, previewKey, sourceRetry, screen.type])
 
-      const navigate = React.useCallback((next, from = screen) => { setSourceDrawerOpen(false); setCaseExportOpen(false); setHistory(previous => [...previous, from]); setScreen(next) }, [screen])
-      const jump = React.useCallback((type) => { setSourceDrawerOpen(false); setCaseExportOpen(false); setScreen({ type }); setHistory([]) }, [])
+      const viewportScopeKey = JSON.stringify([cwd, snapshot?.data_root, selectedTaskId, current?.run_id])
+      const navigate = React.useCallback((next, from = screen) => {
+        const value = capturePanelViewport(panelRootRef.current)
+        const saved = value ? { ...from, viewport: { scopeKey: viewportScopeKey, value } } : from
+        pendingViewportRef.current = next.type === 'case' ? { screen: next, scopeKey: viewportScopeKey, value: null } : null
+        setSourceDrawerOpen(false); setCaseExportOpen(false)
+        setHistory(previous => [...previous, saved]); setScreen(next)
+      }, [screen, viewportScopeKey])
+      const jump = React.useCallback((type) => { pendingViewportRef.current = null; setSourceDrawerOpen(false); setCaseExportOpen(false); setScreen({ type }); setHistory([]) }, [])
       const goBack = React.useCallback(() => {
         const target = analysisBackTarget(screen.type, { pageMode, selectedTaskId, hasHistory: history.length > 0, initialScreen })
+        pendingViewportRef.current = null
         if (target !== 'history') { setScreen({ type: target }); return }
-        setScreen(history[history.length - 1]); setHistory(history.slice(0, -1))
+        const previous = history[history.length - 1]
+        if (previous.viewport) pendingViewportRef.current = { screen: previous, ...previous.viewport }
+        setScreen(previous); setHistory(history.slice(0, -1))
       }, [history, initialScreen, pageMode, screen.type, selectedTaskId])
+      ;(React.useLayoutEffect || React.useEffect)(() => {
+        const pending = pendingViewportRef.current
+        if (!pending) return
+        if (pending.scopeKey !== viewportScopeKey) { pendingViewportRef.current = null; return }
+        if (!visible || pending.screen !== screen || !panelRootRef.current) return
+        if (['cases', 'case', 'coverage', 'coverage-cases'].includes(screen.type) && !current) return
+        // Consume once: polling and subsequent renders must not pull the user back.
+        pendingViewportRef.current = null
+        if (pending.value) restorePanelViewport(panelRootRef.current, pending.value)
+        else for (const element of panelScrollElements(panelRootRef.current)) { element.scrollTop = 0; element.scrollLeft = 0 }
+      }, [screen, viewportScopeKey, Boolean(current), visible])
       function chooseRun(runId) {
         const run = workbench?.runs?.items?.find(item => item.run_id === runId) ?? snapshot?.runs?.find(item => item.run_id === runId)
         const task = workbench?.tasks?.items?.find(item => item.run_id === runId || (run?.task_id && item.task_id === run.task_id))
@@ -6272,7 +6332,7 @@ window.__ModuleLoader__.load({
             onCase: link => navigate({ type: 'case', id: link.target_case_id, ...(link.variant_id != null ? { variant_id: link.variant_id } : {}) }) }) : null,
           h('div', { className: 'b05-toolbar' }, h('input', { value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例、业务路径、参数输入或预期…', onChange: event => setCaseQuery(event.target.value) }),
             h('span', { className: 'b05-subtle' }, `显示 ${filtered.length} 条 · 按分析单元排序`)),
-          h('div', { className: 'b05-table-scroll' }, h('table', { className: 'b05-case-table' },
+          h('div', { className: 'b05-table-scroll', 'data-scroll-key': 'test-case-table' }, h('table', { className: 'b05-case-table' },
             h('thead', null, h('tr', null,
               h('th', null, h('input', { type: 'checkbox', 'aria-label': '选择当前列表', checked: allSelected, disabled: selectableIds.length === 0, onChange: () => setSelectedCaseIds(previous => allSelected ? previous.filter(id => !selectableIds.includes(id)) : [...new Set([...previous, ...selectableIds])]) })),
               ...['编号', '验证目标', '类型', '关联风险', '执行条件', ''].map(label => h('th', { key: label }, label)))),
@@ -6281,7 +6341,7 @@ window.__ModuleLoader__.load({
               h('td', { className: 'b05-mono' }, item.display_id || item.test_case_id || '待编号'),
               h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'case', id: key }) }, text(item.title, '未命名用例')),
                 h('small', null, text(item.verification_goal, '验证目标未记录')),
-                item.variants?.length ? h('details', { className: 'b05-variant-preview' }, h('summary', null, `${item.variants.length} 项参数组合`),
+                item.variants?.length ? h('details', { className: 'b05-variant-preview', 'data-view-key': `case-variants:${key}` }, h('summary', null, `${item.variants.length} 项参数组合`),
                   item.variants.map((variant, index) => h('p', { key: index }, `${variant.variant_id ? `${variant.variant_id} · ` : ''}${variant.input || '输入未提供'} → ${variant.expected || '预期未提供'}`))) : null),
               h('td', null, text(item.case_type, '未标注')),
               h('td', null, linked.length ? linked.map(id => h('span', { key: id, className: 'b05-risk-chip' }, id)) : '—'),
@@ -6615,8 +6675,8 @@ window.__ModuleLoader__.load({
             screen.type === 'coverage-cases' ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportOpen(true) } }, runIcon('FileText'), '导出全部用例') : null,
             screen.type !== 'coverage-cases' ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('report') }, runIcon('FileText'), '查看分析原文') : null)),
         navigation) : null
-      if (screen.type === 'workflow') return h('div', { className: 'pangea-companion', style: styles.root }, monitorPersistenceNotice, renderSourceFirstWorkflow())
-      return h('div', { className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : 'PANGEA 执行环境' },
+      if (screen.type === 'workflow') return h('div', { ref: panelRootRef, className: 'pangea-companion', style: styles.root }, monitorPersistenceNotice, renderSourceFirstWorkflow())
+      return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : 'PANGEA 执行环境' },
         h('style', null, panelCss),
         taskActionDialog ? h(TaskLifecycleDialog, { state: taskActionDialog,
           onClose: () => { if (!taskActionDialog.busy) setTaskActionDialog(null) }, onConfirm: () => { void confirmTaskAction() } }) : null,
