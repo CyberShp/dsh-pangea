@@ -377,6 +377,83 @@ test('stopped workflow explains why continuation is unavailable', async () => {
   assert.ok(!descendants(rendered).some(node => node.type === 'button' && node.children.includes('继续分析')))
 })
 
+function insightWorkspaceRun(records, stage = 'unit_analysis') {
+  const reviewing = stage === 'comparison_review'
+  const action = { action_id: 'action-1', stage, unit_id: 'unit-1', status: 'dispatched', saved_revision: 3, last_saved_at_ms: 1791043200000 }
+  return { run_id: 'insight-run', workflow_version: 'source-first-v1', lifecycle_status: 'running',
+    stage: reviewing ? 'reviewing' : 'analyzing', workflow: {
+      steps: [{ step: '03', stage: reviewing ? 'reviewing' : 'analyzing', title: reviewing ? '结果复核' : '单元分析', status: 'running' }],
+      units: [{ unit_id: 'unit-1', title: '认证协商', purpose: '覆盖已声明的配置分支' }], actions: [action],
+    }, source_first_records: [{ ...action, revision: 3, records }], execution_view: { actions: [action], unresolved: [] },
+    details: { business_flows: [{ flow_id: 'unit-1/flow-1', source_record: { action_id: action.action_id, record_id: 'flow-1', revision: 3 } }],
+      test_cases: [{ test_case_id: 'unit-1/case-1', source_record: { action_id: action.action_id, record_id: 'case-1', revision: 3 } }] } }
+}
+
+test('stage insights replace host-event repetition and open the exact saved flow or case with return context', async () => {
+  const client = await loadClientExports(), opened = [], navigated = []
+  const current = insightWorkspaceRun([
+    { record_id: 'flow-1', kind: 'flow', body: { title: '算法协商流程' } },
+    { record_id: 'case-1', kind: 'test_case', body: { title: 'DH 组协商用例' } },
+  ])
+  const view = client.RunWorkspace({ current, viewState: { tab: 'activity' },
+    timeline: [{ title: 'agent_resume', summary: 'unformatted raw host summary' }],
+    openFlow: (...args) => opened.push(args), navigate: (...args) => navigated.push(args) })
+  const nodes = descendants(view), serialized = JSON.stringify(view)
+  assert.match(serialized, /阶段进展/)
+  assert.match(serialized, /算法协商流程/)
+  assert.match(serialized, /DH 组协商用例/)
+  assert.match(serialized, /已保存草稿/)
+  assert.match(serialized, /执行中/)
+  const visible = nodes.flatMap(node => node.children.filter(child => typeof child === 'string')).join('\n')
+  assert.doesNotMatch(visible, /agent_resume|unformatted raw host summary|活动记录|dispatched/)
+  nodes.find(node => node.type === 'button' && node.children.includes('查看业务流程')).props.onClick()
+  nodes.find(node => node.type === 'button' && node.children.includes('查看测试用例')).props.onClick()
+  assert.equal(opened[0][0], 'unit-1/flow-1')
+  assert.equal(opened[0][1].tab, 'insights')
+  assert.equal(navigated[0][0].type, 'case')
+  assert.equal(navigated[0][0].id, 'unit-1/case-1')
+  assert.equal(navigated[0][1].tab, 'insights')
+})
+
+test('actual review stage shows Chinese structured verdict and preserves original explanation', async () => {
+  const client = await loadClientExports()
+  const current = insightWorkspaceRun([{ record_id: 'decision', kind: 'review_decision', body: {
+    disposition: 'unresolved', summary: '历史 English explanation stays verbatim', reason: '需要确认设备支持', version_set_id: 'VS-raw',
+  } }], 'comparison_review')
+  const view = client.RunWorkspace({ current }), nodes = descendants(view), serialized = JSON.stringify(view)
+  assert.ok(nodes.some(node => node.props['data-review-field'] === 'disposition'))
+  assert.ok(nodes.some(node => node.props['data-review-field'] === 'summary'))
+  assert.match(serialized, /复核裁决/)
+  assert.match(serialized, /待确认/)
+  assert.match(serialized, /复核摘要/)
+  assert.match(serialized, /历史 English explanation stays verbatim/)
+  assert.match(serialized, /查看原始复核记录/)
+})
+
+test('stage insights expose omitted pending rows and stale state in Chinese without losing stored records', async () => {
+  let index = 0
+  const states = []
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!(key in states)) states[key] = initial
+    return [states[key], value => { states[key] = value }]
+  } })
+  const current = insightWorkspaceRun(Array.from({ length: 9 }, (_, i) => ({ record_id: `pending-${i}`, kind: 'unresolved', body: { title: `待确认设备 ${i}`, reason: '缺少明确能力说明' } })))
+  const props = { current, error: 'offline', retry() {} }
+  const first = client.RunWorkspace(props), firstNodes = descendants(first), firstText = JSON.stringify(first)
+  assert.match(firstText, /上次读取的任务/)
+  assert.match(firstText, /还有 3 项待处理/)
+  const insightNode = firstNodes.find(node => node.props.className === 'run-insights')
+  const visible = descendants(insightNode).flatMap(node => node.children.filter(child => typeof child === 'string')).join('\n')
+  assert.doesNotMatch(visible, /last_observed|dispatched|卡住/)
+  firstNodes.find(node => node.type === 'button' && node.children.some(value => typeof value === 'string' && value.startsWith('展开全部阶段信息'))).props.onClick()
+  index = 0
+  const expanded = client.RunWorkspace(props)
+  assert.doesNotMatch(JSON.stringify(expanded), /还有 3 项待处理/)
+  const pendingSection = descendants(expanded).find(node => node.type === 'section' && node.children[0]?.children?.includes('明确记录的待处理事项'))
+  assert.equal(descendants(pendingSection).filter(node => node.type === 'article').length, 9)
+})
+
 test('module analysis queries coverage, selects partial results and removes stale selection on failed requery', async () => {
   let index = 0, resolveQuery
   const form = { repository: 'repo', target: 'TLS', source_scope_text: 'tls', asset_ids: ['design'], scenario: 'module-analysis', mode: 'depth',
@@ -599,7 +676,8 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /finally \{[\s\S]*sequence === workbenchRequestRef\.current\.sequence\) setWorkbenchLoading\(false\)/)
   assert.match(source, /\['home', 'tasks', 'create', 'repository-import', 'report'\]\.includes\(screen\.type\).*header/)
   assert.doesNotMatch(source, /\$\{selectedTask\.title\} · \$\{selectedTask\.task_id\}/)
-  assert.doesNotMatch(source, /任务编号/)
+  // Product forms omit implementation IDs; raw review records may now label them.
+  assert.doesNotMatch(source, /field\('任务编号'/)
   assert.doesNotMatch(source, /\}, task\.task_id\),/)
   assert.match(source, /刷新中…/)
   assert.match(source, /和 DSH 讨论/)

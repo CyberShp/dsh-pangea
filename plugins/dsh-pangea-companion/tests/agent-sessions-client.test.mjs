@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, mkdtemp, mkdir, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
+import { AgentSessionStore } from '../src/agent-sessions.js'
 
 async function client(reactOverrides = {}) {
   let exported
@@ -52,12 +55,12 @@ test('transcript merges text chunks and tool updates without dropping transition
   ]
   const rows = agentSessionTranscript(mergeAgentSessionEvents(events.slice(0, 5), events.slice(4)))
   assert.equal(rows.length, 4)
-  assert.equal(rows[1].text, '第一行\n第二行')
-  assert.equal(rows[2].rawInput.path, 'src/test.c')
-  assert.equal(rows[2].rawOutput.error, '工具失败')
-  assert.equal(rows[2].status, 'failed')
-  assert.deepEqual(Array.from(rows[2].updates, update => update.status), ['pending', 'in_progress', 'failed'])
-  assert.equal(rows[3].status, 'pending')
+  assert.equal(rows[2].text, '第一行\n第二行')
+  assert.equal(rows[1].rawInput.path, 'src/test.c')
+  assert.equal(rows[1].rawOutput.error, '工具失败')
+  assert.equal(rows[1].status, 'failed')
+  assert.deepEqual(Array.from(rows[1].updates, update => update.status), ['pending', 'in_progress', 'failed'])
+  assert.equal(rows[0].status, 'pending')
   assert.equal(events[3].update.status, 'pending', 'folding must not mutate source events')
 })
 
@@ -116,29 +119,37 @@ test('reader rejects late selections and late disposed Run responses while retai
   assert.equal(disposedChanges.length, 1)
 })
 
-test('reader uses returned byte cursor, gates live append until backlog read, and surfaces recording warnings', async () => {
+test('reader starts at the tail and polls live events while independently loading older byte pages', async () => {
   const { createAgentSessionReader } = await client()
   let state, tick, details = 0
+  const history = deferred()
   const cursors = []
   const reader = createAgentSessionReader({ cwd: '/a', runId: 'run-a', onChange: value => { state = value }, schedule: value => { tick = value; return 1 }, cancelSchedule() {}, request: async args => {
     if (args.view === 'agent-sessions') return { run_id: 'run-a', items: [session('a')], recording_error: '索引不完整', truncated: true }
-    cursors.push(args.cursor); details++
-    if (details === 1) return page('a', [{ seq: 1, type: 'host_event', message: '1' }], { next_cursor: 7009, has_more: true, recording_error: '内容已截断', truncated: true })
-    return page('a', [{ seq: 2, type: 'host_event', message: '2' }], { next_cursor: 8005, has_more: false })
+    cursors.push(args.cursor)
+    if (String(args.cursor).startsWith('before:')) return history.promise
+    details++
+    if (details === 1) return page('a', [{ seq: 201, type: 'host_event', message: '最新尾页' }], { next_cursor: 7009, history_cursor: 6001, has_history: true, recording_error: '内容已截断', truncated: true })
+    return page('a', [{ seq: 202, type: 'host_event', message: '实时更新' }], { next_cursor: 8005, has_more: false })
   } })
   reader.start(); await flush()
   assert.equal(state.cursor, 7009)
   assert.equal(state.listRecordingError, '索引不完整')
   assert.equal(state.detailRecordingError, '内容已截断')
   assert.equal(state.detailTruncated, true)
+  const pendingHistory = reader.loadMore(); await flush()
   await tick(); await flush()
-  assert.equal(details, 1, 'poll must not silently advance past a backlog')
-  await reader.loadMore(); await flush()
-  assert.deepEqual(cursors, [0, 7009])
-  assert.deepEqual(Array.from(state.events, event => event.message), ['1', '2'])
+  assert.equal(details, 2, 'history loading must not block current output')
+  assert.equal(state.cursor, 8005)
+  history.resolve(page('a', [{ seq: 101, type: 'host_event', message: '更早历史' }], { next_cursor: 6001, history_cursor: 0, has_history: false }))
+  await pendingHistory
+  assert.equal(state.cursor, 8005, 'an older response never rewinds the live cursor')
+  assert.deepEqual(cursors, ['latest', 'before:6001', 7009])
+  assert.deepEqual(Array.from(state.events, event => event.message), ['更早历史', '最新尾页', '实时更新'])
+  assert.equal(state.hasMore, false)
   await tick(); await flush()
-  assert.deepEqual(cursors, [0, 7009, 8005])
-  assert.equal(state.events.length, 2, 'repeated pages do not duplicate events')
+  assert.deepEqual(cursors, ['latest', 'before:6001', 7009, 8005])
+  assert.equal(state.events.length, 3, 'repeated pages do not duplicate events')
   reader.dispose()
 })
 
@@ -165,10 +176,10 @@ test('historical session replay is labelled and never merged with new live chunk
   ]
   const rows = agentSessionTranscript(events)
   assert.equal(rows.length, 4)
-  assert.equal(rows[0].text, '历史回复')
-  assert.equal(rows[1].text, '新回复')
-  assert.equal(rows[2].status, 'completed')
-  assert.equal(rows[3].status, 'pending')
+  assert.equal(rows[3].text, '历史回复')
+  assert.equal(rows[2].text, '新回复')
+  assert.equal(rows[1].status, 'completed')
+  assert.equal(rows[0].status, 'pending')
   assert.match(text(AgentSessionTranscript({ events })), /恢复时执行器回放 · 原始回合时间未知/)
 })
 
@@ -186,5 +197,116 @@ test('history completeness warning and recorded action IDs are visible without o
     { seq: 3, type: 'prompt', prompt: [{ type: 'text', text: '旧指令' }] },
   ] })
   const labels = nodes(rendered).filter(node => node.type === 'p' && text(node).startsWith('关联动作：')).map(text)
-  assert.deepEqual(labels, ['关联动作：review-independent-a', '关联动作：review-comparison-b'])
+  assert.deepEqual(labels, ['关联动作：review-comparison-b', '关联动作：review-independent-a'])
+})
+
+test('assembled blocks use latest valid update time, while streamed content and tool transitions stay in seq order', async () => {
+  const { agentSessionTranscript, AgentSessionTranscript } = await client()
+  const at = second => `2026-10-16T12:00:${String(second).padStart(2, '0')}Z`
+  const chunk = (seq, time, text) => ({ seq, at: time, type: 'session_update', update: { sessionUpdate: 'agent_message_chunk', content: { text } } })
+  const events = [
+    { seq: 1, at: at(1), type: 'prompt', prompt: '开始' },
+    { seq: 2, at: at(2), type: 'session_update', execution_id: 'e', update: { sessionUpdate: 'tool_call', toolCallId: 't', status: 'pending', rawInput: 'input' } },
+    chunk(3, at(3), '首段\n'), chunk(4, at(4), '后段'),
+    { seq: 5, at: at(6), type: 'session_update', execution_id: 'e', update: { sessionUpdate: 'tool_call_update', toolCallId: 't', status: 'completed', rawOutput: 'late result' } },
+    { seq: 6, at: at(5), type: 'turn_end' },
+    { seq: 7, at: 'invalid', type: 'host_event', message: '无时间1' },
+    { seq: 8, type: 'host_event', message: '无时间2' },
+  ]
+  const rows = agentSessionTranscript([...events].reverse())
+  assert.deepEqual(Array.from(rows, row => row.key), ['tool-2', 'event-6', 'text-3', 'event-1', 'event-8', 'event-7'])
+  assert.equal(rows[0].last_at, at(6))
+  assert.equal(rows[0].rawOutput, 'late result')
+  assert.deepEqual(Array.from(rows[0].updates, row => row.seq), [2, 5])
+  assert.equal(rows[2].text, '首段\n后段')
+  assert.equal(rows[2].last_at, at(4))
+  const rendered = AgentSessionTranscript({ events })
+  assert.equal(nodes(rendered).find(node => node.type === 'time').props.dateTime, at(6))
+  assert.doesNotMatch(text(rendered), /Invalid Date/)
+  assert.equal(events[1].update.status, 'pending')
+  const tied = agentSessionTranscript([{ seq: 1, type: 'host_event', at: at(1) }, { seq: 2, type: 'host_event', at: at(1) }])
+  assert.deepEqual(Array.from(tied, row => row.seq), [2, 1])
+})
+
+test('session list uses latest activity and polling never steals the selected session', async () => {
+  const { createAgentSessionReader } = await client()
+  let state, tick, items = [
+    { ...session('old'), created_at: '2026-01-01', updated_at: '2026-10-16T12:00:01Z' },
+    { ...session('new'), created_at: '2026-10-01', updated_at: '2026-10-16T12:00:02Z' },
+    { ...session('unknown'), updated_at: 'not-a-date' },
+  ]
+  const reader = createAgentSessionReader({ cwd: '/a', runId: 'run-a', onChange: value => { state = value }, schedule: value => { tick = value; return 1 }, cancelSchedule() {}, request: async args => {
+    return args.view === 'agent-sessions' ? { run_id: 'run-a', items } : page(args.sessionId)
+  } })
+  reader.start(); await flush()
+  assert.deepEqual(Array.from(state.items, item => item.session_id), ['new', 'old', 'unknown'])
+  assert.equal(state.selectedId, 'new')
+  reader.select('old'); await flush()
+  items = [{ ...items[1], updated_at: '2026-10-16T12:00:03Z' }]
+  await tick(); await flush()
+  assert.equal(state.selectedId, 'old', 'a reordered or incomplete list must not replace an explicit selection')
+  reader.dispose()
+})
+
+test('live backlog drains forward and rejects regressing cursors without duplicates or history cursor changes', async () => {
+  const { createAgentSessionReader } = await client()
+  let state, tick, reads = 0
+  const cursors = []
+  const reader = createAgentSessionReader({ cwd: '/a', runId: 'run-a', onChange: value => { state = value }, schedule: value => { tick = value; return 1 }, cancelSchedule() {}, request: async args => {
+    if (args.view === 'agent-sessions') return { run_id: 'run-a', items: [session('a')] }
+    cursors.push(args.cursor)
+    const pages = [
+      page('a', [{ seq: 100 }], { next_cursor: 1000, history_cursor: 900, has_history: true }),
+      page('a', [{ seq: 101 }], { next_cursor: 2000, has_more: true }),
+      page('a', [{ seq: 102 }], { next_cursor: 3000 }),
+      page('a', [{ seq: 99 }], { next_cursor: 2000 }),
+    ]
+    return pages[reads++]
+  } })
+  reader.start(); await flush(); await tick(); await flush()
+  assert.deepEqual(cursors, ['latest', 1000, 2000])
+  assert.equal(state.cursor, 3000)
+  assert.equal(state.historyCursor, 900)
+  await tick(); await flush()
+  assert.equal(state.cursor, 3000)
+  assert.match(state.detailError, /倒退/)
+  assert.deepEqual(Array.from(state.events, event => event.seq), [100, 101, 102])
+  reader.dispose()
+})
+
+test('real Store and reader show the latest block first beyond 100 records without losing late tool updates while loading history', async t => {
+  const { createAgentSessionReader, agentSessionTranscript } = await client()
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'session-reader-tail-'))
+  t.after(() => rm(dataRoot, { force: true, recursive: true }))
+  await mkdir(path.join(dataRoot, 'runs', 'run-a'), { recursive: true })
+  const store = new AgentSessionStore({ dataRoot, runId: 'run-a' })
+  const meta = { provider: 'fixture', remote_session_id: 'session', execution_id: 'execution' }
+  const at = index => new Date(Date.UTC(2026, 9, 16, 12, 0, index)).toISOString()
+  await store.append(meta, { at: at(0), type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 't', title: '早期工具', status: 'pending', rawInput: '原始输入' } })
+  for (let index = 1; index <= 205; index++) await store.append(meta, { at: at(index), type: 'host_event', message: String(index) })
+  await store.append(meta, { at: at(206), type: 'session_update', update: { sessionUpdate: 'tool_call_update', toolCallId: 't', status: 'completed', rawOutput: '晚到结果' } })
+  let state, tick
+  const ready = deferred()
+  const reader = createAgentSessionReader({ cwd: dataRoot, dataRoot, runId: 'run-a', onChange: value => { state = value; if (value.tailLoaded) ready.resolve() },
+    schedule: value => { tick = value; return 1 }, cancelSchedule() {}, request: args => args.view === 'agent-sessions' ? store.list() : store.read(args.sessionId, args) })
+  t.after(() => reader.dispose())
+  reader.start(); await ready.promise
+  assert.equal(state.events.length, 100)
+  assert.equal(agentSessionTranscript(state.events)[0].rawOutput, '晚到结果')
+  assert.equal(state.hasMore, true)
+  const firstCursor = state.cursor
+  await store.append(meta, { at: at(207), type: 'host_event', message: '仍在实时同步' })
+  await Promise.all([reader.loadMore(), tick()])
+  const liveCursor = state.cursor
+  assert.ok(liveCursor > firstCursor)
+  while (state.hasMore) await reader.loadMore()
+  assert.equal(state.cursor, liveCursor)
+  assert.equal(state.events.length, 208)
+  assert.equal(new Set(state.events.map(event => event.seq)).size, 208)
+  const rows = agentSessionTranscript(state.events)
+  assert.equal(rows[0].message, '仍在实时同步')
+  assert.equal(rows[1].title, '早期工具')
+  assert.equal(rows[1].rawInput, '原始输入')
+  assert.equal(rows[1].rawOutput, '晚到结果')
+  assert.deepEqual(Array.from(rows[1].updates, update => update.status), ['pending', 'completed'])
 })

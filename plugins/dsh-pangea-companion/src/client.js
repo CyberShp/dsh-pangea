@@ -15,6 +15,8 @@ window.__ModuleLoader__.load({
     const { renderFlowTree, renderCallGraphTree, toSvgString } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
     const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
+    const { renderReviewPresentation, reviewStatusLabel, isReviewRecord } = __reviewPresentation
+    const { buildRunInsights } = __runInsights
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
       if (typeof body === 'string') return body
@@ -306,9 +308,34 @@ window.__ModuleLoader__.load({
       return [...events.values()].sort((a, b) => Number(a.seq) - Number(b.seq))
     }
 
+    function agentSessionTime(value) {
+      if (value == null || value === '') return null
+      const time = new Date(value).getTime()
+      return Number.isFinite(time) ? time : null
+    }
+    function agentSessionLatestFirst(a, b) {
+      const left = agentSessionTime(a.last_at ?? a.at), right = agentSessionTime(b.last_at ?? b.at)
+      if (left !== right) return left == null ? 1 : right == null ? -1 : right - left
+      return Number(b.last_seq ?? b.seq ?? 0) - Number(a.last_seq ?? a.seq ?? 0) || String(a.key ?? '').localeCompare(String(b.key ?? ''))
+    }
+    function agentSessionList(items = []) {
+      return [...items].sort((a, b) => {
+        const left = agentSessionTime(a.updated_at) ?? agentSessionTime(a.created_at)
+        const right = agentSessionTime(b.updated_at) ?? agentSessionTime(b.created_at)
+        return (left === right ? 0 : left == null ? 1 : right == null ? -1 : right - left)
+          || String(a.session_id).localeCompare(String(b.session_id))
+      })
+    }
     function agentSessionTranscript(events = []) {
       const rows = [], tools = new Map()
-      for (const event of events) {
+      const touch = (row, event) => {
+        row.last_seq = event.seq
+        const at = agentSessionTime(event.at), previous = agentSessionTime(row.last_at ?? row.at)
+        if (at != null && (previous == null || at >= previous)) row.last_at = event.at
+      }
+      // Stream reconstruction follows the append sequence; only completed
+      // display blocks are sorted, never chunks or a tool's update history.
+      for (const event of mergeAgentSessionEvents([], events)) {
         const update = event.update ?? {}, kind = update.sessionUpdate ?? update.type
         const context = `${event.replay ? 'replay' : 'live'}:${event.execution_id ?? ''}:${event.action_id ?? ''}`
         if (event.type === 'session_update' && ['agent_message_chunk', 'agent_thought_chunk', 'user_message_chunk'].includes(kind)) {
@@ -316,27 +343,27 @@ window.__ModuleLoader__.load({
           if (!text) continue
           const role = kind === 'agent_thought_chunk' ? 'thought' : kind === 'user_message_chunk' ? 'user' : 'agent'
           const last = rows.at(-1)
-          if (last?.type === 'text' && last.role === role && last.context === context) { last.text += text; last.last_at = event.at }
-          else rows.push({ type: 'text', key: `text-${event.seq}`, at: event.at, context, role, text, replay: Boolean(event.replay) })
+          if (last?.type === 'text' && last.role === role && last.context === context) { last.text += text; touch(last, event) }
+          else rows.push({ type: 'text', key: `text-${event.seq}`, seq: event.seq, last_seq: event.seq, at: event.at, context, role, text, replay: Boolean(event.replay) })
         } else if (event.type === 'session_update' && ['tool_call', 'tool_call_update'].includes(kind)) {
           const id = update.toolCallId ?? update.tool_call_id ?? `unknown-${event.seq}`
           const key = `${event.replay ? 'replay' : 'live'}:${event.execution_id ?? ''}:${id}`
           let tool = tools.get(key)
-          if (!tool) { tool = { type: 'tool', key: `tool-${event.seq}`, at: event.at, id, title: id, status: 'unknown', replay: Boolean(event.replay), updates: [] }; tools.set(key, tool); rows.push(tool) }
+          if (!tool) { tool = { type: 'tool', key: `tool-${event.seq}`, seq: event.seq, at: event.at, id, title: id, status: 'unknown', replay: Boolean(event.replay), updates: [] }; tools.set(key, tool); rows.push(tool) }
           for (const field of ['title', 'status', 'rawInput', 'rawOutput', 'content', 'locations']) if (Object.hasOwn(update, field) && update[field] != null) tool[field] = update[field]
           tool.updates.push({ at: event.at, seq: event.seq, ...update })
-          tool.last_at = event.at
+          touch(tool, event)
         } else rows.push({ ...event, key: `event-${event.seq}` })
       }
-      return rows
+      return rows.sort(agentSessionLatestFirst)
     }
 
     // One read-only reader owns each Run window. Selection tokens also reject
     // responses from servers that finish after their AbortSignal was cancelled.
     function createAgentSessionReader({ cwd, dataRoot, runId, onChange, request = requestWorkbench, pollMs = 2000, schedule = setTimeout, cancelSchedule = clearTimeout }) {
       const scope = `${cwd}\u0000${dataRoot ?? ''}\u0000${runId}`
-      let state = { scope, items: [], selectedId: '', session: null, events: [], cursor: 0, hasMore: false, historyStatus: '', listLoading: true, detailLoading: false, listError: '', detailError: '', listRecordingError: '', detailRecordingError: '', listTruncated: false, detailTruncated: false, updatedAt: '' }
-      let disposed = false, selectionVersion = 0, listBusy = false, detailBusy = false, timer
+      let state = { scope, items: [], selectedId: '', session: null, events: [], cursor: 0, tailLoaded: false, historyCursor: 0, hasMore: false, historyLoading: false, historyError: '', historyStatus: '', listLoading: true, detailLoading: false, listError: '', detailError: '', listRecordingError: '', detailRecordingError: '', listTruncated: false, detailTruncated: false, updatedAt: '' }
+      let disposed = false, selectionVersion = 0, listBusy = false, detailBusy = false, historyBusy = false, timer
       const controllers = new Set()
       const emit = patch => { if (!disposed) { state = { ...state, ...patch }; onChange(state) } }
       async function query(args) {
@@ -349,23 +376,54 @@ window.__ModuleLoader__.load({
         const selectedId = state.selectedId, version = selectionVersion
         detailBusy = true; emit({ detailLoading: true })
         try {
-          const result = await query({ view: 'agent-session', sessionId: selectedId, cursor: state.cursor, limit: 100 })
-          if (disposed || version !== selectionVersion) return
-          if (result.run_id && result.run_id !== runId) throw new Error('会话响应不属于当前 Run，已忽略。')
-          if (result.session?.session_id && result.session.session_id !== selectedId) throw new Error('会话响应身份不匹配，已忽略。')
-          if (result.next_cursor == null) throw new Error('会话分页位置缺失，请重试读取。')
-          emit({ session: result.session ?? state.session, events: mergeAgentSessionEvents(state.events, result.events), cursor: result.next_cursor,
-            hasMore: Boolean(result.has_more), detailRecordingError: result.recording_error ?? '', detailTruncated: Boolean(result.truncated), historyStatus: result.history_status ?? result.session?.history_status ?? '', detailError: '', updatedAt: new Date().toLocaleTimeString() })
+          // The initial tail is independent from older pages. Keep the live
+          // cursor moving forward while history is being read in parallel.
+          let more = true
+          while (more && !disposed && version === selectionVersion) {
+            const initial = !state.tailLoaded, cursor = initial ? 'latest' : state.cursor
+            const result = await query({ view: 'agent-session', sessionId: selectedId, cursor, limit: 100 })
+            if (disposed || version !== selectionVersion) return
+            checkPage(result, selectedId)
+            const next = Number(result.next_cursor)
+            if (!initial && next < cursor) throw new Error('会话分页位置倒退，已保留当前记录，请重试读取。')
+            emit({ session: result.session ?? state.session, events: mergeAgentSessionEvents(state.events, result.events), cursor: next, tailLoaded: true,
+              ...(initial ? { historyCursor: Number(result.history_cursor ?? 0), hasMore: Boolean(result.has_history) } : {}),
+              detailRecordingError: result.recording_error ?? '', detailTruncated: Boolean(state.detailTruncated || result.truncated), historyStatus: result.history_status ?? result.session?.history_status ?? '', detailError: '', updatedAt: new Date().toLocaleTimeString() })
+            more = !initial && Boolean(result.has_more) && next > cursor
+          }
         } catch (error) {
           if (!disposed && version === selectionVersion && error?.name !== 'AbortError') emit({ detailError: error?.message ?? String(error) })
         } finally {
           if (!disposed && version === selectionVersion) { detailBusy = false; emit({ detailLoading: false }) }
         }
       }
+      function checkPage(result, selectedId) {
+        if (result.run_id && result.run_id !== runId) throw new Error('会话响应不属于当前 Run，已忽略。')
+        if (result.session?.session_id && result.session.session_id !== selectedId) throw new Error('会话响应身份不匹配，已忽略。')
+        if (result.next_cursor == null || !Number.isSafeInteger(Number(result.next_cursor)) || Number(result.next_cursor) < 0) throw new Error('会话分页位置缺失或无效，请重试读取。')
+      }
+      async function loadHistory() {
+        if (disposed || historyBusy || !state.selectedId || !state.tailLoaded || !state.hasMore) return
+        const selectedId = state.selectedId, version = selectionVersion, cursor = state.historyCursor
+        historyBusy = true; emit({ historyLoading: true })
+        try {
+          const result = await query({ view: 'agent-session', sessionId: selectedId, cursor: `before:${cursor}`, limit: 100 })
+          if (disposed || version !== selectionVersion) return
+          checkPage(result, selectedId)
+          const previous = Number(result.history_cursor)
+          if (result.history_cursor == null || !Number.isSafeInteger(previous) || previous < 0 || previous >= cursor) throw new Error('更早历史的分页位置无效，已保留当前记录。')
+          emit({ events: mergeAgentSessionEvents(state.events, result.events), historyCursor: previous, hasMore: Boolean(result.has_history), historyError: '',
+            detailRecordingError: result.recording_error || state.detailRecordingError, detailTruncated: Boolean(state.detailTruncated || result.truncated) })
+        } catch (error) {
+          if (!disposed && version === selectionVersion && error?.name !== 'AbortError') emit({ historyError: error?.message ?? String(error) })
+        } finally {
+          if (!disposed && version === selectionVersion) { historyBusy = false; emit({ historyLoading: false }) }
+        }
+      }
       function select(sessionId) {
         if (disposed || sessionId === state.selectedId) return
-        selectionVersion++; detailBusy = false
-        emit({ selectedId: sessionId, session: state.items.find(item => item.session_id === sessionId) ?? null, events: [], cursor: 0, hasMore: false, historyStatus: '', detailError: '', detailRecordingError: '', detailTruncated: false, detailLoading: Boolean(sessionId) })
+        selectionVersion++; detailBusy = false; historyBusy = false
+        emit({ selectedId: sessionId, session: state.items.find(item => item.session_id === sessionId) ?? null, events: [], cursor: 0, tailLoaded: false, historyCursor: 0, hasMore: false, historyLoading: false, historyError: '', historyStatus: '', detailError: '', detailRecordingError: '', detailTruncated: false, detailLoading: Boolean(sessionId) })
         if (sessionId) void loadEvents()
       }
       async function loadList() {
@@ -375,21 +433,21 @@ window.__ModuleLoader__.load({
           const result = await query({ view: 'agent-sessions' })
           if (disposed) return
           if (result.run_id && result.run_id !== runId) throw new Error('会话列表不属于当前 Run，已忽略。')
-          const items = Array.isArray(result.items) ? result.items : []
+          const items = agentSessionList(Array.isArray(result.items) ? result.items : [])
           emit({ items, listLoading: false, listError: '', listRecordingError: result.recording_error ?? '', listTruncated: Boolean(result.truncated), session: items.find(item => item.session_id === state.selectedId) ?? state.session })
-          if (!items.some(item => item.session_id === state.selectedId)) select(items[0]?.session_id ?? '')
+          if (!state.selectedId) select(items[0]?.session_id ?? '')
         } catch (error) {
           if (!disposed && error?.name !== 'AbortError') emit({ listLoading: false, listError: error?.message ?? String(error) })
         } finally { listBusy = false }
       }
       async function tick() {
-        await Promise.allSettled([loadList(), !state.hasMore ? loadEvents() : Promise.resolve()])
+        await Promise.allSettled([loadList(), loadEvents()])
         if (!disposed) timer = schedule(tick, pollMs)
       }
       return {
         start() { emit({}); void tick() }, select,
         refresh() { if (!disposed) { void loadList(); void loadEvents() } },
-        loadMore: loadEvents,
+        loadMore: loadHistory,
         dispose() { disposed = true; selectionVersion++; cancelSchedule(timer); for (const controller of controllers) controller.abort(); controllers.clear() },
       }
     }
@@ -408,11 +466,11 @@ window.__ModuleLoader__.load({
 
     function AgentSessionTranscript({ events = [] }) {
       const rows = agentSessionTranscript(events)
-      const time = at => at ? new Date(at).toLocaleString() : '时间未记录'
+      const time = at => agentSessionTime(at) != null ? new Date(at).toLocaleString() : '时间未记录'
       const pre = (value, props = {}) => h('pre', props, agentSessionContent(value))
       const details = (label, value, open = false) => value == null ? null : h('details', { open }, h('summary', null, label), pre(value))
       return h('div', { className: 'agent-session-transcript' }, rows.map(row => {
-        const head = label => h(React.Fragment, null, h('div', { className: 'agent-event-head' }, h('strong', null, label), h('time', null, time(row.at))), row.replay ? h('p', { className: 'agent-session-muted' }, '恢复时执行器回放 · 原始回合时间未知；此处时间为采集时间。') : null)
+        const head = label => h(React.Fragment, null, h('div', { className: 'agent-event-head' }, h('strong', null, label), h('time', { dateTime: row.last_at ?? row.at ?? undefined }, time(row.last_at ?? row.at))), row.replay ? h('p', { className: 'agent-session-muted' }, '恢复时执行器回放 · 原始回合时间未知；此处时间为采集时间。') : null)
         if (row.type === 'text') return h('article', { key: row.key, className: `agent-event agent-${row.role}` }, head(row.role === 'agent' ? 'Agent' : row.role === 'user' ? '用户消息' : 'Agent 思考记录'), row.role === 'thought' ? details('查看执行器返回的思考记录', row.text) : pre(row.text))
         if (row.type === 'tool') return h('article', { key: row.key, className: 'agent-event agent-tool' },
           head(`工具 · ${row.title}`), h('div', { className: 'agent-tool-state' }, h('span', { className: 'badge', 'data-tool-status': row.status }, agentSessionStatus(row.status)), h('code', null, row.id)),
@@ -456,7 +514,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'agent-sessions-overlay', onKeyDown: keyDown },
         h('style', null, `.agent-sessions-overlay{position:fixed;inset:0;z-index:1200;background:#13202a70;display:flex;align-items:center;justify-content:center;padding:24px}.agent-sessions-dialog{width:min(1320px,100%);height:88vh;max-height:960px;background:#fbfbf8;color:#25392f;border:1px solid #d8dfd8;border-radius:16px;box-shadow:0 28px 80px #17221d33;display:flex;flex-direction:column;overflow:hidden;text-align:left}.agent-sessions-head{display:flex;justify-content:space-between;gap:20px;padding:20px 24px;border-bottom:1px solid #dce2dc}.agent-sessions-head h2{margin:0 0 6px;font-size:21px}.agent-sessions-head p{margin:0;color:#66716a;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.agent-sessions-actions{display:flex;gap:8px;align-items:flex-start;flex-shrink:0}.agent-sessions-dialog button{font:inherit;cursor:pointer}.agent-sessions-dialog button:disabled{cursor:default;opacity:.55}.agent-sessions-dialog button:focus-visible,.agent-sessions-dialog summary:focus-visible{outline:2px solid #347b61;outline-offset:2px}.agent-sessions-body{display:grid;grid-template-columns:285px minmax(0,1fr);min-height:0;flex:1}.agent-sessions-list{padding:16px 12px;overflow:auto;border-right:1px solid #dce2dc;background:#f3f5f1}.agent-sessions-list>h3{font-size:12px;color:#67736c;margin:0 10px 12px}.agent-session-option{display:flex;flex-direction:column;gap:7px;text-align:left;width:100%;border:1px solid transparent;border-radius:10px;padding:13px;background:transparent;color:inherit;margin-bottom:8px;overflow-wrap:anywhere}.agent-session-option[aria-pressed=true]{background:#fff;border-color:#87ac9a;box-shadow:0 3px 12px #23433008}.agent-session-option span,.agent-session-option small{font-size:12px;line-height:1.5}.agent-session-option small{color:#68746c}.agent-session-main{overflow:auto;min-width:0;padding:22px 24px}.agent-session-meta{padding-bottom:18px;border-bottom:1px solid #dce2dc;margin-bottom:18px}.agent-session-meta h3{margin:0 0 10px}.agent-session-meta dl,.agent-event dl{display:grid;grid-template-columns:110px minmax(0,1fr);font-size:12px;gap:7px;margin:12px 0}.agent-session-meta dt,.agent-event dt{color:#758075}.agent-session-meta dd,.agent-event dd{margin:0;overflow-wrap:anywhere}.agent-session-muted{font-size:12px;line-height:1.8;color:#6d786e}.agent-session-alert{padding:12px 14px;margin:12px 0;border:1px solid #e0c4a0;background:#fff5e7;border-radius:8px;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.agent-event{border:1px solid #dce2dc;background:#fff;padding:15px 17px;border-radius:10px;margin-bottom:14px;min-width:0}.agent-event-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;line-height:1.6;margin-bottom:8px;overflow-wrap:anywhere}.agent-event-head strong{font-size:13px;min-width:0}.agent-event-head time{font-size:11px;color:#7a847c;flex-shrink:0}.agent-event pre{font:12px/1.85 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;margin:9px 0}.agent-event summary{font-size:12px;cursor:pointer;margin:10px 0;color:#47765b}.agent-event details+details{border-top:1px solid #eef1ed;padding-top:1px}.agent-event.agent-error,.agent-event.agent-turn_end{border-left:3px solid #b47b46}.agent-tool-state{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}.agent-tool-state code{overflow-wrap:anywhere}.agent-tool-update{padding:10px;background:#f5f6f3;margin-top:6px}.agent-tool-update>div{font-size:11px;color:#71806f}.agent-session-footer{padding:14px 24px;border-top:1px solid #dce2dc;font-size:12px;color:#6d786e;display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap}.agent-sessions-dialog .agent-button{border:1px solid #ced8ce;background:#fff;color:#365340;padding:8px 12px;border-radius:7px;white-space:nowrap}.agent-sessions-empty{padding:32px 16px;color:#68756c;font-size:13px;line-height:1.9}@media(max-width:760px){.agent-sessions-overlay{padding:8px}.agent-sessions-dialog{height:94vh}.agent-sessions-head{padding:16px;gap:8px}.agent-sessions-actions{flex-wrap:wrap;justify-content:flex-end}.agent-sessions-body{grid-template-columns:210px minmax(0,1fr)}.agent-session-main{padding:14px}.agent-event-head{flex-direction:column;gap:3px}.agent-session-meta dl{grid-template-columns:1fr}.agent-sessions-head h2{font-size:18px}}`),
         h('section', { ref: dialog, className: 'agent-sessions-dialog', role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'agent-sessions-title' },
-          h('header', { className: 'agent-sessions-head' }, h('div', null, h('h2', { id: 'agent-sessions-title' }, 'Agent 会话管理'), h('p', null, '查看本次分析的原 Agent 会话 · 只读 · 每 2 秒同步'), h('p', null, `Run：${runId}`)),
+          h('header', { className: 'agent-sessions-head' }, h('div', null, h('h2', { id: 'agent-sessions-title' }, 'Agent 会话管理'), h('p', null, '查看本次分析的原 Agent 会话 · 最新输出在前 · 只读 · 每 2 秒同步'), h('p', null, `Run：${runId}`)),
             h('div', { className: 'agent-sessions-actions' }, h('button', { type: 'button', className: 'agent-button', onClick: () => reader.current?.refresh() }, '刷新记录'), h('button', { type: 'button', className: 'agent-button', 'aria-label': '关闭 Agent 会话管理', onClick: onClose }, '关闭'))),
           h('div', { className: 'agent-sessions-body' },
             h('aside', { className: 'agent-sessions-list', 'aria-label': '本次 Run 的 Agent 会话' }, h('h3', null, `原 Agent 会话 · ${state.items.length}`),
@@ -476,16 +534,47 @@ window.__ModuleLoader__.load({
                 state.detailTruncated || session.truncated ? h('div', { role: 'status', className: 'agent-session-alert' }, '部分记录已截断，以下内容不代表完整会话。') : null,
                 session.history_message ? h('div', { className: 'agent-session-alert', role: 'status' }, agentSessionContent(session.history_message)) : (state.historyStatus || session.history_status) === 'metadata_only' ? h('div', { className: 'agent-session-alert' }, '此历史会话仅保留身份与运行状态，没有采集指令、Agent 回复和工具输入输出；无法补回此前未记录的内容。') : null,
                 state.detailError ? h('div', { role: 'alert', className: 'agent-session-alert' }, `会话内容读取失败：${state.detailError}。已读取的内容仍保留，可点击“刷新记录”重试。`) : null,
+                state.historyError ? h('div', { role: 'alert', className: 'agent-session-alert' }, `更早历史读取失败：${state.historyError}。最新记录继续同步，可重试加载历史。`) : null,
                 h(AgentSessionTranscript, { events: state.events }),
                 !state.events.length && !state.detailLoading && !state.detailError && (state.historyStatus || session.history_status) !== 'metadata_only' ? h('p', { className: 'agent-sessions-empty' }, '会话已关联，尚未收到可显示的事件；这不表示 Agent 已完成。') : null,
                 state.detailLoading ? h('p', { role: 'status', className: 'agent-session-muted' }, '正在读取会话事件…') : null,
-                state.hasMore ? h('button', { type: 'button', className: 'agent-button', disabled: state.detailLoading, onClick: () => reader.current?.loadMore() }, state.detailLoading ? '正在加载…' : '加载更多会话事件') : null))),
-          h('footer', { className: 'agent-session-footer' }, h('span', null, '只读查看，不向 Agent 发送消息或重复执行工具。'), h('span', { role: 'status' }, state.hasMore ? '还有后续记录 · 加载更多后继续实时同步' : state.updatedAt ? `最近同步 ${state.updatedAt}` : '等待首次同步'))))
+                state.hasMore ? h('button', { type: 'button', className: 'agent-button', disabled: state.historyLoading, onClick: () => reader.current?.loadMore() }, state.historyLoading ? '正在加载更早历史…' : '加载更早会话事件') : null))),
+          h('footer', { className: 'agent-session-footer' }, h('span', null, '只读查看，不向 Agent 发送消息或重复执行工具。'), h('span', { role: 'status' }, `${state.hasMore ? '还有更早历史 · 最新记录持续同步 · ' : ''}${state.updatedAt ? `最近同步 ${state.updatedAt}` : '等待首次同步'}`))))
+    }
+
+    function renderRunInsights(insights, { openFlow, navigate, openReport, showAll }) {
+      const time = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '保存时间未记录'
+      const text = value => renderReadableBody(value)
+      const acceptance = value => ({ accepted: '已接受', delivered: '已交付', draft: '已保存草稿' })[value] ?? '已保存'
+      const section = (title, children) => h('section', { className: 'run-insight-section', style: { marginBottom: 24 } }, h('h3', { style: { margin: '0 0 12px', fontSize: 14 } }, title), children)
+      const card = (key, ...children) => h('article', { key, style: { border: '1px solid var(--dsw-alias-border, #dce2dc)', borderRadius: 9, padding: '13px 15px', marginBottom: 10, overflowWrap: 'anywhere' } }, ...children)
+      const recordKey = row => row.key ?? `${row.ref?.action_id ?? ''}:${row.ref?.record_id ?? ''}:${row.ref?.revision ?? ''}`
+      const output = row => card(recordKey(row),
+        h('div', { className: 'row between', style: { alignItems: 'flex-start', gap: 10 } }, h('strong', { style: { fontSize: 14 } }, row.title), h('span', { className: `badge ${row.acceptance === 'accepted' || row.acceptance === 'delivered' ? 'good' : ''}` }, acceptance(row.acceptance))),
+        h('p', { className: 'small muted', style: { margin: '7px 0' } }, [row.label, row.ref?.unit_id, row.saved_at_ms ? `所在产物更新于 ${time(row.saved_at_ms)}` : time(null)].filter(Boolean).join(' · ')),
+        row.navigation?.type === 'flow' && openFlow ? h('button', { type: 'button', className: 'link', onClick: () => openFlow(row.navigation.id) }, '查看业务流程', runIcon('ArrowUpRight')) : row.navigation?.type === 'case' && navigate ? h('button', { type: 'button', className: 'link', onClick: () => navigate({ type: 'case', id: row.navigation.id }) }, '查看测试用例', runIcon('ArrowUpRight')) : null,
+        row.kind === 'review_decision' ? renderReviewPresentation(h, row.record?.body, { renderText: text })
+          : h('details', { style: { marginTop: 10 } }, h('summary', { style: { cursor: 'pointer', fontSize: 12 } }, isReviewRecord(row.record, row.ref?.stage) ? '查看复核内容与依据' : '查看已保存内容'),
+            isReviewRecord(row.record, row.ref?.stage) ? renderReviewPresentation(h, row.record?.body, { renderText: text }) : text(row.record?.body)))
+      return h('div', { className: 'run-insights', 'aria-label': '阶段进展' },
+        insights.notices.map((notice, index) => h('p', { key: index, className: 'small muted', role: 'status', style: { borderLeft: '3px solid #c3a36d', padding: '8px 12px', lineHeight: 1.7 } }, typeof notice === 'string' ? notice : notice.message)),
+        insights.pending.length ? section('明确记录的待处理事项', insights.pending.map(row => card(recordKey(row), h('strong', { style: { fontSize: 14 } }, row.title), row.reason ? text(row.reason) : null,
+          row.action ? h('div', null, h('strong', { className: 'small' }, '建议处理'), text(row.action)) : null,
+          h('p', { className: 'small muted', style: { margin: '8px 0 0' } }, [row.source_label, row.ref?.unit_id, row.note].filter(Boolean).join(' · '))))) : null,
+        section('已保存的阶段产出', h(React.Fragment, null,
+          insights.outputs.counts.length ? h('div', { className: 'row', style: { flexWrap: 'wrap', gap: 8, marginBottom: 12 } }, insights.outputs.counts.map(item => h('span', { key: item.kind, className: 'badge', title: `${item.accepted} 条已接受 · ${item.delivered} 条已交付 · ${item.draft} 条草稿` }, `${item.label} ${item.count}`))) : null,
+          insights.outputs.latest.length ? insights.outputs.latest.map(output) : h('p', { className: 'small muted' }, insights.availability === 'unavailable' ? '阶段产物暂不可读取。' : '当前阶段尚未读取到已保存产物。'),
+          insights.outputs.total_records > insights.outputs.latest.length ? h('p', { className: 'small muted' }, `已读取 ${insights.outputs.total_records} 条记录，当前展示 ${insights.outputs.latest.length} 条产物；完整记录可在“阶段任务”的产物文件中查看。`) : null,
+          openReport ? h('button', { type: 'button', className: 'link', onClick: openReport }, '查看本次交付报告', runIcon('ArrowUpRight')) : null)),
+        insights.outputs.more || insights.pending_more || insights.current_work_more ? h('button', { type: 'button', className: 'btn', onClick: showAll, style: { marginBottom: 20 } }, `展开全部阶段信息${insights.pending_more ? `（还有 ${insights.pending_more} 项待处理）` : ''}`) : null,
+        !insights.pending.length && ['readable', 'partial'].includes(insights.availability) ? h('p', { className: 'small muted' }, '本阶段已读取记录中没有明确列出的待处理事项。') : null,
+        insights.current_work.length ? section('阶段任务进展', h('details', null, h('summary', { style: { cursor: 'pointer', fontSize: 13, marginBottom: 10 } }, `${insights.current_work.length + insights.current_work_more} 项任务 · 查看状态与最近保存时间`), insights.current_work.map(row => card(row.action_id ?? row.unit_id, h('strong', { style: { fontSize: 14 } }, row.title), row.purpose ? text(row.purpose) : null, h('p', { className: 'small muted', style: { marginBottom: 0 } }, [row.state_label, row.last_saved_at_ms ? `最近保存 ${time(row.last_saved_at_ms)}` : '尚未记录结果保存时间'].filter(Boolean).join(' · ')))))) : null,
+        insights.scope.units.length ? section('本阶段分析范围', h('details', null, h('summary', { style: { cursor: 'pointer', fontSize: 13 } }, `已读取 ${insights.scope.units.length} 个分析单元 · 查看目标与范围`), insights.scope.units.map(unit => card(unit.unit_id, h('strong', { style: { fontSize: 13 } }, unit.title), unit.purpose ? text(unit.purpose) : null, unit.owned_regions?.length ? text(unit.owned_regions) : null)))) : null)
     }
 
     function RunWorkspace({ current, task, timeline = [], error, loading, busy, retry, navigate: onNavigate, openFile, openFlow, stop, resume, deliver, discuss, diagnostics, viewState, cwd, dataRoot }) {
       const [selection, setSelection] = React.useState(viewState?.selection ?? '')
-      const [tab, setTab] = React.useState(viewState?.tab ?? 'activity')
+      const [tab, setTab] = React.useState(viewState?.tab === 'tasks' ? 'tasks' : 'insights')
       const view = () => ({ selection, tab, scrollY: window.scrollY })
       const navigate = target => onNavigate(target, view())
       React.useEffect(() => {
@@ -497,6 +586,7 @@ window.__ModuleLoader__.load({
       const [pending, setPending] = React.useState('')
       const [actionError, setActionError] = React.useState('')
       const [sessionsOpen, setSessionsOpen] = React.useState(false)
+      const [insightLimit, setInsightLimit] = React.useState(6)
       const dialog = React.useRef(null)
       const stopTrigger = React.useRef(null)
       React.useEffect(() => {
@@ -547,8 +637,7 @@ window.__ModuleLoader__.load({
       const tone = error ? 'blue' : attention || p.failed ? 'warn' : finished ? 'good' : 'blue'
       const legacy = current && current.workflow_version !== 'source-first-v1'
       const stepProgress = legacy && current.workflow?.step_progress?.step === selected?.step ? current.workflow.step_progress : null
-      const events = timeline.filter(event => legacy ? event.step === selected?.step : !event.stage || event.stage === selected?.stage)
-        .slice().sort((a, b) => (new Date(b.time).getTime() || 0) - (new Date(a.time).getTime() || 0))
+      const insights = buildRunInsights(current, selected ?? {}, { stale: Boolean(error), limit: insightLimit })
       const timingTask = p.identityMatched ? task : null
       const attempt = timingTask?.attempts?.find(item => item.attempt_id === timingTask.attempt_id)
       const startTime = current?.started_at ?? timingTask?.launch_started_at ?? attempt?.started_at
@@ -588,7 +677,7 @@ window.__ModuleLoader__.load({
           loading ? node('section', 'panel', node('div', 'skeleton large'), h('div', { className: 'skeleton', style: { width: '75%' } }), node('div', 'divider'), node('div', 'grid3', [0, 1, 2].map(i => h('div', { key: i }, h('div', { className: 'skeleton', style: { width: '60%' } }), h('div', { className: 'skeleton', style: { height: 120 } }), h('div', { className: 'skeleton', style: { width: '80%' } }))))) : null,
           node('p', 'small muted', '阶段状态尚未读取，不推断运行成功或失败。')) : h(React.Fragment, null,
           node('div', 'hero-band', node('div', '', node('div', 'row', h('h2', null, error ? `上次记录：${current.phase_title ?? ''}` : finished ? '本次分析已完成' : p.stopped ? '本次运行已停止' : attention ? `${current.phase_title ?? '当前阶段'}需要处理` : p.failed ? '本次分析失败' : observation ? observation.activity : `正在进行${current.phase_title ?? active?.title ?? '当前阶段'}`), badge(status, tone)),
-            h('p', null, error ? '当前状态未知，下方是最后成功读取的运行信息。' : current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : finished ? completionSummary : p.stopped ? '源码快照、已接受单元和运行记录均已保留。' : timeline.find(event => event.summary)?.summary || '分析结果会陆续保存。')),
+            h('p', null, error ? '当前状态未知，下方是最后成功读取的运行信息。' : current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : finished ? completionSummary : p.stopped ? '源码快照、已接受单元和运行记录均已保留。' : '选择阶段，查看已保存的产出和待处理事项；实时对话可在 Agent 会话管理中查看。')),
             node('div', 'metrics', stat('阶段已完成', h(React.Fragment, null, current.workflow?.completed_steps?.length ?? 0, node('span', 'small muted', ` / ${steps.length}`))), stat('运行时长', duration), stat('用户介入', attention ? '需要' : '无需'))),
           attention && !error ? h('div', { className: 'notice warn', style: { marginBottom: 24 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, '选择接下来的处理方式'), h('p', null, !task ? '此 Run 未关联任务记录，无法继续执行或交付；可查看已有结果。' : sourceFirstRecordBody(current.blocking_reason) || '查看未解决事项，继续处理或交付已有结果。'))), node('div', 'row', button('交付已有结果', () => perform('deliver', deliver), '', !task), button('继续修正', () => perform('resume', resume), 'primary', !task?.can_resume))) : null,
           h(RunExecutionSummary, { current, task, stale: Boolean(error) }),
@@ -599,18 +688,14 @@ window.__ModuleLoader__.load({
               stepProgress ? node('div', 'callout', h('strong', null, '当前业务进度'), h('p', null, stepProgress.total == null ? `${stepProgress.completed ?? 0} 个已完成` : `${stepProgress.completed ?? 0} / ${stepProgress.total}`), stepProgress.current ? h('p', null, `${stepProgress.current.id} · ${stepProgress.current.title}`) : null, stepProgress.updated_at ? h('p', null, stepProgress.updated_at) : null) : null,
               selected?.stage === 'analyzing' ? h(React.Fragment, null, h('p', { className: 'meta', style: { marginTop: 8 } }, '逐个分析源码单元，整理业务路径、风险与测试依据。'), node('div', 'divider'), node('div', 'row between', h('span', null, h('strong', { style: { fontSize: 23, fontWeight: 500 } }, current.analysis?.completed ?? 0, node('span', 'small muted', ` / ${current.analysis?.total ?? 0}`)), node('span', 'small muted', ' 分析单元已接受')),
                 node('div', 'segment', units.map((unit, i) => h('span', { key: unit.unit_id ?? i, className: unit.status === 'accepted' ? 'good' : unit.status === 'dispatched' && p.running && !error ? 'active' : '' }))))) : stageDescription ? h('p', { className: 'meta', style: { marginTop: 8 } }, stageDescription) : null),
-              node('div', 'tabs-mini', ['activity', 'tasks'].map(value => h('button', { type: 'button', key: value, className: value === tab ? 'active' : '', 'aria-pressed': value === tab, onClick: () => { setSelection(selected?.step ?? ''); setTab(value) } }, value === 'activity' ? '活动记录' : '阶段任务'))),
-              h('div', { key: `${current.run_id}:${selected?.step}:${tab}`, className: 'activity', role: 'region', tabIndex: 0, 'aria-label': `${selected?.title ?? '当前阶段'} · ${tab === 'tasks' ? '阶段任务' : '活动记录'}` }, tab === 'tasks' ? h(React.Fragment, null, heading(selected?.stage === 'analyzing' ? '源码分析单元' : '阶段任务', badge(legacy ? `${tasks.length} 项任务` : `${tasks.filter(item => item.status === 'accepted').length} / ${tasks.length} 已接受`, legacy ? '' : 'good')),
+              node('div', 'tabs-mini', ['insights', 'tasks'].map(value => h('button', { type: 'button', key: value, className: value === tab ? 'active' : '', 'aria-pressed': value === tab, onClick: () => { setSelection(selected?.step ?? ''); setTab(value) } }, value === 'insights' ? '阶段进展' : '阶段任务'))),
+              h('div', { key: `${current.run_id}:${selected?.step}:${tab}`, className: 'activity', role: 'region', tabIndex: 0, 'aria-label': `${selected?.title ?? '当前阶段'} · ${tab === 'tasks' ? '阶段任务' : '阶段进展'}` }, tab === 'tasks' ? h(React.Fragment, null, heading(selected?.stage === 'analyzing' ? '源码分析单元' : '阶段任务', badge(legacy ? `${tasks.length} 项任务` : `${tasks.filter(item => item.status === 'accepted').length} / ${tasks.length} 已接受`, legacy ? '' : 'good')),
                 tasks.length ? tasks.map(item => h('div', { key: item.unit_id ?? item.action_id, className: 'list-row', style: { padding: '10px 0' } }, node('span', 'small', item.title ?? item.task_id ?? item.action_id), badge(({ accepted: '已接受', settled: '待接受', dispatched: p.stopped ? '已停止' : p.failed && selected === active ? '执行已中断' : '执行中', pending: '等待', failed: '失败', paused: '待处理' })[item.status] ?? item.status, item.status === 'accepted' ? 'good' : 'neutral'))) : node('p', 'muted small', '当前阶段暂无任务。'),
                 selected?.artifacts?.length ? node('div', 'run-information', heading('阶段产物'), h('ul', { className: 'stage-artifact-list', 'aria-label': '阶段产物', role: 'list' }, selected.artifacts.map(file => h('li', { key: file },
                   h('button', { type: 'button', className: 'stage-artifact-link', title: file, 'aria-label': `打开${artifactLabel(file)}：${file}`, onClick: () => openFile(file) }, runIcon('FileText'),
                     node('span', 'stage-artifact-copy', node('span', 'stage-artifact-title', artifactLabel(file)), node('span', 'stage-artifact-name', file.split(/[\\/]/).pop())), node('span', 'stage-artifact-open', '打开')))))) : null)
-                : h(React.Fragment, null, h('div', { className: 'row between small muted', style: { marginBottom: 19 } }, h('span', null, '阶段活动'), h('span', null, runIcon('ListFilter'), ' 关键事件')),
-                  node('div', 'timeline', events.length ? events.map((event, i) => h('div', { key: event.key ?? i, className: `event ${i === 0 && p.running && !error ? 'pending' : ''}` }, h('time', null, time(event.time)), h('strong', null, event.title), event.detail ? h('p', null, event.detail) : null,
-                    (event.evidence ?? []).filter(item => typeof item === 'string').map((location, index) => h('span', { key: index, className: 'badge mono' }, location)),
-                    (current.details?.business_flows ?? []).filter(flow => event.relates_to?.some(id => id === flow.flow_id || id === flow.source_record?.record_id)).map(flow => h('button', { key: flow.flow_id, className: 'link', onClick: () => openFlow(flow.flow_id, view()) }, '查看对应流程', runIcon('ArrowUpRight'))),
-                    finished && i === 0 && reportPath ? h('button', { className: 'link', onClick: () => openFile(reportPath) }, '查看分析报告', runIcon('ArrowUpRight')) : null)) : node('p', 'small muted', '当前阶段暂无活动记录。')))),
-              node('div', 'run-foot', h('span', null, h('span', { className: 'status-dot' }), error ? '正在显示上次记录' : p.stopped || finished ? '已保存记录可查看' : events[0]?.time ? `最近活动 · ${Math.max(0, Math.floor((Date.now() - new Date(events[0].time).getTime()) / 1000))} 秒前` : '等待活动记录'), h('span', null, '按发生时间排列'))),
+                : renderRunInsights(insights, { openFlow: id => openFlow(id, view()), navigate, showAll: () => setInsightLimit(Number.MAX_SAFE_INTEGER), openReport: reportPath && ['reporting', 'complete'].includes(selected?.stage) ? () => openFile(reportPath) : null })),
+              node('div', 'run-foot', h('span', null, h('span', { className: 'status-dot' }), error ? '正在显示上次记录' : insights.last_saved_at_ms ? `最近保存 · ${time(insights.last_saved_at_ms)}` : '尚未记录结果保存时间'), h('span', null, '产出按保存时间倒序'))),
             node('aside', 'run-aside', h('section', null, heading('已产出', node('span', 'tiny muted', `${outputs.length} 项可查看`)), outputs.map(output => h('div', { key: output.title, className: 'file-row' }, runIcon('FileText'), h('div', null, h('div', { style: { fontSize: 13 } }, output.title), node('div', 'meta', output.caption)), button('查看', output.action, 'ghost'))), !outputs.length ? node('p', 'small muted', '当前尚无可读取产物。') : null, node('p', 'aside-note', current.publication?.state === 'final' ? '报告包含结论、源码依据与测试建议。' : '分析中的内容为草稿，复核后更新。')),
               h('section', { style: { marginTop: 28 } }, heading('本次运行'), fields([['分析方式', ({ 'module-analysis': '模块分析', 'coverage-analysis': '覆盖率分析', 'risk-analysis': '风险分析', 'branch-analysis': '分支分析' })[current.scenario] ?? current.scenario ?? '未记录'], ['运行模式', ({ depth: '标准型', speed: '速度型' })[current.mode] ?? current.mode ?? '未记录'], ['源码快照', current.source_snapshot?.file_count == null ? '未读取' : `${current.source_snapshot.file_count} 个文件 · ${snapshotLabel}`], ['分析范围', current.target ?? '未记录']]), node('div', 'divider'), node('div', 'small muted', runIcon('LockKeyhole'), ['manifest_verified', 'frozen', 'verified'].includes(snapshotStatus) ? ' 基于冻结的源码快照' : ` 源码快照${snapshotLabel}`),
                 node('details', 'run-information', h('summary', null, '运行信息'), fields([['运行编号', current.run_id], ['开始时间', time(startTime)], ['最近同步', time(current.state_read?.observed_at)], ['工作流', current.workflow_version], ['交付完整性', outcome.delivery], ['审查方式', outcome.review], ['语义结论', outcome.semantic]]), diagnostics), p.stopped && !p.canResume ? h('p', { className: 'aside-note', role: 'status' }, p.resumeBlockedReason) : null)))),
@@ -4997,14 +5082,15 @@ window.__ModuleLoader__.load({
       }
 
       function renderSourceFirstRecords(groups = current?.source_first_records ?? []) {
-        const records = groups.flatMap(group => (group.records ?? []).map(record => ({ ...record, action_id: group.action_id, task_id: group.task_id, revision: group.revision })))
+        const records = (Array.isArray(groups) ? groups : []).flatMap(group => (Array.isArray(group?.records) ? group.records : []).filter(record => record && typeof record === 'object').map(record => ({ ...record, stage: group.stage, action_id: group.action_id, task_id: group.task_id, revision: group.revision })))
         const recordNodes = records.map((record, index) => h('details', {
           key: `${record.action_id}:${record.record_id ?? index}:${index}`,
+          open: record.kind === 'review_decision',
           style: { ...styles.card, margin: '8px 0 0', background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.06))' },
         },
         h('summary', { style: { cursor: 'pointer' } }, `${RECORD_LABELS[record.kind] ?? '分析记录'} · ${text(record.record_id, `record-${index + 1}`)} · 结果文件修订 ${record.revision ?? '—'}`),
         h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `${record.action_id ?? 'unknown action'}${record.task_id ? ` · task ${record.task_id}` : ''}`),
-        renderReadableBody(record.body, record.kind === 'flow'),
+        isReviewRecord(record, record.stage) ? renderReviewPresentation(h, record.body, { renderText: renderReadableBody }) : renderReadableBody(record.body, record.kind === 'flow'),
         Array.isArray(record.evidence) && record.evidence.length ? h('pre', { style: { ...styles.itemMeta, marginTop: 7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, `证据：${sourceFirstRecordBody(record.evidence)}`) : null,
         Array.isArray(record.relates_to) && record.relates_to.length ? h('div', { style: { ...styles.itemMeta, marginTop: 7 } }, `关联：${record.relates_to.map(item => text(item, '')).filter(Boolean).join('、')}`) : null))
         return h('div', { style: styles.card },
@@ -6439,30 +6525,12 @@ window.__ModuleLoader__.load({
       function renderReview() {
         if (current?.workflow_version === 'source-first-v1') return renderSourceFirstRecords((current.source_first_records ?? []).filter(item => ['independent_review', 'comparison_review'].includes(item.stage)))
         const review = current?.review
-        if (!review) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 还没有复核结果。'))
-        const comparisonDecisions = review.comparison?.decisions ?? []
-        const comparisonDetails = review.comparison ? h('details', { style: styles.card, open: true },
-          h('summary', { style: { cursor: 'pointer', fontWeight: 700 } }, '对照复核'),
-          review.comparison.summary ? h('div', { style: { ...styles.text, marginTop: 8 } }, review.comparison.summary) : null,
-          comparisonDecisions.length ? h('div', { style: styles.stageRail }, comparisonDecisions.map(decision => h('div', { key: decision.finding_key, style: styles.stageItem },
-            h('span', { style: { ...styles.stageDot, background: decision.disposition === 'dismissed' ? 'var(--dsw-alias-label-tertiary, #888)' : 'var(--dsw-alias-state-warn-primary, #c9974f)' } }),
-            h('div', null,
-              h('div', { style: styles.itemTitle }, decision.finding_key),
-              decision.conclusion ? h('div', { style: styles.itemMeta }, decision.conclusion) : null),
-            h('span', { style: styles.badge }, decision.disposition === 'dismissed' ? '已驳回' : decision.disposition)))) : null) : null
+        if (review == null) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 还没有复核结果。'))
         return h(React.Fragment, null,
-          h('div', { style: styles.card },
-            field('最终复核状态', REVIEW[review.status] ?? QUALITY[review.status] ?? review.status ?? '待定'),
-            h('div', { style: styles.grid },
-              field('独立发现', review.counts?.independent ?? 0),
-              field('对照驳回', review.counts?.dismissed ?? 0),
-              field('对照确认', review.counts?.confirmed ?? 0),
-              field('最终有效', review.counts?.effective ?? details.review_issues?.length ?? 0)),
-            review.summary ? h('div', { style: { ...styles.text, marginTop: 9 } }, review.summary) : null),
-          review.independent ? h('details', { style: styles.card }, h('summary', { style: { cursor: 'pointer', fontWeight: 700 } }, '独立复核'), review.independent.summary ? h('div', { style: { ...styles.text, marginTop: 8 } }, review.independent.summary) : null, h('div', { style: styles.itemMeta }, `${review.independent.findings?.length ?? 0} 条原始发现`)) : null,
-          comparisonDetails,
-          h('div', { style: styles.sectionTitle }, `最终有效复核问题（${details.review_issues?.length ?? 0}）`),
-          details.review_issues?.length ? details.review_issues.map(issue => h('div', { key: issue.issue_id ?? JSON.stringify(issue), style: styles.card }, h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, issue.issue_id ?? '未编号问题'), issue.unit_id ? h('span', { style: styles.badge }, issue.unit_id) : null), issue.reason ? h(React.Fragment, null, h('div', { style: { ...styles.label, marginTop: 8 } }, '原因'), h('div', { style: styles.text }, issue.reason)) : null, issue.required_change ? h(React.Fragment, null, h('div', { style: { ...styles.label, marginTop: 8 } }, '要求修改'), h('div', { style: styles.text }, issue.required_change)) : null)) : h('div', { style: styles.card }, h('div', { style: styles.empty }, '没有待处理的复核问题。')))
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '复核结论'),
+            renderReviewPresentation(h, review, { renderText: renderReadableBody })),
+          details.review_issues != null ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '有效复核问题'),
+            renderReviewPresentation(h, details.review_issues, { renderText: renderReadableBody })) : null)
       }
 
       let body

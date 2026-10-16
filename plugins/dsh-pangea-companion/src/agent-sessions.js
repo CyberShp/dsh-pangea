@@ -28,6 +28,13 @@ async function recordedPath(file) {
   }
 }
 const present = value => typeof value === 'string' && value.length > 0
+const sessionTimestamp = session => {
+  for (const value of [session.updated_at, session.created_at]) {
+    const timestamp = typeof value === 'string' && value.trim() ? Date.parse(value) : NaN
+    if (Number.isFinite(timestamp)) return timestamp
+  }
+  return -Infinity
+}
 const safeRunId = value => {
   if (!present(value) || value === '.' || value === '..' || /[\\/\0]/.test(value)) throw new Error('无效 run_id')
   return value
@@ -199,7 +206,10 @@ export class AgentSessionStore {
     const seen = new Set(items.map(item => item.session_id))
     try { for (const item of await this.legacySessions()) if (!seen.has(item.session_id)) items.push(item) }
     catch (error) { errors.push(error.message) }
-    return { status: 'ok', run_id: this.runId, items: items.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || ''))), total: items.length,
+    return { status: 'ok', run_id: this.runId, items: items.sort((a, b) => {
+      const left = sessionTimestamp(a), right = sessionTimestamp(b)
+      return left === right ? a.session_id.localeCompare(b.session_id) : left > right ? -1 : 1
+    }), total: items.length,
       recording_error: recordingErrors.get(this.root) || errors.join('；') || null, truncated: files.length > 4000 }
   }
 
@@ -207,11 +217,14 @@ export class AgentSessionStore {
 
   async read(sessionId, { cursor = 0, limit = 100 } = {}) {
     if (!/^[a-f0-9]{64}$/.test(sessionId || '')) throw new Error('无效 session_id')
-    const offset = Number(cursor), count = Number(limit)
+    const latest = cursor === 'latest', earlier = typeof cursor === 'string' && cursor.startsWith('before:')
+    const offset = latest ? 0 : earlier && /^before:\d+$/.test(cursor) ? Number(cursor.slice(7)) : earlier ? NaN : Number(cursor)
+    const count = Number(limit)
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(count) || count < 1 || count > 200) throw new Error('无效会话分页参数')
     const listing = await this.list(), session = listing.items.find(item => item.session_id === sessionId)
     if (!session) throw new Error('Agent 会话不属于当前 Run')
     const result = { status: 'ok', run_id: this.runId, session, events: [], next_cursor: offset, has_more: false,
+      history_cursor: offset, has_history: offset > 0,
       history_status: session.history_status, recording_error: listing.recording_error }
     if (!session.event_count) return result
     const file = await this.safePath(path.join(this.root, `${sessionId}.jsonl`))
@@ -223,10 +236,40 @@ export class AgentSessionStore {
         const before = Buffer.alloc(1); await handle.read(before, 0, 1, offset - 1)
         if (before[0] !== 10) throw new Error('会话游标不在记录边界')
       }
-      const buffer = Buffer.alloc(Math.min(MAX_PAGE_BYTES, size - offset))
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
+      let start = offset, buffer
+      if (latest || earlier) {
+        // The extra record budget locates the first complete boundary and
+        // excludes an in-progress tail. Returned page bytes still stay within
+        // MAX_PAGE_BYTES; reading an entire growing transcript is unnecessary.
+        const boundary = latest ? size : offset
+        const scanStart = Math.max(0, boundary - MAX_PAGE_BYTES - MAX_EVENT_BYTES - 1)
+        const scanned = Buffer.alloc(boundary - scanStart)
+        const { bytesRead } = await handle.read(scanned, 0, scanned.length, scanStart)
+        const completeEnd = bytesRead > 0 ? scanned.lastIndexOf(10, bytesRead - 1) + 1 : 0
+        let begin = completeEnd, records = 0
+        while (begin > 0 && records < count) {
+          const previous = begin > 1 ? scanned.lastIndexOf(10, begin - 2) : -1
+          const candidate = previous + 1
+          if ((candidate === 0 && scanStart > 0) || completeEnd - candidate > MAX_PAGE_BYTES) break
+          begin = candidate
+          records++
+        }
+        start = scanStart + begin
+        if (!records) {
+          // Do not advance a live cursor past any incomplete/unread record.
+          // Valid recorded events fit in the bounded scan; an oversized or
+          // damaged tail is surfaced rather than silently skipped.
+          start = boundary === 0 || scanStart === 0 ? 0 : offset
+          if (boundary > 0) result.recording_error = '会话尾部尚未写完或记录超过读取上限'
+        }
+        buffer = scanned.subarray(begin, completeEnd)
+      } else {
+        buffer = Buffer.alloc(Math.min(MAX_PAGE_BYTES, size - start))
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, start)
+        buffer = buffer.subarray(0, bytesRead)
+      }
       let begin = 0
-      while (begin < bytesRead && result.events.length < count) {
+      while (begin < buffer.length && result.events.length < count) {
         const end = buffer.indexOf(10, begin)
         if (end < 0) break // A concurrently appended partial record is retried.
         try {
@@ -235,13 +278,15 @@ export class AgentSessionStore {
           result.events.push(event)
         } catch (error) {
           result.recording_error = `会话记录损坏：${error.message}`
-          result.events.push({ type: 'recording_error', seq: offset + begin + 1, at: null, message: result.recording_error })
+          result.events.push({ type: 'recording_error', seq: start + begin + 1, at: null, message: result.recording_error })
         }
         begin = end + 1
       }
-      result.next_cursor = offset + begin
+      result.next_cursor = start + begin
+      result.history_cursor = start
+      result.has_history = start > 0
       result.has_more = result.next_cursor < size
-      if (bytesRead > 0 && begin === 0) result.recording_error = '会话尾部尚未写完或记录超过读取上限'
+      if (buffer.length > 0 && begin === 0) result.recording_error = '会话尾部尚未写完或记录超过读取上限'
       return result
     } finally { await handle.close() }
   }
