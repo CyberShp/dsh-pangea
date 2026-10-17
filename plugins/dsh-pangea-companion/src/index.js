@@ -538,7 +538,16 @@ function readJobSnapshot(runtime, task) {
   if (!task?.job_id) return null
   const jobs = runtimeService(runtime, 'jobs')
   if (!jobs?.get) return null
-  const snapshot = jobs.get(task.job_id, jobOwner(runtime, task))
+  const owner = jobOwner(runtime, task)
+  let snapshot
+  try { snapshot = jobs.get(task.job_id, owner) }
+  catch (error) {
+    // Local Jobs are held in memory and disappear after a host restart. Treat
+    // only this exact lookup miss as absent; callers still need independent
+    // stop evidence. Access failures and other registry errors must propagate.
+    if (error instanceof Error && error.message === `unknown job ${task.job_id}`) return null
+    throw error
+  }
   if (snapshot && task.job_started_at !== snapshot.startedAt) throw new Error('ACP Job 身份不匹配，旧执行停止尚未确认')
   return snapshot
 }

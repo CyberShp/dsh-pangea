@@ -10,6 +10,14 @@ import { createTaskStore } from '../src/task-store.js'
 const ok = value => ({ result: { ok: true, value } })
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
 
+async function recordQuiescentWorkers(f, task) {
+  const folder = path.join(f.dataRoot, 'runs', task.run_id)
+  await mkdir(folder, { recursive: true })
+  await writeFile(path.join(folder, 'acp-workers.json'), JSON.stringify({
+    runId: task.run_id, owner: { active: false }, workers: { worker: { quiescent: true } },
+  }))
+}
+
 async function fixture(t, input = {}) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'pangea-task-actions-')))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -37,7 +45,7 @@ async function fixture(t, input = {}) {
     req.headers = { 'sec-fetch-site': 'same-origin' }
     const response = {}
     await workbenchRouteHandler(req, { writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) } },
-      f.api, tasks, f.launchLocks, f.launchLogs, f.runtime, f.monitor, options => f.runner(options))
+      f.api, f.tasks, f.launchLocks, f.launchLogs, f.runtime, f.monitor, options => f.runner(options))
     return response
   }
   f.bind = async ({ provider = 'pangea-nga', workflow = 'legacy-v1', jobStatus = 'running' } = {}) => {
@@ -196,6 +204,118 @@ test('deleting a previously confirmed stopped task does not cancel a historical 
   f.api.sessions.cancel = async () => { throw new Error('historical session no longer exists') }
   const result = await f.request({ action: 'task-delete', task_id: task.task_id })
   assert.equal(result.body.deleted, true, JSON.stringify(result.body))
+})
+
+for (const workflow of ['legacy-v1', 'source-first-v1']) {
+  test(`a confirmed stopped ${workflow} task remains deletable after restart loses its Job`, async t => {
+    const f = await fixture(t)
+    const task = await f.bind({ workflow })
+    if (workflow === 'source-first-v1') await recordQuiescentWorkers(f, task)
+    assert.equal((await f.request({ action: 'stop', task_id: task.task_id })).body.stop_confirmed, true)
+    f.calls.length = 0
+    f.tasks = createTaskStore({ storePath: f.storePath })
+    assert.ok(Number.isFinite((await f.tasks.get(task.task_id)).stop_confirmed_at))
+    f.runtime.agents.get = () => null
+    f.runtime.jobs.get = id => { throw new Error(`unknown job ${id}`) }
+    f.api.sessions.cancel = async () => { throw new Error('historical session must not be cancelled') }
+
+    const result = await f.request({ action: 'task-delete', task_id: task.task_id })
+
+    assert.equal(result.code, 200)
+    assert.equal(result.body.deleted, true, JSON.stringify(result.body))
+    assert.equal(result.body.stop_confirmed, true)
+    assert.deepEqual(f.calls, [], 'a confirmed stop must not send another Run stop or cancel a missing Job')
+    assert.equal((await f.tasks.list()).length, 0)
+    assert.equal((await createTaskStore({ storePath: f.storePath }).list()).length, 0)
+  })
+
+  test(`a persisted terminal ${workflow} task with a missing Job is deletable after execution evidence is checked`, async t => {
+    const f = await fixture(t)
+    const task = await f.bind({ workflow })
+    await f.tasks.settleJob(task.job_id, { ...f.job, status: 'killed' })
+    if (workflow === 'source-first-v1') await recordQuiescentWorkers(f, task)
+    f.tasks = createTaskStore({ storePath: f.storePath })
+    const persisted = await f.tasks.get(task.task_id)
+    assert.equal(persisted.execution_status, 'stopped')
+    assert.equal(persisted.stop_confirmed_at, null, 'a terminal Job event is not a confirmed task stop')
+    f.runtime.jobs.get = id => { throw new Error(`unknown job ${id}`) }
+
+    const result = await f.request({ action: 'task-delete', task_id: task.task_id })
+
+    assert.equal(result.code, 200)
+    assert.equal(result.body.deleted, true, JSON.stringify(result.body))
+    assert.equal(result.body.stop_confirmed, true)
+    assert.deepEqual(f.calls.map(call => call[0]), ['runs'], 'close Run writes without trying to kill a missing Job')
+    assert.equal((await f.tasks.list()).length, 0)
+  })
+}
+
+for (const previouslyConfirmed of [false, true]) {
+  test(`a stopped task (${previouslyConfirmed ? 'previously confirmed' : 'terminal event only'}) with a matching live Job stays visible until that Job actually ends`, async t => {
+    const f = await fixture(t)
+    const task = await f.bind()
+    if (previouslyConfirmed) await f.tasks.markStopped(task.task_id)
+    else await f.tasks.settleJob(task.job_id, { ...f.job, status: 'killed' })
+    f.tasks = createTaskStore({ storePath: f.storePath })
+    assert.equal((await f.tasks.get(task.task_id)).execution_status, 'stopped')
+    assert.equal(f.job.status, 'running')
+    f.runtime.jobs.kill = async (id, owner) => { f.calls.push(['kill', id, owner.id]); return 'requested' }
+
+    const first = await f.request({ action: 'task-delete', task_id: task.task_id })
+
+    assert.equal(first.body.deleted, false)
+    assert.equal(first.body.stop_confirmed, false)
+    assert.match(first.body.error, /Job 尚未确认结束/)
+    assert.equal((await f.tasks.list()).length, 1)
+    assert.equal((await f.tasks.get(task.task_id)).stop_confirmed_at, null)
+    assert.deepEqual(f.calls.map(call => call[0]), previouslyConfirmed ? ['kill'] : ['runs', 'kill'])
+    assert.deepEqual(f.calls.at(-1), ['kill', task.job_id, f.owner.id])
+
+    f.job.status = 'killed'
+    const second = await f.request({ action: 'task-delete', task_id: task.task_id })
+    assert.equal(second.body.deleted, true, JSON.stringify(second.body))
+    assert.equal(f.calls.filter(call => call[0] === 'kill').length, 1)
+  })
+}
+
+for (const workflow of ['legacy-v1', 'source-first-v1']) {
+  test(`a missing historical ${workflow} Job does not prove that its persisted process or worker has exited`, async t => {
+    const f = await fixture(t)
+    const task = await f.bind({ workflow })
+    await f.tasks.settleJob(task.job_id, { ...f.job, status: 'killed' })
+    await f.tasks.bindAgentRuntime(task.task_id, { attemptId: task.attempt_id, agentSessionId: 'retained-agent', processId: process.pid })
+    if (workflow === 'source-first-v1') {
+      const folder = path.join(f.dataRoot, 'runs', task.run_id)
+      await mkdir(folder, { recursive: true })
+      await writeFile(path.join(folder, 'acp-workers.json'), JSON.stringify({
+        runId: task.run_id, owner: { active: false }, workers: { worker: { quiescent: false, process_id: process.pid } },
+      }))
+    }
+    f.runtime.jobs.get = id => { throw new Error(`unknown job ${id}`) }
+
+    const result = await f.request({ action: 'task-delete', task_id: task.task_id })
+
+    assert.equal(result.body.deleted, false)
+    assert.equal(result.body.stop_confirmed, false)
+    assert.match(result.body.error, /进程.*尚未确认/)
+    assert.equal((await f.tasks.list()).length, 1)
+    assert.equal(f.calls.some(call => call[0] === 'kill'), false)
+  })
+}
+
+test('a Job belonging to another session remains a failure even for a confirmed stop', async t => {
+  const f = await fixture(t)
+  const task = await f.bind()
+  await f.tasks.markStopped(task.task_id)
+  f.runtime.jobs.get = id => { throw new Error(`job ${id} belongs to another session`) }
+
+  const result = await f.request({ action: 'task-delete', task_id: task.task_id })
+
+  assert.equal(result.body.deleted, false)
+  assert.equal(result.body.stop_confirmed, false)
+  assert.match(result.body.error, /job job-one belongs to another session/)
+  assert.equal((await f.tasks.list()).length, 1)
+  assert.deepEqual(f.calls, [])
 })
 
 test('stop during Run creation fences the late Run and prevents session creation or worker launch', async t => {
