@@ -1,5 +1,3 @@
-import { riskApplicable } from './analysis-scenes.js'
-import { caseDesignCounts, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } from './behavior-coverage.js'
 function cell(value) {
   if (Array.isArray(value)) return value.map(item => cell(item)).join('；')
   if (value === null || value === undefined) return ''
@@ -7,68 +5,60 @@ function cell(value) {
   return String(value)
 }
 
+const CASE_HEADERS = ['用例ID', '标题', '类型', '前置条件', '操作步骤', '预期结果', '观察点', '清理动作（环境恢复）']
+const CASE_TYPE_LABELS = {
+  business_blackbox: '业务黑盒', developer_assisted: '业务灰盒',
+  interface_contract: '接口契约', whitebox_support: '白盒辅助',
+  positive: '正向验证', negative: '反向验证', boundary: '边界验证',
+  functional: '功能验证', performance: '性能验证', recovery: '恢复验证',
+  concurrency: '并发验证', robustness: '健壮性验证', security: '安全验证',
+  branch: '业务分支', coverage: '覆盖率补测', risk: '风险验证',
+}
+const list = value => Array.isArray(value) ? value : value == null ? [] : [value]
+const lines = value => list(value).map(cell).filter(Boolean).join('\n')
+const numbered = values => values.map((value, index) => `${index + 1}. ${value}`).join('\n')
+
+function caseSteps(item) {
+  // The projection's steps include "action → expected". Use its explicit pairs
+  // instead of splitting that text, which may legitimately contain arrows.
+  const steps = list(item.step_pairs?.length ? item.step_pairs : item.steps)
+  const pairs = steps.map(step => step && typeof step === 'object'
+    ? { action: cell(step.action ?? step.step), expected: cell(step.expected ?? step.expected_result) }
+    : { action: cell(step), expected: '' })
+  const hasExpected = pairs.some(step => step.expected)
+  let actions = numbered(pairs.map(step => step.action || '未提供操作'))
+  let expected = hasExpected ? numbered(pairs.map(step => step.expected || '未提供逐步预期')) : ''
+  const overall = lines(item.expected_results)
+  if (overall) expected = [expected, hasExpected ? `整体预期：\n${overall}` : overall].filter(Boolean).join('\n\n')
+  if (cell(item.entry)) actions = [`操作入口：${cell(item.entry)}`, actions].filter(Boolean).join('\n\n')
+
+  // Keep parameter combinations and their labels within the requested columns;
+  // they remain part of the same case rather than extra rows.
+  const variants = list(item.variants).map((value, index) => value && typeof value === 'object'
+    ? { label: cell(value.variant_id) || String(index + 1), input: cell(value.input), expected: cell(value.expected) }
+    : { label: String(index + 1), input: cell(value), expected: '' })
+  if (variants.length) {
+    actions = [actions, `参数组合：\n${variants.map(value => `${value.label}. ${value.input || '未提供输入'}`).join('\n')}`].filter(Boolean).join('\n\n')
+    expected = [expected, `参数组合预期：\n${variants.map(value => `${value.label}. ${value.expected || '未提供预期'}`).join('\n')}`].filter(Boolean).join('\n\n')
+  }
+  return { actions, expected }
+}
+
 function testCaseRows(run) {
-  const risk = riskApplicable(run)
-  const v2 = run?.analysis_profile === 'behavior-test-v2'
-  const sourceFirst = run?.workflow_version === 'source-first-v1'
-  const cases = run?.details?.test_cases ?? []
-  const designCounts = caseDesignCounts(cases)
-  const ledgers = run?.details?.behavior_coverage ?? behaviorCoverageProjection(run?.details?.notes ?? run?.notes, cases)
-  const rows = [
-    ['Run', run?.run_id],
-    ['结果状态', run?.publication?.state ?? 'pending'],
-    ['结果 revision', run?.publication?.revision ?? 0],
-    ['发布步骤', run?.publication?.step_id],
-    ['复核结论', run?.semantic_review?.verdict ?? '未给出语义结论'],
-    ['源码快照', Number.isInteger(run?.source_snapshot?.file_count) ? `${run.source_snapshot.file_count} 个文件，已复制到 Run` : run?.source_snapshot?.status],
-    ['目标', run?.target],
-    ['流程状态', run?.lifecycle_status],
-    ['交付完整性', run?.delivery_integrity?.status ?? 'not_checked'],
-    ['审查方式', run?.semantic_review?.method ?? 'not_recorded'],
-    [],
-    ['用例 ID', '标题', '类型', '状态', ...(risk ? ['关联风险'] : []), '前置条件', '执行步骤', '预期结果', '观察点', '清理动作'],
-  ]
-  if (sourceFirst) {
-    rows.splice(rows.length - 2, 0, ['用例记录数', designCounts.cases], ['已设计参数组合数', designCounts.variants], ['统计说明', '参数组合不重复计为独立用例；已设计不代表具备执行条件或实测通过。'])
-    rows.at(-1).push('分析单元', '原始记录', '分析原文', '测试入口', '参数变体', '参数组合数', '本分析单元说明', '执行条件', '待补执行条件')
-  }
-  if (v2) {
-    rows.splice(1, 0, ['分析场景', run.analysis_scene?.label ?? run.scenario], ['规则版本', run.analysis_scene?.format_version ?? run.analysis_profile])
-    rows.at(-1).push('流程/路径引用', 'Coverage引用', '源码依据', '覆盖数据来源与匹配')
-  }
-  if (ledgers.length) rows.at(-1).push('业务行为项关联')
-  for (const item of cases) {
-    rows.push([
+  return [CASE_HEADERS, ...(run?.details?.test_cases ?? []).map(item => {
+    const { actions, expected } = caseSteps(item)
+    const type = cell(item.case_type || item.test_level)
+    return [
       item.display_id ?? item.test_case_id,
       item.title,
-      item.case_type,
-      item.status,
-      ...(risk ? [item.linked_risk_ids] : []),
-      item.preconditions,
-      item.steps,
-      item.expected_results,
-      item.observability,
-      item.cleanup,
-      ...(sourceFirst ? [item.unit_id, item.source_record?.record_id, item.source_record?.body, item.entry, item.variants, Array.isArray(item.variants) ? item.variants.length : 0,
-        item.unit_notes?.map(note => note.source_record.body), ({ ready: '具备执行条件', needs_setup: '待补执行条件', unclassified: '未标注' })[item.readiness] ?? '未标注', item.missing_execution_conditions] : []),
-      ...(v2 ? [item.flow_refs ?? item.linked_flow_ids, item.coverage_refs, item.source_evidence ?? item.evidence, run.coverage_match] : []),
-      ...(ledgers.length ? [behaviorCoverageForCase(ledgers, item)] : []),
-    ])
-  }
-  if (ledgers.length) {
-    rows.push([], ['业务行为覆盖清单', '状态来自分析声明；用例关联不代表已执行或实测代码覆盖率。'],
-      ['行为项 ID', '分析单元', '业务操作', '条件', '约束', '预期行为', '声明状态', '依据 / 未覆盖原因', '用例 / 变体引用', '关联诊断', '来源依据', '行为项原文'])
-    for (const ledger of ledgers) {
-      rows.push(['清单范围', ledger.unit_id, ledger.scope], ['组合选择依据', ledger.combination_strategy], ['未决依赖', ledger.unresolved_dependencies])
-      for (const item of ledger.items ?? []) rows.push([item.item_id, ledger.unit_id, item.operation, item.conditions, item.constraints,
-        item.expected_behavior, BEHAVIOR_STATUS_LABELS[item.status] ?? item.status ?? '未标注', item.reason, item.case_refs,
-        [...(item.projection_warnings ?? []), ...(item.case_links ?? []).filter(link => link.issue).map(link => ({ case_id: link.case_id, variant_id: link.variant_id, issue: link.issue }))],
-        item.source_evidence, item.source_item])
-      if (ledger.projection_warnings?.length) rows.push(['清单提示', ledger.projection_warnings])
-      rows.push(['清单原文', ledger.source_record?.body])
-    }
-  }
-  return rows
+      CASE_TYPE_LABELS[type] ?? type,
+      lines(item.preconditions),
+      actions,
+      expected,
+      lines(item.observability ?? item.external_observations),
+      lines(item.cleanup),
+    ]
+  })]
 }
 
 export function csvCell(value) {
@@ -100,7 +90,7 @@ function worksheetXml(rows) {
   const sheetRows = rows.map((row, rowIndex) => {
     const cells = row.map((value, columnIndex) => {
       const reference = `${columnName(columnIndex)}${rowIndex + 1}`
-      const style = row[0] === '用例 ID' ? ' s="1"' : ''
+      const style = rowIndex === 0 ? ' s="1"' : ''
       const content = cell(value)
       if (!content) return `<c r="${reference}"${style}/>`
       return `<c r="${reference}" t="inlineStr"${style}><is><t xml:space="preserve">${xml(content)}</t></is></c>`
@@ -109,8 +99,8 @@ function worksheetXml(rows) {
   }).join('')
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
     `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+
-    `<sheetViews><sheetView workbookViewId="0"><pane ySplit="${rows.findIndex(row => row[0] === '用例 ID') + 1}" topLeftCell="A${rows.findIndex(row => row[0] === '用例 ID') + 2}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`+
-    `<sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="14" customWidth="1"/><col min="2" max="10" width="28" customWidth="1"/></cols>`+
+    `<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`+
+    `<sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="32" customWidth="1"/><col min="3" max="3" width="16" customWidth="1"/><col min="4" max="8" width="48" customWidth="1"/></cols>`+
     `<sheetData>${sheetRows}</sheetData></worksheet>`
 }
 
@@ -168,7 +158,7 @@ export function buildTestCaseXlsx(run) {
   const rows = testCaseRows(run)
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
     `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="测试用例" sheetId="1" r:id="rId1"/></sheets></workbook>`
-  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs></styleSheet>`
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs></styleSheet>`
   return zipStore([
     ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
     ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],

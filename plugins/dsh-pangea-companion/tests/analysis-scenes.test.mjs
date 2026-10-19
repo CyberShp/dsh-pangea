@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { analysisOptions, riskApplicable, SCENE_PROFILE } from '../src/analysis-scenes.js'
+import { analysisOptions, SCENE_PROFILE } from '../src/analysis-scenes.js'
 import { summarizeRun, readInputMaterials } from '../src/reader.js'
 import { buildTestCaseCsv, buildTestCaseXlsx } from '../src/export.js'
 import { createView } from '../src/architecture-views.js'
@@ -70,7 +70,7 @@ test('review stage label follows the frozen speed/depth contract', async t => {
   assert.equal(depth.workflow.steps.find(step => step.stage === 'reviewing').title, depth.phase_title)
 })
 
-test('all scenes read text-only flow; branch/coverage export no formal risk column', async t => {
+test('all scenes read text-only flow and export the same eight user-facing columns', async t => {
   for (const scene of ['module-analysis', 'risk-analysis', 'branch-analysis', 'coverage-analysis']) {
     const f = await fixture(t, scene)
     const run = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
@@ -88,11 +88,10 @@ test('all scenes read text-only flow; branch/coverage export no formal risk colu
     assert.equal(materials[0].input_revision, 'original')
     assert.match(materials[0].consumption_state, /尚无唯一消费记录/)
     const csv = buildTestCaseCsv(run)
-    assert.equal(csv.includes('关联风险'), riskApplicable(run))
-    assert.match(csv, /流程\/路径引用/)
-    assert.match(csv, /分析场景/)
+    assert.equal(csv.split('\r\n')[0], '\uFEFF用例ID,标题,类型,前置条件,操作步骤,预期结果,观察点,清理动作（环境恢复）')
+    assert.doesNotMatch(csv, /关联风险|流程\/路径引用|分析场景|Coverage引用|源码依据/)
     const xlsx = buildTestCaseXlsx(run)
-    assert.equal(xlsx.includes(Buffer.from('关联风险')), riskApplicable(run))
+    for (const label of ['关联风险', '流程/路径引用', '分析场景', 'Coverage引用', '源码依据']) assert.ok(!xlsx.includes(Buffer.from(label)), `${scene}: ${label} must not be exported`)
   }
 })
 

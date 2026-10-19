@@ -62,14 +62,14 @@ test('case search and copy include explicit variant IDs, inputs and expectations
   assert.deepEqual(caseDesignCounts([{ source_record: { kind: 'test_case_group' } }]), { cases: 1, variants: 0, has_legacy_groups: true })
 })
 
-test('CSV and XLSX retain variants, missed behavior items, linkage diagnostics and original notes', () => {
+test('CSV and XLSX retain variant execution data while omitting behavior ledgers and analysis diagnostics', () => {
   const details = sourceFirstProjection([action('u1', [record('c', 'test_case', { case_id: 'TC-1', variants: [{ variant_id: 'V384', input: 'sha384 / ffdhe3072', expected: '连接成功' }] }), record('n', 'note', ledger())])])
-  // Records without source metadata still get the same source-first columns.
+  // Older records without source metadata still use the same eight columns.
   details.test_cases.push({ test_case_id: 'old', title: '旧用例', variants: [] })
   const run = { workflow_version: 'source-first-v1', analysis_profile: 'behavior-test-v2', scenario: 'branch-analysis', details }
   for (const output of [buildTestCaseCsv(run), Buffer.from(buildTestCaseXlsx(run)).toString()]) {
-    for (const value of ['已设计参数组合数', '参数组合数', 'V384', 'ffdhe3072', '业务行为覆盖清单', 'B2', '恢复入口待核实', '待补用例', '清单原文']) assert.ok(output.includes(value), value)
-    assert.ok(!output.includes('可执行变体'))
+    for (const value of ['TC-1', 'V384', 'ffdhe3072', '连接成功', '旧用例']) assert.ok(output.includes(value), value)
+    for (const value of ['已设计参数组合数', '参数组合数', '业务行为覆盖清单', '恢复入口待核实', '待补用例', '清单原文', '可执行变体']) assert.ok(!output.includes(value), value)
   }
 })
 
