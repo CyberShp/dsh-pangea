@@ -105,6 +105,7 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
   const options = { dataRoot, runId: 'run', cwd: dataRoot, providerId: 'pangea-nga', agentModel: 'fixture/model',
     attemptId: 'recovery-attempt', signal: controller.signal, progressPolicy,
     onEvent: async e => { events.push(e); if (e.stage === 'source_first_late_response') lateResponse.resolve() }, subagents: { start: async (_, request) => {
+      assert.equal(request.pangeaCliWorker, true)
       scratchDirectories.push(request.scratchDirectory)
       request.onDiagnostic({ stage: 'file_permission', lastPermissionKind: 'edit',
         lastPermissionPaths: [path.join(request.scratchDirectory, 'unit.json')], lastPermissionDecision: 'allow_once' })

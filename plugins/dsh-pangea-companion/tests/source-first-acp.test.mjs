@@ -19,6 +19,10 @@ test('worker prompt provides a quoted direct PowerShell CLI call and scratch JSO
   assert.match(prompt, /plan-write --unit-file/)
   assert.match(prompt, /result-write\/result-repair --records-file/)
   assert.match(prompt, /供直接阅读；程序解析使用 --output json/)
+  assert.match(prompt, /沿用上述直接 CLI 命令及全部绑定参数/)
+  assert.match(prompt, /source-read --repo-id ID --path PATH --view text/)
+  assert.match(prompt, /插件报未绑定时停止重试，改用上述 Python CLI/)
+  assert.match(prompt, /CLI 自身的绑定错误原样报告，由宿主恢复/)
   assert.doesNotMatch(prompt, /json\.loads 解析/)
 })
 
@@ -188,7 +192,7 @@ test('cancellation while recording request start does not dispatch a prompt', as
   finally { await run.dispose() }
 })
 
-for (const providerId of ['pangea-codeagent', 'pangea-nga']) {
+for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) {
   test(`${providerId} executes planning, analysis, blind/comparison and closure in exact original sessions`, async () => {
     const steps = [
       ['planning', 'planning'], ['analysis', 'unit_analysis'], ['review', 'independent_review'],
@@ -209,6 +213,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga']) {
       signal: new AbortController().signal, runner, onEvent: async event => events.push(event),
       subagents: { start: async (provider, request) => {
         assert.equal(provider, providerId); assert.equal(request.agentOptions.model, 'selected/model')
+        assert.equal(request.pangeaCliWorker, true)
         assert.ok(path.isAbsolute(request.scratchDirectory))
         scratches.push(request.scratchDirectory)
         const id = `worker-${++created}`
@@ -516,6 +521,7 @@ for (const contextError of [false, true]) test(`a ${contextError ? 'context-limi
       return {}
     }, subagents: { start: async (_provider, request) => {
       starts++
+      assert.equal(request.pangeaCliWorker, true)
       scratchDirectories.push(request.scratchDirectory)
       if (starts === 2) assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote-original' })
       else assert.equal(request.resume, undefined)
@@ -557,6 +563,7 @@ test('an older persisted worker gets one scratch directory before restoration an
       return {}
     }, subagents: { start: async (_provider, request) => {
       const saved = JSON.parse(await readFile(bindingPath, 'utf8'))
+      assert.equal(request.pangeaCliWorker, true)
       assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote' })
       assert.equal(request.scratchDirectory, saved.workers.original.scratchDirectory)
       directories.push(request.scratchDirectory)
