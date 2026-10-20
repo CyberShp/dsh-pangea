@@ -289,6 +289,8 @@ export class AssetActionRuntime {
     return this.command(job, args)
   }
   async start({ cwd, dataRoot, assetId, providerId = '', model, agentModel, restart = false }) {
+    // Reject retired executors before mutating an asset or replacing its saved job.
+    if (providerId) acpProviderOption(providerId)
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
     const key = `${path.resolve(resolvedDataRoot)}\n${assetId}`
     const active = this.jobs.get(key)

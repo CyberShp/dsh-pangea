@@ -3845,13 +3845,13 @@ window.__ModuleLoader__.load({
                   h('div', { style: styles.metric }, h('div', { style: styles.label }, '绝对路径'), h('div', { style: styles.value }, provider.resolved_command ?? '待解析'))),
                 provider.resolution_error ? h('div', { style: { ...styles.error, margin: '10px 0' } }, provider.resolution_error) : null,
                 provider.version_error ? h('div', { style: { ...styles.healthWarning, margin: '10px 0' } }, `版本检查：${provider.version_error}`) : null,
-                provider.kind !== 'claude-code' ? h(React.Fragment, null,
+                h(React.Fragment, null,
                 h('div', { style: styles.environmentField }, h('label', { style: styles.environmentLabel }, '启动命令'), h('input', {
                   style: styles.environmentInput, value: value.command ?? '', onChange: event => setField(provider.id, 'command', event.target.value),
                 })),
                 h('div', { style: { ...styles.environmentField, marginTop: 13 } }, h('label', { style: styles.environmentLabel }, '启动参数（每行一个）'), h('textarea', {
                   style: styles.textarea, value: value.args ?? '', placeholder: 'acp', onChange: event => setField(provider.id, 'args', event.target.value),
-                }))) : null)
+                }))))
             )
           }),
           h('div', { style: styles.environmentActions },
@@ -4765,7 +4765,9 @@ window.__ModuleLoader__.load({
         const options = workbench?.acp_providers ?? []
         if (options.length === 0) return
         setCreateForm(value => {
-          if (options.some(item => item.id === value.provider_id)) return value
+          // A saved executor choice belongs to this draft. If it was removed,
+          // require an explicit replacement instead of using global history.
+          if (value.provider_id) return value
           try {
             const selection = JSON.parse(window.localStorage?.getItem(`pangea-execution:${cwd}`) ?? '{}')
             if (selection.provider_id === '') return value
@@ -6305,6 +6307,14 @@ window.__ModuleLoader__.load({
           ? modelOptions.find(item => item.provider === selectedModel.provider && item.model === selectedModel.model)
           : null
         const selectedProvider = providerOptions.find(item => item.id === createForm.provider_id)
+        const unavailableProvider = Boolean(createForm.provider_id) && !selectedProvider
+        const retiredProvider = ['pangea-claude-code', 'claude-code'].includes(createForm.provider_id)
+        const selectedProviderLabel = selectedProvider?.label ?? (createForm.provider_id
+          ? retiredProvider ? 'Claude Code（已移除）' : `${createForm.provider_id}（不可用）`
+          : '内置 API Agent')
+        const unavailableProviderMessage = retiredProvider
+          ? 'Claude Code 支持已移除，历史任务和结果仍保留。请明确选择其他外部 Agent 或内置 API Agent。'
+          : '此前选择的执行器当前不可用。请明确选择其他外部 Agent 或内置 API Agent。'
         const semantic = workbench?.capabilities?.source_first?.version === 'source-first-v1' || workbench?.capabilities?.workflow_versions?.includes('source-first-v1')
         const sceneOptions = workbench?.capabilities?.source_first?.analysis_options_by_profile?.['behavior-test-v2']
         const options = semantic ? sceneOptions ?? workbench.capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'] } : null
@@ -6323,6 +6333,7 @@ window.__ModuleLoader__.load({
           : sourceScope.length === 0 && (sceneOptions || createForm.scenario !== 'coverage-analysis') ? '请填写源码冻结范围，使用 . 可选择整个仓库。'
           : sceneOptions && createForm.asset_ids.some(id => !(assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision) ? '所选资产版本尚未读取，请刷新资产后重新选择。'
           : !coverageReady ? '请先查询、导入或选择可用覆盖率资产。'
+          : unavailableProvider ? unavailableProviderMessage
           : !executionReady ? '请选择已就绪的 Agent 或已配置凭据的内置模型。'
           : coverageQueryBusy ? '覆盖率正在查询，请等待查询完成。' : ''
         const canSubmit = !submitBlockReason && !creatingRun
@@ -6394,7 +6405,7 @@ window.__ModuleLoader__.load({
         let context = panel(h(React.Fragment, null,
           h('div', { className: 'create-side-title' }, '本次分析'), badge(createForm.repository || '待选择仓库', 'neutral'),
           h('h3', { className: 'create-context-title' }, createForm.target || '待填写分析目标'), h('p', { className: 'create-copy' }, scene[2]),
-          h('dl', { className: 'key-value' }, ['分析场景', scene[0], '分析模式', createForm.mode === 'depth' ? '标准型' : '速度型', '源码范围', `${sourceScope.length} 项范围 · 创建时冻结`, '输入资料', step > 1 ? `${selectedAssets.length} 份已选资产` : '下一步选择', '执行 Agent', step > 2 ? selectedProvider?.label ?? '内置 API Agent' : '待选择'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
+          h('dl', { className: 'key-value' }, ['分析场景', scene[0], '分析模式', createForm.mode === 'depth' ? '标准型' : '速度型', '源码范围', `${sourceScope.length} 项范围 · 创建时冻结`, '输入资料', step > 1 ? `${selectedAssets.length} 份已选资产` : '下一步选择', '执行 Agent', step > 2 ? selectedProviderLabel : '待选择'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
           h('div', { className: 'create-scene-focus' }, h('strong', null, '本次分析重点'), h('p', null, scene[3]), badge(createForm.scenario === 'coverage-analysis' ? '覆盖率输入必需' : '覆盖率输入可选', createForm.scenario === 'coverage-analysis' ? 'warn' : 'neutral')),
           step === 1 && h(React.Fragment, null, h('div', { className: 'create-subhead' }, '分析模式'), field('', h('select', { 'aria-label': '分析模式', value: createForm.mode, onChange: event => update('mode', event.target.value) }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '标准型 · 独立盲审 + 对照复核'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型 · 直接审核，跳过盲审')))),
           step === 3 && !executionReady && h('div', { style: { marginTop: 18 } }, badge('执行设置待完成', 'warn')), h('div', { className: 'divider' }), h('div', { className: 'create-check-item' }, runIcon('ShieldCheck'), h('span', null, '每次运行将保存独立的源码快照与资产版本。'))), 'create-side')
@@ -6463,15 +6474,15 @@ window.__ModuleLoader__.load({
           content = panel(h(React.Fragment, null,
             h('h2', { className: 'create-heading' }, '选择执行分析的 Agent'), h('p', { className: 'create-copy' }, '执行方式决定模型来源；本次选择将用于整个分析流程。'),
             h('div', { className: 'create-radio-tabs' }, h('input', { id: 'create-builtin', type: 'radio', name: 'create-agent', checked: !createForm.provider_id, onChange: () => selectProvider('') }), h('label', { htmlFor: 'create-builtin' }, runIcon('Cpu'), ' 内置 API Agent', h('span', null, '选择已配置模型，统一执行分析与复核。')), h('input', { id: 'create-external', type: 'radio', name: 'create-agent', checked: !!createForm.provider_id, disabled: !providerOptions.some(item => item.registered), onChange: () => selectProvider(providerOptions.find(item => item.registered).id) }), h('label', { htmlFor: 'create-external' }, runIcon('Terminal'), ' 外部 Agent', h('span', null, providerOptions.some(item => item.registered) ? '使用当前 Desktop 已加载的 Agent。' : '当前暂无已加载的外部 Agent。'))),
-            h('div', { className: 'form-grid', style: { marginTop: 22 } }, internalModelFields, createForm.provider_id && field('外部 Agent', h('select', { 'aria-label': '外部 Agent', value: createForm.provider_id, onChange: event => selectProvider(event.target.value) }, providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: !item.registered }, item.label)))), createForm.provider_id && h(AgentModelSelect, { key: `${cwd}/${createForm.provider_id}`, providerId: createForm.provider_id, cwd, visible, value: createForm.agent_model, onChange: value => update('agent_model', value) })),
-            h('div', { style: { marginTop: 22 } }, executionReady ? notice('执行环境已就绪', createForm.provider_id ? '使用所选 Agent 的模型与推理配置执行。' : '模型凭据已配置，可以开始分析。', 'good', badge('可用', 'good')) : notice(!createForm.provider_id ? '内置模型尚未就绪' : '执行设置尚未就绪', modelRouting.status === 'error' ? `模型目录读取失败：${modelRouting.error ?? '未知错误'}` : !createForm.provider_id ? '没有已配置凭据的内置 API 模型，无法创建分析。请先完成模型设置，再重新检测。' : '请选择已配置凭据的内置模型或已加载的外部 Agent。', 'warn', h('div', { className: 'row' }, button('打开模型设置', () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })), '', 'Settings'), button('重新检测', () => { void loadWorkbench() }, '', 'RefreshCw')))),
+            h('div', { className: 'form-grid', style: { marginTop: 22 } }, internalModelFields, createForm.provider_id && field('外部 Agent', h('select', { 'aria-label': '外部 Agent', value: createForm.provider_id, onChange: event => selectProvider(event.target.value) }, unavailableProvider && h('option', { value: createForm.provider_id, disabled: true }, selectedProviderLabel), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: !item.registered }, item.label)))), createForm.provider_id && selectedProvider && h(AgentModelSelect, { key: `${cwd}/${createForm.provider_id}`, providerId: createForm.provider_id, cwd, visible, value: createForm.agent_model, onChange: value => update('agent_model', value) })),
+            h('div', { style: { marginTop: 22 } }, unavailableProvider ? notice(retiredProvider ? 'Claude Code 支持已移除' : '原执行器不可用', unavailableProviderMessage, 'warn') : executionReady ? notice('执行环境已就绪', createForm.provider_id ? '使用所选 Agent 的模型与推理配置执行。' : '模型凭据已配置，可以开始分析。', 'good', badge('可用', 'good')) : notice(!createForm.provider_id ? '内置模型尚未就绪' : '执行设置尚未就绪', modelRouting.status === 'error' ? `模型目录读取失败：${modelRouting.error ?? '未知错误'}` : !createForm.provider_id ? '没有已配置凭据的内置 API 模型，无法创建分析。请先完成模型设置，再重新检测。' : '请选择已配置凭据的内置模型或已加载的外部 Agent。', 'warn', h('div', { className: 'row' }, button('打开模型设置', () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })), '', 'Settings'), button('重新检测', () => { void loadWorkbench() }, '', 'RefreshCw')))),
             h('div', { className: 'create-subhead' }, '本次执行包含'), h('div', { className: 'grid3' }, [['单元分析', scene[2]], ...(createForm.mode === 'depth' ? [['独立盲审', '独立检查结果与源码'], ['对照复核', '核对分歧，形成交付']] : [['直接审核', '检查结果与源码']])].map(([title, copy]) => h('div', { key: title, className: 'callout' }, h('strong', { className: 'small' }, title), h('p', { className: 'create-copy', style: { margin: '8px 0 0' } }, copy)))), footer(() => go(2), () => go(4), '下一步 · 确认创建', !executionReady)))
         } else {
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
             row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), `${sourceScope.length} 项待冻结范围`, 1),
             row('流程基线', createForm.flow_baseline?.run_id || '未选择', createForm.flow_baseline?.version_id || '独立分析，不与历史流程自动合并。', 1),
-            row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProvider?.label ?? '内置 API Agent', createForm.provider_id ? createForm.agent_model || '使用 Agent 默认模型与推理配置' : `${selectedModelOption?.provider_name ?? selectedModel?.provider} · ${selectedModelOption?.model_name ?? selectedModel?.model} · 推理级别：${selectedModelOption?.reasoning?.efforts?.find(item => item.id === selectedModel?.reasoning_effort)?.name ?? selectedModel?.reasoning_effort ?? '默认'}`, 3),
+            row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, createForm.provider_id ? createForm.agent_model || '使用 Agent 默认模型与推理配置' : `${selectedModelOption?.provider_name ?? selectedModel?.provider} · ${selectedModelOption?.model_name ?? selectedModel?.model} · 推理级别：${selectedModelOption?.reasoning?.efforts?.find(item => item.id === selectedModel?.reasoning_effort)?.name ?? selectedModel?.reasoning_effort ?? '默认'}`, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
         return h('section', { className: 'pangea-ui pangea-create-workspace', 'aria-label': '新建分析' },

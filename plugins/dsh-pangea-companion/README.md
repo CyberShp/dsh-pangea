@@ -13,9 +13,10 @@
 - 会话删除后仍按 Run 保留最小关联摘要；历史 Run 不依赖原 DSH 会话继续存在。
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
 - 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止；停止时即使 ACP 或 PANGEA API 一侧不可用，也会保留错误并继续尝试其余取消动作。
-- 新建分析会先创建冻结的 Codetalks Skill Run，随后使用用户选定的内置 API、NGA、CodeAgent、OpenCode 或 Claude Code 执行 Step 01–09；页面只监听 Skill 状态和 Markdown 产物。
+- 新建分析会先创建冻结的 Codetalks Skill Run，随后使用用户选定的内置 API、NGA、CodeAgent 或 OpenCode 执行 Step 01–09；页面只监听 Skill 状态和 Markdown 产物。
 - 新建分析只接受仓库、目标、资产库勾选、执行 Agent、模型和 effort；分析重点与源码范围由 Skill 自动确定，不接受手写 focus、source scope、结构化资产 ID 或示例文件路径。
-- “新建分析”选择 NGA、CodeAgent、OpenCode 或 Claude Code 后自动读取该 Agent 的可用模型。可以指定本次模型或沿用 Agent 默认；任务保存选择，续跑继续使用。模型列表来自 ACP 会话或 Claude SDK，读取不发送分析 Prompt，不创建 PANGEA Task/Run，也不读取手工模型目录。
+- “新建分析”选择 NGA、CodeAgent 或 OpenCode 后自动读取该 Agent 的可用模型。可以指定本次模型或沿用 Agent 默认；任务保存选择，续跑继续使用。模型列表来自 ACP 会话，读取不发送分析 Prompt，不创建 PANGEA Task/Run，也不读取手工模型目录。
+- NGA 与 CodeAgent 的新建及已有启动配置统一带上 `--skip-safe-check`，避免工作目录信任询问阻塞无人值守执行；OpenCode 参数保持不变。Claude Code 已退出支持列表，旧任务和会话记录仍保留，显式选择旧执行器会提示改选受支持执行器。
 - “Agent Runtime”默认只展示本机 Agent 状态；命令、参数和诊断收在折叠的高级设置中。仅自定义安装或启动异常时需要打开。启动配置仍保存到 `$DSH_HOME/dsh-pangea-companion/acp-runtime-v1.json`，修改后重启 Harness；模型无需在这里填写。
 - 外部 Agent 使用独立 `external-acp` 模型路由，不调用内部 API；模型或 effort 未配置、Provider 未注册、命令无法解析时禁止创建分析。
 - 外部 Job 持久化展示 Job ID、ACP Session、PID、开始时间、运行时长、最后活动和消息输出；取消、失败、进程丢失与恢复检查都有明确终态。

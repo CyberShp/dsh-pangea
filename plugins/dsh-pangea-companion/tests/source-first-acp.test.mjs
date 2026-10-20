@@ -188,7 +188,7 @@ test('cancellation while recording request start does not dispatch a prompt', as
   finally { await run.dispose() }
 })
 
-for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-claude-code']) {
+for (const providerId of ['pangea-codeagent', 'pangea-nga']) {
   test(`${providerId} executes planning, analysis, blind/comparison and closure in exact original sessions`, async () => {
     const steps = [
       ['planning', 'planning'], ['analysis', 'unit_analysis'], ['review', 'independent_review'],

@@ -12,6 +12,28 @@ import { createTaskStore } from '../src/task-store.js'
 
 function ok(value) { return { result: { ok: true, value } } }
 
+test('retired Claude Code architecture creation is rejected before creating a view or session', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'retired-architecture-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  const task = Object.freeze({ task_id: 'legacy-task', workspace: root, data_root: path.join(root, 'data'),
+    run_id: 'legacy-run', provider: 'pangea-claude-code', target: '已保存分析' })
+  const unexpected = new Proxy({}, { get(_target, key) { assert.fail(`must not access runtime ${String(key)}`) } })
+  const request = Readable.from([Buffer.from(JSON.stringify({ action: 'architecture-create', task_id: task.task_id,
+    profile: 'function_variables', type: 'function' }))])
+  request.method = 'POST'
+  request.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: root })}`
+  request.headers = { 'sec-fetch-site': 'same-origin' }
+  const response = {}
+  await workbenchRouteHandler(request, { writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) } },
+    unexpected, { get: async () => task }, new Set(), unexpected, unexpected, unexpected,
+    async () => assert.fail('must not run the backend or create a view'))
+  assert.equal(response.code, 400)
+  assert.match(response.body.error, /Claude Code 支持已移除/)
+  assert.equal(task.provider, 'pangea-claude-code')
+})
+
 test('home GET returns fresh workspace summaries without CLI, model RPCs, reconciliation or task details', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'home-route-'))
   t.after(() => rm(root, { recursive: true, force: true }))

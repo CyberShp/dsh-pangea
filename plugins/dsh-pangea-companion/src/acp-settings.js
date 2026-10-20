@@ -32,7 +32,9 @@ export class AcpSettingsStore {
   loadIntoEnvironment() {
     const inherited = process.env[ACP_RUNTIME_CONFIG_ENV]
     if (typeof inherited === 'string' && inherited.trim()) {
-      return validateAcpRuntimeConfig(JSON.parse(inherited))
+      const value = validateAcpRuntimeConfig(JSON.parse(inherited))
+      process.env[ACP_RUNTIME_CONFIG_ENV] = JSON.stringify(value)
+      return value
     }
     try {
       const value = validateAcpRuntimeConfig(JSON.parse(readFileSync(this.filePath, 'utf8')))

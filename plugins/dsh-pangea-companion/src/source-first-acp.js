@@ -13,6 +13,12 @@ const liveRuns = new Map()
 const instanceId = randomUUID()
 const text = value => [{ type: 'text', text: value }]
 
+export function sourceFirstAcpUpdateBusy(states = liveRuns) {
+  return [...states.values()].some(state => state.busy || state.pendingStarts?.() || state.blockedReconciliations?.size
+    || [...state.workers.values()].some(worker => !state.closed.has(String(worker.id))
+      && hasUnconfirmedAcpTools(worker.readDiagnostics?.())))
+}
+
 export async function inspectSourceFirstAcpRecovery({ dataRoot, runId }) {
   const state = liveRuns.get(JSON.stringify([path.resolve(dataRoot), runId]))
   if (state?.busy) return { can_resume: false, blocked_reason: '当前 Run 仍由宿主执行，不能重复派发', summary: '当前执行仍在进行' }
@@ -75,7 +81,8 @@ export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, pyt
   ].filter(Boolean).join('\n')
 }
 
-export function createSourceFirstAcpRun({ subagents, parent, providerId, agentModel, cwd, dataRoot, runId, runner, signal, onEvent = async () => {}, python, mode, closureBudgetMs, planningSoftBudgetMs = 600000, progressPolicy, attemptId, executionIds = true }) {
+export function createSourceFirstAcpRun({ subagents, parent, providerId, agentModel, cwd, dataRoot, runId, runner, signal, onEvent = async () => {}, python, mode, closureBudgetMs, planningSoftBudgetMs = 600000, progressPolicy, attemptId, executionIds = true, admission }) {
+  admission?.assertOpen()
   const key = JSON.stringify([path.resolve(dataRoot), runId])
   let state = liveRuns.get(key)
   if (state?.busy) throw new Error(`当前 Run 已由宿主执行：${runId}`)
@@ -98,6 +105,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   const bindingsPath = acpBindingsPath(dataRoot, runId)
   let bindings = {}
   let owner = { pid: process.pid, instance_id: instanceId, attempt_id: attemptId ?? null, active: true, pending_starts: [] }
+  state.pendingStarts = () => owner.pending_starts.length
   let stateWrites = Promise.resolve()
   const serial = operation => {
     const result = stateWrites.then(operation)

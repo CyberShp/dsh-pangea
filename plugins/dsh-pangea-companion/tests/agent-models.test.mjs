@@ -44,6 +44,11 @@ test('unsupported runtimes return an actionable error rather than a manual model
   await assert.rejects(discoverAgentModels({ subagents: { getProvider: () => ({}) } }, { providerId: 'pangea-opencode' }), /更新 Desktop/)
 })
 
+test('retired Claude Code model discovery fails before querying the runtime', async () => {
+  await assert.rejects(discoverAgentModels({ subagents: { getProvider() { assert.fail('must not load retired provider') } } },
+    { providerId: 'pangea-claude-code', cwd }), /Claude Code 支持已移除/)
+})
+
 test('the models HTTP action discovers models without reading or saving runtime configuration', async () => {
   const req = Readable.from([Buffer.from(JSON.stringify({ action: 'models', provider_id: 'pangea-nga', cwd }))])
   req.method = 'POST'

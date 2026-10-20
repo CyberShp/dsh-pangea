@@ -16,13 +16,20 @@ const DEFAULT_PAGE_SIZE = 20
 const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
 
 const ACP_PROVIDER_DEFAULTS = [
-  { id: 'pangea-nga', label: 'NGA', command: 'nga', args: ['acp'] },
-  { id: 'pangea-codeagent', label: 'CodeAgent', command: 'codeagent', args: ['acp'] },
+  { id: 'pangea-nga', label: 'NGA', command: 'nga', args: ['acp', '--skip-safe-check'] },
+  { id: 'pangea-codeagent', label: 'CodeAgent', command: 'codeagent', args: ['acp', '--skip-safe-check'] },
   { id: 'pangea-opencode', label: 'OpenCode', command: 'opencode', args: ['acp'] },
-  { id: 'pangea-claude-code', label: 'Claude Code', kind: 'claude-code', command: 'DSH Claude Code Provider', args: [] },
 ]
 const ANALYSIS_SCENARIOS = new Set(['risk-analysis', 'branch-analysis', 'coverage-analysis', 'module-analysis', 'issue-regression', 'root-cause', 'special-risk', 'custom'])
 const ANALYSIS_MODES = new Set(['speed', 'depth'])
+
+function projectTrustArgs(providerId, args) {
+  if (!['pangea-nga', 'pangea-codeagent'].includes(providerId)) return args
+  const separator = args.indexOf('--')
+  const options = separator < 0 ? args : args.slice(0, separator)
+  const positional = separator < 0 ? [] : args.slice(separator)
+  return [...options.filter(arg => arg !== '--skip-safe-check'), '--skip-safe-check', ...positional]
+}
 
 function configuredProviders(env) {
   const raw = env[ACP_RUNTIME_CONFIG_ENV]
@@ -54,7 +61,7 @@ export function acpProviderOptions(env = process.env) {
     return {
       ...defaults,
       command,
-      args: args.map(item => item.trim()),
+      args: projectTrustArgs(defaults.id, [...args]),
       configured: value !== undefined,
       resolved_command: typeof value?.resolved_command === 'string' && value.resolved_command.trim() ? value.resolved_command.trim() : null,
       available: value?.available !== false,
@@ -71,12 +78,21 @@ export function acpProviderOptions(env = process.env) {
 
 export function validateAcpRuntimeConfig(value) {
   const encoded = JSON.stringify(value)
-  acpProviderOptions({ ...process.env, [ACP_RUNTIME_CONFIG_ENV]: encoded })
-  return JSON.parse(encoded)
+  const providers = acpProviderOptions({ ...process.env, [ACP_RUNTIME_CONFIG_ENV]: encoded })
+  const validated = JSON.parse(encoded)
+  for (const provider of providers) {
+    if (provider.configured && ['pangea-nga', 'pangea-codeagent'].includes(provider.id)) {
+      validated.providers[provider.id].args = provider.args
+    }
+  }
+  return validated
 }
 
 export function acpProviderOption(providerId, env = process.env) {
   const id = typeof providerId === 'string' ? providerId.trim() : ''
+  if (id === 'pangea-claude-code' || id === 'claude-code') {
+    throw new Error('Claude Code 支持已移除，历史任务和结果仍保留。请改选 NGA、CodeAgent、OpenCode 或已配置的内置模型后重新发起任务。')
+  }
   return acpProviderOptions(env).find(provider => provider.id === id) ?? null
 }
 
@@ -853,6 +869,7 @@ export async function launchAnalysisSession(
   if (semantic && !request.agent_model && input?.model_route?.model) request.agent_model = input.model_route.model
   await emitLaunch(onEvent, { stage: 'input_validated', status: 'ok' })
   const selectedProvider = request.provider_id
+  if (selectedProvider && !acpProviderOption(selectedProvider, env)) throw new Error(`未知的 ACP 执行 Agent：${selectedProvider}`)
   if (selectedProvider && !runtime) throw new Error(`外部执行 Agent 需要 DSH ACP runtime：${selectedProvider}`)
   const selectedModel = selectedProvider
     ? null
@@ -987,6 +1004,7 @@ export async function launchAnalysisSession(
       ...(semantic ? {
         startRun: ({ subagents, parent, signal }) => createSourceFirstAcpRun({
           subagents, parent, signal, providerId: selectedProvider, agentModel: request.agent_model,
+          admission: runtimeService(runtime, 'pangeaUpdateAdmission'),
           cwd: root, dataRoot: resolvedDataRoot, runId: run.run_id, runner, python: env.PANGEA_PYTHON, mode: request.mode,
           attemptId: lifecycle.attemptId,
           executionIds: executionRecovery?.execution_ids === true,
@@ -1069,10 +1087,12 @@ export { dataRootFor }
 
 const nativeDiagramSessions = new Set()
 export const isNativeDiagramRunning = sessionId => nativeDiagramSessions.has(sessionId)
+export const nativeDiagramUpdateBusy = () => nativeDiagramSessions.size > 0
 
 // Derived sessions have no dependency on the main Run's completion state.
 export async function launchArchitectureSession(api, { cwd, task, prompt, onSession, onJob, inspect, check, budgetMs = 1200000, onEvent = async () => {} }, runtime, env = process.env) {
   const provider = task.provider
+  if (provider && !acpProviderOption(provider, env)) throw new Error(`未知的 ACP 执行 Agent：${provider}`)
   const model = provider ? null : await requireInternalModel(api, task.model_route)
   const sessionId = await createDshSession(api, workspaceRoot(cwd), `架构视图 · ${task.target}`)
   if (!provider) apiValue(await api.sessions.selectModel(rpc({ sessionId, provider: model.provider, model: model.model,

@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { acpProviderOptions, createTaskConversation, homeSnapshot, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireInternalModel, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
+import { acpProviderOption, acpProviderOptions, createTaskConversation, homeSnapshot, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireInternalModel, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
 const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
 
@@ -293,15 +293,39 @@ test('routes a configured native OpenAI model and rejects inactive, model-less, 
   await assert.rejects(requireInternalModel(api, { provider: 'missing-key-native', model: 'missing-key-model' }), /尚未配置凭证/)
 })
 
-test('advertises NGA, CodeAgent, OpenCode, and Claude Code ACP routes', () => {
+test('advertises supported ACP routes and ignores saved Claude Code configuration', () => {
   assert.deepEqual(acpProviderOptions({}).map(item => item.id), [
-    'pangea-nga', 'pangea-codeagent', 'pangea-opencode', 'pangea-claude-code',
+    'pangea-nga', 'pangea-codeagent', 'pangea-opencode',
   ])
   const configured = acpProviderOptions({ PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify({
-    version: 1, providers: { 'pangea-opencode': { command: 'opencode-custom', args: ['acp'], models: [] } },
+    version: 1, providers: {
+      'pangea-opencode': { command: 'opencode-custom', args: ['acp'], models: [] },
+      'pangea-claude-code': { command: 'claude', args: [] },
+    },
   }) })
   assert.deepEqual(configured[2].command, 'opencode-custom')
-  assert.deepEqual(acpProviderOptions({})[3].kind, 'claude-code')
+  assert.equal(configured.some(provider => provider.id === 'pangea-claude-code'), false)
+  assert.deepEqual(configured[0].args, ['acp', '--skip-safe-check'])
+  assert.deepEqual(configured[1].args, ['acp', '--skip-safe-check'])
+  assert.deepEqual(configured[2].args, ['acp'])
+  assert.throws(() => acpProviderOption('pangea-claude-code'), /Claude Code 支持已移除.*历史任务和结果仍保留/)
+})
+
+test('rejects a retired Claude Code run before creating or resuming analysis and before creating a session', async () => {
+  const root = await workspace()
+  try {
+    for (const resumeRunId of [undefined, 'saved-claude-run']) {
+      const commands = []
+      await assert.rejects(launchAnalysisSession({}, {
+        cwd: root, resumeRunId, input: { repository: 'repo-one', target: '旧任务', provider_id: 'pangea-claude-code' },
+      }, async ({ args }) => {
+        commands.push(args)
+        if (args[0] === 'system' && args[1] === 'capabilities') return capabilities
+        assert.fail('retired provider must not create or resume a Run')
+      }, undefined, undefined, { subagents: { getProvider() { assert.fail('must not load retired provider') } } }, {}), /Claude Code 支持已移除/)
+      assert.equal(commands.length, 1)
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 test('preserves structured command and version probe status for the runtime UI', () => {

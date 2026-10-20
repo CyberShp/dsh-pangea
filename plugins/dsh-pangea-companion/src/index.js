@@ -1,4 +1,6 @@
-import { inspectSourceFirstAcpRecovery, stopSourceFirstAcpRun } from './source-first-acp.js'
+import { inspectSourceFirstAcpRecovery, sourceFirstAcpUpdateBusy, stopSourceFirstAcpRun } from './source-first-acp.js'
+import { companionUpdateBusy, registerUpdateParticipant } from './update-admission.js'
+import { nativeDiagramUpdateBusy } from './workbench-api.js'
 import { AgentSessionStore } from './agent-sessions.js'
 import { runtimeObservation } from './runtime-observation.js'
 import { inspectSourceFirstChildren, interruptSourceFirstChildren } from './report-policy.js'
@@ -1161,6 +1163,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         return json(res, 200, { status: 'ok', views, archify_experimental: archifyExperimental() })
       }
       if (body.action === 'architecture-create') {
+        if (task.provider) acpProviderOption(task.provider)
         if (!archifyExperimental()) {
           const previous = !body.profile && body.previous_view_id ? await loadView(task, body.previous_view_id) : null
           const profile = body.profile ?? (previous ? previous.profile ?? 'standard' : 'standard')
@@ -1822,6 +1825,10 @@ export function apply(ctx) {
   const launchLocks = new Set()
   const environments = new EnvironmentStore()
   const ssh = new PangeaSshRuntime(environments)
+  registerUpdateParticipant(ctx, 'companion', () => companionUpdateBusy({
+    operations: taskOperationState(tasks), launchLocks, sourceFirstBusy: sourceFirstAcpUpdateBusy,
+    nativeDiagramBusy: nativeDiagramUpdateBusy, ssh,
+  }))
 
   const toolDisposers = [ctx.tools.register({
     name: 'pangea_run_create',

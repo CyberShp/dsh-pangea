@@ -10,6 +10,12 @@ import { createRun } from '../src/pangea-api.js'
 import { TaskStore } from '../src/task-store.js'
 
 const capabilities = { repositories: ['repo'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
+test('retired Claude Code diagram execution fails before creating a DSH session or dispatching work', async () => {
+  await assert.rejects(launchArchitectureSession({ sessions: { create() { assert.fail('must not create an empty diagram session') } } },
+    { cwd: '/unused', task: { provider: 'pangea-claude-code', target: 'saved run' }, prompt: 'regenerate' },
+    { subagents: { getProvider() { assert.fail('must not load retired provider') }, start() { assert.fail('must not dispatch work') } } }, {}), /Claude Code 支持已移除/)
+})
+
 test('coverage request preserves exact query version and optional scope end to end', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'coverage-input-'))
   t.after(() => rm(root, { recursive: true, force: true }))

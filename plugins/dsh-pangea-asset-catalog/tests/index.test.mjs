@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { Readable } from 'node:stream'
 
 import { apply, extractionJobs, importAndExtract, listOptions } from '../src/index.js'
+import { AssetExtractionQueue } from '../src/extraction-queue.js'
 
 test('normalizes asset pagination filters for the public API', () => {
   assert.deepEqual(
@@ -95,4 +97,36 @@ test('batch import returns after enqueue rather than waiting for a model start',
   assert.equal(calls.length, 2)
   assert.equal(calls[1].assetId, 'asset-1')
   assert.equal(calls[1].agentModel, 'selected')
+})
+
+test('retired Claude Code import is rejected before importing the file or enqueuing extraction', async () => {
+  await assert.rejects(importAndExtract({
+    cwd: '/fixture', dataRoot: '/fixture/data', sourcePath: '/input/design.md',
+    body: { asset_type: 'design', provider_id: 'pangea-claude-code', agent_model: 'old-model' },
+    runner() { assert.fail('must not import an asset for a retired executor') },
+    runtime: { queue: { start() { assert.fail('must not enqueue extraction') } } },
+  }), /Claude Code 支持已移除/)
+})
+
+test('retired Claude Code HTTP import and extraction reject before entering the persistent queue', async t => {
+  const enqueue = t.mock.method(AssetExtractionQueue.prototype, 'enqueue', () => assert.fail('must not alter the saved queue'))
+  let route, dispose
+  await apply({
+    on: () => () => {}, tools: { register: () => () => {} }, apiProxy: {},
+    webServer: { register(value) { route = value; return () => {} } },
+    effect(factory) { dispose = factory() },
+  })
+  t.after(() => dispose?.())
+  for (const action of ['import', 'extract']) {
+    const req = Readable.from([Buffer.from(JSON.stringify({ action, asset_id: 'saved-asset', asset_type: 'design',
+      provider_id: 'pangea-claude-code', agent_model: 'old-model', restart: true }))])
+    req.method = 'POST'
+    req.url = '/api/pangea-asset-catalog/state?cwd=/fixture&data_root=/fixture/data'
+    req.headers = { 'sec-fetch-site': 'same-origin' }
+    const response = {}
+    await route.handler(req, { writeHead(status) { response.status = status }, end(body) { response.body = JSON.parse(body) } })
+    assert.equal(response.status, 400)
+    assert.match(response.body.error, /Claude Code 支持已移除/)
+  }
+  assert.equal(enqueue.mock.callCount(), 0)
 })

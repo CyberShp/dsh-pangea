@@ -503,7 +503,54 @@ test('module analysis queries coverage, selects partial results and removes stal
   assert.equal(button(render()).props.disabled, true)
 })
 
-for (const providerId of ['pangea-nga', 'pangea-opencode', 'pangea-codeagent', 'pangea-claude-code']) {
+test('a saved retired executor stays explicit until the user replaces it, regardless of global history or sole available provider', async () => {
+  for (const remembered of ['pangea-nga', '']) {
+    let index = 0
+    const states = {
+      1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] },
+        acp_providers: [{ id: 'pangea-nga', label: 'NGA', registered: true }] },
+      16: { type: 'create', createStep: 3 },
+      33: { repository: 'repo', target: 'saved analysis', source_scope_text: '.', asset_ids: [],
+        scenario: 'module-analysis', mode: 'depth', provider_id: 'pangea-claude-code', agent_model: 'old-model' },
+    }
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+      const key = index++
+      if (!(key in states)) states[key] = initial
+      return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+    }, useEffect(effect) {
+      if (String(effect).includes('const options = workbench?.acp_providers')) effect()
+    } }, undefined, undefined, { localStorage: {
+      getItem: key => key === 'pangea.acp-provider.v1' ? remembered : null, setItem() {},
+    } })
+    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const render = () => {
+      index = 0
+      const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+      return descendants(panel.type(panel.props))
+    }
+    let nodes = render()
+    assert.equal(states[33].provider_id, 'pangea-claude-code')
+    assert.equal(states[33].agent_model, 'old-model')
+    assert.equal(nodes.some(node => node.type?.name === 'AgentModelSelect'), false)
+    assert.match(JSON.stringify(nodes), /Claude Code 支持已移除/)
+    const select = nodes.find(node => node.props['aria-label'] === '外部 Agent')
+    assert.equal(select.props.value, 'pangea-claude-code')
+    assert.equal(descendants(select).find(node => node.type === 'option' && node.props.value === 'pangea-claude-code').props.disabled, true)
+    assert.ok(nodes.some(node => node.type === 'button' && node.props.disabled && node.children.includes('下一步 · 确认创建')))
+    states[16] = { type: 'create', createStep: 4 }
+    nodes = render()
+    assert.match(JSON.stringify(nodes), /Claude Code（已移除）/)
+    assert.ok(nodes.some(node => node.type === 'button' && node.props.disabled && node.children.includes('创建并开始分析')))
+    states[16] = { type: 'create', createStep: 3 }
+    render().find(node => node.props['aria-label'] === '外部 Agent').props.onChange({ target: { value: 'pangea-nga' } })
+    assert.equal(states[33].provider_id, 'pangea-nga')
+    assert.equal(states[33].agent_model, '')
+    assert.ok(render().some(node => node.type?.name === 'AgentModelSelect'))
+  }
+})
+
+for (const providerId of ['pangea-nga', 'pangea-opencode', 'pangea-codeagent']) {
   test(`new analysis selects advertised ${providerId} models and clears selection when changing Agent`, async () => {
     let index = 0, phase = 'form', changed
     const form = { repository: 'repo', target: 'analysis', source_scope_text: '.', asset_ids: [], provider_id: providerId, agent_model: '' }

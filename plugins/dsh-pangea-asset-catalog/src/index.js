@@ -6,6 +6,8 @@ import path from 'node:path'
 import { AssetActionRuntime, dataRootFor, runPangea } from './pangea-api.js'
 import { MethodologyCandidateRuntime } from './methodology-runtime.js'
 import { AssetExtractionQueue } from './extraction-queue.js'
+import { installAssetUpdateAdmission } from './update-admission.js'
+import { acpProviderOption } from '../../dsh-pangea-companion/src/workbench-api.js'
 
 export const name = 'dsh-pangea-asset-catalog'
 export const inject = ['tools', 'webServer', 'apiProxy', 'agents', 'subagents']
@@ -225,6 +227,7 @@ async function routeHandler(req, res, runtime) {
     }
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await readBody(req)
+    if (['import', 'extract'].includes(body.action) && body.provider_id) acpProviderOption(body.provider_id)
     const resolvedDataRoot = dataRootFor(cwd, dataRoot)
     // Cancellation must not wait for capability discovery or a full catalogue read.
     if (body.action === 'stop') {
@@ -338,6 +341,7 @@ async function routeHandler(req, res, runtime) {
 }
 
 export async function importAndExtract({ cwd, dataRoot, body, sourcePath, runtime, runner = runPangea }) {
+  if (body.provider_id) acpProviderOption(body.provider_id)
   const args = ['assets', 'import', '--data-root', dataRoot, '--path', sourcePath, '--type', body.asset_type]
   if (body.title) args.push('--title', body.title)
   const result = await runner({ cwd, args })
@@ -354,6 +358,7 @@ export async function apply(ctx) {
   const runtime = new AssetActionRuntime(ctx.apiProxy, runPangea, { agents: ctx.agents, subagents: ctx.subagents })
   runtime.queue = new AssetExtractionQueue(runtime, { concurrency: 2 })
   runtime.methodologies = new MethodologyCandidateRuntime(ctx.apiProxy)
+  installAssetUpdateAdmission(ctx, runtime)
   ctx.on('session/event', (session, event) => runtime.handleSessionEvent(session, event))
   ctx.on('agent/status', ({ agent, status }) => { runtime.handleAgentStatus(agent, status); runtime.methodologies.handleAgentStatus(agent, status) })
   ctx.on('agent/error', ({ agent, error }) => { runtime.handleAgentError(agent, error); runtime.methodologies.handleAgentError(agent, error) })

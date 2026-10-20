@@ -44,6 +44,15 @@ async function workspace() {
   return root
 }
 
+test('retired Claude Code asset extraction is rejected before altering assets or jobs', async () => {
+  const root = await workspace()
+  try {
+    const runtime = new AssetActionRuntime({}, () => assert.fail('must not alter asset state'))
+    await assert.rejects(runtime.start({ cwd: root, assetId: 'saved-asset', providerId: 'pangea-claude-code' }), /Claude Code 支持已移除/)
+    assert.equal(runtime.jobs.size, 0)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('asset extraction runs the deterministic PANGEA command without a DSH session', async () => {
   const root = await workspace()
   const calls = []
