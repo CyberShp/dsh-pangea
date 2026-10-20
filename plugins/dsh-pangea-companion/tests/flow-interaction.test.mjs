@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import vm from 'node:vm'
 import { behaviorCoverageProjection } from '../src/behavior-coverage.js'
+import { toInteractiveFlowSvg, renderFlowTree, toSvgString } from '../src/flow-graph/render.js'
+import { layoutFlow } from '../src/flow-graph/layout.js'
 
 async function harness() {
   let cursor = 0, exported
@@ -65,31 +67,133 @@ test('node click selects the sole declared route, asks on shared nodes, retains 
   assert.equal(find(tree, 'aria-label', '节点详情'), undefined)
 })
 
-test('edge and condition label share exact selection, with endpoints, hover restoration and keyboard focus', async () => {
+test('crossing edges never changes page state; explicit activation selects exact endpoints and stable details', async () => {
   const app = await harness(), data = flow()
   const render = () => app.render('FlowGraphView', { flow: data })
   let tree = render()
   const edge = find(tree, 'data-edge-id', 'ab2')
   assert.ok(find(edge, 'data-edge-label', 'ab2'))
   assert.equal(nodes(tree).filter(node => node.props['data-edge-id'] === 'ab2').length, 1)
-  edge.props.onPointerEnter()
+  // Hover/focus can style the condition badge, but must not render an inserted
+  // detail block that displaces the SVG under the pointer (the flicker loop).
+  for (const name of ['onPointerEnter', 'onPointerLeave', 'onFocus', 'onBlur']) assert.equal(edge.props[name], undefined)
+  assert.equal(find(tree, 'aria-label', '连线详情'), undefined)
+  edge.props.onClick()
   tree = render()
   assert.equal(find(tree, 'data-edge-id', 'ab2').props['data-focused'], 'true')
   assert.equal(find(tree, 'data-edge-id', 'ab').props['data-highlighted'], 'false')
   for (const id of ['a', 'b']) assert.equal(find(tree, 'data-node-id', id).props['data-highlighted'], 'true')
   assert.match(text(find(tree, 'aria-label', '连线详情')), /算法 C.*DH 组 2/)
-  find(tree, 'data-edge-id', 'ab2').props.onKeyDown({ key: ' ', preventDefault() {}, stopPropagation() {} })
-  find(tree, 'data-edge-id', 'ab2').props.onPointerLeave()
-  tree = render()
-  find(tree, 'data-edge-id', 'ac').props.onFocus()
+  const contents = nodes(tree)
+  assert.ok(contents.indexOf(find(tree, 'aria-label', '流程图画布，滚轮缩放，拖拽移动')) < contents.indexOf(find(tree, 'aria-label', '连线详情')))
+  find(tree, 'data-edge-id', 'ac').props.onKeyDown({ key: ' ', preventDefault() {}, stopPropagation() {} })
   tree = render()
   assert.equal(find(tree, 'data-edge-id', 'ac').props['data-focused'], 'true')
-  find(tree, 'data-edge-id', 'ac').props.onBlur()
-  tree = render()
-  assert.equal(find(tree, 'data-edge-id', 'ab2').props['data-focused'], 'true')
+  assert.equal(find(tree, 'data-edge-id', 'ab2').props['data-focused'], 'false')
   data.revision++
   tree = render()
   assert.equal(find(tree, 'aria-label', '连线详情'), undefined)
+})
+
+test('interactive SVG embeds escaped data and verified route identities while static SVG remains script-free', () => {
+  const data = flow()
+  const malicious = '</metadata><script>globalThis.pwned = true</script><![CDATA['
+  data.nodes[0].label = malicious
+  data.paths[0].title = malicious
+  data.paths.push({ path_id: 'broken', node_ids: ['a', 'c'], edge_ids: ['ab'] })
+  const svg = toInteractiveFlowSvg(data)
+  assert.equal((svg.match(/<script /g) ?? []).length, 1)
+  assert.doesNotMatch(svg, /<script>globalThis/)
+  assert.match(svg, /&lt;\/metadata&gt;&lt;script&gt;/)
+  const metadata = svg.match(/<metadata[^>]*>(.*?)<\/metadata>/s)[1]
+  const decode = value => value.replace(/&(quot|#39|lt|gt|amp);/g, (_, key) => ({ quot: '"', '#39': "'", lt: '<', gt: '>', amp: '&' })[key])
+  const payload = JSON.parse(decode(metadata))
+  assert.equal(payload.nodes.find(node => node.id === 'a').label, malicious)
+  assert.deepEqual(payload.paths.find(path => path.path_id === 'p1').edge_ids, ['ab'])
+  assert.deepEqual(payload.paths.find(path => path.path_id === 'broken').edge_ids, [])
+  assert.ok(payload.paths.find(path => path.path_id === 'broken').warnings.length > 0)
+  assert.match(svg, /data-control="next"/)
+  assert.match(svg, /addEventListener\('keydown'/)
+  assert.doesNotMatch(toSvgString(renderFlowTree(layoutFlow(data))), /<script/)
+})
+
+// A small DOM surface for executing the actual embedded SVG script with no
+// browser/test dependencies. It deliberately implements no selection behavior.
+function svgDom(tree, parent = null) {
+  if (!tree || typeof tree !== 'object') return { textContent: String(tree ?? ''), parentElement: parent }
+  const attrs = { ...tree.attrs }, listeners = {}
+  const element = {
+    tagName: tree.tag, parentElement: parent, children: [],
+    getAttribute(name) { return Object.hasOwn(attrs, name) ? String(attrs[name]) : null },
+    hasAttribute(name) { return Object.hasOwn(attrs, name) },
+    setAttribute(name, value) { attrs[name] = String(value) }, removeAttribute(name) { delete attrs[name] },
+    matches(selector) {
+      return selector.split(',').some(part => {
+        const match = part.trim().match(/^\[([^\]]+)\]$/)
+        return match ? this.hasAttribute(match[1]) : this.tagName === part.trim()
+      })
+    },
+    closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) },
+    querySelectorAll(selector) { return this.children.flatMap(child => child.tagName ? [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)] : []) },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null },
+    contains(child) { return child === this || Boolean(child.parentElement && this.contains(child.parentElement)) },
+    addEventListener(name, handler) { listeners[name] = handler },
+    dispatch(name, target, key) {
+      const event = { target, key, prevented: false, preventDefault() { this.prevented = true } }
+      listeners[name](event); return event
+    },
+    get textContent() { return this.children.map(child => child.textContent).join('') },
+    set textContent(value) { this.children = [{ textContent: String(value), parentElement: this }] },
+  }
+  element.children = (tree.children ?? []).map(child => svgDom(child, element))
+  return element
+}
+
+test('downloaded SVG script runs standalone: node routes, exact parallel edges, keyboard, and escaping', () => {
+  const data = flow()
+  data.nodes[0].description = '</script><script>globalThis.pwned=true</script>' + '接收数据后验证消息边界并记录异常原因。'.repeat(30)
+  const markup = toInteractiveFlowSvg(data)
+  const decode = value => value.replace(/&(quot|#39|lt|gt|amp);/g, (_, key) => ({ quot: '"', '#39': "'", lt: '<', gt: '>', amp: '&' })[key])
+  const json = decode(markup.match(/<metadata[^>]*>(.*?)<\/metadata>/s)[1])
+  const script = markup.match(/<script[^>]*><!\[CDATA\[([\s\S]*)\]\]><\/script>/)[1]
+  const tree = renderFlowTree(layoutFlow(data), { idPrefix: 'flow-export' })
+  tree.children.push({ tag: 'metadata', attrs: { 'data-flow-payload': 'true' }, children: [json] },
+    ...['status', 'detail'].map(name => ({ tag: 'g', attrs: { [`data-flow-${name}`]: 'true' }, children: [
+      { tag: 'title', attrs: {}, children: [] },
+      ...[0, 1].map(index => ({ tag: 'text', attrs: { 'data-caption-line': index }, children: [] })),
+    ] })),
+    ...['previous', 'next', 'reset'].map(name => ({ tag: 'g', attrs: { 'data-control': name }, children: [] })))
+  const svg = svgDom(tree), context = vm.createContext({ document: { documentElement: svg } })
+  vm.runInContext(script, context)
+  const group = (attr, id) => svg.querySelectorAll(`[${attr}]`).find(item => item.getAttribute(attr) === id)
+  const click = (attr, id) => svg.dispatch('click', group(attr, id))
+  const high = id => group('data-edge-id', id).getAttribute('data-highlighted')
+  click('data-node-id', 'b')
+  assert.equal(high('ab'), 'true')
+  assert.equal(high('ab2'), 'false')
+  click('data-control', 'reset')
+  click('data-node-id', 'a')
+  assert.match(svg.querySelector('[data-flow-status]').textContent, /2 条声明路径/)
+  assert.equal(high('ab'), 'false')
+  assert.equal(context.pwned, undefined)
+  assert.match(svg.querySelector('[data-flow-detail]').textContent, /<script>globalThis/)
+  const detail = svg.querySelector('[data-flow-detail]')
+  assert.equal(detail.querySelector('title').textContent, `A：${data.nodes[0].description}`)
+  const lines = detail.querySelectorAll('[data-caption-line]')
+  assert.match(lines.at(-1).textContent, /悬停查看全文/)
+  assert.ok(lines.every(line => [...line.textContent].reduce((sum, char) => sum + (char.codePointAt(0) > 255 ? 2 : 1), 0) <= Math.floor((JSON.parse(json).width - 32) / 7.5)))
+  svg.dispatch('keydown', group('data-control', 'next'), 'Enter')
+  assert.equal(high('ab'), 'true')
+  svg.dispatch('keydown', group('data-control', 'next'), ' ')
+  assert.equal(high('ab'), 'false')
+  assert.equal(high('ac'), 'true')
+  // Clicking nested label text delegates to its edge, without guessing siblings.
+  const edge = group('data-edge-id', 'ab2')
+  svg.dispatch('click', edge.querySelector('text'))
+  assert.equal(edge.getAttribute('data-focused'), 'true')
+  const escaped = svg.dispatch('keydown', edge, 'Escape')
+  assert.equal(escaped.prevented, true)
+  assert.ok(svg.querySelectorAll('[data-edge-id]').every(item => item.getAttribute('data-highlighted') === 'false'))
 })
 
 test('cycle route preserves repeated ordered steps and drag suppression does not consume keyboard clicks', async () => {

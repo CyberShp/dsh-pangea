@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { randomUUID, createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, realpath, writeFile, appendFile } from 'node:fs/promises'
 import { diagnosticText } from './launch-log.js'
@@ -185,9 +186,11 @@ function flowContext(projection, flow, branchIds) {
   return { business_flows: [{ ...flow, evidence }], risks, test_cases: cases, evidence, notes: [] }
 }
 
-export async function createView(task, { type = 'workflow', flow_id = null, previous_view_id = null, branch_ids, profile } = {}, env = process.env) {
-  if (!DIAGRAM_TYPES.includes(type)) throw new Error('Unsupported diagram type')
+export async function createView(task, { type, flow_id = null, previous_view_id = null, branch_ids, profile } = {}, env = process.env) {
   const previous = previous_view_id ? await loadView(task, previous_view_id) : null
+  type ??= previous?.type ?? 'workflow'
+  if (!DIAGRAM_TYPES.includes(type)) throw new Error('Unsupported diagram type')
+  if (previous && previous.type !== type) throw new Error('Diagram type mismatch')
   const viewProfile = profile ?? previous?.profile ?? 'standard'
   if (!['standard', 'function_variables'].includes(viewProfile)) throw new Error('Unsupported diagram profile')
   // Call graphs are rendered by the host; only the experimental Archify profile needs the runtime.
@@ -212,6 +215,9 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
   flow_id ??= previous?.flow_id ?? null
   const flow = flow_id ? projection.business_flows?.find(item => item.flow_id === flow_id) : null
   if (flow_id && !flow) throw new Error('该流程已更新或尚未产出，请刷新后重新选择。')
+  if (type === 'sequence' && !flow) throw new Error('时序图需要选择一个已产出的流程，不能扩大为全仓分析。')
+  if (previous && type === 'sequence' && previous.flow_id !== flow_id
+    && !(previous.logical_flow_id && previous.logical_flow_id === flow?.logical_flow_id && previous.flow_unit_id === flow?.unit_id)) throw new Error('Sequence diagram flow mismatch')
   if (viewProfile === 'function_variables' && (!flow || type !== 'workflow')) throw new Error('Function diagram requires a flow and workflow type')
   if (previous && (previous.profile ?? 'standard') !== viewProfile) throw new Error('Diagram profile mismatch')
   if (previous && viewProfile === 'function_variables' && previous.flow_id !== flow_id
@@ -256,6 +262,11 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     await writeFile(path.join(folder, 'candidate.json'), candidate)
   } else if (callGraph) {
     await writeFile(path.join(folder, 'candidate.json'), JSON.stringify(callGraphSkeleton(flow?.title || task.target || '函数调用图', ''), null, 2))
+  } else if (type === 'sequence') {
+    await writeFile(path.join(folder, 'candidate.json'), JSON.stringify({ schema_version: 1, diagram_type: 'sequence',
+      meta: { title: `${flow.title || task.target || '业务流程'} · 时序图`, locale: 'zh-CN', quality_profile: 'showcase', column_fit: 'spread' },
+      participants: [], messages: [], fragments: [], cards: [],
+    }, null, 2))
   } else if (type === 'workflow') {
     await writeFile(path.join(folder, 'candidate.json'), JSON.stringify({
       schema_version: 2, diagram_type: 'workflow',
@@ -272,6 +283,7 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     max_render_attempts: 3 }
   await writeFile(path.join(folder, 'manifest.json'), JSON.stringify(view, null, 2))
   if (callGraph) return { view, prompt: callGraphPrompt({ task, folder, previous: reuseCandidate, branchIds }) }
+  const sequenceGuidance = type === 'sequence' ? fileURLToPath(new URL('./sequence-guidance.md', import.meta.url)) : null
   return { view, prompt: [
     `为 ${task.target} 创建 ${type} 架构视图。${previous ? '这是关联的新画图会话；candidate.json 是旧图，必须按本次 context.json 核对更新。' : ''}`,
     ...(viewProfile === 'function_variables' ? [
@@ -284,6 +296,13 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     ] : []),
     ...(branchIds ? [`本图是局部分支图，仅包含 ${branchIds.join('、')}。主干仅作定位和回接上下文；图题须注明“局部分支”，不得把本图表述为完整流程。`] : []),
     `先读取 ${path.join(archify, 'SKILL.md')}，按需读对应 schema/example；PANGEA 集成约定优先：不运行更新检查，不访问外网，不要求公开仓库，不读取秘密配置。`,
+    ...(type === 'sequence' ? [
+      `必须先读取本地时序分析指引 ${sequenceGuidance}，再读取 Archify schemas/sequence.schema.json 与 examples/cache-miss-request.sequence.json；以本地指引和本任务证据边界优先。`,
+      '时序图不是流程节点的横向重排。先核对参与者、真实调用或报文、响应/回调、状态改变与清理的因果关系，再填写 messages。每条消息使用稳定 id，并在 note 或 cards 记录冻结源码依据；未知发送者、异步顺序或外部实现明确写待确认，不补造消息。',
+      '必须显式区分正常、拒绝、超时/断连及恢复的实际场景。互斥分支放在 fragments.kind=alt 的不同 operands；每个 operand.condition 写触发条件，绘制本分支实际响应、状态改变与清理消息。循环使用 loop 并说明退出条件；只在源码证实时画循环。不支持 par 或嵌套片段，必要时用单独版本展示局部时序并明确边界。',
+      '本地扩展 fragments 样例只演示结构：[{"id":"result","kind":"alt","from":240,"to":590,"label":"处理结果","operands":[{"from":268,"condition":"[请求有效]"},{"from":420,"condition":"else [请求被拒绝]"}]}]。每个 operand 起点至少留40px再绘消息，片段之间不重叠。self 消息 from=to 可表达参与者内部状态变更或清理；不能为画图虚构外部参与者。',
+      'schema_version 保持1，填充候选中 participants/messages/fragments/cards；返回或响应使用 variant=return，异步通知使用 variant=dashed 并在标签说明，不把虚线当异常类型。图中按证据保留必要交互，不以通用 skill 的节点数量建议删除异常行为；完整签名和长证据放 cards。无真实参与者交互时说明不适合时序图，不用假对象凑图。',
+    ] : []),
     ...(type === 'workflow' ? [
       `仅作结构示例，必须用本次源码事实替换：${JSON.stringify(viewProfile === 'function_variables' ? {
         schema_version: 2, diagram_type: 'workflow', meta: { title: '函数与变量关系', locale: 'zh-CN', quality_profile: 'showcase' },
@@ -314,9 +333,10 @@ export async function createView(task, { type = 'workflow', flow_id = null, prev
     `唯一写入目录：${folder}。编写 candidate.json；不要修改 manifest.json。`,
     '本回合只编写一个 candidate.json 并结束；不要调用 Archify validate/deliver 或 architecture-render。宿主会冻结本回合最终字节并执行严格校验和交付；失败诊断由宿主续接本会话。',
     `本次生成总预算 ${view.budget_ms / 60000} 分钟，共 ${view.max_render_attempts} 个候选（初稿和两次修复）；校验与交付计入总时间，交付不额外占候选次数。第三个候选仍由宿主验证，不换会话规避限制。`,
-    '默认省略 phases、groups、mainPath、semanticChecks、固定宽度和手工路由；仅在表达真实语义所必需时添加。渲染验证不证明源码结论正确。',
+    '流程/架构图默认省略 phases、groups、mainPath、semanticChecks、固定宽度和手工路由；仅在表达真实语义所必需时添加。时序图按真实条件使用 fragments。渲染验证不证明源码结论正确。',
     viewProfile === 'function_variables'
       ? '提交渲染前逐项自查并在 cards 保留证据：nodes 只有函数、宏、外部被调用函数；edges 逐条对应源码中的调用表达式（不是函数内控制流）；无调用关系的节点保持独立。Archify 的通用主路径建议不适用于独立函数，不添加 mainPath 来串联它们。长签名、内部计算和变量变化只放 cards，节点只用短符号与简短说明。'
+      : type === 'sequence' ? '提交渲染前逐条核对 participants/messages 的源码依据、响应方向、条件片段归属和 loop 退出条件；每个分支有明确处理及结果。message 的自消息折返也必须完整位于同一 operand 内；不能把互斥分支串成一次执行。'
       : '提交渲染前逐边核对源码依据，并核对 mainPath 中每一对相邻节点确有对应 edge；先完成状态更新，再返回。没有外部调度源码时不构造入口间的生命周期或周期循环。',
     '产物生成后在会话简要说明，不启动主分析流程。',
   ].join('\n') }

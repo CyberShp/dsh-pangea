@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { sourceFirstProjection, coverageSummary, caseQualitySummary } from '../src/source-first-projection.js'
+import { pathMembers } from '../src/flow-graph/layout.js'
 const record = (id, kind, body, extra = {}) => ({ record_id: id, kind, body, ...extra })
 const action = (unit, records, extra = {}) => ({ action_id: `run:analysis:${unit}`, stage: 'unit_analysis', status: 'accepted', task: { unit_id: unit }, result_path: `/run/${unit}.json`, revision: 4, records, ...extra })
 
@@ -282,4 +283,23 @@ test('cyclic main nodes remain visible with an ordering notice', () => {
   assert.equal(flow.mainline_steps.length, 3)
   assert.ok(flow.projection_warnings.some(note => note.includes('拓扑')))
   assert.equal(flow.nodes.length, 4)
+})
+
+test('route projection shares exact SVG membership and diagnoses a missing tail edge', () => {
+  const body = { ...branchedFlow(),
+    edges: [...branchedFlow().edges.map((edge, i) => ({ ...edge, edge_id: `e${i}` })),
+      { edge_id: 'retry', source_step_key: 'error', target_step_key: 'start' },
+      { edge_id: 'parallel', source_step_key: 'middle', target_step_key: 'error', condition: 'another reason' }],
+    paths: [{ path_id: 'incomplete', node_ids: ['start', 'middle', 'error', 'start'], edge_ids: ['e0', 'e2'] },
+      { path_id: 'loop', node_ids: ['start', 'middle', 'error', 'start', 'middle', 'error'], edge_ids: ['e0', 'e2', 'retry', 'e0', 'parallel'] }] }
+  const original = structuredClone(body)
+  const flow = projectFlow(body)
+  for (const route of flow.paths) {
+    const members = pathMembers(flow, route.path_id)
+    assert.deepEqual(flow.branches.filter(edge => edge.path_ids.includes(route.path_id)).map(edge => edge.edge_index), [...members.edge_indexes].sort((a, b) => a - b))
+    for (const warning of members.warnings) assert.ok(flow.projection_warnings.includes(warning))
+  }
+  assert.match(flow.projection_warnings.join('\n'), /edge_ids\[2\] 应连接 error → start/)
+  assert.deepEqual(flow.paths[1].node_ids, body.paths[1].node_ids)
+  assert.deepEqual(body, original)
 })

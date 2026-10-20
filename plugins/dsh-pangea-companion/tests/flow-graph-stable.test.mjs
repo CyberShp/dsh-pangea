@@ -85,18 +85,54 @@ test('declared edge IDs must follow the path node sequence; mismatches never inv
   assert.equal(members.edge_ids.size, 0)
   assert.equal(members.warnings.length, 2)
   assert.match(members.warnings[0], /第 1 条连线/)
+  assert.match(members.warnings[0], /edge_ids\[0\] 应连接 start → choose，实际为 read（query → result）/)
+})
+
+test('length mismatches preserve verified segments and diagnose missing and extra positions without repairing records', () => {
+  const flow = stableFixture()
+  flow.paths.push(path('short', ['start', 'choose', 'deny', 'start'], ['prepare', 'reject']))
+  flow.paths.push(path('long', ['start', 'choose'], ['prepare', 'reject', 'retry']))
+  const before = structuredClone(flow)
+  const short = pathMembers(flow, 'short')
+  assert.deepEqual([...short.edge_ids], ['prepare', 'reject'])
+  assert.match(short.warnings.join('\n'), /edge_ids\[2\] 应连接 deny → start，实际为 未提供/)
+  assert.deepEqual([...pathMembers(flow, 'long').edge_ids], ['prepare'])
+  assert.match(pathMembers(flow, 'long').warnings.join('\n'), /edge_ids\[1\] 起的 2 条连线没有对应节点步/)
+  assert.deepEqual(flow, before)
+})
+
+test('loop occurrences retain their positions and duplicate path IDs do not select an arbitrary route', () => {
+  const flow = stableFixture()
+  flow.paths.push(path('retry-twice', ['start', 'choose', 'deny', 'start', 'choose', 'deny', 'start'],
+    ['prepare', 'reject', 'retry', 'prepare', 'reject', 'retry']))
+  const members = pathMembers(flow, 'retry-twice')
+  assert.deepEqual(members.warnings, [])
+  assert.deepEqual([...members.edge_ids], ['prepare', 'reject', 'retry'])
+  flow.paths.push(path('reject', ['query', 'result'], ['read']))
+  assert.equal(pathMembers(flow, 'reject').edge_ids.size, 0)
+  assert.match(pathMembers(flow, 'reject').warnings[0], /路径 ID reject 重复/)
 })
 
 test('selected declared paths and explicitly kept nodes expand through a collapsed branch', () => {
   const flow = { layout_version: 'stable-v1', main_path_ids: ['main'],
-    nodes: [node('a', 'entry'), node('b'), node('c', 'exit'), node('x', 'branch'), node('y', 'branch'), node('z', 'exit')],
+    nodes: [node('a', 'entry'), node('b'), node('c', 'exit'), node('x', 'branch'), node('y'), node('z', 'exit')],
     edges: [edge('a', 'b'), edge('b', 'c'), edge('b', 'x'), edge('x', 'y'), edge('y', 'z')],
     paths: [path('main', ['a', 'b', 'c']), path('side', ['a', 'b', 'x', 'y', 'z'])] }
-  assert.deepEqual(layoutFlow(flow, { collapseThreshold: 3 }).collapsed.ids, ['y', 'z'])
+  assert.deepEqual(layoutFlow(flow, { collapseThreshold: 3 }).collapsed.ids, ['y'])
   const selected = layoutFlow(flow, { collapseThreshold: 3, activePathId: 'side' })
   assert.equal(selected.collapsed.count, 0)
   for (const id of pathMembers(flow, 'side').edge_ids) assert.ok(selected.edges.some(e => e.edge_id === id))
   assert.ok(layoutFlow(flow, { collapseThreshold: 3, keepNodeIds: ['z'] }).nodes.some(n => n.id === 'z'))
+})
+
+test('large-flow folding keeps declared decisions, exceptions, propagation, recovery and exits visible', () => {
+  const flow = { layout_version: 'stable-v1', main_path_ids: ['main'],
+    nodes: [node('a', 'entry'), node('done', 'exit'), node('side'), node('decision', 'branch'), node('failed', 'error'),
+      node('notify', 'propagation'), node('cleanup', 'recovery'), node('closed', 'exit')],
+    edges: [edge('a', 'done'), edge('a', 'side'), edge('side', 'decision'), edge('decision', 'failed'), edge('failed', 'notify'),
+      edge('notify', 'cleanup'), edge('cleanup', 'closed')], paths: [path('main', ['a', 'done'])] }
+  const layout = layoutFlow(flow, { collapseThreshold: 2 })
+  for (const id of ['decision', 'failed', 'notify', 'cleanup', 'closed']) assert.ok(layout.nodes.some(item => item.id === id))
 })
 
 test('dense return/crossing labels preserve full text, reserve lanes and stay clear of nodes and labels', () => {

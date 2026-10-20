@@ -2,6 +2,7 @@
 // Record bodies remain available verbatim; this layer makes no semantic judgments.
 import { normalizeFlow, normalizeFlows } from './flow-normalize.js'
 import { behaviorCoverageProjection } from './behavior-coverage.js'
+import { pathMembers } from './flow-graph/layout.js'
 const list = value => Array.isArray(value) ? value : value == null ? [] : [value]
 const plain = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value, null, 2)
 const strings = value => list(value).map(plain)
@@ -151,26 +152,17 @@ export function sourceFirstProjection(artifacts) {
       const mainline = mainlineNodes(row)
       const associationWarnings = []
       const pathEdges = new Map(list(row.paths).map(path => {
-        const members = new Set(), ids = list(path.node_ids)
-        if (Array.isArray(path.edge_ids)) {
-          if (path.edge_ids.length !== Math.max(0, ids.length - 1)) associationWarnings.push(`路径 ${path.path_id} 的连线数量与节点顺序不一致；未猜测缺失连线。`)
-          path.edge_ids.forEach((id, position) => {
-            const matches = list(row.edges).filter(edge => edge.edge_id === id)
-            if (matches.length === 1 && matches[0].source_step_key === ids[position] && matches[0].target_step_key === ids[position + 1]) members.add(matches[0])
-            else associationWarnings.push(`路径 ${path.path_id} 的连线 ${id} 缺失、不唯一或与节点顺序不一致；未建立该连线关联。`)
-          })
-        } else ids.slice(0, -1).forEach((id, position) => {
-          const matches = list(row.edges).filter(edge => edge.source_step_key === id && edge.target_step_key === ids[position + 1])
-          if (matches.length === 1) members.add(matches[0])
-          else if (matches.length > 1) associationWarnings.push(`路径 ${path.path_id} 在 ${id} → ${ids[position + 1]} 存在多条连线且未声明 edge_ids；未猜测对应连线。`)
-        })
-        return [path, members]
+        // Use the same exact-route resolver as the SVG, including missing tail
+        // edges, loops, parallel conditions and duplicate declared identities.
+        const members = pathMembers(row, path.path_id)
+        associationWarnings.push(...(members?.warnings ?? []))
+        return [path, members?.edge_indexes ?? new Set()]
       }))
       result.business_flows.push({ ...row, logical_flow_id: row.flow_id ?? row.display_id, text: plain(row.text), flow_id: row.projection_id,
         projection_warnings: [...new Set([...list(row.projection_warnings), ...list(row.normalize_notes), ...associationWarnings])],
         mainline_steps: mainline.map(node => ({ step_id: node.id, title: plain(node.label), processing: plain(node.description), node_kind: node.kind, source_evidence: node.source_evidence })),
         branches: list(row.edges).map((edge, index) => {
-          const paths = list(row.paths).filter(path => pathEdges.get(path).has(edge))
+          const paths = list(row.paths).filter(path => pathEdges.get(path).has(index))
           // A path is not a decision edge. Never attach its condition to its entry node.
           return { branch_id: `${row.projection_id}:edge-${index + 1}`, edge_index: index, ...(edge.edge_id ? { edge_id: edge.edge_id } : {}),
             from_step_id: edge.source_step_key, to_step_id: edge.target_step_key,

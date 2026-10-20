@@ -28,18 +28,24 @@ test('empty, duplicate and dangling inputs produce warnings instead of throwing'
   assert.deepEqual(layout.warnings, ['流程节点 a 重复，图中只显示第一次声明。', '流程连线 a → zz 引用了不存在的节点，未绘制。'])
 })
 
-test('large flows fold nodes beyond the first branch layer unless expanded', () => {
+test('large flows fold only incidental processing nodes while retaining exception and recovery nodes', () => {
   const flow = {
+    layout_version: 'stable-v1', main_path_ids: ['main'],
     nodes: [{ id: 'a', kind: 'entry', label: 'A' }, { id: 'b', kind: 'main', label: 'B' }, { id: 'c', kind: 'exit', label: 'C' },
-      { id: 'x', kind: 'branch', label: 'X' }, { id: 'y', kind: 'branch', label: 'Y' }, { id: 'z', kind: 'branch', label: 'Z' }],
-    edges: [edge('a', 'b'), edge('b', 'c'), edge('b', 'x'), edge('x', 'y'), edge('y', 'z')],
+      { id: 'x', kind: 'branch', label: 'X' }, { id: 'y', kind: 'main', label: 'Y' }, { id: 'z', kind: 'main', label: 'Z' },
+      { id: 'failed', kind: 'error', label: 'Failed' }, { id: 'cleanup', kind: 'recovery', label: 'Cleanup' }],
+    edges: [edge('a', 'b'), edge('b', 'c'), edge('b', 'x'), edge('x', 'y'), edge('y', 'z'), edge('z', 'failed'), edge('failed', 'cleanup')],
+    paths: [{ path_id: 'main', node_ids: ['a', 'b', 'c'] }, { path_id: 'failure', node_ids: ['a', 'b', 'x', 'y', 'z', 'failed', 'cleanup'] }],
   }
   const folded = layoutFlow(flow, { collapseThreshold: 3 })
   assert.deepEqual(folded.collapsed, { count: 2, ids: ['y', 'z'] })
-  assert.deepEqual(folded.nodes.map(n => n.id).sort(), ['a', 'b', 'c', 'x'])
+  assert.deepEqual(folded.nodes.map(n => n.id).sort(), ['a', 'b', 'c', 'cleanup', 'failed', 'x'])
   const expanded = layoutFlow(flow, { collapseThreshold: 3, expandAll: true })
   assert.equal(expanded.collapsed.count, 0)
-  assert.equal(expanded.nodes.length, 6)
+  assert.equal(expanded.nodes.length, 8)
+  const selected = layoutFlow(flow, { collapseThreshold: 3, activePathId: 'failure' })
+  assert.equal(selected.nodes.length, 8)
+  assert.equal(selected.collapsed.count, 0)
 })
 
 test('call graph merges repeated calls and marks unreached functions', () => {

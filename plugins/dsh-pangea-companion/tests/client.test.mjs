@@ -2568,10 +2568,13 @@ test('native flow view stays local while explicit historical diagram selection a
   assert.equal(opened.at(-1), 'function-session-1')
   await render().find(node => node.type === 'button' && node.children.includes('时序')).props.onClick()
   assert.equal(selectedView(), 'archify-v2')
+  assert.ok(render().some(node => node.type === 'button' && node.children.includes('全屏')))
+  assert.ok(render().some(node => node.type === 'a' && node.children.includes('导出交互 HTML')))
   expectSession('archify-session-2')
   render().find(node => node.type === 'button' && node.children.includes('版本与修改')).props.onClick()
   assert.equal(versionItems().length, 1, 'versions are scoped to the selected graph type')
   render().find(node => node.type === 'button' && node.children.includes('返回图表')).props.onClick()
+  await find('流程图视图').props.onClick()
   await render().find(node => node.type === 'button' && node.children.includes('业务流程') && node.props['aria-pressed'] === false).props.onClick()
   assert.equal(selectedView(), 'archify-v1')
   expectSession('archify-session-1')
@@ -2618,9 +2621,9 @@ test('right-panel diagram conversation selection updates the left flow, profile 
   const { find, render, context, opened } = await diagramWorkspace()
   await find('函数与变量流程图视图').props.onClick()
   await context().onSelectConversation('archify-session-2')
-  assert.equal(find('流程图视图').props['aria-pressed'], true)
+  assert.equal(find('时序图视图').props['aria-pressed'], true)
   assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=archify-v2&/)
-  assert.equal(render().find(node => node.type === 'button' && node.children.includes('时序')).props['aria-pressed'], true)
+  assert.ok(render().some(node => node.props['aria-label'] === '时序图工作区'))
   await context().onSelectConversation('archify-session-1')
   assert.equal(find('流程图视图').props['aria-pressed'], true)
   assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=archify-v1&/)
@@ -2959,4 +2962,34 @@ test('graph text follows explicit edges despite node ordering, flattened mainlin
   flow.nodes = [...nodes].reverse()
   flow.mainline_steps = []
   assert.deepEqual(routes(render()), result)
+})
+
+
+test('sequence has a direct flow tab and create action with the experimental flag disabled', async () => {
+  const task = { task_id: 'task', run_id: 'run', status: 'complete' }
+  const current = { run_id: 'run', details: { business_flows: [{ flow_id: 'F1', title: 'Receive' }] } }
+  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
+  const requests = []
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } }, async (_url, options) => {
+    requests.push(JSON.parse(options.body))
+    return { ok: true, async json() { return { status: 'ok', views: [], archify_experimental: false } } }
+  })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const render = () => { index = 0; return descendants(panel.type(panel.props)) }
+  await render().find(n => n.props['aria-label'] === '时序图视图').props.onClick()
+  assert.ok(render().some(n => n.props['aria-label'] === '时序图工作区'))
+  assert.ok(!render().some(n => n.props['aria-label'] === '图表类型'), 'sequence tab must not expose experimental diagram types')
+  render().find(n => n.type === 'button' && n.children.includes('生成时序图')).props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  const request = requests.find(r => r.action === 'architecture-create')
+  assert.equal(request.type, 'sequence')
+  assert.equal(request.flow_id, 'F1')
+  assert.equal(request.profile, 'standard')
 })

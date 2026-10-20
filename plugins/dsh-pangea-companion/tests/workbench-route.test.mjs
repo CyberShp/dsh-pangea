@@ -439,3 +439,27 @@ test('analysis GET returns external providers without querying internal model AP
     { id: 'pangea-opencode', registered: false },
   ])
 })
+
+
+test('sequence creation passes normal admission while other Archify types remain experimental', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'sequence-admission-'))
+  const savedFlag = process.env.PANGEA_ARCHIFY_EXPERIMENTAL, savedRoot = process.env.PANGEA_ARCHIFY_ROOT
+  delete process.env.PANGEA_ARCHIFY_EXPERIMENTAL
+  delete process.env.PANGEA_ARCHIFY_ROOT
+  t.after(async () => {
+    if (savedFlag === undefined) delete process.env.PANGEA_ARCHIFY_EXPERIMENTAL; else process.env.PANGEA_ARCHIFY_EXPERIMENTAL = savedFlag
+    if (savedRoot === undefined) delete process.env.PANGEA_ARCHIFY_ROOT; else process.env.PANGEA_ARCHIFY_ROOT = savedRoot
+    await rm(root, { recursive: true, force: true })
+  })
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  const task = { task_id: 'task', workspace: root, data_root: root, run_id: 'run', provider: 'pangea-nga' }
+  for (const type of ['sequence', 'workflow', 'architecture']) {
+    const req = Readable.from([Buffer.from(JSON.stringify({ action: 'architecture-create', task_id: 'task', flow_id: 'F1', type }))])
+    req.method = 'POST'; req.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: root })}`; req.headers = { 'sec-fetch-site': 'same-origin' }
+    const response = {}
+    await workbenchRouteHandler(req, { writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) } }, {}, { get: async () => task }, new Set(), {}, {}, {}, async () => assert.fail('must not run analysis'))
+    assert.equal(response.code, 400)
+    assert.match(response.body.error, type === 'sequence' ? /Archify runtime unavailable/ : /精美导出（实验）未开启/)
+  }
+})

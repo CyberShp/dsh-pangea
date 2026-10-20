@@ -783,6 +783,7 @@ window.__ModuleLoader__.load({
     const LABEL_GAP = 12
     const MAIN_KINDS = new Set(['entry', 'main', 'exit'])
     const RIGHT_KINDS = new Set(['error', 'propagation'])
+    const KEEP_VISIBLE_KINDS = new Set(['entry', 'branch', 'error', 'propagation', 'recovery', 'exit'])
 
     const listOf = value => Array.isArray(value) ? value : []
     const charWidth = char => char.charCodeAt(0) < 128 ? 1 : 2
@@ -1023,12 +1024,17 @@ window.__ModuleLoader__.load({
     }
 
     function membersForGraph(flow, pathId, graph) {
-      const path = listOf(flow?.paths).find(p => p?.path_id === pathId)
+      const matches = listOf(flow?.paths).filter(p => p?.path_id === pathId)
+      const path = matches[0]
       if (!path) return null
+      if (matches.length > 1) return { nodes: new Set(), pairs: new Set(), edge_ids: new Set(), edge_indexes: new Set(), ambiguous_pairs: [],
+        warnings: [`路径 ID ${pathId} 重复，无法唯一选择路线；请修正原记录。`] }
       const ids = listOf(path.node_ids).map(String)
+      const where = `paths[${listOf(flow?.paths).indexOf(path)}]`
       const warnings = []
       const pairs = new Set()
       const edgeIds = new Set()
+      const edgeIndexes = new Set()
       const ambiguous = []
       const byId = new Map(graph.edges.map(edge => [edge.edge_id, edge]))
       const byPair = new Map()
@@ -1039,25 +1045,34 @@ window.__ModuleLoader__.load({
       }
       const explicit = Array.isArray(path.edge_ids)
       if (explicit && path.edge_ids.length !== Math.max(0, ids.length - 1)) {
-        warnings.push(`路径 ${pathId} 的 edge_ids 与节点步数不一致；未匹配的连线不会高亮。`)
+        warnings.push(`路径 ${pathId}：${where}.edge_ids 有 ${path.edge_ids.length} 条，node_ids 有 ${ids.length} 步，应有 ${Math.max(0, ids.length - 1)} 条；仅高亮已核对的片段。`)
       }
+      const add = edge => { edgeIds.add(edge.edge_id); edgeIndexes.add(edge.index); pairs.add(pairKey(edge.source, edge.target)) }
       for (let i = 1; i < ids.length; i += 1) {
         const key = pairKey(ids[i - 1], ids[i])
         if (explicit) {
-          const edge = byId.get(String(path.edge_ids[i - 1] ?? ''))
-          if (edge?.source === ids[i - 1] && edge?.target === ids[i]) { edgeIds.add(edge.edge_id); pairs.add(key) }
-          else warnings.push(`路径 ${pathId} 的第 ${i} 条连线与节点顺序不符或不存在，未高亮。`)
+          const ref = String(path.edge_ids[i - 1] ?? '')
+          const edge = byId.get(ref)
+          if (edge?.source === ids[i - 1] && edge?.target === ids[i]) add(edge)
+          else {
+            const actual = edge ? `${ref}（${edge.source} → ${edge.target}）` : ref ? `${ref}（不存在或 ID 不唯一）` : '未提供'
+            warnings.push(`路径 ${pathId} 的第 ${i} 条连线：${where}.edge_ids[${i - 1}] 应连接 ${ids[i - 1]} → ${ids[i]}，实际为 ${actual}；该段未高亮，原记录待修正。`)
+          }
         } else {
           const candidates = byPair.get(key) ?? []
-          if (candidates.length === 1) { edgeIds.add(candidates[0].edge_id); pairs.add(key) }
+          if (candidates.length === 1) add(candidates[0])
           else if (candidates.length > 1) {
             ambiguous.push(key)
             warnings.push(`路径 ${pathId} 在 ${ids[i - 1]} → ${ids[i]} 存在多条条件连线，缺少 edge_ids，无法唯一确定路线。`)
           } else warnings.push(`路径 ${pathId} 的 ${ids[i - 1]} → ${ids[i]} 没有声明连线，未补画。`)
         }
       }
+      if (explicit && path.edge_ids.length > Math.max(0, ids.length - 1)) {
+        const offset = Math.max(0, ids.length - 1)
+        warnings.push(`路径 ${pathId}：${where}.edge_ids[${offset}] 起的 ${path.edge_ids.length - offset} 条连线没有对应节点步；未高亮多余引用。`)
+      }
       for (const id of ids) if (!graph.known.has(id)) warnings.push(`路径 ${pathId} 引用了不存在的节点 ${id}。`)
-      return { nodes: new Set(ids.filter(id => graph.known.has(id))), pairs, edge_ids: edgeIds, ambiguous_pairs: ambiguous, warnings }
+      return { nodes: new Set(ids.filter(id => graph.known.has(id))), pairs, edge_ids: edgeIds, edge_indexes: edgeIndexes, ambiguous_pairs: ambiguous, warnings }
     }
 
     /** Exact declared edge membership; legacy parallel edges are reported, never guessed. */
@@ -1194,7 +1209,10 @@ window.__ModuleLoader__.load({
       let collapsedIds = []
       const threshold = options.collapseThreshold ?? FLOW_COLLAPSE_THRESHOLD
       if (!options.expandAll && mainPath.length && graph.nodes.length > threshold) {
-        const keep = new Set([...mainPath, ...listOf(options.keepNodeIds), ...(activeMembers?.nodes ?? [])])
+        // Collapse only incidental processing nodes. Decisions, failure handling,
+        // recovery and exits remain inspectable even on a large unit's default view.
+        const keep = new Set([...mainPath, ...orderedNodes.filter(node => KEEP_VISIBLE_KINDS.has(node.kind)).map(node => node.id),
+          ...listOf(options.keepNodeIds), ...(activeMembers?.nodes ?? [])])
         for (const edge of graph.edges) {
           if (mainSet.has(edge.source)) keep.add(edge.target)
           if (mainSet.has(edge.target)) keep.add(edge.source)
@@ -1358,8 +1376,9 @@ window.__ModuleLoader__.load({
     const __flowRender = (() => {
     // Render layouts into a framework-neutral element tree {tag, attrs, children}.
     // The client maps the tree to React elements; the host serializes it with
-    // toSvgString to store graph.svg. No scripts or external resources are emitted.
-    const { FLOW_KIND_COLORS, FLOW_KIND_LABELS } = __flowLayout
+    // toSvgString keeps ordinary trees static. Interactive downloads explicitly opt
+    // into toInteractiveFlowSvg, which embeds only our fixed local event handler.
+    const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers } = __flowLayout
     const FONT = "'Microsoft YaHei UI','PingFang SC','Noto Sans CJK SC',sans-serif"
     const NEUTRAL = '#7c8798'
     const HIGHLIGHT = '#3157d5'
@@ -1419,14 +1438,15 @@ window.__ModuleLoader__.load({
           'aria-label': `${edge.source} → ${edge.target}${condition ? `：${condition}` : ''}`,
           cursor: 'pointer', opacity: dim ? 0.16 : 1 },
           el('title', {}, `${edge.source} → ${edge.target}${condition ? `：${condition}` : ''}`),
-          el('path', { d: edge.path, fill: 'none', stroke: 'transparent', 'stroke-width': 14, 'pointer-events': 'stroke', 'data-edge-hit': 'true' }),
+          el('path', { d: edge.path, fill: 'none', stroke: 'transparent', 'stroke-width': 8, 'pointer-events': 'stroke', 'data-edge-hit': 'true' }),
           el('path', { d: edge.path, fill: 'none', stroke: color, 'stroke-width': focusedEdge ? 3.6 : on ? 2.8 : 1.4,
+            'data-edge-line': 'true', 'pointer-events': 'none',
             'stroke-dasharray': edge.back ? '6 4' : null, 'marker-end': `url(#${prefix}-${on ? 'arrow-hi' : 'arrow'})` }),
           condition ? el('g', { 'data-edge-label': edge.edge_id },
             leader ? el('path', { d: `M${leader.from.x} ${leader.from.y} L${leader.to.x} ${leader.to.y}`, fill: 'none', stroke: color,
               'stroke-width': on ? 1.5 : 1, 'stroke-dasharray': '2 2', 'pointer-events': 'none' }) : null,
             leader ? el('circle', { cx: leader.from.x, cy: leader.from.y, r: on ? 3 : 2, fill: color, 'pointer-events': 'none' }) : null,
-            box ? el('rect', { x: box.x, y: box.y, width: box.w, height: box.h, rx: 4,
+            box ? el('rect', { x: box.x, y: box.y, width: box.w, height: box.h, rx: 4, 'data-edge-label-box': 'true',
               fill: on ? '#eff6ff' : '#ffffff', stroke: on ? HIGHLIGHT : '#cbd5e1', 'stroke-width': on ? 1.4 : 1 }) : null,
             el('text', { x: edge.label_x, 'text-anchor': 'middle', 'font-size': 11, fill: on ? '#1e40af' : '#334155', 'font-weight': on ? 600 : 400 },
               (edge.label_lines ?? [edge.label]).map((line, index, lines) => el('tspan', {
@@ -1439,7 +1459,7 @@ window.__ModuleLoader__.load({
         return el('g', { 'data-node-id': node.id, 'data-highlighted': on ? 'true' : 'false', 'data-selected': selected ? 'true' : 'false',
           cursor: 'pointer', opacity: hasHighlight && !on ? 0.25 : 1 },
           el('title', {}, `${node.label}${node.kind ? `（${FLOW_KIND_LABELS[node.kind] ?? node.kind}）` : ''}${node.description ? `\n${node.description}` : ''}`),
-          el('rect', { x: node.x, y: node.y, width: node.w, height: node.h, rx: 10, fill: on ? '#eff6ff' : '#ffffff', stroke: color,
+          el('rect', { x: node.x, y: node.y, width: node.w, height: node.h, rx: 10, 'data-node-shape': 'true', fill: on ? '#eff6ff' : '#ffffff', stroke: color,
             'stroke-width': selected || focusNodes.has(node.id) ? 3 : on ? 2.6 : node.on_main ? 2 : 1.4 }),
           el('rect', { x: node.x, y: node.y, width: 6, height: node.h, rx: 3, fill: color }),
           node.kind ? el('text', { x: node.x + node.w - 8, y: node.y + 15, 'text-anchor': 'end', 'font-size': 10, fill: color }, FLOW_KIND_LABELS[node.kind] ?? node.kind) : null,
@@ -1452,7 +1472,11 @@ window.__ModuleLoader__.load({
       }
       return el('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: `0 0 ${layout.width} ${layout.height}`, width: layout.width, height: layout.height,
         'font-family': FONT, role: 'img', 'data-layout-version': layout.layout_version ?? 'legacy' },
-        arrowDefs(prefix), el('rect', { x: 0, y: 0, width: layout.width, height: layout.height, fill: '#fbfcfe' }),
+        arrowDefs(prefix),
+        // Hover/focus is deliberately local and does not change geometry, page
+        // state, or the opacity of other paths. Keyboard activation still selects.
+        el('style', {}, '[data-edge-label]:hover [data-edge-label-box], [data-edge-id]:focus-visible [data-edge-label-box] { stroke: #3157d5; fill: #eff6ff; } [data-node-id]:focus-visible [data-node-shape] { stroke: #3157d5; stroke-width: 3; }'),
+        el('rect', { x: 0, y: 0, width: layout.width, height: layout.height, fill: '#fbfcfe' }),
         el('g', { class: 'edges' }, edges), el('g', { class: 'nodes' }, nodes), extra)
     }
 
@@ -1519,7 +1543,160 @@ window.__ModuleLoader__.load({
       return children ? `<${tree.tag}${attrs}>${children}</${tree.tag}>` : `<${tree.tag}${attrs}/>`
     }
 
-    return { renderFlowTree, renderCallGraphTree, toSvgString }
+    // This function is serialized as trusted application code. All model-authored
+    // content is separately XML-escaped in metadata and rendered with textContent.
+    function interactiveFlowRuntime() {
+      const svg = document.documentElement
+      const data = JSON.parse(svg.querySelector('[data-flow-payload]').textContent)
+      const nodes = [...svg.querySelectorAll('[data-node-id]')]
+      const edges = [...svg.querySelectorAll('[data-edge-id]')]
+      const status = svg.querySelector('[data-flow-status]')
+      const detail = svg.querySelector('[data-flow-detail]')
+      let selectedNode = '', selectedPath = '', selectedEdge = ''
+      const routesForNode = id => data.paths.filter(path => path.node_ids.includes(id))
+      const choices = () => selectedNode ? routesForNode(selectedNode) : data.paths
+      function caption(target, value) {
+        const full = String(value), lines = [...target.querySelectorAll('[data-caption-line]')]
+        target.querySelector('title').textContent = full
+        target.setAttribute('aria-label', full)
+        const capacity = Math.max(20, Math.floor((data.width - 32) / 7.5))
+        const chunks = ['']; let used = 0
+        for (const char of full) {
+          const width = char.codePointAt(0) > 255 ? 2 : 1
+          if (char === '\n' || used + width > capacity) { chunks.push(''); used = 0 }
+          if (char !== '\n') { chunks[chunks.length - 1] += char; used += width }
+        }
+        lines.forEach((line, index) => {
+          const content = chunks[index] || ''
+          line.textContent = index === lines.length - 1 && chunks.length > lines.length
+            ? [...content].slice(0, Math.max(0, [...content].length - 12)).join('') + '…（悬停查看全文）' : content
+        })
+      }
+      const original = new Map()
+      for (const item of [...nodes, ...edges]) {
+        item.setAttribute('role', 'button')
+        item.setAttribute('tabindex', '0')
+        item.setAttribute('aria-label', item.querySelector('title')?.textContent || '查看详情')
+        for (const shape of item.querySelectorAll('[data-node-shape], [data-edge-line]')) {
+          original.set(shape, ['stroke', 'stroke-width', 'fill', 'marker-end'].map(name => [name, shape.getAttribute(name)]))
+        }
+      }
+      function update() {
+        const route = data.paths.find(path => path.path_id === selectedPath)
+        const edge = data.edges.find(item => item.edge_id === selectedEdge)
+        const nodeIds = new Set(route?.node_ids || [])
+        const edgeIds = new Set(route?.edge_ids || [])
+        if (selectedNode) nodeIds.add(selectedNode)
+        if (edge) { nodeIds.add(edge.source); nodeIds.add(edge.target); edgeIds.add(edge.edge_id) }
+        const dim = Boolean(route || edge)
+        for (const [shape, attrs] of original) for (const [name, value] of attrs) {
+          if (value === null) shape.removeAttribute(name)
+          else shape.setAttribute(name, value)
+        }
+        for (const item of nodes) {
+          const id = item.getAttribute('data-node-id'), on = nodeIds.has(id)
+          item.setAttribute('data-highlighted', String(on))
+          item.setAttribute('data-selected', String(id === selectedNode))
+          item.setAttribute('aria-pressed', String(id === selectedNode))
+          item.setAttribute('opacity', dim && !on ? '0.25' : '1')
+          if (on) {
+            const shape = item.querySelector('[data-node-shape]')
+            shape.setAttribute('stroke', '#3157d5'); shape.setAttribute('fill', '#eff6ff'); shape.setAttribute('stroke-width', '3')
+          }
+        }
+        for (const item of edges) {
+          const id = item.getAttribute('data-edge-id'), on = edgeIds.has(id)
+          item.setAttribute('data-highlighted', String(on))
+          item.setAttribute('data-focused', String(id === selectedEdge))
+          item.setAttribute('aria-pressed', String(id === selectedEdge))
+          item.setAttribute('opacity', dim && !on ? '0.16' : '1')
+          if (on) {
+            const line = item.querySelector('[data-edge-line]')
+            line.setAttribute('stroke', '#3157d5'); line.setAttribute('stroke-width', '3')
+            line.setAttribute('marker-end', `url(#${data.prefix}-arrow-hi)`)
+          }
+        }
+        const candidates = choices(), position = candidates.findIndex(path => path.path_id === selectedPath)
+        caption(status, route ? `${route.title || route.path_id} · 路径 ${position + 1}/${candidates.length}${route.warnings.length ? ' · 部分连线未确认，未高亮' : ''}`
+          : selectedNode ? candidates.length ? `此节点属于 ${candidates.length} 条声明路径，请用上一条 / 下一条选择。` : '此节点没有声明路径；仅显示节点，不推断路线。'
+            : '点击节点查看声明路径；多路径用上一条 / 下一条选择。')
+        const node = data.nodes.find(item => item.id === selectedNode)
+        caption(detail, edge ? `${edge.source} → ${edge.target}：${edge.condition || '未提供条件'}`
+          : node ? `${node.label}${node.description ? `：${node.description}` : ''}` : '支持 Tab、Enter / 空格；Esc 清除。请在浏览器中直接打开本 SVG。')
+        for (const button of svg.querySelectorAll('[data-control]')) {
+          const disabled = button.getAttribute('data-control') !== 'reset' && candidates.length === 0
+          button.setAttribute('aria-disabled', String(disabled))
+          button.setAttribute('opacity', disabled ? '0.45' : '1')
+        }
+      }
+      function activate(target) {
+        const control = target.getAttribute('data-control')
+        if (control === 'reset') { selectedNode = ''; selectedPath = ''; selectedEdge = '' }
+        else if (control) {
+          const candidates = choices()
+          if (!candidates.length) return
+          const current = candidates.findIndex(path => path.path_id === selectedPath)
+          const next = current < 0 ? control === 'previous' ? candidates.length - 1 : 0
+            : (current + (control === 'previous' ? -1 : 1) + candidates.length) % candidates.length
+          selectedPath = candidates[next].path_id; selectedEdge = ''
+        } else if (target.hasAttribute('data-node-id')) {
+          selectedNode = target.getAttribute('data-node-id'); selectedEdge = ''
+          const candidates = routesForNode(selectedNode)
+          if (!candidates.some(path => path.path_id === selectedPath)) selectedPath = candidates.length === 1 ? candidates[0].path_id : ''
+        } else { selectedEdge = target.getAttribute('data-edge-id'); selectedNode = '' }
+        update()
+      }
+      svg.addEventListener('click', event => {
+        const target = event.target.closest('[data-node-id], [data-edge-id], [data-control]')
+        if (target && svg.contains(target)) activate(target)
+      })
+      svg.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { selectedNode = ''; selectedPath = ''; selectedEdge = ''; update(); event.preventDefault(); return }
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        const target = event.target.closest('[data-node-id], [data-edge-id], [data-control]')
+        if (target && svg.contains(target)) { event.preventDefault(); activate(target) }
+      })
+      update()
+    }
+
+    /** Offline interactive SVG. Static/PNG serialization never includes this code. */
+    function toInteractiveFlowSvg(graph, options = {}) {
+      const prefix = String(options.idPrefix ?? 'flow-export').replace(/[^\w-]/g, '_')
+      // Include all nodes so an exported path never disappears behind a collapsed
+      // view. Route membership uses the same exact edge validator as the UI.
+      const layout = layoutFlow(graph, { expandAll: true })
+      const drawing = renderFlowTree(layout, { idPrefix: prefix })
+      const width = Math.max(720, layout.width), header = 156
+      const payload = {
+        prefix, width,
+        nodes: layout.nodes.map(({ id, label, description }) => ({ id, label, description })),
+        edges: layout.edges.map(({ edge_id, source, target, condition }) => ({ edge_id, source, target, condition })),
+        paths: (graph.paths ?? []).filter(path => path?.path_id).map(path => {
+          const members = pathMembers(graph, path.path_id)
+          return { path_id: path.path_id, title: path.title, node_ids: Array.isArray(path.node_ids) ? path.node_ids.filter(id => members?.nodes?.has(id)) : [],
+            edge_ids: [...(members?.edge_ids ?? [])], warnings: members?.warnings ?? [] }
+        }),
+      }
+      const button = (action, title, x) => el('g', { 'data-control': action, role: 'button', tabindex: 0, cursor: 'pointer', 'aria-label': title },
+        el('rect', { x, y: 10, width: 86, height: 30, rx: 5, fill: '#ffffff', stroke: '#94a3b8' }),
+        el('text', { x: x + 43, y: 30, 'text-anchor': 'middle', 'font-size': 13, fill: '#1f2937' }, title))
+      const caption = (name, ys, label, color) => el('g', { [`data-flow-${name}`]: 'true', 'aria-live': name === 'status' ? 'polite' : null },
+        el('title', {}, label), ys.map((y, index) => el('text', { x: 16, y, 'font-size': 13, fill: color, 'data-caption-line': index }, index === 0 ? label : '')))
+      const tree = el('svg', { ...drawing.attrs, width, height: layout.height + header,
+        viewBox: `0 0 ${width} ${layout.height + header}`, role: 'group', 'aria-label': '可交互流程图', 'data-interactive-flow': 'v1' },
+        el('metadata', { 'data-flow-payload': 'true' }, JSON.stringify(payload)),
+        el('rect', { width, height: layout.height + header, fill: '#fbfcfe' }),
+        button('previous', '上一条路径', 16), button('next', '下一条路径', 112), button('reset', '清除选择', 208),
+        caption('status', [61, 79], '点击节点查看声明路径；多路径用上一条 / 下一条选择。', '#1e40af'),
+        caption('detail', [105, 123, 141], '支持 Tab、Enter / 空格；Esc 清除。请在浏览器中直接打开本 SVG。', '#475569'),
+        el('g', { transform: `translate(0 ${header})` }, drawing.children))
+      const staticMarkup = toSvgString(tree)
+      // The fixed source has no model interpolation and no external dependencies.
+      const script = `(${interactiveFlowRuntime.toString()})()`
+      return staticMarkup.replace(/<\/svg>$/, `<script type="application/ecmascript"><![CDATA[${script.replace(/\]\]>/g, ']]]]><![CDATA[>')}]]></script></svg>`)
+    }
+
+    return { renderFlowTree, renderCallGraphTree, toSvgString, toInteractiveFlowSvg }
     })()
 
     const __callGraph = (() => {
@@ -1683,7 +1860,7 @@ window.__ModuleLoader__.load({
 
     const { normalizeFlow: sharedNormalizeFlow } = __flowNormalize
     const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, pathsForNode, layoutCallGraph } = __flowLayout
-    const { renderFlowTree, renderCallGraphTree, toSvgString } = __flowRender
+    const { renderFlowTree, renderCallGraphTree, toSvgString, toInteractiveFlowSvg } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
     const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
     const { renderReviewPresentation, reviewStatusLabel, isReviewRecord } = __reviewPresentation
@@ -3929,10 +4106,8 @@ window.__ModuleLoader__.load({
         props.role = 'button'
         props.tabIndex = 0
         props['aria-label'] = tree.attrs?.['aria-label'] || `查看连线 ${edgeId}`
-        props.onPointerEnter = () => onEdge.hover(edgeId)
-        props.onPointerLeave = () => onEdge.hover('')
-        props.onFocus = () => onEdge.hover(edgeId)
-        props.onBlur = () => onEdge.hover('')
+        // Pointer crossing must not change page state or move the canvas.
+        // Local hover/focus styling lives in the SVG; details require activation.
         props.onClick = event => { event?.stopPropagation?.(); onEdge.select(edgeId) }
         props.onKeyDown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation?.(); onEdge.select(edgeId) } }
       }
@@ -3987,8 +4162,8 @@ window.__ModuleLoader__.load({
       link.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
     }
-    function exportSvgTree(tree, name, format) {
-      const markup = toSvgString(tree)
+    function exportSvgTree(tree, name, format, graph) {
+      const markup = format === 'svg' && graph ? toInteractiveFlowSvg(graph) : toSvgString(tree)
       if (format === 'svg') return downloadBlob(new Blob([markup], { type: 'image/svg+xml' }), `${name}.svg`)
       if (typeof Image === 'undefined' || typeof document === 'undefined') return
       const image = new Image()
@@ -4168,7 +4343,6 @@ window.__ModuleLoader__.load({
         flow?.source_record?.record_id, flow?.source_record?.revision, flow?.revision,
         graph.nodes, graph.edges, graph.paths, graph.layout_version, graph.main_path_ids])
       const [selection, setSelection] = React.useState({ key: '', node: '', path: '', edge: '' })
-      const [hover, setHover] = React.useState({ key: '', edge: '' })
       const [expandedKey, setExpandedKey] = React.useState('')
       // A changed flow/revision never inherits a stale route or edge selection.
       const active = selection.key === identity ? selection : { node: '', path: '', edge: '' }
@@ -4186,14 +4360,12 @@ window.__ModuleLoader__.load({
         const routes = pathsForNode(graph, id)
         const nextPath = routes.some(path => path.path_id === pathId) ? pathId : routes.length === 1 ? routes[0].path_id : ''
         setSelection({ key: identity, node: id, path: nextPath, edge: '' })
-        setHover({ key: identity, edge: '' })
       }
       const choosePath = id => {
         const route = paths.find(path => path.path_id === id)
         setSelection({ key: identity, node: route?.node_ids?.includes(selected) ? selected : '', path: id, edge: '' })
-        setHover({ key: identity, edge: '' })
       }
-      const focusedEdgeId = hover.key === identity && hover.edge ? hover.edge : active.edge
+      const focusedEdgeId = active.edge
       const focusedEdge = layout.edges.find(edge => edge.edge_id === focusedEdgeId)
       const name = `${flow?.display_id || flow?.flow_id || 'flow'}`.replace(/[^\w.-]+/g, '_')
       const tree = renderFlowTree(layout, { highlight, selected, focusedEdgeId, idPrefix })
@@ -4201,6 +4373,8 @@ window.__ModuleLoader__.load({
       const evidence = node ? evidenceText(node.source_evidence) : []
       const selectedPath = paths.find(path => path.path_id === pathId)
       const routeLabel = path => `${path.path_id}${path.title ? ` · ${path.title}` : ''}`
+      const routeIncomplete = Boolean(pathId && highlight?.warnings?.length)
+      const graphWarnings = [...new Set([...layout.warnings, ...(highlight?.warnings ?? [])])]
       return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图', style: { marginTop: 12 } },
         h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', margin: '8px 0' } },
           paths.length ? h('select', { 'aria-label': '高亮路径', value: pathId, onChange: event => choosePath(event.target.value) },
@@ -4208,13 +4382,15 @@ window.__ModuleLoader__.load({
             paths.map(path => h('option', { key: path.path_id, value: path.path_id }, routeLabel(path)))) : null,
           controls,
           layout.collapsed.count || expandAll ? h('button', { type: 'button', onClick: () => setExpandedKey(expandAll ? '' : identity) }, expandAll ? '折叠次要节点' : '展开全部') : null,
-          selected || pathId || active.edge ? h('button', { type: 'button', onClick: () => { setSelection({ key: identity, node: '', path: '', edge: '' }); setHover({ key: identity, edge: '' }) } }, '清除选择') : null,
-          h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'svg') }, '导出 SVG'),
+          selected || pathId || active.edge ? h('button', { type: 'button', onClick: () => { setSelection({ key: identity, node: '', path: '', edge: '' }) } }, '清除选择') : null,
+          h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'svg', graph) }, '导出 SVG'),
           h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'png') }, '导出 PNG')),
-        warningList([...layout.warnings, ...(highlight?.warnings ?? [])], '流程图提示'),
+        graphWarnings.length ? h('details', { className: 'pangea-diagram-caption', 'aria-label': '流程图诊断' },
+          h('summary', { style: { cursor: 'pointer' } }, `流程图提示 ${graphWarnings.length} 项（点击查看）`), warningList(graphWarnings, '流程图提示')) : null,
         selected ? h('div', { className: 'pangea-diagram-caption', role: 'status', 'aria-label': '节点路径选择' },
           candidates.length === 0 ? '该节点没有已声明路径；当前只显示节点，不推断完整路线。'
-            : candidates.length > 1 ? `该节点属于 ${candidates.length} 条已声明路径${pathId ? '，当前高亮所选路径。' : '，请选择需要查看的一条。'}`
+            : routeIncomplete ? '该路径存在结构不一致；仅高亮已核实连线，完整路线待确认。'
+              : candidates.length > 1 ? `该节点属于 ${candidates.length} 条已声明路径${pathId ? '，当前高亮所选路径。' : '，请选择需要查看的一条。'}`
               : '已高亮经过该节点的唯一声明路径。',
           candidates.length > 1 ? h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', marginTop: 6 } }, candidates.map(path => h('button', {
             key: path.path_id, type: 'button', 'aria-pressed': pathId === path.path_id, onClick: () => choosePath(path.path_id),
@@ -4222,12 +4398,8 @@ window.__ModuleLoader__.load({
         selectedPath ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '所选路径步骤' },
           h('strong', null, routeLabel(selectedPath)), h('p', null, (selectedPath.node_ids ?? []).map((id, index) =>
             `${index + 1}. ${graph.nodes?.find(item => item.id === id)?.label || id}`).join(' → '))) : null,
-        focusedEdge ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '连线详情' },
-          h('strong', null, `${layout.nodes.find(item => item.id === focusedEdge.source)?.label || focusedEdge.source} → ${layout.nodes.find(item => item.id === focusedEdge.target)?.label || focusedEdge.target}`),
-          h('p', null, focusedEdge.condition || '原记录未提供条件。'), h('small', null, focusedEdge.edge_id)) : null,
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } },
           h('div', { ...panProps, style: { ...panProps.style, flex: '1 1 320px', minWidth: 0 } }, svgTreeToReact(sized(tree), 'svg', chooseNode, {
-            hover: edge => setHover({ key: identity, edge }),
             select: edge => setSelection({ key: identity, node: '', path: pathId, edge }),
           })),
           node ? h('aside', { 'aria-label': '节点详情', style: { width: 240, flex: '0 0 240px', border: '1px solid #e2e7e0', borderRadius: 8, padding: 12, background: '#fff' } },
@@ -4235,7 +4407,10 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', className: 'b04-link', style: { flexShrink: 0 }, 'aria-label': '关闭节点详情', onClick: () => setSelection({ key: identity, node: '', path: pathId, edge: active.edge }) }, '关闭')),
             h('small', null, `${node.id}${node.kind ? ` · ${FLOW_KIND_LABELS[node.kind] ?? node.kind}` : ''}`),
             h('p', null, node.description || '原记录未提供节点说明。'),
-            evidence.length ? h('div', null, h('small', null, '源码依据'), evidence.map(location => h('p', { key: location }, h('code', null, location)))) : null) : null))
+            evidence.length ? h('div', null, h('small', null, '源码依据'), evidence.map(location => h('p', { key: location }, h('code', null, location)))) : null) : null),
+        focusedEdge ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '连线详情' },
+          h('strong', null, `${layout.nodes.find(item => item.id === focusedEdge.source)?.label || focusedEdge.source} → ${layout.nodes.find(item => item.id === focusedEdge.target)?.label || focusedEdge.target}`),
+          h('p', null, focusedEdge.condition || '原记录未提供条件。'), h('small', null, focusedEdge.edge_id)) : null)
     }
 
     /** call-graph-v1 view: function nodes, merged call edges (×N) and per-function variable flow. */
@@ -5379,7 +5554,7 @@ window.__ModuleLoader__.load({
             setDiagramType(view.type || 'workflow')
             if (view.flow_id) setFlowSelection(view.flow_id)
             const flowId = view.flow_id || flowSelection || businessFlows[0]?.flow_id
-            setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : 'diagram', step: '', query: '', page: 1 })
+            setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : view.type === 'sequence' ? 'sequence' : 'diagram', step: '', query: '', page: 1 })
           }
           await loadWorkbench()
         } catch (reason) {
@@ -6648,7 +6823,7 @@ window.__ModuleLoader__.load({
         const currentFlow = businessFlows.find(flow => flow.flow_id === view.flow_id || (view.logical_flow_id && flow.logical_flow_id === view.logical_flow_id && flow.unit_id === view.flow_unit_id))
         if (currentFlow) setFlowSelection(currentFlow.flow_id)
         const flowId = currentFlow?.flow_id || flowSelection || businessFlows[0]?.flow_id
-        setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : 'diagram', step: '', query: '', page: 1 })
+        setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : view.type === 'sequence' ? 'sequence' : 'diagram', step: '', query: '', page: 1 })
         setDiagramError('')
         if (!activateConversation || !view.session_id || view.session_id === selectedTask?.active_conversation_id) return
         if (conversationActionRef.current) { setDiagramError('会话正在切换，请稍后点击“查看图表会话”。'); return }
@@ -6667,19 +6842,23 @@ window.__ModuleLoader__.load({
       async function changeFlowView(reader, view, flow) {
         setFlowReader({ ...reader, view })
         setDiagramError('')
-        if (view !== 'functions') return
+        if (!['functions', 'sequence'].includes(view)) return
+        if (view === 'sequence') { setDiagramType('sequence'); setDiagramPanel('canvas') }
         const listed = await diagramAction('architecture-list')
         if (!listed) return
         const views = matchingDiagrams(flow, view === 'functions' ? 'function_variables' : 'standard', listed)
+          .filter(item => view !== 'sequence' || item.type === 'sequence')
         await chooseDiagram(views.find(item => item.view_id === diagramSelection)
-          ?? views.find(item => item.type === (view === 'functions' ? 'workflow' : diagramType)) ?? views[0])
+          ?? views.find(item => item.type === (view === 'functions' ? 'workflow' : 'sequence')) ?? views[0],
+          view === 'sequence' ? { activateConversation: false } : undefined)
       }
 
-      function renderDiagrams(flow, profile = 'standard') {
+      function renderDiagrams(flow, profile = 'standard', requestedType = '') {
         const functions = profile === 'function_variables'
         const views = matchingDiagrams(flow, profile)
-        const selected = views.find(view => view.view_id === diagramSelection) ?? views.find(view => view.type === (functions ? 'workflow' : diagramType))
-        const type = functions ? 'workflow' : selected?.type || diagramType
+        const selected = views.find(view => view.view_id === diagramSelection && (!requestedType || view.type === requestedType))
+          ?? views.find(view => view.type === (functions ? 'workflow' : requestedType || diagramType))
+        const type = functions ? 'workflow' : requestedType || selected?.type || diagramType
         const wideDiagram = functions || type !== 'workflow'
         const typeViews = views.filter(view => view.type === type)
         const previous = selected?.previous_view_id ? views.find(view => view.view_id === selected.previous_view_id && view.available) : views.find(view => view.view_id !== selected?.view_id && view.available)
@@ -6691,6 +6870,7 @@ window.__ModuleLoader__.load({
         const select = view => { setDiagramZoom(100); setDiagramPanel('canvas'); void chooseDiagram(view) }
         const switchType = nextType => {
           setDiagramType(nextType)
+          setFlowReader(value => ({ ...value, view: nextType === 'sequence' ? 'sequence' : 'diagram' }))
           setDiagramPanel('canvas')
           setDiagramZoom(100)
           const match = views.find(view => view.type === nextType)
@@ -6708,7 +6888,7 @@ window.__ModuleLoader__.load({
             flow_id: selected.flow_id ?? null, previous_view_id: selected.view_id, instruction: diagramInstruction.trim() })
         }
         const callGraph = selected?.renderer === 'call-graph'
-        const canCreate = functions || archifyOn
+        const canCreate = functions || type === 'sequence' || archifyOn
         const callGraphView = view => h(CallGraphView, { key: view.view_id, graph: view.call_graph, status: view.call_graph_status || 'ok',
           errors: view.call_graph_errors ?? [], svgUrl: artifactUrl(view, 'svg', true) })
         const frame = (view, full = false) => view?.renderer === 'call-graph' ? callGraphView(view) : h('iframe', { title: full ? '图表全屏预览' : `${diagramName(view)}预览`, src: artifactUrl(view, 'html'), sandbox: 'allow-scripts allow-downloads',
@@ -6725,7 +6905,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', 'aria-label': '重置图表缩放', onClick: () => setDiagramZoom(100) }, `${diagramZoom}%`),
           h('button', { type: 'button', 'aria-label': '放大图表', onClick: () => zoom(25) }, '+'),
           view && exportAction ? h('a', { className: 'b04-link', href: artifactUrl(view, 'svg', true), download: `${view.view_id}.svg` }, '导出 SVG') : null)
-        const types = !functions ? h('nav', { className: 'b04-diagram-types', 'aria-label': '图表类型' }, Object.entries(DIAGRAM_LABELS).map(([value, label]) => h('button', {
+        const types = !functions && !requestedType ? h('nav', { className: 'b04-diagram-types', 'aria-label': '图表类型' }, Object.entries(DIAGRAM_LABELS).map(([value, label]) => h('button', {
           key: value, type: 'button', 'aria-pressed': type === value, disabled: diagramBusy, onClick: () => switchType(value),
         }, label.replace('图', '')))) : null
         const top = h('div', { className: 'b04-canvas-head' },
@@ -6736,8 +6916,9 @@ window.__ModuleLoader__.load({
             selected && !generating ? h('button', { type: 'button', onClick: () => setDiagramPanel('versions') }, '版本与修改') : null,
             selected?.session_id && !generating && !failed ? h('button', { type: 'button', disabled: diagramBusy, onClick: () => chooseDiagram(selected, { activateConversation: true }) }, '查看图表会话') : null,
             preview && wideDiagram && !callGraph ? h('a', { className: 'b03-task-action', href: artifactUrl(selected, 'svg', true), download: `${selected.view_id}.svg` }, '导出 SVG') : null,
-            preview && !wideDiagram && !callGraph ? h('button', { type: 'button', ref: diagramFullscreenTriggerRef, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏') : null,
-            !selected && canCreate ? h('button', { type: 'button', disabled: diagramBusy, onClick: create }, functions ? '生成函数与变量图' : `生成${DIAGRAM_LABELS[type]}（精美导出）`) : null))
+            preview && type === 'sequence' ? h('a', { className: 'b03-task-action', href: artifactUrl(selected, 'html', true), download: `${selected.view_id}.html` }, '导出交互 HTML') : null,
+            preview && (!wideDiagram || type === 'sequence') && !callGraph ? h('button', { type: 'button', ref: diagramFullscreenTriggerRef, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏') : null,
+            !selected && canCreate ? h('button', { type: 'button', disabled: diagramBusy, onClick: create }, functions ? '生成函数与变量图' : type === 'sequence' ? '生成时序图' : `生成${DIAGRAM_LABELS[type]}（精美导出）`) : null))
         const logs = selected ? h('aside', { className: 'b04-progress-log' }, h('h3', null, failed ? '生成记录与诊断' : '生成进展'),
           failed ? h(React.Fragment, null,
             selected.failure_stage ? field('失败阶段', selected.failure_stage) : null,
@@ -6751,7 +6932,7 @@ window.__ModuleLoader__.load({
               h('p', null, event.error || event.error_summary || event.message || event.stop_reason || (event.at ? formatTime(event.at) : '正在进行'))))),
           selected.session_id ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => chooseDiagram(selected, { activateConversation: true }) }, '查看图表会话') : null) : null
         const pending = selected && (generating || failed) && !preview
-        const canvas = h('section', { className: 'b04-canvas-wrap', 'aria-label': functions ? '函数与变量图工作区' : '精美导出（实验）工作区' }, top,
+        const canvas = h('section', { className: 'b04-canvas-wrap', 'aria-label': functions ? '函数与变量图工作区' : type === 'sequence' ? '时序图工作区' : '精美导出（实验）工作区' }, top,
           diagramError ? h('div', { role: 'alert', style: { ...styles.error, padding: '12px 20px' } }, diagramError) : null,
           selected?.candidate_unverified ? h('div', { className: 'pangea-diagram-caption' }, '最新修改尚未验证；当前预览对应上次验证的候选。',
             !generating ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-validate', { view_id: selected.view_id }) }, '验证最新候选') : null) : null,
@@ -6990,7 +7171,7 @@ window.__ModuleLoader__.load({
         const modebar = flow ? h('div', { className: 'b04-modebar' },
           h('div', null, h('strong', null, flow.title || '业务流程'), h('span', { style: styles.badge }, flow.display_id || flow.flow_id)),
           h('div', { role: 'group', 'aria-label': '流程展示方式', className: 'pangea-flow-modes' },
-            [['reader', '文字流程', '流程阅读视图'], ['diagram', '流程图', '流程图视图'], ['functions', '函数与变量', '函数与变量流程图视图']].map(([view, label, aria]) => h('button', {
+            [['reader', '文字流程', '流程阅读视图'], ['diagram', '流程图', '流程图视图'], ['sequence', '时序图', '时序图视图'], ['functions', '函数与变量', '函数与变量流程图视图']].map(([view, label, aria]) => h('button', {
               key: view, type: 'button', 'aria-label': aria, 'aria-pressed': reader.view === view, disabled: diagramBusy,
               onClick: () => { setFlowBranchDetail(''); return changeFlowView(reader, view, flow) },
             }, label)))) : null
@@ -7141,6 +7322,7 @@ window.__ModuleLoader__.load({
             ref: element => { if (element) { element.scrollTop = panelState(flow).scrollTop; element.scrollLeft = panelState(flow).scrollLeft } },
             onScroll: event => { const state = panelState(flow); state.scrollTop = event.currentTarget.scrollTop; state.scrollLeft = event.currentTarget.scrollLeft } },
             reader.view === 'reader' && !branch ? renderFlowReader(flow)
+            : reader.view === 'sequence' ? renderDiagrams(flow, 'standard', 'sequence')
             : reader.view === 'functions' ? renderDiagrams(flow, 'function_variables')
             : reader.view === 'diagram' ? h('div', null,
               h(FlowGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).graph, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] }),
@@ -8340,7 +8522,7 @@ window.__ModuleLoader__.load({
       const resultTargetDetails = resultTarget ? h('details', { style: { marginTop: 8, fontSize: 12, color: '#68736a' } },
         h('summary', { style: { cursor: 'pointer' } }, '分析目标'),
         h('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: 800 } }, resultTarget)) : null
-      const flowGraphType = flowScreen && flowReader?.view === 'diagram' && !['workflow', ''].includes(diagramType)
+      const flowGraphType = flowScreen && (flowReader?.view === 'sequence' || flowReader?.view === 'diagram' && !['workflow', ''].includes(diagramType))
       const flowHeader = flowScreen ? h(React.Fragment, null,
         h('nav', { className: 'b03-overview-breadcrumb', 'aria-label': '当前位置' },
           h('button', { type: 'button', onClick: () => jump('tasks') }, 'PANGEA 分析'), h('span', { 'aria-hidden': true }, '›'),

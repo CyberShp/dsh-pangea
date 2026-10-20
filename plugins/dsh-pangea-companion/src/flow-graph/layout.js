@@ -20,6 +20,7 @@ const MARGIN_Y = 36
 const LABEL_GAP = 12
 const MAIN_KINDS = new Set(['entry', 'main', 'exit'])
 const RIGHT_KINDS = new Set(['error', 'propagation'])
+const KEEP_VISIBLE_KINDS = new Set(['entry', 'branch', 'error', 'propagation', 'recovery', 'exit'])
 
 const listOf = value => Array.isArray(value) ? value : []
 const charWidth = char => char.charCodeAt(0) < 128 ? 1 : 2
@@ -260,12 +261,17 @@ export function pathsForNode(flow, nodeId) {
 }
 
 function membersForGraph(flow, pathId, graph) {
-  const path = listOf(flow?.paths).find(p => p?.path_id === pathId)
+  const matches = listOf(flow?.paths).filter(p => p?.path_id === pathId)
+  const path = matches[0]
   if (!path) return null
+  if (matches.length > 1) return { nodes: new Set(), pairs: new Set(), edge_ids: new Set(), edge_indexes: new Set(), ambiguous_pairs: [],
+    warnings: [`路径 ID ${pathId} 重复，无法唯一选择路线；请修正原记录。`] }
   const ids = listOf(path.node_ids).map(String)
+  const where = `paths[${listOf(flow?.paths).indexOf(path)}]`
   const warnings = []
   const pairs = new Set()
   const edgeIds = new Set()
+  const edgeIndexes = new Set()
   const ambiguous = []
   const byId = new Map(graph.edges.map(edge => [edge.edge_id, edge]))
   const byPair = new Map()
@@ -276,25 +282,34 @@ function membersForGraph(flow, pathId, graph) {
   }
   const explicit = Array.isArray(path.edge_ids)
   if (explicit && path.edge_ids.length !== Math.max(0, ids.length - 1)) {
-    warnings.push(`路径 ${pathId} 的 edge_ids 与节点步数不一致；未匹配的连线不会高亮。`)
+    warnings.push(`路径 ${pathId}：${where}.edge_ids 有 ${path.edge_ids.length} 条，node_ids 有 ${ids.length} 步，应有 ${Math.max(0, ids.length - 1)} 条；仅高亮已核对的片段。`)
   }
+  const add = edge => { edgeIds.add(edge.edge_id); edgeIndexes.add(edge.index); pairs.add(pairKey(edge.source, edge.target)) }
   for (let i = 1; i < ids.length; i += 1) {
     const key = pairKey(ids[i - 1], ids[i])
     if (explicit) {
-      const edge = byId.get(String(path.edge_ids[i - 1] ?? ''))
-      if (edge?.source === ids[i - 1] && edge?.target === ids[i]) { edgeIds.add(edge.edge_id); pairs.add(key) }
-      else warnings.push(`路径 ${pathId} 的第 ${i} 条连线与节点顺序不符或不存在，未高亮。`)
+      const ref = String(path.edge_ids[i - 1] ?? '')
+      const edge = byId.get(ref)
+      if (edge?.source === ids[i - 1] && edge?.target === ids[i]) add(edge)
+      else {
+        const actual = edge ? `${ref}（${edge.source} → ${edge.target}）` : ref ? `${ref}（不存在或 ID 不唯一）` : '未提供'
+        warnings.push(`路径 ${pathId} 的第 ${i} 条连线：${where}.edge_ids[${i - 1}] 应连接 ${ids[i - 1]} → ${ids[i]}，实际为 ${actual}；该段未高亮，原记录待修正。`)
+      }
     } else {
       const candidates = byPair.get(key) ?? []
-      if (candidates.length === 1) { edgeIds.add(candidates[0].edge_id); pairs.add(key) }
+      if (candidates.length === 1) add(candidates[0])
       else if (candidates.length > 1) {
         ambiguous.push(key)
         warnings.push(`路径 ${pathId} 在 ${ids[i - 1]} → ${ids[i]} 存在多条条件连线，缺少 edge_ids，无法唯一确定路线。`)
       } else warnings.push(`路径 ${pathId} 的 ${ids[i - 1]} → ${ids[i]} 没有声明连线，未补画。`)
     }
   }
+  if (explicit && path.edge_ids.length > Math.max(0, ids.length - 1)) {
+    const offset = Math.max(0, ids.length - 1)
+    warnings.push(`路径 ${pathId}：${where}.edge_ids[${offset}] 起的 ${path.edge_ids.length - offset} 条连线没有对应节点步；未高亮多余引用。`)
+  }
   for (const id of ids) if (!graph.known.has(id)) warnings.push(`路径 ${pathId} 引用了不存在的节点 ${id}。`)
-  return { nodes: new Set(ids.filter(id => graph.known.has(id))), pairs, edge_ids: edgeIds, ambiguous_pairs: ambiguous, warnings }
+  return { nodes: new Set(ids.filter(id => graph.known.has(id))), pairs, edge_ids: edgeIds, edge_indexes: edgeIndexes, ambiguous_pairs: ambiguous, warnings }
 }
 
 /** Exact declared edge membership; legacy parallel edges are reported, never guessed. */
@@ -431,7 +446,10 @@ export function layoutFlow(flow, options = {}) {
   let collapsedIds = []
   const threshold = options.collapseThreshold ?? FLOW_COLLAPSE_THRESHOLD
   if (!options.expandAll && mainPath.length && graph.nodes.length > threshold) {
-    const keep = new Set([...mainPath, ...listOf(options.keepNodeIds), ...(activeMembers?.nodes ?? [])])
+    // Collapse only incidental processing nodes. Decisions, failure handling,
+    // recovery and exits remain inspectable even on a large unit's default view.
+    const keep = new Set([...mainPath, ...orderedNodes.filter(node => KEEP_VISIBLE_KINDS.has(node.kind)).map(node => node.id),
+      ...listOf(options.keepNodeIds), ...(activeMembers?.nodes ?? [])])
     for (const edge of graph.edges) {
       if (mainSet.has(edge.source)) keep.add(edge.target)
       if (mainSet.has(edge.target)) keep.add(edge.source)

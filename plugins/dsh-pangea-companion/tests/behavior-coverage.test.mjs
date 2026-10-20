@@ -90,5 +90,8 @@ test('stable mainline and parallel-edge path associations follow explicit identi
   assert.ok(duplicate.projection_warnings.some(value => value.includes('不唯一')))
   const mismatch = project({ ...body, paths: [{ path_id: 'p', node_ids: ['b', 'a'], edge_ids: ['yes'] }] })
   assert.deepEqual(mismatch.branches.map(row => row.path_ids), [[], []])
-  assert.ok(mismatch.projection_warnings.some(value => value.includes('节点顺序不一致')))
+  assert.ok(mismatch.projection_warnings.some(value =>
+    value.includes('paths[0].edge_ids[0] 应连接 b → a') && value.includes('实际为 yes（a → b）') && value.includes('该段未高亮')))
+  assert.deepEqual(mismatch.paths[0].node_ids, ['b', 'a'])
+  assert.deepEqual(mismatch.paths[0].edge_ids, ['yes'])
 })

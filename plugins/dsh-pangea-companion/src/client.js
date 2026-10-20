@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
     /* @inline-shared-modules */
     const { normalizeFlow: sharedNormalizeFlow } = __flowNormalize
     const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, pathsForNode, layoutCallGraph } = __flowLayout
-    const { renderFlowTree, renderCallGraphTree, toSvgString } = __flowRender
+    const { renderFlowTree, renderCallGraphTree, toSvgString, toInteractiveFlowSvg } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
     const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
     const { renderReviewPresentation, reviewStatusLabel, isReviewRecord } = __reviewPresentation
@@ -2258,10 +2258,8 @@ window.__ModuleLoader__.load({
         props.role = 'button'
         props.tabIndex = 0
         props['aria-label'] = tree.attrs?.['aria-label'] || `查看连线 ${edgeId}`
-        props.onPointerEnter = () => onEdge.hover(edgeId)
-        props.onPointerLeave = () => onEdge.hover('')
-        props.onFocus = () => onEdge.hover(edgeId)
-        props.onBlur = () => onEdge.hover('')
+        // Pointer crossing must not change page state or move the canvas.
+        // Local hover/focus styling lives in the SVG; details require activation.
         props.onClick = event => { event?.stopPropagation?.(); onEdge.select(edgeId) }
         props.onKeyDown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation?.(); onEdge.select(edgeId) } }
       }
@@ -2316,8 +2314,8 @@ window.__ModuleLoader__.load({
       link.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
     }
-    function exportSvgTree(tree, name, format) {
-      const markup = toSvgString(tree)
+    function exportSvgTree(tree, name, format, graph) {
+      const markup = format === 'svg' && graph ? toInteractiveFlowSvg(graph) : toSvgString(tree)
       if (format === 'svg') return downloadBlob(new Blob([markup], { type: 'image/svg+xml' }), `${name}.svg`)
       if (typeof Image === 'undefined' || typeof document === 'undefined') return
       const image = new Image()
@@ -2497,7 +2495,6 @@ window.__ModuleLoader__.load({
         flow?.source_record?.record_id, flow?.source_record?.revision, flow?.revision,
         graph.nodes, graph.edges, graph.paths, graph.layout_version, graph.main_path_ids])
       const [selection, setSelection] = React.useState({ key: '', node: '', path: '', edge: '' })
-      const [hover, setHover] = React.useState({ key: '', edge: '' })
       const [expandedKey, setExpandedKey] = React.useState('')
       // A changed flow/revision never inherits a stale route or edge selection.
       const active = selection.key === identity ? selection : { node: '', path: '', edge: '' }
@@ -2515,14 +2512,12 @@ window.__ModuleLoader__.load({
         const routes = pathsForNode(graph, id)
         const nextPath = routes.some(path => path.path_id === pathId) ? pathId : routes.length === 1 ? routes[0].path_id : ''
         setSelection({ key: identity, node: id, path: nextPath, edge: '' })
-        setHover({ key: identity, edge: '' })
       }
       const choosePath = id => {
         const route = paths.find(path => path.path_id === id)
         setSelection({ key: identity, node: route?.node_ids?.includes(selected) ? selected : '', path: id, edge: '' })
-        setHover({ key: identity, edge: '' })
       }
-      const focusedEdgeId = hover.key === identity && hover.edge ? hover.edge : active.edge
+      const focusedEdgeId = active.edge
       const focusedEdge = layout.edges.find(edge => edge.edge_id === focusedEdgeId)
       const name = `${flow?.display_id || flow?.flow_id || 'flow'}`.replace(/[^\w.-]+/g, '_')
       const tree = renderFlowTree(layout, { highlight, selected, focusedEdgeId, idPrefix })
@@ -2530,6 +2525,8 @@ window.__ModuleLoader__.load({
       const evidence = node ? evidenceText(node.source_evidence) : []
       const selectedPath = paths.find(path => path.path_id === pathId)
       const routeLabel = path => `${path.path_id}${path.title ? ` · ${path.title}` : ''}`
+      const routeIncomplete = Boolean(pathId && highlight?.warnings?.length)
+      const graphWarnings = [...new Set([...layout.warnings, ...(highlight?.warnings ?? [])])]
       return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图', style: { marginTop: 12 } },
         h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', margin: '8px 0' } },
           paths.length ? h('select', { 'aria-label': '高亮路径', value: pathId, onChange: event => choosePath(event.target.value) },
@@ -2537,13 +2534,15 @@ window.__ModuleLoader__.load({
             paths.map(path => h('option', { key: path.path_id, value: path.path_id }, routeLabel(path)))) : null,
           controls,
           layout.collapsed.count || expandAll ? h('button', { type: 'button', onClick: () => setExpandedKey(expandAll ? '' : identity) }, expandAll ? '折叠次要节点' : '展开全部') : null,
-          selected || pathId || active.edge ? h('button', { type: 'button', onClick: () => { setSelection({ key: identity, node: '', path: '', edge: '' }); setHover({ key: identity, edge: '' }) } }, '清除选择') : null,
-          h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'svg') }, '导出 SVG'),
+          selected || pathId || active.edge ? h('button', { type: 'button', onClick: () => { setSelection({ key: identity, node: '', path: '', edge: '' }) } }, '清除选择') : null,
+          h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'svg', graph) }, '导出 SVG'),
           h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'png') }, '导出 PNG')),
-        warningList([...layout.warnings, ...(highlight?.warnings ?? [])], '流程图提示'),
+        graphWarnings.length ? h('details', { className: 'pangea-diagram-caption', 'aria-label': '流程图诊断' },
+          h('summary', { style: { cursor: 'pointer' } }, `流程图提示 ${graphWarnings.length} 项（点击查看）`), warningList(graphWarnings, '流程图提示')) : null,
         selected ? h('div', { className: 'pangea-diagram-caption', role: 'status', 'aria-label': '节点路径选择' },
           candidates.length === 0 ? '该节点没有已声明路径；当前只显示节点，不推断完整路线。'
-            : candidates.length > 1 ? `该节点属于 ${candidates.length} 条已声明路径${pathId ? '，当前高亮所选路径。' : '，请选择需要查看的一条。'}`
+            : routeIncomplete ? '该路径存在结构不一致；仅高亮已核实连线，完整路线待确认。'
+              : candidates.length > 1 ? `该节点属于 ${candidates.length} 条已声明路径${pathId ? '，当前高亮所选路径。' : '，请选择需要查看的一条。'}`
               : '已高亮经过该节点的唯一声明路径。',
           candidates.length > 1 ? h('div', { className: 'b04-canvas-actions', style: { flexWrap: 'wrap', marginTop: 6 } }, candidates.map(path => h('button', {
             key: path.path_id, type: 'button', 'aria-pressed': pathId === path.path_id, onClick: () => choosePath(path.path_id),
@@ -2551,12 +2550,8 @@ window.__ModuleLoader__.load({
         selectedPath ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '所选路径步骤' },
           h('strong', null, routeLabel(selectedPath)), h('p', null, (selectedPath.node_ids ?? []).map((id, index) =>
             `${index + 1}. ${graph.nodes?.find(item => item.id === id)?.label || id}`).join(' → '))) : null,
-        focusedEdge ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '连线详情' },
-          h('strong', null, `${layout.nodes.find(item => item.id === focusedEdge.source)?.label || focusedEdge.source} → ${layout.nodes.find(item => item.id === focusedEdge.target)?.label || focusedEdge.target}`),
-          h('p', null, focusedEdge.condition || '原记录未提供条件。'), h('small', null, focusedEdge.edge_id)) : null,
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } },
           h('div', { ...panProps, style: { ...panProps.style, flex: '1 1 320px', minWidth: 0 } }, svgTreeToReact(sized(tree), 'svg', chooseNode, {
-            hover: edge => setHover({ key: identity, edge }),
             select: edge => setSelection({ key: identity, node: '', path: pathId, edge }),
           })),
           node ? h('aside', { 'aria-label': '节点详情', style: { width: 240, flex: '0 0 240px', border: '1px solid #e2e7e0', borderRadius: 8, padding: 12, background: '#fff' } },
@@ -2564,7 +2559,10 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', className: 'b04-link', style: { flexShrink: 0 }, 'aria-label': '关闭节点详情', onClick: () => setSelection({ key: identity, node: '', path: pathId, edge: active.edge }) }, '关闭')),
             h('small', null, `${node.id}${node.kind ? ` · ${FLOW_KIND_LABELS[node.kind] ?? node.kind}` : ''}`),
             h('p', null, node.description || '原记录未提供节点说明。'),
-            evidence.length ? h('div', null, h('small', null, '源码依据'), evidence.map(location => h('p', { key: location }, h('code', null, location)))) : null) : null))
+            evidence.length ? h('div', null, h('small', null, '源码依据'), evidence.map(location => h('p', { key: location }, h('code', null, location)))) : null) : null),
+        focusedEdge ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '连线详情' },
+          h('strong', null, `${layout.nodes.find(item => item.id === focusedEdge.source)?.label || focusedEdge.source} → ${layout.nodes.find(item => item.id === focusedEdge.target)?.label || focusedEdge.target}`),
+          h('p', null, focusedEdge.condition || '原记录未提供条件。'), h('small', null, focusedEdge.edge_id)) : null)
     }
 
     /** call-graph-v1 view: function nodes, merged call edges (×N) and per-function variable flow. */
@@ -3708,7 +3706,7 @@ window.__ModuleLoader__.load({
             setDiagramType(view.type || 'workflow')
             if (view.flow_id) setFlowSelection(view.flow_id)
             const flowId = view.flow_id || flowSelection || businessFlows[0]?.flow_id
-            setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : 'diagram', step: '', query: '', page: 1 })
+            setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : view.type === 'sequence' ? 'sequence' : 'diagram', step: '', query: '', page: 1 })
           }
           await loadWorkbench()
         } catch (reason) {
@@ -4977,7 +4975,7 @@ window.__ModuleLoader__.load({
         const currentFlow = businessFlows.find(flow => flow.flow_id === view.flow_id || (view.logical_flow_id && flow.logical_flow_id === view.logical_flow_id && flow.unit_id === view.flow_unit_id))
         if (currentFlow) setFlowSelection(currentFlow.flow_id)
         const flowId = currentFlow?.flow_id || flowSelection || businessFlows[0]?.flow_id
-        setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : 'diagram', step: '', query: '', page: 1 })
+        setFlowReader({ scope: `${current?.run_id}:${flowId}`, view: view.profile === 'function_variables' ? 'functions' : view.type === 'sequence' ? 'sequence' : 'diagram', step: '', query: '', page: 1 })
         setDiagramError('')
         if (!activateConversation || !view.session_id || view.session_id === selectedTask?.active_conversation_id) return
         if (conversationActionRef.current) { setDiagramError('会话正在切换，请稍后点击“查看图表会话”。'); return }
@@ -4996,19 +4994,23 @@ window.__ModuleLoader__.load({
       async function changeFlowView(reader, view, flow) {
         setFlowReader({ ...reader, view })
         setDiagramError('')
-        if (view !== 'functions') return
+        if (!['functions', 'sequence'].includes(view)) return
+        if (view === 'sequence') { setDiagramType('sequence'); setDiagramPanel('canvas') }
         const listed = await diagramAction('architecture-list')
         if (!listed) return
         const views = matchingDiagrams(flow, view === 'functions' ? 'function_variables' : 'standard', listed)
+          .filter(item => view !== 'sequence' || item.type === 'sequence')
         await chooseDiagram(views.find(item => item.view_id === diagramSelection)
-          ?? views.find(item => item.type === (view === 'functions' ? 'workflow' : diagramType)) ?? views[0])
+          ?? views.find(item => item.type === (view === 'functions' ? 'workflow' : 'sequence')) ?? views[0],
+          view === 'sequence' ? { activateConversation: false } : undefined)
       }
 
-      function renderDiagrams(flow, profile = 'standard') {
+      function renderDiagrams(flow, profile = 'standard', requestedType = '') {
         const functions = profile === 'function_variables'
         const views = matchingDiagrams(flow, profile)
-        const selected = views.find(view => view.view_id === diagramSelection) ?? views.find(view => view.type === (functions ? 'workflow' : diagramType))
-        const type = functions ? 'workflow' : selected?.type || diagramType
+        const selected = views.find(view => view.view_id === diagramSelection && (!requestedType || view.type === requestedType))
+          ?? views.find(view => view.type === (functions ? 'workflow' : requestedType || diagramType))
+        const type = functions ? 'workflow' : requestedType || selected?.type || diagramType
         const wideDiagram = functions || type !== 'workflow'
         const typeViews = views.filter(view => view.type === type)
         const previous = selected?.previous_view_id ? views.find(view => view.view_id === selected.previous_view_id && view.available) : views.find(view => view.view_id !== selected?.view_id && view.available)
@@ -5020,6 +5022,7 @@ window.__ModuleLoader__.load({
         const select = view => { setDiagramZoom(100); setDiagramPanel('canvas'); void chooseDiagram(view) }
         const switchType = nextType => {
           setDiagramType(nextType)
+          setFlowReader(value => ({ ...value, view: nextType === 'sequence' ? 'sequence' : 'diagram' }))
           setDiagramPanel('canvas')
           setDiagramZoom(100)
           const match = views.find(view => view.type === nextType)
@@ -5037,7 +5040,7 @@ window.__ModuleLoader__.load({
             flow_id: selected.flow_id ?? null, previous_view_id: selected.view_id, instruction: diagramInstruction.trim() })
         }
         const callGraph = selected?.renderer === 'call-graph'
-        const canCreate = functions || archifyOn
+        const canCreate = functions || type === 'sequence' || archifyOn
         const callGraphView = view => h(CallGraphView, { key: view.view_id, graph: view.call_graph, status: view.call_graph_status || 'ok',
           errors: view.call_graph_errors ?? [], svgUrl: artifactUrl(view, 'svg', true) })
         const frame = (view, full = false) => view?.renderer === 'call-graph' ? callGraphView(view) : h('iframe', { title: full ? '图表全屏预览' : `${diagramName(view)}预览`, src: artifactUrl(view, 'html'), sandbox: 'allow-scripts allow-downloads',
@@ -5054,7 +5057,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', 'aria-label': '重置图表缩放', onClick: () => setDiagramZoom(100) }, `${diagramZoom}%`),
           h('button', { type: 'button', 'aria-label': '放大图表', onClick: () => zoom(25) }, '+'),
           view && exportAction ? h('a', { className: 'b04-link', href: artifactUrl(view, 'svg', true), download: `${view.view_id}.svg` }, '导出 SVG') : null)
-        const types = !functions ? h('nav', { className: 'b04-diagram-types', 'aria-label': '图表类型' }, Object.entries(DIAGRAM_LABELS).map(([value, label]) => h('button', {
+        const types = !functions && !requestedType ? h('nav', { className: 'b04-diagram-types', 'aria-label': '图表类型' }, Object.entries(DIAGRAM_LABELS).map(([value, label]) => h('button', {
           key: value, type: 'button', 'aria-pressed': type === value, disabled: diagramBusy, onClick: () => switchType(value),
         }, label.replace('图', '')))) : null
         const top = h('div', { className: 'b04-canvas-head' },
@@ -5065,8 +5068,9 @@ window.__ModuleLoader__.load({
             selected && !generating ? h('button', { type: 'button', onClick: () => setDiagramPanel('versions') }, '版本与修改') : null,
             selected?.session_id && !generating && !failed ? h('button', { type: 'button', disabled: diagramBusy, onClick: () => chooseDiagram(selected, { activateConversation: true }) }, '查看图表会话') : null,
             preview && wideDiagram && !callGraph ? h('a', { className: 'b03-task-action', href: artifactUrl(selected, 'svg', true), download: `${selected.view_id}.svg` }, '导出 SVG') : null,
-            preview && !wideDiagram && !callGraph ? h('button', { type: 'button', ref: diagramFullscreenTriggerRef, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏') : null,
-            !selected && canCreate ? h('button', { type: 'button', disabled: diagramBusy, onClick: create }, functions ? '生成函数与变量图' : `生成${DIAGRAM_LABELS[type]}（精美导出）`) : null))
+            preview && type === 'sequence' ? h('a', { className: 'b03-task-action', href: artifactUrl(selected, 'html', true), download: `${selected.view_id}.html` }, '导出交互 HTML') : null,
+            preview && (!wideDiagram || type === 'sequence') && !callGraph ? h('button', { type: 'button', ref: diagramFullscreenTriggerRef, onClick: () => { setDiagramFullscreen(true); diagramDialogRef.current?.showModal() } }, '全屏') : null,
+            !selected && canCreate ? h('button', { type: 'button', disabled: diagramBusy, onClick: create }, functions ? '生成函数与变量图' : type === 'sequence' ? '生成时序图' : `生成${DIAGRAM_LABELS[type]}（精美导出）`) : null))
         const logs = selected ? h('aside', { className: 'b04-progress-log' }, h('h3', null, failed ? '生成记录与诊断' : '生成进展'),
           failed ? h(React.Fragment, null,
             selected.failure_stage ? field('失败阶段', selected.failure_stage) : null,
@@ -5080,7 +5084,7 @@ window.__ModuleLoader__.load({
               h('p', null, event.error || event.error_summary || event.message || event.stop_reason || (event.at ? formatTime(event.at) : '正在进行'))))),
           selected.session_id ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => chooseDiagram(selected, { activateConversation: true }) }, '查看图表会话') : null) : null
         const pending = selected && (generating || failed) && !preview
-        const canvas = h('section', { className: 'b04-canvas-wrap', 'aria-label': functions ? '函数与变量图工作区' : '精美导出（实验）工作区' }, top,
+        const canvas = h('section', { className: 'b04-canvas-wrap', 'aria-label': functions ? '函数与变量图工作区' : type === 'sequence' ? '时序图工作区' : '精美导出（实验）工作区' }, top,
           diagramError ? h('div', { role: 'alert', style: { ...styles.error, padding: '12px 20px' } }, diagramError) : null,
           selected?.candidate_unverified ? h('div', { className: 'pangea-diagram-caption' }, '最新修改尚未验证；当前预览对应上次验证的候选。',
             !generating ? h('button', { type: 'button', style: styles.button, disabled: diagramBusy, onClick: () => diagramAction('architecture-validate', { view_id: selected.view_id }) }, '验证最新候选') : null) : null,
@@ -5319,7 +5323,7 @@ window.__ModuleLoader__.load({
         const modebar = flow ? h('div', { className: 'b04-modebar' },
           h('div', null, h('strong', null, flow.title || '业务流程'), h('span', { style: styles.badge }, flow.display_id || flow.flow_id)),
           h('div', { role: 'group', 'aria-label': '流程展示方式', className: 'pangea-flow-modes' },
-            [['reader', '文字流程', '流程阅读视图'], ['diagram', '流程图', '流程图视图'], ['functions', '函数与变量', '函数与变量流程图视图']].map(([view, label, aria]) => h('button', {
+            [['reader', '文字流程', '流程阅读视图'], ['diagram', '流程图', '流程图视图'], ['sequence', '时序图', '时序图视图'], ['functions', '函数与变量', '函数与变量流程图视图']].map(([view, label, aria]) => h('button', {
               key: view, type: 'button', 'aria-label': aria, 'aria-pressed': reader.view === view, disabled: diagramBusy,
               onClick: () => { setFlowBranchDetail(''); return changeFlowView(reader, view, flow) },
             }, label)))) : null
@@ -5470,6 +5474,7 @@ window.__ModuleLoader__.load({
             ref: element => { if (element) { element.scrollTop = panelState(flow).scrollTop; element.scrollLeft = panelState(flow).scrollLeft } },
             onScroll: event => { const state = panelState(flow); state.scrollTop = event.currentTarget.scrollTop; state.scrollLeft = event.currentTarget.scrollLeft } },
             reader.view === 'reader' && !branch ? renderFlowReader(flow)
+            : reader.view === 'sequence' ? renderDiagrams(flow, 'standard', 'sequence')
             : reader.view === 'functions' ? renderDiagrams(flow, 'function_variables')
             : reader.view === 'diagram' ? h('div', null,
               h(FlowGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).graph, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] }),
@@ -6669,7 +6674,7 @@ window.__ModuleLoader__.load({
       const resultTargetDetails = resultTarget ? h('details', { style: { marginTop: 8, fontSize: 12, color: '#68736a' } },
         h('summary', { style: { cursor: 'pointer' } }, '分析目标'),
         h('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: 800 } }, resultTarget)) : null
-      const flowGraphType = flowScreen && flowReader?.view === 'diagram' && !['workflow', ''].includes(diagramType)
+      const flowGraphType = flowScreen && (flowReader?.view === 'sequence' || flowReader?.view === 'diagram' && !['workflow', ''].includes(diagramType))
       const flowHeader = flowScreen ? h(React.Fragment, null,
         h('nav', { className: 'b03-overview-breadcrumb', 'aria-label': '当前位置' },
           h('button', { type: 'button', onClick: () => jump('tasks') }, 'PANGEA 分析'), h('span', { 'aria-hidden': true }, '›'),

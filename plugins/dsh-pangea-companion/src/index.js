@@ -1149,9 +1149,9 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       if (body.action === 'architecture-create') {
         if (task.provider) acpProviderOption(task.provider)
         if (!archifyExperimental()) {
-          const previous = !body.profile && body.previous_view_id ? await loadView(task, body.previous_view_id) : null
+          const previous = body.previous_view_id ? await loadView(task, body.previous_view_id) : null
           const profile = body.profile ?? (previous ? previous.profile ?? 'standard' : 'standard')
-          if (profile !== 'function_variables') throw new Error('精美导出（实验）未开启：设置 PANGEA_ARCHIFY_EXPERIMENTAL=1 后可用')
+          if (profile !== 'function_variables' && (body.type ?? previous?.type) !== 'sequence') throw new Error('精美导出（实验）未开启：设置 PANGEA_ARCHIFY_EXPERIMENTAL=1 后可用')
         }
         const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id, branch_ids: body.branch_ids, profile: body.profile })
         try {
