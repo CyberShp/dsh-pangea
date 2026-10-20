@@ -1,7 +1,10 @@
 // The standalone plugins also run without Desktop. Resolve the optional host
 // service at call time so service replacement cannot leave an old lock behind.
 export function updateAdmission(ctx) {
-  return ctx?.get?.('pangeaUpdateAdmission') ?? ctx?.pangeaUpdateAdmission
+  // Cordis permits explicit lookup of optional services. Property access on a
+  // plugin context requires inject, even when the service is not installed.
+  if (typeof ctx?.get === 'function') return ctx.get('pangeaUpdateAdmission')
+  return ctx?.pangeaUpdateAdmission
 }
 
 export function registerUpdateParticipant(ctx, id, check) {

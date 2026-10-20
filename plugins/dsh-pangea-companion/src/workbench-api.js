@@ -13,6 +13,7 @@ import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkil
 import { sourceFirstReportAvailable, summarizeRun } from './reader.js'
 import { taskStatusFromRun } from './task-store.js'
 import { compactToolLifecycle } from './launch-log.js'
+import { updateAdmission } from './update-admission.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
@@ -1004,7 +1005,7 @@ export async function launchAnalysisSession(
       ...(semantic ? {
         startRun: ({ subagents, parent, signal }) => createSourceFirstAcpRun({
           subagents, parent, signal, providerId: selectedProvider, agentModel: request.agent_model,
-          admission: runtimeService(runtime, 'pangeaUpdateAdmission'),
+          admission: updateAdmission(runtime),
           cwd: root, dataRoot: resolvedDataRoot, runId: run.run_id, runner, python: env.PANGEA_PYTHON, mode: request.mode,
           attemptId: lifecycle.attemptId,
           executionIds: executionRecovery?.execution_ids === true,

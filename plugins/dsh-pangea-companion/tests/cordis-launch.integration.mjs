@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 
 import { createTaskStore } from '../src/task-store.js'
 import { launchAnalysisSession, launchArchitectureSession } from '../src/workbench-api.js'
+import { inject as companionInject } from '../src/index.js'
 
 const appRoot = process.env.PANGEA_TEST_APP_ROOT
 if (!appRoot) throw new Error('PANGEA_TEST_APP_ROOT must point to a built PANGEA Desktop app root')
@@ -16,6 +17,153 @@ async function importFromAppRoot(relativePath) {
 }
 
 function ok(value) { return { result: { ok: true, value } } }
+
+// Exercise the production launch entry with the companion's real injection
+// boundary. A plain object (or the root Context) cannot expose missing injects.
+async function sourceFirstAdmissionFixture(t, { provideAdmission, providerId }) {
+  const { Context } = await importFromAppRoot('@deepseek-ai/cordis/lib/index.js')
+  const { LocalJobRegistry } = await importFromAppRoot('@deepseek-ai/dsh-jobs-local/lib/index.js')
+  const { UpdateAdmission } = await importFromAppRoot('dsh-pangea-product/update-admission.js')
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-cordis-admission-'))
+  const context = new Context()
+  const previousDshHome = process.env.DSH_HOME
+  process.env.DSH_HOME = path.join(root, 'harness')
+  const owner = { id: 'admission-owner', ctx: context }
+  const admission = provideAdmission ? new UpdateAdmission() : undefined
+  let runtime, runCount = 0, workerStarts = 0, workerDisposals = 0
+  const provider = {
+    async discoverModels() {
+      return { current_model: 'fixture/default', models: [{ id: 'fixture/default', label: 'Default' }] }
+    },
+  }
+  context.provide('agents', { get: id => id === owner.id ? owner : undefined })
+  context.provide('subagents', {
+    getProvider: id => id === providerId ? provider : undefined,
+    async start(actualProviderId, request) {
+      assert.equal(actualProviderId, providerId)
+      assert.equal(request.agentOptions.model, 'fixture/default')
+      assert.equal(request.pangeaCliWorker, true)
+      workerStarts++
+      let toolCalls = 0
+      return {
+        id: `planning-worker-${workerStarts}`, remoteSessionId: `remote-${workerStarts}`,
+        result: Promise.resolve({ stopReason: 'completed', protocolStopReason: 'end_turn' }),
+        readDiagnostics: () => ({ activeToolCount: 0, toolCalls }),
+        async continuePrompt() {
+          toolCalls++
+          return { stopReason: 'completed', protocolStopReason: 'end_turn' }
+        },
+        async dispose() { workerDisposals++ },
+      }
+    },
+  })
+  for (const name of ['tools', 'webServer', 'apiProxy']) context.provide(name, {})
+  const jobs = new LocalJobRegistry(context, { maxConcurrentJobsPerOwner: 10 })
+  const detachController = jobs.attachController('admission-integration')
+  t.after(async () => {
+    await jobs.disposeAll()
+    detachController()
+    await context.fiber.dispose()
+    if (previousDshHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousDshHome
+    await rm(root, { recursive: true, force: true })
+  })
+  if (admission) await context.plugin({
+    name: 'desktop-admission-fixture',
+    apply(ctx) { ctx.provide('pangeaUpdateAdmission', admission) },
+  })
+  await context.plugin({
+    name: 'companion-launch-fixture', inject: companionInject,
+    apply(ctx) { runtime = ctx },
+  })
+  assert.ok(runtime, 'companion must activate even in a standalone Harness')
+  assert.equal(companionInject.includes('pangeaUpdateAdmission'), false)
+  assert.throws(() => runtime.pangeaUpdateAdmission, /without inject/)
+  assert.equal(Boolean(runtime.get('pangeaUpdateAdmission')), provideAdmission)
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# Synthetic source-first workspace\n')
+  const api = {
+    workspace: { async list() { return ok({ items: [{ workspaceId: 'admission-workspace', path: root }] }) } },
+    sessions: { async create() { return ok({ sessionId: owner.id }) }, async rename() { return ok({}) } },
+  }
+  return {
+    admission,
+    get workerStarts() { return workerStarts },
+    get workerDisposals() { return workerDisposals },
+    async launch() {
+      const runId = `admission-run-${++runCount}`
+      const events = [], commands = []
+      let complete = false
+      const runner = async ({ args }) => {
+        commands.push(args)
+        if (args[0] === 'system') return {
+          repositories: ['repo'], workflow_versions: ['source-first-v1'], source_first: { version: 'source-first-v1' },
+        }
+        if (args[0] === 'runs' && args[1] === 'create') return {
+          run_id: runId, request_path: path.join(root, 'request.json'), run_root: path.join(root, 'data', runId),
+        }
+        if (args[0] === 'runs' && args[1] === 'get') return {
+          run_id: runId, workflow_version: 'source-first-v1', lifecycle_status: complete ? 'complete' : 'running',
+          report_available: complete,
+        }
+        if (args[0] === 'adapter' && args[1] === 'next') return {
+          run_id: runId, lifecycle_status: complete ? 'complete' : 'running',
+          actions: complete ? [] : [{ action_id: `${runId}:planning`, action: 'dispatch_agent', role: 'planning', stage: 'unit_planning' }],
+        }
+        if (args[0] === 'adapter' && args[1] === 'settle') {
+          const directory = path.join(root, 'pangea-data', 'runs', runId)
+          await mkdir(directory, { recursive: true })
+          for (const [name, content] of [['report.md', '# Complete'], ['report.html', '<p>Complete</p>'], ['report-complete.json', '{}']]) {
+            await writeFile(path.join(directory, name), content)
+          }
+          complete = true
+          return {}
+        }
+        if (args[0] === 'adapter' && args[1] === 'bind') return {}
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[0] === 'runs' && args[1] === 'execution') return {}
+        assert.fail(`Unexpected CLI call: ${JSON.stringify(args)}`)
+      }
+      const result = await launchAnalysisSession(api, {
+        cwd: root, input: { repository: 'repo', target: 'Cordis admission', source_scope: ['src'], provider_id: providerId },
+      }, runner, async () => {}, async event => events.push(event), runtime, process.env)
+      const snapshot = await jobs.wait(result.job_id, 5000, owner)
+      return { snapshot, events, commands }
+    },
+  }
+}
+
+for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) {
+  for (const provideAdmission of [true, false]) {
+    test(`${providerId} source-first launch uses real Cordis with ${provideAdmission ? 'Desktop admission outside inject' : 'no standalone admission service'}`, async t => {
+      const fixture = await sourceFirstAdmissionFixture(t, { provideAdmission, providerId })
+      const { snapshot, events, commands } = await fixture.launch()
+      assert.equal(snapshot.status, 'completed', snapshot.detail)
+      assert.equal(fixture.workerStarts, 1)
+      assert.equal(fixture.workerDisposals, 1)
+      assert.ok(events.some(event => event.stage === 'source_first_worker_started'))
+      assert.ok(commands.some(args => args[0] === 'adapter' && args[1] === 'settle'))
+    })
+  }
+
+  test(`${providerId} source-first launch rejects a real upgrade freeze and starts again after release`, async t => {
+    const fixture = await sourceFirstAdmissionFixture(t, { provideAdmission: true, providerId })
+    const token = 'source-first-upgrade-token'
+    fixture.admission.freeze(token)
+    const frozen = await fixture.launch()
+    assert.equal(frozen.snapshot.status, 'failed')
+    assert.match(frozen.snapshot.detail, /正在准备升级/)
+    assert.equal(fixture.workerStarts, 0, 'a frozen launch must not create an external worker')
+    assert.equal(frozen.commands.some(args => args[0] === 'adapter'), false)
+    assert.ok(frozen.events.some(event => event.stage === 'acp_process_spawn' && event.status === 'error'))
+    fixture.admission.release(token)
+    const released = await fixture.launch()
+    assert.equal(released.snapshot.status, 'completed', released.snapshot.detail)
+    assert.equal(fixture.workerStarts, 1)
+    assert.equal(fixture.workerDisposals, 1)
+    assert.ok(released.events.some(event => event.stage === 'source_first_action_settled'))
+  })
+}
 
 test('external diagram completion reaches Jobs observers without waking an unconfigured API owner', async () => {
   const { Context } = await importFromAppRoot('@deepseek-ai/cordis/lib/index.js')
