@@ -113,6 +113,8 @@ $DSH_HOME/dsh-pangea-companion/monitor-v1.json
 - 旧 Run 没有正文时显示元信息与“无历史记录”，不以 launch log 摘要代替全文。恢复原会话时若执行器提供历史回放，则明确标记为回放、原始回合时间未知；未采集且执行器未回放的内容无法补回。
 - 首次读取最新一页；加载更早历史时继续同步最新输出。切换 Run 或会话后，迟到响应不能覆盖当前会话；列表刷新不会自动切换已选会话。
 - `turn_end` 的协议停止原因与宿主暂停事件分开显示；`cancelled` 只证明本次请求已取消，尚未结束的工具仍保持待确认状态。
+- 回合已返回但工具记录没有终态时，显示“工具记录尚无结束确认”，并附“工具结束确认诊断”：列出未闭合工具 ID、上报状态、更新时间和可复制的诊断 JSON。`pending`、空参数或 `end_turn` 均不能单独证明工具已执行或已结束，不据此清除记录、重新派发任务。
+- 支持诊断的 Desktop ACP provider 对照 JSON 解析后的入站通知与 SDK 实际接受的工具事件；新增记录仅保存身份、状态、时间和字段存在性，不包含命令或输入输出正文。`unaccepted_tool_events` 表示尚未确认接收，不等同于校验拒收；判定时需同时查看 `validation_errors`、采样时刻及截断/采集缺失标志。无法解析为 JSON 的原始字节不在此采集范围，旧版本未记录的事件也不能补回。
 
 只读接口均位于 `GET /api/pangea-companion/workbench`，要求明确的 `cwd`、`data_root`、`run_id`：`view=agent-sessions` 返回会话列表；`view=agent-session&session_id=...` 返回该会话事件分页。`cursor` 是服务端返回的不透明游标，调用方不得用消息数量代替。
 

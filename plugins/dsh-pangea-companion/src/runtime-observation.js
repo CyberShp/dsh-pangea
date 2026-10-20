@@ -28,9 +28,9 @@ export function runtimeObservation(task, events = [], recovery = {}) {
     } else if (event.stage === 'source_first_tool_event') {
       if (['pending', 'in_progress'].includes(event.last_tool_status)) {
         const [kind, label] = toolKinds[event.tool_kind] ?? ['tool_running', '工具执行中']
-        Object.assign(value, { kind, label })
+        Object.assign(value, { kind, label: event.last_tool_status === 'pending' ? '等待工具执行状态更新' : label })
       } else if (event.active_tool_count > 0) {
-        Object.assign(value, { kind: 'tool_running', label: '工具仍在执行' })
+        Object.assign(value, { kind: 'tool_running', label: '仍有工具未确认结束' })
       }
       activities.set(actionId, value)
     } else if (['source_first_worker_finished', 'source_first_worker_paused', 'source_first_action_settled'].includes(event.stage)) {

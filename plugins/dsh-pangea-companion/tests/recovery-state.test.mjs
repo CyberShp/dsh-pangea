@@ -81,6 +81,11 @@ test('runtime observation separates received communication from saved progress a
     action_id: 'parallel-tools', tool_kind: 'read', last_tool_status: 'completed', active_tool_count: 1,
   })])
   assert.equal(sibling.activity.kind, 'tool_running')
+  assert.equal(sibling.activity.label, '仍有工具未确认结束')
+  const pending = runtimeObservation(task, [event('source_first_tool_event', 1000, {
+    action_id: 'pending', tool_kind: 'execute', last_tool_status: 'pending', active_tool_count: 1,
+  })])
+  assert.equal(pending.activity.label, '等待工具执行状态更新')
 })
 
 test('a lost host does not downgrade an already verified source-first report', () => {

@@ -6,6 +6,49 @@ import test from 'node:test'
 
 import { LaunchLogStore } from '../src/launch-log.js'
 
+test('persists bounded tool lifecycle evidence without command bodies or validation values', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-tool-lifecycle-'))
+  try {
+    const store = new LaunchLogStore({ root })
+    const file = await store.append('task', { stage: 'source_first_worker_paused', tool_lifecycle: {
+      schema_version: 1, captured_at_ms: 400, request_id: 'request', remote_session_id: 'remote', unclosed_count: 51, pending_count: 51,
+      in_progress_count: 0, unknown_count: 0, received_tool_events: 52, accepted_tool_events: 51, unaccepted_tool_events: 1,
+      validation_error_count: 12, evidence_evicted_count: 3, observer_error_count: 1,
+      tools: Array.from({ length: 51 }, (_, index) => ({ tool_id: `tool-${index}`, status: 'pending', kind: 'execute',
+        input_observed: true, input_nonempty: false, output_observed: false, seen_in_progress: false,
+        first_seen_at_ms: 100, last_update_at_ms: 200, last_received_at_ms: 200, received_update_count: 1, accepted_update_count: 1, evidence_missing: false,
+        request_id: 'request', remote_session_id: 'remote', rawInput: { command: 'private command' }, title: 'private title' })),
+      validation_errors: Array.from({ length: 12 }, (_, index) => ({ tool_id: `tool-${index}`, request_id: 'request',
+        remote_session_id: 'remote', code: 'invalid_type', at_ms: 300, path: ['update', 'content', 'token=fixture-secret'],
+        message: 'private validation message', received: 'private value' })),
+      rawOutput: 'private output', prompt: 'private prompt',
+    } })
+    const event = (await store.read('task')).events[0], evidence = event.tool_lifecycle
+    assert.equal(evidence.unclosed_count, 51)
+    assert.equal(evidence.captured_at_ms, 400)
+    assert.equal(evidence.tools.length, 50)
+    assert.equal(evidence.tools_truncated, true)
+    assert.equal(evidence.tools[0].input_nonempty, false)
+    assert.equal(evidence.tools[0].accepted_update_count, 1)
+    assert.equal(evidence.tools[0].last_received_at_ms, 200)
+    assert.equal(evidence.tools[0].evidence_missing, false)
+    assert.equal(evidence.unaccepted_tool_events, 1)
+    assert.equal(evidence.evidence_evicted_count, 3)
+    assert.equal(evidence.observer_error_count, 1)
+    assert.equal(evidence.validation_errors.length, 10)
+    assert.equal(evidence.validation_errors[0].tool_id, 'tool-2')
+    assert.deepEqual(evidence.validation_errors[0].path, ['update', 'content', '[credential]'])
+    assert.equal(evidence.validation_errors_truncated, true)
+    assert.doesNotMatch(await readFile(file, 'utf8'), /private|fixture-secret|rawInput|rawOutput/)
+    await store.append('task', { stage: 'source_first_worker_paused', tool_lifecycle: {
+      tools: [], validation_errors: [], tools_truncated: true, validation_errors_truncated: true,
+    } })
+    const empty = (await store.read('task')).events[1].tool_lifecycle
+    assert.equal(empty.validation_errors_truncated, true)
+    assert.equal(empty.pending_count, undefined, 'missing provider fields must not become fabricated zeros')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('persists native file permission paths and decisions with existing redaction and text limits', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-permission-log-'))
   try {

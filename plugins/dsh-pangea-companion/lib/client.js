@@ -2137,9 +2137,37 @@ window.__ModuleLoader__.load({
 
     function AgentSessionTranscript({ events = [] }) {
       const rows = agentSessionTranscript(events)
+      const [copyNotice, setCopyNotice] = React.useState(null)
       const time = at => agentSessionTime(at) != null ? new Date(at).toLocaleString() : '时间未记录'
       const pre = (value, props = {}) => h('pre', props, agentSessionContent(value))
       const details = (label, value, open = false) => value == null ? null : h('details', { open }, h('summary', null, label), pre(value))
+      const lifecycle = (value, key) => {
+        const record = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+        const count = field => Number.isInteger(record[field]) && record[field] >= 0 ? record[field] : '未记录'
+        const unclosed = count('unclosed_count')
+        const tools = Array.isArray(record.tools) ? record.tools.filter(tool => tool && typeof tool === 'object') : []
+        const json = JSON.stringify(value ?? {}, null, 2)
+        return h('section', { 'aria-label': '工具结束确认诊断' },
+          h('p', null, `尚无结束确认：${unclosed}${unclosed === '未记录' ? '' : ' 条'}`),
+          h('p', { className: 'agent-session-muted' }, `上报状态 · pending：${count('pending_count')} · in_progress：${count('in_progress_count')} · unknown：${count('unknown_count')}`),
+          h('p', { className: 'agent-session-muted' }, '上报状态不能证明命令实际仍在执行；此处保留尚未收到结束确认的工具记录。'),
+          ['received_tool_events', 'accepted_tool_events', 'unaccepted_tool_events', 'validation_error_count'].some(field => record[field] != null)
+            ? h('p', { className: 'agent-session-muted' }, `工具入站：${count('received_tool_events')} · 已接收：${count('accepted_tool_events')} · 未确认接收：${count('unaccepted_tool_events')} · 校验错误：${count('validation_error_count')}`) : null,
+          tools.map((tool, index) => h('div', { key: `${tool.tool_id ?? 'unknown'}-${index}`, className: 'agent-tool-update' },
+            h('div', { className: 'agent-tool-state' }, h('code', null, tool.tool_id ?? '工具 ID 未记录'), h('span', null, `上报状态：${tool.status ?? '未记录'}`)),
+            h('div', null, '最后更新：', h('time', { dateTime: agentSessionTime(tool.last_update_at_ms) == null ? undefined : new Date(tool.last_update_at_ms).toISOString() }, time(tool.last_update_at_ms))))),
+          record.tools_truncated ? h('p', { className: 'agent-session-muted' }, '工具明细已截断；上方数量可能大于当前列出的工具数。') : null,
+          h('details', null, h('summary', null, '完整工具诊断 JSON（可复制）'),
+            h('button', { type: 'button', className: 'agent-button', onClick: async () => {
+              try {
+                if (!globalThis.navigator?.clipboard?.writeText) throw new Error('clipboard unavailable')
+                await globalThis.navigator.clipboard.writeText(json)
+                setCopyNotice({ key, message: '已复制完整工具诊断。' })
+              } catch { setCopyNotice({ key, message: '复制失败，请手动选择下方 JSON 复制。' }) }
+            } }, '复制工具诊断'),
+            copyNotice?.key === key ? h('p', { className: 'agent-session-muted', role: 'status' }, copyNotice.message) : null,
+            pre(json)))
+      }
       return h('div', { className: 'agent-session-transcript' }, rows.map(row => {
         const head = label => h(React.Fragment, null, h('div', { className: 'agent-event-head' }, h('strong', null, label), h('time', { dateTime: row.last_at ?? row.at ?? undefined }, time(row.last_at ?? row.at))), row.replay ? h('p', { className: 'agent-session-muted' }, '恢复时执行器回放 · 原始回合时间未知；此处时间为采集时间。') : null)
         if (row.type === 'text') return h('article', { key: row.key, className: `agent-event agent-${row.role}` }, head(row.role === 'agent' ? 'Agent' : row.role === 'user' ? '用户消息' : 'Agent 思考记录'), row.role === 'thought' ? details('查看执行器返回的思考记录', row.text) : pre(row.text))
@@ -2148,12 +2176,14 @@ window.__ModuleLoader__.load({
           details('调用输入', row.rawInput, true), details('执行输出', row.rawOutput, true), details('工具返回内容', row.content, true),
           row.rawOutput == null && !row.content?.length ? h('p', { className: 'agent-session-muted' }, ['pending', 'in_progress', 'unknown'].includes(row.status) ? '尚未收到工具执行结果，不能据此确认工具已经结束。' : '执行器未返回输出正文。') : null,
           h('details', null, h('summary', null, `状态与更新记录（${row.updates.length}）`), row.updates.map(update => h('div', { key: update.seq, className: 'agent-tool-update' }, h('div', null, `${time(update.at)} · ${agentSessionStatus(update.status)}`), pre(update)))))
-        const labels = { prompt: '发送给 Agent 的指令', session_bound: '原会话已绑定', turn_end: '回合结束', error: '执行错误', recording_error: '会话记录异常', process_exit: '进程退出', permission: '权限请求与结果', host_event: '宿主状态记录', host: '宿主状态记录' }
+        const toolLifecycle = row.tool_lifecycle ?? row.payload?.tool_lifecycle
+        if (row.type === 'tool_lifecycle') return h('article', { key: row.key, className: 'agent-event agent-tool-lifecycle' }, head('工具结束确认诊断'), lifecycle(toolLifecycle, row.key))
+        const labels = { prompt: '发送给 Agent 的指令', session_bound: '原会话已绑定', turn_end: '回合结束', error: '执行错误', recording_error: '会话记录异常', process_exit: '进程退出', permission: '权限请求与结果', host_event: '宿主状态记录', host: '宿主状态记录', acp_tool_transport: 'ACP 工具入站记录' }
         return h('article', { key: row.key, className: `agent-event agent-${row.type}` }, head(labels[row.type] ?? '会话事件'),
           ['prompt', 'turn_end'].includes(row.type) && row.action_id ? h('p', { className: 'agent-session-muted', style: { overflowWrap: 'anywhere' } }, `关联动作：${row.action_id}`) : null,
           row.type === 'prompt' ? details('查看完整指令', row.prompt ?? row.content ?? row, true)
             : row.type === 'turn_end' ? h(React.Fragment, null, row.response_received === false || row.protocol_stop_reason == null ? h('p', { className: 'agent-session-alert' }, '尚未收到 ACP 的回合结束确认；本地等待已结束不代表工具已完成。') : null, h('dl', null, h('dt', null, '宿主停止原因'), h('dd', null, row.stop_reason ?? '未记录'), h('dt', null, 'ACP 停止原因'), h('dd', null, row.protocol_stop_reason ?? '未记录')), details('完整结束记录', row))
-              : ['host_event', 'host'].includes(row.type) ? h(React.Fragment, null, pre([row.stage, row.message, row.status].filter(Boolean).join('\n')), details('完整宿主记录', row))
+              : ['host_event', 'host'].includes(row.type) ? h(React.Fragment, null, pre([row.stage, row.message, row.status].filter(Boolean).join('\n')), toolLifecycle != null ? h(React.Fragment, null, h('strong', null, '工具结束确认诊断'), lifecycle(toolLifecycle, row.key)) : null, details('完整宿主记录', row))
                 : ['error', 'recording_error'].includes(row.type) ? pre(row.error ?? row.message ?? row) : details('查看事件详情', row, row.type === 'permission'))
       }))
     }

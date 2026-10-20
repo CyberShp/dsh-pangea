@@ -6,12 +6,12 @@ import test from 'node:test'
 import vm from 'node:vm'
 import { AgentSessionStore } from '../src/agent-sessions.js'
 
-async function client(reactOverrides = {}) {
+async function client(reactOverrides = {}, globals = {}) {
   let exported
   const React = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }), Fragment: 'fragment',
     useRef: value => ({ current: value }), useEffect() {}, useState: value => [value, () => {}], ...reactOverrides }
   vm.runInNewContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'), {
-    URLSearchParams, AbortController, setTimeout, clearTimeout, fetch() { throw new Error('unexpected fetch') },
+    URLSearchParams, AbortController, setTimeout, clearTimeout, fetch() { throw new Error('unexpected fetch') }, ...globals,
     window: { __ModuleLoader__: { load: spec => { exported = spec.factory(() => React) } } },
   })
   return exported
@@ -77,6 +77,62 @@ test('transcript shows prompt, pending tool input, both stop reasons, recording 
   for (const expected of ['请定位\n调用链', '调用输入', 'rg test', '尚未收到工具执行结果', 'completed', 'cancelled', '尚未收到 ACP 的回合结束确认', '日志行损坏']) assert.ok(body.includes(expected), expected)
   assert.ok(nodes(rendered).some(node => node.type === 'pre'))
   assert.equal(nodes(rendered).some(node => ['textarea', 'input'].includes(node.type)), false)
+})
+
+test('tool lifecycle diagnostics preserve unclosed IDs and copy evidence without folding transport metadata into tool state', async () => {
+  let copied, copyNotice
+  const { AgentSessionTranscript, agentSessionTranscript } = await client({ useState: value => [value, next => { copyNotice = next }] }, {
+    navigator: { clipboard: { writeText: async value => { copied = value } } },
+  })
+  const ids = ['chatcmpl-tool-a873a78f7e539d5e', 'chatcmpl-tool-9e4b74cbae3ac799']
+  const toolLifecycle = {
+    schema_version: 1, request_id: 'driver-request', remote_session_id: 'remote-session',
+    unclosed_count: 2, pending_count: 2, in_progress_count: 0, unknown_count: 0,
+    received_tool_events: 3, accepted_tool_events: 2, unaccepted_tool_events: 1, validation_error_count: 0,
+    tools: ids.map((tool_id, index) => ({ tool_id, status: 'pending', kind: 'execute',
+      last_update_at_ms: Date.parse(index ? '2026-10-20T07:21:37.610Z' : '2026-10-20T07:21:28.073Z'),
+      seen_in_progress: false, input_observed: true, input_nonempty: false, output_observed: false,
+      received_update_count: 1, accepted_update_count: 1 })),
+    tools_truncated: false, future_evidence_field: { retained: true },
+  }
+  const events = [
+    ...ids.map((toolCallId, index) => ({ seq: index + 1, at: new Date(toolLifecycle.tools[index].last_update_at_ms).toISOString(), type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId, status: 'pending', rawInput: {} } })),
+    { seq: 3, at: '2026-10-20T07:32:18.000Z', type: 'acp_tool_transport', tool_id: ids[0], status: 'completed', accepted: false },
+    { seq: 4, at: '2026-10-20T07:32:19.530Z', type: 'tool_lifecycle', tool_lifecycle: toolLifecycle },
+  ]
+  const rows = agentSessionTranscript(events)
+  assert.deepEqual(Array.from(rows, row => row.type), ['tool_lifecycle', 'acp_tool_transport', 'tool', 'tool'])
+  assert.deepEqual(Array.from(rows.filter(row => row.type === 'tool'), row => [row.status, row.updates.length]), [['pending', 1], ['pending', 1]])
+  const rendered = AgentSessionTranscript({ events })
+  const body = text(rendered)
+  for (const expected of ['工具结束确认诊断', '尚无结束确认：2 条', 'pending：2', 'in_progress：0', 'unknown：0', '未确认接收：1', '上报状态不能证明命令实际仍在执行', 'ACP 工具入站记录', ...ids]) assert.ok(body.includes(expected), expected)
+  const times = nodes(rendered).filter(node => node.type === 'time').map(node => node.props.dateTime)
+  for (const tool of toolLifecycle.tools) assert.ok(times.includes(new Date(tool.last_update_at_ms).toISOString()))
+  const transport = nodes(rendered).find(node => node.type === 'article' && node.props.className === 'agent-event agent-acp_tool_transport')
+  assert.equal(nodes(transport).find(node => node.type === 'details').props.open, false)
+  const diagnosticDetails = nodes(rendered).find(node => node.type === 'details' && text(node.children[0]) === '完整工具诊断 JSON（可复制）')
+  assert.notEqual(diagnosticDetails.props.open, true)
+  await nodes(diagnosticDetails).find(node => node.type === 'button').props.onClick()
+  assert.deepEqual(JSON.parse(copied), toolLifecycle, 'copy includes all evidence fields, not only the visible summary')
+  assert.equal(copyNotice.message, '已复制完整工具诊断。')
+})
+
+test('host pause diagnostics accept partial records without inventing zero counts or completion', async () => {
+  let copyNotice
+  const { AgentSessionTranscript } = await client({ useState: value => [value, next => { copyNotice = next }] })
+  const rendered = AgentSessionTranscript({ events: [
+    { seq: 1, type: 'host_event', message: '原回合已返回，工具记录尚无结束确认', tool_lifecycle: {
+      tools: [null, { tool_id: 'pending-without-time', status: 'pending' }], tools_truncated: true,
+    } },
+    { seq: 2, type: 'tool_lifecycle', payload: { tool_lifecycle: { tools: 'unavailable' } } },
+    { seq: 3, type: 'tool_lifecycle' },
+  ] })
+  const body = text(rendered)
+  for (const expected of ['原回合已返回，工具记录尚无结束确认', '工具结束确认诊断', '尚无结束确认：未记录', 'pending：未记录', 'in_progress：未记录', 'pending-without-time', '上报状态：pending', '时间未记录', '工具明细已截断', '完整宿主记录']) assert.ok(body.includes(expected), expected)
+  assert.equal(body.includes('Invalid Date'), false)
+  assert.equal(body.includes('尚无结束确认：0'), false)
+  await nodes(rendered).find(node => node.type === 'button').props.onClick()
+  assert.equal(copyNotice.message, '复制失败，请手动选择下方 JSON 复制。')
 })
 
 test('reader rejects late selections and late disposed Run responses while retaining last useful data on errors', async () => {

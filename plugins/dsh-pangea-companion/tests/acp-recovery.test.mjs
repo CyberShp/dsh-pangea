@@ -3,10 +3,60 @@ import test from 'node:test'
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { createSourceFirstAcpRun, inspectSourceFirstAcpRecovery } from '../src/source-first-acp.js'
+import { createSourceFirstAcpRun, inspectSourceFirstAcpRecovery, stopSourceFirstAcpRun } from '../src/source-first-acp.js'
 const progressPolicy = { readyWarnMs: 5, readyIdleMs: 20, warnMs: 5, idleMs: 20, cancelMs: 10, pollMs: 2 }
 const completed = { stopReason: 'completed', protocolStopReason: 'end_turn' }
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
+
+test('completed planning turn retains two unclosed pending tools with compact evidence even when a saved result exists', async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-pending-evidence-'))
+  const events = [], toolIds = ['chatcmpl-tool-a873a78f7e539d5e', 'chatcmpl-tool-9e4b74cbae3ac799']
+  const toolLifecycle = { schema_version: 1, request_id: 'driver-request', remote_session_id: 'remote',
+    unclosed_count: 2, pending_count: 2, in_progress_count: 0, unknown_count: 0,
+    received_tool_events: 4, accepted_tool_events: 4, unaccepted_tool_events: 0, validation_error_count: 0,
+    tools: toolIds.map(tool_id => ({ tool_id, status: 'pending', kind: 'execute', request_id: 'driver-request', remote_session_id: 'remote',
+      first_seen_at_ms: 1000, last_update_at_ms: 1000, seen_in_progress: false, input_observed: true, input_nonempty: false,
+      output_observed: false, received_update_count: 1, accepted_update_count: 1, rawInput: { command: 'private command' } })) }
+  let activeToolCount = 0, prompts = 0, settled = false, taskId, disposed = false
+  const worker = { id: 'worker', remoteSessionId: 'remote', result: Promise.resolve(completed),
+    readDiagnostics: () => ({ activeToolCount, toolLifecycle }), dispose: async () => { disposed = true },
+    continuePrompt: async () => { prompts++; activeToolCount = 2; return completed },
+  }
+  const options = { dataRoot, cwd: dataRoot, runId: 'run', providerId: 'fixture', signal: new AbortController().signal,
+    onEvent: event => events.push(event), subagents: { start: async () => worker },
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[0] === 'result-read') return { revision: 3, completion_complete: true, completion_declared_revision: 3 }
+      if (args[1] === 'bind') taskId = args.at(-1)
+      if (args[1] === 'settle') { settled = true; return {} }
+      if (args[1] === 'next') return { run_id: 'run', lifecycle_status: 'running', actions: [
+        { action_id: 'run:planning', action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId, role: 'planning', stage: 'unit_planning' },
+      ] }
+      return {}
+    },
+  }
+  try {
+    const run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).attentionRequired, true)
+    const pause = events.find(event => event.stage === 'source_first_worker_paused')
+    assert.match(pause.message, /2 条工具记录尚无结束确认/)
+    assert.equal(pause.tool_lifecycle.pending_count, 2)
+    assert.deepEqual(pause.tool_lifecycle.tools.map(tool => tool.tool_id), toolIds)
+    assert.doesNotMatch(JSON.stringify(pause.tool_lifecycle), /rawInput|private command/)
+    toolLifecycle.tools[0].status = 'completed'
+    assert.equal(pause.tool_lifecycle.tools[0].status, 'pending', 'persisted evidence is detached from mutable worker diagnostics')
+    assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, false)
+    assert.equal((await run.dispose()).retained, true)
+    assert.equal(prompts, 1)
+    assert.equal(settled, false)
+    assert.equal(disposed, false)
+    assert.equal(activeToolCount, 2)
+    assert.ok(events.some(event => event.stage === 'source_first_saved_result_checked' && event.phase === 'saved_complete'))
+  } finally {
+    await stopSourceFirstAcpRun(options)
+    await rm(dataRoot, { recursive: true, force: true })
+  }
+})
 
 for (const mode of ['late-tool', 'repeat-late-tool', 'unconfirmed-prompt', 'saved-read-failed']) test(`pending tool safety and saved result reconciliation (${mode})`, { timeout: 10000 }, async () => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-late-tool-'))

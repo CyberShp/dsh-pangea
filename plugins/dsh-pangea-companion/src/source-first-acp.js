@@ -5,6 +5,7 @@ import { ACP_PROGRESS_DEFAULTS, AcpStalled, hasUnconfirmedAcpTools, waitForAcpTu
 import { acpBindingsPath, inspectAcpBindings, readAcpBindings } from './acp-recovery.js'
 import { writeTaskStoreFile } from './task-store.js'
 import { createAgentSessionRecorder } from './agent-sessions.js'
+import { compactToolLifecycle } from './launch-log.js'
 
 // This host routes Graph identities; all content/quality decisions stay with
 // the worker. Live handles are retained on a recoverable pause so continuing
@@ -266,11 +267,11 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     const budget = isClosure ? closureBudgetMs ?? opened.task?.execution_budget_ms ?? (mode === 'speed' ? 900000 : 1800000) : null
     let window = closureWindows.get(action.action_id)
     if (!window) { window = { started: Date.now(), repairs: 0, turns: 0 }; closureWindows.set(action.action_id, window) }
-    const pause = async (reason, retain = false) => {
+    const pause = async (reason, retain = false, details = {}) => {
       await execution('paused', reason)
       if (!retain) await disposed(worker)
       pausedReasons.push(reason)
-      await event({ stage: 'source_first_worker_paused', action_id: action.action_id, reason, message: reason })
+      await event({ ...details, stage: 'source_first_worker_paused', action_id: action.action_id, reason, message: reason })
     }
     const pauseForContext = async detail => {
       const reason = `执行器输入超限，已暂停当前 action，未提交空结果或替换会话。需在原会话压缩上下文后继续；若执行器不支持压缩，需用户决定后续处理。${String(detail).slice(0, 1200)}`
@@ -354,7 +355,8 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         await releaseBlocked()
         Promise.resolve(turn).then(outcome => { response = outcome; return releaseBlocked() }).catch(() => {})
       }
-      await pause(error.message, true)
+      const toolLifecycle = compactToolLifecycle(worker.readDiagnostics?.()?.toolLifecycle)
+      await pause(error.message, true, toolLifecycle ? { tool_lifecycle: toolLifecycle } : {})
       return { stopReason: 'completed', attentionRequired: true, diagnostic: error.message }
     }
     const reserveRecovery = async () => {
@@ -501,7 +503,10 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     check()
     if (result.stall) return stallPause(result.stall, result.pendingTurn)
     const diagnostics = worker.readDiagnostics?.() ?? {}
-    if (hasUnconfirmedAcpTools(diagnostics)) return stallPause(new AcpStalled('原回合已返回，但工具仍在执行；保留结果，等待工具结束', false, result), Promise.resolve(result))
+    if (hasUnconfirmedAcpTools(diagnostics)) {
+      const count = Number.isInteger(diagnostics.activeToolCount) && diagnostics.activeToolCount > 0 ? `${diagnostics.activeToolCount} 条` : ''
+      return stallPause(new AcpStalled(`原回合已返回，但${count ? ` ${count}` : ''}工具记录尚无结束确认；保留结果，等待状态确认`, false, result), Promise.resolve(result))
+    }
     await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
     // stderrSummary may contain earlier turns; only current-turn failures can
     // pause this action (in particular after a user compacts and resumes it).

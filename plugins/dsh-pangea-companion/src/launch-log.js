@@ -15,6 +15,39 @@ export function diagnosticText(value, limit = MAX_EVENT_TEXT) {
     .slice(0, limit)
 }
 
+// Metadata only: tool input/output and command text never belong in this
+// compact launch diagnostic. Full accepted events stay in the session log.
+export function compactToolLifecycle(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const compact = (source, strings, numbers, booleans) => {
+    const result = {}
+    for (const key of strings) if (typeof source[key] === 'string') result[key] = diagnosticText(source[key], 256)
+    for (const key of numbers) if (Number.isSafeInteger(source[key]) && source[key] >= 0) result[key] = source[key]
+    for (const key of booleans) if (typeof source[key] === 'boolean') result[key] = source[key]
+    return result
+  }
+  const result = compact(value, ['request_id', 'remote_session_id'],
+    ['schema_version', 'captured_at_ms', 'unclosed_count', 'pending_count', 'in_progress_count', 'unknown_count',
+      'received_tool_events', 'accepted_tool_events', 'unaccepted_tool_events', 'validation_error_count', 'evidence_evicted_count', 'observer_error_count'],
+    ['tools_truncated', 'validation_errors_truncated'])
+  if (Array.isArray(value.tools)) {
+    result.tools = value.tools.slice(0, 50).filter(tool => tool && typeof tool === 'object').map(tool => compact(tool,
+      ['tool_id', 'status', 'kind', 'request_id', 'remote_session_id', 'last_received_status', 'last_accepted_status'],
+      ['first_seen_at_ms', 'last_update_at_ms', 'last_received_at_ms', 'received_update_count', 'accepted_update_count'],
+      ['seen_in_progress', 'input_observed', 'input_nonempty', 'output_observed', 'evidence_missing']))
+    if (value.tools.length > 50) result.tools_truncated = true
+  }
+  if (Array.isArray(value.validation_errors)) {
+    result.validation_errors = value.validation_errors.slice(-10).filter(error => error && typeof error === 'object').map(error => {
+      const entry = compact(error, ['tool_id', 'remote_session_id', 'request_id', 'code'], ['at_ms'], [])
+      if (Array.isArray(error.path)) entry.path = error.path.slice(0, 12).map(part => diagnosticText(part, 64))
+      return entry
+    })
+    if (value.validation_errors.length > 10) result.validation_errors_truncated = true
+  }
+  return result
+}
+
 function logRoot() {
   const configured = process.env.DSH_HOME
   const root = typeof configured === 'string' && configured.trim() !== ''
@@ -83,6 +116,8 @@ function compactEvent(value = {}) {
   for (const key of ['process_exited', 'stderr_truncated', 'output_truncated', 'request_dispatched']) {
     if (typeof value[key] === 'boolean') event[key] = value[key]
   }
+  const toolLifecycle = compactToolLifecycle(value.tool_lifecycle)
+  if (toolLifecycle) event.tool_lifecycle = toolLifecycle
   if (Number.isInteger(value.repository_count) && value.repository_count >= 0) event.repository_count = value.repository_count
   if (Number.isInteger(value.pid) && value.pid > 0) event.pid = value.pid
   if (Number.isInteger(value.errno)) event.errno = value.errno

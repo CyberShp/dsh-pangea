@@ -12,6 +12,7 @@ import { normalizeFlowBaseline, readFlowMetadata, flowBaselineOptions } from './
 import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 import { sourceFirstReportAvailable, summarizeRun } from './reader.js'
 import { taskStatusFromRun } from './task-store.js'
+import { compactToolLifecycle } from './launch-log.js'
 
 const DEFAULT_PAGE_SIZE = 20
 const ACP_RUNTIME_CONFIG_ENV = 'PANGEA_ACP_RUNTIME_CONFIG'
@@ -662,6 +663,7 @@ function acpRunDiagnostics(run) {
     last_tool_id: value.lastToolId,
     last_tool_status: value.lastToolStatus,
     active_tool_count: value.activeToolCount,
+    tool_lifecycle: compactToolLifecycle(value.toolLifecycle),
     turn_duration_ms: value.turnDurationMs,
     first_event_ms: value.firstEventMs,
     stderr_bytes: value.stderrBytes,
