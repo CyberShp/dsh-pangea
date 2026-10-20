@@ -1,3 +1,4 @@
+import { requireAgentModel, requireExternalAnalysisProvider } from './agent-models.js'
 import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import path from 'node:path'
 import { readFile, readdir, stat } from 'node:fs/promises'
@@ -91,7 +92,7 @@ export function validateAcpRuntimeConfig(value) {
 export function acpProviderOption(providerId, env = process.env) {
   const id = typeof providerId === 'string' ? providerId.trim() : ''
   if (id === 'pangea-claude-code' || id === 'claude-code') {
-    throw new Error('Claude Code 支持已移除，历史任务和结果仍保留。请改选 NGA、CodeAgent、OpenCode 或已配置的内置模型后重新发起任务。')
+    throw new Error('Claude Code 支持已移除，历史任务和结果仍保留。请改选 NGA、CodeAgent 或 OpenCode 后重新发起任务。')
   }
   return acpProviderOptions(env).find(provider => provider.id === id) ?? null
 }
@@ -866,19 +867,16 @@ export async function launchAnalysisSession(
   }), value => ({ repository_count: Array.isArray(value?.repositories) ? value.repositories.length : 0 }))
   const request = normalizeAnalysisInput(input, capabilities, true)
   const semantic = supportsSourceFirst(capabilities)
-  if (semantic && !request.agent_model && input?.model_route?.model) request.agent_model = input.model_route.model
+  if (semantic && request.provider_id && !request.agent_model && input?.model_route?.model) request.agent_model = input.model_route.model
   await emitLaunch(onEvent, { stage: 'input_validated', status: 'ok' })
   const selectedProvider = request.provider_id
-  if (selectedProvider && !acpProviderOption(selectedProvider, env)) throw new Error(`未知的 ACP 执行 Agent：${selectedProvider}`)
-  if (selectedProvider && !runtime) throw new Error(`外部执行 Agent 需要 DSH ACP runtime：${selectedProvider}`)
-  const selectedModel = selectedProvider
-    ? null
-    : await launchStep(
-      onEvent,
-      'model_validate',
-      () => requireInternalModel(api, model),
-      value => ({ provider: value.provider, model: value.model }),
-    )
+  requireExternalAnalysisProvider(selectedProvider)
+  if (!runtime) throw new Error(`外部执行 Agent 需要 DSH ACP runtime：${selectedProvider}`)
+  if (resumeRunId && !request.agent_model) throw new Error('历史任务未固定模型，无法确认原执行模型；已保留结果，请选择外部 Agent 和具体模型新建分析')
+  request.agent_model = await launchStep(onEvent, 'model_validate',
+    () => requireAgentModel(runtime, { providerId: selectedProvider, cwd: root, model: request.agent_model }),
+    value => ({ provider: selectedProvider, model: value }))
+  const selectedModel = null
   const requestedResumeRunId = typeof resumeRunId === 'string' ? resumeRunId.trim() : ''
   const executionRecovery = capabilities.source_first?.execution_recovery
   if (semantic && requestedResumeRunId && executionRecovery?.host_quiescent_resume !== true) {

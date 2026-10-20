@@ -6,6 +6,8 @@ import test from 'node:test'
 
 import { acpProviderOption, acpProviderOptions, createTaskConversation, homeSnapshot, internalModelOptions, launchAnalysisSession, normalizeRunInput, requireInternalModel, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from '../src/workbench-api.js'
 
+const catalogProvider = { async discoverModels() { return { current_model: 'native/default', models: [{ id: 'native/default' }, { id: 'native/selected' }] } } }
+
 const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
 
 test('managed depth job pauses Producer, dispatches Reviewer and reuses both sessions until formal review', async () => {
@@ -25,7 +27,7 @@ test('managed depth job pauses Producer, dispatches Reviewer and reuses both ses
     }
     const runtime = { agents: { get: () => owner },
       jobs: { start(spec) { hooks = spec.run(); return 'job' }, get: () => ({ startedAt: 10 }) },
-      subagents: { getProvider: () => ({}), async start(provider, request) {
+      subagents: { getProvider: () => catalogProvider, async start(provider, request) {
         starts++
         if (starts === 1) {
           assert.match(request.prompt[0].text, /完成阶段 03 后/)
@@ -357,28 +359,17 @@ test('keeps legacy ACP model catalogs out of the provider launch contract', () =
   assert.equal(Object.hasOwn(provider, 'models'), false)
 })
 
-test('fails closed before creating a session when the internal credential is missing and records the failing stage', async () => {
-  const root = await workspace()
-  let created = false
-  const launchEvents = []
-  try {
-    const api = internalModelApi()
-    api.credentials.describe = async () => ok({ credentials: { MINIMAX_1_API_KEY: { configured: false, writable: true } } })
-    api.workspace.list = async () => ok({ items: [{ workspaceId: 'workspace-1', path: root }] })
-    api.sessions.create = async () => { created = true; return ok({ sessionId: 'unexpected' }) }
-    await assert.rejects(
-      launchAnalysisSession(api, {
-        cwd: root,
-        input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] },
-        model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
-      }, async () => capabilities, undefined, event => { launchEvents.push(event) }),
-      /尚未配置凭证/,
-    )
-    assert.equal(created, false)
-    assert.equal(launchEvents.some(event => event.stage === 'model_validate' && event.status === 'error'), true)
-    assert.equal(launchEvents.some(event => event.stage === 'session_create'), false)
-  } finally { await rm(root, { recursive: true, force: true }) }
-})
+for (const scenario of ['risk-analysis', 'branch-analysis', 'coverage-analysis', 'module-analysis']) {
+  for (const resumeRunId of [undefined, 'saved-run']) test(`rejects internal API ${scenario} ${resumeRunId ? 'resume' : 'creation'} before changing a Run`, async () => {
+    const root = await workspace()
+    try {
+      await assert.rejects(launchAnalysisSession({}, {
+        cwd: root, input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'], scenario },
+        model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' }, resumeRunId,
+      }, async ({ args }) => { assert.equal(args[0], 'system'); return capabilities }), /内部 API 分析支持已移除/)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+}
 
 test('normalizes Run input and rejects legacy fields and unregistered repositories', () => {
   const input = normalizeRunInput({
@@ -458,63 +449,6 @@ test('keeps the workbench available when one public runs get detail cannot be re
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('creates a Skill Run before launching its dedicated DSH session', async () => {
-  const root = await workspace()
-  try {
-    const events = []
-    const launchEvents = []
-    const api = {
-      ...internalModelApi(events),
-      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
-      sessions: {
-        ...internalModelApi(events).sessions,
-        async create(value) { assert.equal(value.payload.workspaceId, 'workspace-1'); events.push('create'); return ok({ sessionId: 'session-1' }) },
-        async rename(value) { assert.match(value.payload.title, /session/); return ok({}) },
-        async prompt(value) { events.push(['prompt', value.payload]); return ok({}) },
-      },
-    }
-    const runner = async call => {
-      if (call.args[0] === 'system') return capabilities
-      assert.deepEqual(call.args.slice(0, 2), ['runs', 'create'])
-      return {
-        run_id: 'skill-run-1', request_path: '/runtime/request.md', run_root: '/runtime/run',
-        source_snapshot: { file_count: 7, total_bytes: 8192, snapshot_duration_ms: 23 },
-      }
-    }
-    const result = await launchAnalysisSession(api, {
-      cwd: root,
-      input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'], asset_ids: ['asset-1'] },
-      model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
-    }, runner, async session => {
-      events.push(['persist', session])
-    }, async event => { launchEvents.push(event) })
-    assert.equal(result.session_id, 'session-1')
-    assert.equal(events[1][0], 'select-model')
-    assert.deepEqual(events[1][1], { sessionId: 'session-1', provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' })
-    assert.equal(events[2][0], 'persist')
-    assert.equal(events[2][1].session_id, 'session-1')
-    assert.equal(events[3][0], 'prompt')
-    assert.match(events[3][1].content[0].text, /\/runtime\/request\.md/)
-    assert.match(events[3][1].content[0].text, /skill-run-1/)
-    assert.match(events[3][1].content[0].text, /workflow-manifest\.json/)
-    assert.doesNotMatch(events[3][1].content[0].text, /Step 01–09/)
-    assert.doesNotMatch(events[3][1].content[0].text, /pangea_run_create/)
-    assert.equal(result.run.run_id, 'skill-run-1')
-    for (const stage of ['capabilities_check', 'model_validate', 'run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit', 'skill_started']) {
-      assert.equal(launchEvents.some(event => event.stage === stage), true, `missing launch stage ${stage}`)
-    }
-    assert.equal(launchEvents.find(event => event.stage === 'session_create' && event.status === 'ok')?.session_id, 'session-1')
-    const created = launchEvents.find(event => event.stage === 'run_create' && event.status === 'ok')
-    assert.equal(Number.isInteger(created?.duration_ms), true)
-    assert.equal(created?.file_count, 7)
-    assert.equal(created?.total_bytes, 8192)
-    assert.equal(created?.snapshot_duration_ms, 23)
-    for (const stage of ['capabilities_check', 'model_validate', 'run_create', 'session_create', 'model_select', 'session_record', 'prompt_submit']) {
-      assert.equal(Number.isInteger(launchEvents.find(event => event.stage === stage && event.status === 'ok')?.duration_ms), true)
-    }
-  } finally { await rm(root, { recursive: true, force: true }) }
-})
-
 test('creates an additional DSH conversation without starting another Run', async () => {
   const root = await workspace()
   try {
@@ -541,41 +475,6 @@ test('stops one explicit Run through the public runs API', async () => {
     assert.deepEqual(call.args.slice(0, 2), ['runs', 'stop'])
     assert.deepEqual(call.args.slice(-2), ['--run-id', 'run-17'])
     assert.equal(result.run.lifecycle_status, 'stopped')
-  } finally { await rm(root, { recursive: true, force: true }) }
-})
-
-test('resumes an existing Run without creating a second Run', async () => {
-  const root = await workspace()
-  try {
-    const events = []
-    const api = {
-      ...internalModelApi(events),
-      workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
-      sessions: {
-        ...internalModelApi(events).sessions,
-        async create() { return ok({ sessionId: 'session-resume' }) },
-        async rename() { return ok({}) },
-        async prompt(value) { events.push(['prompt', value.payload]); return ok({}) },
-      },
-    }
-    const launchEvents = []
-    const runner = async call => {
-      if (call.args[0] === 'system') return capabilities
-      assert.deepEqual(call.args.slice(0, 2), ['runs', 'resume'])
-      assert.deepEqual(call.args.slice(-2), ['--run-id', 'skill-run-1'])
-      return { run_id: 'skill-run-1', request_path: '/runtime/request.md', run_root: '/runtime/run', current_step: '04' }
-    }
-    const result = await launchAnalysisSession(api, {
-      cwd: root,
-      input: { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] },
-      model: { provider: 'minimax-1', model: 'MiniMax-M2.7-highspeed' },
-      resumeRunId: 'skill-run-1',
-    }, runner, async () => {}, async event => launchEvents.push(event))
-    assert.equal(result.run.run_id, 'skill-run-1')
-    assert.equal(events.at(-1)[0], 'prompt')
-    assert.match(events.at(-1)[1].content[0].text, /run_guard\.py init --resume/)
-    assert.equal(launchEvents.some(event => event.stage === 'run_resume' && event.status === 'ok'), true)
-    assert.equal(launchEvents.some(event => event.stage === 'run_create'), false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -608,7 +507,7 @@ for (const agentModel of [null, 'native/selected']) test(`starts an ACP provider
     const runtime = {
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
-        getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+        getProvider(id) { return id === 'pangea-nga' ? catalogProvider : undefined },
         async start(providerId, request) {
           providerStarted = true
           assert.equal(providerId, 'pangea-nga')
@@ -633,7 +532,7 @@ for (const agentModel of [null, 'native/selected']) test(`starts an ACP provider
     assert.equal(result.job_id, 'subagent-1')
     assert.equal(result.provider, 'pangea-nga')
     assert.equal(providerStarted, true)
-    assert.deepEqual(providerRequest.agentOptions, agentModel ? { model: agentModel } : undefined)
+    assert.deepEqual(providerRequest.agentOptions, { model: agentModel || 'native/default' })
     assert.match(providerRequest.prompt[0].text, /速度型 root-cause 分析/)
     assert.equal(result.model, null)
     assert.equal(promptCalled, false)
@@ -657,7 +556,7 @@ test('records the local Job identity before releasing the ACP provider start', a
     const runtime = {
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
-        getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+        getProvider(id) { return id === 'pangea-nga' ? catalogProvider : undefined },
         async start() {
           order.push('provider-start')
           return { id: 'agent-session', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => {} }
@@ -705,7 +604,7 @@ test('continues an incomplete Codetalks Run in the same ACP session before dispo
     const runtime = {
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
-        getProvider() { return {} },
+        getProvider() { return catalogProvider },
         async start() {
           return {
             id: 'agent-session',
@@ -758,7 +657,7 @@ test('continues within one long module phase while flow progress advances', asyn
     const runtime = {
       agents: { get() { return owner } },
       subagents: {
-        getProvider() { return {} },
+        getProvider() { return catalogProvider },
         async start() {
           return {
             id: 'agent-session',
@@ -808,7 +707,7 @@ test('stops automatic ACP continuation after two turns without Run progress', as
     const runtime = {
       agents: { get() { return owner } },
       subagents: {
-        getProvider() { return {} },
+        getProvider() { return catalogProvider },
         async start() {
           return {
             id: 'agent-session',
@@ -856,7 +755,7 @@ test('does not submit another ACP turn after cancellation during continuation', 
     const runtime = {
       agents: { get() { return owner } },
       subagents: {
-        getProvider() { return {} },
+        getProvider() { return catalogProvider },
         async start() {
           return {
             id: 'agent-session', result: Promise.resolve({ stopReason: 'completed', output: [] }),
@@ -904,7 +803,7 @@ test('blocks ACP start when the durable lifecycle says the attempt is stopping',
     const runtime = {
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
-        getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+        getProvider(id) { return id === 'pangea-nga' ? catalogProvider : undefined },
         async start() {
           providerStarted = true
           return { id: 'agent-session', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => {} }
@@ -952,7 +851,7 @@ test('disposes a started ACP session when durable runtime binding fails', async 
     const runtime = {
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
-        getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+        getProvider(id) { return id === 'pangea-nga' ? catalogProvider : undefined },
         async start() {
           return { id: 'agent-session', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose: async () => { disposed = true } }
         },
@@ -987,7 +886,7 @@ test('reports an ACP provider start failure as failed instead of user cancellati
     const runtime = {
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
-        getProvider() { return {} },
+        getProvider() { return catalogProvider },
         async start() {
           const error = new Error('spawn EINVAL')
           Object.assign(error, {
@@ -1041,7 +940,7 @@ test('does not release ACP when the real Job snapshot identity is unavailable', 
     const runtime = {
       agents: { get(id) { return id === owner.id ? owner : undefined } },
       subagents: {
-        getProvider() { return {} },
+        getProvider() { return catalogProvider },
         async start() { providerStarted = true; throw new Error('must not start') },
       },
       jobs: {

@@ -91,49 +91,29 @@ test('a lost host does not downgrade an already verified source-first report', (
   assert.equal(result.current.external_execution.status, 'interrupted')
 })
 
-test('native DSH blocks busy/unknown owners and resumes the original owner after a proven host exit', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-native-recovery-'))
-  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' })
-  await once(child, 'exit')
+test('historical internal API analysis cannot resume or create an execution', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-native-retired-'))
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), '# fixture')
-    const task = { task_id: 'native', data_root: root, run_id: 'run', workflow_version: 'source-first-v1',
-      provider: null, status: 'failed', execution_status: 'failed', owner_session_id: 'original-owner', host_process_id: child.pid }
-    assert.equal((await assessTaskResumeEligibility({ agents: { get: () => ({ id: 'original-owner', status: 'running' }) } }, task)).can_resume, false)
-    assert.equal((await assessTaskResumeEligibility({ agents: { get: () => ({ id: 'original-owner', status: 'idle', whenIdle: () => new Promise(() => {}) }) } }, task)).can_resume, false)
-    assert.equal((await assessTaskResumeEligibility({ agents: { get: () => undefined } }, { ...task, host_process_id: null })).can_resume, false)
-    const eligibility = await assessTaskResumeEligibility({ agents: { get: () => undefined } }, task)
-    assert.equal(eligibility.can_resume, true)
-    assert.equal(eligibility.host_quiescent, true)
-    const ok = value => ({ result: { ok: true, value } })
-    const prompts = [], ownerBindings = [], calls = []
-    const api = {
-      llm: { providers: async () => ok({ providers: [{ provider: 'model-provider', active: true, declared: true, settingsNs: 'models', settingsPath: [] }] }),
-        models: async () => ok({ groups: [{ id: 'model-provider', models: [{ id: 'model' }] }], failures: [] }) },
-      settings: { describe: async () => ok({ namespaces: [{ ns: 'models', value: {} }] }) },
-      sessions: { selectModel: async () => ok({}), create: async () => assert.fail('native continuation must not replace its owner'),
-        prompt: async request => { prompts.push(request.payload); return ok({}) } },
-    }
-    const capabilities = { workflow_versions: ['source-first-v1'], repositories: ['sample'],
-      source_first: { version: 'source-first-v1', execution_recovery: { host_quiescent_resume: true, execution_ids: true } } }
+    const task = Object.freeze({ task_id: 'native', data_root: root, run_id: 'run', workflow_version: 'source-first-v1',
+      provider: null, status: 'failed', execution_status: 'failed', owner_session_id: 'original-owner' })
+    const unexpected = new Proxy({}, { get() { assert.fail('retired internal analysis must not touch runtime or model API') } })
+    const eligibility = await assessTaskResumeEligibility(unexpected, task)
+    assert.equal(eligibility.can_resume, false)
+    assert.match(eligibility.resume_blocked_reason, /内部 API 分析支持已移除/)
+    const calls = []
     const runner = async ({ args }) => {
       calls.push(args)
-      if (args[0] === 'system') return capabilities
-      assert.equal(args[1], 'resume')
-      assert.ok(args.includes('--host-quiescent'))
-      return { workflow_version: 'source-first-v1', run_id: 'run', data_root: root, agent_actions: [] }
+      assert.equal(args[0], 'system', 'must not create or resume a Run')
+      return { workflow_versions: ['source-first-v1'], repositories: ['sample'],
+        source_first: { version: 'source-first-v1', execution_recovery: { host_quiescent_resume: true, execution_ids: true } } }
     }
-    const value = await launchAnalysisSession(api, { cwd: root, dataRoot: root, input: { repository: 'sample', target: 'native恢复' },
-      model: { provider: 'model-provider', model: 'model' }, resumeRunId: 'run', hostQuiescent: true, resumeOwnerSessionId: 'original-owner' },
-    runner, async () => {}, async () => {}, undefined, process.env, { onOwnerReady: value => ownerBindings.push(value.ownerSessionId) })
-    assert.equal(value.session_id, 'original-owner')
-    assert.deepEqual(ownerBindings, ['original-owner'])
-    assert.equal(prompts[0].sessionId, 'original-owner')
+    await assert.rejects(launchAnalysisSession(unexpected, { cwd: root, dataRoot: root,
+      input: { repository: 'sample', target: '历史分析' }, model: { provider: 'model-provider', model: 'model' },
+      resumeRunId: 'run', hostQuiescent: true, resumeOwnerSessionId: 'original-owner' }, runner), /内部 API 分析支持已移除/)
+    assert.ok(calls.every(args => args[0] === 'system'))
+    assert.equal(task.owner_session_id, 'original-owner')
     await assert.rejects(resumeRun(root, { dataRoot: root, runId: 'run' }, async () => ({ run_id: 'run', requires_host_quiescence: true })), /原执行尚未确认/)
-    capabilities.source_first.execution_recovery = undefined
-    await assert.rejects(launchAnalysisSession(api, { cwd: root, input: { repository: 'sample', target: 'native' },
-      model: { provider: 'model-provider', model: 'model' }, resumeRunId: 'run' }, runner), /不支持.*安全续跑/)
-    assert.equal(prompts.length, 1)
   } finally { await rm(root, { recursive: true, force: true }) }
 })

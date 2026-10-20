@@ -64,62 +64,18 @@ test('new analysis reference-source placeholder matches the approved prototype',
   assert.equal(sourceScope.props.placeholder, '例如：tests/cpuload_test.c')
 })
 
-test('empty model catalog preserves a saved reasoning effort as disabled without making creation ready', async () => {
-  for (const [savedRoute, expectedValue, expectedLabel] of [
-    [null, '', '默认'],
-    [{ provider: 'openai', model: 'gpt-5.4', reasoning_effort: 'high' }, 'high', '高'],
-  ]) {
-    let index = 0, fetchCalls = 0
-    const form = { repository: 'dperf', target: 'CPU 使用率计算分析', source_scope_text: 'src/cpuload.c\nsrc/cpuload.h',
-      asset_ids: ['asset-requirement', 'asset-design', 'asset-defect'], scenario: 'module-analysis', mode: 'depth',
-      provider_id: '', model_route_key: '', agent_model: '' }
-    const states = {
-      1: { compatibility: { compatible: true }, capabilities: { repositories: ['dperf'], workflow_versions: ['source-first-v1'],
-        source_first: { version: 'source-first-v1', analysis_options_by_profile: { 'behavior-test-v2': { scenarios: ['module-analysis'], modes: ['depth'] } } } },
-        model_routing: { status: 'ok', models: [] }, acp_providers: [] },
-      16: { type: 'create', createStep: 3 },
-      33: form,
-      34: { assets: [] },
-      49: {
-        'asset-requirement': { asset_id: 'asset-requirement', title: 'CPU 采样与利用率需求', asset_type: 'requirement', revision: 3, input_revision: 'r3' },
-        'asset-design': { asset_id: 'asset-design', title: 'CPU 负载计算设计说明', asset_type: 'design', revision: 2, input_revision: 'r2' },
-        'asset-defect': { asset_id: 'asset-defect', title: '历史问题：采样间隔异常', asset_type: 'historical_defect', revision: 1, input_revision: 'r1' },
-      },
-    }
-    const executionStorage = new Map([['pangea-execution:/workspace', JSON.stringify({
-      provider_id: '', agent_model: '', ...(savedRoute ? { model_route: savedRoute } : {}),
-    })]])
-    const react = {
-      ...fakeReact(),
-      useState(initial) {
-        const key = index++
-        if (!(key in states)) states[key] = initial
-        return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
-      },
-      useEffect(effect) {
-        if (String(effect).includes('const saved = JSON.parse(window.localStorage')) effect()
-      },
-    }
-    const client = await loadClientExports(react, async () => { fetchCalls++; throw new Error('unexpected request') }, () => {}, {
-      localStorage: { getItem: key => executionStorage.get(key) ?? null, setItem: (key, value) => executionStorage.set(key, value) },
-    })
-    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
-    client.apply(ctx)
-    const render = () => {
-      index = 0
-      const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
-      return descendants(panel.type(panel.props))
-    }
-    render() // Run the component's existing workspace-scoped saved-selection restore effect.
-    const nodes = render()
-    const reasoning = nodes.find(node => node.type === 'select' && node.props['aria-label'] === '推理级别')
-    assert.equal(reasoning.props.disabled, true)
-    assert.equal(reasoning.props.value, expectedValue)
-    assert.equal(reasoning.children[0].children[0], expectedLabel)
-    const continueButton = nodes.find(node => node.type === 'button' && node.props.className === 'create-disabled')
-    assert.equal(continueButton.props.disabled, true)
-    assert.equal(fetchCalls, 0)
-  }
+test('saved internal API settings do not restore an analysis route or show internal model controls', async () => {
+  let index = 0
+  const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: [], model_routing: { status: 'ok', models: [{ provider: 'openai', model: 'internal', credential_configured: true }] } },
+    16: { type: 'create', createStep: 3 }, 33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], provider_id: '', agent_model: '', model_route_key: '' } }
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] }, useEffect(effect) { if (String(effect).includes('const saved = JSON.parse(window.localStorage')) effect() } }, undefined, undefined,
+    { localStorage: { getItem: () => JSON.stringify({ provider_id: '', model_route: { provider: 'openai', model: 'internal' } }), setItem() {} } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }; client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const tree = descendants(panel.type(panel.props))
+  assert.equal(tree.some(node => ['模型', '推理级别'].includes(node.props['aria-label']) || node.props.id === 'create-builtin'), false)
+  assert.equal(states[33].model_route_key, '')
+  assert.equal(tree.find(node => node.type === 'button' && node.children.includes('下一步 · 确认创建')).props.disabled, true)
 })
 
 async function loadClientExports(react = fakeReact(), fetcher = async () => { throw new Error('fetch must not run during registration') }, onEvent = () => {}, windowProperties = {}) {
@@ -175,7 +131,7 @@ test('run progress keeps real result progress separate from newer provider commu
 test('stopped run exposes preserved drafts and exact settle versus continue position', async () => {
   const client = await loadClientExports()
   const current = observableRun({ lifecycle_status: 'stopped', terminal: true })
-  const task = { run_id: current.run_id, data_root: current.data_root, can_resume: true, status: 'stopped', execution_status: 'stopped' }
+  const task = { provider: 'pangea-nga', run_id: current.run_id, data_root: current.data_root, can_resume: true, status: 'stopped', execution_status: 'stopped' }
   const rendered = client.RunExecutionSummary({ current, task })
   const value = JSON.stringify(rendered)
   assert.match(value, /连接恢复：接收已完成提交；资源释放：续接原执行/)
@@ -211,7 +167,7 @@ test('recovery summary does not use continuation permission from an unrelated ta
 
 test('overview loses live status and disables continuation when its current Run read fails', async () => {
   const current = observableRun({ lifecycle_status: 'stopped', terminal: true, details: {}, counts: {} })
-  const task = { task_id: 'observed-task', run_id: current.run_id, data_root: current.data_root, title: 'TLS', target: 'TLS', repository: 'sample', can_resume: true, status: 'stopped', execution_status: 'stopped' }
+  const task = { provider: 'pangea-nga', task_id: 'observed-task', run_id: current.run_id, data_root: current.data_root, title: 'TLS', target: 'TLS', repository: 'sample', can_resume: true, status: 'stopped', execution_status: 'stopped' }
   const states = { 0: { current, data_root: current.data_root }, 1: { tasks: { items: [task] }, compatibility: { compatible: true } }, 2: 'connection lost', 4: current.run_id, 5: task.task_id, 16: { type: 'overview' } }
   let index = 0
   const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
@@ -264,7 +220,7 @@ test('incremental dialog blocks incomplete input and retains request errors for 
 
 test('overview derivation loads only its bound Run and is disabled during execution', async () => {
   for (const running of [false, true]) {
-    const task = { task_id: 'parent-task', run_id: 'parent-run', title: 'TLS分析', repository: 'repo', status: running ? 'running' : 'completed', execution_status: running ? 'running' : 'succeeded' }
+    const task = { provider: 'pangea-nga', task_id: 'parent-task', run_id: 'parent-run', title: 'TLS分析', repository: 'repo', status: running ? 'running' : 'completed', execution_status: running ? 'running' : 'succeeded' }
     const current = { run_id: task.run_id, workflow_version: 'source-first-v1', terminal: !running, lifecycle_status: running ? 'running' : 'complete', details: {}, workflow: { steps: [], units: [], actions: [] } }
     const states = { 0: { status: 'ok', current }, 1: { compatibility: { compatible: true }, tasks: { items: [task] } }, 4: task.run_id, 5: task.task_id, 16: { type: 'overview' } }
     let index = 0
@@ -558,7 +514,7 @@ for (const providerId of ['pangea-nga', 'pangea-opencode', 'pangea-codeagent']) 
       16: { type: 'create', createStep: 3 }, 33: form }
     const client = await loadClientExports({ ...fakeReact(), useState(initial) {
       const key = index++
-      if (phase === 'model') return [key === 0 ? { provider_id: providerId, models: [{ id: 'wire/selected', label: 'Selected' }] } : key === 2 ? false : initial, () => {}]
+      if (key === 87) return [{ status: 'ready', cwd: '/workspace', provider_id: providerId, catalog: { catalog_id: 'receipt', provider_id: providerId, models: [{ id: 'wire/selected', label: 'Selected' }] } }, () => {}]
       return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }]
     } })
     const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
@@ -801,7 +757,7 @@ test('does not present a failed task as pending publication', async () => {
   sandbox.window = { __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? fakeReact() : {}) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
   const failed = exported.deriveRunPresentation(
-    { status: 'failed', execution_status: 'failed', run_id: 'run-1', terminal_error: 'ACP Agent 启动失败', can_resume: true },
+    { provider: 'pangea-nga', status: 'failed', execution_status: 'failed', run_id: 'run-1', terminal_error: 'ACP Agent 启动失败', can_resume: true },
     { run_id: 'run-1', publication: { state: 'pending' } },
     { status: 'pending' },
   )
@@ -834,7 +790,7 @@ test('does not present a failed task as pending publication', async () => {
   assert.equal(stopping.canResume, false)
 
   const failedDraft = exported.deriveRunPresentation(
-    { status: 'failed', execution_status: 'failed', run_id: 'run-draft', can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' },
+    { provider: 'pangea-nga', status: 'failed', execution_status: 'failed', run_id: 'run-draft', can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' },
     { run_id: 'run-draft', publication: { state: 'draft' } },
     { status: 'ok' },
   )
@@ -865,7 +821,7 @@ test('does not present a failed task as pending publication', async () => {
   assert.equal(needsAttention.publicationLabel, '尚未发布（需要处理）')
 
   const userPaused = exported.deriveRunPresentation(
-    { status: 'needs_attention', execution_status: 'paused', run_id: 'run-paused', can_resume: true },
+    { provider: 'pangea-nga', status: 'needs_attention', execution_status: 'paused', run_id: 'run-paused', can_resume: true },
     { run_id: 'run-paused', lifecycle_status: 'running', terminal: false, needs_user: true, publication: { state: 'draft' } },
     { status: 'pending' },
   )
@@ -1740,9 +1696,10 @@ test('result and overview headers keep long analysis instructions in a collapsed
 })
 
 test('new analysis binds no Run while preparing and registers the analysis destination before opening its session', { timeout: 2000 }, async () => {
-  const task = { task_id: 'new-task', title: 'New analysis', run_id: null, data_root: '/data', status: 'preparing' }
+  const task = { provider: 'external', task_id: 'new-task', title: 'New analysis', run_id: null, data_root: '/data', status: 'preparing' }
   const workbench = { compatibility: { compatible: true }, tasks: { items: [] }, acp_providers: [{ id: 'external', registered: true }] }
   const states = { 1: workbench, 4: 'previous-run', 16: { type: 'create', createStep: 4 }, 33: { repository: 'repo', target: 'synthetic', source_scope_text: 'request.c', asset_ids: [], scenario: 'module-analysis', mode: 'speed', provider_id: 'external', model_route_key: '', agent_model: 'selected' } }
+  states[87] = { cwd: '/workspace', provider_id: 'external', status: 'ready', catalog: { catalog_id: 'receipt', provider_id: 'external', models: [{ id: 'selected', label: 'Selected' }] } }
   let index = 0, releaseStart, enteredStart, refreshed
   const preparing = new Promise(resolve => { enteredStart = resolve })
   const started = new Promise(resolve => { releaseStart = resolve })
@@ -2136,7 +2093,7 @@ test('overview status variants separate analysis quality from test execution and
   } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
-  const task = { task_id: 'task-23', title: 'CPU 使用率计算分析', target: 'CPU 使用率计算', repository: 'dperf', data_root: '/workspace/data', run_id: 'run-23' }
+  const task = { provider: 'pangea-nga', task_id: 'task-23', title: 'CPU 使用率计算分析', target: 'CPU 使用率计算', repository: 'dperf', data_root: '/workspace/data', run_id: 'run-23' }
   for (const variant of variants) {
     const current = {
       run_id: 'run-23', data_root: '/workspace/data', target: task.target, repository: task.repository,
@@ -2220,6 +2177,7 @@ test('create form explains the next missing requirement and enables only a ready
   states[33] = { ...states[33], repository: 'demo' }
   assert.ok(render().some(n => n.props.id === 'pangea-create-hint' && n.children.includes('请填写本次分析目标。')))
   states[33] = { ...states[33], target: 'TLS', provider_id: 'agent' }
+  states[87] = { cwd: '/workspace', provider_id: 'agent', status: 'ready', catalog: { catalog_id: 'receipt', provider_id: 'agent', current_model: 'native', models: [{ id: 'native', label: 'Native' }] } }
   const nodes = render()
   assert.equal(nodes.find(n => n.type === 'button' && n.children.includes('创建并开始分析')).props.disabled, false)
   assert.ok(!nodes.some(n => n.props.id === 'pangea-create-hint'))

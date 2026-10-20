@@ -73,8 +73,11 @@ test('uses real Cordis and Jobs to persist one exact ACP attempt through settlem
   const owner = { id: 'owner-session', ctx: context }
   const agents = { get(id) { return id === owner.id ? owner : undefined } }
   const subagents = {
-    getProvider(id) { return id === 'pangea-opencode' ? {} : undefined },
-    async start() {
+    getProvider(id) { return id === 'pangea-opencode' ? {
+      async discoverModels() { return { current_model: 'fixture/default', models: [{ id: 'fixture/default', label: 'Default' }] } },
+    } : undefined },
+    async start(_provider, request) {
+      assert.equal(request.agentOptions.model, 'fixture/default', 'the discovered default must be explicit before dispatch')
       order.push('agent-started')
       return {
         id: 'agent-session',
@@ -169,6 +172,7 @@ test('uses real Cordis and Jobs to persist one exact ACP attempt through settlem
       }),
     })
     assert.equal(result.job_id, 'subagent-1')
+    assert.equal(result.input.agent_model, 'fixture/default')
     assert.deepEqual(order.slice(0, 2), ['job-bound', 'agent-started'])
     assert.equal(job.ownerSessionId, owner.id)
     assert.equal(Number.isFinite(job.jobStartedAt), true)

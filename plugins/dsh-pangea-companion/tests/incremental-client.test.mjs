@@ -69,7 +69,7 @@ function hookRuntime() {
 }
 
 const parent = { task_id: 'parent-task', run_id: 'parent-run', title: 'TLS 原分析', repository: 'repo',
-  workspace: '/workspace', data_root: '/workspace/data-a', status: 'completed', execution_status: 'completed' }
+  workspace: '/workspace', data_root: '/workspace/data-a', provider: 'pangea-nga', agent_model: 'native/model', status: 'completed', execution_status: 'completed' }
 const record = { action_id: 'analysis-one', record_id: 'record-one', unit_id: 'unit-one', title: '资源释放', kind: 'test_case' }
 const options = { can_derive: true, parent_run_id: parent.run_id, units: [{ unit_id: 'unit-one', title: 'TLS' }], records: [record] }
 function snapshot(task, extra = {}) {
@@ -163,6 +163,20 @@ test('incremental client creates then starts exactly one child with the selected
   assert.equal(h.states[5], 'child-task')
   assert.deepEqual(h.openedSessions, ['child-session'])
   assert.equal(h.dialog(), null)
+})
+
+test('historical internal API analysis disables derivation without hiding its existing result', async () => {
+  const h = await harness({ selected: { ...parent, provider: null, agent_model: null } })
+  const button = h.render().find(node => node.children.includes('补充 / 增量分析'))
+  assert.ok(button)
+  assert.equal(button.props.disabled, true)
+  assert.match(button.props.title, /内部 API 分析已停用/)
+  button.props.onClick()
+  await tick()
+  assert.equal(h.dialog(), null)
+  assert.deepEqual(h.requests, [])
+  assert.equal(h.states[4], parent.run_id)
+  assert.equal(h.states[5], parent.task_id)
 })
 
 test('incremental create failure retains the draft for retry and never starts a nonexistent task', async () => {

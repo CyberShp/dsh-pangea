@@ -5,6 +5,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import test from 'node:test'
 
+import { discoverAgentModels } from '../src/agent-models.js'
 import { workbenchRouteHandler } from '../src/index.js'
 import { createLaunchLogStore } from '../src/launch-log.js'
 import { createRuntimeMonitor } from '../src/monitor.js'
@@ -182,10 +183,11 @@ async function fixture() {
   const owner = { id: 'session-06' }
   let jobHooks
   let providerStarts = 0
+  const catalogProvider = { async discoverModels() { return { current_model: 'native/selected', models: [{ id: 'native/selected' }] } } }
   const runtime = {
     agents: { get(id) { return id === owner.id ? owner : undefined } },
     subagents: {
-      getProvider(id) { return id === 'pangea-nga' ? {} : undefined },
+      getProvider(id) { return id === 'pangea-nga' ? catalogProvider : undefined },
       async start(_provider, request) {
         assert.deepEqual(request.agentOptions, { model: 'native/selected' })
         providerStarts += 1
@@ -341,4 +343,99 @@ test('deliver-current freezes the stored Run before delivery and rejects a diffe
     assert.ok(calls.every(args => args[args.indexOf('--data-root') + 1] === value.dataRoot))
     assert.equal(response.body.run.quality_status, 'UNRESOLVED')
   } finally { await value.close() }
+})
+
+
+async function analysisRequest(root, body, { tasks = {}, runtime = {}, runner = async () => { throw new Error('must not create a Run') } } = {}) {
+  const req = Readable.from([Buffer.from(JSON.stringify(body))])
+  req.method = 'POST'
+  req.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: root })}`
+  req.headers = { 'sec-fetch-site': 'same-origin' }
+  const response = {}
+  await workbenchRouteHandler(req, { writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) } },
+    {}, tasks, new Set(), { async append() {} }, runtime, {}, runner)
+  return response
+}
+
+test('new-analysis HTTP admission rejects internal APIs and pending catalogues before creating a task, then freezes a proven default', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'analysis-admission-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  let creates = 0, createdInput
+  const tasks = { async create(value) { creates++; createdInput = value.input; return { task_id: 'created', ...value.input } } }
+  const provider = { async discoverModels() { return { current_model: 'model-one', models: [{ id: 'model-one' }] } } }
+  const runtime = { subagents: { getProvider: () => provider } }
+  for (const scenario of ['risk-analysis', 'branch-analysis', 'coverage-analysis', 'module-analysis']) {
+    const result = await analysisRequest(root, { action: 'task-create', input: { scenario, model_route: { provider: 'api', model: 'configured' } } }, { tasks, runtime })
+    assert.equal(result.code, 400)
+    assert.match(result.body.error, /内部 API 分析支持已移除/)
+  }
+  const input = { repository: 'repo', target: 'test', provider_id: 'pangea-nga', agent_model: '' }
+  assert.equal((await analysisRequest(root, { action: 'task-create', input }, { tasks, runtime })).code, 400)
+  assert.equal(creates, 0)
+  const catalog = await discoverAgentModels(runtime, { providerId: 'pangea-nga', cwd: root })
+  const accepted = await analysisRequest(root, { action: 'task-create', input: { ...input, agent_catalog_id: catalog.catalog_id } }, { tasks, runtime })
+  assert.equal(accepted.code, 200, accepted.body.error)
+  assert.equal(creates, 1)
+  assert.equal(createdInput.agent_model, 'model-one')
+  assert.equal(createdInput.model_route, null)
+  await discoverAgentModels(runtime, { providerId: 'pangea-nga', cwd: root })
+  const stale = await analysisRequest(root, { action: 'task-create', input: { ...input, agent_catalog_id: catalog.catalog_id } }, { tasks, runtime })
+  assert.equal(stale.code, 400)
+  assert.match(stale.body.error, /已被重新读取/)
+  assert.equal(creates, 1)
+})
+
+test('task-start refuses changed or empty providers and historical unfixed defaults without modifying task identity', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'analysis-frozen-model-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  const task = Object.freeze({ task_id: 'old-task', workspace: root, run_id: 'old-run', provider: 'pangea-nga',
+    agent_model: null, attempt_id: 'old-attempt', execution_status: 'stopped', acp_binding: 'saved-binding' })
+  const tasks = { async get() { return task }, async prepareProviderLaunch() { assert.fail('must not mutate the stored task') } }
+  for (const provider_id of ['', null, 'pangea-codeagent']) {
+    const result = await analysisRequest(root, { action: 'task-start', task_id: task.task_id, provider_id, resume: true }, { tasks })
+    assert.equal(result.code, 400)
+    assert.match(result.body.error, /执行 Agent 已冻结/)
+  }
+  const result = await analysisRequest(root, { action: 'task-start', task_id: task.task_id, resume: true }, { tasks })
+  assert.equal(result.code, 400)
+  assert.match(result.body.error, /历史任务未固定模型/)
+  assert.equal(task.agent_model, null)
+  assert.equal(task.attempt_id, 'old-attempt')
+  assert.equal(task.acp_binding, 'saved-binding')
+})
+
+
+test('analysis GET returns external providers without querying internal model APIs', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'analysis-external-catalog-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  let internalReads = 0
+  const api = new Proxy({}, { get(_target, key) { internalReads++; throw new Error(`analysis must not read internal API ${String(key)}`) } })
+  const tasks = { async reconcileRuns() {}, async list() { return [] } }
+  const provider = {}
+  const runtime = { subagents: { getProvider: id => id === 'pangea-nga' ? provider : undefined } }
+  const request = Readable.from([])
+  request.method = 'GET'
+  request.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: root })}`
+  request.headers = { 'sec-fetch-site': 'same-origin' }
+  const response = {}
+  await workbenchRouteHandler(request, { writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) } },
+    api, tasks, new Set(), {}, runtime, {}, async ({ args }) => {
+      if (args[0] === 'system') return { repositories: ['repo-one'] }
+      assert.deepEqual(args.slice(0, 2), ['runs', 'list'])
+      return { items: [], total: 0 }
+    })
+  assert.equal(response.code, 200, response.body.error)
+  assert.equal(internalReads, 0, 'even failed internal API reads must not be attempted')
+  assert.equal(response.body.model_routing, undefined)
+  assert.deepEqual(response.body.acp_providers.map(({ id, registered }) => ({ id, registered })), [
+    { id: 'pangea-nga', registered: true },
+    { id: 'pangea-codeagent', registered: false },
+    { id: 'pangea-opencode', registered: false },
+  ])
 })

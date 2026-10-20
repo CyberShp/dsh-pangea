@@ -19,12 +19,12 @@ import { createTaskStore } from './task-store.js'
 import { ATTENTION_REQUIRED_CODE, decodeAcpOutcomeDetail } from './acp-outcome.js'
 import { createLaunchLogStore } from './launch-log.js'
 import { createAcpSettingsStore } from './acp-settings.js'
-import { discoverAgentModels } from './agent-models.js'
+import { discoverAgentModels, requireAgentModel, requireExternalAnalysisProvider } from './agent-models.js'
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, internalModelOptions, launchAnalysisSession, launchArchitectureSession, isNativeDiagramRunning, queryCoverageAsset, importCoverageAsset, requireInternalModel, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, launchArchitectureSession, isNativeDiagramRunning, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -425,15 +425,6 @@ function sessionFailure(history) {
   return null
 }
 
-async function resolveTaskModel(api, requested) {
-  if (requested?.provider && requested?.model) return requireInternalModel(api, requested)
-  const catalog = await internalModelOptions(api)
-  const usable = catalog.models.filter(item => item.credential_configured)
-  if (usable.length === 1) return requireInternalModel(api, usable[0])
-  if (usable.length === 0) throw new Error('没有可用的内部模型，请先在“模型”设置中完成配置')
-  throw new Error('请选择本次 PANGEA 任务使用的内部模型')
-}
-
 function assertRegisteredAcpProvider(runtime, providerId) {
   const option = acpProviderOption(providerId)
   if (!option) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
@@ -587,6 +578,7 @@ function homeRuntimeTask(runtime, task) {
 function deriveTaskResumeEligibility(runtime, task, sourceRecovery) {
   if (!task?.run_id) return { can_resume: false, resume_blocked_reason: '没有可继续的 Run' }
   if (task.status === 'completed') return { can_resume: false, resume_blocked_reason: '当前 Run 已交付完成' }
+  if (!task.provider) return { can_resume: false, resume_blocked_reason: '内部 API 分析支持已移除；历史结果仍保留，请选择外部 Agent 新建分析' }
   if (task.host_review?.reviewer_session_id && task.host_review.status !== 'complete') {
     return { can_resume: false, resume_blocked_reason: '独立复核尚未结束；需恢复原 Producer/Reviewer 会话，不能创建替代会话' }
   }
@@ -596,7 +588,7 @@ function deriveTaskResumeEligibility(runtime, task, sourceRecovery) {
     try { job = readJobSnapshot(runtime, task) } catch { /* process facts below remain conservative */ }
     if (job && !['completed', 'failed', 'killed'].includes(job.status)) return { can_resume: false, resume_blocked_reason: '旧执行仍未结束' }
     if (!sourceRecovery.can_resume) return { can_resume: false, resume_blocked_reason: sourceRecovery.blocked_reason, summary: sourceRecovery.summary }
-    if (task.execution_status === 'interrupted' || (!task.provider && (sourceRecovery.after_host_restart || ['failed', 'stopped', 'needs_attention'].includes(task.status)))) {
+    if (task.execution_status === 'interrupted') {
       return { can_resume: true, resume_blocked_reason: null, summary: sourceRecovery.summary, host_quiescent: true }
     }
   }
@@ -607,7 +599,6 @@ function deriveTaskResumeEligibility(runtime, task, sourceRecovery) {
   const terminal = ['failed', 'stopped'].includes(task.execution_status)
     || ['failed', 'needs_attention', 'stopped'].includes(task.status)
   if (!terminal) return { can_resume: false, resume_blocked_reason: '当前 Run 不满足续跑条件' }
-  if (!task.provider) return { can_resume: true, resume_blocked_reason: null }
   if (!task.job_id) {
     return task.agent_session_id || task.process_id
       ? { can_resume: false, resume_blocked_reason: '旧执行停止尚未确认' }
@@ -664,10 +655,8 @@ async function nativeRecovery(runtime, task) {
 }
 
 export async function assessTaskResumeEligibility(runtime, task) {
+  if (!task?.provider) return deriveTaskResumeEligibility(runtime, task)
   let recovery
-  if (task?.workflow_version === 'source-first-v1' && !task.provider && task.run_id && task.status !== 'completed') {
-    recovery = await nativeRecovery(runtime, task)
-  }
   if (task?.workflow_version === 'source-first-v1' && task.provider && task.run_id
       && !['preparing', 'starting', 'running', 'stopping'].includes(task.execution_status)) {
     // A launch that failed before any owner/worker existed needs no process proof.
@@ -1052,12 +1041,6 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       await reconcileTaskLaunches(api, tasks, taskItems, launchLogs, runtime)
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       taskItems = await Promise.all(taskItems.map(async task => ({ ...task, ...await assessTaskResumeEligibility(runtime, task) })))
-      let modelRouting
-      try {
-        modelRouting = { status: 'ok', ...await internalModelOptions(api) }
-      } catch (error) {
-        modelRouting = { status: 'error', models: [], failures: [], error: error instanceof Error ? error.message : String(error) }
-      }
       const selectedCandidate = taskId
         ? taskItems.find(item => item.task_id === taskId)
         : sessionId ? taskItems.find(item => item.conversations?.some(conversation => conversation.session_id === sessionId)) : null
@@ -1071,7 +1054,6 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         ...snapshot,
         monitor_persistence: monitor?.getPersistenceStatus?.() ?? null,
         tasks: { items: taskItems, total: taskItems.length },
-        model_routing: modelRouting,
         acp_providers: acpProviderOptions().map(provider => ({
           ...provider,
           registered: Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id)),
@@ -1092,6 +1074,8 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       const options = await analysisDerivationOptions({ task: parent, runId: body.run_id, runner })
       if (body.action === 'derivation-options') return json(res, 200, { status: 'ok', options })
       const input = deriveAnalysisInput(parent, body.input, options)
+      requireExternalAnalysisProvider(input.provider_id)
+      input.agent_model = await requireAgentModel(runtime, { providerId: input.provider_id, cwd: parent.workspace, model: input.agent_model })
       const task = await tasks.create({ workspace: parent.workspace, dataRoot: parentDataRoot, input })
       await appendLaunchSafe(launchLogs, task.task_id, {
         stage: 'task_derived', status: 'ok', source_task_id: parent.task_id,
@@ -1215,12 +1199,13 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       if (body.input?.incremental_request != null) throw new Error('定向补充或变更分析请从来源任务发起')
       if (body.input?.source_task_id) requireWorkspaceTask(await tasks.get(body.input.source_task_id), cwd, body.input.source_task_id)
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
-      if (providerId && !acpProviderOption(providerId)) throw new Error(`未知的 ACP 执行 Agent：${providerId}`)
-      const selectedModel = providerId ? null : await resolveTaskModel(api, body.input?.model_route)
+      requireExternalAnalysisProvider(providerId)
+      const agentModel = await requireAgentModel(runtime, { providerId, cwd: root, model: body.input?.agent_model,
+        catalogId: body.input?.agent_catalog_id, requireReceipt: true })
       const task = await tasks.create({
         workspace: root,
         dataRoot: dataRootFor(root, actionDataRoot),
-        input: { ...body.input, provider_id: providerId || null, model_route: selectedModel },
+        input: { ...body.input, provider_id: providerId, agent_model: agentModel, model_route: null },
       })
       await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_created', status: 'ok' })
       return json(res, 200, { status: 'ok', task })
@@ -1231,6 +1216,9 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         throw new Error(task.flow_baseline ? '流程基线必须使用选择该版本时的数据目录' : '定向分析必须使用来源任务的数据目录')
       }
       const resume = body.resume === true
+      requireExternalAnalysisProvider(task.provider)
+      if (Object.hasOwn(body, 'provider_id') && body.provider_id !== task.provider) throw new Error('任务执行 Agent 已冻结，请重新选择模型并新建分析')
+      if (resume && task.run_id && !task.agent_model?.trim()) throw new Error('历史任务未固定模型，无法确认原执行模型；已保留结果，请选择外部 Agent 和具体模型新建分析')
       const resumeEligibility = await assessTaskResumeEligibility(runtime, task)
       if (task.run_id && !resume) throw new Error('task already has a Run; use resume to continue it')
       if (resume && !task.run_id) throw new Error('没有可继续的 Run')
@@ -1247,7 +1235,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       await appendLaunchSafe(launchLogs, task.task_id, { stage: 'launch_requested', status: 'start', message: `${resume ? '继续分析' : '启动'}尝试 ${task.launch_attempts + 1}` })
       let preparedTask = task
       try {
-        const selectedProvider = body.provider_id ?? task.provider
+        const selectedProvider = task.provider
         let selectedModel = null
         if (selectedProvider) {
           const providerOption = assertRegisteredAcpProvider(runtime, selectedProvider)
@@ -1261,15 +1249,9 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
                 : 'direct'),
           })
           assertLaunchAllowed()
-          preparedTask = await tasks.prepareProviderLaunch(task.task_id, selectedProvider)
-        } else {
-          await appendLaunchSafe(launchLogs, task.task_id, { stage: 'model_route_resolve', status: 'start' })
-          selectedModel = await resolveTaskModel(api, body.model_route ?? task.model_route)
-          await appendLaunchSafe(launchLogs, task.task_id, {
-            stage: 'model_route_resolve', status: 'ok', provider: selectedModel.provider, model: selectedModel.model,
-          })
+          const agentModel = await requireAgentModel(runtime, { providerId: selectedProvider, cwd: task.workspace, model: task.agent_model })
           assertLaunchAllowed()
-          preparedTask = await tasks.prepareLaunch(task.task_id, selectedModel)
+          preparedTask = await tasks.prepareProviderLaunch(task.task_id, selectedProvider, agentModel)
         }
         await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_prepare', status: 'ok' })
         assertLaunchAllowed()

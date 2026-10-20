@@ -17,8 +17,11 @@ test('logs remote identity and completed turns and supplies Python for initializ
     const runtime = {
       agents: { get: () => owner },
       subagents: {
-        getProvider: () => ({}),
+        getProvider: () => ({ async discoverModels() {
+          return { current_model: 'provider/model', models: [{ id: 'provider/model', label: 'Diagnostic model' }] }
+        } }),
         async start(_id, request) {
+          assert.equal(request.agentOptions.model, 'provider/model')
           firstPrompt = request.prompt[0].text
           return {
             id: 'local-id', remoteSessionId: 'remote-id', processId: 123,

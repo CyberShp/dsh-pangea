@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
-import { discoverAgentModels } from '../src/agent-models.js'
+import { discoverAgentModels, requireAgentModel, resolveAgentModel } from '../src/agent-models.js'
 import { acpSettingsRouteHandler } from '../src/index.js'
 
 let cwd
@@ -67,4 +67,62 @@ test('the models HTTP action discovers models without reading or saving runtime 
   assert.equal(body.provider_id, 'pangea-nga')
   assert.deepEqual(body.models, [{ id: 'native', label: 'Native' }])
   assert.equal(res.listenerCount('close'), 0)
+})
+
+
+test('default model must be explicitly advertised; a nonempty list alone cannot authorize an unresolved default', () => {
+  assert.equal(resolveAgentModel({ current_model: 'native', models: [{ id: 'native' }] }, ''), 'native')
+  assert.equal(resolveAgentModel({ models: [{ id: 'chosen' }] }, 'chosen'), 'chosen')
+  assert.throws(() => resolveAgentModel({ current_model: 'native', models: [] }, ''), /未返回可用模型/)
+  assert.throws(() => resolveAgentModel({ current_model: 'removed', models: [{ id: 'native' }] }, ''), /默认模型尚未确认或已不可用/)
+  assert.throws(() => resolveAgentModel({ models: [{ id: 'native' }] }, ''), /默认模型尚未确认/)
+  assert.throws(() => resolveAgentModel({ models: [{ id: 'native' }] }, 'removed'), /已不在当前 Agent/)
+})
+
+test('creation requires the current catalogue receipt bound to the runtime, workspace and provider', async () => {
+  const provider = { async discoverModels() { return { current_model: 'native', models: [{ id: 'native' }] } } }
+  const runtime = { subagents: { getProvider: () => provider } }
+  const request = { providerId: 'pangea-nga', cwd, model: '', requireReceipt: true }
+  await assert.rejects(requireAgentModel(runtime, request), /模型列表尚未就绪/)
+  const catalog = await discoverAgentModels(runtime, request)
+  assert.equal(await requireAgentModel(runtime, { ...request, catalogId: catalog.catalog_id }), 'native')
+  await mkdir(path.join(cwd, 'other/.agents/pangea'), { recursive: true })
+  await writeFile(path.join(cwd, 'other/.agents/pangea/dsh.md'), '# another workspace')
+  for (const altered of [{ catalogId: 'fake' }, { providerId: 'pangea-codeagent' }, { cwd: path.join(cwd, 'other') }]) {
+    await assert.rejects(requireAgentModel(runtime, { ...request, catalogId: catalog.catalog_id, ...altered }), /模型列表尚未就绪/)
+  }
+  await assert.rejects(requireAgentModel({ subagents: { getProvider: () => provider } }, { ...request, catalogId: catalog.catalog_id }), /模型列表尚未就绪/)
+})
+
+test('new probes invalidate earlier receipts immediately and late completions cannot replace the latest catalogue', async () => {
+  const pending = []
+  const provider = { discoverModels: () => new Promise((resolve, reject) => pending.push({ resolve, reject })) }
+  const runtime = { subagents: { getProvider: () => provider } }
+  const request = { providerId: 'pangea-nga', cwd }
+  const first = discoverAgentModels(runtime, request)
+  pending.shift().resolve({ current_model: 'first', models: [{ id: 'first' }] })
+  const firstCatalog = await first
+  const late = discoverAgentModels(runtime, request)
+  const latePending = pending.shift()
+  await assert.rejects(requireAgentModel(runtime, { ...request, requireReceipt: true, catalogId: firstCatalog.catalog_id }), /模型列表尚未就绪/)
+  const latest = discoverAgentModels(runtime, request)
+  pending.shift().resolve({ current_model: 'latest', models: [{ id: 'latest' }] })
+  const latestCatalog = await latest
+  latePending.resolve({ current_model: 'late', models: [{ id: 'late' }] })
+  const lateCatalog = await late
+  await assert.rejects(requireAgentModel(runtime, { ...request, requireReceipt: true, catalogId: lateCatalog.catalog_id }), /模型列表尚未就绪/)
+  assert.equal(await requireAgentModel(runtime, { ...request, requireReceipt: true, catalogId: latestCatalog.catalog_id }), 'latest')
+  const failure = discoverAgentModels(runtime, request)
+  pending.shift().reject(new Error('probe failed'))
+  await assert.rejects(failure, /probe failed/)
+  await assert.rejects(requireAgentModel(runtime, { ...request, requireReceipt: true, catalogId: latestCatalog.catalog_id }), /模型列表尚未就绪/)
+})
+
+test('replacing a registered runtime provider invalidates its previous model receipt', async () => {
+  let provider = { async discoverModels() { return { current_model: 'native', models: [{ id: 'native' }] } } }
+  const runtime = { subagents: { getProvider: () => provider } }
+  const request = { providerId: 'pangea-nga', cwd }
+  const catalog = await discoverAgentModels(runtime, request)
+  provider = { ...provider }
+  await assert.rejects(requireAgentModel(runtime, { ...request, requireReceipt: true, catalogId: catalog.catalog_id }), /模型列表尚未就绪/)
 })

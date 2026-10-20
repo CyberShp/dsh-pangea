@@ -670,6 +670,7 @@ window.__ModuleLoader__.load({
         node('nav', 'task-tabs', [['overview', '概览'], ['flows', '业务流程', 'business_flows'], ...(riskApplicable(current) ? [['risks', '风险', 'risks']] : []), ['cases', '测试用例', 'test_cases'], ['workflow', '运行过程']].map(([target, label, key]) => h('button', { key: target, type: 'button', className: target === 'workflow' ? 'active' : '', 'aria-current': target === 'workflow' ? 'page' : undefined, disabled: target === 'overview' && !task, 'aria-describedby': target === 'overview' && !task ? 'run-task-unavailable' : undefined, onClick: () => navigate(target) }, label, key && current?.counts?.[key] != null ? h('small', { title: current.reader_health?.collection_status?.[key] === 'unavailable' ? '产物暂不可读取' : undefined }, current.reader_health?.collection_status?.[key] === 'unavailable' ? '—' : current.counts[key]) : null))),
         !task && current ? h('p', { id: 'run-task-unavailable', className: 'small muted' }, '此历史 Run 未关联任务记录，任务概览不可用。仍可查看运行记录与已保存产物。') : null,
         notices,
+        analysisExecutorBlockedReason(task) ? h('p', { role: 'status', className: 'small muted' }, analysisExecutorBlockedReason(task)) : null,
         current?.reader_health?.status === 'warning' ? h('div', { className: 'notice warn', role: 'alert' }, node('div', '', h('strong', null, '部分运行资料暂不可读取'), h('p', null, (current.reader_health.issues ?? []).join('；') || '请检查运行资料。不可读取的产物不计为零。')), button('重试读取', retry)) : null,
         legacy && (current.validation?.status === 'failed' || current.workflow?.unresolved?.length) ? h('div', { role: 'alert', className: 'notice warn' }, '当前运行有校验失败或未解决事项，请展开运行信息查看完整原因。') : null,
         actionError ? h('div', { role: 'alert', className: 'notice danger' }, actionError) : null,
@@ -720,7 +721,6 @@ window.__ModuleLoader__.load({
     const WORKBENCH_ACTIVE_POLL_INTERVAL_MS = 2_000
     const WORKBENCH_BACKGROUND_POLL_INTERVAL_MS = 45_000
     const ACP_PROVIDER_STORAGE_KEY = 'pangea.acp-provider.v1'
-    const MODEL_ROUTE_STORAGE_KEY = 'pangea.model-route.v1'
 
 
     const STAGE_STATUS = { pending: '未开始', running: '执行中', completed: '已完成', paused: '待继续', skipped: '无需执行', failed: '失败', stopped: '已停止' }
@@ -777,20 +777,6 @@ window.__ModuleLoader__.load({
     function showRunHealth(screen, selectedTask, current, pageMode) {
       return pageMode === 'analysis' && !!selectedTask?.run_id && selectedTask.run_id === current?.run_id
         && ['overview', 'workflow', 'flows', 'risks', 'risk', 'cases', 'case', 'evidence', 'evidence-detail'].includes(screen.type)
-    }
-
-    function modelSelectionKey(value) {
-      return value?.provider && value?.model
-        ? JSON.stringify([value.provider, value.model, value.reasoning_effort ?? ''])
-        : ''
-    }
-
-    function modelRouteFromKey(value) {
-      try {
-        const [provider, model, reasoningEffort] = JSON.parse(value)
-        if (typeof provider !== 'string' || !provider || typeof model !== 'string' || !model) return null
-        return { provider, model, ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}) }
-      } catch { return null }
     }
 
     function snapshotFingerprint(value) {
@@ -881,6 +867,10 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function analysisExecutorBlockedReason(task) {
+      return task && !task.provider ? '内部 API 分析已停用。历史结果仍可查看，请新建分析并选择外部 Agent。' : ''
+    }
+
     function deriveRunPresentation(task, current, health) {
       const executionTask = current && !taskMatchesRun(task, current) ? null : task
       const taskStatus = executionTask?.status ?? ''
@@ -906,8 +896,9 @@ window.__ModuleLoader__.load({
       const dataTone = healthStatus === 'error' ? 'error' : publicationState === 'final' && healthStatus === 'ok' ? 'ok' : publicationState === 'draft' ? 'notice' : 'neutral'
       const countsAvailability = publicationState === 'pending' ? 'unpublished' : publicationState === 'draft' ? 'draft' : publicationState === 'final' ? 'verified' : publicationState === 'partial' ? 'partial' : 'unavailable'
       const qualityLabel = outcomePresentation(current).semantic
-      const canResume = !running && !stopping && runStatus !== 'complete' && executionTask?.can_resume === true
-      const resumeBlockedReason = canResume ? null : executionTask?.resume_blocked_reason ?? (!executionTask?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件')
+      const executorBlockedReason = analysisExecutorBlockedReason(executionTask)
+      const canResume = !executorBlockedReason && !running && !stopping && runStatus !== 'complete' && executionTask?.can_resume === true
+      const resumeBlockedReason = canResume ? null : executorBlockedReason || executionTask?.resume_blocked_reason || (!executionTask?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件')
       return { executionStatus, executionLabel, failed, needsAttention, stopped, stopping, running, healthStatus, dataStateLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason, identityMatched: !current || taskMatchesRun(task, current) }
     }
 
@@ -2002,8 +1993,9 @@ window.__ModuleLoader__.load({
           : { kind: 'query', query: { product: form.coverage_product, c_version: form.coverage_version, b_version: form.coverage_b_version || '', scope: form.coverage_module, recursive: form.coverage_recursive !== false, source: form.coverage_source || 'summary' } } } : {}),
         mode: form.mode || 'depth',
         provider_id: form.provider_id || null,
-        model_route: form.provider_id ? null : modelRouteFromKey(form.model_route_key),
+        model_route: null,
         agent_model: form.provider_id ? form.agent_model || null : null,
+        ...(form.agent_catalog_id ? { agent_catalog_id: form.agent_catalog_id } : {}),
       }
     }
     function riskApplicable(run) {
@@ -2052,36 +2044,52 @@ window.__ModuleLoader__.load({
       return '未读取'
     }
 
-    function AgentModelSelect({ providerId, cwd, visible, value, onChange }) {
-      const [catalog, setCatalog] = React.useState(null)
-      const [error, setError] = React.useState('')
-      const [loading, setLoading] = React.useState(true)
-      const [refresh, setRefresh] = React.useState(0)
-      React.useEffect(() => {
-        if (!visible) return undefined
-        const controller = new AbortController()
-        setLoading(true)
-        setError('')
-        setCatalog(null)
-        requestAgentModels({ providerId, cwd, signal: controller.signal }).then(result => {
-          if (!controller.signal.aborted) setCatalog(result)
-        }).catch(failure => {
-          if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
-        }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
-        return () => controller.abort()
-      }, [providerId, cwd, visible, refresh])
-      const current = catalog?.provider_id === providerId ? catalog : null
-      const models = current?.models ?? []
+    function analysisExecutionState(form, providers, state, cwd) {
+      const providerId = form.provider_id
+      const provider = (providers ?? []).find(item => item.id === providerId)
+      const blocked = message => ({ ready: false, model: '', catalogId: '', message })
+      if (!providerId) return blocked(form.external_selection_required ? '历史分析使用内部 API，请重新选择外部 Agent 和模型。' : '请选择已加载的外部 Agent。')
+      if (provider?.registered !== true) return blocked('所选外部 Agent 尚未加载，请检查 Agent 设置。')
+      if (state?.cwd !== cwd || state?.provider_id !== providerId || ['idle', 'loading'].includes(state?.status) || !state?.status) return blocked('正在读取 Agent 可用模型，请等待完成后再继续。')
+      if (state.status === 'error') return blocked(state.error || '模型列表读取失败，请刷新模型后重试。')
+      const catalog = state.catalog
+      if (state.status !== 'ready' || catalog?.provider_id !== providerId || !catalog?.catalog_id) return blocked('模型列表尚未确认，请刷新模型后重试。')
+      const models = Array.isArray(catalog.models) ? catalog.models : []
+      const model = form.agent_model || catalog.current_model
+      if (!model) return blocked(models.length ? 'Agent 未返回有效默认模型，请明确选择一个模型。' : 'Agent 未返回可用模型，请检查 Agent 配置后刷新模型。')
+      if (!models.some(item => item.id === model)) return blocked(form.agent_model ? '原选择的模型已不在当前列表中，请重新选择。' : 'Agent 默认模型不在当前可用列表中，请明确选择一个模型。')
+      return { ready: true, model, catalogId: catalog.catalog_id, message: `已确认模型：${model}` }
+    }
+
+    function loadAnalysisAgentModels({ providerId, cwd, onState, fetcher = fetch }) {
+      const controller = new AbortController()
+      const scope = { provider_id: providerId, cwd }
+      onState({ ...scope, status: 'loading' })
+      requestAgentModels({ providerId, cwd, signal: controller.signal, fetcher }).then(catalog => {
+        if (controller.signal.aborted) return
+        if (catalog.provider_id !== providerId) throw new Error('返回的模型列表与所选 Agent 不一致，请重试。')
+        onState({ ...scope, status: 'ready', catalog })
+      }).catch(failure => {
+        if (!controller.signal.aborted) onState({ ...scope, status: 'error', error: failure instanceof Error ? failure.message : String(failure) })
+      })
+      return () => controller.abort()
+    }
+
+    function AgentModelSelect({ providerId, cwd, state, value, onChange, onRefresh, disabled }) {
+      const current = state?.cwd === cwd && state?.provider_id === providerId && state.status === 'ready' ? state.catalog : null
+      const models = Array.isArray(current?.models) ? current.models : []
+      const loading = !state || state.cwd !== cwd || state.provider_id !== providerId || ['idle', 'loading'].includes(state.status)
+      const selection = analysisExecutionState({ provider_id: providerId, agent_model: value }, [{ id: providerId, registered: true }], state, cwd)
+      const defaultReady = Boolean(current?.current_model && models.some(model => model.id === current.current_model))
       return h('div', null,
         h('label', null, h('div', { style: styles.label }, 'Agent 模型'),
-          h('select', { 'aria-label': 'Agent 模型', style: { ...styles.search, marginTop: 5, marginBottom: 0 }, value: value || '', onChange: event => onChange(event.target.value) },
-            h('option', { value: '' }, `使用 Agent 默认${current?.current_model ? `（${current.current_model}）` : ''}`),
+          h('select', { 'aria-label': 'Agent 模型', style: { ...styles.search, marginTop: 5, marginBottom: 0 }, disabled: disabled || !current, value: value || '', onChange: event => onChange(event.target.value) },
+            h('option', { value: '', disabled: !defaultReady }, defaultReady ? `使用 Agent 默认（${current.current_model}）` : loading ? '正在读取模型…' : '请选择可用模型'),
             value && !models.some(model => model.id === value) ? h('option', { value, disabled: true }, `${value}（${loading ? '读取中' : '当前列表不可用'}）`) : null,
-            models.map(model => h('option', { key: model.id, value: model.id }, `${model.label}${model.label === model.id ? '' : ` · ${model.id}`}`)))),
+            models.map(model => h('option', { key: model.id, value: model.id }, `${model.label || model.id}${!model.label || model.label === model.id ? '' : ` · ${model.id}`}`)))),
         h('div', { style: { ...styles.row, marginTop: 6 } },
-          h('span', { style: error ? styles.error : styles.itemMeta, role: error ? 'alert' : 'status' },
-            loading ? '正在读取 Agent 可用模型…' : error || (models.length ? '模型由 Agent 提供，本次选择用于启动和续跑。' : 'Agent 未提供可选模型，将使用其默认配置。')),
-          h('button', { type: 'button', style: styles.button, disabled: loading, onClick: () => setRefresh(count => count + 1) }, '刷新模型')))
+          h('span', { style: state?.status === 'error' ? styles.error : styles.itemMeta, role: state?.status === 'error' ? 'alert' : 'status' }, selection.message),
+          h('button', { type: 'button', style: styles.button, disabled: disabled || loading, onClick: onRefresh }, '刷新模型')))
     }
 
     function AcpSettingsPanel({ visible }) {
@@ -2752,13 +2760,13 @@ window.__ModuleLoader__.load({
         if (!cwd || screen.type !== 'create') return
         try {
           const saved = JSON.parse(window.localStorage?.getItem(`pangea-execution:${cwd}`) ?? '{}')
-          if (saved.provider_id !== undefined) setCreateForm(form => ({ ...form, provider_id: saved.provider_id, agent_model: saved.agent_model ?? '', model_route_key: saved.model_route ? modelSelectionKey(saved.model_route) : '' }))
+          if (saved.provider_id) setCreateForm(form => form.source_task_id ? form : ({ ...form, provider_id: saved.provider_id, agent_model: saved.agent_model ?? '', model_route_key: '' }))
         } catch {}
       }, [cwd, screen.type])
       React.useEffect(() => {
-        if (!cwd || screen.type !== 'create' || (!createForm.provider_id && !createForm.model_route_key)) return
-        try { window.localStorage?.setItem(`pangea-execution:${cwd}`, JSON.stringify({ provider_id: createForm.provider_id, agent_model: createForm.agent_model, model_route: modelRouteFromKey(createForm.model_route_key) })) } catch {}
-      }, [cwd, screen.type, createForm.provider_id, createForm.agent_model, createForm.model_route_key])
+        if (!cwd || screen.type !== 'create' || !createForm.provider_id) return
+        try { window.localStorage?.setItem(`pangea-execution:${cwd}`, JSON.stringify({ provider_id: createForm.provider_id, agent_model: createForm.agent_model })) } catch {}
+      }, [cwd, screen.type, createForm.provider_id, createForm.agent_model])
 
       const [assetCatalog, setAssetCatalog] = React.useState(null)
       const [assetCatalogLoading, setAssetCatalogLoading] = React.useState(false)
@@ -2844,6 +2852,21 @@ window.__ModuleLoader__.load({
       const [derivation, setDerivation] = React.useState(null)
       const [taskActionDialog, setTaskActionDialog] = React.useState(null)
       const [taskActions, setTaskActions] = React.useState({})
+      const [analysisAgentModels, setAnalysisAgentModels] = React.useState({ status: 'idle' })
+      const [analysisAgentModelRefresh, setAnalysisAgentModelRefresh] = React.useState(0)
+      const analysisProviderRegistered = workbench?.acp_providers?.some(item => item.id === createForm.provider_id && item.registered === true) === true
+      React.useEffect(() => {
+        if (!visible || screen.type !== 'create' || !cwd || !createForm.provider_id || !analysisProviderRegistered) {
+          setAnalysisAgentModels({ status: 'idle' })
+          return undefined
+        }
+        return loadAnalysisAgentModels({ providerId: createForm.provider_id, cwd, onState: setAnalysisAgentModels })
+      }, [cwd, visible, screen.type, createForm.provider_id, analysisProviderRegistered, analysisAgentModelRefresh])
+      const refreshAnalysisAgentModels = () => {
+        setAnalysisAgentModels({ cwd, provider_id: createForm.provider_id, status: 'loading' })
+        setAnalysisAgentModelRefresh(value => value + 1)
+      }
+
       const derivationRequestRef = React.useRef(0)
       const derivationSubmitRef = React.useRef(false)
       const derivationScopeRef = React.useRef('')
@@ -3096,31 +3119,14 @@ window.__ModuleLoader__.load({
         setCreateForm(value => {
           // A saved executor choice belongs to this draft. If it was removed,
           // require an explicit replacement instead of using global history.
-          if (value.provider_id) return value
-          try {
-            const selection = JSON.parse(window.localStorage?.getItem(`pangea-execution:${cwd}`) ?? '{}')
-            if (selection.provider_id === '') return value
-          } catch {}
+          if (value.provider_id || value.external_selection_required) return value
           let remembered = ''
           try { remembered = window.localStorage?.getItem(ACP_PROVIDER_STORAGE_KEY) ?? '' } catch { /* storage unavailable */ }
-          const selected = options.some(item => item.id === remembered) ? remembered : options.length === 1 ? options[0].id : ''
-          return selected ? { ...value, provider_id: selected } : value
+          const available = options.filter(item => item.registered === true)
+          const selected = available.find(item => item.id === remembered)?.id ?? available[0]?.id
+          return selected ? { ...value, provider_id: selected, agent_model: '', model_route_key: '' } : value
         })
-      }, [workbench?.acp_providers])
-      React.useEffect(() => {
-        const options = (workbench?.model_routing?.models ?? []).filter(item => item.credential_configured === true)
-        if (options.length === 0) return
-        setCreateForm(value => {
-          const current = modelRouteFromKey(value.model_route_key)
-          if (current && options.some(item => item.provider === current.provider && item.model === current.model)) return value
-          let remembered = ''
-          try { remembered = window.localStorage?.getItem(MODEL_ROUTE_STORAGE_KEY) ?? '' } catch { /* storage unavailable */ }
-          const rememberedRoute = modelRouteFromKey(remembered)
-          const rememberedAvailable = rememberedRoute && options.some(item => item.provider === rememberedRoute.provider && item.model === rememberedRoute.model)
-          const selected = rememberedAvailable ? remembered : options.length === 1 ? modelSelectionKey(options[0]) : ''
-          return selected ? { ...value, model_route_key: selected } : value
-        })
-      }, [workbench?.model_routing?.models])
+      }, [cwd, workbench?.acp_providers])
       React.useEffect(() => {
         if (assetWorkspaceRef.current !== cwd) {
           setAssetCatalog(null)
@@ -3608,6 +3614,8 @@ window.__ModuleLoader__.load({
 
       async function startTask(task, propagate = false, guardSelection) {
         if (!task || creatingRun) return
+        const blocked = analysisExecutorBlockedReason(task)
+        if (blocked) { showActionNotice(blocked, true); if (propagate) throw new Error(blocked); return }
         const stillSelected = () => {
           if (!guardSelection) return true
           const [workspace, taskId] = JSON.parse(derivationScopeRef.current)
@@ -3971,6 +3979,8 @@ window.__ModuleLoader__.load({
       }
       async function submitNewRun() {
         if (pageMode !== 'analysis' || !cwd || creatingRun || coverageQueryBusy || workbench?.compatibility?.compatible !== true) return
+        const execution = analysisExecutionState(createForm, workbench?.acp_providers, analysisAgentModels, cwd)
+        if (!execution.ready) { showActionNotice(execution.message, true); return }
         setCreatingRun(true)
         let createdTask
         try {
@@ -3978,7 +3988,7 @@ window.__ModuleLoader__.load({
             cwd,
             action: 'task-create',
             payload: {
-              input: buildAnalysisRequest({ ...createForm,
+              input: buildAnalysisRequest({ ...createForm, agent_model: execution.model, agent_catalog_id: execution.catalogId,
                 ...(workbench?.capabilities?.source_first?.analysis_options_by_profile?.['behavior-test-v2'] ? {
                   analysis_profile: 'behavior-test-v2',
                   asset_revisions: Object.fromEntries(createForm.asset_ids.map(id => [id, (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision]).filter(([, revision]) => revision)),
@@ -4011,7 +4021,7 @@ window.__ModuleLoader__.load({
         if (createdTask) await startTask(createdTask)
       }
       function canDeriveCurrent() {
-        if (!selectedTask || !current || !taskMatchesRun(selectedTask, current) || error || workbench?.compatibility?.compatible !== true) return false
+        if (!selectedTask || analysisExecutorBlockedReason(selectedTask) || !current || !taskMatchesRun(selectedTask, current) || error || workbench?.compatibility?.compatible !== true) return false
         const state = deriveRunPresentation(selectedTask, current, health)
         return current.workflow_version === 'source-first-v1' && !state.running && !state.stopping && !creatingRun
       }
@@ -4081,7 +4091,7 @@ window.__ModuleLoader__.load({
       function derivationButton(item) {
         if (current?.workflow_version !== 'source-first-v1') return null
         return h('button', { type: 'button', className: 'b03-task-action', style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 6 },
-          disabled: !canDeriveCurrent(), title: canDeriveCurrent() ? '创建关联此结果的新分析' : '请等待当前执行结束并成功读取结果',
+          disabled: !canDeriveCurrent(), title: canDeriveCurrent() ? '创建关联此结果的新分析' : analysisExecutorBlockedReason(selectedTask) || '请等待当前执行结束并成功读取结果',
           onClick: () => { void openDerivation(item) } }, runIcon('GitBranch'), item ? '补充这条结果' : '补充 / 增量分析')
       }
       function renderDerivationOrigin() {
@@ -4627,31 +4637,22 @@ window.__ModuleLoader__.load({
       function renderCreate() {
         const repositories = workbench?.capabilities?.repositories ?? []
         const providerOptions = workbench?.acp_providers ?? []
-        const modelRouting = workbench?.model_routing ?? { status: 'loading', models: [], failures: [] }
-        const modelOptions = (modelRouting.models ?? [])
-        const selectedModel = modelRouteFromKey(createForm.model_route_key)
-        const storedReasoningEffort = selectedModel?.reasoning_effort
-        const storedReasoningEffortLabel = ({ low: '低', medium: '中', high: '高' })[storedReasoningEffort] ?? storedReasoningEffort ?? '默认'
-        const selectedModelOption = selectedModel
-          ? modelOptions.find(item => item.provider === selectedModel.provider && item.model === selectedModel.model)
-          : null
         const selectedProvider = providerOptions.find(item => item.id === createForm.provider_id)
         const unavailableProvider = Boolean(createForm.provider_id) && !selectedProvider
         const retiredProvider = ['pangea-claude-code', 'claude-code'].includes(createForm.provider_id)
         const selectedProviderLabel = selectedProvider?.label ?? (createForm.provider_id
           ? retiredProvider ? 'Claude Code（已移除）' : `${createForm.provider_id}（不可用）`
-          : '内置 API Agent')
+          : '请选择外部 Agent')
         const unavailableProviderMessage = retiredProvider
-          ? 'Claude Code 支持已移除，历史任务和结果仍保留。请明确选择其他外部 Agent 或内置 API Agent。'
-          : '此前选择的执行器当前不可用。请明确选择其他外部 Agent 或内置 API Agent。'
+          ? 'Claude Code 支持已移除，历史任务和结果仍保留。请明确选择其他外部 Agent。'
+          : '此前选择的执行器当前不可用。请明确选择其他外部 Agent。'
         const semantic = workbench?.capabilities?.source_first?.version === 'source-first-v1' || workbench?.capabilities?.workflow_versions?.includes('source-first-v1')
         const sceneOptions = workbench?.capabilities?.source_first?.analysis_options_by_profile?.['behavior-test-v2']
         const options = semantic ? sceneOptions ?? workbench.capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'] } : null
         const supported = (kind, value) => !options || options[kind]?.includes(value)
         const compatible = workbench?.compatibility?.compatible === true
-        const executionReady = createForm.provider_id
-          ? selectedProvider?.registered === true
-          : selectedModelOption?.credential_configured === true
+        const execution = analysisExecutionState(createForm, providerOptions, analysisAgentModels, cwd)
+        const executionReady = execution.ready
         const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
         const selectedCoverage = createForm.asset_ids.some(id => (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.asset_type === 'coverage' && (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.status === 'available')
         const coverageReady = createForm.scenario !== 'coverage-analysis' || (sceneOptions ? selectedCoverage : (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim()))
@@ -4663,7 +4664,7 @@ window.__ModuleLoader__.load({
           : sceneOptions && createForm.asset_ids.some(id => !(assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision) ? '所选资产版本尚未读取，请刷新资产后重新选择。'
           : !coverageReady ? '请先查询、导入或选择可用覆盖率资产。'
           : unavailableProvider ? unavailableProviderMessage
-          : !executionReady ? '请选择已就绪的 Agent 或已配置凭据的内置模型。'
+          : !executionReady ? execution.message
           : coverageQueryBusy ? '覆盖率正在查询，请等待查询完成。' : ''
         const canSubmit = !submitBlockReason && !creatingRun
         const assetItems = assetCatalog?.assets ?? []
@@ -4678,28 +4679,6 @@ window.__ModuleLoader__.load({
           ?? { asset_id: assetId, title: assetDetailStatus[assetId] === 'loading' ? '正在读取资产详情…' : assetDetailStatus[assetId] === 'error' ? `资产 ${assetId} 详情读取失败` : assetId, status: assetDetailStatus[assetId] === 'loading' ? '正在读取' : '读取失败' })
         const assetPagination = assetCatalog?.pagination
         const assetTypeLabels = { requirement: '需求', design: '设计', historical_defect: '历史缺陷', reference: '参考资料', coverage: '覆盖率', test_case_example: '示例用例' }
-        const internalModelFields = !createForm.provider_id ? h(React.Fragment, null,
-          h('label', { className: 'field' },
-            h('span', null, '模型'),
-            h('select', {
-              'aria-label': '模型', className: modelOptions.some(item => item.credential_configured) ? undefined : 'create-error-input', value: selectedModel ? modelSelectionKey({ provider: selectedModel.provider, model: selectedModel.model }) : '',
-              onChange: event => {
-                const key = event.target.value
-                setCreateForm(value => ({ ...value, model_route_key: key }))
-                try { if (key) window.localStorage?.setItem(MODEL_ROUTE_STORAGE_KEY, key) } catch { /* storage unavailable */ }
-              },
-            },
-            h('option', { value: '' }, modelOptions.length ? '选择已配置模型' : modelRouting.status === 'error' ? '无法读取模型目录' : '未发现已配置凭据的模型'),
-            modelOptions.map(item => h('option', {
-              key: `${item.provider}/${item.model}`, value: modelSelectionKey(item), disabled: item.credential_configured !== true,
-            }, `${item.provider_name ?? item.provider} · ${item.model_name ?? item.model}${item.credential_configured === true ? '' : ' · 未配置凭证'}`))), h('span', { className: 'hint' }, modelOptions.some(item => item.credential_configured) ? '模型列表来自当前 Desktop 配置。' : '需要先完成模型与 API 配置。')),
-          selectedModelOption?.reasoning?.efforts?.length ? h('label', { className: 'field' },
-            h('span', null, '推理级别'),
-            h('select', {
-              'aria-label': '推理级别', value: selectedModel?.reasoning_effort ?? '',
-              onChange: event => setCreateForm(value => ({ ...value, model_route_key: modelSelectionKey({ ...selectedModel, reasoning_effort: event.target.value }) })),
-            }, h('option', { value: '' }, '默认'), selectedModelOption.reasoning.efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name ?? effort.id))), h('span', { className: 'hint' }, '仅展示所选模型支持的级别。')) : !selectedModelOption ? h('label', { className: 'field' }, h('span', null, '推理级别'), h('select', { 'aria-label': '推理级别', value: storedReasoningEffort ?? '', disabled: true }, h('option', { value: storedReasoningEffort ?? '' }, storedReasoningEffortLabel)), h('span', { className: 'hint' }, '仅展示所选模型支持的级别。')) : null,
-        ) : null
         const step = screen.createStep ?? 1
         const view = screen.createView ?? 'inputs'
         const scenes = {
@@ -4799,19 +4778,22 @@ window.__ModuleLoader__.load({
               h('div', { className: 'create-coverage-methods' }, h('div', { className: 'callout' }, h('div', { className: 'row' }, h('strong', { className: 'small' }, runIcon('FileUp'), ' 本地覆盖率文件')), h('p', { className: 'create-copy', style: { margin: '8px 0 12px' } }, '支持 XLSX 或 combined JSON。'), h('input', { 'aria-label': '覆盖率文件完整路径', placeholder: '输入覆盖率文件完整路径', style: { fontSize: 12, height: 36 }, value: createForm.coverage_path ?? '', onChange: event => update('coverage_path', event.target.value) }), h('div', { className: 'row', style: { marginTop: 10 } }, button('选择文件', async () => { try { const selected = await window.dshDesktopDirectoryPicker.pick({ purpose: 'coverage' }); if (selected) update('coverage_path', selected) } catch (error) { showActionNotice(error.message, true) } }, 'ghost', 'FolderOpen', !window.dshDesktopDirectoryPicker?.pick || coverageQueryBusy), button('解析并添加', importFile, '', null, !createForm.coverage_path?.trim() || coverageQueryBusy))), h('div', { className: 'callout' }, h('strong', { className: 'small' }, runIcon('Library'), ' 已有覆盖率资产'), h('p', { className: 'create-copy', style: { margin: '8px 0 18px' } }, '选择已解析且状态可用的覆盖率资产。其他类型的资产不能替代覆盖率输入。'), button('选择覆盖率资产', () => openAssets(true), '', 'Plus')))),
             footer(() => go(2), () => go(3), view === 'coverage-result' ? '使用当前输入并继续' : '下一步 · 执行设置', !inputsReady)), view === 'coverage-result' ? 'create-result' : 'create-coverage-panel')
         } else if (step === 3) {
-          const selectProvider = providerId => { setCreateForm(form => ({ ...form, provider_id: providerId, agent_model: '', model_route_key: providerId ? '' : form.model_route_key })); try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ } }
+          const selectProvider = providerId => {
+            setAnalysisAgentModels({ status: 'idle' })
+            setCreateForm(form => ({ ...form, provider_id: providerId, agent_model: '', model_route_key: '', external_selection_required: false }))
+            try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ }
+          }
           content = panel(h(React.Fragment, null,
-            h('h2', { className: 'create-heading' }, '选择执行分析的 Agent'), h('p', { className: 'create-copy' }, '执行方式决定模型来源；本次选择将用于整个分析流程。'),
-            h('div', { className: 'create-radio-tabs' }, h('input', { id: 'create-builtin', type: 'radio', name: 'create-agent', checked: !createForm.provider_id, onChange: () => selectProvider('') }), h('label', { htmlFor: 'create-builtin' }, runIcon('Cpu'), ' 内置 API Agent', h('span', null, '选择已配置模型，统一执行分析与复核。')), h('input', { id: 'create-external', type: 'radio', name: 'create-agent', checked: !!createForm.provider_id, disabled: !providerOptions.some(item => item.registered), onChange: () => selectProvider(providerOptions.find(item => item.registered).id) }), h('label', { htmlFor: 'create-external' }, runIcon('Terminal'), ' 外部 Agent', h('span', null, providerOptions.some(item => item.registered) ? '使用当前 Desktop 已加载的 Agent。' : '当前暂无已加载的外部 Agent。'))),
-            h('div', { className: 'form-grid', style: { marginTop: 22 } }, internalModelFields, createForm.provider_id && field('外部 Agent', h('select', { 'aria-label': '外部 Agent', value: createForm.provider_id, onChange: event => selectProvider(event.target.value) }, unavailableProvider && h('option', { value: createForm.provider_id, disabled: true }, selectedProviderLabel), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: !item.registered }, item.label)))), createForm.provider_id && selectedProvider && h(AgentModelSelect, { key: `${cwd}/${createForm.provider_id}`, providerId: createForm.provider_id, cwd, visible, value: createForm.agent_model, onChange: value => update('agent_model', value) })),
-            h('div', { style: { marginTop: 22 } }, unavailableProvider ? notice(retiredProvider ? 'Claude Code 支持已移除' : '原执行器不可用', unavailableProviderMessage, 'warn') : executionReady ? notice('执行环境已就绪', createForm.provider_id ? '使用所选 Agent 的模型与推理配置执行。' : '模型凭据已配置，可以开始分析。', 'good', badge('可用', 'good')) : notice(!createForm.provider_id ? '内置模型尚未就绪' : '执行设置尚未就绪', modelRouting.status === 'error' ? `模型目录读取失败：${modelRouting.error ?? '未知错误'}` : !createForm.provider_id ? '没有已配置凭据的内置 API 模型，无法创建分析。请先完成模型设置，再重新检测。' : '请选择已配置凭据的内置模型或已加载的外部 Agent。', 'warn', h('div', { className: 'row' }, button('打开模型设置', () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal' } })), '', 'Settings'), button('重新检测', () => { void loadWorkbench() }, '', 'RefreshCw')))),
+            h('h2', { className: 'create-heading' }, '选择执行分析的 Agent'), h('p', { className: 'create-copy' }, '分析与复核统一使用外部 Agent。模型读取完成并确认可用后，才能继续创建。'),
+            h('div', { className: 'form-grid', style: { marginTop: 22 } }, field('外部 Agent', h('select', { 'aria-label': '外部 Agent', value: createForm.provider_id, disabled: creatingRun, onChange: event => selectProvider(event.target.value) }, !createForm.provider_id && h('option', { value: '', disabled: true }, '请选择外部 Agent'), unavailableProvider && h('option', { value: createForm.provider_id, disabled: true }, selectedProviderLabel), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: !item.registered }, item.label)))), createForm.provider_id && selectedProvider && h(AgentModelSelect, { providerId: createForm.provider_id, cwd, state: analysisAgentModels, value: createForm.agent_model, disabled: creatingRun, onChange: value => update('agent_model', value), onRefresh: refreshAnalysisAgentModels })),
+            h('div', { style: { marginTop: 22 } }, unavailableProvider ? notice(retiredProvider ? 'Claude Code 支持已移除' : '原执行器不可用', unavailableProviderMessage, 'warn') : executionReady ? notice('执行环境已就绪', execution.message, 'good', badge('可用', 'good')) : notice('执行设置尚未就绪', execution.message, 'warn', !analysisProviderRegistered && h('div', { className: 'row' }, button('打开 Agent 设置', () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'external' } })), '', 'Settings'), button('重新检测', () => { void loadWorkbench() }, '', 'RefreshCw')))),
             h('div', { className: 'create-subhead' }, '本次执行包含'), h('div', { className: 'grid3' }, [['单元分析', scene[2]], ...(createForm.mode === 'depth' ? [['独立盲审', '独立检查结果与源码'], ['对照复核', '核对分歧，形成交付']] : [['直接审核', '检查结果与源码']])].map(([title, copy]) => h('div', { key: title, className: 'callout' }, h('strong', { className: 'small' }, title), h('p', { className: 'create-copy', style: { margin: '8px 0 0' } }, copy)))), footer(() => go(2), () => go(4), '下一步 · 确认创建', !executionReady)))
         } else {
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
             row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), `${sourceScope.length} 项待冻结范围`, 1),
             row('流程基线', createForm.flow_baseline?.run_id || '未选择', createForm.flow_baseline?.version_id || '独立分析，不与历史流程自动合并。', 1),
-            row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, createForm.provider_id ? createForm.agent_model || '使用 Agent 默认模型与推理配置' : `${selectedModelOption?.provider_name ?? selectedModel?.provider} · ${selectedModelOption?.model_name ?? selectedModel?.model} · 推理级别：${selectedModelOption?.reasoning?.efforts?.find(item => item.id === selectedModel?.reasoning_effort)?.name ?? selectedModel?.reasoning_effort ?? '默认'}`, 3),
+            row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
         return h('section', { className: 'pangea-ui pangea-create-workspace', 'aria-label': '新建分析' },
@@ -5478,7 +5460,7 @@ window.__ModuleLoader__.load({
             setCreateForm(value => ({ ...value, source_task_id: selectedTask.task_id, repository: selectedTask.repository, target: selectedTask.target,
               source_scope_text: selectedTask.source_scope.join('\n'), context_scope_text: (selectedTask.context_scope ?? []).join('\n'), asset_ids: selectedTask.asset_ids,
               scenario: 'coverage-analysis', mode: selectedTask.mode, provider_id: selectedTask.provider || '',
-              agent_model: selectedTask.agent_model || '', model_route_key: selectedTask.model_route ? modelSelectionKey(selectedTask.model_route) : '',
+              agent_model: selectedTask.provider ? selectedTask.agent_model || '' : '', model_route_key: '', external_selection_required: !selectedTask.provider,
               coverage_kind: 'query', coverage_product: query.product || '', coverage_version: query.c_version || '',
               coverage_module: query.scope || query.module || '', coverage_recursive: query.recursive !== false, coverage_source: query.source || 'summary', coverage_b_version: query.b_version || '' }))
             setScreen({ type: 'create' })
@@ -5921,9 +5903,10 @@ window.__ModuleLoader__.load({
           const launchEvents = taskLaunchEvents(selectedTask, workbench)
           const launchFailure = [...launchEvents].reverse().find(event => event.status === 'error')
           const presentation = deriveRunPresentation(selectedTask, null, null)
-          const mayRetryLaunch = !selectedTask.run_id || presentation.canResume
+          const mayRetryLaunch = !analysisExecutorBlockedReason(selectedTask) && (!selectedTask.run_id || presentation.canResume)
           return h(React.Fragment, null, renderCompatibility(),
             overviewBreadcrumb, overviewPageHero, navigation,
+            analysisExecutorBlockedReason(selectedTask) ? h('p', { role: 'status', className: 'b03-task-subtitle' }, analysisExecutorBlockedReason(selectedTask)) : null,
             h('div', { className: 'b03-overview-hero' },
               h('div', null, h('h2', null, presentation.executionLabel),
                 h('p', null, selectedTask.status === 'failed' ? selectedTask.launch_error ?? '分析启动失败。' : '任务已保存，正在准备分析会话和 PANGEA Run。')),
@@ -6013,6 +5996,7 @@ window.__ModuleLoader__.load({
         return h(React.Fragment, null,
           renderCompatibility(),
           overviewBreadcrumb, overviewPageHero, navigation,
+            analysisExecutorBlockedReason(selectedTask) ? h('p', { role: 'status', className: 'b03-task-subtitle' }, analysisExecutorBlockedReason(selectedTask)) : null,
           renderDerivationOrigin(),
           h('div', { className: 'b03-overview-hero' },
             h('div', null, h('h2', null, statusTitle,
@@ -6756,6 +6740,10 @@ window.__ModuleLoader__.load({
     exports.requestRepositoryImport = requestRepositoryImport
     exports.requestAcpSettings = requestAcpSettings
     exports.requestAgentModels = requestAgentModels
+    exports.analysisExecutorBlockedReason = analysisExecutorBlockedReason
+    exports.analysisExecutionState = analysisExecutionState
+    exports.loadAnalysisAgentModels = loadAnalysisAgentModels
+    exports.AgentModelSelect = AgentModelSelect
     exports.saveAcpSettings = saveAcpSettings
     exports.testAcpSettings = testAcpSettings
     exports.filePathFromLocation = filePathFromLocation

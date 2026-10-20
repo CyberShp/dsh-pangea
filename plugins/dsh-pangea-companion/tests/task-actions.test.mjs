@@ -326,7 +326,10 @@ test('stop during Run creation fences the late Run and prevents session creation
   let providerStarts = 0
   f.api.workspace = { async list() { return ok({ items: [{ workspaceId: 'fixture-workspace', path: f.root }] }) } }
   f.api.sessions.create = async () => { sessionCreates += 1; return ok({ sessionId: f.owner.id }) }
-  f.runtime.subagents = { getProvider: () => ({}), async start() { providerStarts += 1; throw new Error('must not start') } }
+  const provider = { async discoverModels() {
+    return { current_model: 'native/selected', models: [{ id: 'native/selected', label: 'Selected' }] }
+  } }
+  f.runtime.subagents = { getProvider: () => provider, async start() { providerStarts += 1; throw new Error('must not start') } }
   f.runner = async ({ args }) => {
     f.calls.push(args)
     if (args[0] === 'system') return { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }

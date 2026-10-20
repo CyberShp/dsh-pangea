@@ -18,7 +18,7 @@ const capabilities = { workflow_versions: ['source-first-v1'], source_first: {
 const supplement = { mode: 'supplement', instruction: '只补充断链后的资源释放场景',
   selected_unit_ids: ['unit-tls'], selected_records: [{ action_id: 'worker-a', record_id: 'rec-1' }], changed_paths: [] }
 
-async function fixture(t) {
+async function fixture(t, parentInput = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-incremental-host-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
@@ -29,7 +29,7 @@ async function fixture(t) {
   const launchLogs = createLaunchLogStore({ root: path.join(root, 'launch-logs') })
   const parent = await tasks.create({ workspace: root, dataRoot, input: {
     repository: 'repo', target: 'TLS 建链', source_scope: ['src/tls.c'], context_scope: ['include/tls.h'],
-    focus: ['release'], asset_ids: ['asset-a'], test_case_examples: ['case-a'], provider_id: 'pangea-nga', agent_model: 'native/model',
+    focus: ['release'], asset_ids: ['asset-a'], test_case_examples: ['case-a'], provider_id: 'pangea-nga', agent_model: 'native/model', ...parentInput,
   } })
   await tasks.bindRun(parent.task_id, 'parent-run', 'source-first-v1')
   await tasks.addConversation(parent.task_id, { sessionId: 'parent-session', kind: 'analysis' })
@@ -37,6 +37,14 @@ async function fixture(t) {
     units: [{ unit_id: 'unit-tls', title: 'TLS 建链' }],
     records: [{ action_id: 'worker-a', record_id: 'rec-1', unit_id: 'unit-tls', kind: 'branch', title: 'TLS 释放' }] }
   const calls = []
+  const modelRequests = []
+  const provider = { async discoverModels(request) {
+    modelRequests.push(request)
+    assert.equal(request.cwd, root)
+    assert.equal(request.signal.aborted, false)
+    return { current_model: 'native/model', models: [{ id: 'native/model', label: 'Native model' }] }
+  } }
+  const runtime = { subagents: { getProvider: id => id === 'pangea-nga' ? provider : undefined } }
   const runner = async ({ args }) => { calls.push(args); assert.equal(args[1], 'derivation-options'); return options }
   async function request(body, cwd = root) {
     const req = Readable.from([Buffer.from(JSON.stringify(body))])
@@ -46,10 +54,10 @@ async function fixture(t) {
     const response = {}
     await workbenchRouteHandler(req, {
       writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) },
-    }, {}, tasks, new Set(), launchLogs, {}, {}, runner)
+    }, {}, tasks, new Set(), launchLogs, runtime, {}, runner)
     return response
   }
-  return { root, dataRoot, storePath, tasks, parent: await tasks.get(parent.task_id), options, calls, request }
+  return { root, dataRoot, storePath, tasks, parent: await tasks.get(parent.task_id), options, calls, modelRequests, request }
 }
 
 test('derivation creates an independent persisted task and carries its exact selection through the CLI contract', async t => {
@@ -65,6 +73,7 @@ test('derivation creates an independent persisted task and carries its exact sel
   assert.equal(child.repository, original.repository)
   assert.equal(child.provider, original.provider)
   assert.equal(child.agent_model, original.agent_model)
+  assert.equal(f.modelRequests.length, 1)
   assert.deepEqual(child.source_scope, original.source_scope)
   assert.deepEqual(child.context_scope, original.context_scope)
   assert.deepEqual(child.asset_ids, original.asset_ids)
@@ -90,6 +99,19 @@ test('derivation creates an independent persisted task and carries its exact sel
   assert.equal(contract.run_id, undefined)
   assert.equal(contract.source_task_id, undefined)
   assert.deepEqual(await f.tasks.get(original.task_id), original)
+})
+
+test('historical internal API results remain readable but cannot derive a new analysis', async t => {
+  const f = await fixture(t, { provider_id: null, agent_model: null })
+  const original = await f.tasks.get(f.parent.task_id)
+  const options = await f.request({ action: 'derivation-options', task_id: f.parent.task_id, run_id: 'parent-run' })
+  assert.equal(options.code, 200)
+  const response = await f.request({ action: 'task-derive', task_id: f.parent.task_id, run_id: 'parent-run', input: supplement })
+  assert.equal(response.code, 400)
+  assert.match(response.body.error, /内部 API 分析支持已移除/)
+  assert.equal(f.modelRequests.length, 0)
+  assert.equal((await f.tasks.list()).length, 1)
+  assert.deepEqual(await f.tasks.get(f.parent.task_id), original)
 })
 
 test('derivation rejects mismatched Run, workspace, data root, and composite record identity before persisting a child', async t => {

@@ -465,13 +465,15 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async prepareProviderLaunch(taskId, provider) {
+  async prepareProviderLaunch(taskId, provider, agentModel) {
     await this.ready
     const task = this.requireTask(taskId)
     const selected = text(provider)
     if (!selected) throw new Error('请选择一个 ACP 执行 Agent')
+    if (agentModel !== undefined && !text(agentModel)) throw new Error('外部 Agent 模型尚未就绪')
     this.prepareAttempt(task, selected)
     if (task.provider !== selected) task.agent_model = null
+    if (agentModel !== undefined) task.agent_model = text(agentModel)
     task.provider = selected
     task.model_route = null
     task.status = 'preparing'

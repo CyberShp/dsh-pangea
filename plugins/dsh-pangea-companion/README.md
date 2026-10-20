@@ -1,6 +1,6 @@
 # dsh-pangea-companion
 
-`dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的伴生插件：创建 Run 后立即通过 DSH 的内置模型或已注册 ACP Agent 启动 Codetalks Skill，监听冻结 Run 的 Markdown 产物和生命周期，并保留独立的用例执行能力。
+`dsh-pangea-companion` 是 PANGEA 在 DeepSeek Harness 中的伴生插件：分析使用已注册的外部 ACP Agent，监听冻结 Run 的产物和生命周期，并保留独立的用例执行能力。
 
 分析插件不自行生成阶段、结果或报告：它只负责创建唯一 Skill Run、启动已选择的执行 Agent、读取真实状态并展示诊断。用例执行仍使用 `pangea-data/executor-runs/` 中的独立 Executor Run，和分析生命周期分开。
 
@@ -13,9 +13,11 @@
 - 会话删除后仍按 Run 保留最小关联摘要；历史 Run 不依赖原 DSH 会话继续存在。
 - 当前 Run 返回结构化明细：风险、测试用例、证据、业务流程、复核问题；历史 Run 保持轻量摘要。
 - 通过稳定 `system / runs` API 检查后端兼容性、分页列出全部 Run，并支持新建和显式确认停止；停止时即使 ACP 或 PANGEA API 一侧不可用，也会保留错误并继续尝试其余取消动作。
-- 新建分析会先创建冻结的 Codetalks Skill Run，随后使用用户选定的内置 API、NGA、CodeAgent 或 OpenCode 执行 Step 01–09；页面只监听 Skill 状态和 Markdown 产物。
+- 模块、风险、分支和覆盖率分析只支持 NGA、CodeAgent 或 OpenCode；内部 API 不再用于新建、启动或恢复分析。历史任务与结果仍可查看、停止或删除，资料提取和普通讨论的模型设置独立保留。
 - 新建分析只接受仓库、目标、资产库勾选、执行 Agent、模型和 effort；分析重点与源码范围由 Skill 自动确定，不接受手写 focus、source scope、结构化资产 ID 或示例文件路径。
-- “新建分析”选择 NGA、CodeAgent 或 OpenCode 后自动读取该 Agent 的可用模型。可以指定本次模型或沿用 Agent 默认；任务保存选择，续跑继续使用。模型列表来自 ACP 会话，读取不发送分析 Prompt，不创建 PANGEA Task/Run，也不读取手工模型目录。
+- “新建分析”选择外部 Agent 后自动读取其可用模型。读取中、读取失败、模型列表为空或选择已失效时，不能进入确认页或提交；切换工作区、Agent 或刷新模型后需重新确认就绪状态。默认选项必须解析为列表中的具体模型 ID，和显式选择一样冻结到任务，续跑继续使用该模型。
+- 模型列表来自 ACP 会话，读取不发送分析 Prompt，不创建 PANGEA Task/Run，也不读取手工模型目录。后端在创建和启动前验证模型发现结果，阻止绕过页面或使用过期选择进入 planning。
+- 历史外部 Run 若未保存具体模型 ID，不能把当前默认模型套入原 worker 身份；恢复时保留已有结果并明确提示选择模型新建。已固定模型的任务继续沿用原模型与会话绑定。
 - NGA 与 CodeAgent 的新建及已有启动配置统一带上 `--skip-safe-check`，避免工作目录信任询问阻塞无人值守执行；OpenCode 参数保持不变。Claude Code 已退出支持列表，旧任务和会话记录仍保留，显式选择旧执行器会提示改选受支持执行器。
 - “Agent Runtime”默认只展示本机 Agent 状态；命令、参数和诊断收在折叠的高级设置中。仅自定义安装或启动异常时需要打开。启动配置仍保存到 `$DSH_HOME/dsh-pangea-companion/acp-runtime-v1.json`，修改后重启 Harness；模型无需在这里填写。
 - 外部 Agent 使用独立 `external-acp` 模型路由，不调用内部 API；模型或 effort 未配置、Provider 未注册、命令无法解析时禁止创建分析。
@@ -26,7 +28,7 @@
 - 通过 `ctx.pangea` 向统一工作台注册“分析”和“执行”两页，不再直接注册 Better Sidebar Tab。
 - `dsh-pangea` 是客户端页面的必需 peer dependency；通用侧栏只由基座接入。
 - 当前 Agent 工作目录或其上级目录存在 `.agents/pangea/dsh.md` 时，`subagent-report` 静默投递，由原生 `subagent-settled` 在子 Agent 真正结束后唤醒根 Agent；其他工作区保持 DSH 默认行为。
-- 内置 API Agent 和 ACP Agent 的启动失败都会写入持久化 launch log，并在任务总览中显示失败阶段、错误码和原始错误；不会用伪造结果或静默回退掩盖失败。
+- ACP Agent 的启动失败会写入持久化 launch log，并在任务总览中显示失败阶段、错误码和原始错误；不会静默回退到内部 API。
 - 在“执行”页维护主机 alias、阵列 alias、自动化仓库 ID 和设备绑定；SSH 用户名/密码继续使用 `dsh-ssh` 的 `~/.dsh/dsh-ssh.json`。
 - 在用例列表中多选测试用例和执行环境，一键创建真实 DSH 执行会话；执行会话按独立 Executor Graph 生成计划并运行。
 - 提供 `pangea_environment_get`、`pangea_ssh_exec/start/read/stop/interactive` 工具，支持普通命令、持续 IO 后台任务和同一阵列 PTY 内的 `diagnose_usr → attach → dtoe` 交互。
