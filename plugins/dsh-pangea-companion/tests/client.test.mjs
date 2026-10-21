@@ -3,6 +3,12 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
+
+function scopePreviewFixture(states, cwd = '/workspace') {
+  const form = states[33]
+  if (!form?.source_scope_text?.trim()) return null
+  return { key: JSON.stringify([cwd, states[1]?.data_root, form.repository, form.source_scope_text]), preview_state: 'complete', matched_file_count: 1, preview_id: 'verified-scope-fixture', scope_revision: 'scope-fixture-v1', files: [{ relative_path: 'request.c' }] }
+}
 import { fileURLToPath } from 'node:url'
 import { applyTaskExecutionState } from '../src/index.js'
 
@@ -25,7 +31,7 @@ test('create form shows and can remove selected assets absent from its repositor
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create', createStep: 2 }, 33: form, 34: { assets: [{ asset_id: 'tagged', title: '仓库需求', asset_type: 'requirement' }] } }
   let index = 0, changed
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }]
   } })
   const pages = []
@@ -53,7 +59,7 @@ test('new analysis reference-source placeholder matches the approved prototype',
   }
   let index = 0
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     return [Object.hasOwn(states, key) ? states[key] : initial, () => {}]
   } })
   const pages = []
@@ -68,7 +74,7 @@ test('saved internal API settings do not restore an analysis route or show inter
   let index = 0
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: [], model_routing: { status: 'ok', models: [{ provider: 'openai', model: 'internal', credential_configured: true }] } },
     16: { type: 'create', createStep: 3 }, 33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], provider_id: '', agent_model: '', model_route_key: '' } }
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] }, useEffect(effect) { if (String(effect).includes('const saved = JSON.parse(window.localStorage')) effect() } }, undefined, undefined,
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] }, useEffect(effect) { if (String(effect).includes('const saved = JSON.parse(window.localStorage')) effect() } }, undefined, undefined,
     { localStorage: { getItem: () => JSON.stringify({ provider_id: '', model_route: { provider: 'openai', model: 'internal' } }), setItem() {} } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }; client.apply(ctx)
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -170,7 +176,7 @@ test('overview loses live status and disables continuation when its current Run 
   const task = { provider: 'pangea-nga', task_id: 'observed-task', run_id: current.run_id, data_root: current.data_root, title: 'TLS', target: 'TLS', repository: 'sample', can_resume: true, status: 'stopped', execution_status: 'stopped' }
   const states = { 0: { current, data_root: current.data_root }, 1: { tasks: { items: [task] }, compatibility: { compatible: true } }, 2: 'connection lost', 4: current.run_id, 5: task.task_id, 16: { type: 'overview' } }
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/isolated' }, visible: true })
@@ -225,7 +231,7 @@ test('overview derivation loads only its bound Run and is disabled during execut
     const states = { 0: { status: 'ok', current }, 1: { compatibility: { compatible: true }, tasks: { items: [task] } }, 4: task.run_id, 5: task.task_id, 16: { type: 'overview' } }
     let index = 0
     const requests = []
-    const react = { ...fakeReact(), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] } }
+    const react = { ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] } }
     const client = await loadClientExports(react, async (url, options) => { requests.push(JSON.parse(options.body)); return { ok: true, json: async () => ({ status: 'ok', options: { can_derive: true, records: [], units: [] } }) } })
     const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
     client.apply(ctx)
@@ -390,7 +396,7 @@ test('stage insights expose omitted pending rows and stale state in Chinese with
   let index = 0
   const states = []
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!(key in states)) states[key] = initial
     return [states[key], value => { states[key] = value }]
   } })
@@ -398,14 +404,14 @@ test('stage insights expose omitted pending rows and stale state in Chinese with
   const props = { current, error: 'offline', retry() {} }
   const first = client.RunWorkspace(props), firstNodes = descendants(first), firstText = JSON.stringify(first)
   assert.match(firstText, /上次读取的任务/)
-  assert.match(firstText, /还有 3 项待处理/)
+  assert.match(firstText, /还有 6 项待处理/)
   const insightNode = firstNodes.find(node => node.props.className === 'run-insights')
   const visible = descendants(insightNode).flatMap(node => node.children.filter(child => typeof child === 'string')).join('\n')
   assert.doesNotMatch(visible, /last_observed|dispatched|卡住/)
   firstNodes.find(node => node.type === 'button' && node.children.some(value => typeof value === 'string' && value.startsWith('展开全部阶段信息'))).props.onClick()
   index = 0
   const expanded = client.RunWorkspace(props)
-  assert.doesNotMatch(JSON.stringify(expanded), /还有 3 项待处理/)
+  assert.doesNotMatch(JSON.stringify(expanded), /还有 6 项待处理/)
   const pendingSection = descendants(expanded).find(node => node.type === 'section' && node.children[0]?.children?.includes('明确记录的待处理事项'))
   assert.equal(descendants(pendingSection).filter(node => node.type === 'article').length, 9)
 })
@@ -419,7 +425,7 @@ test('module analysis queries coverage, selects partial results and removes stal
     acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create', createStep: 2, createView: 'coverage' }, 33: form }
   const calls = []
   const react = { ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!(key in states)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } }
@@ -470,7 +476,7 @@ test('a saved retired executor stays explicit until the user replaces it, regard
         scenario: 'module-analysis', mode: 'depth', provider_id: 'pangea-claude-code', agent_model: 'old-model' },
     }
     const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-      const key = index++
+      const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
       if (!(key in states)) states[key] = initial
       return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
     }, useEffect(effect) {
@@ -513,7 +519,7 @@ for (const providerId of ['pangea-nga', 'pangea-opencode', 'pangea-codeagent']) 
     const states = { 1: { compatibility: { compatible: true }, acp_providers: [{ id: providerId, registered: true }] },
       16: { type: 'create', createStep: 3 }, 33: form }
     const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-      const key = index++
+      const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
       if (key === 82) return [{ status: 'ready', cwd: '/workspace', provider_id: providerId, catalog: { catalog_id: 'receipt', provider_id: providerId, models: [{ id: 'wire/selected', label: 'Selected' }] } }, () => {}]
       return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }]
     } })
@@ -664,7 +670,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /本次执行/)
   assert.match(source, /用例尚未编号，不能选择/)
   assert.match(source, /filter\(hasText\)/)
-  assert.match(source, /← 返回/)
+  assert.match(source, /aria-label': backLabel/)
   assert.match(source, /数据状态/)
   assert.match(source, /数据读取异常/)
   assert.match(source, /renderIssueCard\('未解决事项'/)
@@ -966,7 +972,7 @@ test('launch diagnostics explain planning, ACP and host timing without treating 
     4: task.run_id, 5: task.task_id, 16: { type: 'overview' } }
   let index = 0
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     return [Object.hasOwn(states, key) ? states[key] : initial, () => {}]
   } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
@@ -1238,7 +1244,7 @@ test('risk and test case pages use result-focused copy and only show recorded me
   assert.match(source, /直接源码依据/)
   assert.doesNotMatch(source, /严重度来自 SFMEA/)
   assert.match(source, /测试用例/)
-  assert.match(source, /从分析发现到可验证步骤/)
+  assert.doesNotMatch(source, /从分析发现到可验证步骤/)
   assert.match(source, /操作步骤与逐步预期/)
   assert.doesNotMatch(source, /置信度.*\?\? '—'/)
   assert.doesNotMatch(source, /TRANSLATION\[risk\.translation_status\].*未标注/)
@@ -1411,7 +1417,7 @@ for (const screenType of ['flows', 'coverage']) {
     const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: screenType } }
     let index = 0, nextScreen
     const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-      const key = index++
+      const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
       return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 16) nextScreen = value }]
     } })
     const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
@@ -1451,7 +1457,7 @@ test('dense flow reader pages branches, focuses a step and keeps search, destina
   const requests = []
   const openedSessions = []
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } }, async (_url, options) => {
@@ -1464,10 +1470,10 @@ test('dense flow reader pages branches, focuses a step and keeps search, destina
   const render = () => { index = 0; return descendants(panel.type(panel.props)) }
   const find = label => render().find(node => node.props['aria-label'] === label)
   const rows = () => render().filter(node => node.props['aria-label']?.startsWith('查看分支 '))
-  assert.equal(rows().length, 12)
+  assert.equal(rows().length, 20)
   assert.equal(rows()[0].props['aria-label'], '查看分支 B1')
   find('下一页分支').props.onClick()
-  assert.equal(rows()[0].props['aria-label'], '查看分支 B13')
+  assert.equal(rows()[0].props['aria-label'], '查看分支 B21')
   find('搜索分支').props.onChange({ target: { value: '条件 30' } })
   assert.equal(rows().length, 1)
   assert.equal(rows()[0].props['aria-label'], '查看分支 B30')
@@ -1480,21 +1486,20 @@ test('dense flow reader pages branches, focuses a step and keeps search, destina
   assert.equal(rows()[0].props['aria-label'], '查看分支 B32')
   find('查看全部分支').props.onClick()
   find('筛选分支').props.onChange({ target: { value: 'timeout' } })
-  assert.equal(rows().length, 12)
-  find('下一页分支').props.onClick()
-  assert.equal(rows().length, 3)
+  assert.equal(rows().length, 15)
+  assert.equal(find('下一页分支').props.disabled, true)
   assert.ok(rows().every(node => Number(node.props['aria-label'].match(/B(\d+)/)[1]) % 2 === 1))
   await find('绘制本页分支').props.onClick()
   assert.equal(requests.length, 0, 'drawing a branch page must not request an Agent or historical diagrams')
   const graph = render().find(node => node.type?.name === 'FlowGraphView')
   assert.ok(graph)
   assert.equal(graph.props.flow, flow)
-  assert.deepEqual(Array.from(graph.props.highlightBranchIds), ['B25', 'B27', 'B29'])
+  assert.deepEqual(Array.from(graph.props.highlightBranchIds), Array.from({ length: 15 }, (_, index) => `B${index * 2 + 1}`))
   assert.equal(openedSessions.length, 0, 'local drawing must keep the current conversation')
   assert.equal(rows().length, 0)
   assert.equal(find('流程图视图').props['aria-pressed'], true)
   find('流程阅读视图').props.onClick()
-  assert.equal(rows().length, 3)
+  assert.equal(rows().length, 15)
 })
 
 test('flow page draws natively and orders main, attached and unparseable flows', async () => {
@@ -1510,7 +1515,7 @@ test('flow page draws natively and orders main, attached and unparseable flows',
   let index = 0
   const requests = []
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } }, async (_url, options) => {
@@ -1572,7 +1577,7 @@ test('flow tabs sort sub-flows by parent and mainline attachment while preservin
     1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
   let index = 0
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     return [Object.hasOwn(states, key) ? states[key] : initial, () => {}]
   } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
@@ -1596,7 +1601,7 @@ test('four flow tabs isolate content and restore each flow reader, scroll and vi
   const refs = []
   let index = 0, refIndex = 0
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   }, useRef(initial) { return refs[refIndex++] ??= { current: initial } } })
@@ -1660,7 +1665,7 @@ test('selected task overview shows loading until its workbench request settles a
   for (const [workbench, pending, failure, loadingExpected] of [[undefined, false, undefined, true], [{ tasks: { items: [] } }, true, undefined, true], [undefined, false, 'fixture backend unavailable', false]]) {
     const states = { 1: workbench, 3: failure, 5: 'selected-task', 9: pending, 16: { type: 'overview' } }
     let index = 0
-    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
     const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
     client.apply(ctx)
     const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -1671,25 +1676,22 @@ test('selected task overview shows loading until its workbench request settles a
   }
 })
 
-test('result and overview headers keep long analysis instructions in a collapsed target disclosure', async () => {
-  const target = '完整任务指令第一段：覆盖正常和异常路径。\n第二段：检查所有数据边界及资源释放。'
+test('result and overview headers keep task metadata in the task info drawer', async () => {
+  const target = '完整任务指令第一段。\n第二段：检查数据边界和资源释放。'
   const task = { task_id: 'task', run_id: 'run', data_root: '/data', repository: 'repo', source_scope: ['src/request.c'], title: '请求分析', target, status: 'complete' }
   const current = { run_id: 'run', data_root: '/data', repository: 'repo', target, status: 'complete', details: {} }
   for (const type of ['overview', 'flows']) {
-    const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type } }
-    let index = 0
+    const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type } }; let index = 0
     const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
-    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
-    client.apply(ctx)
+    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }; client.apply(ctx)
     const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
     const nodes = descendants(panel.type(panel.props))
-    const metadata = nodes.find(node => node.props.className === 'b03-overview-run-meta')
-    assert.ok(metadata)
-    assert.doesNotMatch(JSON.stringify(metadata), /完整任务指令第一段/)
-    const disclosure = nodes.find(node => node.type === 'details' && node.children.some(child => child?.type === 'summary' && child.children.includes('分析目标')))
-    assert.ok(disclosure)
-    assert.notEqual(disclosure.props.open, true)
-    assert.ok(JSON.stringify(disclosure).includes(JSON.stringify(target).slice(1, -1)))
+    assert.ok(!nodes.some(node => node.props.className === 'b03-overview-run-meta'))
+    const info = nodes.find(node => node.type === client.TaskInfoAction); assert.ok(info); assert.equal(info.props.task.target, target)
+    const opened = await loadClientExports({ ...fakeReact(), useState() { return [true, () => {}] } })
+    const drawer = descendants(opened.TaskInfoAction(info.props))
+    assert.ok(drawer.some(node => node.props.role === 'dialog' && node.props['aria-label'] === '任务信息'))
+    assert.ok(drawer.some(node => node.type === 'dd' && node.children.includes(target)))
   }
 })
 
@@ -1704,7 +1706,7 @@ test('new analysis binds no Run while preparing and registers the analysis desti
   const complete = new Promise(resolve => { refreshed = resolve })
   const actions = []
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } }, async (_url, options) => {
@@ -1734,7 +1736,7 @@ test('coverage browser pages raw gaps, resets filters and ignores stale Run resp
   const states = [], effects = [], calls = []
   let index = 0, effectKey, cleanup
   const react = { ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!(key in states)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   }, useEffect(fn, deps) {
@@ -1795,7 +1797,7 @@ for (const body of [{ description: '真实风险说明', trigger: '边界输入'
     const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
     const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'risk', id: 'a/r' } }
     let index = 0, nextScreen
-    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 16) nextScreen = value }] } })
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 16) nextScreen = value }] } })
     const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
     client.apply(ctx)
     const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -1817,7 +1819,7 @@ test('source-first create form disables unsupported analysis options', async () 
   const form = { repository: 'repo', target: 'sample', source_scope_text: 'sample.c', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: 'pangea-opencode' }
   const states = { 1: { compatibility: { compatible: true }, capabilities: { workflow_versions: ['source-first-v1'], repositories: ['repo'] }, acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create' }, 33: form }
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
   const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -1839,7 +1841,7 @@ test('short case detail renders variants, opens unit notes and navigates to the 
   const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'case', id: 'a/c' } }
   let index = 0, nextScreen
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 16) nextScreen = value }] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 16) nextScreen = value }] } })
   const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -1856,7 +1858,7 @@ test('reference scope form preserves the analysis target and emits separate refe
   const form = { repository: 'repo', target: 'auth', source_scope_text: 'src/auth.c', context_scope_text: '', asset_ids: [], provider_id: 'pangea-opencode' }
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'], workflow_versions: ['source-first-v1'] }, acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create' }, 33: form }
   let index = 0, changed
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }] } })
   const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -1910,7 +1912,7 @@ test('task filters can reset a no-results state without changing the selected ta
     5: 'T-1', 6: '', 7: '全部',
   }
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     return [Object.hasOwn(states, key) ? states[key] : initial, value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
@@ -1944,7 +1946,7 @@ test('successful empty task catalog presents the first-use creation action and e
   let index = 0
   const states = { 1: { compatibility: { compatible: true }, tasks: { items: [], total: 0 }, runs: { items: [] } }, 16: { type: 'tasks' } }
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } })
@@ -1960,7 +1962,7 @@ test('successful empty task catalog presents the first-use creation action and e
   assert.deepEqual(stepCards.map(card => descendants(card).find(node => node.type === 'p')?.children[0]), [
     '明确要分析的模块与源码范围。', '按需加入需求、设计和历史缺陷。', '在运行过程中查看阶段与产物。',
   ])
-  assert.ok(nodes.some(node => node.type === 'p' && node.children.includes('从一个明确的分析目标开始。')))
+  assert.ok(nodes.some(node => node.type === 'h1' && node.children.includes('分析任务')))
   assert.ok(nodes.some(node => node.type === 'button' && node.children.includes('新建分析')))
   assert.ok(!nodes.some(node => node.type === 'button' && node.children.includes('添加仓库')))
   assert.ok(!nodes.some(node => node.props.className === 'b03-task-metrics' || node.props.className === 'b03-task-breadcrumb'))
@@ -1989,7 +1991,7 @@ test('task rows open their own Run and keep unlinked Runs in a read-only route',
     16: { type: 'tasks' },
   }
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } })
@@ -2039,7 +2041,7 @@ test('unlinked Run opens a read-only record from the selected frozen snapshot', 
     4: 'run-18', 5: undefined, 16: { type: 'run-record' },
   }
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } })
@@ -2053,7 +2055,8 @@ test('unlinked Run opens a read-only record from the selected frozen snapshot', 
   assert.equal(record.props['data-task-id'], '')
   assert.equal(record.props['aria-readonly'], 'true')
   assert.ok(nodes.some(node => node.type === 'h1' && node.children.includes('CPU计时边界分析')))
-  assert.ok(nodes.some(node => node.type === 'p' && node.children.includes('dperf / CPU计时边界分析 · RUN 18 · 9 月 20 日 16:08')))
+  assert.equal(nodes.find(node => node.type?.name === 'TaskInfoAction').props.current.run_id, 'run-18')
+  assert.ok(!nodes.some(node => node.props.className === 'b03-run-record-breadcrumb'))
   assert.ok(nodes.some(node => node.type === 'strong' && node.children.includes('此运行未关联分析任务')))
   assert.ok(nodes.some(node => node.type === 'p' && node.children.includes('可阅读保留的运行记录、冻结输入与交付摘要。')))
   assert.ok(nodes.some(node => node.type === 'section' && node.props['aria-label'] === '运行结果'))
@@ -2063,13 +2066,9 @@ test('unlinked Run opens a read-only record from the selected frozen snapshot', 
   assert.ok(nodes.some(node => node.type === 'p' && node.children.includes('CPU 使用率分析摘要。')))
   assert.ok(nodes.some(node => node.type === 'p' && node.props.className === 'b03-run-record-summary-meta' && node.children.includes('RUN 18 · 已完成 · 模块分析 · 标准型')))
   assert.ok(!nodes.some(node => node.type === 'button' && ['停止 Run', '继续分析', '查看分析报告', '打开 HTML 报告'].includes(node.children[0])))
-  const backButton = nodes.find(node => node.type === 'button' && node.children.includes('返回任务列表'))
+  const backButton = nodes.find(node => node.type === 'button' && node.props['aria-label'] === '返回任务列表')
   assert.ok(backButton)
   backButton.props.onClick()
-  assert.equal(states[16].type, 'tasks')
-  const breadcrumb = nodes.find(node => node.type === 'nav' && node.props.className === 'b03-run-record-breadcrumb')
-  assert.ok(breadcrumb)
-  descendants(breadcrumb).find(node => node.type === 'button' && node.children.includes('PANGEA 分析')).props.onClick()
   assert.equal(states[16].type, 'tasks')
 })
 
@@ -2085,7 +2084,7 @@ test('overview status variants separate analysis quality from test execution and
   let index = 0
   const states = {}
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } })
@@ -2143,7 +2142,7 @@ test('task list distinguishes loading and request failure from a successful firs
     let index = 0
     const states = { 1: scenario.workbench, 3: scenario.workbenchError }
     const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-      const key = index++
+      const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
       if (!Object.hasOwn(states, key)) states[key] = initial
       return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
     } })
@@ -2164,7 +2163,7 @@ test('create form explains the next missing requirement and enables only a ready
   let index = 0
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['demo'] }, acp_providers: [{ id: 'agent', label: 'Agent', registered: true }] }, 16: { type: 'create', createStep: 4 } }
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } })
@@ -2174,7 +2173,8 @@ test('create form explains the next missing requirement and enables only a ready
   assert.ok(render().some(n => n.props.id === 'pangea-create-hint' && n.children.includes('请先选择源码仓库。')))
   states[33] = { ...states[33], repository: 'demo' }
   assert.ok(render().some(n => n.props.id === 'pangea-create-hint' && n.children.includes('请填写本次分析目标。')))
-  states[33] = { ...states[33], target: 'TLS', provider_id: 'agent' }
+  states[33] = { ...states[33], target: 'TLS', provider_id: 'agent', source_scope_text: 'tls' }
+  states[91] = scopePreviewFixture(states)
   states[82] = { cwd: '/workspace', provider_id: 'agent', status: 'ready', catalog: { catalog_id: 'receipt', provider_id: 'agent', current_model: 'native', models: [{ id: 'native', label: 'Native' }] } }
   const nodes = render()
   assert.equal(nodes.find(n => n.type === 'button' && n.children.includes('创建并开始分析')).props.disabled, false)
@@ -2192,7 +2192,7 @@ for (const body of [
   const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'case', id: 'u/c' } }
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
   const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -2212,7 +2212,7 @@ test('path-only flow renders complete entry and path content without inventing g
   const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
   const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -2234,7 +2234,7 @@ async function caseMetricsView(records, gaps, screen) {
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: screen }
   const before = JSON.stringify(states)
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -2295,7 +2295,7 @@ test('closure diagnostics remain available and delivery has one primary control'
   const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', stage: 'closing', lifecycle_status: 'running', needs_user: true, analysis: { total: 1, completed: 1 }, details: {}, execution_progress: [{ action_id: 'closure-u', unit_id: 'u', stage: 'targeted_closure', status: 'paused', elapsed_ms: 900000, worker_turns: 2, auto_continuations: 1, finding_count: 4, modified_records: 3 }] }
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'workflow' } }
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
   const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -2314,7 +2314,7 @@ async function executionMetricsView(metrics, { detailRunId = 'run', screen = 'wo
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] }, run: { run_id: detailRunId, execution_metrics: metrics } }, 4: 'run', 5: 'task', 16: { type: screen } }
   const before = JSON.stringify(states)
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -2335,7 +2335,7 @@ test('risk method UI shows external observations, literal quotes, ledger and emp
     const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'completed' }
     const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: screen }
     let index = 0
-    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
     const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
     client.apply(ctx)
     const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -2443,7 +2443,7 @@ async function diagramWorkspace(overrides = []) {
   const requests = [], opened = [], registered = [], refs = [], events = []
   let index = 0, refIndex = 0, publishContext
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
     if (!Object.hasOwn(states, key)) states[key] = typeof initial === 'function' ? initial() : initial
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   }, useRef(initial) {
@@ -2717,7 +2717,7 @@ test('initial workflow read keeps known task identity without inventing run resu
   const client = await loadClientExports()
   const rendered = client.RunWorkspace({ loading: true, task: { run_id: 'bound-run', title: 'Known task' } })
   const nodes = descendants(rendered)
-  assert.ok(nodes.some(node => node.props.className === 'mono' && node.children.includes('bound-run')))
+  assert.ok(nodes.some(node => node.type === client.TaskInfoAction && node.props.task?.run_id === 'bound-run'))
   assert.match(JSON.stringify(rendered), /正在读取当前运行/)
   assert.ok(!nodes.some(node => ['hero-band', 'run-layout'].includes(node.props.className)))
 })
@@ -2775,7 +2775,7 @@ test('creation wizard preserves draft across scenarios and blocks forward naviga
   let index = 0
   const form = { repository: 'repo', target: '', source_scope_text: 'src/a.c', context_scope_text: 'test/a.c', asset_ids: ['asset'], scenario: 'module-analysis', mode: 'depth', provider_id: 'agent' }
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'], source_first: { version: 'source-first-v1', analysis_options_by_profile: { 'behavior-test-v2': { scenarios: ['module-analysis', 'risk-analysis', 'branch-analysis', 'coverage-analysis'], modes: ['depth', 'speed'] } } } } }, 16: { type: 'create' }, 33: form }
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const render = () => { index = 0; const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true }); return descendants(panel.type(panel.props)) }
@@ -2812,7 +2812,7 @@ test('creation wizard resolves selected asset IDs without opening the asset pick
   const react = {
     ...fakeReact(),
     useState(initial) {
-      const key = index++
+      const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
       if (!(key in states)) states[key] = initial
       return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
     },
@@ -2867,7 +2867,7 @@ test('graph text follows explicit edges despite node ordering, flattened mainlin
   const current = { run_id: 'run', data_root: '/data', details: { business_flows: [flow] } }
   const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
   const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })

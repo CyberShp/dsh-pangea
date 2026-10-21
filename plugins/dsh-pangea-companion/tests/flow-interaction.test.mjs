@@ -85,7 +85,7 @@ test('crossing edges never changes page state; explicit activation selects exact
   for (const id of ['a', 'b']) assert.equal(find(tree, 'data-node-id', id).props['data-highlighted'], 'true')
   assert.match(text(find(tree, 'aria-label', '连线详情')), /算法 C.*DH 组 2/)
   const contents = nodes(tree)
-  assert.ok(contents.indexOf(find(tree, 'aria-label', '流程图画布，滚轮缩放，拖拽移动')) < contents.indexOf(find(tree, 'aria-label', '连线详情')))
+  assert.ok(contents.indexOf(find(tree, 'aria-label', '流程图画布，Ctrl加滚轮缩放，普通滚轮滚动页面，拖拽移动')) < contents.indexOf(find(tree, 'aria-label', '连线详情')))
   find(tree, 'data-edge-id', 'ac').props.onKeyDown({ key: ' ', preventDefault() {}, stopPropagation() {} })
   tree = render()
   assert.equal(find(tree, 'data-edge-id', 'ac').props['data-focused'], 'true')
@@ -205,7 +205,7 @@ test('cycle route preserves repeated ordered steps and drag suppression does not
   find(tree, 'data-node-id', 'b').props.onClick()
   tree = render()
   assert.match(text(find(tree, 'aria-label', '所选路径步骤')), /1\. A → 2\. B → 3\. A → 4\. C/)
-  const canvas = find(tree, 'aria-label', '流程图画布，滚轮缩放，拖拽移动')
+  const canvas = find(tree, 'aria-label', '流程图画布，Ctrl加滚轮缩放，普通滚轮滚动页面，拖拽移动')
   const target = { setPointerCapture() {}, hasPointerCapture() { return true }, releasePointerCapture() {} }
   const event = { button: 0, pointerId: 1, clientX: 10, clientY: 10, currentTarget: target, preventDefault() {} }
   canvas.props.onPointerDown(event)

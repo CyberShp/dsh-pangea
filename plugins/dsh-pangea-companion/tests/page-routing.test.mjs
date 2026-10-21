@@ -102,7 +102,7 @@ async function harness({ onboarding = false, tasks = [], selectedId, onImport, c
     return nodes(tree)
   }
   function click(id, label) {
-    const button = render(id).find(node => node.type === 'button' && node.children.includes(label))
+    const button = render(id).find(node => node.type === 'button' && (node.children.includes(label) || node.props['aria-label'] === label))
     assert.ok(button, `missing ${id} button: ${label}`)
     assert.equal(Boolean(button.props.disabled), false, `${label} disabled`)
     return button.props.onClick()

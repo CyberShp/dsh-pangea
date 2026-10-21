@@ -664,7 +664,8 @@ test('closure budget pauses only its original worker, other units complete, expl
   await writeFile(path.join(root, 'runs', runId, 'acp-workers.json'), JSON.stringify({ runId, workers: bindings }))
   const done = new Set(), paused = new Set(), resumed = [], events = []
   let active = 0, peak = 0, allowSlow = false
-  const options = { providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId, signal: controller.signal, closureBudgetMs: 80,
+  const options = { providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId, signal: controller.signal, closureBudgetMs: 1000, // Allow binding persistence before testing the slow-worker deadline.
+
     runner: async ({ args }) => {
       const id = args[args.indexOf('--action-id') + 1]
       if (args[0] === 'task-open') return { task: {} }

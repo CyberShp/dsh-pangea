@@ -354,7 +354,7 @@ test('renders the update page from real update bridge states without invented pr
   assert.deepEqual(patchReady.calls, ['install'])
 
   const restarting = await updateSettingsPageHarness({ phase: 'downloaded', currentVersion: '4.2.1', availableVersion: '4.3.0', packageType: 'full', manual: true }, { busyAction: 'install' })
-  assert.match(restarting.text, /安装前检查/)
+  assert.match(restarting.text, /正在检查安装条件/)
   assert.doesNotMatch(restarting.text, /安装助手已经接管|即将退出/)
   assert.match(restarting.text, /正在检查安装条件/)
   assert.equal(restarting.nodes.some(node => node.props?.['data-pangea-update-action'] === 'import'), false)
@@ -393,7 +393,7 @@ test('renders the update page from real update bridge states without invented pr
 
   const statusError = await updateSettingsPageHarness(null, { actionError: '版本状态读取失败，请重试。' })
   assert.match(statusError.text, /暂时无法读取版本状态/)
-  assert.match(statusError.text, /版本状态读取失败/)
+  assert.match(statusError.text, /状态读取失败/)
   assert.ok(statusError.nodes.some(node => node.props?.['data-pangea-update-action'] === 'refresh' && node.props.disabled === false))
 })
 

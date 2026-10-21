@@ -94,7 +94,8 @@ test('partial call graph keeps authored status in wrapper and downloaded SVG/HTM
   assert.equal(source[0][0], 'src/login.c:20')
   button(tree, '导出 SVG').props.onClick()
   button(tree, '导出 HTML').props.onClick()
-  assert.match(await app.downloads[0].text(), /函数与变量关系部分可用.*外部依赖尚未确认/s)
+  assert.match(await app.downloads[0].text(), /&quot;status&quot;:&quot;partial&quot;/)
+  assert.match(await app.downloads[0].text(), /外部依赖尚未确认/)
   assert.match(await app.downloads[0].text(), /变量 ok：读取 user, pw；计算 check_password/)
   assert.match(await app.downloads[0].text(), /<metadata>/)
   assert.match(await app.downloads[1].text(), /&quot;status&quot;: &quot;partial&quot;/)
@@ -123,7 +124,7 @@ test('HTML export escapes authored text and preserves searchable analysis withou
 })
 
 
-test('narrow single-function SVG keeps long Chinese and ASCII variable captions inside the exported width', async () => {
+test('variable explanations remain complete outside SVG geometry and in standalone metadata', async () => {
   const app = await harness()
   const graph = { format_version: 'call-graph-v1', root: 'f', title: '窄图变量说明',
     functions: [{ id: 'f', label: '处理请求', kind: 'function', file: 'src/main.c', line: 12 }], calls: [], notes: [],
@@ -134,11 +135,13 @@ test('narrow single-function SVG keeps long Chinese and ASCII variable captions 
   const svg = await app.downloads[0].text()
   const width = Number(svg.match(/<svg[^>]* width="([\d.]+)"/)[1])
   assert.ok(width <= 360, `fixture must exercise a narrow graph, got ${width}`)
-  const lines = [...svg.matchAll(/<text data-diagram-caption="\d+"[^>]*>(.*?)<\/text>/gs)].map(match => match[1])
-  assert.ok(lines.length > 8)
-  assert.equal(lines.join(''), `f · 变量 最终处理结果：读取 输入请求参数与缓存状态；计算 ${graph.variables[0].compute}；写入 输出结果结构体；行 28`)
-  for (const line of lines) {
-    const measured = [...line].reduce((sum, char) => sum + 13 * (char.codePointAt(0) > 127 ? 1.1 : /[MW@#%&]/.test(char) ? 1 : 0.65), 0)
-    assert.ok(measured <= width - 24, `caption overflows ${measured}px in ${width}px: ${line}`)
-  }
+  assert.doesNotMatch(svg, /data-diagram-caption/)
+  assert.match(svg, /<metadata>/)
+  assert.ok(svg.includes(graph.variables[0].compute), 'standalone metadata/tooltips retain the full variable text')
+  assert.ok(text(tree).includes(graph.variables[0].compute), 'HTML explanation is readable outside the zoom canvas')
+  const height = Number(svg.match(/<svg[^>]* height="([\d.]+)"/)[1])
+  const withoutVariables = app.render('CallGraphView', { graph: { ...graph, variables: [] } })
+  button(withoutVariables, '导出 SVG').props.onClick()
+  const simple = await app.downloads[1].text()
+  assert.equal(height, Number(simple.match(/<svg[^>]* height="([\d.]+)"/)[1]), 'long variable explanations must not change fit geometry')
 })

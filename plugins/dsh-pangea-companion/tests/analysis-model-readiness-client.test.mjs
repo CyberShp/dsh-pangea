@@ -3,6 +3,12 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import vm from 'node:vm'
 
+function scopePreviewFixture(states, cwd = '/workspace') {
+  const form = states[33]
+  if (!form?.source_scope_text?.trim()) return null
+  return { key: JSON.stringify([cwd, states[1]?.data_root, form.repository, form.source_scope_text]), preview_state: 'complete', matched_file_count: 1, preview_id: 'verified-scope-fixture', scope_revision: 'scope-fixture-v1', files: [{ relative_path: 'request.c' }] }
+}
+
 const clientSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const providers = [{ id: 'pangea-nga', label: 'NGA', registered: true }, { id: 'pangea-codeagent', label: 'CodeAgent', registered: true }]
@@ -27,7 +33,7 @@ function harness({ providerId = 'pangea-nga', state, storage, selectionEffects =
     33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: providerId, agent_model: '' }, ...(state ? { 82: state } : {}) }
   let index = 0, effectDeps, cleanup, pendingEffect
   const calls = []
-  const react = { ...baseReact, useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] },
+  const react = { ...baseReact, useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] },
     useEffect(fn, deps) {
       if (selectionEffects && (String(fn).includes('const saved = JSON.parse(window.localStorage') || String(fn).includes('const options = workbench?.acp_providers'))) { fn(); return }
       if (!String(fn).includes('return loadAnalysisAgentModels')) return

@@ -247,6 +247,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     scenario,
     mode,
     source_scope: sourceScope,
+    ...(value?.expected_scope_revision ? { expected_scope_revision: value.expected_scope_revision } : {}),
     ...(value?.analysis_profile === SCENE_PROFILE ? { analysis_profile: SCENE_PROFILE, asset_revisions: value.asset_revisions ?? {} } : scenario === 'coverage-analysis' ? { coverage_input: value.coverage_input } : {}),
     asset_ids: stringList(value?.asset_ids),
     provider_id: typeof value?.provider_id === 'string' && value.provider_id.trim() ? value.provider_id.trim() : null,

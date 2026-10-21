@@ -10,6 +10,7 @@ import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
 import { buildTestCaseCsv, buildTestCaseXlsx } from './export.js'
+import { CaseReviewStore, selectExportCases } from './case-review-store.js'
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -25,6 +26,7 @@ import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
+import { scopeTree, validateScope, previewScope, confirmScope } from './repositories/scope.js'
 
 export const name = 'dsh-pangea-companion'
 export const inject = ['tools', 'webServer', 'agents', 'apiProxy', 'subagents', 'jobs']
@@ -32,6 +34,7 @@ export const inject = ['tools', 'webServer', 'agents', 'apiProxy', 'subagents', 
 const API_PATH = '/api/pangea-companion/state'
 const SOURCE_API_PATH = '/api/pangea-companion/source'
 const EXPORT_API_PATH = '/api/pangea-companion/export'
+const CASE_REVIEW_API_PATH = '/api/pangea-companion/case-reviews'
 const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
 const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
@@ -356,7 +359,7 @@ async function launchLogRouteHandler(req, res, launchLogs) {
     const record = await launchLogs.read(taskId, { limit: 100 })
     return json(res, 200, { status: 'ok', task_id: taskId, ...record })
   } catch (error) {
-    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+    return json(res, error.statusCode ?? 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
 }
 
@@ -377,7 +380,7 @@ async function environmentRouteHandler(req, res, store, ssh) {
     }
     return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   } catch (error) {
-    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+    return json(res, error.statusCode ?? 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
 }
 
@@ -397,7 +400,7 @@ async function executionRouteHandler(req, res, store, api) {
     const launched = await launchExecution(api, input, environment)
     return json(res, 200, { status: 'ok', ...launched })
   } catch (error) {
-    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+    return json(res, error.statusCode ?? 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
 }
 
@@ -481,31 +484,44 @@ function jobOwner(runtime, task) {
   return runtimeService(runtime, 'agents')?.get?.(task.owner_session_id)
 }
 
-async function exportRouteHandler(req, res) {
-  if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+export async function caseReviewRouteHandler(req, res, { readRun = summarizeRun, resolveRoot = discoverPangeaDataRoot } = {}) {
+  if (!['GET', 'POST'].includes(req.method)) return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
-  const url = new URL(req.url ?? EXPORT_API_PATH, 'http://localhost')
-  const runId = url.searchParams.get('run_id') ?? ''
-  const format = url.searchParams.get('format') ?? 'csv'
   try {
-    if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error('run_id is required')
-    if (!['csv', 'xlsx'].includes(format)) throw new Error('仅支持 CSV 或 XLSX 用例导出')
-    const dataRoot = await discoverPangeaDataRoot({
-      cwd: url.searchParams.get('cwd') ?? undefined,
-      dataRoot: url.searchParams.get('data_root') ?? undefined,
-    })
-    const run = await summarizeRun(dataRoot, runId, { includeDetails: true })
+    const url = new URL(req.url ?? CASE_REVIEW_API_PATH, 'http://localhost')
+    const input = req.method === 'POST' ? await requestJson(req) : Object.fromEntries(url.searchParams)
+    if (!/^[A-Za-z0-9._-]+$/.test(input.run_id || '')) return json(res, 400, { status: 'error', code: 'invalid_run_id', error: 'run_id 无效' })
+    const dataRoot = await resolveRoot({ cwd: input.cwd, dataRoot: input.data_root })
+    const run = await readRun(dataRoot, input.run_id, { includeDetails: true })
+    if (run.run_id !== input.run_id) return json(res, 409, { status: 'error', code: 'run_mismatch', error: '读取的用例不属于请求 Run' })
+    if (run.reader_health?.collection_status?.test_cases === 'unavailable') return json(res, 422, { status: 'error', code: 'cases_unreadable', error: '用例暂不可读取' })
+    const store = new CaseReviewStore({ dataRoot, runId: input.run_id }), items = run.details?.test_cases ?? []
+    return json(res, 200, req.method === 'POST' ? await store.update(items, input) : await store.project(items))
+  } catch (reason) { return json(res, reason.statusCode ?? (reason.code === 'ENOENT' ? 404 : 500), { status: 'error', code: reason.code ?? 'review_failed', error: reason.message }) }
+}
+
+export async function exportRouteHandler(req, res, { readRun = summarizeRun, resolveRoot = discoverPangeaDataRoot } = {}) {
+  if (!['GET', 'POST'].includes(req.method)) return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  try {
+    const url = new URL(req.url ?? EXPORT_API_PATH, 'http://localhost')
+    const input = req.method === 'POST' ? await requestJson(req) : Object.fromEntries(url.searchParams)
+    const runId = input.run_id ?? '', format = input.format ?? 'csv'
+    if (!/^[A-Za-z0-9._-]+$/.test(runId)) return json(res, 400, { status: 'error', error: 'run_id is required' })
+    if (!['csv', 'xlsx'].includes(format)) return json(res, 400, { status: 'error', error: '仅支持 CSV 或 XLSX 用例导出' })
+    const dataRoot = await resolveRoot({ cwd: input.cwd, dataRoot: input.data_root })
+    const run = await readRun(dataRoot, runId, { includeDetails: true })
+    if (run.run_id !== runId) return json(res, 409, { status: 'error', code: 'run_mismatch', error: '导出内容不属于请求 Run' })
+    if (run.reader_health?.collection_status?.test_cases === 'unavailable') return json(res, 422, { status: 'error', error: '用例暂不可读取，无法导出' })
+    const items = run.details?.test_cases ?? []
+    const selected = req.method === 'POST' ? await selectExportCases(items, input, new CaseReviewStore({ dataRoot, runId })) : items
+    const snapshot = { ...run, details: { ...run.details, test_cases: selected } }
     const filename = `pangea-${runId}-test-cases.${format}`
-    const body = format === 'xlsx' ? buildTestCaseXlsx(run) : buildTestCaseCsv(run)
-    const contentType = format === 'xlsx'
-      ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-      : 'text/csv; charset=utf-8'
-    return textResponse(res, 200, contentType, body, {
+    const body = format === 'xlsx' ? buildTestCaseXlsx(snapshot) : buildTestCaseCsv(snapshot)
+    return textResponse(res, 200, format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv; charset=utf-8', body, {
       'content-disposition': `attachment; filename="${filename}"`,
     })
-  } catch (error) {
-    return json(res, 404, { status: 'error', error: error instanceof Error ? error.message : String(error) })
-  }
+  } catch (reason) { return json(res, reason.statusCode ?? (reason.code === 'ENOENT' ? 404 : 500), { status: 'error', code: reason.code ?? 'export_failed', error: reason.message }) }
 }
 
 function jobReference(runtime, task, jobId = task?.job_id) {
@@ -1128,6 +1144,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       const root = workspaceRoot(cwd)
       if (body.input?.incremental_request != null) throw new Error('定向补充或变更分析请从来源任务发起')
       if (body.input?.source_task_id) requireWorkspaceTask(await tasks.get(body.input.source_task_id), cwd, body.input.source_task_id)
+      if (body.input?.scope_preview_id || body.input?.expected_scope_revision) { const checked = await confirmScope({ ...body.input, cwd: root, dataRoot: dataRootFor(root, actionDataRoot) }, runner); body.input.source_scope = checked.normalized_scope }
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
       requireExternalAnalysisProvider(providerId)
       const agentModel = await requireAgentModel(runtime, { providerId, cwd: root, model: body.input?.agent_model,
@@ -1386,20 +1403,23 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     }
     return json(res, 400, { status: 'error', error: 'unsupported-action' })
   } catch (error) {
-    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+    return json(res, error.statusCode ?? 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
 }
 
-async function repositoryRouteHandler(req, res) {
+export async function repositoryRouteHandler(req, res, runner = runPangea) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   const url = new URL(req.url ?? REPOSITORY_API_PATH, 'http://localhost')
   const cwd = url.searchParams.get('cwd') ?? process.env.PANGEA_WORKSPACE_ROOT ?? undefined
   const explicitDataRoot = url.searchParams.get('data_root') ?? undefined
   try {
     const dataRoot = dataRootFor(workspaceRoot(cwd), explicitDataRoot ?? process.env.PANGEA_DATA_ROOT)
+    if (req.method === 'GET' && url.searchParams.get('view') === 'tree') return json(res, 200, await scopeTree({ dataRoot, ...Object.fromEntries(url.searchParams) }))
     if (req.method === 'GET') return json(res, 200, await repositoryStatus(dataRoot))
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
+    if (body.action === 'validate-scope') return json(res, 200, await validateScope({ ...body, dataRoot }))
+    if (body.action === 'preview-scope') return json(res, 200, await previewScope({ ...body, dataRoot, cwd }, runner))
     const imported = await importRepository({
       dataRoot,
       sourcePath: body.source_path,
@@ -1407,7 +1427,7 @@ async function repositoryRouteHandler(req, res) {
     })
     return json(res, 200, { status: 'ok', repository: imported })
   } catch (error) {
-    return json(res, 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
+    return json(res, error.statusCode ?? 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
 }
 
@@ -1830,6 +1850,7 @@ export function apply(ctx) {
 
   const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks, ctx, launchLogs) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
+  const disposeCaseReviewRoute = ctx.webServer.register({ kind: 'exact', path: CASE_REVIEW_API_PATH, handler: (req, res) => caseReviewRouteHandler(req, res) })
   const disposeExportRoute = ctx.webServer.register({ kind: 'exact', path: EXPORT_API_PATH, handler: exportRouteHandler })
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
@@ -1851,6 +1872,7 @@ export function apply(ctx) {
     disposeLaunchLogRoute()
     disposeSourceRoute()
     disposeExportRoute()
+    disposeCaseReviewRoute()
     disposeStateRoute()
     disposeJobDone?.()
     disposeJobController?.()

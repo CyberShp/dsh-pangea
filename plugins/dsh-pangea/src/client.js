@@ -10,6 +10,8 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const ReactDOM = require('react-dom')
     const h = React.createElement
+    /* PRODUCT_UI_COMPONENTS */
+    const productUi = createProductUi(React)
     const inject = ['betterSidebar', 'workspaces', 'sessions']
     const PAGE_PREFIX = 'dsh-pangea:'
     const PRODUCT_STYLE_ID = 'dsh-pangea-product-shell'
@@ -118,7 +120,7 @@ window.__ModuleLoader__.load({
           width: 100%; height: 100%; min-width: 0; min-height: 0;
           display: grid; grid-template-columns: 216px minmax(0, 1fr);
           color: var(--dsw-alias-label-primary); background: #fff;
-          font-family: "Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+          font-family:var(--pangea-font,"Segoe UI","Microsoft YaHei UI",sans-serif);
           font-synthesis: none;
           -webkit-font-smoothing: antialiased;
           text-rendering: optimizeLegibility;
@@ -157,7 +159,7 @@ window.__ModuleLoader__.load({
         }
         [data-pangea-system-dot] {
           width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%;
-          color: #fff; background: #2da44e; font-size: 11px; font-weight: 800;
+          color: #fff; background: #2da44e; font-size:12px; font-weight: 800;
         }
         [data-pangea-system-state][data-state="warning"] [data-pangea-system-dot] { background: #e58a00; }
         [data-pangea-system-state][data-state="error"] [data-pangea-system-dot] { background: var(--pangea-red); }
@@ -169,7 +171,7 @@ window.__ModuleLoader__.load({
           overflow-y: auto; scrollbar-width: thin; background: #f7f8fa;
         }
         [data-pangea-nav-list], [data-pangea-tool-list] { display: grid; gap: 5px; flex-shrink: 0; }
-        [data-pangea-nav-heading] { padding: 0 12px 7px; color: var(--pangea-muted); font-size: 11px; font-weight: 650; letter-spacing: .06em; }
+        [data-pangea-nav-heading] { padding: 0 12px 7px; color: var(--pangea-muted); font-size:12px; font-weight: 650; letter-spacing: .06em; }
         [data-pangea-nav-button], [data-pangea-tool-button] {
           box-sizing: border-box; width: 100%; min-height: 44px; display: grid;
           grid-template-columns: 25px minmax(0, 1fr); align-items: center; gap: 10px;
@@ -218,13 +220,13 @@ window.__ModuleLoader__.load({
           border-radius: 10px; background: #fff; box-shadow: 0 2px 8px rgba(25,31,40,.035);
         }
         [data-pangea-settings-card-title] { margin: 0; font-size: 17px; line-height: 25px; font-weight: 700; }
-        [data-pangea-settings-card-description] { max-width: 680px; margin: 7px 0 0; color: var(--pangea-muted); font-size: 13px; line-height: 21px; }
+        [data-pangea-settings-card-description] { max-width: 680px; margin: 7px 0 0; color: var(--pangea-muted); font-size:14px; line-height: 21px; }
         [data-pangea-update-meta] { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 12px; color: #4d5560; font-size: 12px; line-height: 18px; }
         [data-pangea-update-error] { margin: 10px 0 0; color: var(--pangea-red); font-size: 12px; line-height: 19px; overflow-wrap: anywhere; }
         [data-pangea-settings-actions] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
         [data-pangea-settings-action] {
           box-sizing: border-box; min-width: 126px; height: 38px; padding: 0 16px; border: 1px solid #cfd4da;
-          border-radius: 6px; color: #34383f; background: #fff; font: inherit; font-size: 13px;
+          border-radius: 6px; color: #34383f; background: #fff; font: inherit; font-size:14px;
           font-weight: 620; white-space: nowrap; cursor: pointer;
         }
         [data-pangea-settings-action]:hover:not(:disabled) { border-color: #aeb5bd; background: #f6f7f8; }
@@ -244,7 +246,7 @@ window.__ModuleLoader__.load({
           align-self: end; min-width: 150px; height: 35px; display: flex; align-items: center; gap: 8px;
           padding: 0 13px; border: 1px solid #d9dde3; border-bottom-color: #fff;
           border-radius: 6px 6px 0 0; box-shadow: inset 0 2px var(--pangea-red);
-          color: #24282e; background: #fff; font-size: 13px; font-weight: 650;
+          color: #24282e; background: #fff; font-size:14px; font-weight: 650;
         }
         [data-pangea-utility-host][data-utility="editor"] { grid-template-rows: 71px minmax(0, 1fr); }
         [data-pangea-utility-host][data-utility="editor"] [data-pangea-utility-head] { padding: 0 20px; }
@@ -274,14 +276,14 @@ window.__ModuleLoader__.load({
         [data-pangea-utility-body] > * { width: 100%; height: 100%; min-width: 0; min-height: 0; }
         [data-pangea-file-layout] { display: flex; flex-direction: column; min-height: 0; }
         [data-pangea-file-tabs] { flex: none; display: flex; align-items: stretch; height: 35px; border-bottom: 1px solid #e7eae3; background: #fbfcf9; }
-        [data-pangea-file-tabs] button { min-width: 120px; max-width: 200px; padding: 0 14px; border: 0; border-right: 1px solid #e7eae3; background: transparent; color: #75806f; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; cursor: pointer; }
+        [data-pangea-file-tabs] button { min-width: 120px; max-width: 200px; padding: 0 14px; border: 0; border-right: 1px solid #e7eae3; background: transparent; color: #75806f; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size:12px; cursor: pointer; }
         [data-pangea-file-tabs] button[data-active="true"] { background: #fff; color: #a62b39; box-shadow: inset 0 -2px #b62836; }
         [data-pangea-file-panels] { flex: 1; min-height: 0; display: flex; }
         [data-pangea-file-pane] { flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
         [data-pangea-file-pane][data-hidden="true"] { display: none; }
         [data-pangea-file-pane] + [data-pangea-file-pane] { border-left: 1px solid #dfe3dc; }
         [data-pangea-file-pane] > * { width: 100%; height: 100%; }
-        [data-pangea-file-pane] > [data-pangea-file-side-head] { height: 32px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; border-bottom: 1px solid #e7eae3; color: #70767d; background: #fbfcf9; font-size: 11px; }
+        [data-pangea-file-pane] > [data-pangea-file-side-head] { height: 32px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; border-bottom: 1px solid #e7eae3; color: #70767d; background: #fbfcf9; font-size:12px; }
         [data-pangea-file-side-head] button { width: 22px; height: 22px; border: 0; background: transparent; color: #70767d; cursor: pointer; }
         [data-pangea-file-pane]:has([data-pangea-file-side-head]) > :last-child { height: calc(100% - 32px); }
         [data-pangea-file-panels]:has([data-side]) [data-pangea-file-pane] [class*="editorHeader"] { height: 88px; min-height: 88px; flex-wrap: wrap; align-content: center; gap: 6px; padding: 7px 10px; }
@@ -382,7 +384,7 @@ window.__ModuleLoader__.load({
             display: grid; gap: 8px; margin-top: 10px; padding: 12px;
             border: 1px solid #e1e4e8; border-radius: 8px; background: #f4f5f3;
           }
-          [data-pangea-assistant-context-heading] { color: #34383f; font-size: 13px; font-weight: 650; }
+          [data-pangea-assistant-context-heading] { color: #34383f; font-size:14px; font-weight: 650; }
           [data-pangea-assistant-context-row] { display: grid; grid-template-columns: 82px minmax(0,1fr); gap: 8px; font-size: 12px; line-height: 1.55; }
           [data-pangea-assistant-context-row] > span { color: #757c87; }
           [data-pangea-assistant-context-row] > strong { min-width: 0; color: #34383f; font-weight: 550; overflow-wrap: anywhere; }
@@ -401,7 +403,7 @@ window.__ModuleLoader__.load({
           }
           [data-pangea-assistant-name] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 700; }
           [data-pangea-assistant-meta] { margin-top: 5px; color: #757c87; font-size: 14px; line-height: 1.45; }
-          [data-pangea-assistant-progress] { margin-top: 4px; color: #68707c; font-size: 13px; }
+          [data-pangea-assistant-progress] { margin-top: 4px; color: #68707c; font-size:14px; }
           [data-pangea-assistant-select] {
             min-width: 0; flex: 1; height: 36px; border: 1px solid #d9dde3; border-radius: 6px;
             padding: 0 8px; color: #34383f; background: #fff; font: inherit; font-size: 14px;
@@ -413,7 +415,7 @@ window.__ModuleLoader__.load({
         [data-pangea-assistant-section-label] { display: block; margin-bottom: 5px; color: #68707c; font-size: 12px; font-weight: 600; }
         [data-pangea-assistant-conversations] { margin-top: 12px; }
         [data-pangea-assistant-actions] { display: flex; align-items: center; gap: 8px; }
-        [data-pangea-assistant-feedback] { margin: 7px 0 0; color: #68707c; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+        [data-pangea-assistant-feedback] { margin: 7px 0 0; color: #68707c; font-size:14px; line-height: 1.5; overflow-wrap: anywhere; }
         [data-pangea-assistant-feedback="error"] { color: #b51d29; }
         [data-pangea-assistant-actions] :disabled { cursor: wait; opacity: .6; }
         [data-pangea-assistant-actions] :focus-visible { outline: 2px solid #c7000b; outline-offset: 2px; }
@@ -440,7 +442,7 @@ window.__ModuleLoader__.load({
             color: var(--pangea-ink); background: rgba(251,252,253,.98);
           }
           [data-pangea-assistant-process-head] { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: none; font-size: 16px; }
-          [data-pangea-assistant-process-run] { display: block; margin-top: 3px; color: #757c87; font-size: 11px; font-weight: 500; }
+          [data-pangea-assistant-process-run] { display: block; margin-top: 3px; color: #757c87; font-size:12px; font-weight: 500; }
           [data-pangea-assistant-process-status] { color: #68707c; font-size: 16px; }
           [data-pangea-assistant-process-status="failed"], [data-pangea-assistant-process-status="interrupted"] { color: var(--pangea-red); }
           [data-pangea-assistant-process-error] { flex: none; margin-top: 8px; color: var(--pangea-red); font-size: 16px; line-height: 26px; overflow-wrap: anywhere; }
@@ -902,13 +904,14 @@ window.__ModuleLoader__.load({
       const card = (title, description, icon, state, metrics, note, action) => node('section', 'panel settings-overview-card',
         node('div', 'settings-overview-head', node('div', 'settings-brand-icon', settingsIcon(icon)), node('div', '', h('h3', null, title), h('p', null, description)), state),
         metrics, node('div', 'settings-overview-foot', node('span', 'settings-form-note', note), action))
-      const modelCard = card('模型与 API', '配置 PANGEA 分析使用的模型接口与 API 凭据。', 'Cpu', badge(modelStatus, modelCatalog.status === 'ready' && modelCatalog.modelAvailable ? 'good' : ''), modelMetrics, '外部 Agent 的模型在新建分析时选择', button('打开模型设置', openModels, true))
+      const modelCard = card('讨论助手模型', '为讨论助手配置模型接口与 API 凭据。', 'Cpu', badge(modelStatus, modelCatalog.status === 'ready' && modelCatalog.modelAvailable ? 'good' : ''), modelMetrics, '外部 Agent 的模型在新建分析时选择', button('打开模型设置', openModels, true))
+      const executorCard = card('分析执行器', '源码分析由外部 Agent 执行；每次创建前检查 Agent 和模型是否就绪。', 'Activity', badge('创建时检查'), null, '执行器的就绪状态以新建分析页的实时检查为准', button('选择分析执行器', () => service.requestRunCreation(scope)))
       const versionCard = card('版本与升级', '导入并校验 PANGEA Desktop 签名升级包。', 'PackageCheck', badge('Windows'),
         node('div', 'settings-overview-metrics', node('div', '', node('span', '', '当前版本'), node('strong', '', updateStatus?.currentVersion ?? '待读取')), node('div', '', node('span', '', '升级状态'), node('strong', '', actionError ? '读取失败' : !updateStatus ? '正在读取' : updateStatus.phase === 'idle' ? '暂无待安装包' : updateStatusCopy(updateStatus)))),
         '支持完整包与严格匹配基线的增量补丁', button('管理版本', () => setSection('update')))
-      const help = node('aside', 'panel settings-help', h('h2', { className: 'panel-title' }, '设置作用范围'), h('p', null, '模型配置用于本地模型接入。每次分析仍可单独选择已就绪的执行方式与模型。'), node('div', 'divider'), h('h3', null, '升级你的 Desktop'), h('p', null, '选择原始签名 ZIP，无需提前解压。完成校验后，再决定何时安装并重启。'))
+      const help = node('aside', 'panel settings-help', h('h2', { className: 'panel-title' }, '设置作用范围'), h('p', null, '分析使用外部 Agent，在新建分析中选择并检查就绪状态；讨论助手使用这里配置的内部模型。两类配置分别生效。'), node('div', 'divider'), h('h3', null, '升级你的 Desktop'), h('p', null, '选择原始签名 ZIP，无需提前解压。完成校验后，再决定何时安装并重启。'))
       const modelsEmpty = modelCatalog.status === 'ready' && connections.length === 0 && !modelCatalog.modelAvailable
-      const modelsHelp = node('aside', 'panel settings-help', h('h2', { className: 'panel-title' }, '接入说明'), h('p', null, 'API 密钥通过独立凭据接口保存，设置页不显示已保存密钥。'), h('p', null, '接口地址、协议与模型目录共同决定模型如何被调用。'), node('div', 'divider'), h('p', null, '推理级别跟随具体模型能力，在新建分析或模型选择时设置。'))
+      const modelsHelp = node('aside', 'panel settings-help', h('h2', { className: 'panel-title' }, '接入说明'), h('p', null, 'API 密钥通过独立凭据接口保存，设置页不显示已保存密钥。'), h('p', null, '接口地址、协议与模型目录共同决定模型如何被调用。'), node('div', 'divider'), h('p', null, '讨论助手的模型设置在此生效；分析执行器的模型与推理级别在新建分析时选择。'))
       const renderConnection = connection => {
         const credential = connection.credentialConfigured ? '已配置 · 单独安全保存' : connection.credentialRequired ? '尚未配置' : '使用提供方原生认证'
         return h('section', { key: connection.id, className: 'panel' },
@@ -929,17 +932,16 @@ window.__ModuleLoader__.load({
         : updateStatus?.phase === 'install-error' ? '升级未完成'
         : updateStatus?.phase === 'unsupported' ? '当前环境无法导入'
         : actionError ? '版本状态读取失败' : '版本与升级'
-      const sectionTitle = { general: updateStatus?.phase === 'downloaded' ? '升级就绪通知' : '概览', models: modelCreating ? '连接模型接口' : modelsEmpty ? '首次连接模型' : '模型与 API', update: updateCrumb }[section]
+      const sectionTitle = { general: updateStatus?.phase === 'downloaded' ? '升级就绪通知' : '概览', models: modelCreating ? '连接模型接口' : modelsEmpty ? '首次连接模型' : '讨论助手模型', update: updateCrumb }[section]
       return node('section', 'pangea-ui pangea-settings-workspace',
-        node('div', 'breadcrumb', '工作空间', settingsIcon('ChevronRight'), '设置', settingsIcon('ChevronRight'), sectionTitle),
-        node('header', 'page-head', node('div', '', h('h1', null, '设置'), h('p', null, '管理模型接入、应用版本与本地升级。')), button('返回工作台', () => service.openPage(scope, 'workbench'))),
+        h(productUi.PageHeader, { title: '设置', onBack: () => service.openPage(scope, 'workbench'), backLabel: '返回工作台' }),
         node('div', 'settings-layout', h('nav', { className: 'settings-nav', 'aria-label': '设置分类' }, node('div', 'settings-nav-label', 'PANGEA DESKTOP'),
-          [['general', '概览', 'SlidersHorizontal'], ['models', '模型与 API', 'Cpu'], ['update', '版本与升级', 'PackageCheck']].map(([id, title, icon]) => h('button', { key: id, type: 'button', className: section === id ? 'active' : '', 'aria-current': section === id ? 'page' : undefined, onClick: () => setSection(id) }, settingsIcon(icon), title)),
+          [['general', '概览', 'SlidersHorizontal'], ['models', '讨论助手模型', 'Cpu'], ['update', '版本与升级', 'PackageCheck']].map(([id, title, icon]) => h('button', { key: id, type: 'button', className: section === id ? 'active' : '', 'aria-current': section === id ? 'page' : undefined, onClick: () => setSection(id) }, settingsIcon(icon), title)),
           node('div', 'divider'), node('div', 'settings-form-note', '本地模型接入', h('br'), '版本与签名升级')),
           node('div', 'settings-content', section === 'update' ? updatePanel() : h(React.Fragment, null,
-            node('div', 'settings-section-head', node('div', '', h('h2', null, section === 'general' ? '为分析准备好连接与版本' : '模型与 API'), h('p', null, section === 'general' ? '在这里配置模型，查看当前版本，并导入本地升级包。' : modelCreating ? '连接一个内部模型接口。' : modelsEmpty ? '连接一个内部模型接口，开始你的第一项分析。' : '配置内部自定义模型接口与凭据。')), section === 'models' && !modelsEmpty && button('打开模型设置', () => openModels(), true, 'Settings2')),
+            node('div', 'settings-section-head', node('div', '', h('h2', null, section === 'general' ? '分析执行器与讨论助手模型' : '讨论助手模型'), h('p', null, section === 'general' ? '分别查看分析执行器和讨论助手的配置入口。' : modelCreating ? '连接一个内部模型接口。' : modelsEmpty ? '连接讨论助手模型；源码分析请在新建分析中选择外部分析执行器。' : '配置内部自定义模型接口与凭据。')), section === 'models' && !modelsEmpty && button('打开模型设置', () => openModels(), true, 'Settings2')),
             modelCatalog.status === 'error' && h('p', { role: 'alert' }, modelCatalog.error ?? '模型目录读取失败'),
-            section === 'models' ? modelsBody : node('div', 'settings-main-cols', node('div', 'stack', modelCard, versionCard), help)))))
+            section === 'models' ? modelsBody : node('div', 'settings-main-cols', node('div', 'stack', executorCard, modelCard, versionCard), help)))))
     }
 
     function chinesePhase(value) {
@@ -958,11 +960,10 @@ window.__ModuleLoader__.load({
         ? `${startedAt.toDateString() === new Date().toDateString() ? '今天' : `${startedAt.getMonth() + 1}月${startedAt.getDate()}日`}${startedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })} 开始`
         : null
       return h('header', { 'data-pangea-assistant-page-head': true },
-        h('div', { 'data-pangea-assistant-breadcrumb': true }, 'PANGEA 分析', ' › ', (context?.taskTitle || context?.title || context?.target || '当前任务').replace(/分析$/, ''), ' › ', 'AI 助手'),
         h('div', { 'data-pangea-assistant-page-title-row': true },
           h('div', null,
             h('h1', null, context?.taskTitle || context?.title || '当前分析'),
-            h('p', null, [context?.repository, context?.target].filter(Boolean).join(' / '), runLabel ? ` · ${runLabel}` : '', startedLabel ? ` · ${startedLabel}` : '')),
+            null),
           h('button', { type: 'button', onClick: onClose }, '← 返回任务')),
         h('nav', { 'data-pangea-assistant-task-tabs': true, 'aria-label': '任务页面' }, tabs.map(([type, label]) =>
           h('button', { key: type, type: 'button', 'aria-current': type === (record ? 'workflow' : 'overview') ? 'page' : undefined,
@@ -1895,6 +1896,7 @@ window.__ModuleLoader__.load({
       const disposeDefaultState = betterSidebar.subscribeState?.(ensureProductPage) ?? (() => {})
 
       publicService = Object.freeze({
+        ui: productUi,
         registerPage,
         openPage,
         openTool,

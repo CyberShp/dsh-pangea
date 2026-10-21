@@ -243,7 +243,7 @@ test('historical session replay is labelled and never merged with new live chunk
 test('history completeness warning and recorded action IDs are visible without opening raw event details', async () => {
   const history = '当前仅有部分会话记录，恢复回放已跳过，不保证此前历史完整。'
   const snapshot = { scope: ['/fixture', '/fixture/data', 'run-a'].join('\u0000'), items: [session('a')], events: [], session: { ...session('a'), history_message: history, history_status: 'metadata_only' } }
-  const { AgentSessionsDialog, AgentSessionTranscript } = await client({ useState: () => [snapshot, () => {}] })
+  const { AgentSessionsDialog, AgentSessionTranscript } = await client({ useState: initial => [initial === null ? snapshot : initial, () => {}] })
   const dialog = AgentSessionsDialog({ cwd: '/fixture', dataRoot: '/fixture/data', runId: 'run-a', onClose() {} })
   assert.ok(text(dialog).includes(history))
   assert.equal(text(dialog).includes('此历史会话仅保留身份与运行状态'), false, 'server explanation replaces duplicate metadata-only copy')
@@ -365,4 +365,20 @@ test('real Store and reader show the latest block first beyond 100 records witho
   assert.equal(rows[1].rawInput, '原始输入')
   assert.equal(rows[1].rawOutput, '晚到结果')
   assert.deepEqual(Array.from(rows[1].updates, update => update.status), ['pending', 'completed'])
+})
+
+test('task entry opens its exact failed attempt and ambiguous unit entries do not pick a newer success', async () => {
+  const { createAgentSessionReader } = await client()
+  const items = [{ ...session('failed-attempt'), unit_id: 'unit-a', attempt_id: 'try-1', action_ids: ['action-failed'], status: 'failed', updated_at: '2026-10-21T01:00:00Z' }, { ...session('newer-success'), unit_id: 'unit-a', attempt_id: 'try-2', action_ids: ['action-newer'], status: 'completed', updated_at: '2026-10-21T02:00:00Z' }]
+  for (const [initialSelection, selected] of [[{ initialUnitId: 'unit-a', initialAttemptId: 'try-1', initialActionId: 'action-failed' }, 'failed-attempt'], [{ initialUnitId: 'unit-a' }, null]]) {
+    let state; const opened = []
+    const reader = createAgentSessionReader({ cwd: '/fixture', runId: 'run-a', initialSelection, schedule: () => 1, cancelSchedule() {}, onChange: value => { state = value }, request: async args => {
+      if (args.view === 'agent-sessions') return { run_id: 'run-a', items }
+      opened.push(args.sessionId); return page(args.sessionId, [])
+    } })
+    reader.start(); await flush(); await flush()
+    if (selected) { assert.equal(state.selectedId, selected); assert.deepEqual(opened, [selected]) }
+    else { assert.equal(opened.length, 0); assert.match(state.detailError, /关联到多个尝试/) }
+    reader.dispose()
+  }
 })

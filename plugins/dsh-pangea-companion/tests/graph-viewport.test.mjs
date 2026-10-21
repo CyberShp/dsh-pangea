@@ -82,15 +82,16 @@ test('the graph fits one bounded viewport and responsive fitting contains all no
   graph.dispose()
 })
 
-test('ordinary and Ctrl wheel zoom around the pointer and cancel browser scrolling or zoom', () => {
+test('ordinary wheel scrolls the page while Ctrl wheel zooms around the pointer', () => {
   const graph = viewport()
   assert.equal(graph.listeners.get('wheel').options.passive, false)
   for (const ctrlKey of [false, true]) {
     const before = graph.camera()
     const event = graph.wheel({ ctrlKey, clientX: 221, clientY: 181 })
     const after = graph.camera()
-    assert.equal(event.prevented, true)
-    assert.equal(event.stopped, true)
+    assert.equal(event.prevented, ctrlKey)
+    assert.equal(event.stopped, ctrlKey)
+    if (!ctrlKey) { close(after.scale, before.scale); continue }
     assert.ok(after.scale > before.scale)
     close((200 - after.x) / after.scale, (200 - before.x) / before.scale)
     close((150 - after.y) / after.scale, (150 - before.y) / before.scale)

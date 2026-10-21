@@ -8,6 +8,8 @@ const productUi = await readFile(path.join(root, 'src', 'product-ui.css'), 'utf8
 const cssPlaceholder = "/* PRODUCT_UI_CSS */ ''"
 if (source.split(cssPlaceholder).length !== 2) throw new Error('Expected one PRODUCT_UI_CSS placeholder')
 source = source.replace(cssPlaceholder, JSON.stringify(productUi))
+const uiComponents = await readFile(path.join(root, 'src', 'ui-components.js'), 'utf8')
+source = source.replace('/* PRODUCT_UI_COMPONENTS */', uiComponents.replace(/^export /gm, ''))
 const modelAdapter = await readFile(path.join(root, 'src', 'product-model-adapter.js'), 'utf8')
 await mkdir(path.join(root, 'lib'), { recursive: true })
 await writeFile(path.join(root, 'lib', 'client.js'), `${source.trimEnd()}\n\n${modelAdapter.trim()}\n`, 'utf8')

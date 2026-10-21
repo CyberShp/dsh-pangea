@@ -1,3 +1,4 @@
+import { CASE_TYPE_LABELS } from './case-review-projection.js'
 function cell(value) {
   if (Array.isArray(value)) return value.map(item => cell(item)).join('；')
   if (value === null || value === undefined) return ''
@@ -6,14 +7,7 @@ function cell(value) {
 }
 
 const CASE_HEADERS = ['用例ID', '标题', '类型', '前置条件', '操作步骤', '预期结果', '观察点', '清理动作（环境恢复）']
-const CASE_TYPE_LABELS = {
-  business_blackbox: '业务黑盒', developer_assisted: '业务灰盒',
-  interface_contract: '接口契约', whitebox_support: '白盒辅助',
-  positive: '正向验证', negative: '反向验证', boundary: '边界验证',
-  functional: '功能验证', performance: '性能验证', recovery: '恢复验证',
-  concurrency: '并发验证', robustness: '健壮性验证', security: '安全验证',
-  branch: '业务分支', coverage: '覆盖率补测', risk: '风险验证',
-}
+
 const list = value => Array.isArray(value) ? value : value == null ? [] : [value]
 const lines = value => list(value).map(cell).filter(Boolean).join('\n')
 const numbered = values => values.map((value, index) => `${index + 1}. ${value}`).join('\n')

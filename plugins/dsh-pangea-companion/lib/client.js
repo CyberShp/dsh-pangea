@@ -9,6 +9,144 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
+    const __sourceScopePicker = (() => {
+    function createSourceScopePicker(React) {
+      const h = React.createElement
+      return function SourceScopePicker({ cwd, dataRoot, repository, value, preview, onChange, onPreview }) {
+        const [open, setOpen] = React.useState(false), [tree, setTree] = React.useState(null)
+        const [busy, setBusy] = React.useState(false), [error, setError] = React.useState('')
+        const root = React.useRef(null), trigger = React.useRef(null), sequence = React.useRef(0)
+        const scope = String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean)
+        React.useEffect(() => { sequence.current += 1; setTree(null); setError(''); setBusy(false) }, [cwd, dataRoot, repository])
+        React.useEffect(() => { sequence.current += 1; setError(''); setBusy(false) }, [value])
+        React.useEffect(() => { if (!open) return; root.current?.querySelector('button')?.focus(); return () => trigger.current?.focus?.() }, [open])
+        async function request(input, treeQuery = false) {
+          const token = ++sequence.current
+          if (!treeQuery && !input.preview_id) onPreview(null)
+          setBusy(true); setError('')
+          try {
+            const query = new URLSearchParams({ cwd, ...(dataRoot ? { data_root: dataRoot } : {}), ...(treeQuery ? { view: 'tree', repository, ...input } : {}) })
+            const response = await fetch(`/api/pangea-companion/repositories?${query}`, { cache: 'no-store', ...(treeQuery ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'preview-scope', cwd, data_root: dataRoot, repository, source_scope: scope, ...input }) }) })
+            const result = await response.json()
+            if (!response.ok || result.status !== 'ok') throw new Error(result.error || `HTTP ${response.status}`)
+            if (sequence.current !== token) return
+            if (treeQuery) setTree(result)
+            else onPreview(result)
+          } catch (reason) { if (sequence.current === token) setError(reason.message) }
+          finally { if (sequence.current === token) setBusy(false) }
+        }
+        const toggle = path => onChange(scope.includes(path) ? scope.filter(item => item !== path).join('\n') : [...scope.filter(item => item !== '.'), path].join('\n'))
+        return h('section', { className: 'pangea-scope-picker', 'aria-label': '源码范围选择与预览' },
+          h('div', { className: 'pangea-page-actions' },
+            h('button', { type: 'button', ref: trigger, disabled: !repository || busy, onClick: () => { setOpen(true); void request({ path: '.' }, true) } }, '选择目录或文件'),
+            h('button', { type: 'button', disabled: !repository || busy, onClick: () => onChange('.') }, '选择整个仓库'),
+            h('button', { type: 'button', disabled: !repository || !scope.length || busy, onClick: () => { void request({}) } }, busy ? '正在读取范围…' : '预览命中文件')),
+          error ? h('p', { role: 'alert' }, `范围预览失败：${error}`) : null,
+          preview ? h('div', { className: 'pangea-scope-preview', role: 'status' },
+            h('strong', null, `${preview.is_entire_repository ? '整个仓库' : '指定范围'} · 命中 ${preview.matched_file_count} 个源码文件`),
+            preview.matched_file_count === 0 ? h('p', null, '没有匹配源码，请调整范围后重试。') : null,
+            h('details', null, h('summary', null, '查看命中文件清单'), h('ul', null, preview.files.map(item => h('li', { key: item.relative_path }, h('code', null, item.relative_path)))),
+              h('div', { className: 'pangea-page-actions' }, h('button', { type: 'button', disabled: busy || Number(preview.next_cursor) <= 50, onClick: () => { void request({ preview_id: preview.preview_id, cursor: Math.max(0, Number(preview.next_cursor) - 100) }) } }, '上一页'),
+                h('span', null, `共 ${preview.matched_file_count} 个文件`), h('button', { type: 'button', disabled: busy || !preview.has_more, onClick: () => { void request({ preview_id: preview.preview_id, cursor: preview.next_cursor }) } }, '下一页'))))
+            : h('p', { className: 'b05-subtle' }, '选择范围后预览实际命中文件；范围变化后需要重新预览。'),
+          open ? h('div', { className: 'pangea-info-overlay' }, h('section', { className: 'pangea-info-drawer', ref: root, role: 'dialog', 'aria-modal': true, 'aria-label': '选择源码范围', onKeyDown: event => {
+            if (event.key === 'Escape') setOpen(false)
+            if (event.key === 'Tab') { const controls = [...root.current.querySelectorAll('button:not(:disabled),input:not(:disabled)')]; if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus() } else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus() } }
+          } }, h('div', { className: 'pangea-page-actions' }, h('h2', null, '选择源码范围'), h('button', { type: 'button', onClick: () => setOpen(false) }, '完成选择')),
+          h('p', null, tree?.path || '.'), h('button', { type: 'button', disabled: busy || !tree || tree.path === '.', onClick: () => { void request({ path: tree.path.split('/').slice(0, -1).join('/') || '.' }, true) } }, '上一级'),
+          h('ul', { className: 'pangea-scope-tree' }, (tree?.entries || []).map(item => h('li', { key: item.path }, h('label', null, h('input', { type: 'checkbox', checked: scope.includes(item.path), disabled: !item.selectable, onChange: () => toggle(item.path) }), item.name), item.kind === 'directory' ? h('button', { type: 'button', disabled: busy || !item.selectable, onClick: () => { void request({ path: item.path }, true) } }, '打开') : null))),
+          tree && h('button', { type: 'button', disabled: busy || !tree.cursor, onClick: () => { void request({ path: tree.path, cursor: Math.max(0, tree.cursor - 100) }, true) } }, '上一页目录项'),
+          tree?.has_more ? h('button', { type: 'button', disabled: busy, onClick: () => { void request({ path: tree.path, cursor: tree.next_cursor }, true) } }, '下一页目录项') : null,
+          error ? h('p', { role: 'alert' }, error) : null)) : null)
+      }
+    }
+
+    return { createSourceScopePicker }
+    })()
+
+    const __overviewFindings = (() => {
+    const list = value => Array.isArray(value) ? value : []
+    const bodyText = value => typeof value === 'string' ? value : value?.message ?? value?.summary ?? value?.title ?? ''
+
+    // Projection only: preserve the original findings and their provenance.
+    function buildOverviewFindings({ current = {}, risks = [], notes = [] } = {}) {
+      const found = [], seen = new Set()
+      const add = item => {
+        if (!item.id || seen.has(item.id)) return
+        seen.add(item.id); found.push(item)
+      }
+      for (const [index, value] of list(current.workflow?.unresolved).entries()) {
+        const title = bodyText(value)
+        if (title) add({ id: `workflow:${value?.id ?? value?.code ?? index}`, title, summary: '', kind: 'workflow', validationState: '待处理', sourceRefs: [], caseRefs: [] })
+      }
+      for (const risk of list(risks)) {
+        const id = risk.projection_id ?? risk.risk_id
+        if (!id) continue
+        add({ id: `risk:${id}`, title: risk.title ?? risk.risk_id ?? '待验证风险',
+          summary: risk.narrative ?? risk.trigger ?? risk.residual_effect ?? '', kind: 'risk', validationState: '待验证',
+          sourceRefs: [id], caseRefs: list(risk.linked_test_case_ids) })
+      }
+      for (const note of list(notes)) {
+        const record = note.source_record ?? note
+        if (record.kind !== 'note') continue
+        const id = note.projection_id ?? record.record_id
+        const body = note.body ?? record.body
+        const summary = bodyText(body)
+        if (id && summary) add({ id: `note:${id}`, title: body?.title ?? note.title ?? '分析记录', summary, kind: 'note', validationState: '待验证', sourceRefs: [id], caseRefs: [] })
+      }
+      return found
+    }
+
+    return { buildOverviewFindings }
+    })()
+
+    const __caseReviewProjection = (() => {
+    const CASE_TYPE_LABELS = {
+      business_blackbox: '业务黑盒', developer_assisted: '业务灰盒',
+      interface_contract: '接口契约', whitebox_support: '白盒辅助',
+      positive: '正向验证', negative: '反向验证', boundary: '边界验证',
+      functional: '功能验证', performance: '性能验证', recovery: '恢复验证',
+      concurrency: '并发验证', robustness: '健壮性验证', security: '安全验证',
+      branch: '业务分支', coverage: '覆盖率补测', risk: '风险验证',
+    }
+
+    const REVIEW_LABELS = Object.freeze({ unreviewed: '未评审', adopted: '已采纳', excluded: '暂不采纳', needs_recheck: '需重新评审' })
+
+    function caseIdentity(item) {
+      const id = item?.projection_id || item?.test_case_id
+      return typeof id === 'string' && id.trim() ? id : null
+    }
+
+    function filterTestCases(items = [], filters = {}, reviews = {}) {
+      const query = String(filters.query ?? '').trim().toLocaleLowerCase()
+      return items.filter(item => {
+        const review = reviews[caseIdentity(item)]?.review_status ?? 'unreviewed'
+        return (!query || JSON.stringify(item).toLocaleLowerCase().includes(query))
+          && (!filters.unit || item.unit_id === filters.unit)
+          && (!filters.type || (item.case_type || item.test_level || 'unclassified') === filters.type)
+          && (!filters.readiness || (['ready', 'needs_setup'].includes(item.readiness) ? item.readiness : 'unclassified') === filters.readiness)
+          && (!filters.review || review === filters.review)
+      })
+    }
+
+    function reviewProjection(items = [], decisions = {}, hashes = {}) {
+      const counts = { unreviewed: 0, adopted: 0, excluded: 0, needs_recheck: 0 }
+      const frequencies = new Map()
+      for (const item of items) { const id = caseIdentity(item); if (id) frequencies.set(id, (frequencies.get(id) || 0) + 1) }
+      const cases = items.map(item => {
+        const key = caseIdentity(item), valid = key && frequencies.get(key) === 1
+        const saved = valid ? decisions[key] : null
+        const review_status = !saved ? 'unreviewed' : saved.content_hash === hashes[key] ? saved.decision : 'needs_recheck'
+        counts[review_status] += 1
+        return { case_key: valid ? key : null, content_hash: valid ? hashes[key] : null, review_status,
+          decision: saved?.decision ?? null, updated_at: saved?.updated_at ?? null }
+      })
+      return { cases, counts }
+    }
+
+    return { CASE_TYPE_LABELS, REVIEW_LABELS, caseIdentity, filterTestCases, reviewProjection }
+    })()
+
     const __reviewPresentation = (() => {
     // Presentation only: never translate arbitrary Agent prose, infer a verdict,
     // drop unknown fields, or rewrite saved records. IDs and source quotes stay raw.
@@ -2098,6 +2236,9 @@ window.__ModuleLoader__.load({
     const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
     const { renderReviewPresentation, reviewStatusLabel, isReviewRecord } = __reviewPresentation
     const { buildRunInsights } = __runInsights
+    const { buildOverviewFindings } = __overviewFindings
+    const { caseIdentity, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
+    const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
       if (typeof body === 'string') return body
@@ -2169,7 +2310,7 @@ window.__ModuleLoader__.load({
         loading && h('p', { role: 'status' }, '正在读取可用资产…'), error && h('div', { role: 'alert' }, error, button('重试', onRefresh)),
         h('table', null, h('thead', null, h('tr', null, ['', '资产名称', '类型', '版本', '状态'].map((label, index) => h('th', { key: index }, label)))), h('tbody', null, items.map(item => h('tr', { key: item.asset_id },
           h('td', { style: { width: 35 } }, h('input', { type: 'checkbox', 'aria-label': `选择${item.title}`, checked: !!pending[item.asset_id], disabled: item.status !== 'available', onChange: () => toggle(item) })),
-          h('td', null, h('strong', { style: { fontSize: 13 } }, item.title), h('div', { className: 'tiny muted', style: { marginTop: 6 } }, item.source_name ?? item.source_path)), h('td', null, h('span', { className: 'badge' }, typeLabels[item.asset_type] ?? item.asset_type)), h('td', { className: 'mono small' }, item.revision == null ? '待读取' : `r${item.revision}`), h('td', null, h('span', { className: `badge ${item.status === 'available' ? 'good' : 'warn'}` }, item.status === 'available' ? '可用' : item.status)))))),
+          h('td', null, h('strong', { style: { fontSize: 14 } }, item.title), h('div', { className: 'tiny muted', style: { marginTop: 6 } }, item.source_name ?? item.source_path)), h('td', null, h('span', { className: 'badge' }, typeLabels[item.asset_type] ?? item.asset_type)), h('td', { className: 'mono small' }, item.revision == null ? '待读取' : `r${item.revision}`), h('td', null, h('span', { className: `badge ${item.status === 'available' ? 'good' : 'warn'}` }, item.status === 'available' ? '可用' : item.status)))))),
         !loading && !error && !items.length && h('p', { className: 'muted' }, '没有匹配的资料，试试其他关键词或筛选条件。'),
         pagination?.total_pages > 1 && h('div', { className: 'row', style: { marginTop: 12 } }, button('上一页', () => onPage(pagination.page - 1), '', loading || pagination.page <= 1), h('span', null, `第 ${pagination.page} / ${pagination.total_pages} 页`), button('下一页', () => onPage(pagination.page + 1), '', loading || pagination.page >= pagination.total_pages)),
         h('div', { className: 'modal-footer' }, h('span', { className: 'small muted', style: { marginRight: 'auto' } }, `已选 ${Object.keys(pending).length} 份资产`), button('取消', onClose, 'ghost'), button('使用所选资产并返回', () => onConfirm(Object.values(pending)), 'primary'))))
@@ -2216,7 +2357,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'pangea-derivation-overlay', onKeyDown,
         style: { position: 'fixed', inset: 0, zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, background: 'rgba(25,31,28,.35)' } },
         h('section', { ref: dialog, role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'pangea-derivation-title',
-          style: { width: 772, maxWidth: '100%', boxSizing: 'border-box', maxHeight: 'calc(100vh - 40px)', overflowY: 'auto', padding: 26, borderRadius: 12, background: '#fff', color: '#25292e', boxShadow: '0 16px 60px #0002', fontFamily: '"Segoe UI", "Microsoft YaHei", sans-serif' } },
+          style: { width: 772, maxWidth: '100%', boxSizing: 'border-box', maxHeight: 'calc(100vh - 40px)', overflowY: 'auto', padding: 26, borderRadius: 12, background: '#fff', color: '#25292e', boxShadow: '0 16px 60px #0002', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)' } },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'start' } },
             h('div', null, h('h2', { id: 'pangea-derivation-title', style: { margin: 0, fontSize: 21 } }, '基于此结果继续分析'),
               h('p', { style: { fontSize: 12, color: '#70767d', lineHeight: 1.8 } }, `来源：${state.title} · ${state.run_id}`)),
@@ -2224,14 +2365,14 @@ window.__ModuleLoader__.load({
           h('div', { role: 'group', 'aria-label': '继续分析方式', style: { display: 'flex', gap: 10, margin: '8px 0 18px' } },
             [['supplement', '定向补充'], ['changed-files', '按变更文件分析']].map(([mode, label]) => h('button', { key: mode, type: 'button', 'aria-pressed': draft.mode === mode, disabled: busy,
               onClick: () => change({ mode }), style: { ...styles.button, borderColor: draft.mode === mode ? '#c7000b' : '#e5e7e4', color: draft.mode === mode ? '#c7000b' : '#505956' } }, label))),
-          h('p', { style: { fontSize: 13, color: '#59655e', lineHeight: 1.8, padding: 13, borderRadius: 7, background: '#f5f7f5' } }, draft.mode === 'supplement'
+          h('p', { style: { fontSize: 14, color: '#59655e', lineHeight: 1.8, padding: 13, borderRadius: 7, background: '#f5f7f5' } }, draft.mode === 'supplement'
             ? '使用原分析保存的源码和资料，补充指定场景。新结果单独保存，并关联原分析。'
             : '读取当前工作区仓库中的指定文件，与原分析保存的版本对照，检查受影响的流程和用例。请先将新源码放入该仓库。'),
-          h('label', { style: { display: 'block', fontSize: 13, margin: '18px 0 8px' } }, draft.mode === 'changed-files' ? '本次分析要求（选填）' : '本次分析要求',
+          h('label', { style: { display: 'block', fontSize: 14, margin: '18px 0 8px' } }, draft.mode === 'changed-files' ? '本次分析要求（选填）' : '本次分析要求',
             h('textarea', { 'aria-label': '本次分析要求', value: draft.instruction, disabled: busy,
               placeholder: draft.mode === 'supplement' ? '例如：只补充 TLS 断链后的资源释放与恢复场景。' : '例如：检查这次修改影响哪些异常分支，更新相关测试用例。',
               style: { ...fieldStyle, marginTop: 8 }, onChange: event => change({ instruction: event.target.value }) })),
-          draft.mode === 'changed-files' ? h('label', { style: { display: 'block', fontSize: 13, margin: '16px 0' } }, '变更文件（相对源码仓库，每行一个）',
+          draft.mode === 'changed-files' ? h('label', { style: { display: 'block', fontSize: 14, margin: '16px 0' } }, '变更文件（相对源码仓库，每行一个）',
             h('textarea', { 'aria-label': '变更文件', value: draft.changed_paths_text, disabled: busy, placeholder: 'src/tcp/tls.c\nsrc/tcp/session.c',
               style: { ...fieldStyle, fontFamily: 'Consolas, monospace', marginTop: 8 }, onChange: event => change({ changed_paths_text: event.target.value }) }),
             h('small', { style: { display: 'block', color: '#70767d', marginTop: 7 } }, '可填写新增、修改或删除的文件；相关依赖由分析过程核对。')) : null,
@@ -2241,7 +2382,7 @@ window.__ModuleLoader__.load({
           state.notice ? h('p', { role: 'status', style: { fontSize: 12, color: '#906d30' } }, state.notice) : null,
           options && !allowed ? h('p', { role: 'alert' }, options.blocked_reason ?? options.reason ?? options.message ?? '当前分析暂不能用于创建增量任务。') : null,
           allowed ? h('details', { open: Boolean(draft.selected_unit_ids.length || draft.selected_records.length), style: { margin: '18px 0', border: '1px solid #e5e7e4', borderRadius: 8, padding: 14 } },
-            h('summary', { style: { cursor: 'pointer', fontSize: 13 } }, `限定参考结果（可选） · 已选 ${draft.selected_unit_ids.length} 个单元、${draft.selected_records.length} 条记录`),
+            h('summary', { style: { cursor: 'pointer', fontSize: 14 } }, `限定参考结果（可选） · 已选 ${draft.selected_unit_ids.length} 个单元、${draft.selected_records.length} 条记录`),
             h('p', { style: { color: '#70767d', fontSize: 12, lineHeight: 1.7 } }, '不勾选时，按本次要求定位原分析中的相关内容；勾选后优先围绕所选内容展开。'),
             (options.units ?? []).length ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, margin: '14px 0' } }, options.units.map(unit => h('label', { key: unit.unit_id, style: { display: 'flex', gap: 6, fontSize: 12, alignItems: 'center' } },
               h('input', { type: 'checkbox', disabled: busy, checked: draft.selected_unit_ids.includes(unit.unit_id), 'aria-label': `选择单元 ${unit.title || unit.unit_id}`,
@@ -2316,11 +2457,11 @@ window.__ModuleLoader__.load({
           field('最近有效进展', time(info.lastProgressAt), info.lastProgressAt == null ? '尚无结果保存时间；不据此推断执行卡住。' : `${info.lastProgressUnit ? `${info.lastProgressUnit} · ` : ''}结果已保存（北京时间）`),
           field('业务单元提交', units, '按单元完成提交计数；复核结论单独展示。'),
           field('最近通信', time(info.lastCommunicationAt), `${info.connection}；通信更新不代表成果增加。`)),
-        h('p', { style: { margin: '18px 0 0', fontSize: 13, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('strong', null, info.finished ? '交付状态：' : '续接位置：'), info.recovery),
+        h('p', { style: { margin: '18px 0 0', fontSize: 14, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('strong', null, info.finished ? '交付状态：' : '续接位置：'), info.recovery),
         compact ? null : h(React.Fragment, null,
           h('p', { style: { ...muted, margin: '8px 0 0' } }, `${info.diagnostics.length ? '已读取' : '保留'} ${info.preserved.length} 份结果记录 · ${info.unresolved.length} 项执行待处理。已保存草稿与已接受结果分别标注。`),
           info.preserved.length || info.unresolved.length ? h('details', { style: { marginTop: 15 } },
-            h('summary', { style: { cursor: 'pointer', fontSize: 13 } }, '查看保留成果与待处理任务'),
+            h('summary', { style: { cursor: 'pointer', fontSize: 14 } }, '查看保留成果与待处理任务'),
             h('div', { role: 'region', 'aria-label': '保留成果与续接位置表', tabIndex: 0, style: { overflowX: 'auto', marginTop: 12 } },
               h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12, textAlign: 'left' } },
                 h('thead', null, h('tr', null, ['任务', '保存内容', '状态', '继续位置'].map(label => h('th', { key: label, scope: 'col', style: { padding: '8px 10px', borderBottom: '1px solid #e5e7e4', whiteSpace: 'nowrap' } }, label)))),
@@ -2441,7 +2582,7 @@ window.__ModuleLoader__.load({
 
     // One read-only reader owns each Run window. Selection tokens also reject
     // responses from servers that finish after their AbortSignal was cancelled.
-    function createAgentSessionReader({ cwd, dataRoot, runId, onChange, request = requestWorkbench, pollMs = 2000, schedule = setTimeout, cancelSchedule = clearTimeout }) {
+    function createAgentSessionReader({ cwd, dataRoot, runId, onChange, request = requestWorkbench, pollMs = 2000, schedule = setTimeout, cancelSchedule = clearTimeout, initialSelection = {} }) {
       const scope = `${cwd}\u0000${dataRoot ?? ''}\u0000${runId}`
       let state = { scope, items: [], selectedId: '', session: null, events: [], cursor: 0, tailLoaded: false, historyCursor: 0, hasMore: false, historyLoading: false, historyError: '', historyStatus: '', listLoading: true, detailLoading: false, listError: '', detailError: '', listRecordingError: '', detailRecordingError: '', listTruncated: false, detailTruncated: false, updatedAt: '' }
       let disposed = false, selectionVersion = 0, listBusy = false, detailBusy = false, historyBusy = false, timer
@@ -2516,7 +2657,14 @@ window.__ModuleLoader__.load({
           if (result.run_id && result.run_id !== runId) throw new Error('会话列表不属于当前 Run，已忽略。')
           const items = agentSessionList(Array.isArray(result.items) ? result.items : [])
           emit({ items, listLoading: false, listError: '', listRecordingError: result.recording_error ?? '', listTruncated: Boolean(result.truncated), session: items.find(item => item.session_id === state.selectedId) ?? state.session })
-          if (!state.selectedId) select(items[0]?.session_id ?? '')
+          if (!state.selectedId) {
+            const requested = Object.values(initialSelection).some(Boolean)
+            const candidates = items.filter(item => initialSelection.initialSessionId ? item.session_id === initialSelection.initialSessionId
+              : (!initialSelection.initialActionId || item.action_ids?.includes(initialSelection.initialActionId)) && (!initialSelection.initialAttemptId || item.attempt_id === initialSelection.initialAttemptId) && (!initialSelection.initialUnitId || item.unit_id === initialSelection.initialUnitId))
+            if (!requested) select(items[0]?.session_id ?? '')
+            else if (candidates.length === 1) select(candidates[0].session_id)
+            else emit({ detailError: candidates.length ? '关联到多个尝试，请选择对应会话；未自动打开其他尝试。' : '未找到关联会话；请核对本次尝试。' })
+          }
         } catch (error) {
           if (!disposed && error?.name !== 'AbortError') emit({ listLoading: false, listError: error?.message ?? String(error) })
         } finally { listBusy = false }
@@ -2580,10 +2728,10 @@ window.__ModuleLoader__.load({
       }
       return h('div', { className: 'agent-session-transcript' }, rows.map(row => {
         const head = label => h(React.Fragment, null, h('div', { className: 'agent-event-head' }, h('strong', null, label), h('time', { dateTime: row.last_at ?? row.at ?? undefined }, time(row.last_at ?? row.at))), row.replay ? h('p', { className: 'agent-session-muted' }, '恢复时执行器回放 · 原始回合时间未知；此处时间为采集时间。') : null)
-        if (row.type === 'text') return h('article', { key: row.key, className: `agent-event agent-${row.role}` }, head(row.role === 'agent' ? 'Agent' : row.role === 'user' ? '用户消息' : 'Agent 思考记录'), row.role === 'thought' ? details('查看执行器返回的思考记录', row.text) : pre(row.text))
+        if (row.type === 'text') return h('article', { key: row.key, className: `agent-event agent-${row.role}` }, head(row.role === 'agent' ? 'Agent' : row.role === 'user' ? '用户消息' : 'Agent 思考记录'), row.role === 'thought' ? details('查看执行器返回的思考记录', row.text) : renderReadableBody(row.text))
         if (row.type === 'tool') return h('article', { key: row.key, className: 'agent-event agent-tool' },
           head(`工具 · ${row.title}`), h('div', { className: 'agent-tool-state' }, h('span', { className: 'badge', 'data-tool-status': row.status }, agentSessionStatus(row.status)), h('code', null, row.id)),
-          details('调用输入', row.rawInput, true), details('执行输出', row.rawOutput, true), details('工具返回内容', row.content, true),
+          row.status === 'failed' ? h('p', { role: 'alert', className: 'agent-session-alert' }, agentSessionContent(row.rawOutput?.error ?? row.rawOutput ?? row.content ?? '工具执行失败').slice(0, 400)) : null, details('调用输入', row.rawInput), details('执行输出', row.rawOutput), details('工具返回内容', row.content),
           row.rawOutput == null && !row.content?.length ? h('p', { className: 'agent-session-muted' }, ['pending', 'in_progress', 'unknown'].includes(row.status) ? '尚未收到工具执行结果，不能据此确认工具已经结束。' : '执行器未返回输出正文。') : null,
           h('details', null, h('summary', null, `状态与更新记录（${row.updates.length}）`), row.updates.map(update => h('div', { key: update.seq, className: 'agent-tool-update' }, h('div', null, `${time(update.at)} · ${agentSessionStatus(update.status)}`), pre(update)))))
         const toolLifecycle = row.tool_lifecycle ?? row.payload?.tool_lifecycle
@@ -2591,19 +2739,19 @@ window.__ModuleLoader__.load({
         const labels = { prompt: '发送给 Agent 的指令', session_bound: '原会话已绑定', turn_end: '回合结束', error: '执行错误', recording_error: '会话记录异常', process_exit: '进程退出', permission: '权限请求与结果', host_event: '宿主状态记录', host: '宿主状态记录', acp_tool_transport: 'ACP 工具入站记录' }
         return h('article', { key: row.key, className: `agent-event agent-${row.type}` }, head(labels[row.type] ?? '会话事件'),
           ['prompt', 'turn_end'].includes(row.type) && row.action_id ? h('p', { className: 'agent-session-muted', style: { overflowWrap: 'anywhere' } }, `关联动作：${row.action_id}`) : null,
-          row.type === 'prompt' ? details('查看完整指令', row.prompt ?? row.content ?? row, true)
+          row.type === 'prompt' ? details('查看完整指令', row.prompt ?? row.content ?? row)
             : row.type === 'turn_end' ? h(React.Fragment, null, row.response_received === false || row.protocol_stop_reason == null ? h('p', { className: 'agent-session-alert' }, '尚未收到 ACP 的回合结束确认；本地等待已结束不代表工具已完成。') : null, h('dl', null, h('dt', null, '宿主停止原因'), h('dd', null, row.stop_reason ?? '未记录'), h('dt', null, 'ACP 停止原因'), h('dd', null, row.protocol_stop_reason ?? '未记录')), details('完整结束记录', row))
               : ['host_event', 'host'].includes(row.type) ? h(React.Fragment, null, pre([row.stage, row.message, row.status].filter(Boolean).join('\n')), toolLifecycle != null ? h(React.Fragment, null, h('strong', null, '工具结束确认诊断'), lifecycle(toolLifecycle, row.key)) : null, details('完整宿主记录', row))
                 : ['error', 'recording_error'].includes(row.type) ? pre(row.error ?? row.message ?? row) : details('查看事件详情', row, row.type === 'permission'))
       }))
     }
 
-    function AgentSessionsDialog({ cwd, dataRoot, runId, onClose, request = requestWorkbench }) {
+    function AgentSessionsDialog({ cwd, dataRoot, runId, onClose, request = requestWorkbench, initialSessionId, initialUnitId, initialActionId, initialAttemptId, unitTitles = {} }) {
       const scope = `${cwd}\u0000${dataRoot ?? ''}\u0000${runId}`
       const [snapshot, setSnapshot] = React.useState(null)
       const reader = React.useRef(null), dialog = React.useRef(null)
       React.useEffect(() => {
-        const controller = createAgentSessionReader({ cwd, dataRoot, runId, request, onChange: setSnapshot })
+        const controller = createAgentSessionReader({ cwd, dataRoot, runId, request, onChange: setSnapshot, initialSelection: { initialSessionId, initialUnitId, initialActionId, initialAttemptId } })
         reader.current = controller; controller.start()
         return () => { controller.dispose(); if (reader.current === controller) reader.current = null }
       }, [cwd, dataRoot, runId, request])
@@ -2614,19 +2762,26 @@ window.__ModuleLoader__.load({
       }, [])
       const state = snapshot?.scope === scope ? snapshot : { items: [], events: [], listLoading: true }
       const session = state.session
+      const [sessionQuery, setSessionQuery] = React.useState(''), [statusFilter, setStatusFilter] = React.useState(''), [unitFilter, setUnitFilter] = React.useState(''), [stageFilter, setStageFilter] = React.useState('')
+      const visibleSessions = state.items.filter(item => (!statusFilter || item.status === statusFilter) && (!unitFilter || item.unit_id === unitFilter) && (!stageFilter || item.stage === stageFilter))
+      const visibleEvents = sessionQuery.trim() ? state.events.filter(event => JSON.stringify(event).toLowerCase().includes(sessionQuery.trim().toLowerCase())) : state.events
       const keyDown = event => {
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
         if (event.key !== 'Tab') return
-        const buttons = [...(dialog.current?.querySelectorAll('button:not(:disabled), summary, [tabindex="0"]') ?? [])]
+        const buttons = [...(dialog.current?.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary, [tabindex="0"]') ?? [])]
         const first = buttons[0], last = buttons.at(-1)
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
       }
       return h('div', { className: 'agent-sessions-overlay', onKeyDown: keyDown },
-        h('style', null, `.agent-sessions-overlay{position:fixed;inset:0;z-index:1200;background:#13202a70;display:flex;align-items:center;justify-content:center;padding:24px}.agent-sessions-dialog{width:min(1320px,100%);height:88vh;max-height:960px;background:#fbfbf8;color:#25392f;border:1px solid #d8dfd8;border-radius:16px;box-shadow:0 28px 80px #17221d33;display:flex;flex-direction:column;overflow:hidden;text-align:left}.agent-sessions-head{display:flex;justify-content:space-between;gap:20px;padding:20px 24px;border-bottom:1px solid #dce2dc}.agent-sessions-head h2{margin:0 0 6px;font-size:21px}.agent-sessions-head p{margin:0;color:#66716a;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.agent-sessions-actions{display:flex;gap:8px;align-items:flex-start;flex-shrink:0}.agent-sessions-dialog button{font:inherit;cursor:pointer}.agent-sessions-dialog button:disabled{cursor:default;opacity:.55}.agent-sessions-dialog button:focus-visible,.agent-sessions-dialog summary:focus-visible{outline:2px solid #347b61;outline-offset:2px}.agent-sessions-body{display:grid;grid-template-columns:285px minmax(0,1fr);min-height:0;flex:1}.agent-sessions-list{padding:16px 12px;overflow:auto;border-right:1px solid #dce2dc;background:#f3f5f1}.agent-sessions-list>h3{font-size:12px;color:#67736c;margin:0 10px 12px}.agent-session-option{display:flex;flex-direction:column;gap:7px;text-align:left;width:100%;border:1px solid transparent;border-radius:10px;padding:13px;background:transparent;color:inherit;margin-bottom:8px;overflow-wrap:anywhere}.agent-session-option[aria-pressed=true]{background:#fff;border-color:#87ac9a;box-shadow:0 3px 12px #23433008}.agent-session-option span,.agent-session-option small{font-size:12px;line-height:1.5}.agent-session-option small{color:#68746c}.agent-session-main{overflow:auto;min-width:0;padding:22px 24px}.agent-session-meta{padding-bottom:18px;border-bottom:1px solid #dce2dc;margin-bottom:18px}.agent-session-meta h3{margin:0 0 10px}.agent-session-meta dl,.agent-event dl{display:grid;grid-template-columns:110px minmax(0,1fr);font-size:12px;gap:7px;margin:12px 0}.agent-session-meta dt,.agent-event dt{color:#758075}.agent-session-meta dd,.agent-event dd{margin:0;overflow-wrap:anywhere}.agent-session-muted{font-size:12px;line-height:1.8;color:#6d786e}.agent-session-alert{padding:12px 14px;margin:12px 0;border:1px solid #e0c4a0;background:#fff5e7;border-radius:8px;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.agent-event{border:1px solid #dce2dc;background:#fff;padding:15px 17px;border-radius:10px;margin-bottom:14px;min-width:0}.agent-event-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;line-height:1.6;margin-bottom:8px;overflow-wrap:anywhere}.agent-event-head strong{font-size:13px;min-width:0}.agent-event-head time{font-size:11px;color:#7a847c;flex-shrink:0}.agent-event pre{font:12px/1.85 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;margin:9px 0}.agent-event summary{font-size:12px;cursor:pointer;margin:10px 0;color:#47765b}.agent-event details+details{border-top:1px solid #eef1ed;padding-top:1px}.agent-event.agent-error,.agent-event.agent-turn_end{border-left:3px solid #b47b46}.agent-tool-state{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}.agent-tool-state code{overflow-wrap:anywhere}.agent-tool-update{padding:10px;background:#f5f6f3;margin-top:6px}.agent-tool-update>div{font-size:11px;color:#71806f}.agent-session-footer{padding:14px 24px;border-top:1px solid #dce2dc;font-size:12px;color:#6d786e;display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap}.agent-sessions-dialog .agent-button{border:1px solid #ced8ce;background:#fff;color:#365340;padding:8px 12px;border-radius:7px;white-space:nowrap}.agent-sessions-empty{padding:32px 16px;color:#68756c;font-size:13px;line-height:1.9}@media(max-width:760px){.agent-sessions-overlay{padding:8px}.agent-sessions-dialog{height:94vh}.agent-sessions-head{padding:16px;gap:8px}.agent-sessions-actions{flex-wrap:wrap;justify-content:flex-end}.agent-sessions-body{grid-template-columns:210px minmax(0,1fr)}.agent-session-main{padding:14px}.agent-event-head{flex-direction:column;gap:3px}.agent-session-meta dl{grid-template-columns:1fr}.agent-sessions-head h2{font-size:18px}}`),
+        h('style', null, `.agent-sessions-overlay{position:fixed;inset:0;z-index:1200;background:#13202a70;display:flex;align-items:center;justify-content:center;padding:24px}.agent-sessions-dialog{width:min(1320px,100%);height:88vh;max-height:960px;background:#fbfbf8;color:#25392f;border:1px solid #d8dfd8;border-radius:16px;box-shadow:0 28px 80px #17221d33;display:flex;flex-direction:column;overflow:hidden;text-align:left}.agent-sessions-head{display:flex;justify-content:space-between;gap:20px;padding:20px 24px;border-bottom:1px solid #dce2dc}.agent-sessions-head h2{margin:0 0 6px;font-size:21px}.agent-sessions-head p{margin:0;color:#66716a;font-size:12px;line-height:1.7;overflow-wrap:anywhere}.agent-sessions-actions{display:flex;gap:8px;align-items:flex-start;flex-shrink:0}.agent-sessions-dialog button{font:inherit;cursor:pointer}.agent-sessions-dialog button:disabled{cursor:default;opacity:.55}.agent-sessions-dialog button:focus-visible,.agent-sessions-dialog summary:focus-visible{outline:2px solid #347b61;outline-offset:2px}.agent-sessions-body{display:grid;grid-template-columns:285px minmax(0,1fr);min-height:0;flex:1}.agent-sessions-list{padding:16px 12px;overflow:auto;border-right:1px solid #dce2dc;background:#f3f5f1}.agent-sessions-list>h3{font-size:12px;color:#67736c;margin:0 10px 12px}.agent-session-option{display:flex;flex-direction:column;gap:7px;text-align:left;width:100%;border:1px solid transparent;border-radius:10px;padding:13px;background:transparent;color:inherit;margin-bottom:8px;overflow-wrap:anywhere}.agent-session-option[aria-pressed=true]{background:#fff;border-color:#87ac9a;box-shadow:0 3px 12px #23433008}.agent-session-option span,.agent-session-option small{font-size:12px;line-height:1.5}.agent-session-option small{color:#68746c}.agent-session-main{overflow:auto;min-width:0;padding:22px 24px}.agent-session-meta{padding-bottom:18px;border-bottom:1px solid #dce2dc;margin-bottom:18px}.agent-session-meta h3{margin:0 0 10px}.agent-session-meta dl,.agent-event dl{display:grid;grid-template-columns:110px minmax(0,1fr);font-size:12px;gap:7px;margin:12px 0}.agent-session-meta dt,.agent-event dt{color:#758075}.agent-session-meta dd,.agent-event dd{margin:0;overflow-wrap:anywhere}.agent-session-muted{font-size:12px;line-height:1.8;color:#6d786e}.agent-session-alert{padding:12px 14px;margin:12px 0;border:1px solid #e0c4a0;background:#fff5e7;border-radius:8px;font-size:14px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}.agent-event{border:1px solid #dce2dc;background:#fff;padding:15px 17px;border-radius:10px;margin-bottom:14px;min-width:0}.agent-event-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;line-height:1.6;margin-bottom:8px;overflow-wrap:anywhere}.agent-event-head strong{font-size:14px;min-width:0}.agent-event-head time{font-size:12px;color:#7a847c;flex-shrink:0}.agent-event pre{font:12px/1.85 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;margin:9px 0}.agent-event summary{font-size:12px;cursor:pointer;margin:10px 0;color:#47765b}.agent-event details+details{border-top:1px solid #eef1ed;padding-top:1px}.agent-event.agent-error,.agent-event.agent-turn_end{border-left:3px solid #b47b46}.agent-tool-state{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}.agent-tool-state code{overflow-wrap:anywhere}.agent-tool-update{padding:10px;background:#f5f6f3;margin-top:6px}.agent-tool-update>div{font-size:12px;color:#71806f}.agent-session-footer{padding:14px 24px;border-top:1px solid #dce2dc;font-size:12px;color:#6d786e;display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap}.agent-sessions-dialog .agent-button{border:1px solid #ced8ce;background:#fff;color:#365340;padding:8px 12px;border-radius:7px;white-space:nowrap}.agent-sessions-empty{padding:32px 16px;color:#68756c;font-size:14px;line-height:1.9}@media(max-width:760px){.agent-sessions-overlay{padding:8px}.agent-sessions-dialog{height:94vh}.agent-sessions-head{padding:16px;gap:8px}.agent-sessions-actions{flex-wrap:wrap;justify-content:flex-end}.agent-sessions-body{grid-template-columns:210px minmax(0,1fr)}.agent-session-main{padding:14px}.agent-event-head{flex-direction:column;gap:3px}.agent-session-meta dl{grid-template-columns:1fr}.agent-sessions-head h2{font-size:18px}}`),
         h('section', { ref: dialog, className: 'agent-sessions-dialog', role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'agent-sessions-title' },
           h('header', { className: 'agent-sessions-head' }, h('div', null, h('h2', { id: 'agent-sessions-title' }, 'Agent 会话管理'), h('p', null, '查看本次分析的原 Agent 会话 · 最新输出在前 · 只读 · 每 2 秒同步'), h('p', null, `Run：${runId}`)),
             h('div', { className: 'agent-sessions-actions' }, h('button', { type: 'button', className: 'agent-button', onClick: () => reader.current?.refresh() }, '刷新记录'), h('button', { type: 'button', className: 'agent-button', 'aria-label': '关闭 Agent 会话管理', onClick: onClose }, '关闭'))),
+          h('div', { className: 'pangea-session-filters' }, h('input', { type: 'search', 'aria-label': '搜索已加载会话内容', placeholder: '搜索已加载会话内容', value: sessionQuery, onChange: event => setSessionQuery(event.target.value) }), h('span', null, `已加载 ${state.events.length} 条事件${state.hasMore ? '，仍有更早记录' : ''}`),
+            h('select', { 'aria-label': '筛选会话状态', value: statusFilter, onChange: event => setStatusFilter(event.target.value) }, h('option', { value: '' }, '全部状态'), [...new Set(state.items.map(item => item.status).filter(Boolean))].map(value => h('option', { key: value, value }, agentSessionStatus(value)))),
+            h('select', { 'aria-label': '筛选会话分析单元', value: unitFilter, onChange: event => setUnitFilter(event.target.value) }, h('option', { value: '' }, '全部分析单元'), [...new Set(state.items.map(item => item.unit_id).filter(Boolean))].map(value => h('option', { key: value, value }, unitTitles[value] || value))),
+            h('select', { 'aria-label': '筛选会话阶段', value: stageFilter, onChange: event => setStageFilter(event.target.value) }, h('option', { value: '' }, '全部阶段'), [...new Set(state.items.map(item => item.stage).filter(Boolean))].map(value => h('option', { key: value, value }, ({ source_first_plan: '单元规划', unit_planning: '单元规划', unit_analysis: '单元分析', independent_review: '独立复核', comparison_review: '对照复核', targeted_closure: '定向修正' })[value] || value)))),
           h('div', { className: 'agent-sessions-body' },
             h('aside', { className: 'agent-sessions-list', 'aria-label': '本次 Run 的 Agent 会话' }, h('h3', null, `原 Agent 会话 · ${state.items.length}`),
               state.listError ? h('div', { className: 'agent-session-alert', role: 'alert' }, `会话列表读取失败：${state.listError}`) : null,
@@ -2634,19 +2789,21 @@ window.__ModuleLoader__.load({
               state.listTruncated ? h('div', { className: 'agent-session-alert' }, '会话列表记录已截断。') : null,
               state.listLoading ? h('p', { className: 'agent-sessions-empty', role: 'status' }, '正在读取会话列表…') : null,
               !state.listLoading && !state.items.length && !state.listError ? h('p', { className: 'agent-sessions-empty' }, '此 Run 暂无 Agent 会话记录。历史版本的会话可能只有运行日志，无法还原未记录的会话正文。') : null,
-              state.items.map(item => h('button', { type: 'button', key: item.session_id, className: 'agent-session-option', 'aria-pressed': item.session_id === state.selectedId, onClick: () => reader.current?.select(item.session_id) },
-                h('strong', null, agentSessionRole(item)), h('span', null, item.unit_id || item.action_ids?.join(' · ') || item.stage || '待关联任务'),
+              !state.listLoading && state.items.length > 0 && !visibleSessions.length ? h('p', { role: 'status', className: 'agent-sessions-empty' }, '没有符合筛选条件的会话。') : null,
+              visibleSessions.map(item => h('button', { type: 'button', key: item.session_id, className: 'agent-session-option', 'aria-pressed': item.session_id === state.selectedId, onClick: () => reader.current?.select(item.session_id) },
+                h('strong', null, agentSessionRole(item)), h('span', null, unitTitles[item.unit_id] || item.unit_id || item.action_ids?.join(' · ') || item.stage || '待关联任务'),
                 h('span', null, item.provider || '执行器未记录'), h('small', null, item.model || '模型未记录'), h('small', null, `${agentSessionStatus(item.status)} · ${item.event_count ?? 0} 条事件`), item.history_status === 'metadata_only' ? h('small', null, '历史会话 · 仅元数据') : null))),
             h('main', { className: 'agent-session-main', 'aria-label': 'Agent 会话内容', tabIndex: 0 },
-              !session ? h('p', { className: 'agent-sessions-empty' }, '选择左侧会话，查看指令、回复与工具执行详情。') : h(React.Fragment, null,
-                h('div', { className: 'agent-session-meta' }, h('h3', null, agentSessionRole(session)), h('span', { className: 'badge' }, agentSessionStatus(session.status)),
+              !session ? h(React.Fragment, null, state.detailError ? h('p', { role: 'alert', className: 'agent-session-alert' }, state.detailError) : null, h('p', { className: 'agent-sessions-empty' }, '选择左侧会话，查看指令、回复与工具执行详情。')) : h(React.Fragment, null,
+                h('details', { className: 'agent-session-meta' }, h('summary', null, '会话信息'), h('h3', null, agentSessionRole(session)), h('span', { className: 'badge' }, agentSessionStatus(session.status)),
                   h('dl', null, [['执行器 / 模型', [session.provider, session.model].filter(Boolean).join(' / ') || '未记录'], ['原 Agent 会话', session.remote_session_id || session.agent_session_id || '尚未绑定'], ['本地会话', session.session_id], ['关联任务', session.action_ids?.join('、') || session.unit_id || '未记录'], ['最近工具', session.last_tool_id ? `${session.last_tool_id} · ${agentSessionStatus(session.last_tool_status)}` : '未记录']].map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value))))),
                 (state.detailRecordingError || session.recording_error) ? h('div', { role: 'alert', className: 'agent-session-alert' }, `会话记录不完整：${agentSessionContent(state.detailRecordingError || session.recording_error)}`) : null,
                 state.detailTruncated || session.truncated ? h('div', { role: 'status', className: 'agent-session-alert' }, '部分记录已截断，以下内容不代表完整会话。') : null,
                 session.history_message ? h('div', { className: 'agent-session-alert', role: 'status' }, agentSessionContent(session.history_message)) : (state.historyStatus || session.history_status) === 'metadata_only' ? h('div', { className: 'agent-session-alert' }, '此历史会话仅保留身份与运行状态，没有采集指令、Agent 回复和工具输入输出；无法补回此前未记录的内容。') : null,
                 state.detailError ? h('div', { role: 'alert', className: 'agent-session-alert' }, `会话内容读取失败：${state.detailError}。已读取的内容仍保留，可点击“刷新记录”重试。`) : null,
                 state.historyError ? h('div', { role: 'alert', className: 'agent-session-alert' }, `更早历史读取失败：${state.historyError}。最新记录继续同步，可重试加载历史。`) : null,
-                h(AgentSessionTranscript, { events: state.events }),
+                sessionQuery.trim() && !visibleEvents.length ? h('p', { role: 'status' }, '已加载记录中没有匹配内容，可加载更早记录或调整搜索。') : null,
+                h(AgentSessionTranscript, { events: visibleEvents }),
                 !state.events.length && !state.detailLoading && !state.detailError && (state.historyStatus || session.history_status) !== 'metadata_only' ? h('p', { className: 'agent-sessions-empty' }, '会话已关联，尚未收到可显示的事件；这不表示 Agent 已完成。') : null,
                 state.detailLoading ? h('p', { role: 'status', className: 'agent-session-muted' }, '正在读取会话事件…') : null,
                 state.hasMore ? h('button', { type: 'button', className: 'agent-button', disabled: state.historyLoading, onClick: () => reader.current?.loadMore() }, state.historyLoading ? '正在加载更早历史…' : '加载更早会话事件') : null))),
@@ -2679,11 +2836,41 @@ window.__ModuleLoader__.load({
           openReport ? h('button', { type: 'button', className: 'link', onClick: openReport }, '查看本次交付报告', runIcon('ArrowUpRight')) : null)),
         insights.outputs.more || insights.pending_more || insights.current_work_more ? h('button', { type: 'button', className: 'btn', onClick: showAll, style: { marginBottom: 20 } }, `展开全部阶段信息${insights.pending_more ? `（还有 ${insights.pending_more} 项待处理）` : ''}`) : null,
         !insights.pending.length && ['readable', 'partial'].includes(insights.availability) ? h('p', { className: 'small muted' }, '本阶段已读取记录中没有明确列出的待处理事项。') : null,
-        insights.current_work.length ? section('阶段任务进展', h('details', null, h('summary', { style: { cursor: 'pointer', fontSize: 13, marginBottom: 10 } }, `${insights.current_work.length + insights.current_work_more} 项任务 · 查看状态与最近保存时间`), insights.current_work.map(row => card(row.action_id ?? row.unit_id, h('strong', { style: { fontSize: 14 } }, row.title), row.purpose ? text(row.purpose) : null, h('p', { className: 'small muted', style: { marginBottom: 0 } }, [row.state_label, row.last_saved_at_ms ? `最近保存 ${time(row.last_saved_at_ms)}` : '尚未记录结果保存时间'].filter(Boolean).join(' · ')))))) : null,
-        insights.scope.units.length ? section('本阶段分析范围', h('details', null, h('summary', { style: { cursor: 'pointer', fontSize: 13 } }, `已读取 ${insights.scope.units.length} 个分析单元 · 查看目标与范围`), insights.scope.units.map(unit => card(unit.unit_id, h('strong', { style: { fontSize: 13 } }, unit.title), unit.purpose ? text(unit.purpose) : null, unit.owned_regions?.length ? text(unit.owned_regions) : null)))) : null)
+        insights.current_work.length ? section('阶段任务进展', h('details', null, h('summary', { style: { cursor: 'pointer', fontSize: 14, marginBottom: 10 } }, `${insights.current_work.length + insights.current_work_more} 项任务 · 查看状态与最近保存时间`), insights.current_work.map(row => card(row.action_id ?? row.unit_id, h('strong', { style: { fontSize: 14 } }, row.title), row.purpose ? text(row.purpose) : null, h('p', { className: 'small muted', style: { marginBottom: 0 } }, [row.state_label, row.last_saved_at_ms ? `最近保存 ${time(row.last_saved_at_ms)}` : '尚未记录结果保存时间'].filter(Boolean).join(' · ')))))) : null,
+        insights.scope.units.length ? section('本阶段分析范围', h('details', null, h('summary', { style: { cursor: 'pointer', fontSize: 14 } }, `已读取 ${insights.scope.units.length} 个分析单元 · 查看目标与范围`), insights.scope.units.map(unit => card(unit.unit_id, h('strong', { style: { fontSize: 14 } }, unit.title), unit.purpose ? text(unit.purpose) : null, unit.owned_regions?.length ? text(unit.owned_regions) : null)))) : null)
     }
 
-    function RunWorkspace({ current, task, timeline = [], error, loading, busy, retry, navigate: onNavigate, openFile, openFlow, stop, resume, deliver, discuss, diagnostics, viewState, cwd, dataRoot }) {
+    function pageHeader({ title, task, current, onBack, backLabel = '返回任务列表', ui, actions }) {
+      const infoAction = task || current ? h(TaskInfoAction, { task, current }) : null
+      if (ui?.PageHeader) return h(ui.PageHeader, { title, onBack, backLabel, infoAction, actions })
+      return h('header', { className: 'pangea-page-header' },
+        h('div', { className: 'pangea-page-heading-row' }, onBack ? h('button', { type: 'button', className: 'pangea-back-button', onClick: onBack, 'aria-label': backLabel }, '←') : null, h('h1', { title }, title)),
+        h('div', { className: 'pangea-page-actions' }, infoAction, actions))
+    }
+    function TaskInfoAction({ task, current }) {
+      const [open, setOpen] = React.useState(false)
+      const panel = React.useRef(null), trigger = React.useRef(null)
+      React.useEffect(() => {
+        if (!open) return
+        panel.current?.querySelector('button')?.focus()
+        return () => { trigger.current?.focus?.({ preventScroll: true }) }
+      }, [open])
+      const rows = [
+        ['分析目标', current?.target || task?.target], ['仓库', current?.repository || task?.repository],
+        ['源码范围', (task?.source_scope || current?.source_scope || []).join('、')], ['运行编号', current?.run_id || task?.run_id],
+        ['场景', current?.scenario || task?.scenario], ['工作流', current?.workflow_version || task?.workflow_version],
+        ['开始时间', current?.started_at], ['结束时间', current?.ended_at], ['源码文件', current?.source_snapshot?.file_count],
+        ['资料版本', (current?.input_materials || []).map(item => `${item.title || item.name || item.asset_id || '资料'}${item.revision != null ? ' r' + item.revision : ''}`).join('、')],
+      ]
+      return h(React.Fragment, null, h('button', { type: 'button', className: 'pangea-info-button', 'aria-label': '任务信息', ref: trigger, onClick: () => setOpen(true) }, 'ⓘ 任务信息'),
+        open ? h('div', { className: 'pangea-info-overlay', onClick: event => { if (event.target === event.currentTarget) setOpen(false) } },
+          h('section', { ref: panel, className: 'pangea-info-drawer', role: 'dialog', 'aria-modal': true, 'aria-label': '任务信息', onKeyDown: event => {
+            if (event.key === 'Escape') { event.preventDefault(); setOpen(false) }
+            if (event.key === 'Tab') { const controls = [...panel.current.querySelectorAll('button,a,input,[tabindex="0"]')]; const first = controls[0], last = controls.at(-1); if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() } }
+          } }, h('div', { className: 'pangea-page-actions' }, h('h2', null, '任务信息'), h('button', { type: 'button', onClick: () => setOpen(false), 'aria-label': '关闭任务信息' }, '关闭')),
+          h('dl', null, rows.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value == null || value === '' ? '未记录' : String(value))))))) : null)
+    }
+    function RunWorkspace({ current, task, timeline = [], error, loading, busy, retry, navigate: onNavigate, openFile, openFlow, stop, resume, deliver, discuss, diagnostics, viewState, cwd, dataRoot, ui }) {
       const [selection, setSelection] = React.useState(viewState?.selection ?? '')
       const [tab, setTab] = React.useState(viewState?.tab === 'tasks' ? 'tasks' : 'insights')
       const view = () => ({ selection, tab, scrollY: window.scrollY })
@@ -2697,7 +2884,7 @@ window.__ModuleLoader__.load({
       const [pending, setPending] = React.useState('')
       const [actionError, setActionError] = React.useState('')
       const [sessionsOpen, setSessionsOpen] = React.useState(false)
-      const [insightLimit, setInsightLimit] = React.useState(6)
+      const [insightLimit, setInsightLimit] = React.useState(3)
       const dialog = React.useRef(null)
       const stopTrigger = React.useRef(null)
       React.useEffect(() => {
@@ -2730,6 +2917,7 @@ window.__ModuleLoader__.load({
       const snapshotStatus = current?.source_snapshot?.status
       const snapshotLabel = ['manifest_verified', 'frozen', 'verified'].includes(snapshotStatus) ? '已冻结' : ['corrupt', 'invalid'].includes(snapshotStatus) ? '资料损坏，待检查' : snapshotStatus === 'legacy_unavailable' ? '历史 Run 未冻结' : '尚未验证'
       const attention = Boolean(current?.needs_user || p.needsAttention)
+      const failureReason = sourceFirstRecordBody(current?.terminal_error || task?.launch_error || current?.blocking_reason || current?.workflow?.error || '未记录具体原因，请展开执行详情查看诊断。')
       const finished = current?.lifecycle_status === 'complete' || (!current?.lifecycle_status && current?.terminal && current?.phase === 'COMPLETE')
       const outcome = outcomePresentation(current)
       const reportPath = current?.report_available ? current.artifacts?.report_html ?? current.artifacts?.report_md : null
@@ -2744,6 +2932,11 @@ window.__ModuleLoader__.load({
       const stages = { preparing: [], planning: ['unit_planning', 'source_first_plan'], analyzing: ['unit_analysis'], reviewing: ['independent_review', 'comparison_review'], closing: ['targeted_closure'], reporting: ['report'], complete: [] }
       const selectedActions = actions.filter(action => (stages[selected?.stage] ?? [selected?.stage]).includes(action.stage))
       const tasks = selected?.stage === 'analyzing' ? units : selectedActions
+      const sessionSelection = item => {
+        const candidates = selectedActions.filter(action => action.unit_id === item.unit_id && (!['failed', 'paused'].includes(item.status) || ['failed', 'paused'].includes(action.status)))
+        const action = item.action_id ? item : candidates.length === 1 ? candidates[0] : null
+        return { initialUnitId: item.unit_id, initialActionId: action?.action_id, initialAttemptId: item.attempt_id || action?.attempt_id || task?.attempt_id }
+      }
       const status = error ? '上次记录' : p.stopping ? '正在停止' : p.failed ? '分析失败' : p.stopped ? '已停止' : attention ? '等待决定' : finished ? '已完成' : '运行中'
       const tone = error ? 'blue' : attention || p.failed ? 'warn' : finished ? 'good' : 'blue'
       const legacy = current && current.workflow_version !== 'source-first-v1'
@@ -2771,13 +2964,15 @@ window.__ModuleLoader__.load({
       ]
       const notices = error ? h('div', { className: 'notice warn', role: 'alert', style: { marginBottom: 22 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, current ? '同步失败，正在显示上次结果' : '无法读取当前运行'), h('p', null, current ? `最后成功读取于 ${time(current.state_read?.observed_at)}。当前执行状态暂时未知，已显示的结果仍保留。` : error))), button('重试读取', retry)) : null
       return node('section', 'pangea-ui pangea-run-workspace',
-        sessionsOpen && current?.run_id ? h(AgentSessionsDialog, { key: `${cwd}:${dataRoot}:${current.run_id}`, cwd, dataRoot, runId: current.run_id, onClose: () => setSessionsOpen(false) }) : null,
-        node('div', 'breadcrumb', h('button', { className: 'link', style: { color: 'inherit' }, onClick: () => navigate('tasks') }, 'PANGEA 分析'), runIcon('ChevronRight'), h('span', null, task?.target ?? task?.title ?? '分析任务'), runIcon('ChevronRight'), h('span', null, '运行过程')),
-        node('div', 'page-head', node('div', '', h('h1', null, task?.title ?? '运行过程'), node('p', 'subtitle', [task?.repository && `${task.repository} / ${task.target ?? ''}`, (current?.run_id ?? task?.run_id) && h('span', { className: 'mono', key: 'run' }, current?.run_id ?? task.run_id), startTime ? `${new Date(startTime).toLocaleDateString() === new Date().toLocaleDateString() ? '今天 ' : ''}${time(startTime).slice(0,5)} 开始` : null].filter(Boolean).flatMap((part, index) => index ? [' \u00a0 · \u00a0 ', part] : [part]))),
-          node('div', 'page-actions', h('button', { type: 'button', className: 'btn primary', disabled: !current?.run_id || !cwd, onClick: () => setSessionsOpen(true) }, runIcon('SquareTerminal'), 'Agent 会话管理'), error ? button('重试读取', retry) : h(React.Fragment, null, button('AI 助手', () => perform('discuss', discuss), '', !task), button('返回任务列表', () => navigate('tasks'))),
-            !error && current && !current.terminal && !finished && !p.stopped ? button(p.stopping ? '等待停止确认' : '停止', () => setConfirmStop(true), 'danger', p.stopping, { ref: stopTrigger, style: confirmStop ? { display: 'none' } : undefined }) : null,
-            !error && p.canResume ? button('继续分析', () => perform('resume', resume), 'primary') : null,
-            !error && reportPath ? button('查看报告', () => openFile(reportPath), 'primary') : null)),
+        sessionsOpen && current?.run_id ? h(AgentSessionsDialog, { key: `${cwd}:${dataRoot}:${current.run_id}`, cwd, dataRoot, runId: current.run_id, ...(typeof sessionsOpen === 'object' ? sessionsOpen : {}), unitTitles: Object.fromEntries((current.workflow?.units ?? []).map(unit => [unit.unit_id, unit.title || unit.unit_id])), onClose: () => setSessionsOpen(false) }) : null,
+        pageHeader({ title: task?.title || current?.target || '运行过程', task, current, ui, onBack: () => navigate('tasks') }),
+        node('div', 'page-actions run-context-actions',
+          error ? button('重试读取', retry, 'primary') : null,
+          !error && p.canResume ? button('继续分析', () => perform('resume', resume), 'primary') : null,
+          !error && !p.canResume && outputs.length ? button('查看已生成结果', outputs[0].action, 'primary') : null,
+          !error && current && !current.terminal && !finished && !p.stopped && !p.failed ? button(p.stopping ? '等待停止确认' : '停止', () => setConfirmStop(true), 'danger', p.stopping, { ref: stopTrigger }) : null,
+          reportPath ? button('查看报告', () => openFile(reportPath)) : null,
+          button('AI 助手', () => perform('discuss', discuss), '', !task)),
         node('nav', 'task-tabs', [['overview', '概览'], ['flows', '业务流程', 'business_flows'], ...(riskApplicable(current) ? [['risks', '风险', 'risks']] : []), ['cases', '测试用例', 'test_cases'], ['workflow', '运行过程']].map(([target, label, key]) => h('button', { key: target, type: 'button', className: target === 'workflow' ? 'active' : '', 'aria-current': target === 'workflow' ? 'page' : undefined, disabled: target === 'overview' && !task, 'aria-describedby': target === 'overview' && !task ? 'run-task-unavailable' : undefined, onClick: () => navigate(target) }, label, key && current?.counts?.[key] != null ? h('small', { title: current.reader_health?.collection_status?.[key] === 'unavailable' ? '产物暂不可读取' : undefined }, current.reader_health?.collection_status?.[key] === 'unavailable' ? '—' : current.counts[key]) : null))),
         !task && current ? h('p', { id: 'run-task-unavailable', className: 'small muted' }, '此历史 Run 未关联任务记录，任务概览不可用。仍可查看运行记录与已保存产物。') : null,
         notices,
@@ -2788,11 +2983,12 @@ window.__ModuleLoader__.load({
         !current ? node('div', 'stack', !error ? h('div', { className: 'notice blue', role: 'status' }, node('div', 'notice-main', runIcon('Info'), node('div', '', h('strong', null, loading ? '正在读取当前运行' : '当前尚无运行记录'), h('p', null, '正在读取阶段状态与已保存产物。首次读取完成后显示本次运行信息。')))) : null,
           loading ? node('section', 'panel', node('div', 'skeleton large'), h('div', { className: 'skeleton', style: { width: '75%' } }), node('div', 'divider'), node('div', 'grid3', [0, 1, 2].map(i => h('div', { key: i }, h('div', { className: 'skeleton', style: { width: '60%' } }), h('div', { className: 'skeleton', style: { height: 120 } }), h('div', { className: 'skeleton', style: { width: '80%' } }))))) : null,
           node('p', 'small muted', '阶段状态尚未读取，不推断运行成功或失败。')) : h(React.Fragment, null,
-          node('div', 'hero-band', node('div', '', node('div', 'row', h('h2', null, error ? `上次记录：${current.phase_title ?? ''}` : finished ? '本次分析已完成' : p.stopped ? '本次运行已停止' : attention ? `${current.phase_title ?? '当前阶段'}需要处理` : p.failed ? '本次分析失败' : observation ? observation.activity : `正在进行${current.phase_title ?? active?.title ?? '当前阶段'}`), badge(status, tone)),
-            h('p', null, error ? '当前状态未知，下方是最后成功读取的运行信息。' : current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : finished ? completionSummary : p.stopped ? '源码快照、已接受单元和运行记录均已保留。' : '选择阶段，查看已保存的产出和待处理事项；实时对话可在 Agent 会话管理中查看。')),
-            node('div', 'metrics', stat('阶段已完成', h(React.Fragment, null, current.workflow?.completed_steps?.length ?? 0, node('span', 'small muted', ` / ${steps.length}`))), stat('运行时长', duration), stat('用户介入', attention ? '需要' : '无需'))),
-          attention && !error ? h('div', { className: 'notice warn', style: { marginBottom: 24 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, '选择接下来的处理方式'), h('p', null, !task ? '此 Run 未关联任务记录，无法继续执行或交付；可查看已有结果。' : sourceFirstRecordBody(current.blocking_reason) || '查看未解决事项，继续处理或交付已有结果。'))), node('div', 'row', button('交付已有结果', () => perform('deliver', deliver), '', !task), button('继续修正', () => perform('resume', resume), 'primary', !task?.can_resume))) : null,
-          h(RunExecutionSummary, { current, task, stale: Boolean(error) }),
+          node('div', 'hero-band', node('div', '', node('div', 'row', h('h2', null, error ? `上次记录：${current.phase_title ?? ''}` : finished ? '本次分析已完成' : p.stopped ? '本次运行已停止' : attention ? `${current.phase_title ?? '当前阶段'}需要处理` : p.failed ? '本次分析失败' : units.some(unit => unit.status === 'dispatched') ? units.filter(unit => unit.status === 'dispatched').map(unit => unit.title || unit.unit_id).join('、') : observation ? observation.activity : `正在进行${current.phase_title ?? active?.title ?? '当前阶段'}`), badge(status, tone)),
+            h('p', null, error ? '当前状态未知，下方是最后成功读取的运行信息。' : p.failed ? '已有结果和失败会话已保留，可查看原因后继续分析。' : current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : finished ? completionSummary : p.stopped ? '源码快照、已接受单元和运行记录均已保留。' : '选择阶段，查看已保存的产出和待处理事项；实时对话可在 Agent 会话管理中查看。')),
+            node('div', 'metrics', stat('阶段已完成', h(React.Fragment, null, current.workflow?.completed_steps?.length ?? steps.filter(step => step.status === 'completed').length, node('span', 'small muted', ` / ${steps.length}`))), stat('运行时长', duration), stat('用户介入', attention || p.failed ? '需要' : '无需'))),
+          p.failed && !error ? h('p', { role: 'alert', className: 'notice danger' }, failureReason) : null,
+          attention && !error ? h('div', { className: 'notice warn', style: { marginBottom: 24 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, '选择接下来的处理方式'), h('p', null, !task ? '此 Run 未关联任务记录，无法继续执行或交付；可查看已有结果。' : sourceFirstRecordBody(current.blocking_reason) || '查看未解决事项，继续处理或交付已有结果。'))), node('div', 'row', button('交付已有结果', () => perform('deliver', deliver), '', !task), button('继续修正', () => perform('resume', resume), '', !task?.can_resume))) : null,
+          h('details', { className: 'run-execution-details' }, h('summary', null, '执行详情与 Agent 会话'), h('button', { type: 'button', className: 'btn', disabled: !current?.run_id || !cwd, onClick: () => setSessionsOpen(true) }, 'Agent 会话管理'), h(RunExecutionSummary, { current, task, stale: Boolean(error) })),
           node('div', 'run-layout', node('section', 'run-stages', heading('运行阶段', node('span', 'tiny muted', `${steps.length} 个阶段`)),
             steps.map(step => h('button', { key: step.step, type: 'button', className: `stage ${step.status === 'completed' ? 'done' : ''} ${step === selected ? 'current' : ''}`, 'aria-pressed': step === selected, onClick: () => setSelection(step.step) },
               h('b', null, step.status === 'completed' ? '✓' : step.step), h('div', null, step.title, h('p', null, error && step === active ? '上次记录' : step.status === 'pending' ? '等待前序完成' : step.status === 'running' ? p.failed && step === active ? '本次执行失败' : '当前正在执行' : step.status === 'paused' ? '等待你的决定' : step.status === 'stopped' && p.canResume ? '已停止 · 可继续' : STAGE_STATUS[step.status] ?? step.status)))), node('p', 'aside-note', '选择阶段，查看对应任务与产物。')),
@@ -2802,13 +2998,13 @@ window.__ModuleLoader__.load({
                 node('div', 'segment', units.map((unit, i) => h('span', { key: unit.unit_id ?? i, className: unit.status === 'accepted' ? 'good' : unit.status === 'dispatched' && p.running && !error ? 'active' : '' }))))) : stageDescription ? h('p', { className: 'meta', style: { marginTop: 8 } }, stageDescription) : null),
               node('div', 'tabs-mini', ['insights', 'tasks'].map(value => h('button', { type: 'button', key: value, className: value === tab ? 'active' : '', 'aria-pressed': value === tab, onClick: () => { setSelection(selected?.step ?? ''); setTab(value) } }, value === 'insights' ? '阶段进展' : '阶段任务'))),
               h('div', { key: `${current.run_id}:${selected?.step}:${tab}`, className: 'activity', role: 'region', tabIndex: 0, 'aria-label': `${selected?.title ?? '当前阶段'} · ${tab === 'tasks' ? '阶段任务' : '阶段进展'}` }, tab === 'tasks' ? h(React.Fragment, null, heading(selected?.stage === 'analyzing' ? '源码分析单元' : '阶段任务', badge(legacy ? `${tasks.length} 项任务` : `${tasks.filter(item => item.status === 'accepted').length} / ${tasks.length} 已接受`, legacy ? '' : 'good')),
-                tasks.length ? tasks.map(item => h('div', { key: item.unit_id ?? item.action_id, className: 'list-row', style: { padding: '10px 0' } }, node('span', 'small', item.title ?? item.task_id ?? item.action_id), badge(({ accepted: '已接受', settled: '待接受', dispatched: p.stopped ? '已停止' : p.failed && selected === active ? '执行已中断' : '执行中', pending: '等待', failed: '失败', paused: '待处理' })[item.status] ?? item.status, item.status === 'accepted' ? 'good' : 'neutral'))) : node('p', 'muted small', '当前阶段暂无任务。'),
+                tasks.length ? tasks.map(item => h('div', { key: item.unit_id ?? item.action_id, className: 'list-row', style: { padding: '10px 0' } }, h('button', { type: 'button', className: 'pangea-stage-session', onClick: () => setSessionsOpen(sessionSelection(item)) }, item.title ?? item.task_id ?? item.action_id, ' ↗'), badge(({ accepted: '已接受', settled: '待接受', dispatched: p.stopped ? '已停止' : p.failed && selected === active ? '执行已中断' : '执行中', pending: '等待', failed: '失败', paused: '待处理' })[item.status] ?? item.status, item.status === 'accepted' ? 'good' : 'neutral'))) : node('p', 'muted small', '当前阶段暂无任务。'),
                 selected?.artifacts?.length ? node('div', 'run-information', heading('阶段产物'), h('ul', { className: 'stage-artifact-list', 'aria-label': '阶段产物', role: 'list' }, selected.artifacts.map(file => h('li', { key: file },
                   h('button', { type: 'button', className: 'stage-artifact-link', title: file, 'aria-label': `打开${artifactLabel(file)}：${file}`, onClick: () => openFile(file) }, runIcon('FileText'),
                     node('span', 'stage-artifact-copy', node('span', 'stage-artifact-title', artifactLabel(file)), node('span', 'stage-artifact-name', file.split(/[\\/]/).pop())), node('span', 'stage-artifact-open', '打开')))))) : null)
                 : renderRunInsights(insights, { openFlow: id => openFlow(id, view()), navigate, showAll: () => setInsightLimit(Number.MAX_SAFE_INTEGER), openReport: reportPath && ['reporting', 'complete'].includes(selected?.stage) ? () => openFile(reportPath) : null })),
               node('div', 'run-foot', h('span', null, h('span', { className: 'status-dot' }), error ? '正在显示上次记录' : insights.last_saved_at_ms ? `最近保存 · ${time(insights.last_saved_at_ms)}` : '尚未记录结果保存时间'), h('span', null, '产出按保存时间倒序'))),
-            node('aside', 'run-aside', h('section', null, heading('已产出', node('span', 'tiny muted', `${outputs.length} 项可查看`)), outputs.map(output => h('div', { key: output.title, className: 'file-row' }, runIcon('FileText'), h('div', null, h('div', { style: { fontSize: 13 } }, output.title), node('div', 'meta', output.caption)), button('查看', output.action, 'ghost'))), !outputs.length ? node('p', 'small muted', '当前尚无可读取产物。') : null, node('p', 'aside-note', current.publication?.state === 'final' ? '报告包含结论、源码依据与测试建议。' : '分析中的内容为草稿，复核后更新。')),
+            node('aside', 'run-aside', h('section', null, heading('已产出', node('span', 'tiny muted', `${outputs.length} 项可查看`)), outputs.map(output => h('div', { key: output.title, className: 'file-row' }, runIcon('FileText'), h('div', null, h('div', { style: { fontSize: 14 } }, output.title), node('div', 'meta', output.caption)), button('查看', output.action, 'ghost'))), !outputs.length ? node('p', 'small muted', '当前尚无可读取产物。') : null, node('p', 'aside-note', current.publication?.state === 'final' ? '报告包含结论、源码依据与测试建议。' : '分析中的内容为草稿，复核后更新。')),
               h('section', { style: { marginTop: 28 } }, heading('本次运行'), fields([['分析方式', ({ 'module-analysis': '模块分析', 'coverage-analysis': '覆盖率分析', 'risk-analysis': '风险分析', 'branch-analysis': '分支分析' })[current.scenario] ?? current.scenario ?? '未记录'], ['运行模式', ({ depth: '标准型', speed: '速度型' })[current.mode] ?? current.mode ?? '未记录'], ['源码快照', current.source_snapshot?.file_count == null ? '未读取' : `${current.source_snapshot.file_count} 个文件 · ${snapshotLabel}`], ['分析范围', current.target ?? '未记录']]), node('div', 'divider'), node('div', 'small muted', runIcon('LockKeyhole'), ['manifest_verified', 'frozen', 'verified'].includes(snapshotStatus) ? ' 基于冻结的源码快照' : ` 源码快照${snapshotLabel}`),
                 node('details', 'run-information', h('summary', null, '运行信息'), fields([['运行编号', current.run_id], ['开始时间', time(startTime)], ['最近同步', time(current.state_read?.observed_at)], ['工作流', current.workflow_version], ['交付完整性', outcome.delivery], ['审查方式', outcome.review], ['语义结论', outcome.semantic]]), diagnostics), p.stopped && !p.canResume ? h('p', { className: 'aside-note', role: 'status' }, p.resumeBlockedReason) : null)))),
           confirmStop ? node('div', 'run-overlay', h('section', { className: 'modal', ref: dialog, role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'pangea-stop-title', onKeyDown: event => {
@@ -2854,6 +3050,7 @@ window.__ModuleLoader__.load({
     }
     // All text becomes React text nodes. No HTML execution or external markdown dependency.
     function renderReadableBody(value, hideSourceEvidence = false) {
+      const inline = value => !/\*\*|`/.test(String(value)) ? String(value) : String(value).split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/g).map((part, index) => part.startsWith('**') && part.endsWith('**') ? h('strong', { key: index }, part.slice(2, -2)) : part.startsWith('`') && part.endsWith('`') ? h('code', { key: index }, part.slice(1, -1)) : part)
       let body = value
       if (typeof body === 'string' && /^[\s]*[\[{]/.test(body)) {
         try { body = JSON.parse(body) } catch { /* preserve non-JSON prose */ }
@@ -2876,9 +3073,9 @@ window.__ModuleLoader__.load({
           const headers = cells(line), rows = []; i++
           while (i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].trim()) rows.push(cells(lines[++i]))
           nodes.push(h('div', { key: i, className: 'pangea-reader-table', tabIndex: 0, role: 'region', 'aria-label': headers.join('、'), style: { overflowX: 'auto' } }, h('table', { style: { borderCollapse: 'collapse', width: '100%' } }, h('thead', null, h('tr', null, headers.map((cell, j) => h('th', { key: j, scope: 'col', style: { textAlign: 'left', padding: 7, borderBottom: '1px solid #aaa' } }, cell)))), h('tbody', null, rows.map((row, j) => h('tr', { key: j }, row.map((cell, k) => h('td', { key: k, style: { padding: 7, verticalAlign: 'top', borderBottom: '1px solid #ddd' } }, cell))))))))
-        } else if (/^#{1,6}\s/.test(line)) nodes.push(h(`h${Math.min(6, line.match(/^#+/)[0].length + 1)}`, { key: i }, line.replace(/^#{1,6}\s+/, '')))
-        else if (/^\s*[-*+]\s/.test(line)) nodes.push(h('div', { key: i, style: { paddingLeft: 10, margin: '5px 0' } }, '• ', line.replace(/^\s*[-*+]\s+/, '')))
-        else if (line.trim()) nodes.push(h('p', { key: i, style: { margin: '7px 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, line))
+        } else if (/^#{1,6}\s/.test(line)) nodes.push(h(`h${Math.min(6, line.match(/^#+/)[0].length + 1)}`, { key: i }, inline(line.replace(/^#{1,6}\s+/, ''))))
+        else if (/^\s*[-*+]\s/.test(line)) nodes.push(h('div', { key: i, style: { paddingLeft: 10, margin: '5px 0' } }, '• ', inline(line.replace(/^\s*[-*+]\s+/, ''))))
+        else if (line.trim()) nodes.push(h('p', { key: i, style: { margin: '7px 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, inline(line)))
       }
       return h('div', { className: 'pangea-reader' }, nodes)
     }
@@ -3010,7 +3207,8 @@ window.__ModuleLoader__.load({
       const executorBlockedReason = analysisExecutorBlockedReason(executionTask)
       const canResume = !executorBlockedReason && !running && !stopping && runStatus !== 'complete' && executionTask?.can_resume === true
       const resumeBlockedReason = canResume ? null : executorBlockedReason || executionTask?.resume_blocked_reason || (!executionTask?.run_id ? '没有可继续的 Run' : running ? '当前执行仍在进行' : executionStatus === 'stopping' ? '正在等待停止确认' : '当前 Run 不满足续跑条件')
-      return { executionStatus, executionLabel, failed, needsAttention, stopped, stopping, running, healthStatus, dataStateLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason, identityMatched: !current || taskMatchesRun(task, current) }
+      const statusKey = failed ? 'failed' : needsAttention ? 'attention' : stopped ? 'stopped' : stopping ? 'stopping' : running ? 'running' : runStatus === 'complete' || executionStatus === 'completed' ? 'complete' : 'pending'
+      return { statusKey, statusLabel: executionLabel, tone: failed ? 'danger' : needsAttention ? 'warn' : statusKey === 'complete' ? 'good' : 'neutral', executionStatus, executionLabel, failed, needsAttention, stopped, stopping, running, healthStatus, dataStateLabel, publicationLabel, dataTone, qualityLabel, countsAvailability, isAnimating: running, canResume, resumeBlockedReason, identityMatched: !current || taskMatchesRun(task, current) }
     }
 
     function taskLaunchEvents(task, workbench) {
@@ -3053,9 +3251,18 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestRunExport({ cwd, dataRoot, runId, format = 'csv', signal, fetcher = fetch }) {
+    async function requestCaseReviews({ cwd, dataRoot, runId, input, signal, fetcher = fetch }) {
+      const query = new URLSearchParams({ cwd, data_root: dataRoot, run_id: runId })
+      const response = await fetcher(`/api/pangea-companion/case-reviews?${query}`, { cache: 'no-store', signal,
+        ...(input ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd, data_root: dataRoot, run_id: runId, ...input }) } : {}) })
+      const value = await response.json()
+      if (!response.ok || value.status !== 'ok') throw new Error(value.error || `HTTP ${response.status}`)
+      if (value.run_id !== runId) throw new Error('评审响应与当前 Run 不一致')
+      return value
+    }
+    async function requestRunExport({ cwd, dataRoot, runId, format = 'csv', scope, caseKeys, caseSetRevision, reviewRevision, signal, fetcher = fetch }) {
       const query = new URLSearchParams({ cwd, data_root: dataRoot, run_id: runId, format })
-      const response = await fetcher(`${EXPORT_API_PATH}?${query.toString()}`, { cache: 'no-store', signal })
+      const response = await fetcher(`${EXPORT_API_PATH}?${query.toString()}`, { cache: 'no-store', signal, ...(scope ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd, data_root: dataRoot, run_id: runId, format, scope, case_keys: caseKeys, case_set_revision: caseSetRevision, review_revision: reviewRevision }) } : {}) })
       if (!response.ok) {
         let message = `HTTP ${response.status}`
         try { message = (await response.json()).error ?? message } catch { /* preserve HTTP status */ }
@@ -3127,7 +3334,7 @@ window.__ModuleLoader__.load({
       })
       const body = await response.json()
       const accepted = body.status === 'ok' || (['stop', 'task-delete'].includes(action) && body.status === 'stopping')
-      if (!response.ok || !accepted) throw new Error(body.error ?? `HTTP ${response.status}`)
+      if (!response.ok || !accepted) throw Object.assign(new Error(body.error ?? `HTTP ${response.status}`), { statusCode: response.status, code: body.code })
       return body
     }
 
@@ -3283,14 +3490,14 @@ window.__ModuleLoader__.load({
       .b03-task-stat strong { display: block; font-size: 27px; line-height: 1.5; font-weight: 500; font-variant-numeric: tabular-nums; }
       .b03-task-panel { padding: 22px; border: 1px solid #e5e7e4; border-radius: 10px; background: #fff; }
       .b03-task-controls { display: grid; grid-template-columns: minmax(0, 1fr); gap: 11px; margin-bottom: 19px; }
-      .b03-task-search { width: 100%; min-height: 40px; margin: 0; padding: 9px 12px; border: 1px solid #dce0dd; border-radius: 6px; background: #fff; color: #25292e; font-size: 13px; }
+      .b03-task-search { width: 100%; min-height: 40px; margin: 0; padding: 9px 12px; border: 1px solid #dce0dd; border-radius: 6px; background: #fff; color: #25292e; font-size:14px; }
       .b03-task-control-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
       .b03-task-filters { display: flex; align-items: center; gap: 10px; min-width: 0; }
       .b03-task-filter { box-sizing: border-box; height: 29px; flex: 0 0 auto; padding: 6px 11px; border: 1px solid #e5e7e4; border-radius: 5px; background: #fff; color: #25292e; font-size: 12px; }
       .b03-task-filter[aria-pressed="true"] { border-color: #25292e; background: #25292e; color: #fff; }
       .b03-task-sort { margin-left: auto; color: #496988; font-size: 12px; white-space: nowrap; }
       .b03-task-table-wrap { overflow-x: auto; }
-      .b03-task-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+      .b03-task-table { width: 100%; border-collapse: collapse; text-align: left; font-size:14px; }
       .b03-task-table th { height: 50px; padding: 0 13px; border-bottom: 1px solid #e5e7e4; background: #f3f4f2; color: #70767d; font-size: 12px; font-weight: 500; line-height: 1.8; white-space: nowrap; }
       .b03-task-table td { padding: 14px 13px; border-bottom: 1px solid #e5e7e4; color: #25292e; line-height: 1.8; vertical-align: top; }
       .b03-task-table tbody tr:last-child td { border-bottom: 0; }
@@ -3311,7 +3518,7 @@ window.__ModuleLoader__.load({
       .b03-task-open { color: #25292e; font-size: 12px; white-space: nowrap; }
       .b03-task-open svg, .b03-task-run svg { width: 14px; height: 14px; }
       .b03-task-title { line-height: 1.7; }
-      .b03-task-status { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 4px; background: #f3f4f2; color: #70767d; font-size: 11px; line-height: 1.5; white-space: nowrap; }
+      .b03-task-status { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 4px; background: #f3f4f2; color: #70767d; font-size:12px; line-height: 1.5; white-space: nowrap; }
       .b03-task-status.good { background: #eaf5ee; color: #20765a; }
       .b03-task-status.blue { background: #edf3f8; color: #496988; }
       .b03-task-status.warn { background: #fbf4e6; color: #926316; }
@@ -3325,9 +3532,9 @@ window.__ModuleLoader__.load({
       .b03-task-empty-icon { display: grid; width: 52px; height: 52px; place-items: center; margin-bottom: 22px; border: 1px solid #e5e7e4; border-radius: 13px; color: #70767d; }
       .b03-task-empty-icon svg { width: 22px; height: 22px; }
       .b03-task-first-use-content h2, .b03-task-filter-empty-content h2 { margin: 0; color: #25292e; font-size: 20px; font-weight: 600; line-height: 1.5; }
-      .b03-task-first-use-content p, .b03-task-filter-empty-content p { max-width: 500px; margin: 10px 0 24px; color: #496988; font-size: 13px; line-height: 1.8; }
+      .b03-task-first-use-content p, .b03-task-filter-empty-content p { max-width: 500px; margin: 10px 0 24px; color: #496988; font-size:14px; line-height: 1.8; }
       .b03-task-first-use-steps { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 20px; padding: 18px 82px 24px; border-top: 1px solid #e5e7e4; }
-      .b03-task-first-use-steps span { display: block; margin-bottom: 7px; color: #496988; font-size: 11px; }
+      .b03-task-first-use-steps span { display: block; margin-bottom: 7px; color: #496988; font-size:12px; }
       .b03-task-first-use-steps strong { display: block; margin-bottom: 7px; font-size: 14px; font-weight: 600; }
       .b03-task-first-use-steps p { margin: 0; color: #496988; font-size: 12px; line-height: 1.8; }
       .b03-task-panel.filtered-empty { min-height: 472px; padding: 22px; }
@@ -3340,7 +3547,7 @@ window.__ModuleLoader__.load({
       .b03-task-filter-empty-icon svg { width: 22px; height: 22px; }
       .pangea-companion:has(.b03-run-record-screen) > div:has(> .pangea-panel-header) { display: none !important; }
       .pangea-companion:has(.b03-run-record-screen) > .pangea-content { padding: 25px 31px 27px !important; max-width: none !important; margin: 0 !important; }
-      .b03-run-record-screen { min-height: 100%; background: #f7f7f5; color: #25292e; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-synthesis: none; text-rendering: auto; -webkit-font-smoothing: auto; }
+      .b03-run-record-screen { min-height: 100%; background: #f7f7f5; color: #25292e; font-family:var(--pangea-font,"Segoe UI","Microsoft YaHei UI",sans-serif); font-synthesis: none; text-rendering: auto; -webkit-font-smoothing: auto; }
       .b03-run-record-layout { display: grid; gap: 18px; min-width: 0; }
       .b03-run-record-breadcrumb { display: flex; align-items: center; gap: 8px; margin-bottom: 17px; color: #70767d; font-size: 12px; line-height: normal; }
       .b03-run-record-breadcrumb button { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -3352,7 +3559,7 @@ window.__ModuleLoader__.load({
       .b03-run-record-action svg { width: 15px; height: 15px; }
       .b03-run-record-notice { display: flex; align-items: flex-start; gap: 10px; padding: 15px 17px; border-radius: 7px; background: #edf3f8; color: #496988; }
       .b03-run-record-notice > svg { width: 17px; height: 17px; flex: 0 0 auto; margin-top: 1px; }
-      .b03-run-record-notice strong { font-size: 13px; line-height: 1.7; }
+      .b03-run-record-notice strong { font-size:14px; line-height: 1.7; }
       .b03-run-record-notice p { margin: 4px 0 0; font-size: 12px; line-height: 1.8; }
       .b03-run-record-card { min-width: 0; padding: 22px; border: 1px solid #e5e7e4; border-radius: 10px; background: #fff; }
       .b03-run-record-card h2 { margin: 0 0 17px; color: #25292e; font-size: 15px; font-weight: 600; line-height: normal; }
@@ -3364,14 +3571,14 @@ window.__ModuleLoader__.load({
       .b03-run-record-divider { margin: 18px 0; border-top: 1px solid #e5e7e4; }
       .b03-run-record-summary { line-height: 1.9; }
       .b03-run-record-summary-title { margin: 0 0 10px; color: #25292e; font-size: 15px; font-weight: 600; line-height: inherit; }
-      .b03-run-record-summary p { margin: 0 0 15px; color: #25292e; font-size: 13px; line-height: 1.8; }
+      .b03-run-record-summary p { margin: 0 0 15px; color: #25292e; font-size:14px; line-height: 1.8; }
       .b03-run-record-summary .b03-run-record-summary-meta { color: #70767d; }
-      .b03-run-record-inputs { display: grid; grid-template-columns: 105px minmax(0,1fr); gap: 14px 17px; margin: 0; font-size: 13px; line-height: 1.8; }
+      .b03-run-record-inputs { display: grid; grid-template-columns: 105px minmax(0,1fr); gap: 14px 17px; margin: 0; font-size:14px; line-height: 1.8; }
       .b03-run-record-inputs dt { color: #70767d; }
       .b03-run-record-inputs dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
       .b03-run-record-inputs .mono { font-family: Consolas, monospace; font-size: 12px; }
       .b03-run-record-status { color: #20765a; }
-      .b03-overview-screen { color: #25292e !important; background: #f7f7f5 !important; font-family: "Segoe UI", "Microsoft YaHei", sans-serif !important; font-synthesis: none; text-rendering: auto; -webkit-font-smoothing: auto !important; }
+      .b03-overview-screen { color: #25292e !important; background: #f7f7f5 !important; font-family:var(--pangea-font,"Segoe UI","Microsoft YaHei UI",sans-serif); font-synthesis: none; text-rendering: auto; -webkit-font-smoothing: auto !important; }
       .b03-overview-screen button { font-family: inherit; }
       .b03-overview-hero { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 6px 0 23px; border-bottom: 1px solid #e5e7e4; margin: 25px 0 26px; }
       .b03-overview-breadcrumb { display: flex; align-items: center; gap: 8px; margin: 0 0 17px; color: #70767d; font-size: 12px; line-height: 18px; }
@@ -3384,18 +3591,18 @@ window.__ModuleLoader__.load({
       .b03-overview-run-meta { max-width: 650px; margin-top: 9px; color: #70767d; font-size: 12px; line-height: 1.8; }
       .b03-overview-page-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
       .b03-overview-nav { display: flex !important; align-items: stretch; gap: 28px !important; margin: 0 !important; overflow-x: auto; border-bottom: 1px solid #e5e7e4; }
-      .b03-overview-nav button { flex: 0 0 auto; padding: 9px 0 13px !important; color: #70767d !important; font-size: 13px !important; }
+      .b03-overview-nav button { flex: 0 0 auto; padding: 9px 0 13px !important; color: #70767d !important; font-size:14px !important; }
       .b03-overview-nav button[aria-current="page"] { color: #25292e !important; border-bottom-color: #b62836 !important; font-weight: 600 !important; }
       .b03-overview-hero h2 { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 23px; font-weight: 600; line-height: 1.5; }
-      .b03-overview-status { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; line-height: 1.6; white-space: nowrap; }
+      .b03-overview-status { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 4px; font-size:12px; font-weight: 500; line-height: 1.6; white-space: nowrap; }
       .b03-overview-status-complete { background: #e9f7ef; color: #26754e; }
       .b03-overview-status-running { background: #edf4fc; color: #35699b; }
       .b03-overview-status-attention, .b03-overview-status-partial { background: #fff3df; color: #9a5b00; }
       .b03-overview-status-stopped { background: #f0f2f3; color: #667085; }
-      .b03-overview-hero p { margin: 6px 0 0; color: #70767d; font-size: 13px; line-height: 1.8; }
+      .b03-overview-hero p { margin: 6px 0 0; color: #70767d; font-size:14px; line-height: 1.8; }
       .b03-overview-hero-action { display: inline-flex; align-items: center; flex: 0 0 auto; min-height: 36px; padding: 0 15px; border: 1px solid #25292e; border-radius: 5px; background: #25292e; color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
       .b03-overview-attention { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px; margin: -1px 0 23px; border-radius: 8px; background: #fbf4e5; color: #8c5700; }
-      .b03-overview-attention strong { display: block; font-size: 13px; font-weight: 600; }
+      .b03-overview-attention strong { display: block; font-size:14px; font-weight: 600; }
       .b03-overview-attention p { margin: 5px 0 0; color: #94620f; font-size: 12px; line-height: 1.7; }
       .b03-overview-attention button { min-height: 36px; flex: 0 0 auto; padding: 0 13px; border: 1px solid #e5e7e4; border-radius: 6px; background: #fff; color: #8c5700; font: inherit; font-size: 12px; cursor: pointer; }
       .b03-overview-layout { display: grid; grid-template-columns: minmax(0,1fr) 310px; gap: 24px; align-items: start; }
@@ -3404,7 +3611,7 @@ window.__ModuleLoader__.load({
       .b03-overview-card h3 { margin: 0 0 17px; font-size: 15px; font-weight: 600; }
       .b03-overview-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 17px; }
       .b03-overview-card-heading h3 { margin: 0; }
-      .b03-overview-verdict { flex: 0 0 auto; padding: 3px 7px; border-radius: 4px; font-size: 10px; line-height: 1.5; }
+      .b03-overview-verdict { flex: 0 0 auto; padding: 3px 7px; border-radius: 4px; font-size:12px; line-height: 1.5; }
       .b03-overview-verdict-pass { background: #e9f7ef; color: #26754e; }
       .b03-overview-verdict-unresolved { background: #fff3df; color: #9a5b00; }
       .b03-overview-summary { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 22px; }
@@ -3412,33 +3619,33 @@ window.__ModuleLoader__.load({
       .b03-overview-summary > div:first-child { padding-left: 0; border-left: 0; }
       .b03-overview-summary span { display: block; color: #70767d; font-size: 12px; }
       .b03-overview-summary strong { display: block; font-size: 27px; line-height: 1.5; font-weight: 500; font-variant-numeric: tabular-nums; }
-      .b03-overview-summary small { display: block; color: #70767d; font-size: 11px; }
-      .b03-overview-copy { padding-top: 17px; margin-top: 28px; border-top: 1px solid #e5e7e4; font-size: 13px; line-height: 1.8; }
+      .b03-overview-summary small { display: block; color: #70767d; font-size:12px; }
+      .b03-overview-copy { padding-top: 17px; margin-top: 28px; border-top: 1px solid #e5e7e4; font-size:14px; line-height: 1.8; }
       .b03-overview-summary + .b03-overview-copy { margin-top: 26px; padding-bottom: 20px; }
       .b03-overview-copy p { margin: 0 0 14px; }
       .b03-overview-copy p:last-child { margin-bottom: 0; }
-      .b03-overview-findings { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+      .b03-overview-findings { width: 100%; border-collapse: collapse; text-align: left; font-size:14px; }
       .b03-overview-findings th { padding: 14px 13px; color: #70767d; background: #f3f4f2; font-size: 12px; font-weight: 500; line-height: 1.8; }
       .b03-overview-findings td { padding: 14px 13px; border-bottom: 1px solid #e5e7e4; vertical-align: top; line-height: 1.8; }
       .b03-overview-findings td:nth-child(2) { max-width: 400px; }
       .b03-overview-findings td:nth-child(2) .b03-task-run { margin: 0 4px 0 0; white-space: normal; }
       .b03-overview-findings tbody tr:last-child td { border-bottom: 0; }
-      .b03-overview-validation { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 11px; line-height: 1.7; white-space: nowrap; }
+      .b03-overview-validation { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size:12px; line-height: 1.7; white-space: nowrap; }
       .b03-overview-validation-todo, .b03-overview-validation-unresolved { background: #fff3df; color: #9a5b00; }
       .b03-overview-validation-running { background: #edf4fc; color: #35699b; }
       .b03-overview-validation-done { background: #e9f7ef; color: #26754e; }
       .b03-overview-validation-waiting { background: #f0f2f3; color: #667085; }
-      .b03-overview-topic { display: block; padding: 0; border: 0; background: transparent; color: #25292e; font-size: 13px; font-weight: 600; line-height: 1.8; text-align: left; cursor: pointer; }
+      .b03-overview-topic { display: block; padding: 0; border: 0; background: transparent; color: #25292e; font-size:14px; font-weight: 600; line-height: 1.8; text-align: left; cursor: pointer; }
       .b03-overview-findings-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 0; margin-top: 16px; border-top: 0; color: #70767d; font-size: 12px; }
       .b03-overview-main > .b03-overview-card:nth-child(2) { padding-bottom: 22px; }
-      .b03-overview-kv { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 14px 17px; margin: 0; font-size: 13px; line-height: 1.8; }
+      .b03-overview-kv { display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 14px 17px; margin: 0; font-size:14px; line-height: 1.8; }
       .b03-overview-kv dt { color: #70767d; }
       .b03-overview-kv dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
       .b03-overview-aside-divider { margin: 18px 0; border-top: 1px solid #e5e7e4; }
       .b03-overview-card-heading + .b03-overview-kv + .b03-overview-aside-divider { margin-top: 18px; }
       .b03-overview-aside-note { margin: 0; padding-top: 0; color: #70767d; font-size: 12px; line-height: 1.8; }
-      .b03-overview-file small { display: block; color: #70767d; font-size: 11px; }
-      .b03-report-breadcrumb, .b03-report-page-head, .b03-report-tabs, .b03-report-document, .b03-report-nav, .b03-report-traceability { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-synthesis: none; text-rendering: auto; -webkit-font-smoothing: auto; }
+      .b03-overview-file small { display: block; color: #70767d; font-size:12px; }
+      .b03-report-breadcrumb, .b03-report-page-head, .b03-report-tabs, .b03-report-document, .b03-report-nav, .b03-report-traceability { font-family:var(--pangea-font,"Segoe UI","Microsoft YaHei UI",sans-serif); font-synthesis: none; text-rendering: auto; -webkit-font-smoothing: auto; }
       .b03-report-breadcrumb { display: flex; align-items: center; gap: 8px; margin-bottom: 17px; color: #70767d; font-size: 12px; line-height: 16px; }
       .b03-report-breadcrumb button { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
       .b03-report-breadcrumb [aria-current="page"] { color: #4f5964; }
@@ -3450,9 +3657,9 @@ window.__ModuleLoader__.load({
       .b03-report-page-action.primary { border-color: #25292e; background: #25292e; color: #fff; }
       .b03-report-page-action svg { width: 15px; height: 15px; }
       .b03-report-tabs { display: flex; gap: 28px; margin: 7px 0 25px; border-bottom: 1px solid #e5e7e4; flex-wrap: wrap; }
-      .b03-report-tabs button { display: inline-flex; align-items: center; border: 0; border-bottom: 2px solid transparent; padding: 9px 0 13px; background: transparent; color: #70767d; font-size: 13px; white-space: nowrap; }
+      .b03-report-tabs button { display: inline-flex; align-items: center; border: 0; border-bottom: 2px solid transparent; padding: 9px 0 13px; background: transparent; color: #70767d; font-size:14px; white-space: nowrap; }
       .b03-report-tabs button[aria-current="page"] { color: #25292e; border-bottom-color: #b62836; font-weight: 600; }
-      .b03-report-tabs small { margin-left: 5px; color: #70767d; font-size: 11px; }
+      .b03-report-tabs small { margin-left: 5px; color: #70767d; font-size:12px; }
       .b03-report-layout { position: relative; left: 50%; display: grid; width: min(1362px, calc(100vw - 238px)); max-width: none; margin: 0; transform: translateX(-50%); grid-template-columns: minmax(0,1fr) 310px; gap: 24px; align-items: start; }
       .b03-report-document { padding: 22px; border: 1px solid #e5e7e4; border-radius: 10px; background: #fff; line-height: 1.9; }
       .b03-report-document { color: #25292e; }
@@ -3461,22 +3668,22 @@ window.__ModuleLoader__.load({
       .b03-report-document .b03-report-head .pangea-eyebrow { margin-bottom: 10px; }
       .b03-report-document .b03-report-head h2 { margin: 0; font-size: 22px; font-weight: 600; }
       .b03-report-document .b03-report-head p { margin: 8px 0 15px; color: #70767d; font-size: 12px; line-height: 1.8; }
-      .b03-report-status { flex-shrink: 0; padding: 3px 8px; border-radius: 4px; background: #eaf5ee; color: #20765a; font-size: 11px; line-height: 1.5; }
+      .b03-report-status { flex-shrink: 0; padding: 3px 8px; border-radius: 4px; background: #eaf5ee; color: #20765a; font-size:12px; line-height: 1.5; }
       .b03-report-status.partial { background: #fbf4e6; color: #926316; }
       .b03-report-partial-notice { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin: 0; padding: 15px 17px; border-radius: 7px; background: #fbf4e6; color: #926316; }
       .b03-report-notice-main { display: flex; gap: 10px; }
       .b03-report-partial-notice svg { width: 17px; height: 17px; flex-shrink: 0; }
-      .b03-report-partial-notice strong { font-size: 13px; line-height: 1.7; }
-      .b03-report-document .b03-report-partial-notice p { margin: 4px 0 15px; font-size: 13px; line-height: 1.8; }
+      .b03-report-partial-notice strong { font-size:14px; line-height: 1.7; }
+      .b03-report-document .b03-report-partial-notice p { margin: 4px 0 15px; font-size:14px; line-height: 1.8; }
       .b03-report-stats { margin: 25px 0; }
       .b03-report-stats strong { letter-spacing: -.7px; }
       .b03-report-divider { margin: 18px 0; border-top: 1px solid #e5e7e4; }
-      .b03-report-findings { margin: 10px 0 18px; padding-left: 22px; font-size: 13px; }
+      .b03-report-findings { margin: 10px 0 18px; padding-left: 22px; font-size:14px; }
       .b03-report-findings li { margin-bottom: 0; }
       .b03-report-risk-link { display: inline-flex; margin-left: 8px; padding: 0; border: 0; background: transparent; color: #496988; font-size: 12px; cursor: pointer; }
       .b03-report-document h2 { margin: 0 0 8px; font-size: 23px; }
       .b03-report-document h3 { margin: 23px 0 10px; font-size: 15px; font-weight: 600; }
-      .b03-report-document p { margin: 0 0 15px; font-size: 13px; line-height: 1.8; }
+      .b03-report-document p { margin: 0 0 15px; font-size:14px; line-height: 1.8; }
       .b03-report-nav { display: grid; gap: 18px; }
       .b03-report-nav > .b03-overview-card h3 { line-height: 1.333333; }
       .b03-report-nav button { justify-content: flex-start; width: 100%; text-align: left; }
@@ -3493,7 +3700,7 @@ window.__ModuleLoader__.load({
       .b03-report-file-icon svg { width: 18px; height: 18px; }
       .b03-report-traceability { display: flex; align-items: flex-start; gap: 10px; padding: 16px 17px; border-radius: 7px; background: #edf3f8; color: #496988; font-size: 12px; line-height: 1.7; }
       .b03-report-traceability > svg { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 2px; }
-      .b03-report-traceability h3 { margin: 0; font-size: 13px; font-weight: 600; }
+      .b03-report-traceability h3 { margin: 0; font-size:14px; font-weight: 600; }
       .b03-report-traceability p { margin: 4px 0 0; font-size: 12px; }
       .pangea-empty-state { padding: 36px 24px; text-align: center; }
       .pangea-empty-state p { color: #68707c; line-height: 1.7; margin: 8px 0 18px; }
@@ -3504,7 +3711,7 @@ window.__ModuleLoader__.load({
       .pangea-reader h2 { font-size: 20px; padding-bottom: 10px; border-bottom: 1px solid #e4e7eb; }
       .pangea-reader > :first-child { margin-top: 0; }
       .pangea-reader dd { margin-bottom: 16px; }
-      .pangea-reader pre { padding: 14px 16px; background: #f3f5f8; border: 1px solid #e1e5ea; border-radius: 8px; line-height: 1.65; font-size: 13px; }
+      .pangea-reader pre { padding: 14px 16px; background: #f3f5f8; border: 1px solid #e1e5ea; border-radius: 8px; line-height: 1.65; font-size:14px; }
       .pangea-reader-table { margin: 16px 0; border: 1px solid #dfe3e8; border-radius: 8px; }
       .pangea-reader-table table { min-width: 360px; }
       .pangea-reader-table th { background: #f3f5f8; font-weight: 650; }
@@ -3532,7 +3739,7 @@ window.__ModuleLoader__.load({
       .b04-flow-empty { display: grid; grid-template-columns: 244px minmax(0,1fr); gap: 22px; align-items: start; }
       .b04-flow-nav, .b04-flow-card, .b04-flow-side, .b04-version-side, .b04-version-form { background: #fff; border: 1px solid #e1e6df; border-radius: 9px; }
       .b04-flow-nav { padding: 18px; min-height: 650px; box-sizing: border-box; }
-      .b04-flow-nav-label, .b04-overline { color: #919a91; font-size: 11px; letter-spacing: .09em; }
+      .b04-flow-nav-label, .b04-overline { color: #919a91; font-size:12px; letter-spacing: .09em; }
       .b04-flow-screen .b04-page-hero { margin: 0 0 0; padding: 0 0 19px; border-bottom: 0; }
       .b04-flow-screen .b04-page-hero h1 { margin: 0; color: #25292e; font-size: 27px; font-weight: 650; line-height: 1.4; }
       .b04-flow-screen .b03-overview-nav { margin-bottom: 25px !important; }
@@ -3540,25 +3747,25 @@ window.__ModuleLoader__.load({
       .b04-flow-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 4px 2px 10px; margin-bottom: 16px; border-bottom: 1px solid #e1e6df; }
       .b04-flow-tab { flex: 0 0 auto; max-width: 320px; padding: 12px 16px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #59625d; cursor: pointer; text-align: left; }
       .b04-flow-tab strong { display: block; font-size: 14px; white-space: normal; overflow-wrap: anywhere; }
-      .b04-flow-tab small { display: block; margin-top: 5px; font-size: 11px; }
+      .b04-flow-tab small { display: block; margin-top: 5px; font-size:12px; }
       .b04-flow-tab[aria-selected="true"] { border-color: #e9c7cb; background: #faf0f0; color: #922532; }
       .b04-flow-tab:focus-visible, .b04-flow-panel:focus-visible { outline: 2px solid #922532; outline-offset: 2px; }
       .b04-flow-panel { min-width: 0; min-height: 320px; max-height: calc(100vh - 340px); overflow: auto; scrollbar-gutter: stable; }
-      .b04-flow-nav-foot { border-top: 1px solid #e7e9e5; padding-top: 17px; margin-top: 17px; font-size: 11px; line-height: 1.75; color: #919792; }
+      .b04-flow-nav-foot { border-top: 1px solid #e7e9e5; padding-top: 17px; margin-top: 17px; font-size:12px; line-height: 1.75; color: #919792; }
       .b04-modebar { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 18px; }
       .b04-modebar > div:first-child { display: flex; align-items: center; gap: 10px; min-width: 0; }
       .b04-modebar strong { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .b04-flow-card { padding: 25px 28px; }
       .b04-flow-card h2 { font-size: 21px; letter-spacing: -.3px; margin: 6px 0 10px; line-height: 1.4; }
-      .b04-flow-description { color: #717972; font-size: 13px; line-height: 1.85; margin: 0 0 18px; max-width: 720px; }
+      .b04-flow-description { color: #717972; font-size:14px; line-height: 1.85; margin: 0 0 18px; max-width: 720px; }
       .b04-flow-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-      .b04-flow-badges > span { border: 1px solid #e2e6df; border-radius: 20px; padding: 4px 9px; color: #73806f; font-size: 11px; }
+      .b04-flow-badges > span { border: 1px solid #e2e6df; border-radius: 20px; padding: 4px 9px; color: #73806f; font-size:12px; }
       .b04-flow-sequence { border-top: 1px solid #e8ece6; margin-top: 20px; padding-top: 23px; }
       .b04-flow-step { display: grid; grid-template-columns: 34px minmax(0,1fr) minmax(82px,112px); gap: 13px; position: relative; padding-bottom: 23px; }
       .b04-flow-step[aria-current="step"] { border-radius: 8px; background: #f8f3ed; }
       .b04-flow-step { grid-template-columns: minmax(0,1fr) minmax(82px,112px); border-bottom: 1px solid #e8ece6; margin-bottom: 16px; }
       .b04-flow-step-num { display: grid; place-items: center; width: 31px; height: 31px; border: 1px solid #dfe5df; border-radius: 50%; background: #f8faf6; color: #66705f; font: 11px Consolas,monospace; z-index: 1; }
-      .b04-flow-step strong { font-size: 13px; line-height: 31px; }
+      .b04-flow-step strong { font-size:14px; line-height: 31px; }
       .b04-flow-step p { margin: 1px 0 5px; color: #828981; font-size: 12px; line-height: 1.75; }
       .b04-flow-ref { color: #8d948e; font: 10px Consolas,monospace; text-align: right; padding-top: 9px; overflow-wrap: anywhere; }
       .b04-flow-ref .b04-link { color: inherit; font: inherit; }
@@ -3567,9 +3774,9 @@ window.__ModuleLoader__.load({
       .b04-branch-choice strong { display: block; font-size: 12px; line-height: 1.5; }
       .b04-branch-choice small { display: block; color: #8b918b; margin-top: 4px; }
       .b04-branch-detail { display: grid; grid-template-columns: minmax(0,1fr) 304px; gap: 22px; align-items: start; }
-      .b04-flow-definition { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 16px 20px; font-size: 13px; line-height: 1.9; margin: 22px 0; }
+      .b04-flow-definition { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 16px 20px; font-size:14px; line-height: 1.9; margin: 22px 0; }
       .b04-flow-definition dt { color: #90968e; }.b04-flow-definition dd { margin: 0; overflow-wrap: anywhere; }
-      .b04-flow-side { padding: 18px; margin-bottom: 14px; }.b04-flow-side h3 { font-size: 13px; margin: 0 0 12px; }.b04-flow-side p { font-size: 12px; color: #838d82; line-height: 1.8; }
+      .b04-flow-side { padding: 18px; margin-bottom: 14px; }.b04-flow-side h3 { font-size:14px; margin: 0 0 12px; }.b04-flow-side p { font-size: 12px; color: #838d82; line-height: 1.8; }
       .b04-code-line[data-target="true"] { background: #faeaea; color: #a1323b; }
       .b04-link { border: 0; background: transparent; padding: 0; color: #a52d39; font-size: 12px; cursor: pointer; text-align: left; }
       .b04-diagram-types { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 17px; }
@@ -3577,36 +3784,36 @@ window.__ModuleLoader__.load({
       .b04-diagram-types button[aria-pressed="true"] { border-color: #25292e; background: #25292e; color: #fff; }
       .b04-canvas-wrap { border: 1px solid #e1e6df; border-radius: 10px; background: #fcfdfb; overflow: hidden; }
       .b04-canvas-head, .b04-canvas-foot { display: flex; justify-content: space-between; align-items: center; gap: 14px; background: #fff; }
-      .b04-canvas-head { padding: 16px 20px; border-bottom: 1px solid #e7eae4; }.b04-canvas-foot { padding: 12px 20px; border-top: 1px solid #e8ece4; color: #969d92; font-size: 11px; }
-      .b04-canvas-head strong { font-size: 14px; }.b04-canvas-head small { display: block; color: #91988f; margin-top: 5px; font-size: 11px; }
+      .b04-canvas-head { padding: 16px 20px; border-bottom: 1px solid #e7eae4; }.b04-canvas-foot { padding: 12px 20px; border-top: 1px solid #e8ece4; color: #969d92; font-size:12px; }
+      .b04-canvas-head strong { font-size: 14px; }.b04-canvas-head small { display: block; color: #91988f; margin-top: 5px; font-size:12px; }
       .b04-canvas-actions, .b04-canvas-controls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
       .b04-empty-actions { justify-content: center; flex-wrap: nowrap; }.b04-empty-actions button { width: auto; min-width: 126px; }.b04-empty-actions button:first-child { background: #27372d; border-color: #27372d; color: #fff; }
       .b04-canvas-actions button, .b04-canvas-controls button, .b04-version-form button, .b04-progress-actions button { border: 1px solid #dfe5dc; border-radius: 6px; background: #fff; padding: 8px 12px; color: #566051; font-size: 12px; cursor: pointer; }
       .b04-canvas-grid { display: grid; grid-template-columns: minmax(0,1fr) 238px; }.b04-canvas { min-width: 0; min-height: 467px; overflow: auto; background-color: #fbfcfa; background-image: radial-gradient(#dce2d8 .65px,transparent .65px); background-size: 20px 20px; }
       .b04-canvas-grid.wide { display: block; }.b04-canvas-grid.wide .b04-canvas { min-height: 467px; }
       .b04-canvas iframe { display: block; width: 100%; min-height: 467px; border: 0; background: transparent; pointer-events: none; }
-      .b04-canvas-aside { border-left: 1px solid #e7ebe3; background: #fff; padding: 22px 19px; }.b04-canvas-aside h3 { font-size: 12px; margin: 0 0 16px; }.b04-canvas-aside p { color: #8c9685; font-size: 11px; line-height: 1.8; }
+      .b04-canvas-aside { border-left: 1px solid #e7ebe3; background: #fff; padding: 22px 19px; }.b04-canvas-aside h3 { font-size: 12px; margin: 0 0 16px; }.b04-canvas-aside p { color: #8c9685; font-size:12px; line-height: 1.8; }
       .b04-canvas-aside section { border-top: 1px solid #ecefe8; padding: 15px 0; font-size: 12px; }.b04-canvas-aside section:first-of-type { border: 0; padding-top: 0; }
       .b04-version-grid { display: grid; grid-template-columns: 290px minmax(0,1fr); gap: 22px; }.b04-version-side, .b04-version-form { padding: 24px; }.b04-version-item { display: block; width: 100%; text-align: left; border: 1px solid #e1e5de; border-radius: 8px; padding: 17px; margin: 12px 0; background: #fff; cursor: pointer; }.b04-version-item[aria-current="true"] { border-color: #d6a7ad; background: #fdf6f6; }
       .b04-version-form textarea { display: block; width: 100%; min-height: 113px; margin: 8px 0 20px; box-sizing: border-box; padding: 13px; border: 1px solid #dce2da; border-radius: 6px; line-height: 1.8; resize: vertical; }
-      .b04-progress-shell { display: grid; grid-template-columns: minmax(0,1fr) 310px; min-height: 426px; }.b04-progress-art { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 45px; text-align: center; background: #fbfcf9; }.b04-progress-art h2 { font-size: 20px; margin: 23px 0 10px; }.b04-progress-art p { color: #858d80; font-size: 12px; line-height: 1.9; max-width: 390px; }.b04-progress-log { border-left: 1px solid #e7ebe3; background: #fff; padding: 29px 25px; }.b04-progress-log h3 { font-size: 13px; margin: 0 0 24px; }
+      .b04-progress-shell { display: grid; grid-template-columns: minmax(0,1fr) 310px; min-height: 426px; }.b04-progress-art { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 45px; text-align: center; background: #fbfcf9; }.b04-progress-art h2 { font-size: 20px; margin: 23px 0 10px; }.b04-progress-art p { color: #858d80; font-size: 12px; line-height: 1.9; max-width: 390px; }.b04-progress-log { border-left: 1px solid #e7ebe3; background: #fff; padding: 29px 25px; }.b04-progress-log h3 { font-size:14px; margin: 0 0 24px; }
       .b04-progress-icon { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 18px; background: #edf3e8; color: #7b9367; font-size: 28px; }.b04-progress-bar { width: 260px; max-width: 100%; height: 4px; margin: 25px 0 13px; border-radius: 4px; background: #e6ebdf; overflow: hidden; }.b04-progress-bar::before { content: ''; display: block; width: 34%; height: 100%; background: #a4b592; animation: b04-progress 1.5s ease-in-out infinite alternate; }@keyframes b04-progress { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
-      .b04-progress-row { display: grid; grid-template-columns: 17px minmax(0,1fr); gap: 10px; margin-bottom: 22px; color: #687464; font-size: 11px; }.b04-progress-row strong { font-size: 12px; }.b04-progress-row p { margin: 5px 0 0; color: #93998f; line-height: 1.6; }
-      .b04-flow-empty .b04-flow-nav i { display: block; width: 72%; height: 9px; border-radius: 5px; background: #edf0e9; margin: 22px 12px; }.b04-empty-content { display: flex; align-items: center; justify-content: center; flex-direction: column; min-height: 520px; text-align: center; }.b04-empty-content h2 { font-size: 20px; margin: 22px 0 10px; }.b04-empty-content p { color: #8a9284; font-size: 13px; line-height: 1.9; max-width: 440px; }
+      .b04-progress-row { display: grid; grid-template-columns: 17px minmax(0,1fr); gap: 10px; margin-bottom: 22px; color: #687464; font-size:12px; }.b04-progress-row strong { font-size: 12px; }.b04-progress-row p { margin: 5px 0 0; color: #93998f; line-height: 1.6; }
+      .b04-flow-empty .b04-flow-nav i { display: block; width: 72%; height: 9px; border-radius: 5px; background: #edf0e9; margin: 22px 12px; }.b04-empty-content { display: flex; align-items: center; justify-content: center; flex-direction: column; min-height: 520px; text-align: center; }.b04-empty-content h2 { font-size: 20px; margin: 22px 0 10px; }.b04-empty-content p { color: #8a9284; font-size:14px; line-height: 1.9; max-width: 440px; }
       .b05-result-screen .b03-overview-page-hero { margin-bottom: 0; }.b05-result-screen .b03-overview-nav { margin-bottom: 27px !important; }
-      .b05-section-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }.b05-section-head h2 { font-size: 18px; margin: 0 0 5px; }.b05-section-head p { color: #747970; font-size: 13px; margin: 0; line-height: 1.7; }
-      .b05-metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); background: #fff; border: 1px solid #e5e7e4; border-radius: 9px; padding: 20px 23px; margin-bottom: 20px; }.b05-metric { border-right: 1px solid #e5e7e4; padding: 0 16px; }.b05-metric:first-child { padding-left: 0; }.b05-metric:last-child { border: 0; }.b05-metric small { display: block; color: #758085; font-size: 12px; }.b05-metric strong { display: block; font-size: 24px; font-weight: 500; margin: 4px 0; }.b05-metric span { font-size: 11px; color: #858d8e; }
+      .b05-section-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; }.b05-section-head h2 { font-size: 18px; margin: 0 0 5px; }.b05-section-head p { color: #747970; font-size:14px; margin: 0; line-height: 1.7; }
+      .b05-metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); background: #fff; border: 1px solid #e5e7e4; border-radius: 9px; padding: 20px 23px; margin-bottom: 20px; }.b05-metric { border-right: 1px solid #e5e7e4; padding: 0 16px; }.b05-metric:first-child { padding-left: 0; }.b05-metric:last-child { border: 0; }.b05-metric small { display: block; color: #758085; font-size: 12px; }.b05-metric strong { display: block; font-size: 24px; font-weight: 500; margin: 4px 0; }.b05-metric span { font-size:12px; color: #858d8e; }
       .b05-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 20px 0 15px; }.b05-toolbar input { border: 1px solid #dfe4df; border-radius: 5px; padding: 10px 12px; width: 215px; font: inherit; font-size: 12px; background: #fff; }.b05-filters { display: flex; gap: 7px; }.b05-filters button { background: #fff; border: 1px solid #e0e4df; border-radius: 5px; padding: 6px 11px; font-size: 12px; cursor: pointer; }.b05-filters button[aria-pressed="true"] { background: #25292e; color: #fff; border-color: #25292e; }
-      .b05-group-label { display: flex; justify-content: space-between; color: #798285; font-size: 12px; margin: 20px 0 10px; }.b05-risk-row { display: grid; grid-template-columns: minmax(0,1fr) 142px 160px 20px; gap: 18px; align-items: center; width: 100%; text-align: left; border: 1px solid #e5e7e4; border-radius: 9px; background: #fff; padding: 21px 24px; margin: 11px 0; cursor: pointer; }.b05-risk-row:hover { border-color: #b62836; }.b05-risk-row h3 { font-size: 16px; margin: 0 0 9px; }.b05-risk-row p { font-size: 13px; line-height: 1.65; color: #747c80; margin: 0 0 10px; }.b05-risk-row small { display: block; color: #778186; font-size: 12px; line-height: 1.7; }.b05-risk-row .b05-risk-meta { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #7a8285; }.b05-risk-row .b05-risk-meta span { padding: 3px 7px; border-radius: 4px; background: #f8f4e9; color: #a6732b; }.b05-risk-row .b05-risk-meta span:first-child { background: #fbeded; color: #b62836; }
-      .b05-detail-title { font-size: 21px; margin: 9px 0; }.b05-detail-grid { display: grid; grid-template-columns: 1fr 1fr 1.12fr; gap: 18px; margin-top: 20px; }.b05-card { background: #fff; border: 1px solid #e5e7e4; border-radius: 9px; padding: 20px; min-width: 0; }.b05-card h3 { font-size: 15px; margin: 0 0 15px; }.b05-card p { font-size: 13px; line-height: 1.8; }.b05-card h4 { font-size: 12px; margin: 18px 0 6px; }.b05-step-label { font-size: 11px; font-weight: 650; letter-spacing: .8px; color: #969d9e; margin-bottom: 13px; }.b05-detail-bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 17px; margin-top: 18px; }
+      .b05-group-label { display: flex; justify-content: space-between; color: #798285; font-size: 12px; margin: 20px 0 10px; }.b05-risk-row { display: grid; grid-template-columns: minmax(0,1fr) 142px 160px 20px; gap: 18px; align-items: center; width: 100%; text-align: left; border: 1px solid #e5e7e4; border-radius: 9px; background: #fff; padding: 21px 24px; margin: 11px 0; cursor: pointer; }.b05-risk-row:hover { border-color: #b62836; }.b05-risk-row h3 { font-size: 16px; margin: 0 0 9px; }.b05-risk-row p { font-size:14px; line-height: 1.65; color: #747c80; margin: 0 0 10px; }.b05-risk-row small { display: block; color: #778186; font-size: 12px; line-height: 1.7; }.b05-risk-row .b05-risk-meta { display: flex; align-items: center; gap: 8px; font-size:12px; color: #7a8285; }.b05-risk-row .b05-risk-meta span { padding: 3px 7px; border-radius: 4px; background: #f8f4e9; color: #a6732b; }.b05-risk-row .b05-risk-meta span:first-child { background: #fbeded; color: #b62836; }
+      .b05-detail-title { font-size: 21px; margin: 9px 0; }.b05-detail-grid { display: grid; grid-template-columns: 1fr 1fr 1.12fr; gap: 18px; margin-top: 20px; }.b05-card { background: #fff; border: 1px solid #e5e7e4; border-radius: 9px; padding: 20px; min-width: 0; }.b05-card h3 { font-size: 15px; margin: 0 0 15px; }.b05-card p { font-size:14px; line-height: 1.8; }.b05-card h4 { font-size: 12px; margin: 18px 0 6px; }.b05-step-label { font-size:12px; font-weight: 650; letter-spacing: .8px; color: #969d9e; margin-bottom: 13px; }.b05-detail-bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 17px; margin-top: 18px; }
       .b05-case-table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #e5e7e4; }.b05-case-table th { color: #828987; background: #fafbf8; font-size: 12px; font-weight: 500; text-align: left; padding: 12px 14px; }.b05-case-table td { border-top: 1px solid #eff0ed; padding: 12px 14px; font-size: 12px; line-height: 1.7; vertical-align: middle; }.b05-case-table a,.b05-case-table button { color: #466484; }.b05-case-table input { accent-color: #b62836; }
-      .b05-head-actions { display: flex; align-items: center; gap: 9px; }.b05-head-actions button,.b05-selected-bar button { border: 1px solid #dfe4df; background: #fff; border-radius: 6px; padding: 9px 13px; font-size: 12px; color: #4b5d67; cursor: pointer; }.b05-head-actions button.primary,.b05-export-modal button.primary { background: #27372d; border-color: #27372d; color: #fff; }.b05-table-scroll { overflow-x: auto; border-radius: 8px; }.b05-case-table { min-width: 850px; }.b05-case-table td:nth-child(3) { min-width: 240px; }.b05-case-table td small { display: block; max-width: 350px; color: #929a98; margin-top: 4px; }.b05-text-link { border: 0; background: none; padding: 0; text-align: left; cursor: pointer; font: inherit; }.b05-mono { font-family: Consolas,monospace; color: #6b7580; }.b05-risk-chip,.b05-readiness { display: inline-block; padding: 4px 8px; border-radius: 4px; background: #f1f3f4; color: #6d777d; white-space: nowrap; }.b05-readiness.good { background: #edf5eb; color: #64855f; }.b05-readiness.warn { background: #fff5e6; color: #ad7a27; }.b05-selected-bar { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 14px 18px; background: #f4f5f2; border: 1px solid #e7ebe5; border-radius: 7px; margin-top: 17px; font-size: 12px; }.b05-selected-bar small { display: block; color: #949d99; margin-top: 4px; }.b05-subtle { color: #929a99; font-size: 11px; }
-      .b05-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: #17201866; backdrop-filter: blur(2px); }.b05-export-modal { width: min(490px, 88vw); max-height: 88vh; overflow: auto; box-sizing: border-box; background: #fff; border-radius: 9px; box-shadow: 0 18px 60px #17201830; padding: 24px; }.b05-export-modal header,.b05-export-modal footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }.b05-export-modal header small { font-size: 11px; color: #8a9490; }.b05-export-modal header h2 { font-size: 20px; margin: 6px 0 0; }.b05-export-modal header button { width: 30px; height: 30px; border: 1px solid #e0e5df; border-radius: 5px; background: #fff; cursor: pointer; }.b05-export-modal p { color: #7d8583; font-size: 12px; line-height: 1.7; }.b05-export-modal h3 { font-size: 12px; margin: 23px 0 11px; }.b05-export-scope { background: #f5f7f4; padding: 16px; border-radius: 6px; font-size: 12px; }.b05-export-scope span { float: right; color: #63825d; }.b05-export-scope p { margin: 8px 0; }.b05-export-scope small { color: #8f9894; }.b05-export-choice { display: grid; grid-template-columns: 18px 46px minmax(0,1fr) auto; gap: 12px; align-items: center; border: 1px solid #e3e7e2; border-radius: 7px; padding: 13px; margin: 8px 0; cursor: pointer; }.b05-export-choice.selected { border-color: #9eb6a1; background: #fbfdfb; }.b05-export-choice strong { font-size: 12px; }.b05-export-choice small { display: block; color: #929b96; font-size: 11px; margin-top: 4px; }.b05-export-choice em { font-size: 10px; color: #5c8b5d; font-style: normal; }.b05-file-icon { font: bold 10px Consolas,monospace; color: #508460; }.b05-export-modal footer { border-top: 1px solid #e6eae5; margin-top: 20px; padding-top: 18px; justify-content: flex-end; }.b05-export-modal footer button { border: 1px solid #dfe5de; border-radius: 5px; padding: 9px 15px; background: #fff; cursor: pointer; }.b05-export-error { color: #b62836 !important; }
+      .b05-head-actions { display: flex; align-items: center; gap: 9px; }.b05-head-actions button,.b05-selected-bar button { border: 1px solid #dfe4df; background: #fff; border-radius: 6px; padding: 9px 13px; font-size: 12px; color: #4b5d67; cursor: pointer; }.b05-head-actions button.primary,.b05-export-modal button.primary { background: #27372d; border-color: #27372d; color: #fff; }.b05-table-scroll { overflow-x: auto; border-radius: 8px; }.b05-case-table { min-width: 850px; }.b05-case-table td:nth-child(3) { min-width: 240px; }.b05-case-table td small { display: block; max-width: 350px; color: #929a98; margin-top: 4px; }.b05-text-link { border: 0; background: none; padding: 0; text-align: left; cursor: pointer; font: inherit; }.b05-mono { font-family: Consolas,monospace; color: #6b7580; }.b05-risk-chip,.b05-readiness { display: inline-block; padding: 4px 8px; border-radius: 4px; background: #f1f3f4; color: #6d777d; white-space: nowrap; }.b05-readiness.good { background: #edf5eb; color: #64855f; }.b05-readiness.warn { background: #fff5e6; color: #ad7a27; }.b05-selected-bar { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 14px 18px; background: #f4f5f2; border: 1px solid #e7ebe5; border-radius: 7px; margin-top: 17px; font-size: 12px; }.b05-selected-bar small { display: block; color: #949d99; margin-top: 4px; }.b05-subtle { color: #929a99; font-size:12px; }
+      .b05-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: #17201866; backdrop-filter: blur(2px); }.b05-export-modal { width: min(490px, 88vw); max-height: 88vh; overflow: auto; box-sizing: border-box; background: #fff; border-radius: 9px; box-shadow: 0 18px 60px #17201830; padding: 24px; }.b05-export-modal header,.b05-export-modal footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }.b05-export-modal header small { font-size:12px; color: #8a9490; }.b05-export-modal header h2 { font-size: 20px; margin: 6px 0 0; }.b05-export-modal header button { width: 30px; height: 30px; border: 1px solid #e0e5df; border-radius: 5px; background: #fff; cursor: pointer; }.b05-export-modal p { color: #7d8583; font-size: 12px; line-height: 1.7; }.b05-export-modal h3 { font-size: 12px; margin: 23px 0 11px; }.b05-export-scope { background: #f5f7f4; padding: 16px; border-radius: 6px; font-size: 12px; }.b05-export-scope span { float: right; color: #63825d; }.b05-export-scope p { margin: 8px 0; }.b05-export-scope small { color: #8f9894; }.b05-export-choice { display: grid; grid-template-columns: 18px 46px minmax(0,1fr) auto; gap: 12px; align-items: center; border: 1px solid #e3e7e2; border-radius: 7px; padding: 13px; margin: 8px 0; cursor: pointer; }.b05-export-choice.selected { border-color: #9eb6a1; background: #fbfdfb; }.b05-export-choice strong { font-size: 12px; }.b05-export-choice small { display: block; color: #929b96; font-size:12px; margin-top: 4px; }.b05-export-choice em { font-size:12px; color: #5c8b5d; font-style: normal; }.b05-file-icon { font: bold 10px Consolas,monospace; color: #508460; }.b05-export-modal footer { border-top: 1px solid #e6eae5; margin-top: 20px; padding-top: 18px; justify-content: flex-end; }.b05-export-modal footer button { border: 1px solid #dfe5de; border-radius: 5px; padding: 9px 15px; background: #fff; cursor: pointer; }.b05-export-error { color: #b62836 !important; }
       .b05-case-layout { display: grid; grid-template-columns: minmax(0,1.75fr) minmax(275px,1fr); gap: 18px; align-items: start; }.b05-case-layout main,.b05-case-layout aside { display: grid; gap: 17px; min-width: 0; }.b05-case-layout .b05-card h3 { margin-bottom: 17px; }.b05-detail-label { color: #9a7770; font: 12px Consolas,monospace; }.b05-bullet { display: grid; grid-template-columns: 16px minmax(0,1fr); gap: 9px; align-items: start; margin: 12px 0; font-size: 12px; color: #6d7772; line-height: 1.7; }.b05-case-notice { padding: 15px 18px; border: 1px solid #f0dfba; background: #fff8e9; border-radius: 7px; color: #a37121; font-size: 12px; }.b05-case-notice p { margin: 5px 0 0; line-height: 1.7; }.b05-step-table { min-width: 520px; }.b05-step-table td:first-child { width: 50px; }.b05-step-table td:nth-child(2) { width: 46%; }.b05-case-kv { display: grid; grid-template-columns: 80px minmax(0,1fr); gap: 15px 7px; margin: 0; font-size: 12px; }.b05-case-kv dt { color: #929b98; }.b05-case-kv dd { margin: 0; line-height: 1.7; }.b05-case-kv button { display: block; margin-bottom: 4px; }.b05-raw-record { margin-top: 18px; font-size: 12px; color: #7c8881; }.b05-raw-record summary { cursor: pointer; }
-      .b05-coverage-notice { border: 1px solid #dce8f1; background: #f3f8fb; border-radius: 7px; padding: 14px 18px; color: #53758b; font-size: 12px; line-height: 1.7; margin-bottom: 20px; }.b05-coverage-notice p { margin: 4px 0 0; }.b05-coverage-grid { display: grid; grid-template-columns: minmax(0,1.5fr) minmax(275px,1fr); gap: 18px; }.b05-gap-row { display: grid; grid-template-columns: 78px minmax(0,1.2fr) minmax(0,1fr) 78px; align-items: center; gap: 12px; padding: 16px 0; border-bottom: 1px solid #e9ede7; font-size: 11px; }.b05-gap-row strong { display: block; font-size: 12px; }.b05-gap-row small { display: block; color: #9ba49e; margin-top: 5px; overflow-wrap: anywhere; }.b05-gap-row button { display: block; margin: 4px 0; }.b05-coverage-source { padding: 16px; border: 1px solid #e7ebe5; border-radius: 5px; margin-bottom: 17px; font-size: 12px; overflow-wrap: anywhere; }
+      .b05-coverage-notice { border: 1px solid #dce8f1; background: #f3f8fb; border-radius: 7px; padding: 14px 18px; color: #53758b; font-size: 12px; line-height: 1.7; margin-bottom: 20px; }.b05-coverage-notice p { margin: 4px 0 0; }.b05-coverage-grid { display: grid; grid-template-columns: minmax(0,1.5fr) minmax(275px,1fr); gap: 18px; }.b05-gap-row { display: grid; grid-template-columns: 78px minmax(0,1.2fr) minmax(0,1fr) 78px; align-items: center; gap: 12px; padding: 16px 0; border-bottom: 1px solid #e9ede7; font-size:12px; }.b05-gap-row strong { display: block; font-size: 12px; }.b05-gap-row small { display: block; color: #9ba49e; margin-top: 5px; overflow-wrap: anywhere; }.b05-gap-row button { display: block; margin: 4px 0; }.b05-coverage-source { padding: 16px; border: 1px solid #e7ebe5; border-radius: 5px; margin-bottom: 17px; font-size: 12px; overflow-wrap: anywhere; }
       @container pangea-panel (max-width: 900px) { .b05-coverage-grid { grid-template-columns: minmax(0,1fr); }.b05-gap-row { grid-template-columns: 65px minmax(0,1fr) minmax(0,1fr) 70px; } }
       @container pangea-panel (max-width: 900px) { .b05-case-layout { grid-template-columns: minmax(0,1fr); }.b05-section-head { flex-wrap: wrap; } }
-      .b05-source-layer { position: fixed; inset: 0; z-index: 70; display: flex; justify-content: flex-end; background: rgba(19,24,25,.2); }.b05-source-drawer { box-sizing: border-box; width: min(650px, 82vw); height: 100%; overflow: auto; background: #fff; padding: 28px; box-shadow: -12px 0 30px rgba(0,0,0,.12); }.b05-source-drawer header { display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid #e5e7e4; padding-bottom: 22px; }.b05-source-drawer header button { width: 32px; height: 32px; padding: 0; }.b05-source-drawer header small { color: #b62836; letter-spacing: .8px; font-size: 11px; }.b05-source-drawer h2 { font-size: 20px; margin: 8px 0 2px; }.b05-source-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e5e7e4; padding: 18px 0; font-size: 12px; overflow-wrap: anywhere; }.b05-source-context { background: #f5f6f4; border-radius: 6px; padding: 15px; margin: 20px 0; font-size: 12px; line-height: 1.7; }.b05-source-code { background: #f7f8f6; border: 1px solid #e4e8e2; border-radius: 6px; overflow: auto; padding: 12px 0; font: 11px/2.05 Consolas,monospace; }.b05-source-code-line { display: grid; grid-template-columns: 44px minmax(max-content,1fr); white-space: pre; }.b05-source-code-line[data-target="true"] { background: #fcebec; color: #a52b35; }.b05-source-code-line span { text-align: right; padding: 0 10px; color: #929aa0; }.b05-source-code-line code { padding: 0 10px; }.b05-source-failure { background: #fff7e8; color: #9b651a; border-radius: 6px; padding: 18px; margin: 20px 0; }.b05-source-drawer footer { display: flex; justify-content: space-between; border-top: 1px solid #e5e7e4; margin-top: 20px; padding-top: 20px; }.b05-source-drawer button { border: 1px solid #e0e4df; background: #fff; border-radius: 6px; padding: 8px 11px; cursor: pointer; }
+      .b05-source-layer { position: fixed; inset: 0; z-index: 70; display: flex; justify-content: flex-end; background: rgba(19,24,25,.2); }.b05-source-drawer { box-sizing: border-box; width: min(650px, 82vw); height: 100%; overflow: auto; background: #fff; padding: 28px; box-shadow: -12px 0 30px rgba(0,0,0,.12); }.b05-source-drawer header { display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid #e5e7e4; padding-bottom: 22px; }.b05-source-drawer header button { width: 32px; height: 32px; padding: 0; }.b05-source-drawer header small { color: #b62836; letter-spacing: .8px; font-size:12px; }.b05-source-drawer h2 { font-size: 20px; margin: 8px 0 2px; }.b05-source-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e5e7e4; padding: 18px 0; font-size: 12px; overflow-wrap: anywhere; }.b05-source-context { background: #f5f6f4; border-radius: 6px; padding: 15px; margin: 20px 0; font-size: 12px; line-height: 1.7; }.b05-source-code { background: #f7f8f6; border: 1px solid #e4e8e2; border-radius: 6px; overflow: auto; padding: 12px 0; font: 11px/2.05 Consolas,monospace; }.b05-source-code-line { display: grid; grid-template-columns: 44px minmax(max-content,1fr); white-space: pre; }.b05-source-code-line[data-target="true"] { background: #fcebec; color: #a52b35; }.b05-source-code-line span { text-align: right; padding: 0 10px; color: #929aa0; }.b05-source-code-line code { padding: 0 10px; }.b05-source-failure { background: #fff7e8; color: #9b651a; border-radius: 6px; padding: 18px; margin: 20px 0; }.b05-source-drawer footer { display: flex; justify-content: space-between; border-top: 1px solid #e5e7e4; margin-top: 20px; padding-top: 20px; }.b05-source-drawer button { border: 1px solid #e0e4df; background: #fff; border-radius: 6px; padding: 8px 11px; cursor: pointer; }
       @container pangea-panel (max-width: 760px) { .b05-detail-grid,.b05-detail-bottom { grid-template-columns: 1fr; }.b05-risk-row { grid-template-columns: minmax(0,1fr) 110px 110px 14px; gap: 10px; }.b05-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); row-gap: 16px; }.b05-metric:nth-child(2) { border: 0; } }
       .b04-source-overlay { position: fixed; inset: 0; z-index: 110; background: #17201866; }.b04-source-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(650px, 88vw); background: #fff; box-shadow: -16px 0 50px #18201424; display: flex; flex-direction: column; }.b04-source-drawer header, .b04-source-drawer footer { padding: 20px 24px; border-bottom: 1px solid #e6ebe3; }.b04-source-drawer footer { margin-top: auto; border-top: 1px solid #e6ebe3; border-bottom: 0; }.b04-source-drawer main { padding: 22px 24px; overflow: auto; }.b04-source-drawer .b04-code { overflow: auto; border: 1px solid #e2e7e0; border-radius: 8px; background: #fafcf8; font: 12px/1.7 Consolas,monospace; }.b04-source-drawer .b04-code-line { display: grid; grid-template-columns: 48px minmax(max-content,1fr); white-space: pre; }.b04-source-drawer .b04-code-line span:first-child { color: #9da69b; text-align: right; padding-right: 12px; border-right: 1px solid #e2e7e0; }.b04-source-drawer .b04-code-line code { padding: 0 12px; }.b04-source-drawer .b04-code-line[data-target="true"] { background: #f4e9e9; }
       .pangea-diagram-dialog.b04-fullscreen[open] { display: flex; flex-direction: column; }.b04-fullscreen .b04-canvas { flex: 1; min-height: 0; }.b04-fullscreen .b04-canvas iframe { height: 100%; min-height: 0; }
@@ -3660,7 +3867,7 @@ window.__ModuleLoader__.load({
           .b03-task-table col:nth-child(2) { width: 12.8% !important; }
         }
       @media (prefers-reduced-motion: reduce) { .pangea-companion button { transition: none; } }
-      .b06-home-screen { background:#f7f7f5 !important; color:#25292e !important; font-family:"Segoe UI","Microsoft YaHei",sans-serif !important; font-synthesis:none; -webkit-font-smoothing:auto; }
+      .b06-home-screen { background:#f7f7f5 !important; color:#25292e !important; font-family:var(--pangea-font,"Segoe UI","Microsoft YaHei UI",sans-serif); font-synthesis:none; -webkit-font-smoothing:auto; }
       .b06-home-screen .pangea-content { box-sizing:border-box; }
       .b06-breadcrumb { display:flex; align-items:center; gap:11px; color:#7c878a; font-size:12px; margin-bottom:20px; }
       .b06-home-head { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:25px; }
@@ -3668,29 +3875,29 @@ window.__ModuleLoader__.load({
       .b06-home-head p { font-size:12px; color:#78838d; margin:0; }
       .b06-head-actions,.b06-section-head,.b06-row,.b06-between { display:flex; align-items:center; gap:10px; }.b06-head-actions { margin-top:16px; }.b06-between,.b06-section-head { justify-content:space-between; }
       .b06-button { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:36px; padding:7px 13px; border:1px solid #dfe4e1; border-radius:5px; background:#fff; color:#29353e; font-size:12px; cursor:pointer; white-space:nowrap; }.b06-button.primary { background:#25292e; border-color:#25292e; color:#fff; }.b06-button:disabled { background:#9b9d9e; border-color:#9b9d9e; color:#fff; cursor:default; }
-      .b06-banner { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:16px 20px; border-radius:7px; margin-bottom:0; background:#fff5e5; color:#a56c19; font-size:12px; }.b06-banner strong { display:block; font-size:13px; margin-bottom:6px; }.b06-banner.success { background:#eaf5ec; color:#28764b; }
+      .b06-banner { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:16px 20px; border-radius:7px; margin-bottom:0; background:#fff5e5; color:#a56c19; font-size:12px; }.b06-banner strong { display:block; font-size:14px; margin-bottom:6px; }.b06-banner.success { background:#eaf5ec; color:#28764b; }
       .b06-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:17px; margin-bottom:25px; }.b06-metric { display:flex; align-items:center; gap:17px; min-height:100px; box-sizing:border-box; padding:19px 22px; background:#fff; border:1px solid #dfe4e1; border-radius:9px; }.b06-icon { display:grid; place-items:center; width:42px; height:42px; flex:0 0 42px; border-radius:7px; background:#f1f3f2; color:#697882; }.b06-metric:first-child .b06-icon { color:#497ba4; }.b06-metric:nth-child(2) .b06-icon { color:#b57a23; }.b06-metric:nth-child(3) .b06-icon { color:#288b68; }.b06-metric small { display:block; color:#798590; font-size:12px; }.b06-metric strong { display:block; color:#17202b; font-size:29px; font-weight:500; line-height:1.45; }
-      .b06-home-grid { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(300px,1fr); gap:24px; }.b06-stack { display:flex; flex-direction:column; gap:18px; min-width:0; }.b06-panel { box-sizing:border-box; padding:22px; background:#fff; border:1px solid #dfe4e1; border-radius:9px; min-width:0; }.b06-section-head { margin-bottom:17px; }.b06-section-head h2 { font-size:15px; margin:0; }.b06-section-head small { color:#7a868f; font-size:11px; }.b06-link { border:0; background:transparent; color:#416890; font-size:12px; cursor:pointer; padding:0; }
-      .b06-attention { border-left:3px solid #b72638; border-radius:0 8px 8px 0; background:#fffaf8; padding:19px 21px; }.b06-attention h3 { margin:8px 0; font-size:17px; }.b06-attention p { margin:0; color:#7d8892; font-size:12px; line-height:1.7; }.b06-attention-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:17px; }.b06-meta { color:#7d8892; font-size:11px; }.b06-badge { display:inline-flex; align-items:center; border-radius:3px; padding:4px 7px; color:#a66a16; background:#fff0d7; font-size:11px; }.b06-badge.blue { color:#416b95; background:#edf3f8; }.b06-badge.green { color:#27784e; background:#e8f5ec; }
-      .b06-running { display:grid; grid-template-columns:37px minmax(0,1fr) auto; align-items:center; gap:13px; min-height:73px; }.b06-running strong,.b06-report strong { display:block; font-size:13px; }.b06-running p { color:#7d8892; font-size:11px; margin:5px 0 0; }.b06-shortcuts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:15px; }.b06-shortcut { display:flex; align-items:flex-start; gap:15px; text-align:left; cursor:pointer; }.b06-shortcut strong { display:block; font-size:14px; margin:3px 0 7px; }.b06-shortcut p { color:#7d8892; font-size:12px; margin:0; line-height:1.6; }
-      .b06-report { width:100%; display:grid; grid-template-columns:37px minmax(0,1fr) 14px; align-items:center; gap:12px; background:transparent; border:0; border-bottom:1px solid #e3e6e3; text-align:left; padding:20px 0; cursor:pointer; }.b06-report:last-child { border-bottom:0; }.b06-report .b06-meta { display:block; margin-top:5px; }.b06-repo { display:flex; align-items:center; justify-content:space-between; gap:15px; background:#f2f4f2; padding:14px 17px; border-radius:7px; font-size:12px; }.b06-repo-note { color:#7d8892; font-size:12px; line-height:1.8; margin:14px 0; }.b06-divider { border-top:1px solid #e2e5e2; margin:17px 0; }.b06-muted { color:#7d8892; font-size:13px; line-height:1.9; padding:18px 8px; }.b06-skeleton { display:block; height:14px; border-radius:5px; background:#eef0ee; animation:b06-pulse 1.4s ease-in-out infinite alternate; }@keyframes b06-pulse { to { opacity:.5; } }
-      .b06-onboard-head { margin-bottom:25px; }.b06-onboard-grid { width:min(1080px,100%); display:grid; grid-template-columns:minmax(0,1.55fr) minmax(280px,1fr); gap:25px; margin:0 auto; }.b06-onboard-grid .b06-panel { padding:30px; }.b06-onboard-grid h2 { font-size:23px; margin:12px 0; }.b06-onboard-lead { color:#7d8892; font-size:13px; line-height:1.9; margin:0 0 24px; }.b06-eyebrow { font-size:10px; letter-spacing:1.3px; color:#b72638; }.b06-field { display:block; margin-top:20px; font-size:12px; font-weight:600; }.b06-field input { box-sizing:border-box; width:100%; height:42px; border:1px solid #dbe0dd; border-radius:5px; padding:10px 13px; font:inherit; font-weight:400; margin-top:8px; background:#fff; }.b06-field-row { display:flex; gap:12px; }.b06-field-row input { flex:1; min-width:0; }.b06-hint { color:#7d8892; font-size:12px; line-height:1.7; margin:10px 0 0; }.b06-onboard-step { display:flex; gap:13px; padding:18px 0; border-bottom:1px solid #e3e6e3; }.b06-onboard-step b { display:grid; place-items:center; width:25px; height:25px; flex:none; border-radius:50%; background:#f2f4f2; color:#78848c; font:12px Consolas; }.b06-onboard-step.done b { background:#e8f5ec; color:#278452; }.b06-onboard-step.current b { background:#fbecee; color:#bc2b3d; }.b06-onboard-step strong { font-size:12px; }.b06-onboard-step p { color:#7d8892; font-size:12px; margin:5px 0 0; }.b06-onboard-foot { display:flex; justify-content:space-between; align-items:center; gap:15px; border-top:1px solid #e3e6e3; margin-top:24px; padding-top:20px; }.b06-copy-progress { height:5px; border-radius:5px; background:#eef0ee; overflow:hidden; margin:20px 0; }.b06-copy-progress::before { display:block; content:""; width:34%; height:100%; background:#4b6b8c; animation:b06-progress 1.7s ease-in-out infinite alternate; }@keyframes b06-progress { from { transform:translateX(-100%); } to { transform:translateX(300%); } }
+      .b06-home-grid { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(300px,1fr); gap:24px; }.b06-stack { display:flex; flex-direction:column; gap:18px; min-width:0; }.b06-panel { box-sizing:border-box; padding:22px; background:#fff; border:1px solid #dfe4e1; border-radius:9px; min-width:0; }.b06-section-head { margin-bottom:17px; }.b06-section-head h2 { font-size:15px; margin:0; }.b06-section-head small { color:#7a868f; font-size:12px; }.b06-link { border:0; background:transparent; color:#416890; font-size:12px; cursor:pointer; padding:0; }
+      .b06-attention { border-left:3px solid #b72638; border-radius:0 8px 8px 0; background:#fffaf8; padding:19px 21px; }.b06-attention h3 { margin:8px 0; font-size:17px; }.b06-attention p { margin:0; color:#7d8892; font-size:12px; line-height:1.7; }.b06-attention-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:17px; }.b06-meta { color:#7d8892; font-size:12px; }.b06-badge { display:inline-flex; align-items:center; border-radius:3px; padding:4px 7px; color:#a66a16; background:#fff0d7; font-size:12px; }.b06-badge.blue { color:#416b95; background:#edf3f8; }.b06-badge.green { color:#27784e; background:#e8f5ec; }
+      .b06-running { display:grid; grid-template-columns:37px minmax(0,1fr) auto; align-items:center; gap:13px; min-height:73px; }.b06-running strong,.b06-report strong { display:block; font-size:14px; }.b06-running p { color:#7d8892; font-size:12px; margin:5px 0 0; }.b06-shortcuts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:15px; }.b06-shortcut { display:flex; align-items:flex-start; gap:15px; text-align:left; cursor:pointer; }.b06-shortcut strong { display:block; font-size:14px; margin:3px 0 7px; }.b06-shortcut p { color:#7d8892; font-size:12px; margin:0; line-height:1.6; }
+      .b06-report { width:100%; display:grid; grid-template-columns:37px minmax(0,1fr) 14px; align-items:center; gap:12px; background:transparent; border:0; border-bottom:1px solid #e3e6e3; text-align:left; padding:20px 0; cursor:pointer; }.b06-report:last-child { border-bottom:0; }.b06-report .b06-meta { display:block; margin-top:5px; }.b06-repo { display:flex; align-items:center; justify-content:space-between; gap:15px; background:#f2f4f2; padding:14px 17px; border-radius:7px; font-size:12px; }.b06-repo-note { color:#7d8892; font-size:12px; line-height:1.8; margin:14px 0; }.b06-divider { border-top:1px solid #e2e5e2; margin:17px 0; }.b06-muted { color:#7d8892; font-size:14px; line-height:1.9; padding:18px 8px; }.b06-skeleton { display:block; height:14px; border-radius:5px; background:#eef0ee; animation:b06-pulse 1.4s ease-in-out infinite alternate; }@keyframes b06-pulse { to { opacity:.5; } }
+      .b06-onboard-head { margin-bottom:25px; }.b06-onboard-grid { width:min(1080px,100%); display:grid; grid-template-columns:minmax(0,1.55fr) minmax(280px,1fr); gap:25px; margin:0 auto; }.b06-onboard-grid .b06-panel { padding:30px; }.b06-onboard-grid h2 { font-size:23px; margin:12px 0; }.b06-onboard-lead { color:#7d8892; font-size:14px; line-height:1.9; margin:0 0 24px; }.b06-eyebrow { font-size:12px; letter-spacing:1.3px; color:#b72638; }.b06-field { display:block; margin-top:20px; font-size:12px; font-weight:600; }.b06-field input { box-sizing:border-box; width:100%; height:42px; border:1px solid #dbe0dd; border-radius:5px; padding:10px 13px; font:inherit; font-weight:400; margin-top:8px; background:#fff; }.b06-field-row { display:flex; gap:12px; }.b06-field-row input { flex:1; min-width:0; }.b06-hint { color:#7d8892; font-size:12px; line-height:1.7; margin:10px 0 0; }.b06-onboard-step { display:flex; gap:13px; padding:18px 0; border-bottom:1px solid #e3e6e3; }.b06-onboard-step b { display:grid; place-items:center; width:25px; height:25px; flex:none; border-radius:50%; background:#f2f4f2; color:#78848c; font:12px Consolas; }.b06-onboard-step.done b { background:#e8f5ec; color:#278452; }.b06-onboard-step.current b { background:#fbecee; color:#bc2b3d; }.b06-onboard-step strong { font-size:12px; }.b06-onboard-step p { color:#7d8892; font-size:12px; margin:5px 0 0; }.b06-onboard-foot { display:flex; justify-content:space-between; align-items:center; gap:15px; border-top:1px solid #e3e6e3; margin-top:24px; padding-top:20px; }.b06-copy-progress { height:5px; border-radius:5px; background:#eef0ee; overflow:hidden; margin:20px 0; }.b06-copy-progress::before { display:block; content:""; width:34%; height:100%; background:#4b6b8c; animation:b06-progress 1.7s ease-in-out infinite alternate; }@keyframes b06-progress { from { transform:translateX(-100%); } to { transform:translateX(300%); } }
       @container pangea-panel (max-width:900px) { .b06-home-grid,.b06-onboard-grid { grid-template-columns:1fr; }.b06-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }.b06-home-screen .pangea-page-heading { font-size:27px !important; }
     `
 
     const styles = {
-      root: { height: '100%', overflow: 'auto', containerType: 'inline-size', containerName: 'pangea-panel', boxSizing: 'border-box', color: '#17191d', background: '#f5f6f8', fontFamily: '"Huawei Sans", "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif', fontSize: 14, WebkitFontSmoothing: 'antialiased' },
+      root: { height: '100%', overflow: 'auto', containerType: 'inline-size', containerName: 'pangea-panel', boxSizing: 'border-box', color: '#17191d', background: '#f5f6f8', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', fontSize: 14, WebkitFontSmoothing: 'antialiased' },
       sticky: { position: 'sticky', top: 0, zIndex: 5, padding: '17px 22px 0', background: 'var(--dsw-alias-bg-layer-1, #fff)', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(31,35,41,.14))' },
       header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
       headerLeft: { minWidth: 0, display: 'flex', alignItems: 'center', gap: 7 },
       title: { fontSize: 20, fontWeight: 600, letterSpacing: '-0.012em', lineHeight: 1.25, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       subline: { marginTop: 5, color: 'var(--dsw-alias-label-tertiary, #7a818b)', fontSize: 12, lineHeight: 1.45, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-      backButton: { border: 0, background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', padding: '4px 2px', cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' },
-      button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '7px 10px', cursor: 'pointer', fontSize: 13 },
+      backButton: { border: 0, background: 'transparent', color: 'var(--dsw-alias-label-secondary, inherit)', padding: '4px 2px', cursor: 'pointer', fontSize: 14, whiteSpace: 'nowrap' },
+      button: { border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 6, padding: '7px 10px', cursor: 'pointer', fontSize: 14 },
       primaryButton: { width: '100%', border: '1px solid var(--pangea-red, #c7000b)', background: 'var(--pangea-red, #c7000b)', color: '#fff', borderRadius: 8, padding: '10px 16px', cursor: 'pointer', fontSize: 14, fontWeight: 600 },
       buttonDisabled: { cursor: 'default', opacity: 0.55 },
       nav: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'minmax(72px, 1fr)', gap: 0, marginTop: 12, overflowX: 'auto' },
-      navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '11px 4px 10px', cursor: 'pointer', fontSize: 13 },
+      navButton: { border: 0, borderBottom: '2px solid transparent', background: 'transparent', color: 'var(--dsw-alias-label-tertiary, inherit)', padding: '11px 4px 10px', cursor: 'pointer', fontSize: 14 },
       navActive: { color: 'var(--dsw-alias-label-primary, inherit)', fontWeight: 700, borderBottomColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)' },
       content: { padding: '24px 28px 40px', maxWidth: 1320, margin: '0 auto' },
       homeContent: { padding: '32px 36px 42px', maxWidth: 1440, margin: '0 auto', background: '#f5f6f8' },
@@ -3719,18 +3926,18 @@ window.__ModuleLoader__.load({
       chip: { border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, padding: '5px 9px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 12 },
       search: { width: '100%', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #cfd5dc)', background: 'var(--dsw-alias-bg-layer-1, #fff)', color: 'inherit', borderRadius: 8, padding: '10px 12px', fontSize: 14, marginBottom: 8 },
       filters: { display: 'flex', gap: 5, overflowX: 'auto', paddingBottom: 5, marginBottom: 3 },
-      filter: { flex: '0 0 auto', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, background: 'transparent', color: 'inherit', padding: '5px 10px', fontSize: 13, cursor: 'pointer' },
+      filter: { flex: '0 0 auto', border: '1px solid var(--dsw-alias-border-l2, #555)', borderRadius: 999, background: 'transparent', color: 'inherit', padding: '5px 10px', fontSize: 14, cursor: 'pointer' },
       filterActive: { background: '#fff0f1', color: '#aa0010', borderColor: '#e7a4aa', fontWeight: 700 },
       text: { fontSize: 14, lineHeight: 1.65, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
       list: { margin: '6px 0 0', paddingLeft: 20, fontSize: 14, lineHeight: 1.65 },
       separator: { border: 0, borderTop: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', margin: '10px 0' },
-      empty: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 13, lineHeight: 1.6 },
-      error: { whiteSpace: 'pre-wrap', fontSize: 13, color: 'var(--dsw-alias-state-error-primary, #e66767)' },
+      empty: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 14, lineHeight: 1.6 },
+      error: { whiteSpace: 'pre-wrap', fontSize: 14, color: 'var(--dsw-alias-state-error-primary, #e66767)' },
       runButton: { width: '100%', textAlign: 'left', border: 0, borderRadius: 7, padding: '7px 8px', marginBottom: 3, cursor: 'pointer', color: 'inherit', background: 'transparent' },
       runActive: { background: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,.1))' },
       toolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 7, flexWrap: 'wrap' },
       formGrid: { display: 'grid', gap: 8, marginTop: 9 },
-      textarea: { width: '100%', minHeight: 74, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '8px 9px', outline: 'none', fontSize: 13, lineHeight: 1.5 },
+      textarea: { width: '100%', minHeight: 74, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '8px 9px', outline: 'none', fontSize: 14, lineHeight: 1.5 },
       compatibility: { borderLeft: '3px solid var(--dsw-alias-state-business-primary, #4d9ad6)' },
       stageRail: { display: 'grid', gap: 7, marginTop: 8 },
       stageItem: { display: 'grid', gridTemplateColumns: '9px minmax(0, 1fr) auto', gap: 8, alignItems: 'start', borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.13))', paddingBottom: 8 },
@@ -3751,7 +3958,7 @@ window.__ModuleLoader__.load({
       choiceButtonActive: { borderColor: 'var(--dsw-alias-state-business-primary, #4d9ad6)', background: 'var(--dsw-alias-state-business-tertiary, rgba(77,154,214,.12))' },
       evidenceChecks: { display: 'grid', gap: 5, marginTop: 7 },
       formGrid: { display: 'grid', gap: 7, marginTop: 8 },
-      textarea: { width: '100%', minHeight: 86, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '8px 9px', outline: 'none', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 13 },
+      textarea: { width: '100%', minHeight: 86, resize: 'vertical', boxSizing: 'border-box', border: '1px solid var(--dsw-alias-border-l2, #555)', background: 'var(--dsw-alias-bg-layer-2, transparent)', color: 'inherit', borderRadius: 7, padding: '8px 9px', outline: 'none', fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)', fontSize: 14 },
       caseSelect: { display: 'flex', alignItems: 'flex-start', gap: 8 },
       caseDetailButton: { flex: 1, minWidth: 0, border: 0, background: 'transparent', color: 'inherit', padding: 0, textAlign: 'left', cursor: 'pointer' },
       evidenceCheck: { display: 'flex', alignItems: 'flex-start', gap: 7, border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.16))', borderRadius: 7, padding: '7px 8px', cursor: 'pointer', fontSize: 12, lineHeight: 1.4 },
@@ -3764,12 +3971,12 @@ window.__ModuleLoader__.load({
       timelineItem: { position: 'relative', padding: '0 0 13px 18px', borderLeft: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', marginLeft: 4 },
       timelineDot: { position: 'absolute', left: -4, top: 4, width: 7, height: 7, borderRadius: '50%', background: 'var(--dsw-alias-state-business-primary, #4d9ad6)', boxShadow: '0 0 0 3px var(--dsw-alias-bg-base, #111)' },
       timelineTime: { color: 'var(--dsw-alias-label-tertiary, #888)', fontSize: 12, fontVariantNumeric: 'tabular-nums' },
-      timelineTitle: { marginTop: 2, fontSize: 13, fontWeight: 600, lineHeight: 1.45 },
+      timelineTitle: { marginTop: 2, fontSize: 14, fontWeight: 600, lineHeight: 1.45 },
       timelineDetail: { marginTop: 3, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 12, lineHeight: 1.5, overflowWrap: 'anywhere' },
       eyebrow: { color: 'var(--dsw-alias-state-business-primary, #4d9ad6)', fontSize: 12, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' },
       decisionHero: { border: '1px solid var(--dsw-alias-border-l2, #dfe3e8)', borderLeft: '3px solid var(--pangea-red, #c7000b)', borderRadius: 10, padding: 22, marginBottom: 18, background: 'var(--dsw-alias-bg-layer-1, #fff)' },
       decisionTitle: { marginTop: 5, fontSize: 18, fontWeight: 780, lineHeight: 1.3, letterSpacing: '-0.02em' },
-      decisionHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 13, lineHeight: 1.55 },
+      decisionHint: { marginTop: 6, color: 'var(--dsw-alias-label-secondary, inherit)', fontSize: 14, lineHeight: 1.55 },
       decisionBand: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 14, marginTop: 18 },
       decisionItem: { minWidth: 0, borderTop: '1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))', paddingTop: 7 },
       decisionValue: { marginTop: 3, fontSize: 14, fontWeight: 600, lineHeight: 1.4, overflowWrap: 'anywhere' },
@@ -3782,7 +3989,7 @@ window.__ModuleLoader__.load({
       technical: { border: '1px dashed var(--dsw-alias-border-l2, rgba(127,127,127,.32))', borderRadius: 8, padding: 10, marginBottom: 11, background: 'transparent' },
       homeHero: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 24, padding: '4px 4px 26px', marginBottom: 0 },
       homeTitle: { fontSize: 32, fontWeight: 720, lineHeight: 1.15, letterSpacing: '-0.045em', color: '#14161a' },
-      homeLead: { maxWidth: 650, marginTop: 9, color: '#747b85', fontSize: 13, lineHeight: 1.55 },
+      homeLead: { maxWidth: 650, marginTop: 9, color: '#747b85', fontSize: 14, lineHeight: 1.55 },
       metricGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 16, marginBottom: 18 },
       metricCard: { position: 'relative', minHeight: 110, display: 'grid', gridTemplateColumns: '48px minmax(0, 1fr)', alignItems: 'center', columnGap: 13, border: '1px solid #dce1e6', borderRadius: 9, padding: '17px 16px', background: '#fff', boxShadow: '0 1px 2px rgba(20,29,40,.035), 0 8px 24px rgba(20,29,40,.035)', boxSizing: 'border-box' },
       metricIcon: { width: 48, height: 48, display: 'grid', placeItems: 'center', borderRadius: 11, background: 'color-mix(in srgb, currentColor 10%, white)' },
@@ -3818,13 +4025,13 @@ window.__ModuleLoader__.load({
       environmentFieldGrid: { display: 'grid', gridTemplateColumns: 'minmax(0, 1.25fr) minmax(0, .85fr)', gap: 13 },
       environmentField: { minWidth: 0 },
       environmentFieldWide: { gridColumn: '1 / -1' },
-      environmentLabel: { display: 'block', marginBottom: 7, color: '#343a43', fontSize: 13, fontWeight: 620 },
+      environmentLabel: { display: 'block', marginBottom: 7, color: '#343a43', fontSize: 14, fontWeight: 620 },
       environmentInput: { width: '100%', height: 42, boxSizing: 'border-box', border: '1px solid #cfd5dc', borderRadius: 5, padding: '0 12px', outline: 'none', color: '#272b31', background: '#fff', fontSize: 14 },
       environmentConnectionFoot: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginTop: 16 },
       environmentTestState: { color: '#7a818c', fontSize: 12 },
       environmentActions: { display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 2 },
-      environmentSecondaryButton: { minWidth: 74, height: 36, border: '1px solid #cfd4da', borderRadius: 5, padding: '0 16px', color: '#343a43', background: '#fff', cursor: 'pointer', fontSize: 13 },
-      environmentPrimaryButton: { minWidth: 102, height: 36, border: '1px solid #c7000b', borderRadius: 5, padding: '0 18px', color: '#fff', background: '#c7000b', cursor: 'pointer', fontSize: 13, fontWeight: 650 },
+      environmentSecondaryButton: { minWidth: 74, height: 36, border: '1px solid #cfd4da', borderRadius: 5, padding: '0 16px', color: '#343a43', background: '#fff', cursor: 'pointer', fontSize: 14 },
+      environmentPrimaryButton: { minWidth: 102, height: 36, border: '1px solid #c7000b', borderRadius: 5, padding: '0 18px', color: '#fff', background: '#c7000b', cursor: 'pointer', fontSize: 14, fontWeight: 650 },
       environmentAdvanced: { gridColumn: '1 / -1', marginTop: 1, color: '#59616c', fontSize: 12 },
       environmentList: { display: 'grid', gap: 9 },
       environmentListItem: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'center', gap: 14, padding: '13px 14px', border: '1px solid #e1e5e9', borderRadius: 7, background: '#fff' },
@@ -3839,7 +4046,7 @@ window.__ModuleLoader__.load({
       onboardingStepTitle: { color: '#292d33', fontSize: 14, fontWeight: 680, marginBottom: 4 },
       repositoryPicker: { marginTop: 6, border: '1px solid #dce1e6', borderRadius: 9, padding: 18, background: '#fafbfc' },
       repositoryPickerRow: { display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto', alignItems: 'end', gap: 14 },
-      repositoryPath: { minHeight: 42, display: 'flex', alignItems: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid #cfd5dc', borderRadius: 5, padding: '0 12px', color: '#4e5661', background: '#fff', fontSize: 13, boxSizing: 'border-box' },
+      repositoryPath: { minHeight: 42, display: 'flex', alignItems: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', border: '1px solid #cfd5dc', borderRadius: 5, padding: '0 12px', color: '#4e5661', background: '#fff', fontSize: 14, boxSizing: 'border-box' },
       repositoryActions: { display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 12, marginTop: 22 },
       repositoryHint: { marginTop: 12, color: '#7a828d', fontSize: 12, lineHeight: 1.6 },
     }
@@ -4068,7 +4275,7 @@ window.__ModuleLoader__.load({
         : String(item)
       return h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, title), h(ordered ? 'ol' : 'ul', { style: styles.list }, items.map((item, index) => h('li', { key: `${index}:${display(item)}` }, display(item)))))
     }
-    function chip(label, onClick) { return h('button', { type: 'button', style: styles.chip, onClick }, label) }
+    function chip(label, onClick, key = label) { return h('button', { key, type: 'button', style: styles.chip, onClick }, label) }
     function navType(screen) {
       if (screen.type === 'home') return 'home'
       if (screen.type === 'tasks') return 'tasks'
@@ -4093,7 +4300,8 @@ window.__ModuleLoader__.load({
         ...(form.flow_baseline ? { flow_baseline: { ...form.flow_baseline } } : {}),
         repository: form.repository,
         target: form.target,
-        source_scope: String(form.source_scope_text ?? '').split(/[\n,]/).map(value => value.trim()).filter(Boolean),
+        ...(form.scope_preview_id ? { scope_preview_id: form.scope_preview_id, expected_scope_revision: form.expected_scope_revision } : {}),
+        source_scope: String(form.source_scope_text ?? '').split(/\r?\n/).map(value => value.trim()).filter(Boolean),
         ...(String(form.context_scope_text ?? '').trim() ? { context_scope: String(form.context_scope_text).split(/[\n,]/).map(value => value.trim()).filter(Boolean) } : {}),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'module-analysis',
@@ -4450,6 +4658,7 @@ window.__ModuleLoader__.load({
           })
         }
         const wheel = event => {
+          if (!event.ctrlKey) return
           event.preventDefault()
           event.stopPropagation()
           const rect = canvas.getBoundingClientRect()
@@ -4479,8 +4688,12 @@ window.__ModuleLoader__.load({
         h('span', { 'aria-label': `${label}缩放比例`, style: { minWidth: 42, textAlign: 'center' } }, `${Math.round(camera.scale * 100)}%`),
         h('button', { type: 'button', 'aria-label': `放大${label}`, onClick: () => change(1.25) }, '+'),
         h('button', { type: 'button', 'aria-label': `${label}原始大小`, onClick: () => setCamera(centered(1, false)) }, '100%'),
-        h('button', { type: 'button', 'aria-label': `适应${label}画布`, onClick: () => setCamera(centered(fitScale(sizeRef.current), true)) }, '适应画布'))
-      const panProps = { ref: canvasRef, tabIndex: 0, style: { ...GRAPH_CANVAS_STYLE, cursor: dragging ? 'grabbing' : 'grab' }, 'aria-label': `${label}画布，滚轮缩放，拖拽移动`,
+        h('button', { type: 'button', 'aria-label': `适应${label}画布`, onClick: () => setCamera(centered(fitScale(sizeRef.current), true)) }, '适应画布'),
+        h('button', { type: 'button', 'aria-label': `全屏阅读${label}`, onClick: async () => {
+          const element = canvasRef.current?.closest?.('section') ?? canvasRef.current?.parentElement
+          try { if (document.fullscreenElement) await document.exitFullscreen(); else await element?.requestFullscreen?.() } catch {}
+        } }, '全屏阅读'))
+      const panProps = { ref: canvasRef, className: 'pangea-graph-canvas', tabIndex: 0, style: { ...GRAPH_CANVAS_STYLE, cursor: dragging ? 'grabbing' : 'grab' }, 'aria-label': `${label}画布，Ctrl加滚轮缩放，普通滚轮滚动页面，拖拽移动`,
         onPointerDown: event => {
           if (event.button !== 0 || dragRef.current) return
           suppressClickRef.current = false
@@ -4502,7 +4715,12 @@ window.__ModuleLoader__.load({
         } }
       const sized = tree => ({ ...tree, attrs: { ...tree.attrs, width: '100%', height: '100%', viewBox: `0 0 ${size.width} ${size.height}`, preserveAspectRatio: 'none', style: { display: 'block' } },
         children: [{ tag: 'g', attrs: { transform: `translate(${camera.x} ${camera.y}) scale(${camera.scale})` }, children: tree.children }] })
-      return { controls, panProps, sized }
+      const focus = bounds => {
+        if (!bounds) return
+        const size = sizeRef.current, scale = Math.min(3, (size.width - 32) / Math.max(1, bounds.width), (size.height - 32) / Math.max(1, bounds.height))
+        setCamera({ x: size.width / 2 - (bounds.x + bounds.width / 2) * scale, y: size.height / 2 - (bounds.y + bounds.height / 2) * scale, scale, fit: false })
+      }
+      return { controls, panProps, sized, focus }
     }
     function warningList(warnings, label) {
       return warnings?.length ? h('ul', { 'aria-label': label, style: { color: '#8a5a00', fontSize: 12, margin: '6px 0', paddingLeft: 18 } },
@@ -4586,7 +4804,7 @@ window.__ModuleLoader__.load({
       const active = selection.key === identity ? selection : { node: '', path: '', edge: '' }
       const selected = active.node, pathId = active.path, expandAll = expandedKey === identity
       const layout = layoutFlow(graph, { expandAll, activePathId: pathId })
-      const { controls, panProps, sized } = useGraphZoom('流程图', layout.width, layout.height, flow?.flow_id, viewport)
+      const { controls, panProps, sized, focus } = useGraphZoom('流程图', layout.width, layout.height, flow?.flow_id, viewport)
       if (!layout.nodes.length) {
         return h('section', { className: 'pangea-flow-graph', 'aria-label': '流程图' },
           h('div', { role: 'status', className: 'pangea-diagram-caption' }, '当前流程没有可绘制节点。'), warningList(layout.warnings, '流程图提示'))
@@ -4619,6 +4837,12 @@ window.__ModuleLoader__.load({
             h('option', { value: '' }, highlightBranchIds.length ? '所选分支' : '全部路径'),
             paths.map(path => h('option', { key: path.path_id, value: path.path_id }, routeLabel(path)))) : null,
           controls,
+          h('button', { type: 'button', disabled: !pathId, onClick: () => {
+            const members = new Set((graph.paths || []).find(item => item.path_id === pathId)?.node_ids || [])
+            const nodes = layout.nodes.filter(item => members.has(item.id)); if (!nodes.length) return
+            const x = Math.min(...nodes.map(item => item.x)), y = Math.min(...nodes.map(item => item.y))
+            focus({ x, y, width: Math.max(...nodes.map(item => item.x + (item.width || item.w || 120))) - x, height: Math.max(...nodes.map(item => item.y + (item.height || item.h || 60))) - y })
+          } }, '聚焦所选路径'),
           layout.collapsed.count || expandAll ? h('button', { type: 'button', onClick: () => setExpandedKey(expandAll ? '' : identity) }, expandAll ? '折叠次要节点' : '展开全部') : null,
           selected || pathId || active.edge ? h('button', { type: 'button', onClick: () => { setSelection({ key: identity, node: '', path: '', edge: '' }) } }, '清除选择') : null,
           h('button', { type: 'button', onClick: () => exportSvgTree(tree, name, 'svg', graph) }, '导出 SVG'),
@@ -4728,21 +4952,6 @@ window.__ModuleLoader__.load({
         diagramRecordDetails(raw))
     }
 
-    // Captions retain every character, including long identifiers. Conservative
-    // font metrics reserve a full em for wide Latin glyphs and 1.1 em for CJK.
-    function wrapDiagramCaption(value, width, fontSize = 13) {
-      const lines = []
-      let line = '', used = 0
-      for (const char of String(value ?? '').replace(/\r\n?/g, '\n')) {
-        if (char === '\n') { lines.push(line); line = ''; used = 0; continue }
-        const glyphWidth = fontSize * (char.codePointAt(0) > 127 ? 1.1 : /[MW@#%&]/.test(char) ? 1 : 0.65)
-        if (line && used + glyphWidth > width) { lines.push(line); line = ''; used = 0 }
-        line += char; used += glyphWidth
-      }
-      if (line || !lines.length) lines.push(line)
-      return lines
-    }
-
     /** call-graph-v1 view: function nodes, merged call edges (×N) and per-function variable flow. */
     function CallGraphView({ graph, status = 'ok', errors = [], svgUrl = '', authoredStatus = '', raw, viewport, onSource }) {
       const identity = JSON.stringify([graph, authoredStatus])
@@ -4752,8 +4961,7 @@ window.__ModuleLoader__.load({
       const layout = layoutCallGraph(graph)
       const captions = [authoredStatus === 'partial' ? '本次分析声明：函数与变量关系部分可用' : '', ...errors, ...(graph?.notes ?? []),
         ...(graph?.variables ?? []).map(item => `${item.function} · 变量 ${item.name}：读取 ${item.reads.join(', ') || '未记录'}；计算 ${item.compute || '未记录'}；写入 ${item.writes || '未记录'}${item.line ? `；行 ${item.line}` : ''}`)].filter(Boolean)
-      const captionLines = captions.flatMap(value => wrapDiagramCaption(value, layout.width - 24))
-      const height = layout.height + (captionLines.length ? 24 + captionLines.length * 20 : 0)
+      const height = layout.height
       const { controls, panProps, sized } = useGraphZoom('函数调用图', layout.width, height, identity, viewport)
       const notice = errors.length ? h('div', { role: 'status', 'aria-label': '调用图结构问题', className: 'pangea-diagram-caption' },
         h('strong', null, status === 'invalid' ? '调用图无法绘制。' : '调用图部分可用，部分结构需要确认。'), warningList(errors, '调用图结构问题明细')) : null
@@ -4774,7 +4982,7 @@ window.__ModuleLoader__.load({
       }
       const annotatedTree = annotate(baseTree)
       const tree = { ...baseTree, attrs: { ...baseTree.attrs, height, viewBox: `0 0 ${layout.width} ${height}` },
-        children: [{ tag: 'metadata', children: [JSON.stringify(raw ?? { ...graph, status: authoredStatus || status, errors })] }, ...annotatedTree.children, ...captionLines.map((line, index) => ({ tag: 'text', attrs: { 'data-diagram-caption': index, x: 12, y: layout.height + 20 + index * 20, fill: '#8a5a00', 'font-size': 13 }, children: [line] }))] }
+        children: [{ tag: 'metadata', children: [JSON.stringify(raw ?? { ...graph, status: authoredStatus || status, errors })] }, ...annotatedTree.children] }
       const choose = id => setSelection({ identity, id, variable: '' })
       const source = item => item?.file ? diagramSource(`${item.file}${item.line ? `:${item.line}` : ''}`, `函数与变量 · ${fn?.label || item.from || ''}`, onSource) : '未提供源码位置'
       const cell = { padding: 4, borderBottom: '1px solid #eef1ec', verticalAlign: 'top' }
@@ -4786,6 +4994,7 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', onClick: () => exportSvgTree(tree, 'call-graph', 'png') }, '导出 PNG'),
           h('button', { type: 'button', onClick: () => exportDiagramHtml(tree, 'call-graph', graph?.title || '函数与变量关系', raw ?? { ...graph, status: authoredStatus || status, errors }) }, '导出 HTML')),
         h('div', panProps, svgTreeToReact(sized(tree), 'svg', choose)),
+        captions.length ? h('details', { className: 'pangea-diagram-notes' }, h('summary', null, '函数与变量说明'), captions.map((value, index) => h('p', { key: index }, value))) : null,
         fn ? h('div', { 'aria-label': '函数变量流', style: { marginTop: 12 } },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } }, h('strong', null, fn.label),
             h('button', { type: 'button', className: 'b04-link', onClick: () => choose('') }, '关闭')),
@@ -4976,7 +5185,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '.', context_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '', context_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
       React.useEffect(() => {
         if (!cwd || screen.type !== 'create') return
         try {
@@ -5059,6 +5268,11 @@ window.__ModuleLoader__.load({
         }
         return loadAnalysisAgentModels({ providerId: createForm.provider_id, cwd, onState: setAnalysisAgentModels })
       }, [cwd, visible, screen.type, createForm.provider_id, analysisProviderRegistered, analysisAgentModelRefresh])
+      React.useEffect(() => {
+        if (!caseExportOpen || typeof document === 'undefined') return
+        const previous = document.activeElement
+        return () => { if (previous?.isConnected) previous.focus?.({ preventScroll: true }) }
+      }, [caseExportOpen])
       const refreshAnalysisAgentModels = () => {
         setAnalysisAgentModels({ cwd, provider_id: createForm.provider_id, status: 'loading' })
         setAnalysisAgentModelRefresh(value => value + 1)
@@ -5530,7 +5744,7 @@ window.__ModuleLoader__.load({
           repository: selectedCurrent?.repository ?? selectedTask.repository,
           target: selectedCurrent?.target ?? selectedTask.target,
           startedAt: selectedCurrent?.started_at ?? selectedTask.launch_started_at,
-          sourceFileCount: selectedCurrent?.input_materials?.length ?? 0,
+          sourceFileCount: selectedCurrent?.source_snapshot?.file_count ?? null,
           sourceFrozen: Boolean(selectedCurrent?.source_snapshot?.manifest_path),
           tabCounts: { flows: businessFlows.length, risks: risks.length, cases: testCases.length },
           discussionContext: {
@@ -5588,13 +5802,62 @@ window.__ModuleLoader__.load({
           onOpenSource: location => openSidebarFile(location, '源码依据'),
         } : null }))
       }, [current, error, health?.status, monitorPersistenceDegraded, pageMode, screen.id, screen.type, selectedTask, visible, diagramViews, conversationPending, workbench?.compatibility?.compatible, workbench?.launch_log?.events, workbenchError])
+      const [caseFilters, setCaseFilters] = React.useState({ unit: '', type: '', readiness: '', review: '' })
+      const [casePage, setCasePage] = React.useState(1)
+      const [caseReview, setCaseReview] = React.useState(null)
+      const [reviewError, setReviewError] = React.useState('')
+      const [reviewSaving, setReviewSaving] = React.useState(false)
+      const [caseExportScope, setCaseExportScope] = React.useState('all')
+      const [caseReviewOrder, setCaseReviewOrder] = React.useState([])
+      const reviewScope = `${cwd}\u0000${snapshot?.data_root ?? ''}\u0000${current?.run_id ?? ''}`
+      const activeReviewScope = React.useRef(reviewScope)
+      activeReviewScope.current = reviewScope
+      const reviews = caseReview?.scope === reviewScope ? caseReview : null
+      const reviewByKey = Object.fromEntries((reviews?.cases ?? []).filter(row => row.case_key).map(row => [row.case_key, row]))
+      const unitOrder = new Map(workflow.units.map((unit, index) => [unit.unit_id, index]))
+      const orderedCases = [...testCases].sort((a, b) => (unitOrder.get(a.unit_id) ?? Number.MAX_SAFE_INTEGER) - (unitOrder.get(b.unit_id) ?? Number.MAX_SAFE_INTEGER))
+      const filteredCaseRows = filterTestCases(orderedCases, { ...caseFilters, query: caseQuery }, reviewByKey)
+      const acceptReview = (value, scopeKey) => setCaseReview(previous => previous?.scope === scopeKey && previous.revision > value.revision ? previous : { ...value, scope: scopeKey })
+      React.useEffect(() => {
+        setCaseReview(null); setReviewSaving(false); setReviewError(''); setCaseFilters({ unit: '', type: '', readiness: '', review: '' }); setCasePage(1); setCaseReviewOrder([]); setSelectedCaseIds([])
+      }, [reviewScope])
+      React.useEffect(() => {
+        if (!current?.run_id || !snapshot?.data_root) return
+        const controller = new AbortController(), scopeKey = reviewScope
+        void requestCaseReviews({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, signal: controller.signal }).then(value => {
+          if (!controller.signal.aborted && activeReviewScope.current === scopeKey) acceptReview(value, scopeKey)
+        }).catch(reason => { if (reason.name !== 'AbortError' && activeReviewScope.current === scopeKey) setReviewError(reason.message) })
+        return () => controller.abort()
+      }, [reviewScope, current?.publication?.revision, testCases])
+      React.useEffect(() => { setCasePage(1) }, [caseQuery, caseFilters.unit, caseFilters.type, caseFilters.readiness, caseFilters.review])
+      async function saveReview(item, decision) {
+        const key = caseIdentity(item), row = reviewByKey[key]
+        if (!row || reviewSaving || !reviews) return
+        const scopeKey = reviewScope
+        setReviewSaving(true); setReviewError('')
+        try {
+          const value = await requestCaseReviews({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, input: { expected_revision: reviews.revision, case_key: key, expected_content_hash: row.content_hash, decision } })
+          if (activeReviewScope.current === scopeKey) acceptReview(value, scopeKey)
+        } catch (reason) {
+          if (activeReviewScope.current === scopeKey) {
+            setReviewError(reason.message)
+            try { const value = await requestCaseReviews({ cwd, dataRoot: snapshot.data_root, runId: current.run_id }); if (activeReviewScope.current === scopeKey) acceptReview(value, scopeKey) } catch {}
+          }
+        } finally { if (activeReviewScope.current === scopeKey) setReviewSaving(false) }
+      }
+      function openCaseDetail(key) { setCaseReviewOrder(filteredCaseRows.map(item => caseKeyByItem.get(item))); navigate({ type: 'case', id: key }) }
+      const [scopePreview, setScopePreview] = React.useState(null)
+      const createScopeKey = JSON.stringify([cwd, workbench?.data_root, createForm.repository, createForm.source_scope_text])
+      const validScopePreview = scopePreview?.key === createScopeKey && scopePreview.preview_state === 'complete' ? scopePreview : null
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
       const methodologyDetailError = workbench?.run_detail?.run_id === current?.run_id && workbench?.run_detail?.status === 'error'
         ? workbench.run_detail.error : ''
       const methodologyManifests = methodologyDetailAvailable ? workbench.run.methodologies : []
       const methodologiesByUnit = new Map(methodologyManifests.map(manifest => [manifest.unit_id, Array.isArray(manifest.items) ? manifest.items : []]))
       const riskEntries = risks.map((item, index) => [hasText(item.risk_id) ? item.risk_id : `__risk__:${index}`, item])
-      const caseEntries = testCases.map((item, index) => [hasText(item.test_case_id) ? item.test_case_id : `__case__:${index}`, item])
+      const identityCounts = new Map()
+      for (const item of testCases) { const key = caseIdentity(item); if (key) identityCounts.set(key, (identityCounts.get(key) || 0) + 1) }
+      const caseEntries = testCases.map((item, index) => [identityCounts.get(caseIdentity(item)) === 1 ? caseIdentity(item) : `__case__:${index}`, item])
       const riskById = new Map(riskEntries)
       const caseById = new Map(caseEntries)
       const riskKeyByItem = new Map(riskEntries.map(([key, item]) => [item, key]))
@@ -5648,6 +5911,7 @@ window.__ModuleLoader__.load({
         setSourceDrawerOpen(false); setCaseExportOpen(false)
         setHistory(previous => [...previous, saved]); setScreen(next)
       }, [screen, viewportScopeKey])
+      function selectReviewCase(id) { const next = { type: 'case', id }; pendingViewportRef.current = { screen: next, scopeKey: viewportScopeKey, value: null }; setSourceDrawerOpen(false); setScreen(next) }
       const jump = React.useCallback((type) => { pendingViewportRef.current = null; setSourceDrawerOpen(false); setCaseExportOpen(false); setScreen({ type }); setHistory([]) }, [])
       const goBack = React.useCallback(() => {
         const target = analysisBackTarget(screen.type, { pageMode, selectedTaskId, hasHistory: history.length > 0, initialScreen })
@@ -6172,6 +6436,7 @@ window.__ModuleLoader__.load({
         navigate({ type: 'repository-import' })
       }
       async function submitNewRun() {
+        if (!validScopePreview?.matched_file_count) { showActionNotice('请先预览并确认源码范围。', true); return }
         if (pageMode !== 'analysis' || !cwd || creatingRun || coverageQueryBusy || workbench?.compatibility?.compatible !== true) return
         const execution = analysisExecutionState(createForm, workbench?.acp_providers, analysisAgentModels, cwd)
         if (!execution.ready) { showActionNotice(execution.message, true); return }
@@ -6182,7 +6447,7 @@ window.__ModuleLoader__.load({
             cwd,
             action: 'task-create',
             payload: {
-              input: buildAnalysisRequest({ ...createForm, agent_model: execution.model, agent_catalog_id: execution.catalogId,
+              input: buildAnalysisRequest({ ...createForm, scope_preview_id: validScopePreview.preview_id, expected_scope_revision: validScopePreview.scope_revision, agent_model: execution.model, agent_catalog_id: execution.catalogId,
                 ...(workbench?.capabilities?.source_first?.analysis_options_by_profile?.['behavior-test-v2'] ? {
                   analysis_profile: 'behavior-test-v2',
                   asset_revisions: Object.fromEntries(createForm.asset_ids.map(id => [id, (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision]).filter(([, revision]) => revision)),
@@ -6208,6 +6473,7 @@ window.__ModuleLoader__.load({
           setHistory([])
           showActionNotice(`任务“${createdTask.title}”已创建，正在准备分析。`)
         } catch (reason) {
+          if (reason.statusCode === 409 && !createdTask) { setScopePreview(null); setScreen(value => ({ ...value, createStep: 1 })) }
           showActionNotice(`创建失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
         } finally {
           setCreatingRun(false)
@@ -6294,7 +6560,7 @@ window.__ModuleLoader__.load({
         return h('section', { className: 'b03-overview-card', style: { marginBottom: 18 }, 'aria-label': '增量分析来源' },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } }, runIcon('GitBranch'),
             h('strong', null, origin.mode === 'changed-files' ? '基于源码变更的增量分析' : '基于已有结果的定向补充')),
-          h('p', { style: { margin: '8px 0', fontSize: 13, lineHeight: 1.8, whiteSpace: 'pre-wrap' } }, origin.instruction),
+          h('p', { style: { margin: '8px 0', fontSize: 14, lineHeight: 1.8, whiteSpace: 'pre-wrap' } }, origin.instruction),
           origin.changed_paths?.length ? h('p', { style: { fontSize: 12, color: '#70767d', overflowWrap: 'anywhere' } }, `变更文件：${origin.changed_paths.join('、')}`) : null,
           h('button', { type: 'button', className: 'b03-task-run', onClick: () => {
             const parent = taskItems.find(task => task.task_id === selectedTask.source_task_id && task.run_id === origin.parent_run_id
@@ -6419,7 +6685,7 @@ window.__ModuleLoader__.load({
           const launched = await launchExecution({
             workspace_id: scope?.workspaceId ?? scope?.workspace?.workspaceId,
             analysis_run_id: current.run_id,
-            test_case_ids: selectedCaseIds,
+            test_case_ids: testCases.filter(item => selectedCaseIds.includes(caseIdentity(item))).map(item => item.test_case_id),
             environment_id: selectedEnvironment,
             data_root: snapshot.data_root,
           })
@@ -6434,7 +6700,8 @@ window.__ModuleLoader__.load({
       async function exportCurrentCases(format = 'csv') {
         if (!current?.run_id || !snapshot?.data_root) return false
         try {
-          const result = await requestRunExport({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, format })
+          if (caseExportScope !== 'all' && !reviews) throw new Error('评审范围尚未读取，请刷新后重新确认导出范围。')
+          const result = await requestRunExport({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, format, ...(reviews ? { scope: caseExportScope, caseKeys: caseExportScope === 'filtered' ? filteredCaseRows.map(caseIdentity) : selectedCaseIds, caseSetRevision: reviews.case_set_revision, reviewRevision: reviews.revision } : {}) })
           if (!result.blob?.size) throw new Error('导出服务未返回文件内容')
           const objectUrl = URL.createObjectURL(result.blob)
           const anchor = document.createElement('a')
@@ -6455,7 +6722,7 @@ window.__ModuleLoader__.load({
         }
       }
       async function copySelectedCases() {
-        const selected = testCases.filter(item => selectedCaseIds.includes(item.test_case_id))
+        const selected = testCases.filter(item => selectedCaseIds.includes(caseIdentity(item)))
         if (selected.length === 0) {
           showActionNotice('请先选择至少一条已编号用例。', true)
           return
@@ -6667,22 +6934,7 @@ window.__ModuleLoader__.load({
         }, refreshBusy ? '刷新中…' : '刷新')
       }
 
-      const header = h('div', { style: styles.sticky },
-        h('div', { className: 'pangea-panel-header', style: styles.header },
-          h('div', { style: styles.headerLeft },
-            screen.type !== 'home' && screen.type !== 'tasks' ? h('button', { type: 'button', style: styles.backButton, onClick: () => {
-              if (!history.length && pageMode === 'analysis' && ['overview', 'risks', 'cases', 'review'].includes(screen.type)) jump('tasks')
-              else goBack()
-            } }, '← 返回') : null,
-            h('div', { style: { minWidth: 0 } },
-              h('div', { style: styles.statusRow }, h('span', { style: styles.statusDot, 'aria-hidden': true }), h('div', { role: screen.type === 'create' ? undefined : 'heading', 'aria-level': screen.type === 'create' ? undefined : 1, style: styles.title }, screenTitle)),
-              h('div', { style: screen.type === 'create' ? { ...styles.subline, fontSize: 14 } : styles.subline }, screen.type === 'create' ? '选择仓库、分析目标与执行方式' : selectedTask
-                ? selectedTask.title
-                : current?.run_id ? `Run ${current.run_id}` : 'PANGEA 测试平台'))),
-          h('div', { style: styles.chips },
-            pageMode === 'analysis' && screen.type !== 'create' ? h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, style: { ...styles.button, ...(workbench?.compatibility?.compatible !== true ? styles.buttonDisabled : {}) }, onClick: () => jump('create') }, '新建分析') : null,
-            renderRefreshButton())),
-        navigation)
+      const header = h('div', { style: styles.sticky }, pageHeader({ title: screenTitle, task: selectedTask, current, ui: ctx.pangea?.ui, onBack: screen.type === 'environment' ? undefined : goBack, actions: renderRefreshButton() }), navigation)
 
       function countCheck(key) { return health?.count_checks?.[key] }
       function displayCount(key, number) {
@@ -6847,14 +7099,15 @@ window.__ModuleLoader__.load({
         const compatible = workbench?.compatibility?.compatible === true
         const execution = analysisExecutionState(createForm, providerOptions, analysisAgentModels, cwd)
         const executionReady = execution.ready
-        const sourceScope = createForm.source_scope_text.split(/[\n,]/).map(value => value.trim()).filter(Boolean)
+        const sourceScope = createForm.source_scope_text.split(/\r?\n/).map(value => value.trim()).filter(Boolean)
         const selectedCoverage = createForm.asset_ids.some(id => (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.asset_type === 'coverage' && (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.status === 'available')
         const coverageReady = createForm.scenario !== 'coverage-analysis' || (sceneOptions ? selectedCoverage : (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim()))
         const submitBlockReason = !compatible ? '等待工作台就绪后即可创建分析。'
           : !supported('scenarios', createForm.scenario) || !supported('modes', createForm.mode) ? '请选择当前环境支持的分析场景与模式。'
           : !createForm.repository ? '请先选择源码仓库。'
           : !createForm.target.trim() ? '请填写本次分析目标。'
-          : sourceScope.length === 0 && (sceneOptions || createForm.scenario !== 'coverage-analysis') ? '请填写源码冻结范围，使用 . 可选择整个仓库。'
+          : sourceScope.length === 0 ? '请选择源码范围；分析整个仓库请明确选择根目录。'
+          : !validScopePreview?.matched_file_count ? '请预览并确认命中的源码文件。'
           : sceneOptions && createForm.asset_ids.some(id => !(assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision) ? '所选资产版本尚未读取，请刷新资产后重新选择。'
           : !coverageReady ? '请先查询、导入或选择可用覆盖率资产。'
           : unavailableProvider ? unavailableProviderMessage
@@ -6882,7 +7135,7 @@ window.__ModuleLoader__.load({
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
-        const targetReady = Boolean(createForm.repository && createForm.target.trim() && sourceScope.length && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
+        const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && sourceScope.length && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
         const inputsReady = coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
         const go = (next, nextView = 'inputs') => {
           if (creatingRun) return
@@ -6907,7 +7160,7 @@ window.__ModuleLoader__.load({
         let context = panel(h(React.Fragment, null,
           h('div', { className: 'create-side-title' }, '本次分析'), badge(createForm.repository || '待选择仓库', 'neutral'),
           h('h3', { className: 'create-context-title' }, createForm.target || '待填写分析目标'), h('p', { className: 'create-copy' }, scene[2]),
-          h('dl', { className: 'key-value' }, ['分析场景', scene[0], '分析模式', createForm.mode === 'depth' ? '标准型' : '速度型', '源码范围', `${sourceScope.length} 项范围 · 创建时冻结`, '输入资料', step > 1 ? `${selectedAssets.length} 份已选资产` : '下一步选择', '执行 Agent', step > 2 ? selectedProviderLabel : '待选择'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
+          h('dl', { className: 'key-value' }, ['分析场景', scene[0], '分析模式', createForm.mode === 'depth' ? '标准型' : '速度型', '源码范围', validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库' : '指定范围'} · ${validScopePreview.matched_file_count} 个源码文件` : '尚未预览命中文件', '输入资料', step > 1 ? `${selectedAssets.length} 份已选资产` : '下一步选择', '执行 Agent', step > 2 ? selectedProviderLabel : '待选择'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
           h('div', { className: 'create-scene-focus' }, h('strong', null, '本次分析重点'), h('p', null, scene[3]), badge(createForm.scenario === 'coverage-analysis' ? '覆盖率输入必需' : '覆盖率输入可选', createForm.scenario === 'coverage-analysis' ? 'warn' : 'neutral')),
           step === 1 && h(React.Fragment, null, h('div', { className: 'create-subhead' }, '分析模式'), field('', h('select', { 'aria-label': '分析模式', value: createForm.mode, onChange: event => update('mode', event.target.value) }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '标准型 · 独立盲审 + 对照复核'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型 · 直接审核，跳过盲审')))),
           step === 3 && !executionReady && h('div', { style: { marginTop: 18 } }, badge('执行设置待完成', 'warn')), h('div', { className: 'divider' }), h('div', { className: 'create-check-item' }, runIcon('ShieldCheck'), h('span', null, '每次运行将保存独立的源码快照与资产版本。'))), 'create-side')
@@ -6929,6 +7182,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'create-subhead' }, '分析场景 ', h('span', { className: 'small muted', style: { fontWeight: 400 } }, '选择本次分析的重点')),
           h('div', { className: 'choice-grid create-scenes', role: 'group', 'aria-label': '分析场景' }, Object.entries(scenes).map(([id, item]) => h('button', { key: id, type: 'button', className: `choice create-option ${createForm.scenario === id ? 'selected' : ''}`, 'aria-pressed': createForm.scenario === id, disabled: !supported('scenarios', id), 'data-scenario': id, onClick: () => update('scenario', id) }, runIcon(item[1]), h('div', null, h('strong', null, item[0]), h('p', null, item[2])), h('span', { className: 'create-scene-check' }, runIcon('CircleCheck'))))),
           h('div', { className: 'form-grid create-scope', style: { marginTop: 22 } }, input('源码冻结范围', 'source_scope_text', '相对仓库根目录，每行一个文件或目录；「.」代表整个仓库。', true), input('参考源码范围', 'context_scope_text', '辅助理解的相关实现、文档或测试文件。', true)),
+          h(SourceScopePicker, { cwd, dataRoot: workbench?.data_root, repository: createForm.repository, value: createForm.source_scope_text, preview: validScopePreview, onChange: value => update('source_scope_text', value), onPreview: value => setScopePreview({ ...value, key: createScopeKey }) }),
           field('流程基线（可选）', h('select', { 'aria-label': '流程基线', value: chosenBaseline, disabled: creatingRun, onChange: event => {
             const choice = baselineOptions.find(item => baselineKey(item) === event.target.value)
             update('flow_baseline', choice ? { run_id: choice.run_id, version_id: choice.version_id } : null)
@@ -6985,14 +7239,13 @@ window.__ModuleLoader__.load({
         } else {
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
-            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), `${sourceScope.length} 项待冻结范围`, 1),
+            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库 · ' : ''}命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
             row('流程基线', createForm.flow_baseline?.run_id || '未选择', createForm.flow_baseline?.version_id || '独立分析，不与历史流程自动合并。', 1),
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
         return h('section', { className: 'pangea-ui pangea-create-workspace', 'aria-label': '新建分析' },
-          h('div', { className: 'breadcrumb' }, h('span', null, 'PANGEA 分析'), runIcon('ChevronRight'), h('span', null, '新建分析')),
-          h('div', { className: 'page-head' }, h('div', null, h('h1', null, '新建分析'), h('p', { className: 'subtitle' }, '从清晰的分析目标开始，把源码转化为可核验的测试结论。')), button('返回分析任务', () => navigate({ type: 'tasks' }), 'ghost', 'ArrowLeft')),
+          pageHeader({ title: '新建分析', ui: ctx.pangea?.ui, onBack: () => navigate({ type: 'tasks' }), backLabel: '返回分析任务' }),
           renderCompatibility(), h('div', { className: 'create-frame' }, h('nav', { className: 'wizard', 'aria-label': '创建分析步骤' }, ['分析目标', '输入资料', '执行设置', '确认创建'].map((label, index) => h('button', { key: label, type: 'button', className: `wizard-step ${step === index + 1 ? 'active' : step > index + 1 ? 'done' : ''}`, 'aria-current': step === index + 1 ? 'step' : undefined, onClick: () => go(index + 1), disabled: creatingRun || index > 0 && !targetReady || index > 1 && !inputsReady || index > 2 && !executionReady }, h('b', null, step > index + 1 ? '✓' : `0${index + 1}`), label))), h('div', { className: 'cols', style: { marginTop: 24 } }, h('div', null, content), h('aside', null, context))),
           assetSelectorOpen && h(CreateAssetPicker, { items: assetItems, selectedAssets, loading: assetCatalogLoading, error: assetCatalogError, pagination: assetPagination, query: assetQueryDraft, type: assetType, repositoryOnly: assetRepositoryOnly, repository: createForm.repository, typeLabels: assetTypeLabels,
             onQuery: value => { setAssetQueryDraft(value); setAssetPage(1); setAssetQuery(value.trim()) }, onSearch: () => { setAssetPage(1); setAssetQuery(assetQueryDraft.trim()) }, onType: value => { setAssetPage(1); setAssetType(value) }, onRepository: value => { setAssetPage(1); setAssetRepositoryOnly(value) }, onPage: setAssetPage, onRefresh: () => setAssetRefresh(value => value + 1), onClose: () => setAssetSelectorOpen(false),
@@ -7226,7 +7479,7 @@ window.__ModuleLoader__.load({
         return h(RunWorkspace, { key: `${selectedTask?.task_id}:${current?.run_id}`, current, task: selectedTask, cwd: scope?.cwd, dataRoot: current?.data_root ?? snapshot?.data_root,
           timeline: workflowEvents(current, taskLaunchEvents(selectedTask, workbench)),
           error, loading, busy: creatingRun, retry: () => load({ foreground: true }),
-          viewState: screen.view,
+          viewState: screen.view, ui: ctx.pangea?.ui,
           navigate: (target, view) => ['flows', 'risks', 'cases'].includes(target) ? navigate({ type: target }, { type: 'workflow', view }) : jump(target), openFile: openSidebarFile, stop: () => stopCurrentRun(true),
           openFlow: (flowId, view) => { setFlowSelection(flowId); navigate({ type: 'flows' }, { type: 'workflow', view }) },
           resume: () => startTask(selectedTask, true), deliver: () => deliverCurrentRun(true),
@@ -7334,9 +7587,9 @@ window.__ModuleLoader__.load({
           && (!branchFilter || (branchFilter === 'no_case' ? !item.linked_test_case_ids?.length
             : branchFilter === 'unresolved' ? item.status === 'unresolved'
               : branchFilter === 'high_risk' ? (item.linked_risk_ids ?? []).some(id => ['P0', 'P1', 'critical', 'high'].includes(riskById.get(id)?.priority || riskById.get(id)?.severity)) : item.kind === branchFilter)))
-          const branchPages = Math.max(1, Math.ceil(filteredBranches.length / 12))
+          const branchPages = Math.max(1, Math.ceil(filteredBranches.length / 20))
           const branchPage = Math.min(reader.page, branchPages)
-          const visibleBranches = filteredBranches.slice((branchPage - 1) * 12, branchPage * 12)
+          const visibleBranches = filteredBranches.slice((branchPage - 1) * 20, branchPage * 20)
           return { scope, reader, steps, branches, unbound, filteredBranches, branchPages, branchPage, visibleBranches }
         }
         const { scope, reader, steps, branches } = readingState(flow)
@@ -7345,7 +7598,7 @@ window.__ModuleLoader__.load({
           h('input', { 'aria-label': '搜索业务流程', value: flowQuery, placeholder: '搜索流程…', onChange: event => setFlowQuery(event.target.value),
             style: { ...styles.search, width: 240, maxWidth: '100%', fontSize: 12, marginBottom: 10 } }),
           h('div', { className: 'b04-flow-tabs', role: 'tablist', 'aria-label': '业务流程' },
-            filtered.map((item, index) => h('button', { key: cardScope(item), type: 'button', className: 'b04-flow-tab', role: 'tab',
+            filtered.map((item, index) => h('button', { key: cardScope(item), type: 'button', className: 'b04-flow-tab', role: 'tab', 'data-flow-parent': item.attach_to || undefined, style: { marginLeft: item.attach_to ? 20 : 0 },
               id: `${cardId(item)}-tab`, 'aria-controls': cardId(item), 'aria-selected': item.flow_id === flow?.flow_id,
               tabIndex: item.flow_id === flow?.flow_id ? 0 : -1, onClick: () => selectFlow(item),
               onKeyDown: event => {
@@ -7405,16 +7658,7 @@ window.__ModuleLoader__.load({
               h('p', null, flow.paths?.length ? '原文提供业务路径，但尚无可解析节点，暂不能据此绘制流程图。' : '尚无可解析的主干步骤，分析可能仍在发布中。'),
               flow.text ? renderReadableBody(flow.text, true) : null),
           h('section', { 'aria-label': '分支与异常' }, h('h3', null, '分支与异常'),
-            visibleBranches.length ? h('table', { 'aria-label': '分支列表', style: { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 13 } },
-              h('thead', null, h('tr', null, ['从', '条件', '处理', '去向'].map(label => h('th', { key: label, style: cell }, label)))),
-              h('tbody', null, visibleBranches.map(item => h('tr', { key: item.branch_id },
-                h('td', { style: cell }, nodeLabel(item.from_step_id)),
-                h('td', { style: cell }, h('button', { type: 'button', className: 'b04-link', 'aria-label': `查看分支 ${item.branch_id}`, onClick: () => openBranch(item.branch_id) }, `${item.branch_id} · ${item.condition || '条件待确认'}`)),
-                h('td', { style: cell }, item.processing || item.result || '原记录未提供说明', linkedItems(item)),
-                h('td', { style: cell }, item.to_step_id ? nodeLabel(item.to_step_id) : item.terminal_result || '未记录')))))
-              : h('p', { style: styles.itemMeta }, branches.length ? '没有符合当前筛选的分支。' : '原记录未提供分支与异常。'),
-          h('details', { style: { marginTop: 24 } }, h('summary', { style: { cursor: 'pointer', fontSize: 12, color: '#8b9588' } }, '查看分析原文与全部分支'),
-            renderRecordBody(flow),
+            h('section', { className: 'pangea-branch-controls', 'aria-label': '分支筛选与分页' },
             h('div', { className: 'b04-canvas-actions', style: { margin: '14px 0' } },
               h('button', { type: 'button', 'aria-label': '查看全部分支', onClick: () => updateReader({ ...reader, step: '', page: 1 }) }, '全部步骤'),
               steps.map(item => h('button', { key: item.step_id, type: 'button', 'aria-label': `查看步骤 ${item.step_id} 的分支`,
@@ -7434,7 +7678,16 @@ window.__ModuleLoader__.load({
                 updateReader({ ...reader, view: 'diagram' })
               } }, '绘制本页分支'),
               h('button', { type: 'button', 'aria-label': '上一页分支', disabled: branchPage === 1, onClick: () => updateReader({ ...reader, page: branchPage - 1 }) }, '上一页'),
-              h('button', { type: 'button', 'aria-label': '下一页分支', disabled: branchPage === branchPages, onClick: () => updateReader({ ...reader, page: branchPage + 1 }) }, '下一页')))),
+              h('button', { type: 'button', 'aria-label': '下一页分支', disabled: branchPage === branchPages, onClick: () => updateReader({ ...reader, page: branchPage + 1 }) }, '下一页'))),
+          visibleBranches.length ? h('table', { 'aria-label': '分支列表', style: { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 14 } },
+              h('thead', null, h('tr', null, ['从', '条件', '处理', '去向'].map(label => h('th', { key: label, style: cell }, label)))),
+              h('tbody', null, visibleBranches.map(item => h('tr', { key: item.branch_id },
+                h('td', { style: cell }, nodeLabel(item.from_step_id)),
+                h('td', { style: cell }, h('button', { type: 'button', className: 'b04-link', 'aria-label': `查看分支 ${item.branch_id}`, onClick: () => openBranch(item.branch_id) }, `${item.branch_id} · ${item.condition || '条件待确认'}`)),
+                h('td', { style: cell }, item.processing || item.result || '原记录未提供说明', linkedItems(item)),
+                h('td', { style: cell }, item.to_step_id ? nodeLabel(item.to_step_id) : item.terminal_result || '未记录')))))
+              : h('p', { style: styles.itemMeta }, branches.length ? '没有符合当前筛选的分支。' : '原记录未提供分支与异常。'),
+          h('details', { className: 'pangea-flow-original' }, h('summary', null, '查看分析原文'), renderRecordBody(flow))),
           h('section', { 'aria-label': '业务路径阅读' }, h('h3', null, '路径'),
             flow.entry_points ? renderReadableBody(flow.entry_points, true) : null,
             flow.paths?.length ? flow.paths.map((path, index) => h('div', { key: path.path_id || index },
@@ -7546,8 +7799,7 @@ window.__ModuleLoader__.load({
           const path = value => h('div', { className: 'create-import-path mono', title: value === target ? `${dataRoot}/repositories/${name}` : value, style: { overflowWrap: 'anywhere' } }, value)
           const phase = (number, title, copy, kind) => h('div', { className: `create-import-phase ${kind}` }, h('span', null, number), h('div', null, h('strong', null, title), h('p', null, copy)))
           return h('section', { className: 'pangea-ui pangea-create-workspace', 'aria-label': '添加源码仓库' },
-            h('div', { className: 'breadcrumb' }, h('span', null, pageMode === 'home' ? '工作台' : 'PANGEA 分析'), runIcon('ChevronRight'), h('span', null, history.at(-1)?.type === 'create' ? '新建分析' : '添加源码仓库')),
-            h('div', { className: 'page-head' }, h('div', null, h('h1', null, '添加源码仓库'), h('p', { className: 'subtitle' }, repositoryImporting ? '正在准备本地分析工作区。' : '连接本地源码，让分析拥有清晰、独立的工作范围。')), button(pageMode === 'home' ? '返回工作台' : history.at(-1)?.type === 'create' ? '返回新建分析' : '返回分析任务', goBack, 'ghost', 'ArrowLeft')),
+            pageHeader({ title: '添加源码仓库', ui: ctx.pangea?.ui, onBack: goBack, backLabel: pageMode === 'home' ? '返回工作台' : history.at(-1)?.type === 'create' ? '返回新建分析' : '返回分析任务' }),
             h('div', { className: 'create-import-shell' }, h('div', { className: 'cols' },
               h('section', { className: 'panel' },
                 h('div', { className: 'create-import-hero' }, h('div', { className: 'create-import-symbol', style: repositoryImporting ? { color: '#497ba4', background: '#f2f6fb', borderColor: '#dce7f0' } : undefined }, runIcon(repositoryImporting ? 'Copy' : 'FolderGit2')), h('div', null, h('div', { className: 'create-focus-label', style: repositoryImporting ? { color: '#497ba4' } : undefined }, repositoryImporting ? 'IMPORT IN PROGRESS' : 'SOURCE REPOSITORY'), h('h2', { className: 'create-heading', style: { margin: '7px 0 0' } }, repositoryImporting ? `正在复制 ${name}` : '把源码加入 PANGEA'))),
@@ -7619,9 +7871,7 @@ window.__ModuleLoader__.load({
             : staleHome ? ['同步中断，保留上次结果', `最后同步于${workbench.__clientSyncedAt ? taskUpdatedLabel(workbench.__clientSyncedAt) : '上次成功读取时'} · 当前执行状态待重新确认。`, '重新同步'] : null
         const reportTitle = run => tasks.find(task => task.run_id === run.run_id)?.title ?? runLabel(run)
         return h('div', { className: 'b06-home' },
-          h('nav', { className: 'b06-breadcrumb', 'aria-label': '当前位置' }, h('span', null, '工作空间'), h('span', null, '›'), h('span', null, '工作台'), h('span', null, '›'), h('span', null, repositoryLoading ? '初次读取' : failedHome ? '同步失败' : incompatibleHome ? '版本待更新' : staleHome ? '同步中断' : '总览')),
-          h('header', { className: 'b06-home-head' }, h('div', null, h('h1', null, '测试工作台'), h('p', null, '查看正在进行的分析、需要处理的事项与最近报告。')),
-            h('div', { className: 'b06-head-actions' }, button(workbenchLoading ? '刷新中…' : '刷新', refresh, false, workbenchLoading, 'RefreshCw', workbenchLoading), button('添加仓库', openRepositoryImport, false, false, 'FolderPlus'), button('新建分析', openAnalysisCreate, true, !available || staleHome, 'Plus'))),
+          pageHeader({ title: '测试工作台', ui: ctx.pangea?.ui, actions: h('div', { className: 'b06-head-actions' }, button(workbenchLoading ? '刷新中…' : '刷新', refresh, false, workbenchLoading, 'RefreshCw', workbenchLoading), button('添加仓库', openRepositoryImport, false, false, 'FolderPlus'), button('新建分析', openAnalysisCreate, true, !available || staleHome, 'Plus')) }),
           notice && h('div', { className: 'b06-banner', role: 'alert' }, h('div', null, h('strong', null, notice[0]), h('span', null, notice[1])), button(notice[2], refresh)),
           !notice && homeRefreshed && h('div', { className: 'b06-banner success', role: 'status' }, h('div', null, h('strong', null, '工作台已同步'), h('span', null, '任务状态与报告列表已更新。'))),
           h('div', { className: 'b06-metrics', 'aria-label': '任务指标' }, metric('Cpu', '进行中', running.length), metric('CircleAlert', '需要处理', attention.length), metric('CircleCheck', '已完成', completed.length), metric('FileText', '已有报告', reportRuns.length)),
@@ -7722,7 +7972,7 @@ window.__ModuleLoader__.load({
           return rightTime - leftTime
         })
         const filtered = sortedTasks.filter(task => {
-          if (taskStatus !== '全部' && task.status !== taskStatus && !(taskStatus === 'running' && ['starting', 'running', 'stopping'].includes(task.execution_status))) return false
+          if (taskStatus !== '全部' && !(taskStatus === 'needs_attention' ? ['needs_attention', 'failed'].includes(task.status) : task.status === taskStatus) && !(taskStatus === 'running' && ['starting', 'running', 'stopping'].includes(task.execution_status))) return false
           return !query || [task.title, task.target, task.repository, task.task_id, task.run_id].filter(Boolean).join(' ').toLowerCase().includes(query)
         })
         const statusFilters = [
@@ -7813,8 +8063,7 @@ window.__ModuleLoader__.load({
           : filteredEmpty
             ? `${repositoryLabel} · ${taskTotal} 个分析任务`
             : '所有分析目标与运行记录，都从这里接续。'
-        const pageHeader = h('section', { className: `b03-task-page-head${firstUse || filteredEmpty ? ' without-breadcrumb' : ''}` },
-          h('div', null, h('h1', { className: 'pangea-page-heading' }, '分析任务'), h('p', null, taskSubtitle)), taskActions)
+        const taskPageHeader = pageHeader({ title: '分析任务', ui: ctx.pangea?.ui, actions: taskActions })
         const filterEmptyControls = filteredEmpty ? h('div', { className: 'b03-task-controls' },
           h('input', { id: 'pangea-task-search', className: 'b03-task-search', type: 'search', value: taskQuery, 'aria-label': '搜索分析任务', placeholder: '搜索分析目标或仓库…', onChange: event => setTaskQuery(event.target.value) }),
           h('div', { className: 'b03-task-control-row' },
@@ -7830,8 +8079,7 @@ window.__ModuleLoader__.load({
               h('span', { className: 'b03-task-sort' }, '按最近更新排序'))) : null
         return h(React.Fragment, null,
           renderCompatibility(),
-          !firstUse && !filteredEmpty ? h('div', { className: 'b03-task-breadcrumb', 'aria-label': '当前位置' }, 'PANGEA 分析', h('span', { 'aria-hidden': true }, '›'), '分析任务') : null,
-          pageHeader,
+          taskPageHeader,
           workbench && !workbenchError && !firstUse && !filteredEmpty ? h('div', { className: 'b03-task-metrics', 'aria-label': '任务概况' },
             [['全部任务', taskItems.length], ['运行中', runningCount], ['需要处理', attentionCount], ['已完成', completedCount]].map(([label, value]) => h('div', { key: label, className: 'b03-task-stat' }, h('span', null, label), h('strong', null, String(value)))),
           ) : null,
@@ -7906,12 +8154,7 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'b03-run-record-screen', role: 'region', 'aria-label': '运行记录 · 只读', 'data-run-id': runId ?? selectedRun,
           'data-task-id': run?.task_id ?? current?.task_id ?? '', 'aria-readonly': 'true' },
           renderCompatibility(),
-          h('nav', { className: 'b03-run-record-breadcrumb', 'aria-label': '当前位置' },
-            h('button', { type: 'button', onClick: () => jump('tasks') }, 'PANGEA 分析'),
-            h('span', { 'aria-hidden': true }, '›'), h('span', { 'aria-current': 'page' }, runTitle)),
-          h('section', { className: 'b03-run-record-page-head' },
-            h('div', null, h('h1', null, runTitle), h('p', null, titleMeta || `RUN ${runId ?? selectedRun}`)),
-            h('button', { type: 'button', className: 'b03-run-record-action', onClick: () => jump('tasks') }, runIcon('ArrowLeft'), '返回任务列表')),
+          pageHeader({ title: runTitle, current, ui: ctx.pangea?.ui, onBack: () => jump('tasks') }),
           h('div', { className: 'b03-run-record-layout' },
             h('div', { className: 'b03-run-record-notice', role: 'note' }, runIcon('Info'),
               h('div', null, h('strong', null, run?.task_id ? '关联任务暂不可用' : '此运行未关联分析任务'), h('p', null, readOnlyMessage))),
@@ -7942,30 +8185,8 @@ window.__ModuleLoader__.load({
         if (!selectedTask) return h(React.Fragment, null, renderCompatibility(), h('div', { style: styles.card },
           h('div', { style: styles.empty }, workbenchError ? '任务列表读取失败，请返回任务列表重试。' : '请先从任务列表选择一个分析任务。'),
           h('button', { type: 'button', style: { ...styles.primaryButton, marginTop: 10 }, onClick: () => jump('tasks') }, '返回任务列表')))
-        const overviewTargetLabel = text(selectedTask.title, text(selectedTask.target, current?.target ?? '分析任务')).replace(/\s*分析\s*$/, '')
-        const overviewRunMeta = [
-          [selectedTask.repository || current?.repository || '当前仓库', selectedTask.source_scope?.join('、')].filter(Boolean).join(' / '),
-          current?.run_id ? h('span', { className: 'mono' }, taskRunLabel(current.run_id)) : null,
-          current?.started_at ? `${taskUpdatedLabel(current.started_at)} 开始` : null,
-        ].filter(Boolean).flatMap((part, index) => index ? ['\u00a0 · \u00a0', part] : [part])
-        const overviewBreadcrumb = h('nav', { className: 'b03-overview-breadcrumb', 'aria-label': '当前位置' },
-          h('button', { type: 'button', onClick: () => jump('tasks') }, 'PANGEA 分析'),
-          h('span', { 'aria-hidden': true }, '›'),
-          h('span', null, overviewTargetLabel),
-          h('span', { 'aria-hidden': true }, '›'),
-          h('span', { 'aria-current': 'page' }, '任务概览'))
-        const overviewPageHero = h('section', { className: 'b03-overview-page-hero' },
-          h('div', { style: { minWidth: 0 } },
-            h('h1', { className: 'pangea-page-heading', style: { ...styles.homeTitle, fontSize: 27, fontWeight: 650, lineHeight: 1.4, letterSpacing: '-0.5px', color: '#25292e' } }, selectedTask.title),
-            h('div', { className: 'b03-overview-run-meta' }, overviewRunMeta),
-            current?.target || selectedTask.target ? h('details', { style: { marginTop: 8, fontSize: 12, color: '#68736a' } },
-              h('summary', { style: { cursor: 'pointer' } }, '分析目标'),
-              h('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: 800 } }, current?.target || selectedTask.target)) : null),
-          h('div', { className: 'b03-overview-page-actions' },
-            derivationButton(),
-            taskActionButtons(selectedTask),
-            h('button', { type: 'button', style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 6 }, onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-assistant')) }, runIcon('Sparkles'), 'AI 助手'),
-            h('button', { type: 'button', style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 6 }, onClick: () => jump('tasks') }, runIcon('ArrowLeft'), '返回任务列表')))
+        const overviewBreadcrumb = null
+        const overviewPageHero = pageHeader({ title: selectedTask.title || current?.target || '分析详情', task: selectedTask, current, ui: ctx.pangea?.ui, onBack: () => jump('tasks'), actions: h('div', { className: 'pangea-page-actions' }, derivationButton(), taskActionButtons(selectedTask)) })
         if (!current) {
           const launchEvents = taskLaunchEvents(selectedTask, workbench)
           const launchFailure = [...launchEvents].reverse().find(event => event.status === 'error')
@@ -8015,32 +8236,18 @@ window.__ModuleLoader__.load({
               : presentation.stopped ? `${current.analysis?.completed ?? 0} / ${current.analysis?.total ?? '—'} 个分析单元已接受，源码快照与检查点已保存，可从运行过程继续。`
                 : presentation.failed ? '本次执行未正常结束。已有结果和错误记录仍可查看。'
                 : '已完成源码分析、独立复核与定向修正，结果可查看与交付。'
+        const progressAction = presentation.needsAttention || presentation.failed || presentation.stopping || presentation.stopped || presentation.running
+        const progressActionLabel = presentation.needsAttention ? '处理待办' : presentation.failed ? '查看失败原因' : presentation.stopping ? '查看停止进度' : presentation.stopped ? '前往继续分析' : '查看运行过程'
         const semanticVerdict = outcomePresentation(current).semantic
         const verdictBadge = current.terminal && semanticVerdict === 'PASS（审查者结论）' ? '审查 PASS'
           : current.terminal && semanticVerdict === 'UNRESOLVED（审查者结论）' ? '审查未解决'
             : null
         const previousFailures = previousAttemptFailures(selectedTask)
-        const findingRows = testCases.length
-          ? testCases.slice(0, 4).map(testCase => {
-            const linkedRisks = (testCase.linked_risk_ids ?? []).map(id => riskById.get(id)).filter(Boolean)
-            const executions = executorRuns.filter(run => run.selected_test_case_ids?.includes(testCase.test_case_id))
-            const analysisState = ({ analyzing: '分析中', analyzed: '已分析', waiting: '等待', paused: '待继续', unresolved: '依据待补充' })[testCase.analysis_status]
-            const executionLabel = executions.length ? executions.at(-1).result_status ?? executions.at(-1).phase ?? '已有执行记录' : analysisState ?? '待执行验证'
-            const executionStyle = ({ '分析中': 'running', '已分析': 'done', '等待': 'waiting', '待继续': 'waiting', '依据待补充': 'unresolved' })[executionLabel] ?? 'todo'
-            const associatedCaseState = testCase.associated_case_state
-            return h('tr', { key: caseKeyByItem.get(testCase) },
-              h('td', null, h('button', { type: 'button', className: 'b03-overview-topic', onClick: () => navigate({ type: 'case', id: caseKeyByItem.get(testCase) }) }, testCase.title ?? '未命名用例')),
-              h('td', null, testCase.summary ?? testCase.expected_result ?? testCase.description ?? '该用例没有单独的摘要记录。'),
-              h('td', null, associatedCaseState
-                ? /^TC-/.test(associatedCaseState) ? h('button', { type: 'button', className: 'b03-task-run', onClick: () => jump('cases') }, associatedCaseState, runIcon('ArrowUpRight')) : associatedCaseState
-                : linkedRisks.length ? linkedRisks.map(risk => h('button', { key: riskKeyByItem.get(risk), type: 'button', className: 'b03-task-run', onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }) }, risk.risk_id ?? risk.title, runIcon('ArrowUpRight'))) : '—'),
-              h('td', null, h('span', { className: `b03-overview-validation b03-overview-validation-${executionStyle}` }, executionLabel)))
-          })
-          : risks.slice(0, 8).map(risk => h('tr', { key: riskKeyByItem.get(risk) },
-            h('td', null, h('button', { type: 'button', className: 'b03-task-title', onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }) }, risk.risk_id ?? risk.title ?? '风险')),
-            h('td', null, risk.trigger ?? risk.narrative ?? risk.residual_effect ?? '当前风险没有摘要记录。'),
-            h('td', null, (risk.linked_test_case_ids ?? []).join('、') || '暂无关联用例'),
-            h('td', null, '待验证')))
+        const findingRows = buildOverviewFindings({ current, risks: riskEnabled ? risks : [], notes: current.details?.notes ?? current.notes ?? [] }).slice(0, 3).map(finding => h('tr', { key: finding.id },
+          h('td', null, h('button', { type: 'button', className: 'b03-overview-topic', onClick: () => finding.kind === 'risk' ? navigate({ type: 'risk', id: finding.sourceRefs[0] }) : jump(finding.kind === 'workflow' ? 'workflow' : 'report') }, finding.title)),
+          h('td', null, finding.summary || '查看来源记录'),
+          h('td', null, finding.caseRefs.length ? h('button', { type: 'button', className: 'b03-task-run', onClick: () => jump('cases') }, `${finding.caseRefs.length} 条关联用例`) : '—'),
+          h('td', null, finding.validationState)))
         const unresolved = current.workflow?.unresolved ?? []
         const unresolvedItems = unresolved.map((item, index) => ({ id: item?.id ?? item?.code ?? String(index + 1), text: typeof item === 'string' ? item : item?.message ?? item?.title ?? JSON.stringify(item) }))
         const summaryCount = (key, count) => {
@@ -8067,19 +8274,29 @@ window.__ModuleLoader__.load({
           renderDerivationOrigin(),
           h('div', { className: 'b03-overview-hero' },
             h('div', null, h('h2', null, statusTitle,
-              h('span', { className: `b03-overview-status b03-overview-status-${error ? 'stopped' : presentation.needsAttention ? 'attention' : presentation.running ? 'running' : presentation.stopped ? 'stopped' : current.partial_delivery ? 'partial' : 'complete'}` },
-                error ? '上次记录' : presentation.needsAttention ? '需要处理' : presentation.running ? '运行中' : presentation.stopped ? '已停止' : current.partial_delivery ? '部分交付' : '已完成')),
+              h('span', { className: `b03-overview-status b03-overview-status-${error ? 'unknown' : current.partial_delivery ? 'partial' : presentation.statusKey}` },
+                error ? '上次记录' : current.partial_delivery ? '部分交付' : presentation.statusLabel)),
               h('p', null, statusHint)),
-            h('button', { type: 'button', className: 'b03-overview-hero-action', onClick: () => presentation.needsAttention ? jump('workflow') : reportAvailableFor(current) ? jump('report') : jump('workflow') },
-              runIcon(presentation.needsAttention ? 'ArrowRight' : reportAvailableFor(current) ? 'FileText' : 'ScanLine'),
-              presentation.needsAttention ? '处理待办' : reportAvailableFor(current) ? '查看分析报告' : '查看运行过程')),
+            h('button', { type: 'button', className: 'b03-overview-hero-action', onClick: () => progressAction ? jump('workflow') : testCases.length ? jump('cases') : reportAvailableFor(current) ? jump('report') : jump('workflow') },
+              runIcon(progressAction ? 'ArrowRight' : reportAvailableFor(current) ? 'FileText' : 'ScanLine'),
+              progressAction ? progressActionLabel : testCases.length ? '评审测试用例' : reportAvailableFor(current) ? '查看分析报告' : '查看运行过程')),
+          presentation.failed ? h('p', { role: 'alert', className: 'notice danger' }, sourceFirstRecordBody(current.terminal_error || selectedTask.launch_error || current.blocking_reason || '未记录具体原因，请查看运行过程中的执行诊断。')) : null,
+          reportAvailableFor(current) ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('report') }, '查看分析报告') : null,
           presentation.needsAttention && unresolvedItems.length ? h('section', { className: 'b03-overview-attention', role: 'alert' },
             h('div', null, h('strong', null, unresolvedItems[0].text), h('p', null, '可继续定向修正，或保留未解决项并交付已有结果。')),
             h('button', { type: 'button', onClick: () => jump('workflow') }, '查看处理方式')) : null,
           ['warning', 'error'].includes(health?.status) ? renderHealthCard(false) : null,
-          h(RunExecutionSummary, { current, task: selectedTask, stale: Boolean(error), compact: true }),
+          h('details', { className: 'run-execution-details' }, h('summary', null, '执行状态详情'), h(RunExecutionSummary, { current, task: selectedTask, stale: Boolean(error), compact: true })),
           h('div', { className: 'b03-overview-layout' },
             h('div', { className: 'b03-overview-main' },
+              h('section', { className: 'b03-overview-card' },
+                h('h3', null, '分析发现与验证缺口'),
+                h('p', { className: 'b03-task-subtitle' }, '按检查主题查看结论、设计用例和仍需验证的内容。'),
+                findingRows.length ? h('div', { style: { overflowX: 'auto' } }, h('table', { className: 'b03-overview-findings' },
+                  h('thead', null, h('tr', null, h('th', null, '检查主题'), h('th', null, '分析依据与待办'), h('th', null, '关联用例'), h('th', null, '验证状态'))),
+                  h('tbody', null, findingRows))) : h('div', { className: 'b03-task-subtitle' }, collectionEmpty(testCases.length ? 'test_cases' : 'risks', '当前 Run 没有可展示的发现记录。')),
+                h('div', { className: 'b03-overview-copy b03-overview-findings-footer' }, findingsFooter,
+                  h('button', { type: 'button', className: 'b03-task-run', onClick: () => jump('cases') }, '查看用例与预期验证'))),
               h('section', { className: 'b03-overview-card' },
                 h('h3', null, '结果摘要'),
                 h('div', { className: 'b03-overview-summary' }, summaryCounts.map(([label, value, hint]) => h('div', { key: label },
@@ -8087,14 +8304,6 @@ window.__ModuleLoader__.load({
               h('div', { className: 'b03-overview-copy' },
                 h('p', null, summaryText),
                 summaryNote && summaryNote !== summaryText ? h('p', { className: 'b03-task-subtitle' }, summaryNote) : null)),
-              h('section', { className: 'b03-overview-card' },
-                h('h3', null, '分析发现与验证缺口'),
-                h('p', { className: 'b03-task-subtitle' }, '按检查主题查看结论、设计用例和仍需验证的内容。'),
-                findingRows.length ? h('div', { style: { overflowX: 'auto' } }, h('table', { className: 'b03-overview-findings' },
-                  h('thead', null, h('tr', null, h('th', null, '检查主题'), h('th', null, '本次发现'), h('th', null, '关联用例'), h('th', null, '验证状态'))),
-                  h('tbody', null, findingRows))) : h('div', { className: 'b03-task-subtitle' }, collectionEmpty(testCases.length ? 'test_cases' : 'risks', '当前 Run 没有可展示的发现记录。')),
-                h('div', { className: 'b03-overview-copy b03-overview-findings-footer' }, findingsFooter,
-                  h('button', { type: 'button', className: 'b03-task-run', onClick: () => jump('cases') }, '查看用例与预期验证'))),
               current.partial_delivery ? h('section', { className: 'b03-overview-card', role: 'status' },
                 h('h3', null, current.partial_delivery ? '部分交付 · 未解决项保留' : '待处理事项'),
                 unresolvedItems.length ? h('ul', null, unresolvedItems.map(item => h('li', { key: item.id }, h('strong', null, item.id + ' · '), item.text))) : h('p', null, '此报告标记为部分交付。尚未解决的内容以真实报告文件为准。')) : null,
@@ -8109,10 +8318,10 @@ window.__ModuleLoader__.load({
                 h('h3', null, '分析范围'),
                 h('dl', { className: 'b03-overview-kv' },
                   h('dt', null, '源码仓库'), h('dd', null, current.repository ?? selectedTask.repository ?? '未记录'),
-                  h('dt', null, '主要范围'), h('dd', null, current.input_materials?.length
-                    ? current.input_materials.map(material => h('div', { key: material.asset_id ?? material.title, className: 'b03-overview-file' }, material.title ?? material.asset_id ?? '输入资料'))
+                  h('dt', null, '主要范围'), h('dd', null, selectedTask.source_scope?.length
+                    ? selectedTask.source_scope.map(path => h('div', { key: path, className: 'b03-overview-file' }, path))
                     : current.target ?? '未记录'),
-                  h('dt', null, '冻结文件'), h('dd', null, current.input_materials?.length == null ? '未记录' : `${current.input_materials.length} 个`),
+                  h('dt', null, '冻结文件'), h('dd', null, current.source_snapshot?.file_count == null ? '未记录' : `${current.source_snapshot.file_count} 个源码文件`),
                   h('dt', null, '分析单元'), h('dd', null, current.analysis?.total == null && workflow.units?.length == null ? '未记录' : `${current.analysis?.total ?? workflow.units.length} 个`)),
                 h('div', { className: 'b03-overview-aside-divider' }),
                 h('p', { className: 'b03-overview-aside-note' }, '具体引用位置随流程、风险和用例一起查看。')),
@@ -8178,19 +8387,7 @@ window.__ModuleLoader__.load({
         ]
         return h(React.Fragment, null,
           renderCompatibility(),
-          h('nav', { className: 'b03-report-breadcrumb', 'aria-label': '当前位置' },
-            h('button', { type: 'button', onClick: () => jump('tasks') }, 'PANGEA 分析'),
-            h('span', { 'aria-hidden': true }, '›'),
-            h('button', { type: 'button', onClick: () => jump('overview') }, selectedTask?.title ?? current.target ?? '当前任务'),
-            h('span', { 'aria-hidden': true }, '›'),
-            h('span', { 'aria-current': 'page' }, '分析报告')),
-          h('section', { className: 'b03-report-page-head' },
-            h('div', null,
-              h('h1', null, selectedTask?.title ?? current.target ?? 'PANGEA 分析'),
-              h('p', null, [reportScope, `RUN ${reportRunNumber}`, reportStart].filter(Boolean).join(' · '))),
-            h('div', { className: 'b03-report-page-actions' },
-              h('button', { type: 'button', className: 'b03-report-page-action', onClick: () => jump(selectedTask ? 'overview' : 'tasks') }, runIcon('ArrowLeft'), '返回任务'),
-              h('button', { type: 'button', className: 'b03-report-page-action primary', disabled: !reportArtifact, onClick: () => reportArtifact && openSidebarFile(reportArtifact, reportArtifactTitle) }, runIcon('ArrowUpRight'), '打开已有报告'))),
+          pageHeader({ title: selectedTask?.title || current?.target || '分析报告', task: selectedTask, current, ui: ctx.pangea?.ui, onBack: () => jump(selectedTask ? 'overview' : 'tasks'), actions: h('button', { type: 'button', className: 'b03-report-page-action', disabled: !reportArtifact, onClick: () => reportArtifact && openSidebarFile(reportArtifact, reportArtifactTitle) }, '打开已有报告') }),
           h('nav', { className: 'b03-report-tabs', 'aria-label': 'PANGEA 分析页面' }, reportNavigation.map(([target, label, key]) => h('button', {
             key: target, type: 'button', 'aria-current': target === 'overview' ? 'page' : undefined,
             onClick: () => jump(target),
@@ -8200,7 +8397,7 @@ window.__ModuleLoader__.load({
             h('article', { className: 'b03-report-document' },
               h('div', { className: 'b03-report-head' },
                 h('div', null,
-                  h('div', { className: 'pangea-eyebrow', style: { color: '#b62836', letterSpacing: '1.4px', fontSize: 10, fontWeight: 600 } }, 'PANGEA · ANALYSIS REPORT'),
+                  h('div', { className: 'pangea-eyebrow', style: { color: '#b62836', letterSpacing: '1.4px', fontSize: 12, fontWeight: 600 } }, 'PANGEA · ANALYSIS REPORT'),
                   h('h2', null, reportTitle),
                   h('p', null, [reportScope, 'RUN ' + reportRunNumber, partial ? '部分交付' : '已完成'].filter(Boolean).join(' · '))),
                 h('span', { className: `b03-report-status${partial ? ' partial' : ''}`, role: 'status' }, partial ? '部分交付' : '已保存')),
@@ -8365,10 +8562,12 @@ window.__ModuleLoader__.load({
 
       function renderCases() {
         const query = caseQuery.trim().toLowerCase()
-        const filtered = testCases.filter(item => !query || caseSearchText(item).includes(query))
+        const filtered = filteredCaseRows
+        const pages = Math.max(1, Math.ceil(filtered.length / 50)), page = Math.min(casePage, pages)
+        const pageItems = filtered.slice((page - 1) * 50, page * 50)
         const designCounts = caseDesignCounts(testCases)
         const behaviorLedgers = current?.details?.behavior_coverage ?? behaviorCoverageProjection(current?.details?.notes ?? current?.notes, testCases)
-        const selectableIds = filtered.map(item => item.test_case_id).filter(hasText)
+        const selectableIds = filtered.map(caseIdentity).filter(key => key && testCases.filter(item => caseIdentity(item) === key).length === 1)
         const selectedVisible = selectableIds.filter(id => selectedCaseIds.includes(id))
         const allSelected = selectableIds.length > 0 && selectedVisible.length === selectableIds.length
         const linkedCases = testCases.filter(item => (item.linked_risk_ids?.length ?? 0) > 0).length
@@ -8380,40 +8579,50 @@ window.__ModuleLoader__.load({
         const readinessLabel = item => item.readiness === 'ready' ? '具备执行条件' : item.readiness === 'needs_setup' ? '待补执行条件' : '执行条件未标注'
         const formatRisk = item => (item.linked_risk_ids ?? []).map(id => riskById.get(id)?.display_id || id)
         return h(React.Fragment, null,
-          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '从分析发现到可验证步骤'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '独立验证目标'} · ${designCounts.variants} 项已设计参数组合，保留前置条件、操作与预期结果。`)),
+          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '测试用例'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '独立验证目标'} · ${designCounts.variants} 项已设计参数组合，保留前置条件、操作与预期结果。`)),
             h('div', { className: 'b05-head-actions' }, coverageAvailable ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => navigate({ type: 'coverage-cases' }) }, '覆盖补测视图') : null,
-              h('button', { type: 'button', className: 'b03-task-action primary', disabled: !current?.run_id, onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportOpen(true) } }, '导出全部用例'))),
+              h('button', { type: 'button', className: 'b03-task-action primary', disabled: !current?.run_id, onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true) } }, reviews?.counts?.adopted ? `导出已采纳 ${reviews.counts.adopted} 条` : '导出用例'))),
           h('div', { className: 'b05-metrics' },
             metric('全部测试用例', testCases.length, `分布在 ${unitCount} 个分析单元`), metric('具备执行条件', readiness.ready ?? '未知', '条件来自用例分析记录'),
             metric('待补执行条件', readiness.needs_setup ?? '未知', '需核对执行准备条件'), riskEnabled ? metric('关联风险的用例', linkedCases, '按用例去重计数') : metric('已设计参数组合', designCounts.variants, '按变体记录计数，不计入独立用例数')),
-          quality ? h('section', { className: 'b05-card', 'aria-label': '黑盒与灰盒可实施性' }, h('h3', null, '黑盒与灰盒可实施性'),
+          quality ? h('details', { className: 'b05-card', 'aria-label': '黑盒与灰盒可实施性' }, h('summary', null, '黑盒与灰盒可实施性'),
             h('p', null, `业务黑盒 ${quality.business_blackbox} 条（具备执行条件 ${quality.ready_blackbox} 条） · 业务灰盒 ${quality.developer_assisted} 条（具备执行条件 ${quality.ready_graybox} 条）`),
             h('p', null, quality.has_legacy_groups ? '包含旧用例组，独立用例比例待复核。' : quality.ready_ratio == null ? '无可统计用例。' : `可实施黑盒与灰盒：${quality.ready_cases}/${quality.total_cases}（${(quality.ready_ratio * 100).toFixed(1)}%）；目标 ≥70%。`),
             h('p', { className: 'b05-subtle' }, '全部正式、辅助及未分类用例均计入分母。比例按作者声明汇总，具备执行条件不代表实测通过。')) : null,
           behaviorLedgers.length || current?.scenario === 'branch-analysis' ? h(BehaviorCoverageView, { ledgers: behaviorLedgers,
             onCase: link => navigate({ type: 'case', id: link.target_case_id, ...(link.variant_id != null ? { variant_id: link.variant_id } : {}) }) }) : null,
+          reviewError ? h('p', { role: 'alert', className: 'pangea-review-error' }, `评审记录：${reviewError}`) : null,
+          h('div', { className: 'pangea-case-filters', 'aria-label': '测试用例筛选' },
+            ...[
+              ['unit', '分析单元', [...new Set(testCases.map(item => item.unit_id).filter(Boolean))].map(id => [id, unitById.get(id)?.title || id])],
+              ['type', '用例类型', [...new Set(testCases.map(item => item.case_type || item.test_level || 'unclassified'))].map(value => [value, CASE_TYPE_LABELS[value] || value])],
+              ['readiness', '执行条件', [['ready', '具备执行条件'], ['needs_setup', '待补执行条件'], ['unclassified', '执行条件未标注']]],
+              ['review', '评审状态', Object.entries(REVIEW_LABELS)],
+            ].map(([key, label, options]) => h('label', { key }, label, h('select', { 'aria-label': label, value: caseFilters[key], onChange: event => setCaseFilters(value => ({ ...value, [key]: event.target.value })) }, h('option', { value: '' }, `全部${label}`), options.map(([value, name]) => h('option', { key: value, value }, name))))),
+            h('button', { type: 'button', onClick: () => { setCaseQuery(''); setCaseFilters({ unit: '', type: '', readiness: '', review: '' }) } }, '清除筛选')),
           h('div', { className: 'b05-toolbar' }, h('input', { value: caseQuery, 'aria-label': '搜索测试用例', placeholder: '搜索用例、业务路径、参数输入或预期…', onChange: event => setCaseQuery(event.target.value) }),
             h('span', { className: 'b05-subtle' }, `显示 ${filtered.length} 条 · 按分析单元排序`)),
           h('div', { className: 'b05-table-scroll', 'data-scroll-key': 'test-case-table' }, h('table', { className: 'b05-case-table' },
             h('thead', null, h('tr', null,
               h('th', null, h('input', { type: 'checkbox', 'aria-label': '选择当前列表', checked: allSelected, disabled: selectableIds.length === 0, onChange: () => setSelectedCaseIds(previous => allSelected ? previous.filter(id => !selectableIds.includes(id)) : [...new Set([...previous, ...selectableIds])]) })),
               ...['编号', '验证目标', '类型', '关联风险', '执行条件', ''].map(label => h('th', { key: label }, label)))),
-            h('tbody', null, filtered.map((item, index) => { const key = caseKeyByItem.get(item); const selectable = hasText(item.test_case_id); const linked = formatRisk(item); return h('tr', { key: `${key}:${index}` },
-              h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(item.test_case_id), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(item.test_case_id) })),
+            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const selectable = Boolean(caseIdentity(item)) && testCases.filter(other => caseIdentity(other) === caseIdentity(item)).length === 1; const linked = formatRisk(item); return h('tr', { key: `${key}:${index}` },
+              h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(caseIdentity(item)), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(caseIdentity(item)) })),
               h('td', { className: 'b05-mono' }, item.display_id || item.test_case_id || '待编号'),
-              h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'case', id: key }) }, text(item.title, '未命名用例')),
+              h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => openCaseDetail(key) }, text(item.title, '未命名用例')),
                 h('small', null, text(item.verification_goal, '验证目标未记录')),
                 item.variants?.length ? h('details', { className: 'b05-variant-preview', 'data-view-key': `case-variants:${key}` }, h('summary', null, `${item.variants.length} 项参数组合`),
                   item.variants.map((variant, index) => h('p', { key: index }, `${variant.variant_id ? `${variant.variant_id} · ` : ''}${variant.input || '输入未提供'} → ${variant.expected || '预期未提供'}`))) : null),
-              h('td', null, text(item.case_type, '未标注')),
+              h('td', null, CASE_TYPE_LABELS[item.case_type] || text(item.case_type, '未标注')),
               h('td', null, linked.length ? linked.map(id => h('span', { key: id, className: 'b05-risk-chip' }, id)) : '—'),
               h('td', null, h('span', { className: `b05-readiness ${item.readiness === 'ready' ? 'good' : 'warn'}` }, readinessLabel(item))),
-              h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'case', id: key }) }, '查看 ›')))
+              h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => openCaseDetail(key) }, '查看 ›')))
             })))),
           filtered.length === 0 ? h('div', { className: 'b05-card', role: collectionWarning(health, 'test_cases') ? 'alert' : 'status' }, collectionEmpty('test_cases', '没有符合条件的测试用例。')) : null,
-          h('div', { className: 'b05-selected-bar' }, h('div', null, `已选择 ${selectedCaseIds.length} 条用例`, h('small', null, '选中内容可复制到测试计划')),
+          h('div', { className: 'pangea-case-paging' }, h('button', { type: 'button', disabled: page <= 1, onClick: () => setCasePage(page - 1) }, '上一页'), h('span', null, `第 ${page} / ${pages} 页 · 共 ${filtered.length} 条`), h('button', { type: 'button', disabled: page >= pages, onClick: () => setCasePage(page + 1) }, '下一页')),
+          selectedCaseIds.length ? h('div', { className: 'b05-selected-bar' }, h('div', null, `已选择 ${selectedCaseIds.length} 条用例`, h('small', null, `含 ${selectedCaseIds.filter(id => !selectableIds.includes(id)).length} 条筛选外选择；可复制或导出` )),
             h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: () => setSelectedCaseIds([]) }, '清空选择'),
-              h('button', { type: 'button', disabled: selectedCaseIds.length === 0, onClick: () => { void copySelectedCases() } }, '复制选中用例'))),
+              h('button', { type: 'button', disabled: selectedCaseIds.length === 0, onClick: () => { void copySelectedCases() } }, '复制选中用例'), h('button', { type: 'button', onClick: () => { setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true); setCaseExportScope('selected') } }, '导出所选')) ) : null,
           h('p', { className: 'b05-subtle' }, '执行条件反映用例准备情况；实际验证结果需由测试执行记录确认。'),
           renderCaseExportDialog())
       }
@@ -8421,21 +8630,15 @@ window.__ModuleLoader__.load({
       function renderCaseExportDialog() {
         if (!caseExportOpen) return null
         const close = () => { if (!caseExportBusy) setCaseExportOpen(false) }
+        const counts = { all: testCases.length, filtered: filteredCaseRows.length, selected: selectedCaseIds.length, adopted: reviews?.counts?.adopted ?? 0 }
         return h('div', { className: 'b05-modal-backdrop', onClick: event => { if (event.target === event.currentTarget) close() } },
-          h('div', { role: 'dialog', 'aria-modal': 'true', 'aria-label': '导出本轮测试用例', className: 'b05-export-modal', onKeyDown: event => { if (event.key === 'Escape') close() } },
-            h('header', null, h('div', null, h('small', null, '测试用例出口'), h('h2', null, '导出本轮测试用例')), h('button', { type: 'button', 'aria-label': '关闭导出窗口', autoFocus: true, disabled: caseExportBusy, onClick: close }, '×')),
-            h('p', null, '保存完整用例，便于导入测试管理工具或进行评审。'),
-            h('div', { className: 'b05-export-scope' }, h('strong', null, '导出范围'), h('span', null, `全部 ${testCases.length} 条用例`),
-              h('p', null, `当前 Run · ${text(current?.target, text(selectedTask?.title, '当前分析'))}`),
-              h('small', null, '列表中的选择用于复制；文件导出包含本轮完整用例。')),
-            h('h3', null, '选择文件格式'),
-            [['xlsx', 'Excel 工作簿', '适合逐条评审，保留多列结构与完整内容。'], ['csv', '逗号分隔文件', '适合数据处理或导入现有测试管理工具。']].map(([value, title, description]) => h('label', { key: value, className: `b05-export-choice${caseExportFormat === value ? ' selected' : ''}` },
-              h('input', { type: 'radio', name: 'case-export-format', value, checked: caseExportFormat === value, disabled: caseExportBusy, onChange: () => setCaseExportFormat(value) }),
-              h('span', { className: 'b05-file-icon' }, value.toUpperCase()), h('span', null, h('strong', null, title), h('small', null, description)), value === 'xlsx' ? h('em', null, '推荐') : null)),
-            h('p', { className: 'b05-subtle' }, '包含用例编号、验证目标、前置条件、操作步骤、预期结果与关联信息。'),
-            caseExportError ? h('p', { role: 'alert', className: 'b05-export-error' }, `导出失败：${caseExportError}`) : null,
-            h('footer', null, h('button', { type: 'button', disabled: caseExportBusy, onClick: close }, '取消'),
-              h('button', { type: 'button', className: 'primary', disabled: caseExportBusy, onClick: async () => { setCaseExportBusy(true); setCaseExportError(''); const success = await exportCurrentCases(caseExportFormat); setCaseExportBusy(false); if (success) setCaseExportOpen(false) } }, caseExportBusy ? '正在导出…' : '导出文件'))))
+          h('section', { role: 'dialog', 'aria-modal': 'true', 'aria-label': '导出测试用例', className: 'b05-export-modal', onKeyDown: event => { if (event.key === 'Escape') close(); if (event.key === 'Tab') { const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')]; if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus() } else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus() } } } },
+            h('header', null, h('h2', null, '导出测试用例'), h('button', { type: 'button', onClick: close, autoFocus: true, 'aria-label': '关闭导出窗口' }, '关闭')),
+            h('fieldset', null, h('legend', null, '导出范围'), [['all', '全部用例'], ['filtered', '当前筛选结果'], ['selected', '已勾选'], ['adopted', '已采纳']].map(([value, label]) => h('label', { key: value, className: 'pangea-export-scope-option' }, h('input', { type: 'radio', name: 'case-export-scope', value, checked: caseExportScope === value, disabled: caseExportBusy || value !== 'all' && !reviews, onChange: () => setCaseExportScope(value) }), `${label} · ${counts[value]} 条`))),
+            h('label', null, '文件格式', h('select', { 'aria-label': '文件格式', value: caseExportFormat, onChange: event => setCaseExportFormat(event.target.value) }, h('option', { value: 'xlsx' }, 'Excel 工作簿'), h('option', { value: 'csv' }, 'CSV'))),
+            h('p', { className: 'b05-subtle' }, '八列：用例ID、标题、类型、前置条件、操作步骤、预期结果、观察点、清理动作（环境恢复）。'),
+            caseExportError ? h('p', { role: 'alert' }, caseExportError) : null,
+            h('footer', null, h('button', { type: 'button', disabled: caseExportBusy, onClick: close }, '取消'), h('button', { type: 'button', className: 'primary', disabled: caseExportBusy || !counts[caseExportScope] || caseExportScope !== 'all' && !reviews, onClick: async () => { setCaseExportBusy(true); setCaseExportError(''); const success = await exportCurrentCases(caseExportFormat); setCaseExportBusy(false); if (success) close() } }, caseExportBusy ? '正在导出…' : `导出 ${counts[caseExportScope]} 条`))))
       }
 
       function renderCoverageCases() {
@@ -8573,9 +8776,23 @@ window.__ModuleLoader__.load({
         const behaviorItems = behaviorCoverageForCase(current?.details?.behavior_coverage ?? behaviorCoverageProjection(current?.details?.notes ?? current?.notes, testCases), item)
         const values = (values, empty) => Array.isArray(values) && values.length ? values.map((value, index) => h('div', { key: index, className: 'b05-bullet' }, '✓', h('span', null, text(value, empty)))) : h('p', { className: 'b05-subtle' }, empty)
         const copyCase = () => { void copySingleCase(item) }
-        return h(React.Fragment, null,
+        const order = (caseReviewOrder.length ? caseReviewOrder : filteredCaseRows.map(value => caseKeyByItem.get(value))).filter(key => caseById.has(key))
+        const position = order.indexOf(screen.id), savedReview = reviewByKey[caseIdentity(item)]
+        const controls = h('div', { className: 'pangea-case-review-actions' },
+          h('button', { type: 'button', disabled: position <= 0, onClick: () => selectReviewCase(order[position - 1]) }, '上一条'),
+          h('span', null, position < 0 ? '当前用例已不在筛选范围' : `${position + 1} / ${order.length}`),
+          h('button', { type: 'button', disabled: position < 0 || position >= order.length - 1, onClick: () => selectReviewCase(order[position + 1]) }, '下一条'),
+          h('span', { className: 'pangea-status' }, REVIEW_LABELS[savedReview?.review_status ?? 'unreviewed']),
+          h('button', { type: 'button', disabled: reviewSaving || !savedReview, onClick: () => { void saveReview(item, 'excluded') } }, '暂不采纳'),
+          h('button', { type: 'button', disabled: reviewSaving || !savedReview, onClick: () => { void saveReview(item, 'adopted') } }, reviewSaving ? '保存中…' : '采纳此用例'),
+          savedReview?.decision ? h('button', { type: 'button', disabled: reviewSaving, onClick: () => { void saveReview(item, 'unreviewed') } }, '撤销决定') : null)
+        const detailContent = h(React.Fragment, null, controls,
+          reviewError ? h('p', { role: 'alert' }, reviewError) : null,
+          reviews && !savedReview ? h('p', { role: 'status' }, '该用例缺少唯一身份，可阅读或随全部导出，暂不能保存评审。') : null,
+          !filteredCaseRows.includes(item) ? h('p', { role: 'status' }, '当前用例已不符合筛选条件，仍保留本次阅读；上一条与下一条沿用进入详情时的顺序。') : null,
+
           h('div', { className: 'b05-section-head' }, h('div', null,
-            h('div', { className: 'b05-detail-label' }, item.display_id || item.test_case_id || '待编号', ' · ', text(item.case_type, '类型未标注'), ' · ', hasText(item.priority) ? `优先级 ${item.priority}` : '优先级未标注', ' · ', readiness),
+            h('div', { className: 'b05-detail-label' }, item.display_id || item.test_case_id || '待编号', ' · ', CASE_TYPE_LABELS[item.case_type] || text(item.case_type, '类型未标注'), ' · ', hasText(item.priority) ? `优先级 ${item.priority}` : '优先级未标注', ' · ', readiness),
             h('h2', { className: 'b05-detail-title' }, text(item.title, '未命名用例')),
             h('p', null, `独立验证目标：${text(item.verification_goal, '当前记录未单独声明，请核对用例原文。')}`)),
             h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: copyCase }, '复制用例'),
@@ -8614,6 +8831,7 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', className: 'b05-text-link', onClick: () => jump('report') }, '查看完整用例记录 ↗')))),
           item.source_record ? h('details', { className: 'b05-raw-record' }, h('summary', null, '查看本轮原始用例记录'), renderRecordBody(item, true)) : null,
           renderB05SourceDrawer('case', item))
+        return h('div', { className: 'pangea-case-review-shell' }, h('aside', { className: 'pangea-case-review-list', 'aria-label': '当前筛选用例' }, h('h3', null, `当前筛选 · ${order.length} 条`), order.slice(Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50), Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50) + 50).map(key => h('button', { key, type: 'button', 'aria-current': key === screen.id ? 'true' : undefined, onClick: () => selectReviewCase(key) }, caseById.get(key)?.display_id || key, h('span', null, caseById.get(key)?.title)))), h('div', { className: 'pangea-case-review-detail' }, detailContent))
       }
 
       async function copySingleCase(item) {
@@ -8698,7 +8916,7 @@ window.__ModuleLoader__.load({
       const flowScreen = screen.type === 'flows' && pageMode === 'analysis' && selectedTask
       const resultScreen = ['risks', 'risk', 'cases', 'case', 'coverage-cases'].includes(screen.type) && pageMode === 'analysis' && selectedTask
       const rootClassName = `pangea-companion${screen.type === 'home' ? ' b06-home-screen' : ''}${screen.type === 'tasks' ? ' b03-task-screen' : ''}${screen.type === 'overview' || flowScreen || resultScreen ? ' b03-overview-screen' : ''}${flowScreen ? ' b04-flow-screen' : ''}${resultScreen ? ' b05-result-screen' : ''}`
-      const rootStyle = screen.type === 'home' || screen.type === 'tasks' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: '"Segoe UI", "Microsoft YaHei", sans-serif', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
+      const rootStyle = screen.type === 'home' || screen.type === 'tasks' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
       const flowTargetLabel = text(selectedTask?.title, text(selectedTask?.target, '分析任务')).replace(/\s*分析\s*$/, '')
       const resultScopeLabel = [selectedTask?.repository || current?.repository || '当前仓库',
         selectedTask?.source_scope?.join('、')].filter(Boolean).join(' / ')
@@ -8708,35 +8926,9 @@ window.__ModuleLoader__.load({
         h('p', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: 800 } }, resultTarget)) : null
       const flowGraphType = flowScreen && ['sequence', 'functions'].includes(flowReader?.view)
       const flowHeader = flowScreen ? h(React.Fragment, null,
-        h('nav', { className: 'b03-overview-breadcrumb', 'aria-label': '当前位置' },
-          h('button', { type: 'button', onClick: () => jump('tasks') }, 'PANGEA 分析'), h('span', { 'aria-hidden': true }, '›'),
-          h('button', { type: 'button', onClick: () => jump('overview') }, flowTargetLabel), h('span', { 'aria-hidden': true }, '›'),
-          h('span', { 'aria-current': 'page' }, flowGraphType ? '图表类型' : '业务流程')),
-        h('section', { className: 'b03-overview-page-hero b04-page-hero' },
-          h('div', null, h('h1', { className: 'pangea-page-heading' }, selectedTask.title),
-            h('div', { className: 'b03-overview-run-meta' },
-              `${resultScopeLabel} · ${current?.run_id ? taskRunLabel(current.run_id) : '等待运行'}`), resultTargetDetails),
-          flowBranchDetail ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { setFlowBranchDetail(''); setBranchSelection('') } }, runIcon('ArrowLeft'), '返回流程')
-          : flowGraphType ? h('div', { className: 'b03-overview-page-actions' },
-            h('button', { type: 'button', className: 'b03-task-action', onClick: () => window.dispatchEvent(new CustomEvent('pangea:open-assistant')) }, runIcon('Sparkles'), 'AI 助手'),
-            h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('tasks') }, runIcon('ArrowLeft'), '返回任务列表'))
-            : businessFlows.length === 0 ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('workflow') }, runIcon('Play'), '查看运行过程')
-              : h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('report') }, runIcon('FileText'), '查看分析原文')),
-        navigation) : null
+        pageHeader({ title: selectedTask.title || current?.target || '分析详情', task: selectedTask, current, ui: ctx.pangea?.ui, onBack: flowBranchDetail ? () => { setFlowBranchDetail(''); setBranchSelection('') } : () => jump('tasks'), actions: h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('report') }, '查看分析原文') }), navigation) : null
       const resultHeader = resultScreen ? h(React.Fragment, null,
-        h('nav', { className: 'b03-overview-breadcrumb', 'aria-label': '当前位置' },
-          h('button', { type: 'button', onClick: () => jump('tasks') }, 'PANGEA 分析'), h('span', { 'aria-hidden': true }, '›'),
-          h('button', { type: 'button', onClick: () => jump('overview') }, flowTargetLabel), h('span', { 'aria-hidden': true }, '›'),
-          h('span', { 'aria-current': 'page' }, screen.type === 'risk' ? '风险详情' : screen.type === 'risks' ? '风险列表' : screen.type === 'case' ? '测试用例详情' : screen.type === 'coverage-cases' ? '覆盖补测' : '测试用例列表')),
-        h('section', { className: 'b03-overview-page-hero b05-page-hero' },
-          h('div', null, h('h1', { className: 'pangea-page-heading' }, selectedTask.title),
-            h('div', { className: 'b03-overview-run-meta' }, `${resultScopeLabel} · ${current?.run_id ? taskRunLabel(current.run_id) : '等待运行'}`), resultTargetDetails),
-          h('div', { className: 'b03-overview-page-actions' },
-            derivationButton(screen.type === 'case' ? caseById.get(screen.id) : screen.type === 'risk' ? riskById.get(screen.id) : undefined),
-            ['risk', 'case', 'coverage-cases'].includes(screen.type) ? h('button', { type: 'button', className: 'b03-task-action', onClick: goBack }, runIcon('ArrowLeft'), screen.type === 'risk' ? '返回风险' : screen.type === 'case' ? '返回用例' : '返回全部用例') : null,
-            screen.type === 'coverage-cases' ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportOpen(true) } }, runIcon('FileText'), '导出全部用例') : null,
-            screen.type !== 'coverage-cases' ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('report') }, runIcon('FileText'), '查看分析原文') : null)),
-        navigation) : null
+        pageHeader({ title: selectedTask.title || current?.target || '分析详情', task: selectedTask, current, ui: ctx.pangea?.ui, onBack: ['risk', 'case', 'coverage-cases'].includes(screen.type) ? goBack : () => jump('tasks'), backLabel: screen.type === 'case' ? '返回用例' : screen.type === 'risk' ? '返回风险' : '返回任务列表', actions: derivationButton(screen.type === 'case' ? caseById.get(screen.id) : screen.type === 'risk' ? riskById.get(screen.id) : undefined) }), navigation) : null
       if (screen.type === 'workflow') return h('div', { ref: panelRootRef, className: 'pangea-companion', style: styles.root }, monitorPersistenceNotice, renderSourceFirstWorkflow())
       return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : 'PANGEA 执行环境' },
         h('style', null, panelCss),
@@ -8789,12 +8981,15 @@ window.__ModuleLoader__.load({
     exports.agentSessionContent = agentSessionContent
     exports.mergeAgentSessionEvents = mergeAgentSessionEvents
     exports.RunWorkspace = RunWorkspace
+    exports.PangeaPanel = PangeaPanel
+    exports.TaskInfoAction = TaskInfoAction
     exports.RunExecutionSummary = RunExecutionSummary
     exports.executionObservation = executionObservation
     exports.inject = inject
     exports.requestSnapshot = requestSnapshot
     exports.requestSourceSnippet = requestSourceSnippet
     exports.requestRunExport = requestRunExport
+    exports.requestCaseReviews = requestCaseReviews
     exports.requestAssetCatalog = requestAssetCatalog
     exports.requestAssetDetail = requestAssetDetail
     exports.requestEnvironments = requestEnvironments

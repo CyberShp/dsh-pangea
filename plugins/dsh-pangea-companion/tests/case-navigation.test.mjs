@@ -141,7 +141,7 @@ async function harness() {
     return node
   }
   function click(label) {
-    const node = find(node => node.type === 'button' && content(node).trim() === label, `button ${label}`)
+    const node = find(node => node.type === 'button' && (content(node).trim() === label || node.props['aria-label'] === label), `button ${label}`)
     node.props.onClick(); render()
   }
   function input(label) { return find(node => node.type === 'input' && node.props['aria-label'] === label, `input ${label}`) }

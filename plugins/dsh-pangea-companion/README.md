@@ -220,3 +220,15 @@ npm test
 当前测试覆盖：分析结果读取、报告/结构化计数核对、独立与对照复核合并、历史 Run 摘要、Run 分页/新建/停止、资产草稿传递、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册和证据交互。
 
 风险方法 v1：独立只读检查账本、风险原样引文及外部观测；空 narrative 继续展示 trigger。检查记录不进入用例说明/导出，comparison 复核记录保持阶段隔离。
+
+### UI/UX 开发分支：范围预览与用例评审
+
+新建分析要求明确选择源码范围并预览实际命中文件。`source_scope` 仍为相对路径数组，整个仓库需显式选择 `.`。范围校验和预览位于 `src/repositories/scope.js`，复用 Agent 的只读 `source-scope-preview`；提交前重新确认 `scope_preview_id` / `expected_scope_revision`。工作台与冻结引擎版本需配套。
+
+用例用户决定独立存放在 `<dataRoot>/.pangea/case-reviews/<runId>.json`，通过 `/api/pangea-companion/case-reviews` GET/POST 读取和 CAS 保存。源码 Run 保持只读。`projection_id` 或唯一 `test_case_id` 用于持久身份，重复/缺失身份只允许阅读和全部导出。内容变化后需重新评审。
+
+`/api/pangea-companion/export` 的 GET 保持全量兼容；POST 支持 `all/filtered/selected/adopted`，需 `case_set_revision`，采纳范围另需 `review_revision`。空范围、失效身份或版本冲突不会扩大为全部。CSV/XLSX 始终保持原八列。
+
+浏览器开发预览使用真实 React 组件与隔离 fixture；源码范围、评审与导出走实际本地 API，其余 Agent/分析数据为示例，不代表完成真实分析。可运行 `scripts/preview-ui.mjs`，使用 `--desktop`、`--agent`、`--python` 指定配套工程/解释器。`scripts/verify-ui-browser.mjs` 使用外部开发测试工具 Playwright（`--playwright` 可指定其模块路径）；不增加产品依赖。截图和断言输出默认保存到 Desktop 的 `.pangea-build/uiux-verification`。Windows 使用系统字体；Linux 截图可通过 `--tools` 指向含 `@fontsource/noto-sans-sc` 的开发工具目录。
+
+引擎范围一致性回归在 `tests/source-scope-engine.test.mjs`，以 `PANGEA_TEST_PYTHON` / `PANGEA_AGENT_ROOT` 指向锁定的配套引擎。桌面集成与内网验收记录见 Desktop `feature-specs/2026-10-21-uiux-development.md`。
