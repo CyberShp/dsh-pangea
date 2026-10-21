@@ -2417,6 +2417,19 @@ window.__ModuleLoader__.load({
       const cameraRef = React.useRef(camera)
       cameraRef.current = camera
       const [dragging, setDragging] = React.useState(false)
+      const [fullscreen, setFullscreen] = React.useState(false)
+      const [fullscreenBusy, setFullscreenBusy] = React.useState(false)
+      const [fullscreenError, setFullscreenError] = React.useState('')
+      const fullscreenTarget = () => canvasRef.current?.closest?.('section') ?? canvasRef.current?.parentElement
+      React.useEffect(() => {
+        const syncFullscreen = () => {
+          setFullscreen(Boolean(document.fullscreenElement && document.fullscreenElement === fullscreenTarget()))
+          setFullscreenError('')
+        }
+        syncFullscreen()
+        document.addEventListener('fullscreenchange', syncFullscreen)
+        return () => document.removeEventListener('fullscreenchange', syncFullscreen)
+      }, [])
       const fitScale = bounds => Math.min(1, Math.max(1, bounds.width - 32) / Math.max(1, graphWidth), Math.max(1, bounds.height - 32) / Math.max(1, graphHeight))
       const centered = (scale, fit) => ({ scale, fit, x: (sizeRef.current.width - graphWidth * scale) / 2, y: (sizeRef.current.height - graphHeight * scale) / 2 })
       const zoomAt = (value, factor, x, y) => {
@@ -2471,10 +2484,23 @@ window.__ModuleLoader__.load({
         h('button', { type: 'button', 'aria-label': `放大${label}`, onClick: () => change(1.25) }, '+'),
         h('button', { type: 'button', 'aria-label': `${label}原始大小`, onClick: () => setCamera(centered(1, false)) }, '100%'),
         h('button', { type: 'button', 'aria-label': `适应${label}画布`, onClick: () => setCamera(centered(fitScale(sizeRef.current), true)) }, '适应画布'),
-        h('button', { type: 'button', 'aria-label': `全屏阅读${label}`, onClick: async () => {
-          const element = canvasRef.current?.closest?.('section') ?? canvasRef.current?.parentElement
-          try { if (document.fullscreenElement) await document.exitFullscreen(); else await element?.requestFullscreen?.() } catch {}
-        } }, '全屏阅读'))
+        h('button', { type: 'button', 'aria-label': fullscreen ? `退出${label}全屏` : `全屏阅读${label}`, 'aria-pressed': fullscreen, disabled: fullscreenBusy, onClick: async () => {
+          const element = fullscreenTarget(), exiting = Boolean(element && document.fullscreenElement === element)
+          setFullscreenError('')
+          if (!element || typeof (exiting ? document.exitFullscreen : element.requestFullscreen) !== 'function') {
+            setFullscreenError('当前环境不支持全屏阅读。')
+            return
+          }
+          setFullscreenBusy(true)
+          try {
+            if (exiting) await document.exitFullscreen()
+            else await element.requestFullscreen()
+            setFullscreen(document.fullscreenElement === element)
+          } catch {
+            setFullscreenError(exiting ? '未能退出全屏，请按 Esc 重试。' : '全屏阅读未能开启，请重试或在当前视图继续阅读。')
+          } finally { setFullscreenBusy(false) }
+        } }, fullscreen ? '退出全屏' : '全屏阅读'),
+        fullscreenError ? h('span', { role: 'alert', className: 'pangea-fullscreen-error', style: { color: '#9c2330', flexBasis: '100%' } }, fullscreenError) : null)
       const panProps = { ref: canvasRef, className: 'pangea-graph-canvas', tabIndex: 0, style: { ...GRAPH_CANVAS_STYLE, cursor: dragging ? 'grabbing' : 'grab' }, 'aria-label': `${label}画布，Ctrl加滚轮缩放，普通滚轮滚动页面，拖拽移动`,
         onPointerDown: event => {
           if (event.button !== 0 || dragRef.current) return

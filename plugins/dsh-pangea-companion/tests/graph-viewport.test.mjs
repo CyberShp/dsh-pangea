@@ -7,9 +7,17 @@ const source = await readFile(new URL('../src/client.js', import.meta.url), 'utf
 const hookSource = source.slice(source.indexOf('    const GRAPH_CANVAS_STYLE ='), source.indexOf('    function warningList('))
 
 function viewport(graphWidth = 1000, graphHeight = 800, savedViewport) {
-  const hooks = [], pending = [], observers = [], listeners = new Map(), captures = new Set()
+  const hooks = [], pending = [], observers = [], listeners = new Map(), captures = new Set(), fullscreenListeners = new Map()
   let index = 0, view, graphKey = 'first'
+  const document = {
+    fullscreenElement: null,
+    addEventListener(name, fn) { fullscreenListeners.set(name, fn) },
+    removeEventListener(name, fn) { assert.equal(fullscreenListeners.get(name), fn); fullscreenListeners.delete(name) },
+    async exitFullscreen() { this.fullscreenElement = null; fullscreenListeners.get('fullscreenchange')?.() },
+  }
+  const section = { async requestFullscreen() { document.fullscreenElement = this; fullscreenListeners.get('fullscreenchange')?.() } }
   const canvas = {
+    closest: () => section,
     clientWidth: 600, clientHeight: 400, clientLeft: 1, clientTop: 1,
     getBoundingClientRect: () => ({ left: 20, top: 30 }),
     addEventListener(name, fn, options) { listeners.set(name, { fn, options }) },
@@ -31,7 +39,7 @@ function viewport(graphWidth = 1000, graphHeight = 800, savedViewport) {
       pending.push(() => { previous?.cleanup?.(); hooks[slot] = { dependencies, cleanup: effect() } })
     },
   }
-  const context = vm.createContext({ React,
+  const context = vm.createContext({ React, document,
     h: (tag, props, ...children) => ({ tag, props, children }),
     ResizeObserver: class {
       constructor(callback) { this.callback = callback; observers.push(this) }
@@ -44,7 +52,7 @@ function viewport(graphWidth = 1000, graphHeight = 800, savedViewport) {
   const flush = () => { render(); pending.splice(0).forEach(effect => effect()); return render() }
   flush()
   return {
-    canvas, captures, listeners,
+    canvas, captures, listeners, section, document, fullscreenListeners,
     get view() { return render() },
     camera() {
       const tree = render().sized({ tag: 'svg', attrs: { width: graphWidth, height: graphHeight }, children: [] })
@@ -54,7 +62,7 @@ function viewport(graphWidth = 1000, graphHeight = 800, savedViewport) {
     event(extra = {}) { return { currentTarget: canvas, button: 0, pointerId: 7, clientX: 100, clientY: 100, detail: 1,
       prevented: false, stopped: false, preventDefault() { this.prevented = true }, stopPropagation() { this.stopped = true }, ...extra } },
     wheel(extra = {}) { const event = this.event({ deltaY: -100, deltaMode: 0, ...extra }); listeners.get('wheel').fn(event); return event },
-    click(label) { const button = render().controls.children.find(child => child.props['aria-label'] === label); assert.ok(button); button.props.onClick() },
+    click(label) { const button = render().controls.children.find(child => child?.props['aria-label'] === label); assert.ok(button); return button.props.onClick() },
     resize(width, height) { canvas.clientWidth = width; canvas.clientHeight = height; observers.filter(observer => observer.active).forEach(observer => observer.callback()) },
     switchGraph(key) { graphKey = key; flush() },
     dispose() { hooks.forEach(hook => hook?.cleanup?.()); assert.ok(observers.every(observer => !observer.active)) },
@@ -79,6 +87,44 @@ test('the graph fits one bounded viewport and responsive fitting contains all no
   assert.ok(fitted.x >= 16 && fitted.y >= 16)
   assert.ok(fitted.x + 1000 * fitted.scale <= 284)
   assert.ok(fitted.y + 800 * fitted.scale <= 304)
+  graph.dispose()
+})
+
+test('fullscreen controls track this diagram, browser exit and failures without losing the camera', async () => {
+  const graph = viewport()
+  graph.click('测试图原始大小')
+  const before = graph.camera()
+  await graph.click('全屏阅读测试图')
+  assert.equal(graph.document.fullscreenElement, graph.section)
+  assert.equal(graph.view.controls.children.find(child => child?.props['aria-pressed'])?.children[0], '退出全屏')
+  await graph.document.exitFullscreen()
+  assert.equal(graph.view.controls.children.find(child => child?.props['aria-label'] === '全屏阅读测试图').props['aria-pressed'], false)
+  close(graph.camera().scale, before.scale)
+
+  graph.document.fullscreenElement = {}
+  graph.fullscreenListeners.get('fullscreenchange')()
+  assert.equal(graph.view.controls.children.find(child => child?.props['aria-label'] === '全屏阅读测试图').props['aria-pressed'], false)
+  graph.section.requestFullscreen = async () => { throw new Error('permission denied') }
+  await graph.click('全屏阅读测试图')
+  assert.match(graph.view.controls.children.find(child => child?.props.role === 'alert').children[0], /未能开启/)
+  delete graph.section.requestFullscreen
+  await graph.click('全屏阅读测试图')
+  assert.match(graph.view.controls.children.find(child => child?.props.role === 'alert').children[0], /不支持/)
+  graph.dispose()
+  assert.equal(graph.fullscreenListeners.size, 0)
+})
+
+test('fullscreen exit button reports failure and can be retried', async () => {
+  const graph = viewport()
+  await graph.click('全屏阅读测试图')
+  const exitFullscreen = graph.document.exitFullscreen
+  graph.document.exitFullscreen = async () => { throw new Error('exit rejected') }
+  await graph.click('退出测试图全屏')
+  assert.match(graph.view.controls.children.find(child => child?.props.role === 'alert').children[0], /未能退出/)
+  graph.document.exitFullscreen = exitFullscreen
+  await graph.click('退出测试图全屏')
+  assert.equal(graph.document.fullscreenElement, null)
+  assert.equal(graph.view.controls.children.some(child => child?.props.role === 'alert'), false)
   graph.dispose()
 })
 
