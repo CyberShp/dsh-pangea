@@ -13,6 +13,7 @@ window.__ModuleLoader__.load({
     const { normalizeFlow: sharedNormalizeFlow } = __flowNormalize
     const { buildModuleOverview } = __moduleOverview
     const { diagramDiagnostics } = __diagramContract
+    const flowContractDiagnostics = flow => Array.isArray(flow?.diagram_diagnostics) ? flow.diagram_diagnostics : diagramDiagnostics(flow?.source_record?.body ?? flow)
     const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, pathsForNode, layoutCallGraph } = __flowLayout
     const { renderFlowTree, renderCallGraphTree, toSvgString, toInteractiveFlowSvg } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
@@ -5588,7 +5589,7 @@ window.__ModuleLoader__.load({
               ` · ${row.category} · ${row.relationship}`,
               h('div', { style: styles.itemMeta }, `入口：${row.entries.map(node => node.label || node.id).join('、') || row.flow.entry || '未声明'}；主干路径：${row.main_paths.map(path => path.path_id).join('、') || '未声明'}；调用入口：${row.call_root || '未声明'}；显式调用关系：${row.calls.length}`),
               row.calls.length ? h('details', null, h('summary', null, '显式调用关系'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(row.calls, null, 2))) : null,
-              diagramDiagnostics(row.flow.source_record?.body ?? row.flow).length ? h('details', null, h('summary', null, '图形合同诊断'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(diagramDiagnostics(row.flow.source_record?.body ?? row.flow), null, 2))) : null,
+              flowContractDiagnostics(row.flow).length ? h('details', null, h('summary', null, '图形合同诊断'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(flowContractDiagnostics(row.flow), null, 2))) : null,
               sourceButton(row.flow, '查看流程证据 ↗', row.flow.title || row.flow.flow_id)))) : h('p', { style: styles.itemMeta }, '当前没有已发布流程；入口和关系未知。'))))
         return h(React.Fragment, null, overviewPanel, renderFlowVersions(), tabs, flow ? h(React.Fragment, null, modebar,
           h('section', { key: cardScope(flow), id: cardId(flow), role: 'tabpanel', tabIndex: 0, 'aria-labelledby': `${cardId(flow)}-tab`,

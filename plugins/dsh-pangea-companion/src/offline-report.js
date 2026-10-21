@@ -33,7 +33,8 @@ export function buildOfflineReport(run, { originalText = '', originalTextDiagnos
   if (originalTextDiagnostic) diagnostics.push({ kind: 'text_report', message: originalTextDiagnostic })
   const sections = overview.flows.map((row, index) => {
     const flow = row.flow
-    diagnostics.push(...diagramDiagnostics(flow.source_record?.body ?? flow).map(item => ({ ...item, unit_id: flow.unit_id, flow_id: flow.flow_id })))
+    const contractDiagnostics = Array.isArray(flow.diagram_diagnostics) ? flow.diagram_diagnostics : diagramDiagnostics(flow.source_record?.body ?? flow)
+    diagnostics.push(...contractDiagnostics.map(item => ({ ...item, unit_id: flow.unit_id, flow_id: flow.flow_id })))
     const figures = [['flow', '流程图'], ['sequence', '时序图'], ['call', '函数调用图']].map(([kind, title]) => {
       let tree, errors = []
       try {

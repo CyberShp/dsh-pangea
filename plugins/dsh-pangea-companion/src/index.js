@@ -515,37 +515,56 @@ export async function exportRouteHandler(req, res, { readRun = summarizeRun, res
     const url = new URL(req.url ?? EXPORT_API_PATH, 'http://localhost')
     const input = req.method === 'POST' ? await requestJson(req) : Object.fromEntries(url.searchParams)
     const runId = input.run_id ?? '', format = input.format ?? 'csv'
-    if (!/^[A-Za-z0-9._-]+$/.test(runId)) return json(res, 400, { status: 'error', error: 'run_id is required' })
+    if (typeof runId !== 'string' || !/^[A-Za-z0-9._-]+$/.test(runId) || ['.', '..'].includes(runId)) return json(res, 400, { status: 'error', error: 'run_id is required' })
     if (!['csv', 'xlsx', 'csv-bundle', 'report-bundle'].includes(format)) return json(res, 400, { status: 'error', error: '不支持的导出格式' })
     const dataRoot = await resolveRoot({ cwd: input.cwd, dataRoot: input.data_root })
     const run = await readRun(dataRoot, runId, { includeDetails: true })
     if (run.run_id !== runId) return json(res, 409, { status: 'error', code: 'run_mismatch', error: '导出内容不属于请求 Run' })
     if (format === 'report-bundle') {
       let originalText = '', originalTextDiagnostic = ''
-      let textFile = null, markerFile = null, markerText = null, publicationManifest = null
+      let publicationManifest = null
+      let artifactWindow = run.artifacts?.report_md || run.artifacts?.report_complete ? 'verified' : 'unavailable'
+      const artifactDiagnostics = [], samples = []
       const initialHash = reportSnapshotHash(run)
-      try {
-        if (run.artifacts?.report_md) {
-          const root = await realpath(path.join(dataRoot, 'runs', runId))
-          const file = await realpath(run.artifacts.report_md)
-          const relative = path.relative(root, file)
-          if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('文字报告路径越出当前 Run')
-          textFile = file
-          originalText = await readFile(file, 'utf8')
-          if (run.artifacts.report_complete) {
-            const markerCandidate = await realpath(run.artifacts.report_complete)
-            const markerRelative = path.relative(root, markerCandidate)
-            if (!markerRelative || markerRelative.startsWith('..') || path.isAbsolute(markerRelative)) throw new Error('发布记录路径越出当前 Run')
-            markerFile = markerCandidate
-            markerText = await readFile(markerFile, 'utf8')
-            publicationManifest = JSON.parse(markerText)
-          }
-        } else originalTextDiagnostic = '当前 Run 未提供文字报告；完整快照与图形事实已保留。'
-      } catch (error) { originalTextDiagnostic = `原文字报告不可读取：${error.message}` }
+      const boundFile = async (candidate, label) => {
+        const root = await realpath(path.join(dataRoot, 'runs', runId))
+        const file = await realpath(candidate), relative = path.relative(root, file)
+        if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`${label}路径越出当前 Run`)
+        return file
+      }
+      const sampleArtifact = async (candidate, label) => {
+        try {
+          const file = await boundFile(candidate, label), text = await readFile(file, 'utf8')
+          // Only successful reads participate in the before/after comparison.
+          samples.push({ file, text, label })
+          return text
+        } catch (error) {
+          artifactWindow = 'unverified'
+          artifactDiagnostics.push(`${label}不可读取：${error.message}`)
+          return null
+        }
+      }
+      if (run.artifacts?.report_md) originalText = await sampleArtifact(run.artifacts.report_md, '原文字报告') ?? ''
+      else artifactDiagnostics.push('当前 Run 未提供文字报告；完整快照与图形事实已保留。')
+      if (run.artifacts?.report_complete) {
+        const markerText = await sampleArtifact(run.artifacts.report_complete, '发布记录')
+        if (markerText !== null) {
+          try { publicationManifest = JSON.parse(markerText) }
+          catch (error) { artifactDiagnostics.push(`发布记录不可解析：${error.message}`) }
+        }
+      }
       const finalRun = await readRun(dataRoot, runId, { includeDetails: true })
-      if (initialHash !== reportSnapshotHash(finalRun)
-        || (textFile && originalText !== await readFile(textFile, 'utf8'))
-        || (markerFile && markerText !== await readFile(markerFile, 'utf8'))) {
+      let publicationChanged = initialHash !== reportSnapshotHash(finalRun)
+      for (const sample of samples) {
+        try {
+          const file = await boundFile(sample.file, sample.label)
+          if (file !== sample.file || sample.text !== await readFile(file, 'utf8')) publicationChanged = true
+        } catch (error) {
+          artifactWindow = 'unverified'
+          artifactDiagnostics.push(`${sample.label}在导出复核时不可读取；保留首次读取内容，附件版本窗口未验证：${error.message}`)
+        }
+      }
+      if (publicationChanged) {
         return json(res, 409, { status: 'error', code: 'publication_changed', error: '导出期间发布版本发生变化，请重试以获取同一版本的报告和图形。' })
       }
       const accepted = Object.fromEntries((run.workflow?.actions ?? []).filter(action => action.accepted_revision != null).map(action => [action.action_id, action.accepted_revision]))
@@ -556,9 +575,9 @@ export async function exportRouteHandler(req, res, { readRun = summarizeRun, res
       // that limitation explicitly while retaining the exact original text.
       const versionNote = !revisionMatch ? '原文字报告缺少匹配当前结果的发布版本记录；原文作为独立附件保留，图形与事实使用本次同一快照。'
         : '发布记录的接受版本已核对；旧发布记录未保存文字内容哈希，原文字报告的生成版本仅能核对至结果版本。'
-      originalTextDiagnostic = [originalTextDiagnostic, versionNote].filter(Boolean).join('\n')
+      originalTextDiagnostic = [...artifactDiagnostics, versionNote].join('\n')
       const report = buildOfflineReport(run, { originalText, originalTextDiagnostic, publicationManifest,
-        consistency: { snapshot_window: 'verified_before_after', original_text_version: revisionMatch ? 'accepted_revisions_match_no_original_digest' : 'unverified', accepted_revisions: accepted } })
+        consistency: { snapshot_window: 'verified_before_after', artifact_window: artifactWindow, original_text_version: revisionMatch && artifactWindow === 'verified' ? 'accepted_revisions_match_no_original_digest' : 'unverified', accepted_revisions: accepted } })
       return textResponse(res, 200, 'application/zip', report.bytes, { 'content-disposition': `attachment; filename="pangea-${runId}-offline-report.zip"` })
     }
     if (run.reader_health?.collection_status?.test_cases === 'unavailable') return json(res, 422, { status: 'error', error: '用例暂不可读取，无法导出' })

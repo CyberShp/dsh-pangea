@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { readFile, mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { Readable } from 'node:stream'
@@ -63,6 +63,14 @@ test('offline report renders all three diagrams from exact facts and retains mal
   assert.match(report.html, /Content-Security-Policy/)
 })
 
+test('offline report uses current persisted contract diagnostics, including strict missing fields and an empty active list', () => {
+  const persisted = { kind: 'diagram_format_diagnostic', classification: 'missing', field: 'sequence.messages', message: '新冻结合同缺少 messages', record_id: 'flow', record_revision: 7 }
+  const report = buildOfflineReport({ run_id: 'run', details: { business_flows: [flow('a', 'active', { diagram_diagnostics: [persisted] }), flow('b', 'clean', { diagram_diagnostics: [] })] } })
+  const contract = report.diagnostics.filter(item => item.kind === 'diagram_format_diagnostic')
+  assert.deepEqual(contract, [{ ...persisted, unit_id: 'a', flow_id: 'a/active' }])
+  assert.match(report.html, /新冻结合同缺少 messages/)
+})
+
 test('CSV bundle and XLSX append execution evidence without changing the eight-column main table or selected identities', async t => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'offline-export-')); t.after(() => rm(dataRoot, { recursive: true, force: true }))
   const items = [0, 1, 2].map(index => ({ projection_id: `u${index}/same`, unit_id: `u${index}`, display_id: 'same', title: `case${index}`, execution_readiness: 'needs_instrumentation', readiness_reason: '需要抓包', test_level: 'interface_contract', purpose: '验证边界', source_evidence: ['repo:a.c:12'], entry: '网络入口', expected_oracle: '响应长度' }))
@@ -102,6 +110,52 @@ test('report export detects a changing publication instead of mixing versions', 
   const req = { method: 'GET', url: '/export?run_id=run&format=report-bundle', headers: { 'sec-fetch-site': 'same-origin' } }
   let reads = 0, status, output
   await exportRouteHandler(req, { writeHead(value) { status = value }, end(value) { output = value } }, { resolveRoot: async () => os.tmpdir(), readRun: async () => ({ run_id: 'run', publication: { revision: ++reads }, details: { business_flows: [] } }) })
+  assert.equal(status, 409)
+  assert.equal(JSON.parse(output).code, 'publication_changed')
+})
+
+test('report export rejects dot identities before resolving or reading a data root', async () => {
+  for (const runId of ['.', '..']) {
+    let status
+    await exportRouteHandler({ method: 'GET', url: `/export?run_id=${runId}&format=report-bundle`, headers: { 'sec-fetch-site': 'same-origin' } },
+      { writeHead(value) { status = value }, end() {} }, { resolveRoot: async () => assert.fail('invalid identity must not reach filesystem'), readRun: async () => assert.fail('invalid identity must not read a Run') })
+    assert.equal(status, 400, runId)
+  }
+})
+
+for (const broken of ['report-directory', 'marker-directory', 'marker-corrupt', 'report-unreadable-on-recheck']) {
+  test(`report export degrades ${broken} to a diagnostic and retains complete facts`, async t => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'report-degraded-')); t.after(() => rm(dataRoot, { recursive: true, force: true }))
+    const root = path.join(dataRoot, 'runs', 'run'); await mkdir(root, { recursive: true })
+    const report = path.join(root, 'report.md'), marker = path.join(root, 'report-complete.json')
+    if (broken === 'report-directory') await mkdir(report)
+    else await writeFile(report, '# 已保存的原文字报告')
+    if (broken === 'marker-directory') await mkdir(marker)
+    else await writeFile(marker, broken === 'marker-corrupt' ? '{broken' : JSON.stringify({ run_id: 'run', accepted_revisions: {} }))
+    const snapshot = { run_id: 'run', artifacts: { report_md: report, report_complete: marker }, details: { business_flows: [flow('unit', 'fact')] } }
+    let status, output, reads = 0
+    await exportRouteHandler({ method: 'GET', url: '/export?run_id=run&format=report-bundle', headers: { 'sec-fetch-site': 'same-origin' } },
+      { writeHead(value) { status = value }, end(value) { output = value } }, { resolveRoot: async () => dataRoot, readRun: async () => {
+        if (++reads === 2 && broken === 'report-unreadable-on-recheck') { await rm(report); await mkdir(report) }
+        return snapshot
+      } })
+    assert.equal(status, 200, String(output))
+    const files = entries(output)
+    assert.deepEqual(JSON.parse(files.get('facts.json')), snapshot)
+    assert.equal(files.get('report.md'), broken === 'report-directory' ? '' : '# 已保存的原文字报告')
+    assert.match(files.get('diagnostics.json'), broken.startsWith('marker') ? /发布记录.*不可读取|发布记录.*不可解析/ : /原文字报告.*不可读取/)
+    if (broken === 'report-unreadable-on-recheck') assert.equal(JSON.parse(files.get('manifest.json')).consistency.artifact_window, 'unverified')
+  })
+}
+
+test('report content change during a stable-facts export is a version race (409)', async t => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'report-changing-')); t.after(() => rm(dataRoot, { recursive: true, force: true }))
+  const root = path.join(dataRoot, 'runs', 'run'); await mkdir(root, { recursive: true })
+  const report = path.join(root, 'report.md'); await writeFile(report, 'version-one')
+  const snapshot = { run_id: 'run', artifacts: { report_md: report }, details: { business_flows: [] } }
+  let reads = 0, status, output
+  await exportRouteHandler({ method: 'GET', url: '/export?run_id=run&format=report-bundle', headers: { 'sec-fetch-site': 'same-origin' } },
+    { writeHead(value) { status = value }, end(value) { output = value } }, { resolveRoot: async () => dataRoot, readRun: async () => { if (++reads === 2) await writeFile(report, 'version-two'); return snapshot } })
   assert.equal(status, 409)
   assert.equal(JSON.parse(output).code, 'publication_changed')
 })
