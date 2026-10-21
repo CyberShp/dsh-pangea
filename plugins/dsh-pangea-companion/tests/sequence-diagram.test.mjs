@@ -86,7 +86,8 @@ test('out-of-order and non-contiguous branches are not flattened into false exec
     assert.equal(result.graph.fragments.length, 0)
     for (const id of ids) assert.equal(result.graph.messages.some(row => row.id === id), false)
     assert.deepEqual(result.raw, input)
-    assert.match(toSvgString(renderSequenceTree(layoutSequence(result.graph))), /相关消息未绘制/)
+    // Match visible text across SVG wrapping boundaries.
+    assert.match(toSvgString(renderSequenceTree(layoutSequence(result.graph))).replace(/<[^>]+>/g, ''), /相关消息未绘制/)
   }
 })
 

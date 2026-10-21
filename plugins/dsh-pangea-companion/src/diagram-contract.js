@@ -56,7 +56,7 @@ export function diagramDiagnostics(body, { strict = false } = {}) {
     if (!object(value)) { emit(diagram, where || 'body', 'invalid_type', '图资料必须是 object；原值保留'); continue }
     const version = check(diagram, value, 'format_version', 'string', where, true)
     if (version != null && version !== FORMATS[diagram]) {
-      emit(diagram, where ? `${where}.format_version` : 'format_version', 'unsupported_version', '格式版本暂不支持，原始资料保留', 'valid_but_unsupported')
+      emit(diagram, where ? `${where}.format_version` : 'format_version', 'unsupported_version', '格式版本暂不支持，原始资料保留', diagram === 'flow' && version === 'module-flow-text-v1' ? 'valid_but_unsupported' : 'unknown')
       continue
     }
     if (diagram !== 'flow') {
@@ -78,7 +78,7 @@ export function diagramDiagnostics(body, { strict = false } = {}) {
       const participants = rows(diagram, value, 'participants', where, true), participantIds = identities(diagram, participants)
       for (const [participant, path] of participants) check(diagram, participant, 'label', 'string', path, true)
       const messages = rows(diagram, value, 'messages', where, true), messageIds = identities(diagram, messages)
-      const positions = new Map(messages.flatMap(([message], index) => typeof message.id === 'string' ? [[message.id, index]] : []))
+      const positions = new Map((Array.isArray(value.messages) ? value.messages : []).flatMap((message, index) => object(message) && typeof message.id === 'string' ? [[message.id, index]] : []))
       for (const [message, path] of messages) {
         for (const key of ['from', 'to']) reference(diagram, message, key, participantIds, path)
         check(diagram, message, 'label', 'string', path, true)
@@ -95,14 +95,16 @@ export function diagramDiagnostics(body, { strict = false } = {}) {
         const indexes = []
         for (const [operand, operandPath] of operands) {
           check(diagram, operand, 'condition', 'string', operandPath, true)
+          const operandIndexes = []
           for (const [index, ref] of strings(diagram, operand, 'message_ids', operandPath, true).entries()) {
             if (typeof ref !== 'string') continue
             const refPath = `${operandPath}.message_ids[${index}]`
             if (!messageIds.has(ref)) emit(diagram, refPath, 'unknown_reference', '引用未声明的 id；原值保留')
-            else indexes.push(positions.get(ref))
+            else { indexes.push(positions.get(ref)); operandIndexes.push(positions.get(ref)) }
             if (owned.has(ref)) emit(diagram, refPath, 'overlapping_fragment', '消息同时属于多个分支或片段；归属待确认')
             owned.add(ref)
           }
+          if (operandIndexes.some((position, index) => index && position <= operandIndexes[index - 1])) emit(diagram, `${operandPath}.message_ids`, 'conflicting_message_order', '同一分支内的消息顺序与 messages 冲突；保留原始关系')
         }
         const ordered = [...new Set(indexes)].sort((a, b) => a - b)
         if (ordered.length && ordered.at(-1) - ordered[0] + 1 !== ordered.length) emit(diagram, `${path}.operands`, 'noncontiguous_fragment', '片段消息在 messages 中不连续；保留原始关系')
@@ -125,8 +127,8 @@ export function diagramDiagnostics(body, { strict = false } = {}) {
         reference(diagram, variable, 'function', ids, path)
         for (const key of ['name', 'compute']) check(diagram, variable, key, 'string', path, true)
         strings(diagram, variable, 'reads', path, true)
-        if (!strict && Array.isArray(variable.writes) && variable.writes.every(item => typeof item === 'string')) emit(diagram, `${path}.writes`, 'legacy_writes_array', '旧冻结合同的 writes 数组按原项目兼容展示', 'valid_but_unsupported')
-        else check(diagram, variable, 'writes', 'string', path, true)
+        // The legacy array is already supported by display compatibility.
+        if (strict || !Array.isArray(variable.writes) || !variable.writes.every(item => typeof item === 'string')) check(diagram, variable, 'writes', 'string', path, true)
         check(diagram, variable, 'line', 'line', path)
       }
     }
@@ -145,5 +147,6 @@ export function activeDiagramDiagnostics(result) {
   }
   const active = new Map(records.filter(record => !retired.has(record.record_id)).map(record => [record.record_id, record]))
   return (result?.warnings ?? []).filter(item => item.kind === 'diagram_format_diagnostic'
-    && active.has(item.record_id) && item.record_revision === active.get(item.record_id).created_revision)
+    && active.has(item.record_id) && item.record_revision === active.get(item.record_id).created_revision
+    && ['run_id', 'action_id', 'task_id'].every(key => item[key] === result.binding?.[key]))
 }

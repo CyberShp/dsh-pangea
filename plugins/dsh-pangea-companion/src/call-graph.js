@@ -122,8 +122,13 @@ export function validateCallGraph(input) {
     const name = str(row.name)
     if (!ids.has(fn)) { errors.push(`${where}.function='${fn}' 不在 functions 中`); continue }
     if (!name) { errors.push(`${where} 缺少 name`); continue }
+    // Older frozen rubrics did not constrain writes to string. Preserve every
+    // authored array entry in the display; diagnostics for the current frozen
+    // contract are produced separately by diagram-contract, never retroactively.
+    const writes = Array.isArray(row.writes) && row.writes.every(item => typeof item === 'string')
+      ? row.writes.join('\n') : textField(row.writes, `${where}.writes`, errors)
     variables.push({ function: fn, name, reads: stringList(row.reads, `${where}.reads`, errors), compute: textField(row.compute, `${where}.compute`, errors),
-      writes: textField(row.writes, `${where}.writes`, errors), line: lineField(row.line, `${where}.line`, errors) })
+      writes, line: lineField(row.line, `${where}.line`, errors) })
   }
 
   let root = str(value.root)

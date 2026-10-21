@@ -1962,8 +1962,13 @@ window.__ModuleLoader__.load({
         const name = str(row.name)
         if (!ids.has(fn)) { errors.push(`${where}.function='${fn}' 不在 functions 中`); continue }
         if (!name) { errors.push(`${where} 缺少 name`); continue }
+        // Older frozen rubrics did not constrain writes to string. Preserve every
+        // authored array entry in the display; diagnostics for the current frozen
+        // contract are produced separately by diagram-contract, never retroactively.
+        const writes = Array.isArray(row.writes) && row.writes.every(item => typeof item === 'string')
+          ? row.writes.join('\n') : textField(row.writes, `${where}.writes`, errors)
         variables.push({ function: fn, name, reads: stringList(row.reads, `${where}.reads`, errors), compute: textField(row.compute, `${where}.compute`, errors),
-          writes: textField(row.writes, `${where}.writes`, errors), line: lineField(row.line, `${where}.line`, errors) })
+          writes, line: lineField(row.line, `${where}.line`, errors) })
       }
 
       let root = str(value.root)
@@ -2137,11 +2142,16 @@ window.__ModuleLoader__.load({
           }
           const condition = field(operand, 'condition', ['guard'], where)
           if (!condition) errors.push(`片段 '${name}' 的分支 ${operandIndex + 1} 条件未提供`)
+          const operandIndexes = ids.map(id => messageIndex.get(id)).filter(Number.isInteger)
+          if (operandIndexes.some((position, at) => at && position <= operandIndexes[at - 1])) problems.push(`分支 ${operandIndex + 1} 内的消息顺序不连续或与原消息顺序冲突`)
           return { condition, message_ids: ids.filter(id => typeof id === 'string') }
         })
         const ids = operands.flatMap(operand => operand.message_ids)
-        const indexes = ids.map(id => messageIndex.get(id))
-        if (indexes.some((position, at) => at && position !== indexes[at - 1] + 1)) problems.push('消息顺序不连续或与原消息顺序冲突')
+        // Only the fragment's occupied span must be contiguous. Alternative
+        // operands have their own authored order; their declaration order need not
+        // match the branch order in messages (and implies no order between paths).
+        const indexes = ids.map(id => messageIndex.get(id)).filter(Number.isInteger).sort((a, b) => a - b)
+        if (indexes.some((position, at) => at && position !== indexes[at - 1] + 1)) problems.push('片段消息顺序不连续（按原消息数组的占用区间）')
         return { row: object(row) ? row : {}, id, kind, name, operands, ids, indexes, problems, unresolvedMembership }
       })
       // Overlapping top-level fragments cannot be flattened or silently re-ordered.
@@ -2213,7 +2223,11 @@ window.__ModuleLoader__.load({
       const byId = new Map(participants.map(row => [row.id, row]))
       const sourceMessages = graph.messages
       const byMessage = new Map(sourceMessages.map((row, index) => [row.id, { ...row, index }]))
-      const fragmentAt = new Map(graph.fragments.map(fragment => [fragment.operands[0]?.message_ids[0], fragment]))
+      const fragmentAt = new Map(graph.fragments.map(fragment => {
+        const ids = new Set(fragment.operands.flatMap(operand => operand.message_ids))
+        // Anchor the frame at its actual span start, not its first declared branch.
+        return [sourceMessages.find(message => ids.has(message.id))?.id, fragment]
+      }))
       const messages = [], fragments = []
       let cursor = headerY + headerHeight + 32
       const addMessage = row => {
