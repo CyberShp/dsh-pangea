@@ -7,6 +7,7 @@ import { sourceFirstProjection, coverageSummary, caseQualitySummary, mainlineNod
 import { parseFlowText, unwrapFlows, normalizeFlows } from './flow-normalize.js'
 import { readableNotesEnvelope, sourceFirstExecutionView, sourceFirstUnitRows } from './runtime-view.js'
 import { activeDiagramDiagnostics } from './diagram-contract.js'
+import { currentResultWarnings, currentWarningDegradations } from './result-warning-projection.js'
 
 const STEP_TITLES = [
   '范围和任务契约',
@@ -823,6 +824,7 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
       finding_count: task.correction_record_ids?.length ?? 0,
       records,
       diagram_diagnostics: activeDiagramDiagnostics(result),
+      current_warnings: currentResultWarnings(result),
     })
   }
   return { artifacts, issues, diagnostics, deliveryUnavailable }
@@ -935,6 +937,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     records: item.records,
     record_contracts: item.task?.record_contracts ?? {},
     diagram_diagnostics: item.diagram_diagnostics,
+    current_warnings: item.current_warnings,
   }))
   const steps = sourceFirstStepRows(progress, runDirectory, actionView.artifacts, contract?.analysis_settings?.mode)
   const workflow = {
@@ -960,7 +963,8 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     })),
     units: unitRows,
     quality_checks: [],
-    unresolved: [...(Array.isArray(progress.degradations) ? progress.degradations : []), ...(progress.blocking_reason ? [progress.blocking_reason] : [])],
+    unresolved: [...currentWarningDegradations(progress.degradations, actionView.artifacts), ...(progress.blocking_reason ? [progress.blocking_reason] : [])],
+    diagnostic_history: Array.isArray(progress.degradations) ? progress.degradations : [],
     error_history: [...(Array.isArray(progress.errors) ? progress.errors : []), ...actionView.issues],
     step_progress: { completed: steps.filter(item => ['completed', 'skipped'].includes(item.status)).length, total: SOURCE_FIRST_STAGES.length },
   }
