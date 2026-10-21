@@ -122,10 +122,25 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     await persist()
   })
   const disposed = async worker => {
-    await worker.dispose?.()
-    state.blockedReconciliations.delete(String(worker.id))
-    state.closed.add(String(worker.id))
-    await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
+    const taskId = String(worker.id)
+    const needsTreeProof = bindings[taskId]?.requires_process_tree_confirmation === true
+    if (needsTreeProof) {
+      const stoppedExecution = bindings[taskId]?.execution_id
+      if (state.workers.get(taskId) !== worker || typeof worker.quiesceForRecovery !== 'function') throw new Error('无法确认旧执行进程树停止，保留阻塞状态')
+      let timer
+      try {
+        const proof = await Promise.race([
+          Promise.resolve().then(() => worker.quiesceForRecovery()),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('确认旧执行进程树停止超时，保留阻塞状态')), progressPolicy?.cancelMs ?? ACP_PROGRESS_DEFAULTS.cancelMs) }),
+        ])
+        if (proof?.confirmed !== true || proof.processTreeStopped !== true) throw new Error('无法确认旧执行进程树停止，保留阻塞状态')
+        if (state.workers.get(taskId) !== worker || bindings[taskId]?.execution_id !== stoppedExecution) throw new Error('执行身份已变化，未清除新执行的阻塞状态')
+      } finally { clearTimeout(timer) }
+    } else await worker.dispose?.()
+    state.blockedReconciliations.delete(taskId)
+    state.closed.add(taskId)
+    await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false,
+      ...(needsTreeProof ? { requires_process_tree_confirmation: false } : {}) })
   }
   const check = () => { if (signal.aborted) throw signal.reason ?? new Error('执行已取消') }
   const cli = args => {
@@ -161,7 +176,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     const startId = randomUUID()
     await serial(async () => { owner.pending_starts.push(startId); await persist() })
     const controller = new AbortController()
-    const startSignal = AbortSignal.any([signal, controller.signal])
+    const startSignal = AbortSignal.any([signal, controller.signal, ...(request.signal ? [request.signal] : [])])
     const ms = progressPolicy?.readyIdleMs ?? ACP_PROGRESS_DEFAULTS.readyIdleMs
     let timer
     const warning = setTimeout(() => { void event({ stage: 'source_first_waiting', status: 'info', message: '等待 ACP 初始化或恢复会话', duration_ms: progressPolicy?.readyWarnMs ?? ACP_PROGRESS_DEFAULTS.readyWarnMs }) }, progressPolicy?.readyWarnMs ?? ACP_PROGRESS_DEFAULTS.readyWarnMs)
@@ -260,9 +275,16 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     actionContext.execution_id = executionId
     await remember(worker, undefined, { execution_id: executionId })
     const opened = await cli(['task-open', ...binding])
-    const execution = (eventName, reason = '', budget, automatic = false) => cli(['runs', 'execution', ...binding, '--event', eventName,
-      ...(executionIds ? ['--execution-id', executionId] : []),
-      ...(reason ? ['--reason', reason] : []), ...(budget ? ['--budget-ms', String(budget)] : []), ...(automatic ? ['--automatic'] : [])])
+    let executionStarted = false
+    const execution = async (eventName, reason = '', budget, automatic = false) => {
+      const result = await cli(['runs', 'execution', ...binding, '--event', eventName,
+        // Readiness can pause before Graph has accepted an execution ID. Keep
+        // exact action/task binding, without inventing a formal worker turn.
+        ...(executionIds && (eventName === 'started' || executionStarted) ? ['--execution-id', executionId] : []),
+        ...(reason ? ['--reason', reason] : []), ...(budget ? ['--budget-ms', String(budget)] : []), ...(automatic ? ['--automatic'] : [])])
+      if (eventName === 'started') executionStarted = true
+      return result
+    }
     const isClosure = action.stage === 'targeted_closure'
     const budget = isClosure ? closureBudgetMs ?? opened.task?.execution_budget_ms ?? (mode === 'speed' ? 900000 : 1800000) : null
     let window = closureWindows.get(action.action_id)
@@ -323,22 +345,36 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }
     const stallPause = async (error, turn) => {
       if (!error.savedCompletionChecked) await readSavedCompletion()
+      const treeAlreadyStopped = () => error.requiresProcessTreeConfirmation === true
+        && bindings[taskId]?.requires_process_tree_confirmation === false && bindings[taskId]?.quiescent === true && state.closed.has(taskId)
+      if (!error.confirmed) {
+        // A delayed proof can arrive while saved results are being read. Do not
+        // re-block a handle already fenced, or let a plain PID exit release it.
+        error.confirmed = await serial(async () => {
+          if (treeAlreadyStopped()) return true
+          bindings[taskId] ??= { providerId, agentModel, remoteSessionId: worker.remoteSessionId }
+          bindings[taskId].blocked = true
+          await persist()
+          return false
+        })
+      }
       if (error.confirmed) await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
       if (!error.confirmed) {
-        bindings[taskId] ??= { providerId, agentModel, remoteSessionId: worker.remoteSessionId }
-        bindings[taskId].blocked = true
-        await remember(worker)
         // The prompt and final tool update may arrive in either order. Reconcile
         // both without sending a new prompt or inventing a tool completion.
         const pausedExecutionId = executionId
         let response = error.outcome, releasing
         const releaseBlocked = () => {
           if (releasing) return releasing
+          if (treeAlreadyStopped()) {
+            if (state.blockedReconciliations.get(taskId) === releaseBlocked) state.blockedReconciliations.delete(taskId)
+            return Promise.resolve()
+          }
           const diagnostics = worker.readDiagnostics?.() ?? {}
-          if (state.generation !== generation || bindings[taskId]?.execution_id !== pausedExecutionId || !bindings[taskId]?.blocked || !response?.protocolStopReason || diagnostics.activeToolCount !== 0) return Promise.resolve()
+          if (state.generation !== generation || bindings[taskId]?.execution_id !== pausedExecutionId || bindings[taskId]?.requires_process_tree_confirmation === true || !bindings[taskId]?.blocked || !response?.protocolStopReason || diagnostics.activeToolCount !== 0) return Promise.resolve()
           releasing = (async () => {
             const released = await serial(async () => {
-              if (state.generation !== generation || bindings[taskId]?.execution_id !== pausedExecutionId || !bindings[taskId]?.blocked || worker.readDiagnostics?.()?.activeToolCount !== 0) return false
+              if (state.generation !== generation || bindings[taskId]?.execution_id !== pausedExecutionId || bindings[taskId]?.requires_process_tree_confirmation === true || !bindings[taskId]?.blocked || worker.readDiagnostics?.()?.activeToolCount !== 0) return false
               Object.assign(bindings[taskId], { blocked: false, inflight: false, quiescent: true })
               await persist()
               return true
@@ -375,6 +411,9 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
           emit: value => event({ ...value, action_id: action.action_id, agent_session_id: taskId }) })
         check()
         if (ready.stopReason !== 'completed') throw new Error(`Worker 初始化未完成：${ready.stopReason}`)
+        if (hasUnconfirmedAcpTools(worker.readDiagnostics?.())) {
+          return stallPause(new AcpStalled('就绪回合的工具尚无结束确认，已暂停；未发送正式任务', false, ready), Promise.resolve(ready))
+        }
         await remember(worker, undefined, { inflight: false, quiescent: true })
       } catch (error) {
         if (!(error instanceof AcpStalled)) throw error
@@ -399,7 +438,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       await remember(worker, undefined, { execution_id: executionId, inflight: true, quiescent: false })
       await event({ stage: 'source_first_worker_started', action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, execution_id: executionId, budget_ms: budget })
     }
-    let result, timer, softTimer, abortTurn
+    let result, timer, softTimer, abortTurn, toolExecutionQuiesced = false
     const timeout = new Error('本单元定向修正达到执行预算，保留已保存结果')
     try {
       if (action.role === 'planning') {
@@ -425,6 +464,104 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         const toolsBefore = toolCalls()
         let turn = submitPrompt(text(prompt), 'task')
         let disconnected = false
+        const reconcileEndedTools = async outcome => {
+          if (providerId !== 'pangea-codeagent' || outcome.protocolStopReason !== 'end_turn'
+            || !hasUnconfirmedAcpTools(worker.readDiagnostics?.()) || typeof worker.quiesceForRecovery !== 'function') return outcome
+          const stalled = (message, confirmed = false) => {
+            const stall = new AcpStalled(message, confirmed, outcome)
+            stall.requiresProcessTreeConfirmation = true
+            return { stall, pendingTurn: Promise.resolve(outcome) }
+          }
+          // Empty input and end_turn do not prove that an edit was never run.
+          // Only this owned handle's explicit process-tree fence permits recovery.
+          if (!await reserveRecovery()) return stalled('已自动恢复一次，工具记录再次缺少结束确认；保留结果，等待处理')
+          const recoveringWorker = worker
+          const recoveryExecutionId = executionId
+          await remember(recoveringWorker, undefined, { requires_process_tree_confirmation: true, quiescent: false, blocked: true })
+          const confirmTreeStopped = async (proof, late = false) => {
+            if (proof?.confirmed !== true || proof.processTreeStopped !== true) return false
+            const confirmed = await serial(async () => {
+              if (state.generation !== generation || bindings[taskId]?.execution_id !== recoveryExecutionId
+                || state.workers.get(taskId) !== recoveringWorker || bindings[taskId]?.requires_process_tree_confirmation !== true) return false
+              Object.assign(bindings[taskId], { requires_process_tree_confirmation: false, inflight: false, quiescent: true, blocked: false })
+              await persist()
+              state.closed.add(taskId)
+              state.blockedReconciliations.delete(taskId)
+              return true
+            })
+            if (confirmed && late) await event({ ...actionContext, stage: 'source_first_late_response', process_tree_stopped: true,
+              message: '已收到旧执行进程树停止确认，可继续原会话；未自动重复发送，原工具记录保留' })
+            return confirmed
+          }
+          const quiescence = Promise.resolve().then(() => recoveringWorker.quiesceForRecovery())
+          let deadline, aborted
+          try {
+            const proof = await Promise.race([
+              quiescence,
+              new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('等待旧执行停止超时')), progressPolicy?.cancelMs ?? ACP_PROGRESS_DEFAULTS.cancelMs) }),
+              new Promise((_, reject) => {
+                aborted = () => reject(turnSignal.reason ?? new Error('执行已取消'))
+                turnSignal.addEventListener('abort', aborted, { once: true })
+                if (turnSignal.aborted) aborted()
+              }),
+            ])
+            turnSignal.throwIfAborted()
+            if (state.generation !== generation || worker !== recoveringWorker) return stalled('执行身份已变化，未自动恢复')
+            if (proof?.confirmed !== true || proof.processTreeStopped !== true) return stalled('旧工具执行停止尚未确认；保留结果，未重复操作')
+            if (!await confirmTreeStopped(proof)) return stalled('执行身份或停止确认状态已变化，未自动恢复')
+          } catch (error) {
+            // A timeout does not cancel owned cleanup. A late proof unlocks only
+            // this exact handle/execution and never dispatches another prompt.
+            void quiescence.then(proof => confirmTreeStopped(proof, true)).catch(() => {})
+            if (turnSignal.aborted) throw error
+            return stalled(`无法确认旧工具执行已停止；保留结果，未重复操作：${error.message}`)
+          } finally {
+            clearTimeout(deadline)
+            if (aborted) turnSignal.removeEventListener('abort', aborted)
+          }
+          toolExecutionQuiesced = true
+          await event({ ...actionContext, stage: 'source_first_tool_recovery', status: 'ok', process_tree_stopped: true,
+            message: '已确认旧执行进程树停止；保留原工具记录，正在核对已保存结果' })
+          const savedComplete = await readSavedCompletion()
+          if (savedComplete === null) {
+            const paused = stalled('旧执行已停止，但保存结果暂时无法读取；已暂停，未重复操作', true)
+            paused.stall.savedCompletionChecked = true
+            return paused
+          }
+          if (savedComplete) return outcome
+          if (worker.readDiagnostics?.()?.canLoadSession !== true) {
+            const paused = stalled('旧执行已停止，结果尚未完成且执行器不支持恢复原会话；保留结果', true)
+            paused.stall.savedCompletionChecked = true
+            return paused
+          }
+          turnSignal.throwIfAborted()
+          const remoteSessionId = worker.remoteSessionId
+          const restoredWorker = await startWorker({ parent, signal: turnSignal, resume: { taskId, remoteSessionId }, prompt: [], scratchDirectory, onDiagnostic, onSessionEvent,
+            ...(agentModel ? { agentOptions: { model: agentModel } } : {}) })
+          if (turnSignal.aborted || state.generation !== generation) {
+            await disposed(restoredWorker)
+            turnSignal.throwIfAborted()
+            throw new Error('执行身份已变化，已停止恢复会话')
+          }
+          worker = restoredWorker
+          if (String(worker.id) !== taskId || worker.remoteSessionId !== remoteSessionId) {
+            await worker.dispose?.()
+            throw new Error('执行器未恢复原会话，拒绝替换任务')
+          }
+          state.workers.set(taskId, worker); state.closed.delete(taskId); current = worker
+          toolExecutionQuiesced = false
+          turnSignal.throwIfAborted()
+          await startContinuation()
+          turn = submitPrompt(text(`继续当前 action_id=${action.action_id}，task_id=${taskId}。旧执行进程树已确认停止，旧工具记录没有结束状态，不能把它们视为成功或直接重放。CLI 绑定参数：${JSON.stringify(binding)}；Python：${python || 'python'}。先 result-read 获取当前结果与 revision，再核对已有临时文件；保留已保存内容，从未完成部分继续，不重复已完成工具操作。完成后 work-finish；不要询问是否继续。`), 'tool_recovery')
+          try {
+            const recovered = await monitor(turn)
+            await event({ ...actionContext, stage: 'source_first_recovered', message: '原会话恢复回合已结束' })
+            return recovered
+          } catch (error) {
+            if (!(error instanceof AcpStalled)) throw error
+            return { stall: error, pendingTurn: turn }
+          }
+        }
         try {
           const outcome = await monitor(turn)
           if (outcome.stopReason === 'error' && !contextLimitError(outcome.diagnostic) && !contextLimitError(worker.readDiagnostics?.().errorSummary)) {
@@ -444,9 +581,9 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
             turnSignal.throwIfAborted()
             await startContinuation()
             turn = submitPrompt(text(`用 read 工具读取 ${cliContract(cwd)}。`), 'zero_tool_followup')
-            return await monitor(turn)
+            return await reconcileEndedTools(await monitor(turn))
           }
-          return outcome
+          return await reconcileEndedTools(outcome)
         }
         catch (error) {
           if (!(error instanceof AcpStalled)) throw error
@@ -477,7 +614,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
           try {
             const result = await monitor(turn)
             await event({ stage: 'source_first_recovered', action_id: action.action_id, message: '原会话恢复回合已结束' })
-            return result
+            return await reconcileEndedTools(result)
           } catch (error) {
             if (!(error instanceof AcpStalled)) throw error
             return { stall: error, pendingTurn: turn }
@@ -503,7 +640,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     check()
     if (result.stall) return stallPause(result.stall, result.pendingTurn)
     const diagnostics = worker.readDiagnostics?.() ?? {}
-    if (hasUnconfirmedAcpTools(diagnostics)) {
+    if (!toolExecutionQuiesced && hasUnconfirmedAcpTools(diagnostics)) {
       const count = Number.isInteger(diagnostics.activeToolCount) && diagnostics.activeToolCount > 0 ? `${diagnostics.activeToolCount} 条` : ''
       return stallPause(new AcpStalled(`原回合已返回，但${count ? ` ${count}` : ''}工具记录尚无结束确认；保留结果，等待状态确认`, false, result), Promise.resolve(result))
     }
@@ -612,8 +749,10 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     readDiagnostics: () => current?.readDiagnostics?.() ?? {},
     async dispose() {
       if (!state.terminal && !signal.aborted) return { retained: true }
-      await Promise.allSettled([...state.workers.values()].map(disposed))
+      const results = await Promise.allSettled([...state.workers.values()].map(disposed))
       await sessionRecorder.flush()
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed) throw failed.reason
       liveRuns.delete(key)
       return { retained: false }
     },

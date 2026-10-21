@@ -33,6 +33,7 @@ export function inspectAcpBindings(saved, { currentInstanceId, presence = proces
   const workers = Object.values(saved.workers)
   if (!owner && !workers.length) return blocked('缺少原宿主与 worker 的执行身份，不能确认旧执行已结束')
   for (const binding of workers) {
+    if (binding.requires_process_tree_confirmation === true) return blocked('旧执行进程树停止尚未确认；仅根进程退出不能恢复')
     if (binding.quiescent === true) continue
     if (presence(binding.process_id) !== 'absent') return blocked('原 ACP 请求或工具仍可能运行；进程结束尚未确认')
   }

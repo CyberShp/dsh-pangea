@@ -4,9 +4,213 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { createSourceFirstAcpRun, inspectSourceFirstAcpRecovery, stopSourceFirstAcpRun } from '../src/source-first-acp.js'
+import { inspectAcpBindings } from '../src/acp-recovery.js'
 const progressPolicy = { readyWarnMs: 5, readyIdleMs: 20, warnMs: 5, idleMs: 20, cancelMs: 10, pollMs: 2 }
 const completed = { stopReason: 'completed', protocolStopReason: 'end_turn' }
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
+
+for (const mode of ['saved', 'resume', 'stale-revision', 'second-pending', 'rejected-proof', 'cleanup-error', 'cleanup-timeout',
+  'no-capability', 'result-read-error', 'cannot-load', 'wrong-session', 'aborted', 'restore-aborted', 'wrong-provider', 'cancelled-end']) {
+  test(`CodeAgent ended turn requires owned process-tree proof before recovery (${mode})`, { timeout: 10000 }, async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'codeagent-tool-recovery-'))
+    const controller = new AbortController(), events = [], prompts = [], starts = [], restoredDisposed = deferred()
+    let activeToolCount = 0, taskId, settled = false, quiescences = 0, reads = 0, stopped = false
+    const outcome = mode === 'cancelled-end' ? { stopReason: 'aborted', protocolStopReason: 'cancelled' } : completed
+    const oldWorker = { id: 'worker', remoteSessionId: 'original-remote', result: Promise.resolve(completed),
+      readDiagnostics: () => ({ activeToolCount, canLoadSession: mode !== 'cannot-load' }),
+      dispose: async () => {},
+      continuePrompt: async prompt => { prompts.push(prompt[0].text); activeToolCount = 4; return outcome },
+      ...(mode === 'no-capability' ? {} : { quiesceForRecovery: async () => {
+        quiescences++
+        assert.equal(settled, false)
+        if (mode === 'cleanup-error') throw new Error('owned process cleanup failed')
+        if (mode === 'cleanup-timeout') return new Promise(() => {})
+        if (mode === 'aborted') { controller.abort(new Error('fixture abort')); return new Promise(() => {}) }
+        if (mode === 'rejected-proof') return { confirmed: true, processTreeStopped: false }
+        stopped = true
+        return { confirmed: true, processTreeStopped: true }
+      } }),
+    }
+    let recoveredActive = 0
+    const resumedWorker = { id: 'worker', remoteSessionId: mode === 'wrong-session' ? 'replacement-remote' : 'original-remote',
+      result: Promise.resolve(completed), dispose: async () => { restoredDisposed.resolve() },
+      readDiagnostics: () => ({ activeToolCount: recoveredActive, canLoadSession: true }),
+      continuePrompt: async prompt => {
+        assert.equal(stopped, true)
+        assert.ok(reads > 0)
+        prompts.push(prompt[0].text)
+        recoveredActive = mode === 'second-pending' ? 4 : 0
+        return completed
+      },
+      quiesceForRecovery: async () => { assert.fail('must not quiesce twice for one action') },
+    }
+    const options = { dataRoot, cwd: dataRoot, runId: 'run', providerId: mode === 'wrong-provider' ? 'pangea-nga' : 'pangea-codeagent',
+      signal: controller.signal, progressPolicy, onEvent: event => events.push(event),
+      subagents: { start: async (_, request) => {
+        starts.push(request)
+        if (starts.length === 1) return oldWorker
+        assert.deepEqual(request.resume, { taskId: 'worker', remoteSessionId: 'original-remote' })
+        assert.equal(request.scratchDirectory, starts[0].scratchDirectory)
+        if (mode === 'restore-aborted') controller.abort(new Error('fixture restore abort'))
+        return resumedWorker
+      } },
+      runner: async ({ args }) => {
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[0] === 'result-read') {
+          reads++
+          if (mode === 'result-read-error') throw new Error('saved result unavailable')
+          return { revision: 3, completion_complete: ['saved', 'stale-revision'].includes(mode), completion_declared_revision: mode === 'stale-revision' ? 2 : 3 }
+        }
+        if (args[1] === 'bind') taskId = args.at(-1)
+        if (args[1] === 'settle') { assert.equal(stopped, true); settled = true; return {} }
+        if (args[1] === 'next') return { run_id: 'run', lifecycle_status: settled ? 'complete' : 'running', actions: settled ? [] : [
+          { action_id: 'run:planning', action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId, role: 'planning', stage: 'unit_planning' },
+        ] }
+        return {}
+      },
+    }
+    const run = createSourceFirstAcpRun(options)
+    try {
+      if (['aborted', 'restore-aborted', 'wrong-session'].includes(mode)) {
+        await assert.rejects(run.result, mode === 'wrong-session' ? /未恢复原会话/ : /fixture (restore )?abort/)
+        if (mode === 'restore-aborted') await restoredDisposed.promise
+        assert.equal(settled, false)
+        assert.equal(prompts.length, 1)
+      } else {
+        const result = await run.result
+        const successful = ['saved', 'resume', 'stale-revision'].includes(mode)
+        assert.equal(Boolean(result.attentionRequired), !successful)
+        assert.equal(settled, successful)
+        assert.equal(quiescences, ['no-capability', 'wrong-provider', 'cancelled-end'].includes(mode) ? 0 : 1)
+        assert.equal(prompts.length, ['resume', 'stale-revision', 'second-pending'].includes(mode) ? 2 : 1)
+        assert.equal(activeToolCount, 4, 'quiescence never fabricates terminal tool events')
+        const bindings = JSON.parse(await readFile(path.join(dataRoot, 'runs/run/acp-workers.json'), 'utf8'))
+        if (!successful) assert.equal(bindings.workers.worker.blocked, !['result-read-error', 'cannot-load'].includes(mode))
+        if (mode === 'result-read-error') assert.equal(reads, 1, 'a failed saved-result read does not dispatch or silently retry')
+        if (prompts.length === 2) assert.match(prompts[1], /先 result-read.*核对已有临时文件/)
+        if (stopped) assert.ok(events.some(event => event.stage === 'source_first_tool_recovery' && event.process_tree_stopped === true))
+        if (mode === 'rejected-proof') {
+          await assert.rejects(stopSourceFirstAcpRun(options), /无法确认旧执行进程树停止/)
+          await assert.rejects(run.dispose(), /无法确认旧执行进程树停止/)
+          const blocked = JSON.parse(await readFile(path.join(dataRoot, 'runs/run/acp-workers.json'), 'utf8'))
+          assert.equal(blocked.workers.worker.requires_process_tree_confirmation, true)
+          assert.equal(inspectAcpBindings(blocked, { presence: () => 'absent' }).can_resume, false)
+          oldWorker.quiesceForRecovery = async () => ({ confirmed: true, processTreeStopped: true })
+          assert.equal(await stopSourceFirstAcpRun(options), true, 'failed ordinary dispose must retain the owned handle for an explicit stop retry')
+          const stoppedBinding = JSON.parse(await readFile(path.join(dataRoot, 'runs/run/acp-workers.json'), 'utf8'))
+          assert.equal(stoppedBinding.workers.worker.requires_process_tree_confirmation, false)
+        }
+      }
+    } finally {
+      // Explicit test cleanup supplies a new positive tree proof. Failure cases
+      // above must never be released by ordinary root-only dispose.
+      oldWorker.quiesceForRecovery = async () => ({ confirmed: true, processTreeStopped: true })
+      await stopSourceFirstAcpRun(options)
+      await rm(dataRoot, { recursive: true, force: true })
+    }
+  })
+}
+
+test('a delayed tree proof unlocks explicit recovery without reusing the fenced handle or relying on root PID exit', async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'codeagent-late-tree-proof-'))
+  const quiescence = deferred(), unlocked = deferred()
+  let taskId, starts = 0, prompts = 0, settled = false, diagnostic, activeToolCount = 0
+  const oldWorker = { id: 'worker', remoteSessionId: 'remote', result: Promise.resolve(completed),
+    readDiagnostics: () => ({ activeToolCount, canLoadSession: true }), dispose: async () => {},
+    quiesceForRecovery: () => quiescence.promise,
+    continuePrompt: async () => { assert.equal(prompts++, 0, 'a fenced handle cannot accept another prompt'); activeToolCount = 4; return completed },
+  }
+  const restored = { id: 'worker', remoteSessionId: 'remote', result: Promise.resolve(completed),
+    readDiagnostics: () => ({ activeToolCount: 0, canLoadSession: true }), dispose: async () => {},
+    continuePrompt: async () => { assert.fail('the completed saved revision needs no new model turn') },
+  }
+  const options = { dataRoot, cwd: dataRoot, runId: 'run', providerId: 'pangea-codeagent', progressPolicy,
+    signal: new AbortController().signal,
+    onEvent: event => { if (event.stage === 'source_first_late_response' && event.process_tree_stopped) unlocked.resolve() },
+    subagents: { start: async (_, request) => {
+      starts++
+      if (starts === 1) { diagnostic = request.onDiagnostic; return oldWorker }
+      assert.deepEqual(request.resume, { taskId: 'worker', remoteSessionId: 'remote' })
+      return restored
+    } },
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[0] === 'result-read') return { revision: 3, completion_complete: true, completion_declared_revision: 3 }
+      if (args[1] === 'bind') taskId = args.at(-1)
+      if (args[1] === 'settle') { settled = true; return {} }
+      if (args[1] === 'next') return { run_id: 'run', lifecycle_status: settled ? 'complete' : 'running', actions: settled ? [] : [
+        { action_id: 'run:planning', action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId, role: 'planning', stage: 'unit_planning' },
+      ] }
+      return {}
+    },
+  }
+  const binding = async () => JSON.parse(await readFile(path.join(dataRoot, 'runs/run/acp-workers.json'), 'utf8'))
+  try {
+    const run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).attentionRequired, true)
+    const paused = await binding()
+    assert.equal(paused.workers.worker.requires_process_tree_confirmation, true)
+    assert.equal(inspectAcpBindings(paused, { presence: () => 'absent' }).can_resume, false)
+    activeToolCount = 0
+    diagnostic({ stage: 'tool_event', lastToolStatus: 'completed', activeToolCount: 0 })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, false, 'tool updates cannot clear a process-tree fence')
+    activeToolCount = 4
+    quiescence.resolve({ confirmed: true, processTreeStopped: true })
+    await unlocked.promise
+    const confirmed = await binding()
+    assert.equal(confirmed.workers.worker.requires_process_tree_confirmation, false)
+    assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, true)
+    assert.equal(prompts, 1); assert.equal(starts, 1); assert.equal(settled, false)
+    const continued = createSourceFirstAcpRun(options)
+    assert.equal((await continued.result).attentionRequired, false)
+    assert.equal(starts, 2); assert.equal(prompts, 1); assert.equal(settled, true)
+    assert.equal(activeToolCount, 4, 'the old pending records are preserved')
+  } finally {
+    quiescence.resolve({ confirmed: true, processTreeStopped: true })
+    await stopSourceFirstAcpRun(options)
+    await rm(dataRoot, { recursive: true, force: true })
+  }
+})
+
+test('an ended ready turn with unclosed tools pauses Graph without inventing a formal worker turn', async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-ready-pending-'))
+  let taskId, prompts = 0, settled = false, graphPaused = false, formalTurns = 0
+  const worker = { id: 'ready-worker', remoteSessionId: 'ready-remote', result: Promise.resolve(completed),
+    readDiagnostics: () => ({ activeToolCount: 1 }), dispose: async () => {},
+    continuePrompt: async () => { prompts++; return completed },
+  }
+  const options = { dataRoot, cwd: dataRoot, runId: 'run', providerId: 'pangea-codeagent', signal: new AbortController().signal,
+    subagents: { start: async () => worker }, runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[0] === 'result-read') return { revision: 1, completion_complete: false }
+      if (args[0] === 'runs' && args[1] === 'execution') {
+        const event = args[args.indexOf('--event') + 1]
+        if (event === 'started') formalTurns++
+        if (event === 'paused') {
+          // Graph ignores a finish/pause for an execution ID never started.
+          if (args.includes('--execution-id')) return { event_ignored: true, reason: 'stale_execution' }
+          graphPaused = true
+        }
+      }
+      if (args[1] === 'bind') taskId = args.at(-1)
+      if (args[1] === 'settle') settled = true
+      if (args[1] === 'next') return { run_id: 'run', actions: [
+        { action_id: 'run:planning', action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId, role: 'planning', stage: 'unit_planning' },
+      ] }
+      return {}
+    },
+  }
+  try {
+    const run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).attentionRequired, true)
+    assert.equal(prompts, 0)
+    assert.equal(formalTurns, 0)
+    assert.equal(graphPaused, true)
+    assert.equal(settled, false)
+    assert.equal((await inspectSourceFirstAcpRecovery(options)).can_resume, false)
+  } finally { await stopSourceFirstAcpRun(options); await rm(dataRoot, { recursive: true, force: true }) }
+})
 
 test('completed planning turn retains two unclosed pending tools with compact evidence even when a saved result exists', async () => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-pending-evidence-'))

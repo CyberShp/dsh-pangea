@@ -115,6 +115,7 @@ $DSH_HOME/dsh-pangea-companion/monitor-v1.json
 - `turn_end` 的协议停止原因与宿主暂停事件分开显示；`cancelled` 只证明本次请求已取消，尚未结束的工具仍保持待确认状态。
 - 回合已返回但工具记录没有终态时，显示“工具记录尚无结束确认”，并附“工具结束确认诊断”：列出未闭合工具 ID、上报状态、更新时间和可复制的诊断 JSON。`pending`、空参数或 `end_turn` 均不能单独证明工具已执行或已结束，不据此清除记录、重新派发任务。
 - 支持诊断的 Desktop ACP provider 对照 JSON 解析后的入站通知与 SDK 实际接受的工具事件；新增记录仅保存身份、状态、时间和字段存在性，不包含命令或输入输出正文。`unaccepted_tool_events` 表示尚未确认接收，不等同于校验拒收；判定时需同时查看 `validation_errors`、采样时刻及截断/采集缺失标志。无法解析为 JSON 的原始字节不在此采集范围，旧版本未记录的事件也不能补回。
+- CodeAgent 的正式回合以真实 `end_turn` 返回、但仍缺少工具终态时，每个 action 最多自动恢复一次：先要求 Desktop provider 提供所拥有进程树已停止的显式证明，再读取保存结果；匹配当前 revision 的完整结果交给原验证流程，否则在执行器支持时恢复原会话，先核对已保存结果和临时文件，再继续未完成部分。原工具记录保持不变，不把 `pending` 或空输入改成成功。缺少停止证明、停止超时或失败、读取保存结果失败时仍暂停，不自动重放工具。这是宿主的恢复机制，不表示已经修复 CodeAgent 缺失终态事件的原因。
 
 只读接口均位于 `GET /api/pangea-companion/workbench`，要求明确的 `cwd`、`data_root`、`run_id`：`view=agent-sessions` 返回会话列表；`view=agent-session&session_id=...` 返回该会话事件分页。`cursor` 是服务端返回的不透明游标，调用方不得用消息数量代替。
 
