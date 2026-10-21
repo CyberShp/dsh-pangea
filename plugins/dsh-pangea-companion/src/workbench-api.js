@@ -6,7 +6,7 @@ import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
 import { createSourceFirstAcpRun } from './source-first-acp.js'
 import { normalizeIncrementalRequest } from './incremental-request.js'
-import { normalizeFlowBaseline, readFlowMetadata, flowBaselineOptions } from './flow-baseline.js'
+import { normalizeFlowBaseline, readFlowMetadata } from './flow-baseline.js'
 
 import { assertSourceFirstCapabilities, supportsSourceFirst, assertCodetalksSkill, createRun, resumeRun, runPangea, workspaceRoot } from './pangea-api.js'
 import { sourceFirstReportAvailable, summarizeRun } from './reader.js'
@@ -549,7 +549,6 @@ export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limi
       capabilities,
       runs,
       run,
-      flow_baseline_options: flowBaselineOptions([...(runs.items ?? []), run]),
       run_detail: runDetail,
       pagination: { cursor: pageCursor, limit: pageLimit },
     }

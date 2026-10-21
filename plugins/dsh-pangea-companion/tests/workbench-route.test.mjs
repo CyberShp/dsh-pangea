@@ -357,6 +357,24 @@ async function analysisRequest(root, body, { tasks = {}, runtime = {}, runner = 
   return response
 }
 
+test('new-analysis HTTP admission rejects retired inputs before creating tasks or querying models', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'analysis-current-inputs-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
+  const unexpected = new Proxy({}, { get(_target, key) { assert.fail(`must not access ${String(key)}`) } })
+  for (const [retired, message] of [
+    [{ context_scope: ['include/tls.h'] }, /不再支持参考源码范围/],
+    [{ context_scope: 'include/tls.h' }, /不再支持参考源码范围/],
+    [{ flow_baseline: { run_id: 'saved-run', version_id: 'saved-version' } }, /不再支持流程基线/],
+  ]) {
+    const result = await analysisRequest(root, { action: 'task-create', input: { repository: 'repo', target: 'test', source_scope: ['src'], ...retired } },
+      { tasks: unexpected, runtime: unexpected })
+    assert.equal(result.code, 400)
+    assert.match(result.body.error, message)
+  }
+})
+
 test('new-analysis HTTP admission rejects internal APIs and pending catalogues before creating a task, then freezes a proven default', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'analysis-admission-'))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -375,7 +393,7 @@ test('new-analysis HTTP admission rejects internal APIs and pending catalogues b
   assert.equal((await analysisRequest(root, { action: 'task-create', input }, { tasks, runtime })).code, 400)
   assert.equal(creates, 0)
   const catalog = await discoverAgentModels(runtime, { providerId: 'pangea-nga', cwd: root })
-  const accepted = await analysisRequest(root, { action: 'task-create', input: { ...input, agent_catalog_id: catalog.catalog_id } }, { tasks, runtime })
+  const accepted = await analysisRequest(root, { action: 'task-create', input: { ...input, agent_catalog_id: catalog.catalog_id, context_scope: [], flow_baseline: null } }, { tasks, runtime })
   assert.equal(accepted.code, 200, accepted.body.error)
   assert.equal(creates, 1)
   assert.equal(createdInput.agent_model, 'model-one')
@@ -393,7 +411,8 @@ test('task-start refuses changed or empty providers and historical unfixed defau
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
   const task = Object.freeze({ task_id: 'old-task', workspace: root, run_id: 'old-run', provider: 'pangea-nga',
-    agent_model: null, attempt_id: 'old-attempt', execution_status: 'stopped', acp_binding: 'saved-binding' })
+    agent_model: null, attempt_id: 'old-attempt', execution_status: 'stopped', acp_binding: 'saved-binding',
+    context_scope: ['include/tls.h'], flow_baseline: { run_id: 'baseline-run', version_id: 'baseline-version' } })
   const tasks = { async get() { return task }, async prepareProviderLaunch() { assert.fail('must not mutate the stored task') } }
   for (const provider_id of ['', null, 'pangea-codeagent']) {
     const result = await analysisRequest(root, { action: 'task-start', task_id: task.task_id, provider_id, resume: true }, { tasks })
@@ -406,6 +425,8 @@ test('task-start refuses changed or empty providers and historical unfixed defau
   assert.equal(task.agent_model, null)
   assert.equal(task.attempt_id, 'old-attempt')
   assert.equal(task.acp_binding, 'saved-binding')
+  assert.deepEqual(task.context_scope, ['include/tls.h'])
+  assert.deepEqual(task.flow_baseline, { run_id: 'baseline-run', version_id: 'baseline-version' })
 })
 
 

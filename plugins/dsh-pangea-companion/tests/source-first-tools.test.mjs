@@ -1,7 +1,41 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
-import { sourceFirstTools } from '../src/index.js'
+import { apply, sourceFirstTools } from '../src/index.js'
+
+test('new-Run tool hides retired inputs and rejects them when execute bypasses schema validation', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-tool-current-inputs-'))
+  const previousHome = process.env.DSH_HOME, previousConfig = process.env.PANGEA_ACP_RUNTIME_CONFIG
+  process.env.DSH_HOME = root
+  delete process.env.PANGEA_ACP_RUNTIME_CONFIG
+  let cleanup
+  t.after(async () => {
+    try { await cleanup?.() } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      if (previousConfig === undefined) delete process.env.PANGEA_ACP_RUNTIME_CONFIG
+      else process.env.PANGEA_ACP_RUNTIME_CONFIG = previousConfig
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+  const registered = new Map()
+  apply({
+    on() { return () => {} },
+    tools: { register(tool) { registered.set(tool.name, tool); return () => {} } },
+    webServer: { register() { return () => {} } },
+    effect(effect) { cleanup = effect() },
+  })
+  const create = registered.get('pangea_run_create')
+  assert.equal(Object.hasOwn(create.parameters.properties, 'context_scope'), false)
+  assert.equal(Object.hasOwn(create.parameters.properties, 'flow_baseline'), false)
+  const exec = { agent: { session: { header: { cwd: root } } } }
+  const input = { repository: 'repo', target: 'test', source_scope: ['src'] }
+  await assert.rejects(create.execute({ ...input, context_scope: ['include/tls.h'] }, exec), /不再支持参考源码范围/)
+  await assert.rejects(create.execute({ ...input, flow_baseline: { run_id: 'saved-run', version_id: 'saved-version' } }, exec), /不再支持流程基线/)
+})
 
 test('registers source-first lifecycle, source, result, review, and finish tools with exact bindings', async () => {
   const registered = []

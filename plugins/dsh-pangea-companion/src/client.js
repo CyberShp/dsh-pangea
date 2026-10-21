@@ -2079,12 +2079,10 @@ window.__ModuleLoader__.load({
       return {
         request_version: '2.0',
         ...(form.source_task_id ? { source_task_id: form.source_task_id } : {}),
-        ...(form.flow_baseline ? { flow_baseline: { ...form.flow_baseline } } : {}),
         repository: form.repository,
         target: form.target,
         ...(form.scope_preview_id ? { scope_preview_id: form.scope_preview_id, expected_scope_revision: form.expected_scope_revision } : {}),
         source_scope: String(form.source_scope_text ?? '').split(/\r?\n/).map(value => value.trim()).filter(Boolean),
-        ...(String(form.context_scope_text ?? '').trim() ? { context_scope: String(form.context_scope_text).split(/[\n,]/).map(value => value.trim()).filter(Boolean) } : {}),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'module-analysis',
         ...(form.analysis_profile ? { analysis_profile: form.analysis_profile, asset_revisions: form.asset_revisions ?? {} } : {}),
@@ -2576,16 +2574,13 @@ window.__ModuleLoader__.load({
                 item.projection_warnings?.length ? h('details', null, h('summary', null, '行为项原文'), h('pre', null, show(item.source_item))) : null)))))))))
     }
 
-    function FlowComparisonView({ stability, comparison, baseline, onUseBaseline }) {
-      if (!stability && !comparison && !baseline) return null
+    function FlowComparisonView({ stability, comparison }) {
+      if (!stability && !comparison) return null
       const dimensions = { source: '源码', scope: '分析范围', assets: '资料与示例', methodology: '方法论', model: '模型及已声明设置', objective: '目标与执行设置' }
       const statuses = { same: '相同', changed: '有变更', unknown: '待确认', unchanged: '结构相同', added: '新增流程', removed: '移除流程', unresolved: '对应关系待确认' }
       const comparable = { comparable: '已记录输入一致', different_inputs: '输入有变更', unknown: '输入可比性待确认' }
       return h('section', { className: 'b05-card', 'aria-label': '流程版本与差异' },
         h('h3', null, '流程版本与差异'),
-        baseline?.run_id && baseline?.version_id ? h('div', null,
-          h('p', null, `本次已审核流程版本：${baseline.version_id}`),
-          onUseBaseline ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => onUseBaseline(baseline) }, '以此流程为基线新建分析') : null) : null,
         stability ? h('details', null, h('summary', null, '本次冻结输入指纹'),
           h('p', { className: 'b05-mono', style: { overflowWrap: 'anywhere' } }, stability.fingerprint || '未提供'),
           h('dl', { className: 'b05-case-kv' }, Object.entries(stability.dimension_hashes ?? {}).flatMap(([key, value]) => [h('dt', { key: `${key}-label` }, dimensions[key] || key), h('dd', { key, style: { overflowWrap: 'anywhere' } }, value)])),
@@ -3013,7 +3008,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '', context_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
       React.useEffect(() => {
         if (!cwd || screen.type !== 'create') return
         try {
@@ -4970,16 +4965,11 @@ window.__ModuleLoader__.load({
           if (next > 1 && !targetReady || next > 2 && !inputsReady || next > 3 && !executionReady) { showActionNotice(submitBlockReason || '请先完成前面的设置。', true); return }
           setScreen(value => ({ ...value, createStep: next, createView: nextView }))
         }
-        const update = (key, value) => setCreateForm(form => ({ ...form, [key]: value,
-          ...(key === 'repository' && value !== form.repository ? { flow_baseline: null } : {}) }))
-        const baselineKey = value => value?.run_id && value?.version_id ? JSON.stringify([value.run_id, value.version_id]) : ''
-        const baselineOptions = (Array.isArray(workbench?.flow_baseline_options) ? workbench.flow_baseline_options : [])
-          .filter(item => baselineKey(item) && (!createForm.repository || item.repository === createForm.repository))
-        const chosenBaseline = baselineKey(createForm.flow_baseline)
+        const update = (key, value) => setCreateForm(form => ({ ...form, [key]: value }))
         const button = (text, onClick, variant = '', iconName, disabled = false) => h('button', { type: 'button', className: `btn ${variant}`, onClick, disabled: creatingRun || disabled }, iconName && runIcon(iconName), text)
         const badge = (text, kind = '') => h('span', { className: `badge ${kind}` }, text)
         const field = (label, control, hint) => h('label', { className: 'field' }, h('span', null, label), control, hint && h('span', { className: 'hint' }, hint))
-        const input = (label, key, hint, multiline = false) => field(['context_scope_text', 'coverage_b_version'].includes(key) ? h(React.Fragment, null, label, h('span', { className: 'muted small' }, ' 可选')) : label, h(multiline ? 'textarea' : 'input', { 'aria-label': label, className: multiline ? 'mono' : undefined, value: createForm[key] ?? '', placeholder: key === 'context_scope_text' ? '例如：tests/cpuload_test.c' : key === 'coverage_b_version' ? '需要对比的基线版本' : undefined, disabled: creatingRun, onChange: event => update(key, event.target.value) }), hint)
+        const input = (label, key, hint, multiline = false) => field(key === 'coverage_b_version' ? h(React.Fragment, null, label, h('span', { className: 'muted small' }, ' 可选')) : label, h(multiline ? 'textarea' : 'input', { 'aria-label': label, className: multiline ? 'mono' : undefined, value: createForm[key] ?? '', placeholder: key === 'coverage_b_version' ? '需要对比的基线版本' : undefined, disabled: creatingRun, onChange: event => update(key, event.target.value) }), hint)
         const notice = (title, detail, kind = 'blue', actions) => h('div', { className: `notice ${kind}`, role: 'status' }, h('div', { className: 'notice-main' }, runIcon(kind === 'good' ? 'CircleCheck' : kind === 'warn' ? 'CircleAlert' : 'Info'), h('div', null, h('strong', null, title), h('p', null, detail))), actions)
         const panel = (content, extra = '') => h('section', { className: `panel ${extra}` }, content)
         const footer = (prev, next, text, disabled = false) => h('div', { className: 'wizard-footer' }, button(step === 1 ? '上一步' : view !== 'inputs' && step === 2 ? '返回输入资料' : '上一步', prev, 'ghost', 'ArrowLeft'), h('div', { className: 'row' }, step === 1 && h('span', { className: 'create-footer-note' }, '第 1 步，共 4 步'), step === 3 && disabled ? h(React.Fragment, null, h('span', { className: 'small', style: { color: '#aa6e33' } }, '模型就绪后可继续'), h('button', { type: 'button', className: 'create-disabled', disabled: true }, text)) : button(text, next, 'primary', step === 4 ? 'Play' : 'ArrowRight', disabled)))
@@ -5009,16 +4999,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'form-grid' }, field('源码仓库', h('div', { className: 'row', style: { flexWrap: 'nowrap' } }, h('select', { 'aria-label': '源码仓库', value: createForm.repository, onChange: event => update('repository', event.target.value) }, h('option', { value: '' }, '选择仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository))), button('添加', openRepositoryImport, 'ghost', 'Plus')), createForm.repository ? `本地工作区 / repositories / ${createForm.repository}` : '先添加或选择源码仓库'), input('分析目标', 'target', '使用具体的模块、功能或业务行为命名')),
           h('div', { className: 'create-subhead' }, '分析场景 ', h('span', { className: 'small muted', style: { fontWeight: 400 } }, '选择本次分析的重点')),
           h('div', { className: 'choice-grid create-scenes', role: 'group', 'aria-label': '分析场景' }, Object.entries(scenes).map(([id, item]) => h('button', { key: id, type: 'button', className: `choice create-option ${createForm.scenario === id ? 'selected' : ''}`, 'aria-pressed': createForm.scenario === id, disabled: !supported('scenarios', id), 'data-scenario': id, onClick: () => update('scenario', id) }, runIcon(item[1]), h('div', null, h('strong', null, item[0]), h('p', null, item[2])), h('span', { className: 'create-scene-check' }, runIcon('CircleCheck'))))),
-          h('div', { className: 'form-grid create-scope', style: { marginTop: 22 } }, input('源码冻结范围', 'source_scope_text', '相对仓库根目录，每行一个文件或目录；「.」代表整个仓库。', true), input('参考源码范围', 'context_scope_text', '辅助理解的相关实现、文档或测试文件。', true)),
+          h('div', { className: 'create-scope', style: { marginTop: 22 } }, input('源码冻结范围', 'source_scope_text', '相对仓库根目录，每行一个文件或目录；「.」代表整个仓库。', true)),
           h(SourceScopePicker, { cwd, dataRoot: workbench?.data_root, repository: createForm.repository, value: createForm.source_scope_text, preview: validScopePreview, onChange: value => update('source_scope_text', value), onPreview: value => setScopePreview({ ...value, key: createScopeKey }) }),
-          field('流程基线（可选）', h('select', { 'aria-label': '流程基线', value: chosenBaseline, disabled: creatingRun, onChange: event => {
-            const choice = baselineOptions.find(item => baselineKey(item) === event.target.value)
-            update('flow_baseline', choice ? { run_id: choice.run_id, version_id: choice.version_id } : null)
-          } }, h('option', { value: '' }, '不选择 · 独立分析'),
-            chosenBaseline && !baselineOptions.some(item => baselineKey(item) === chosenBaseline)
-              ? h('option', { value: chosenBaseline }, `已选 ${createForm.flow_baseline.run_id} · ${createForm.flow_baseline.version_id}`) : null,
-            baselineOptions.map(item => h('option', { key: baselineKey(item), value: baselineKey(item) }, `${item.target || item.run_id} · ${item.run_id} · ${item.version_id}`))),
-          '选择已审核流程，用于对照本次分析的差异。候选来自当前已加载记录，不会自动选择最近一次结果。'),
           footer(() => navigate({ type: 'tasks' }), () => go(2), '下一步 · 输入资料', !targetReady)), 'create-target-panel')
         else if (step === 2 && view === 'inputs') content = panel(h(React.Fragment, null,
           h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '让分析理解更多上下文'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '选择与目标相关的需求、设计或已有测试资料。')), button('选择资产', () => openAssets(), '', 'Plus')),
@@ -5068,7 +5050,6 @@ window.__ModuleLoader__.load({
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
             row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库 · ' : ''}命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
-            row('流程基线', createForm.flow_baseline?.run_id || '未选择', createForm.flow_baseline?.version_id || '独立分析，不与历史流程自动合并。', 1),
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
@@ -5347,18 +5328,9 @@ window.__ModuleLoader__.load({
       }
 
       function renderFlowVersions() {
-        return h(FlowComparisonView, { stability: current?.flow_stability, comparison: current?.flow_comparison,
-          baseline: current?.flow_baseline, onUseBaseline: baseline => {
-            if (!baseline?.run_id || !baseline?.version_id) return
-            setCreateForm(value => ({ ...value, source_task_id: selectedTask?.task_id,
-              repository: current?.repository || selectedTask?.repository || baseline.repository || '',
-              target: current?.target || selectedTask?.target || baseline.target || '',
-              source_scope_text: (selectedTask?.source_scope ?? current?.source_scope ?? []).join('\n'),
-              context_scope_text: (selectedTask?.context_scope ?? []).join('\n'), asset_ids: [],
-              scenario: current?.scenario || baseline.scenario || 'branch-analysis',
-              flow_baseline: { run_id: baseline.run_id, version_id: baseline.version_id } }))
-            setScreen({ type: 'create', createStep: 1 })
-          } })
+        return current?.flow_comparison
+          ? h(FlowComparisonView, { stability: current.flow_stability, comparison: current.flow_comparison })
+          : null
       }
 
       function renderFlows() {
@@ -5606,7 +5578,7 @@ window.__ModuleLoader__.load({
           onReload: loadWorkbench,
           onNewQuery: query => {
             setCreateForm(value => ({ ...value, source_task_id: selectedTask.task_id, repository: selectedTask.repository, target: selectedTask.target,
-              source_scope_text: selectedTask.source_scope.join('\n'), context_scope_text: (selectedTask.context_scope ?? []).join('\n'), asset_ids: selectedTask.asset_ids,
+              source_scope_text: selectedTask.source_scope.join('\n'), asset_ids: selectedTask.asset_ids,
               scenario: 'coverage-analysis', mode: selectedTask.mode, provider_id: selectedTask.provider || '',
               agent_model: selectedTask.provider ? selectedTask.agent_model || '' : '', model_route_key: '', external_selection_required: !selectedTask.provider,
               coverage_kind: 'query', coverage_product: query.product || '', coverage_version: query.c_version || '',

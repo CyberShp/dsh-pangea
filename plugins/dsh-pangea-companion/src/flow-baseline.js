@@ -82,8 +82,3 @@ export async function readFlowMetadata(runDirectory, runId, { lifecycle_status, 
   }
   return result
 }
-
-export function flowBaselineOptions(runs) {
-  return [...new Map((runs ?? []).filter(Boolean).filter(run => run.flow_baseline)
-    .map(run => [JSON.stringify([run.flow_baseline.run_id, run.flow_baseline.version_id]), run.flow_baseline])).values()]
-}

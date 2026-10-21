@@ -90,7 +90,6 @@ const RUN_CREATE_PARAMETERS = {
     repository: { type: 'string', minLength: 1, description: '当前冻结输入中的仓库 ID。创建前只做确定性目录/文件名范围准备。' },
     target: { type: 'string', minLength: 1, description: '用户确认的分析对象原文。' },
     source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '相对仓库根目录的源码范围。' },
-    context_scope: { type: 'array', items: { type: 'string', minLength: 1 }, description: '冻结为参考资料的仓库相对文件路径；分析目标仍由 source_scope 指定。' },
     focus: { type: 'array', items: { type: 'string', minLength: 1 } },
     asset_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
     test_case_examples: { type: 'array', items: { type: 'string', minLength: 1 } },
@@ -110,6 +109,13 @@ const RUN_RESUME_PARAMETERS = {
     run_id: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 8 },
   },
+}
+
+function requireCurrentAnalysisInputs(input) {
+  if (input?.context_scope != null && (!Array.isArray(input.context_scope) || input.context_scope.length > 0)) {
+    throw new Error('新建分析不再支持参考源码范围，请使用源码范围指定分析对象')
+  }
+  if (input?.flow_baseline != null) throw new Error('新建分析不再支持流程基线')
 }
 
 const PHASE_LABELS = {
@@ -1142,6 +1148,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     }
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)
+      requireCurrentAnalysisInputs(body.input)
       if (body.input?.incremental_request != null) throw new Error('定向补充或变更分析请从来源任务发起')
       if (body.input?.source_task_id) requireWorkspaceTask(await tasks.get(body.input.source_task_id), cwd, body.input.source_task_id)
       if (body.input?.scope_preview_id || body.input?.expected_scope_revision) { const checked = await confirmScope({ ...body.input, cwd: root, dataRoot: dataRootFor(root, actionDataRoot) }, runner); body.input.source_scope = checked.normalized_scope }
@@ -1767,6 +1774,7 @@ export function apply(ctx) {
     description: '创建 source-first PANGEA Run：Graph 冻结源码索引、结果外壳、task/action/result 绑定，并返回第一批待派发 action。',
     parameters: RUN_CREATE_PARAMETERS,
     async execute(args, exec) {
+      requireCurrentAnalysisInputs(args)
       const result = await createRun(workspaceCwd(exec), {
         ...args,
         effective_context_budget: args.effective_context_budget ?? 250000,

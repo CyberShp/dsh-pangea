@@ -111,6 +111,8 @@ try {
     await page.evaluate(()=>document.body.classList.remove('preview-assistant'));await page.setViewportSize({width:1380,height:900})
     for(const name of ['home','tasks','create','assets','settings','environment']){await page.evaluate(name=>window.previewMount(name,name==='home'?'home':name==='environment'?'execution':'analysis'),name);await ready();if(name==='tasks'){await page.waitForTimeout(800);await page.getByRole('button',{name:'返回任务列表',exact:true}).click();await page.locator('.b03-task-screen').waitFor()}await snap(`${name}-1380`)
       if(name==='create'){
+        assert.equal(await page.getByRole('textbox',{name:'参考源码范围',exact:true}).count(),0)
+        assert.equal(await page.getByRole('combobox',{name:'流程基线',exact:true}).count(),0)
         const range=page.getByRole('textbox',{name:'源码冻结范围',exact:true});assert.equal(await range.inputValue(),'')
         await page.getByRole('textbox',{name:'分析目标',exact:true}).fill('TLS fixture')
         await page.getByRole('button',{name:'选择目录或文件',exact:true}).click();const picker=page.getByRole('dialog',{name:'选择源码范围'})

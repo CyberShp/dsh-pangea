@@ -49,25 +49,38 @@ test('create form shows and can remove selected assets absent from its repositor
   assert.deepEqual(Array.from(changed.asset_ids), ['tagged'])
 })
 
-test('new analysis reference-source placeholder matches the approved prototype', async () => {
-  const form = { repository: 'repo', target: 'CPU 使用率计算分析', source_scope_text: 'src/cpuload.c', context_scope_text: '', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '' }
-  const states = {
-    1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: [] },
-    16: { type: 'create', createStep: 1 },
-    33: form,
-    34: { assets: [] },
+test('new analysis target and confirmation steps show only the selected source scope', async () => {
+  for (const createStep of [1, 4]) {
+    const form = { repository: 'repo', target: 'CPU 使用率计算分析', source_scope_text: 'src/cpuload.c', context_scope_text: 'tests/old-reference.c', flow_baseline: { run_id: 'old-run', version_id: 'old-version' }, asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '' }
+    const states = {
+      1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: [], flow_baseline_options: [{ repository: 'repo', run_id: 'old-run', version_id: 'old-version' }] },
+      16: { type: 'create', createStep },
+      33: form,
+      34: { assets: [] },
+    }
+    let index = 0
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+      const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
+      return [Object.hasOwn(states, key) ? states[key] : initial, () => {}]
+    } })
+    const pages = []
+    const ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const nodes = descendants(panel.type(panel.props))
+    assert.doesNotMatch(JSON.stringify(nodes), /参考源码范围|流程基线|tests\/old-reference\.c|old-run|old-version/, `create step ${createStep}`)
+    if (createStep === 1) {
+      const sourceScope = nodes.find(node => node.type === 'textarea' && node.props['aria-label'] === '源码冻结范围')
+      assert.equal(sourceScope.props.value, 'src/cpuload.c')
+      const picker = nodes.find(node => node.type?.name === 'SourceScopePicker')
+      assert.equal(picker.props.value, 'src/cpuload.c')
+      assert.equal(picker.props.repository, 'repo')
+      assert.equal(picker.props.preview.matched_file_count, 1)
+    } else {
+      assert.match(JSON.stringify(nodes), /CPU 使用率计算分析/)
+      assert.ok(nodes.some(node => node.type === 'button' && node.children.includes('创建并开始分析')))
+    }
   }
-  let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
-    return [Object.hasOwn(states, key) ? states[key] : initial, () => {}]
-  } })
-  const pages = []
-  const ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
-  client.apply(ctx)
-  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
-  const sourceScope = descendants(panel.type(panel.props)).find(node => node.type === 'textarea' && node.props['aria-label'] === '参考源码范围')
-  assert.equal(sourceScope.props.placeholder, '例如：tests/cpuload_test.c')
 })
 
 test('saved internal API settings do not restore an analysis route or show internal model controls', async () => {
@@ -1854,21 +1867,19 @@ test('short case detail renders variants, opens unit notes and navigates to the 
   assert.equal(nextScreen.type, 'flows')
 })
 
-test('reference scope form preserves the analysis target and emits separate reference paths', async () => {
-  const form = { repository: 'repo', target: 'auth', source_scope_text: 'src/auth.c', context_scope_text: '', asset_ids: [], provider_id: 'pangea-opencode' }
-  const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'], workflow_versions: ['source-first-v1'] }, acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create' }, 33: form }
-  let index = 0, changed
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }] } })
-  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
-  client.apply(ctx)
-  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
-  const input = descendants(panel.type(panel.props)).find(n => n.props['aria-label'] === '参考源码范围')
-  assert.ok(input)
-  input.props.onChange({ target: { value: 'include/auth.h\ndocs/usage.md' } })
-  const request = client.buildAnalysisRequest(changed)
-  assert.deepEqual(Array.from(request.source_scope), ['src/auth.c'])
-  assert.deepEqual(Array.from(request.context_scope), ['include/auth.h', 'docs/usage.md'])
-  assert.equal(client.buildAnalysisRequest(form).context_scope, undefined)
+test('analysis request excludes retired inputs from an existing draft and preserves active inputs', async () => {
+  const client = await loadClientExports()
+  const form = { repository: 'repo', target: 'auth', source_scope_text: 'src/auth.c\ninclude/auth.h', context_scope_text: 'test/auth.c\ndocs/usage.md', flow_baseline: { run_id: 'old-run', version_id: 'old-version' }, asset_ids: ['requirement'], provider_id: 'pangea-opencode' }
+  const original = structuredClone(form)
+  const request = client.buildAnalysisRequest(form)
+  assert.equal(request.repository, 'repo')
+  assert.equal(request.target, 'auth')
+  assert.deepEqual(Array.from(request.source_scope), ['src/auth.c', 'include/auth.h'])
+  assert.deepEqual(Array.from(request.asset_ids), ['requirement'])
+  assert.equal(request.provider_id, 'pangea-opencode')
+  assert.equal(Object.hasOwn(request, 'context_scope'), false)
+  assert.equal(Object.hasOwn(request, 'flow_baseline'), false)
+  assert.deepEqual(form, original)
 })
 
 
@@ -2773,7 +2784,7 @@ test('asset picker commits only on confirmation and preserves selected revisions
 
 test('creation wizard preserves draft across scenarios and blocks forward navigation until ready', async () => {
   let index = 0
-  const form = { repository: 'repo', target: '', source_scope_text: 'src/a.c', context_scope_text: 'test/a.c', asset_ids: ['asset'], scenario: 'module-analysis', mode: 'depth', provider_id: 'agent' }
+  const form = { repository: 'repo', target: '', source_scope_text: 'src/a.c', asset_ids: ['asset'], scenario: 'module-analysis', mode: 'depth', provider_id: 'agent' }
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'], source_first: { version: 'source-first-v1', analysis_options_by_profile: { 'behavior-test-v2': { scenarios: ['module-analysis', 'risk-analysis', 'branch-analysis', 'coverage-analysis'], modes: ['depth', 'speed'] } } } } }, 16: { type: 'create' }, 33: form }
   const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] } })
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
@@ -2786,7 +2797,7 @@ test('creation wizard preserves draft across scenarios and blocks forward naviga
   assert.equal(states[16].createStep, undefined)
   nodes.find(node => node.props['data-scenario'] === 'branch-analysis').props.onClick()
   assert.equal(states[33].scenario, 'branch-analysis')
-  assert.equal(states[33].context_scope_text, 'test/a.c')
+  assert.equal(states[33].source_scope_text, 'src/a.c')
   assert.deepEqual(Array.from(states[33].asset_ids), ['asset'])
   render().find(node => node.props['aria-label'] === '分析目标').props.onChange({ target: { value: 'A module' } })
   render().find(node => node.children.includes('下一步 · 输入资料')).props.onClick()
@@ -2798,7 +2809,7 @@ test('creation wizard preserves draft across scenarios and blocks forward naviga
 
 test('creation wizard resolves selected asset IDs without opening the asset picker', async () => {
   let index = 0
-  const form = { repository: 'repo', target: 'CPU analysis', source_scope_text: 'src/cpu.c', context_scope_text: '',
+  const form = { repository: 'repo', target: 'CPU analysis', source_scope_text: 'src/cpu.c',
     asset_ids: ['asset-requirement', 'asset-design'], scenario: 'module-analysis', mode: 'depth', provider_id: 'agent' }
   const states = {
     1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'], workflow_versions: ['source-first-v1'],

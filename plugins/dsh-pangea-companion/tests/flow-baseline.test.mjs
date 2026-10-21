@@ -52,7 +52,7 @@ test('baseline identity rejects paths and missing version; model metadata never 
   assert.equal(normalizeModelSettings({ api_key: 'secret', temperature: NaN }), null)
 })
 
-test('only exact completed PASS artifacts are listed; missing or corrupt optional metadata remains readable', async t => {
+test('historical flow metadata remains readable without offering new-analysis baseline options', async t => {
   const f = await fixture(t)
   const run = { run_id: 'reviewed-run', workflow_version: 'source-first-v1', lifecycle_status: 'complete', quality_status: 'PASS' }
   assert.deepEqual(await readFlowMetadata(f.runDirectory, run.run_id, run), { warnings: [] })
@@ -67,8 +67,9 @@ test('only exact completed PASS artifacts are listed; missing or corrupt optiona
   }
   const snapshot = await workbenchSnapshot({ cwd: f.root, dataRoot: f.dataRoot, runId: run.run_id,
     runner: async ({ args }) => args[0] === 'system' ? capabilities : args[1] === 'list' ? { items: [run], total: 1 } : run })
-  assert.equal(snapshot.flow_baseline_options.length, 1)
-  assert.equal(snapshot.flow_baseline_options[0].run_id, run.run_id)
+  assert.equal(Object.hasOwn(snapshot, 'flow_baseline_options'), false)
+  assert.equal(snapshot.run.flow_baseline.version_id, baseline.version_id)
+  assert.equal(snapshot.run.flow_stability.fingerprint, fingerprint.fingerprint)
   const reviewComparison = { format_version: 'flow-comparison-v1', comparison_scope: 'first_round', candidate: { run_id: run.run_id } }
   const deliveryComparison = { ...reviewComparison, comparison_scope: 'delivery', reviewed: false }
   await writeFile(path.join(f.runDirectory, 'inputs/flow-comparison.json'), JSON.stringify(reviewComparison))

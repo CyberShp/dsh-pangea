@@ -236,6 +236,8 @@ test('coverage list links declared variants and comparison distinguishes structu
   assert.equal(selected.target_case_id, 'u/c')
   assert.equal(selected.variant_id, 'V')
   const comparison = app.render('FlowComparisonView', {
+    baseline: { run_id: 'old-run', version_id: 'old-version' },
+    onUseBaseline() { assert.fail('historical comparison must remain read-only') },
     stability: { fingerprint: 'hash', model: { metadata_status: 'unknown' } },
     comparison: { comparison_scope: 'delivery', reviewed: false, comparability: { status: 'unknown' }, flows: [
       { flow_id: 'f', status: 'unchanged', content_changed: true, content_changes: { changed: [{ before: '旧依据', after: '新依据' }] } },
@@ -245,14 +247,13 @@ test('coverage list links declared variants and comparison distinguishes structu
   assert.match(text(comparison), /旧依据.*新依据/s)
   assert.match(text(comparison), /未作语义裁决/)
   assert.match(text(comparison), /模型设置记录：未知/)
+  assert.equal(nodes(comparison).some(node => node.type === 'button'), false)
 })
 
-test('analysis request includes only explicitly chosen flow baseline', async () => {
-  const { client } = await harness()
-  assert.equal(Object.hasOwn(client.buildAnalysisRequest({ repository: 'r' }), 'flow_baseline'), false)
-  const baseline = { run_id: 'reviewed-run', version_id: 'v17' }
-  const request = client.buildAnalysisRequest({ repository: 'r', flow_baseline: baseline })
-  assert.equal(request.flow_baseline.run_id, 'reviewed-run')
-  assert.equal(request.flow_baseline.version_id, 'v17')
-  assert.notEqual(request.flow_baseline, baseline)
+test('baseline metadata alone does not expose a new analysis action', async () => {
+  const app = await harness()
+  assert.equal(app.render('FlowComparisonView', {
+    baseline: { run_id: 'reviewed-run', version_id: 'v17' },
+    onUseBaseline() { assert.fail('baseline metadata must not create an action') },
+  }), null)
 })
