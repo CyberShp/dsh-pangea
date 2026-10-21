@@ -13,6 +13,12 @@ export function uiWorkbenchFixture(dataRoot, scene = 'running', count = 40) {
     nodes: [{ id: 'start', kind: 'entry', label: '发起连接' }, { id: 'handshake', kind: 'main', label: '执行 TLS 握手' }, { id: 'verify', kind: 'branch', label: '握手是否成功' }, { id: 'ready', kind: 'exit', label: '连接可用' }, { id: 'cleanup', kind: 'main', label: '释放失败连接' }, { id: 'retry', kind: 'exit', label: '保留重新建链入口' }],
     edges: [{ edge_id: 'e1', source_step_key: 'start', target_step_key: 'handshake' }, { edge_id: 'e2', source_step_key: 'handshake', target_step_key: 'verify' }, { edge_id: 'e3', source_step_key: 'verify', target_step_key: 'ready', label: '成功' }, { edge_id: 'e4', source_step_key: 'verify', target_step_key: 'cleanup', label: '超时或认证失败' }, { edge_id: 'e5', source_step_key: 'cleanup', target_step_key: 'retry' }],
     paths: [{ path_id: 'normal', label: '正常建链', node_ids: ['start', 'handshake', 'verify', 'ready'], edge_ids: ['e1', 'e2', 'e3'] }, { path_id: 'failure', label: '失败清理与恢复', node_ids: ['start', 'handshake', 'verify', 'cleanup', 'retry'], edge_ids: ['e1', 'e2', 'e4', 'e5'] }] }
+  const detailEvidence = Array.from({ length: 80 }, (_, index) => `storage:tls/handshake.c:${index + 1}`)
+  graph.nodes[0].source_evidence = detailEvidence
+  graph.sequence = { format_version: 'sequence-v1', status: 'ready', title: 'TLS 握手交互',
+    participants: [{ id: 'client', label: '客户端' }, { id: 'server', label: '服务端' }],
+    messages: [{ id: 'tls-hello', from: 'client', to: 'server', label: 'ClientHello', kind: 'call', source_evidence: detailEvidence },
+      { id: 'tls-response', from: 'server', to: 'client', label: 'ServerHello', kind: 'return' }], fragments: [], notes: [] }
   const flow = { flow_id: 'flow-tls', unit_id: 'unit-tls', title: 'TLS 握手与失败恢复', ...graph,
     branches: Array.from({ length: 27 }, (_, index) => ({ branch_id: `branch-${index + 1}`, from_step_id: 'verify', to_step_id: index % 2 ? 'ready' : 'cleanup', condition: index % 2 ? `有效输入组合 ${index + 1}` : `异常输入组合 ${index + 1}`, processing: '按对应分支进行连接状态处理', branch_type: index % 2 ? 'normal' : 'exception' })),
     mainline_steps: graph.nodes.map(item => ({ step_id: item.id, title: item.label, node_kind: item.kind })), transitions: graph.edges.map(item => ({ from_step_id: item.source_step_key, to_step_id: item.target_step_key, condition: item.label })), source_record: { kind: 'flow', record_id: 'flow-record', body: graph } }

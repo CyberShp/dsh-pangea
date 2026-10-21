@@ -31,6 +31,18 @@ try {
   const scene=async(value,count=40)=>{await page.request.get(`${url}/fixture?scene=${value}&count=${count}`);await page.goto(url);await ready();await page.locator('.b03-overview-status').waitFor();await page.waitForTimeout(750)}
   const tab=name=>page.getByRole('navigation',{name:'PANGEA 分析页面'}).getByRole('button',{name})
   const cases=async()=>{await tab(/^测试用例/).click();await page.locator('.b05-case-table').waitFor()}
+  const checkFullscreenBody=async(withDetails=false)=>{
+    const bounds=await page.evaluate(()=>{
+      const section=document.fullscreenElement,body=section.querySelector(':scope > .pangea-graph-body'),canvas=body.querySelector('.pangea-graph-canvas'),style=getComputedStyle(section)
+      const number=value=>parseFloat(value)||0
+      const siblings=[...section.children].filter(child=>child!==body).reduce((height,child)=>{const css=getComputedStyle(child);return height+child.getBoundingClientRect().height+number(css.marginTop)+number(css.marginBottom)},0)
+      const aside=body.querySelector('aside');if(aside)aside.scrollTop=80
+      return {available:section.clientHeight-number(style.paddingTop)-number(style.paddingBottom)-siblings,body:body.getBoundingClientRect().height,canvas:canvas.getBoundingClientRect().height,aside:aside?{height:aside.clientHeight,scrollHeight:aside.scrollHeight,scrollTop:aside.scrollTop}:null}
+    })
+    assert.ok(Math.abs(bounds.body-bounds.available)<3,`graph body fills remaining fullscreen height: ${JSON.stringify(bounds)}`)
+    assert.ok(Math.abs(bounds.canvas-bounds.body)<3,`canvas fills graph body: ${JSON.stringify(bounds)}`)
+    if(withDetails){assert.ok(bounds.aside.scrollHeight>bounds.aside.height);assert.ok(bounds.aside.scrollTop>0);assert.ok(bounds.aside.height<=bounds.body)}
+  }
   try {
     await scene('complete');assert.equal(await page.locator('#app h1').count(),1)
     assert.match(await page.locator('.b03-overview-status').innerText(),/已完成/)
@@ -73,14 +85,20 @@ try {
     assert.equal(await exitFullscreen().getAttribute('aria-pressed'),'true')
     const fullscreenBounds=await page.evaluate(()=>{const bounds=document.fullscreenElement.getBoundingClientRect();return {x:bounds.x,y:bounds.y,width:bounds.width,height:bounds.height,viewportWidth:innerWidth,viewportHeight:innerHeight}})
     assert.deepEqual(fullscreenBounds,{x:0,y:0,width:fullscreenBounds.viewportWidth,height:fullscreenBounds.viewportHeight,viewportWidth:fullscreenBounds.viewportWidth,viewportHeight:fullscreenBounds.viewportHeight})
-    const canvasBounds=await canvas.boundingBox();assert.ok(canvasBounds.y+canvasBounds.height<=fullscreenBounds.height,'fullscreen canvas fits below its toolbar');assert.ok(canvasBounds.height>=fullscreenBounds.height/2)
-    await snap('flow-fullscreen');await exitFullscreen().click();await enterFullscreen().waitFor();assert.equal(await page.evaluate(()=>document.fullscreenElement),null)
-    await enterFullscreen().click();await exitFullscreen().waitFor();await page.evaluate(()=>document.exitFullscreen());await enterFullscreen().waitFor()
+    await checkFullscreenBody();await snap('flow-fullscreen')
+    await canvas.locator('[data-node-id="start"]').click();await page.getByRole('complementary',{name:'节点详情'}).waitFor();await checkFullscreenBody(true);await snap('flow-fullscreen-details')
+    await exitFullscreen().click();await enterFullscreen().waitFor();await page.setViewportSize({width:2560,height:1440})
+    await enterFullscreen().click();await exitFullscreen().waitFor();await checkFullscreenBody(true);await snap('flow-fullscreen-2560')
+    await exitFullscreen().click();await enterFullscreen().waitFor();assert.equal(await page.evaluate(()=>document.fullscreenElement),null);await page.setViewportSize({width:1380,height:900})
+    await enterFullscreen().click();await exitFullscreen().waitFor();await page.keyboard.press('Escape');await enterFullscreen().waitFor();await page.waitForFunction(()=>!document.fullscreenElement)
     assert.equal(await page.getByRole('combobox',{name:'高亮路径',exact:true}).inputValue(),'normal')
     await page.evaluate(()=>{window.previewRequestFullscreen=Element.prototype.requestFullscreen;Element.prototype.requestFullscreen=()=>Promise.reject(new Error('fullscreen denied for regression test'))})
     await enterFullscreen().click();await page.getByRole('alert').filter({hasText:'全屏阅读未能开启'}).waitFor();await snap('flow-fullscreen-denied')
     await page.evaluate(()=>{Element.prototype.requestFullscreen=window.previewRequestFullscreen;delete window.previewRequestFullscreen})
     await enterFullscreen().click();await exitFullscreen().waitFor();assert.equal(await page.locator('.pangea-fullscreen-error').count(),0);await exitFullscreen().click();await enterFullscreen().waitFor()
+    await page.getByRole('button',{name:'时序图视图',exact:true}).click();await page.getByRole('button',{name:'全屏阅读时序图',exact:true}).click();await page.getByRole('button',{name:'退出时序图全屏',exact:true}).waitFor();await checkFullscreenBody()
+    await page.locator('[data-message-id="tls-hello"]').click();await page.getByRole('complementary',{name:'交互详情'}).waitFor();await checkFullscreenBody(true);await snap('sequence-fullscreen-details')
+    await page.keyboard.press('Escape');await page.getByRole('button',{name:'全屏阅读时序图',exact:true}).waitFor();await page.waitForFunction(()=>!document.fullscreenElement)
     for(const value of ['running','failed','stopping','partial']){await scene(value);const badge=await page.locator('.b03-overview-status').innerText();if(['failed','stopping'].includes(value))assert.doesNotMatch(badge,/已完成/);await tab('运行过程').click();await page.locator('.pangea-run-workspace').waitFor();await snap(`run-${value}-1380`)}
     await page.getByText('执行详情与 Agent 会话',{exact:true}).click();await page.getByRole('button',{name:'Agent 会话管理',exact:true}).click()
     await page.getByRole('dialog',{name:'Agent 会话管理'}).waitFor();await page.locator('.agent-session-transcript').waitFor()

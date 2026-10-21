@@ -128,6 +128,27 @@ test('fullscreen exit button reports failure and can be retried', async () => {
   graph.dispose()
 })
 
+test('Escape exits only this fullscreen diagram and preserves dialog keyboard handling', async () => {
+  const graph = viewport(), escape = graph.fullscreenListeners.get('keydown')
+  let prevented = 0
+  const event = extra => ({ key: 'Escape', preventDefault() { prevented++ }, ...extra })
+  await escape(event())
+  assert.equal(prevented, 0)
+  await graph.click('全屏阅读测试图')
+  await escape(event({ defaultPrevented: true }))
+  await escape(event({ target: { closest: () => ({ role: 'dialog' }) } }))
+  assert.equal(prevented, 0)
+  assert.equal(graph.document.fullscreenElement, graph.section)
+  await escape(event())
+  assert.equal(prevented, 1)
+  assert.equal(graph.document.fullscreenElement, null)
+  await graph.click('全屏阅读测试图')
+  graph.document.exitFullscreen = async () => { throw new Error('exit denied') }
+  await escape(event())
+  assert.match(graph.view.controls.children.find(child => child?.props.role === 'alert').children[0], /未能退出/)
+  graph.dispose()
+})
+
 test('ordinary wheel scrolls the page while Ctrl wheel zooms around the pointer', () => {
   const graph = viewport()
   assert.equal(graph.listeners.get('wheel').options.passive, false)

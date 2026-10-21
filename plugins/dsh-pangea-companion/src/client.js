@@ -2426,9 +2426,21 @@ window.__ModuleLoader__.load({
           setFullscreen(Boolean(document.fullscreenElement && document.fullscreenElement === fullscreenTarget()))
           setFullscreenError('')
         }
+        const exitOnEscape = async event => {
+          if (event.key !== 'Escape' || event.defaultPrevented || event.repeat || !document.fullscreenElement || document.fullscreenElement !== fullscreenTarget()
+            || event.target?.closest?.('dialog[open], [role="dialog"], [role="alertdialog"]')) return
+          event.preventDefault()
+          setFullscreenError('')
+          try { await document.exitFullscreen() }
+          catch { setFullscreenError('未能退出全屏，请重试退出全屏按钮。') }
+        }
         syncFullscreen()
         document.addEventListener('fullscreenchange', syncFullscreen)
-        return () => document.removeEventListener('fullscreenchange', syncFullscreen)
+        document.addEventListener('keydown', exitOnEscape)
+        return () => {
+          document.removeEventListener('fullscreenchange', syncFullscreen)
+          document.removeEventListener('keydown', exitOnEscape)
+        }
       }, [])
       const fitScale = bounds => Math.min(1, Math.max(1, bounds.width - 32) / Math.max(1, graphWidth), Math.max(1, bounds.height - 32) / Math.max(1, graphHeight))
       const centered = (scale, fit) => ({ scale, fit, x: (sizeRef.current.width - graphWidth * scale) / 2, y: (sizeRef.current.height - graphHeight * scale) / 2 })
@@ -2668,7 +2680,7 @@ window.__ModuleLoader__.load({
         selectedPath ? h('div', { className: 'pangea-diagram-caption', 'aria-label': '所选路径步骤' },
           h('strong', null, routeLabel(selectedPath)), h('p', null, (selectedPath.node_ids ?? []).map((id, index) =>
             `${index + 1}. ${graph.nodes?.find(item => item.id === id)?.label || id}`).join(' → '))) : null,
-        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } },
+        h('div', { className: 'pangea-graph-body', style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' } },
           h('div', { ...panProps, style: { ...panProps.style, flex: '1 1 320px', minWidth: 0 } }, svgTreeToReact(sized(tree), 'svg', chooseNode, {
             select: edge => setSelection({ key: identity, node: '', path: pathId, edge }),
           })),
@@ -2729,14 +2741,15 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', onClick: () => exportSvgTree(tree, 'sequence', 'svg') }, '导出 SVG'),
             h('button', { type: 'button', onClick: () => exportSvgTree(tree, 'sequence', 'png') }, '导出 PNG'),
             h('button', { type: 'button', onClick: () => exportDiagramHtml(tree, 'sequence', graph.title || flow?.title || '时序图', flow.sequence) }, '导出 HTML')),
-          h('div', panProps, svgTreeToReact(sized(tree), 'svg', null, null, id => setSelection({ identity, id }))),
-          message ? h('aside', { 'aria-label': '交互详情', className: 'pangea-diagram-caption' },
+          h('div', { className: 'pangea-graph-body' },
+            h('div', panProps, svgTreeToReact(sized(tree), 'svg', null, null, id => setSelection({ identity, id }))),
+            message ? h('aside', { 'aria-label': '交互详情', className: 'pangea-diagram-caption' },
             h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 } },
               h('strong', null, `${participant(message.from)} → ${participant(message.to)}`),
               h('button', { type: 'button', onClick: () => setSelection({ identity, id: '' }) }, '关闭')),
             h('p', null, message.label),
             h('small', null, `${message.id} · ${{ call: '调用', return: '返回', async: '异步', self: '自身处理' }[message.kind] || message.kind}`),
-            evidenceText(message.source_evidence).map(location => h('p', { key: location }, diagramSource(location, `时序交互 · ${message.label}`, onSource)))) : null) : null,
+            evidenceText(message.source_evidence).map(location => h('p', { key: location }, diagramSource(location, `时序交互 · ${message.label}`, onSource)))) : null)) : null,
         unsequenced.length ? h('section', { className: 'pangea-diagram-caption', 'aria-label': '分支关系待确认的交互' },
           h('strong', null, `保留的交互记录（${unsequenced.length} 条）`),
           h('p', null, '这些交互的分支归属或先后关系尚未明确。以下逐条保留原记录中的双方与内容，不表示它们依次执行。'),
