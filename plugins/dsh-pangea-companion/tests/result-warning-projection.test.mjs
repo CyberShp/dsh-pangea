@@ -53,6 +53,34 @@ test('legacy degradation matching stays exact and action-local; current same tex
   assert.deepEqual(currentWarningDegradations(pending, [{ ...artifact(a), binding_status: 'pending' }]), pending)
 })
 
+test('source warnings need matching record provenance and never fall back to legacy message matching', () => {
+  const value = result(), message = value.warnings[0].message
+  const valid = { kind: 'flow_path_hint', record_id: 'one', message }
+  const invalidSources = [null, undefined, [], 'not an object', 0, false, {},
+    { record_id: 'one', message }, { kind: 'flow_path_hint', message },
+    { kind: 'custom_warning', message }, { kind: 'risk_method_hint', message },
+    { ...valid, kind: 'custom_warning' }, { ...valid, kind: 'risk_contract_hint' }, { ...valid, kind: [] },
+    ...['', ' ', 'two', 'missing'].map(record_id => ({ ...valid, record_id })),
+    { ...valid, message: 'a different warning' },
+    ...[null, true, '1', 0, 2].map(record_revision => ({ ...valid, record_revision })),
+    ...['run_id', 'action_id', 'task_id', 'data_root'].map(key => ({ ...valid, [key]: 'foreign' }))]
+  const pending = invalidSources.map(source_warning => degradation('action-a', message, { source_warning }))
+  const before = structuredClone(pending)
+  assert.deepEqual(currentWarningDegradations(pending, [artifact(value)]), pending)
+  assert.deepEqual(pending, before)
+  for (const source_warning of [valid, { ...valid, record_revision: 1 }, { ...valid, ...value.binding, record_revision: 1 }]) {
+    const item = degradation('action-a', message, { source_warning })
+    assert.deepEqual(currentWarningDegradations([item], [artifact(value)]), [])
+    const foreign = { ...item, task_id: 'foreign' }
+    assert.deepEqual(currentWarningDegradations([foreign], [artifact(value)]), [foreign])
+  }
+  const legacy = degradation('action-a', message, { record_id: 'one', record_revision: 1 })
+  assert.deepEqual(currentWarningDegradations([legacy], [artifact(value)]), [legacy])
+  value.warnings.push({ ...valid, record_id: 'two' })
+  const item = degradation('action-a', message, { source_warning: valid })
+  assert.deepEqual(currentWarningDegradations([item], [artifact(value)]), [item])
+})
+
 test('reader and overview omit a retired flattened path hint but retain history and cross-action current hints', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'current-warning-reader-'))
   t.after(() => rm(root, { recursive: true, force: true }))

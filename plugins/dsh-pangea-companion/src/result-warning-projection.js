@@ -42,12 +42,21 @@ export function currentWarningDegradations(degradations, artifacts) {
   return list(degradations).filter(item => {
     const result = object(item) ? results.get(item.action_id) : null
     if (!result || item.kind !== 'agent_result_warning' || typeof item.message !== 'string') return true
-    const source = object(item.source_warning) ? item.source_warning : item
-    if (['run_id', 'action_id', 'task_id', 'data_root'].some(key => Object.hasOwn(source, key) && source[key] !== result.binding?.[key])) return true
+    const hasSource = Object.hasOwn(item, 'source_warning')
+    const source = hasSource ? item.source_warning : item
+    if (hasSource && (!object(source) || typeof source.record_id !== 'string' || !source.record_id.trim()
+      || !RECORD_WARNING_KINDS.has(source.kind)
+      || Object.hasOwn(source, 'message') && source.message !== item.message
+      || Object.hasOwn(source, 'record_revision') && (!Number.isInteger(source.record_revision) || source.record_revision < 1))) return true
+    if ([item, source].some(identity => ['run_id', 'action_id', 'task_id', 'data_root']
+      .some(key => Object.hasOwn(identity, key) && identity[key] !== result.binding?.[key]))) return true
     const sameMessage = warning => warning?.message === item.message
+    const recordRevisions = new Map(list(result.records).map(record => [record.record_id, record.created_revision]))
     const retired = retiredResultWarnings(result).filter(warning => sameMessage(warning)
+      && (!hasSource || source.kind === warning.kind)
       && (!Object.hasOwn(source, 'record_id') || source.record_id === warning.record_id)
-      && (!Object.hasOwn(source, 'record_revision') || source.record_revision === warning.record_revision))
+      && (!Object.hasOwn(source, 'record_revision') || source.record_revision ===
+        (Object.hasOwn(warning, 'record_revision') ? warning.record_revision : hasSource ? recordRevisions.get(warning.record_id) : undefined)))
     return !retired.length || currentResultWarnings(result).some(sameMessage)
   })
 }
