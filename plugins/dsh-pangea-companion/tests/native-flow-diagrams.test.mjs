@@ -75,3 +75,30 @@ test('unusable optional diagram data does not erase valid flow or the authored e
   assert.deepEqual(normalizeFlow(raw).source_evidence, raw.source_evidence)
   assert.equal(summary.lifecycle_status, 'complete')
 })
+
+test('all seven main/sub flows retain their own sequence and function facts through projection', async t => {
+  const f = await fixture(t, authored)
+  const result = JSON.parse(await readFile(f.resultPath, 'utf8'))
+  result.records = Array.from({ length: 7 }, (_, index) => ({
+    record_id: `flow-${index}`, kind: 'flow', evidence: ['repo:receive.c:10-50'],
+    body: { ...structuredClone(authored), flow_id: `flow-${index}`, role: index === 0 ? 'main' : 'sub',
+      title: `流程 ${index + 1}` },
+  }))
+  await writeFile(f.resultPath, JSON.stringify(result))
+  const before = await readFile(f.resultPath, 'utf8')
+  const summary = await summarizeRun(f.task.data_root, f.task.run_id, { includeDetails: true })
+  const flows = summary.details.business_flows
+  assert.equal(flows.length, 7)
+  for (const record of result.records) {
+    const flow = flows.find(row => row.source_record?.record_id === record.record_id)
+    assert.ok(flow, record.record_id)
+    assert.deepEqual(flow.sequence, record.body.sequence)
+    assert.deepEqual(flow.call_graph, record.body.call_graph)
+    const sequence = layoutSequence(flow.sequence)
+    assert.equal(sequence.messages.length, record.body.sequence.messages.length)
+    assert.equal(sequence.fragments.length, 1)
+    assert.equal(validateCallGraph(flow.call_graph).graph.calls.length, 2)
+  }
+  assert.equal(await readFile(f.resultPath, 'utf8'), before)
+  assert.equal(summary.lifecycle_status, 'complete')
+})

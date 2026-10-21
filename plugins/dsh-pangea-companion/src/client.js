@@ -2601,10 +2601,11 @@ window.__ModuleLoader__.load({
       const tree = renderSequenceTree(layout, { selectedMessage: selected, idPrefix: 'sequence' })
       const message = graph?.messages?.find(item => item.id === selected)
       const participant = id => graph?.participants?.find(item => item.id === id)?.label || id
+      const unsequenced = graph?.unsequenced_messages ?? []
       const drawable = Boolean(graph?.messages?.length) && !['unknown', 'not_applicable', 'invalid'].includes(normalized.status)
       const statusText = normalized.status === 'not_applicable' ? '本次分析声明此流程不适用时序图。'
         : normalized.status === 'unknown' ? flow?.sequence ? '本次分析尚未确认时序交互，暂不绘制。' : '本次分析未提供时序交互数据。重新分析时可由 Agent 随流程一并提供。'
-        : normalized.status === 'invalid' ? '本次时序交互数据无法绘制，可查看分析原文。'
+        : normalized.status === 'invalid' ? unsequenced.length ? '分支关系尚未明确；可读交互列在下方，暂不连成时序图。' : '本次时序交互数据无法绘制，可查看分析原文。'
         : normalized.status === 'partial' ? '时序图部分可用；未确认或无法绘制的内容见下方说明。'
         : !drawable ? '本次分析未记录可绘制的交互消息。' : ''
       return h('section', { className: 'pangea-sequence-graph', 'aria-label': '时序图', style: { padding: '8px 12px' } },
@@ -2624,6 +2625,12 @@ window.__ModuleLoader__.load({
             h('p', null, message.label),
             h('small', null, `${message.id} · ${{ call: '调用', return: '返回', async: '异步', self: '自身处理' }[message.kind] || message.kind}`),
             evidenceText(message.source_evidence).map(location => h('p', { key: location }, diagramSource(location, `时序交互 · ${message.label}`, onSource)))) : null) : null,
+        unsequenced.length ? h('section', { className: 'pangea-diagram-caption', 'aria-label': '分支关系待确认的交互' },
+          h('strong', null, `保留的交互记录（${unsequenced.length} 条）`),
+          h('p', null, '这些交互的分支归属或先后关系尚未明确。以下逐条保留原记录中的双方与内容，不表示它们依次执行。'),
+          h('ul', null, unsequenced.map(item => h('li', { key: item.id },
+            h('strong', null, `${participant(item.from)} → ${participant(item.to)}`), h('p', null, item.label),
+            evidenceText(item.source_evidence).map(location => h('p', { key: location }, diagramSource(location, `待确认交互 · ${item.label}`, onSource))))))) : null,
         diagramRecordDetails(flow?.sequence))
     }
 
@@ -2639,7 +2646,7 @@ window.__ModuleLoader__.load({
         : declared === 'partial' ? '函数与变量关系部分可用；未确认的内容见下方说明。' : ''
       return h('section', { 'aria-label': '函数与变量图' },
         statusText ? h('p', { role: 'status', className: 'pangea-diagram-caption' }, statusText) : null,
-        diagramNotes(authored?.notes),
+        diagramNotes(checked.graph?.notes),
         raw && !['unknown', 'not_applicable'].includes(declared) ? h(CallGraphView, {
           key: JSON.stringify([flow?.flow_id, flow?.revision, flow?.source_record?.revision, raw]),
           graph: checked.graph, status: checked.status, errors: checked.errors, authoredStatus: declared,

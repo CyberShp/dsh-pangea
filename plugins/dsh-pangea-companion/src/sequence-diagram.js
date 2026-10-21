@@ -7,7 +7,7 @@ const AUTHOR_STATUSES = new Set(['ready', 'partial', 'unknown', 'not_applicable'
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 const text = value => typeof value === 'string' ? value.trim() : ''
 const array = value => Array.isArray(value) ? value : []
-const emptyGraph = () => ({ format_version: SEQUENCE_FORMAT, title: '', participants: [], messages: [], fragments: [], notes: [] })
+const emptyGraph = () => ({ format_version: SEQUENCE_FORMAT, title: '', participants: [], messages: [], fragments: [], notes: [], unsequenced_messages: [] })
 const repeatedIds = rows => {
   const counts = new Map()
   for (const row of rows) if (object(row) && text(row.id)) counts.set(row.id, (counts.get(row.id) ?? 0) + 1)
@@ -29,10 +29,41 @@ export function normalizeSequence(input) {
     return { status: 'invalid', errors, graph: { ...emptyGraph(), view_status: 'invalid', view_errors: errors }, raw }
   }
   const errors = []
+  // Compatibility belongs to the disposable view, never to the authored record.
+  // Conflicting spellings are unresolved; their priority must not invent facts.
+  const field = (row, key, aliases, where, literal = false) => {
+    const read = name => literal ? row[name] : text(row[name])
+    const choices = [key, ...aliases].filter(name => text(row?.[name]))
+    const values = new Set(choices.map(read))
+    if (values.size > 1) { errors.push(`${where}.${key} 与 ${choices.filter(name => name !== key).join('/')} 内容冲突，待确认`); return '' }
+    if (text(row?.[key])) return read(key)
+    if (choices.length) { errors.push(`${where}.${key} 未提供，当前视图读取 ${choices[0]}，原始记录未改写`); return read(choices[0]) }
+    return ''
+  }
+  const listField = (row, key, alias, where) => {
+    const canonical = row?.[key], alternate = row?.[alias]
+    if (canonical != null && alternate != null && JSON.stringify(canonical) !== JSON.stringify(alternate)) {
+      errors.push(`${where}.${key} 与 ${alias} 内容冲突，待确认`)
+      return []
+    }
+    if (canonical != null) return array(canonical)
+    if (Array.isArray(alternate)) { errors.push(`${where}.${key} 未提供，当前视图读取 ${alias}，原始记录未改写`); return alternate }
+    return []
+  }
+  const localId = (rows, prefix) => {
+    const reserved = new Set(rows.filter(object).map(row => row.id).filter(id => typeof id === 'string'))
+    return index => {
+      const base = `__view_${prefix}_${index + 1}`
+      let id = base, suffix = 1
+      while (reserved.has(id)) id = `${base}_${suffix++}`
+      reserved.add(id)
+      return id
+    }
+  }
   if (input.format_version !== SEQUENCE_FORMAT) errors.push(`时序格式应为 ${SEQUENCE_FORMAT}，原记录保留`)
   if (input.status != null && !AUTHOR_STATUSES.has(input.status)) errors.push('时序记录的完成状态无法识别')
   for (const name of ['participants', 'messages', 'fragments', 'notes']) {
-    if (input[name] != null && !Array.isArray(input[name])) errors.push(`${name} 必须是数组`)
+    if (input[name] != null && !Array.isArray(input[name])) errors.push(`${name} 必须是数组${name === 'notes' && typeof input[name] === 'string' ? '，当前视图保留为一条说明，原始记录未改写' : ''}`)
   }
   const evidence = (value, where) => {
     if (value == null) return []
@@ -43,51 +74,74 @@ export function normalizeSequence(input) {
   const participants = array(input.participants).flatMap((row, index) => {
     if (!object(row) || !text(row.id)) { errors.push(`participants[${index}] 缺少参与者 id，未绘制`); return [] }
     if (duplicateParticipants.has(row.id)) { errors.push(`参与者 id '${row.id}' 重复，无法确定消息归属`); return [] }
-    if (!text(row.label)) errors.push(`参与者 '${row.id}' 缺少名称，暂显示 id`)
-    return [{ ...row, id: row.id, label: text(row.label) || row.id, description: text(row.description) }]
+    const label = field(row, 'label', ['name'], `participants[${index}]`)
+    if (!label) errors.push(`参与者 '${row.id}' 缺少名称，暂显示 id`)
+    return [{ ...row, id: row.id, label: label || row.id, description: text(row.description) }]
   })
   const participantIds = new Set(participants.map(row => row.id))
-  const duplicateMessages = repeatedIds(array(input.messages))
-  const messages = array(input.messages).flatMap((row, index) => {
+  const rawMessages = array(input.messages)
+  const duplicateMessages = repeatedIds(rawMessages)
+  const messageId = localId(rawMessages, 'message')
+  const positions = new Map()
+  const messages = rawMessages.flatMap((row, index) => {
     const where = `messages[${index}]`
-    if (!object(row) || !text(row.id)) { errors.push(`${where} 缺少消息 id，未绘制`); return [] }
+    if (!object(row)) { errors.push(`${where} 必须是对象，未绘制`); return [] }
+    const id = text(row.id) ? row.id : messageId(index)
+    if (!text(row.id)) errors.push(`${where} 缺少消息 id，当前视图使用临时标识；不推断片段引用，原始记录未改写`)
     if (duplicateMessages.has(row.id)) { errors.push(`消息 id '${row.id}' 重复，未绘制`); return [] }
-    if (!participantIds.has(row.from) || !participantIds.has(row.to)) { errors.push(`消息 '${row.id}' 的发送方或接收方未明确，未绘制`); return [] }
-    if (row.kind === 'self' && row.from !== row.to) { errors.push(`消息 '${row.id}' 声明 self，但两端不同，未绘制`); return [] }
-    if (!MESSAGE_KINDS.has(row.kind)) errors.push(`消息 '${row.id}' 的交互类型待确认`)
-    if (!text(row.label)) errors.push(`消息 '${row.id}' 缺少说明，暂显示 id`)
-    return [{ ...row, id: row.id, label: text(row.label) || row.id, kind: MESSAGE_KINDS.has(row.kind) ? row.kind : 'unknown',
-      source_evidence: evidence(row.source_evidence, `${where}.source_evidence`) }]
+    const from = field(row, 'from', ['source'], where, true), to = field(row, 'to', ['target'], where, true)
+    const kind = field(row, 'kind', ['type'], where)
+    const label = field(row, 'label', ['text', 'name'], where)
+    if (!participantIds.has(from) || !participantIds.has(to)) { errors.push(`消息 '${id}' 的发送方或接收方未明确，未绘制`); return [] }
+    if (kind === 'self' && from !== to) { errors.push(`消息 '${id}' 声明 self，但两端不同，未绘制`); return [] }
+    if (!MESSAGE_KINDS.has(kind)) errors.push(`消息 '${id}' 的交互类型待确认`)
+    if (!label) errors.push(`消息 '${id}' 缺少说明，暂显示 id`)
+    positions.set(id, index)
+    return [{ ...row, id, from, to, label: label || id, kind: MESSAGE_KINDS.has(kind) ? kind : 'unknown',
+      view_generated_id: !text(row.id), source_evidence: evidence(row.source_evidence, `${where}.source_evidence`) }]
   })
-  const originalPositions = new Map(array(input.messages).map((row, index) => [row?.id, index]))
-  const messageIndex = new Map(messages.map(row => [row.id, originalPositions.get(row.id)]))
-  const duplicateFragments = repeatedIds(array(input.fragments))
-  const candidates = array(input.fragments).map((row, index) => {
+  // Only authored ids can resolve fragment references. Display ids are not facts.
+  const messageIndex = new Map(messages.filter(row => !row.view_generated_id).map(row => [row.id, positions.get(row.id)]))
+  const rawFragments = array(input.fragments)
+  const duplicateFragments = repeatedIds(rawFragments)
+  const fragmentId = localId(rawFragments, 'fragment')
+  const candidates = rawFragments.map((row, index) => {
     const problems = []
     const name = text(row?.id) || `fragments[${index}]`
-    if (!object(row) || !text(row.id)) problems.push('缺少片段 id')
+    const id = text(row?.id) ? row.id : fragmentId(index)
+    if (!object(row)) problems.push('片段必须是对象')
+    if (!text(row?.id)) errors.push(`片段 '${name}' 缺少片段 id，当前视图使用临时标识，原始记录未改写`)
     if (duplicateFragments.has(row?.id)) problems.push('片段 id 重复')
-    if (!FRAGMENT_KINDS.has(row?.kind)) problems.push('片段类型不是 alt/opt/loop/par')
-    const rawOperands = array(row?.operands)
-    if (['alt', 'par'].includes(row?.kind) && rawOperands.length < 2 || ['opt', 'loop'].includes(row?.kind) && rawOperands.length !== 1) problems.push('分支数量与片段类型不符')
+    const kind = field(row, 'kind', ['type'], `fragments[${index}]`)
+    if (!FRAGMENT_KINDS.has(kind)) problems.push('片段类型不是 alt/opt/loop/par')
+    const rawOperands = listField(row, 'operands', 'branches', `fragments[${index}]`)
+    if (['alt', 'par'].includes(kind) && rawOperands.length < 2 || ['opt', 'loop'].includes(kind) && rawOperands.length !== 1) problems.push('分支数量与片段类型不符')
     if (!rawOperands.length) problems.push('没有可读取的分支')
     const seen = new Set()
+    let unresolvedMembership = !rawOperands.length
     const operands = rawOperands.map((operand, operandIndex) => {
-      const ids = array(operand?.message_ids)
-      if (!ids.length || ids.some(id => typeof id !== 'string')) problems.push(`分支 ${operandIndex + 1} 缺少消息 id 数组`)
+      const where = `fragments[${index}].operands[${operandIndex}]`
+      const ids = listField(operand, 'message_ids', 'messages', where)
+      if (!ids.length || ids.some(id => typeof id !== 'string')) {
+        problems.push(`分支 ${operandIndex + 1} 缺少消息 id 数组`)
+        unresolvedMembership = true
+      }
       for (const id of ids) {
-        if (!messageIndex.has(id)) problems.push(`分支引用了未知或无法绘制的消息 '${String(id)}'`)
+        if (!messageIndex.has(id)) {
+          problems.push(`分支引用了未知或无法绘制的消息 '${String(id)}'`)
+          unresolvedMembership = true
+        }
         if (seen.has(id)) problems.push(`消息 '${String(id)}' 同时属于多个分支`)
         seen.add(id)
       }
-      const condition = text(operand?.condition)
+      const condition = field(operand, 'condition', ['guard'], where)
       if (!condition) errors.push(`片段 '${name}' 的分支 ${operandIndex + 1} 条件未提供`)
       return { condition, message_ids: ids.filter(id => typeof id === 'string') }
     })
     const ids = operands.flatMap(operand => operand.message_ids)
     const indexes = ids.map(id => messageIndex.get(id))
     if (indexes.some((position, at) => at && position !== indexes[at - 1] + 1)) problems.push('消息顺序不连续或与原消息顺序冲突')
-    return { row: object(row) ? row : {}, name, operands, ids, indexes, problems }
+    return { row: object(row) ? row : {}, id, kind, name, operands, ids, indexes, problems, unresolvedMembership }
   })
   // Overlapping top-level fragments cannot be flattened or silently re-ordered.
   const memberships = new Map()
@@ -100,21 +154,29 @@ export function normalizeSequence(input) {
   const omitted = new Set()
   for (const candidate of candidates) if (candidate.problems.length) {
     for (const id of candidate.ids) if (messageIndex.has(id)) omitted.add(id)
-    errors.push(`片段 '${candidate.name}'：${[...new Set(candidate.problems)].join('；')}；相关消息未绘制，原始记录保留`)
+    errors.push(`片段 '${candidate.name}'：${[...new Set(candidate.problems)].join('；')}；相关消息未绘制为时序，交互事实另列，原始记录保留`)
   }
   const fragments = candidates.filter(candidate => !candidate.problems.length).map(candidate => ({
-    ...candidate.row, id: candidate.row.id, kind: candidate.row.kind, label: text(candidate.row.label), operands: candidate.operands,
+    ...candidate.row, id: candidate.id, kind: candidate.kind, label: text(candidate.row.label), operands: candidate.operands,
   }))
-  const notes = array(input.notes).filter(note => typeof note === 'string')
-  if (array(input.notes).length !== notes.length) errors.push('notes 中有非文字项目，原始记录保留')
+  const confirmedMemberships = new Set(fragments.flatMap(fragment => fragment.operands.flatMap(operand => operand.message_ids)))
+  // An unreadable fragment may own any unassigned message. Preserve those facts
+  // separately instead of implying that alternatives execute consecutively.
+  if ((input.fragments != null && !Array.isArray(input.fragments)) || candidates.some(candidate => candidate.problems.length && candidate.unresolvedMembership)) {
+    for (const message of messages) if (!confirmedMemberships.has(message.id)) omitted.add(message.id)
+  }
+  const noteItems = typeof input.notes === 'string' ? [input.notes] : array(input.notes)
+  const notes = noteItems.filter(note => typeof note === 'string')
+  if (noteItems.length !== notes.length) errors.push('notes 中有非文字项目，原始记录保留')
   const uniqueErrors = [...new Set(errors)]
   const visibleMessages = messages.filter(row => !omitted.has(row.id))
+  const unsequencedMessages = messages.filter(row => omitted.has(row.id))
   const status = input.status === 'not_applicable' || input.status === 'unknown' ? input.status
-    : !participants.length || !visibleMessages.length ? (uniqueErrors.length ? 'invalid' : 'unknown')
+    : !participants.length || !messages.length ? (uniqueErrors.length ? 'invalid' : 'unknown')
       : uniqueErrors.length || input.status === 'partial' ? 'partial' : 'ok'
   // A declaration of ready does not manufacture messages for an empty record.
   const graph = { ...input, format_version: SEQUENCE_FORMAT, title: text(input.title), participants, messages: visibleMessages, fragments,
-    notes, omitted_message_ids: [...omitted], view_status: status, view_errors: uniqueErrors }
+    notes, omitted_message_ids: [...omitted], unsequenced_messages: unsequencedMessages, view_status: status, view_errors: uniqueErrors }
   return { status, errors: uniqueErrors, graph, raw }
 }
 
@@ -188,18 +250,26 @@ export function layoutSequence(input) {
     index += fragment.operands.reduce((sum, operand) => sum + operand.message_ids.length, 0)
   }
   const notes = [...graph.notes]
-  if (!messages.length) notes.unshift(graph.status === 'not_applicable' ? '当前分析标注此流程不适合时序图。' : '当前记录未提供可展示的交互消息。')
+  if (!messages.length) notes.unshift(graph.status === 'not_applicable' ? '当前分析标注此流程不适合时序图。'
+    : graph.unsequenced_messages?.length ? '已有交互事实，但片段归属尚未确认；请查看下列待确认交互。' : '当前记录未提供可展示的交互消息。')
   const errors = [...normalized.errors]
   const footer = [
     ...(normalized.status === 'unknown' ? ['交互关系待确认；当前内容不代表已完成的时序结论。'] : []),
     ...(normalized.status === 'not_applicable' && messages.length ? ['当前分析标注此流程不适合时序图；以下内容仅保留已有记录。'] : []),
     ...(normalized.status === 'partial' || errors.length ? ['当前时序资料不完整，请结合下列提示与原始记录查看。'] : []),
     ...errors.map(error => `待确认：${error}`), ...notes,
+    ...(graph.unsequenced_messages?.length ? [
+      '片段归属待确认的交互事实（以下排列不表示执行顺序或同一路径）：',
+      ...graph.unsequenced_messages.flatMap(message => [
+        `${byId.get(message.from)?.label || message.from} → ${byId.get(message.to)?.label || message.to}：${message.label}`,
+        ...message.source_evidence.map(item => `源码依据：${item}`),
+      ]),
+    ] : []),
   ].flatMap(note => wrap(note, width - 80))
   const footerY = cursor + 16
   const height = Math.max(240, footerY + footer.length * 18 + 28)
   return { width, height, title: graph.title || '时序图', titleLines, participants, messages, fragments, notes, errors,
-    status: normalized.status, footer, footerY, lifelineTop: headerY + headerHeight, lifelineBottom: cursor - 10 }
+    status: normalized.status, unsequenced_messages: graph.unsequenced_messages ?? [], footer, footerY, lifelineTop: headerY + headerHeight, lifelineBottom: cursor - 10 }
 }
 
 const el = (tag, attrs = {}, ...children) => ({ tag, attrs, children: children.flat().filter(child => child != null && child !== false) })
