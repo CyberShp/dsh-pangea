@@ -189,3 +189,181 @@ test('missing or explicitly unconfirmed facts never become a completed diagram',
   const incorrect = fixture(); incorrect.messages[0].kind = 'self'
   assert.match(normalizeSequence(incorrect).errors.join('\n'), /self.*两端不同/)
 })
+
+
+test('five idless interactions retain explicit endpoints with display-only identities', () => {
+  const input = fixture()
+  input.fragments = []
+  input.participants = input.participants.map(({ id, label }) => ({ id, name: label }))
+  input.messages = input.messages.map(({ id, ...row }) => row)
+  input.notes = 'Agent 给出的单条说明仍然可读。'
+  const before = structuredClone(input)
+  const result = normalizeSequence(input)
+  assert.equal(result.status, 'partial')
+  assert.equal(result.graph.messages.length, 5)
+  assert.deepEqual(result.graph.messages.map(row => [row.from, row.to, row.label]), input.messages.map(row => [row.from, row.to, row.label]))
+  assert.equal(new Set(result.graph.messages.map(row => row.id)).size, 5)
+  assert.equal(result.graph.messages.every(row => row.view_generated_id), true)
+  assert.deepEqual(result.graph.notes, [input.notes])
+  assert.deepEqual(result.graph.participants.map(row => row.label), ['主机', '阵列连接处理器'])
+  assert.match(result.errors.join('\n'), /临时标识/)
+  assert.equal(layoutSequence(result.graph).messages.length, 5)
+  assert.deepEqual(normalizeSequence(input).graph, result.graph)
+  assert.deepEqual(input, before)
+  assert.equal(result.raw, input)
+})
+
+test('explicit alternative field names remain a partial view without changing recorded facts', () => {
+  const input = fixture()
+  input.messages[0] = { id: 'request', source: 'host', target: 'target', text: '发送建链请求', type: 'call' }
+  input.fragments = [{ type: 'alt', branches: [
+    { guard: '参数合法，允许建链', messages: ['accept'] },
+    { guard: '参数非法，拒绝建链', messages: ['cleanup', 'reject'] },
+  ] }]
+  const before = structuredClone(input)
+  const result = normalizeSequence(input)
+  assert.equal(result.status, 'partial')
+  assert.equal(result.graph.fragments[0].kind, 'alt')
+  assert.deepEqual(result.graph.fragments[0].operands.map(row => row.message_ids), [['accept'], ['cleanup', 'reject']])
+  assert.equal(layoutSequence(result.graph).messages.length, 5)
+  assert.match(result.errors.join('\n'), /读取 branches/)
+  assert.deepEqual(input, before)
+})
+
+test('display identities cannot collide with authored ids or resolve fragment references', () => {
+  const input = fixture()
+  input.fragments = []
+  delete input.messages[0].id
+  input.messages[1].id = '__view_message_1'
+  input.messages[2].id = '__view_message_1_1'
+  const result = normalizeSequence(input)
+  assert.equal(result.graph.messages[0].id, '__view_message_1_2')
+  assert.equal(new Set(result.graph.messages.map(row => row.id)).size, 5)
+  input.fragments = [{ id: 'guess', kind: 'opt', operands: [{ condition: '未有正式标识', message_ids: ['__view_message_1_2'] }] }]
+  const unresolved = normalizeSequence(input)
+  assert.equal(unresolved.graph.fragments.length, 0)
+  assert.match(unresolved.errors.join('\n'), /未知或无法绘制的消息/)
+  assert.equal(unresolved.graph.unsequenced_messages.length, 5)
+})
+
+test('conflicting aliases never override explicit participant, endpoint or fragment facts', () => {
+  const input = fixture()
+  input.participants[0].name = '与主机相冲突的名称'
+  input.messages[0].source = 'target'
+  input.fragments[0].type = 'loop'
+  const before = structuredClone(input)
+  const result = normalizeSequence(input)
+  assert.equal(result.status, 'partial')
+  assert.equal(result.graph.participants[0].label, 'host')
+  assert.equal(result.graph.messages.some(row => row.id === 'request'), false)
+  assert.equal(result.graph.fragments.length, 0)
+  assert.match(result.errors.join('\n'), /participants\[0\].label.*冲突/)
+  assert.match(result.errors.join('\n'), /messages\[0\].from.*冲突/)
+  assert.match(result.errors.join('\n'), /fragments\[0\].kind.*冲突/)
+  assert.deepEqual(input, before)
+  const conflict = fixture()
+  conflict.fragments[0].branches = [{ condition: '另一个范围', message_ids: ['request'] }]
+  assert.equal(normalizeSequence(conflict).graph.fragments.length, 0)
+  assert.match(normalizeSequence(conflict).errors.join('\n'), /operands.*branches.*冲突/)
+})
+
+test('malformed fragments retain all readable interaction facts without implying a trace', () => {
+  const input = fixture()
+  input.messages = input.messages.map(({ id, ...row }) => row)
+  input.fragments = [{ description: '片段字段未按合同提供' }]
+  const result = normalizeSequence(input)
+  assert.equal(result.status, 'partial')
+  assert.equal(result.graph.messages.length, 0)
+  assert.equal(result.graph.unsequenced_messages.length, 5)
+  const layout = layoutSequence(result.graph)
+  assert.equal(layout.messages.length, 0)
+  assert.equal(layout.unsequenced_messages.length, 5)
+  const svg = toSvgString(renderSequenceTree(layout))
+  assert.match(svg, /以下排列不表示执行顺序或同一路径/)
+  for (const row of input.messages) assert.match(svg, new RegExp(row.label))
+  assert.match(svg, /repo:connect.c:12/)
+  assert.deepEqual(result.raw, input)
+})
+
+test('unknown branch membership does not hide sound fragments or flatten contradictory branches', () => {
+  const input = fixture()
+  input.fragments.push({ kind: 'unknown', description: '未提供消息归属' })
+  const result = normalizeSequence(input)
+  assert.equal(result.graph.fragments.length, 1)
+  assert.deepEqual(result.graph.messages.map(row => row.id), ['accept', 'cleanup', 'reject'])
+  assert.deepEqual(result.graph.unsequenced_messages.map(row => row.id), ['request', 'notify'])
+  assert.deepEqual(layoutSequence(result.graph).messages.map(row => row.id), ['accept', 'cleanup', 'reject'])
+  const crossing = fixture()
+  crossing.fragments[0].operands[1].message_ids.reverse()
+  const unresolved = normalizeSequence(crossing)
+  assert.deepEqual(unresolved.graph.unsequenced_messages.map(row => row.id), ['accept', 'cleanup', 'reject'])
+  assert.deepEqual(unresolved.graph.messages.map(row => row.id), ['request', 'notify'])
+})
+
+test('literal participant ids keep exact identity semantics in endpoint aliases', () => {
+  const input = fixture()
+  input.fragments = []
+  input.participants[0].id = ' host '
+  input.messages = [{ id: 'literal', source: ' host ', target: 'target', type: 'call', text: '按字面标识引用' }]
+  const result = normalizeSequence(input)
+  assert.equal(result.graph.messages[0].from, ' host ')
+  assert.equal(result.graph.messages.length, 1)
+  input.messages[0].from = 'host'
+  const conflict = normalizeSequence(input)
+  assert.equal(conflict.graph.messages.length, 0)
+  assert.match(conflict.errors.join('\n'), /from.*source.*冲突/)
+})
+
+
+test('non-array fragment or operand containers preserve facts outside a fabricated sequence', () => {
+  for (const fragments of [{}, 'alt', [{ id: 'bad', kind: 'alt', operands: { accept: ['accept'], reject: ['reject'] } }]]) {
+    const input = fixture()
+    input.fragments = fragments
+    const result = normalizeSequence(input)
+    assert.equal(result.status, 'partial')
+    assert.equal(result.graph.messages.length, 0)
+    assert.equal(result.graph.fragments.length, 0)
+    assert.equal(result.graph.unsequenced_messages.length, 5)
+    const svg = toSvgString(renderSequenceTree(layoutSequence(result.graph)))
+    assert.match(svg, /已有交互事实/)
+    assert.match(svg, /以下排列不表示执行顺序或同一路径/)
+    assert.doesNotMatch(svg, /未提供可展示的交互消息/)
+  }
+})
+
+
+test('partly resolved fragments cannot turn idless alternatives into unconditional messages', () => {
+  const input = {
+    format_version: 'sequence-v1', status: 'ready',
+    participants: [{ id: 'a', label: '调用者' }, { id: 'b', label: '处理者' }],
+    messages: [
+      { id: 'yes', from: 'a', to: 'b', kind: 'call', label: 'yes branch' },
+      { from: 'a', to: 'b', kind: 'call', label: 'no branch' },
+    ],
+    fragments: [{ id: 'choice', kind: 'alt', operands: [
+      { condition: 'yes', message_ids: ['yes'] }, { condition: 'no', message_ids: ['no'] },
+    ] }],
+  }
+  const before = structuredClone(input)
+  const result = normalizeSequence(input)
+  assert.equal(result.status, 'partial')
+  assert.equal(result.graph.fragments.length, 0)
+  assert.equal(result.graph.messages.length, 0)
+  assert.deepEqual(result.graph.unsequenced_messages.map(row => row.label), ['yes branch', 'no branch'])
+  assert.equal(layoutSequence(result.graph).messages.length, 0)
+  assert.deepEqual(input, before)
+})
+
+test('partly known and empty operand membership quarantines only messages outside sound fragments', () => {
+  for (const unresolvedIds of [['unknown'], [], ['request', 42]]) {
+    const input = fixture()
+    input.fragments.push({ id: 'uncertain', kind: 'alt', operands: [
+      { condition: 'known', message_ids: ['request'] },
+      { condition: 'unknown', message_ids: unresolvedIds },
+    ] })
+    const result = normalizeSequence(input)
+    assert.equal(result.graph.fragments.length, 1)
+    assert.deepEqual(result.graph.messages.map(row => row.id), ['accept', 'cleanup', 'reject'])
+    assert.deepEqual(result.graph.unsequenced_messages.map(row => row.id), ['request', 'notify'])
+  }
+})

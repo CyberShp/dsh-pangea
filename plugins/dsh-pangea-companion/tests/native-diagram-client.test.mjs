@@ -115,6 +115,60 @@ test('malformed sequence preserves raw records and incomplete status in standalo
   assert.match(svg, /broken/)
 })
 
+test('id-less interactions with explicit endpoints stay visible in the built client and exported SVG', async () => {
+  const app = await harness(), raw = sequence()
+  raw.participants = raw.participants.map(({ id, label }) => ({ id, name: label }))
+  raw.messages = Array.from({ length: 5 }, (_, index) => ({ from: 'caller', to: 'service', kind: 'call', label: `交互 ${index + 1}` }))
+  raw.notes = '原始说明保留'
+  const before = JSON.stringify(raw)
+  const tree = app.render('SequenceGraphView', { flow: { sequence: raw } })
+  assert.match(text(tree), /部分可用/)
+  assert.equal(nodes(tree).filter(node => node.props['data-message-id']).length, 5)
+  assert.match(text(tree), /调用方.*服务/s)
+  assert.match(text(tree), /原始说明保留/)
+  button(tree, '导出 SVG').props.onClick()
+  const svg = await app.downloads[0].text()
+  for (let index = 1; index <= 5; index++) assert.match(svg, new RegExp(`交互 ${index}`))
+  assert.equal(JSON.stringify(raw), before)
+  assert.deepEqual(app.requests, [])
+})
+
+test('unreadable fragment membership preserves all readable facts without inventing a sequential trace', async () => {
+  const app = await harness(), raw = sequence()
+  raw.fragments = [{ description: '分支结构未提供' }]
+  const tree = app.render('SequenceGraphView', { flow: { sequence: raw } })
+  const facts = find(tree, 'aria-label', '分支关系待确认的交互')
+  assert.ok(facts)
+  assert.match(text(facts), /2 条/)
+  assert.match(text(facts), /不表示它们依次执行/)
+  assert.match(text(facts), /提交请求.*返回结果/s)
+  assert.equal(nodes(tree).filter(node => node.props['data-message-id']).length, 0)
+  assert.match(text(tree), /部分可用|尚未明确/)
+  assert.deepEqual(app.requests, [])
+})
+
+test('explicit call aliases preserve arrows and variable details in built client without rewriting raw facts', async () => {
+  const app = await harness(), raw = structuredClone(CALL_GRAPH_EXAMPLE)
+  raw.functions = raw.functions.map(({ kind, label, ...row }) => ({ ...row, type: kind, name: label }))
+  raw.calls = raw.calls.map(({ from, to, ...row }) => ({ ...row, caller: from, callee: to }))
+  raw.variables = raw.variables.map(({ function: fn, ...row }) => ({ ...row, function_id: fn }))
+  raw.notes = '函数关系原始说明'
+  const before = JSON.stringify(raw)
+  const wrapper = app.render('FunctionVariablesView', { flow: { call_graph: raw } })
+  const child = nodes(wrapper).find(node => node.type?.name === 'CallGraphView')
+  assert.equal(child.props.status, 'partial')
+  assert.equal(child.props.graph.calls.length, raw.calls.length)
+  assert.equal(child.props.graph.variables.length, raw.variables.length)
+  assert.match(text(wrapper), /函数关系原始说明/)
+  const tree = app.render('CallGraphView', child.props)
+  button(tree, '导出 SVG').props.onClick()
+  const svg = await app.downloads[0].text()
+  assert.match(svg, /变量/)
+  assert.doesNotMatch(svg, /NaN|Infinity/)
+  assert.equal(JSON.stringify(raw), before)
+  assert.deepEqual(app.requests, [])
+})
+
 test('HTML export escapes authored text and preserves searchable analysis without executable content', async () => {
   const app = await harness(), malicious = '</pre><script>alert(1)</script>'
   const html = app.client.diagramHtmlDocument({ tag: 'svg', attrs: {}, children: [{ tag: 'text', children: [malicious] }] }, malicious, { notes: [malicious] })

@@ -72,3 +72,67 @@ test('variable highlighting follows declared writes into arguments without match
     ] }).graph
   assert.deepEqual([...callsForVariable(graph, 'a', { name: 'temp', writes: 'ctx->size' })], [0, 3])
 })
+
+test('explicit alternate fields stay drawable with compatibility warnings and unchanged source', () => {
+  const candidate = { format_version: CALL_GRAPH_FORMAT, status: 'partial', root: 'recv',
+    functions: [
+      { id: 'recv', type: 'function', name: '接收请求' },
+      { id: 'handle', type: 'external', name: '处理请求' },
+    ],
+    calls: [
+      { caller: 'recv', callee: 'handle', args: ['req → request'], returns: 'rc' },
+      { source: 'handle', target: 'recv' },
+    ],
+    variables: [{ function_id: 'recv', name: 'rc', reads: ['req'], compute: 'handle(req)', writes: 'rc' }],
+    notes: '外部实现尚未核对',
+  }
+  const original = structuredClone(candidate)
+  const result = validateCallGraph(candidate)
+  assert.equal(result.status, 'partial')
+  assert.deepEqual(result.graph.functions.map(row => [row.kind, row.label]), [['function', '接收请求'], ['external', '处理请求']])
+  assert.deepEqual(result.graph.calls.map(row => [row.from, row.to]), [['recv', 'handle'], ['handle', 'recv']])
+  assert.equal(result.graph.variables[0].function, 'recv')
+  assert.deepEqual(result.graph.notes, ['外部实现尚未核对'])
+  for (const field of ['functions[0].kind', 'functions[0].label', 'calls[0].from', 'calls[0].to', 'calls[1].from', 'calls[1].to', 'variables[0].function', 'notes']) {
+    assert.ok(result.errors.some(error => error.includes(field) && error.includes('原记录保留')), field)
+  }
+  assert.deepEqual(candidate, original)
+})
+
+test('missing and conflicting references cannot become invented calls or variable ownership', () => {
+  const result = validateCallGraph({ format_version: CALL_GRAPH_FORMAT, root: 'a',
+    functions: [{ ...fn('a'), label: 'same' }, { ...fn('b'), label: 'same' }],
+    calls: [
+      {},
+      { caller: 'same', callee: 'b' },
+      { from: 'a', caller: 'b', to: 'b' },
+      { caller: 'a', source: 'b', callee: 'b' },
+      { caller: { id: 'a' }, callee: 'b' },
+      { from: 'a', caller: 'a', to: 'b', callee: 'b' },
+    ],
+    variables: [
+      { name: 'missing' },
+      { function: 'a', function_id: 'b', name: 'conflict' },
+      { function_id: 'same', name: 'ambiguous-label' },
+      { function_id: 'a', name: 'valid' },
+    ],
+  })
+  assert.equal(result.status, 'partial')
+  assert.deepEqual(result.graph.calls.map(row => [row.from, row.to]), [['a', 'b'], ['a', 'b']])
+  assert.deepEqual(result.graph.variables.map(row => [row.function, row.name]), [['a', 'conflict'], ['a', 'valid']])
+  for (const field of ['calls[2].from', 'calls[3].from', 'variables[1].function']) {
+    assert.ok(result.errors.some(error => error.includes(field) && error.includes('冲突')), field)
+  }
+  assert.ok(result.errors.includes("calls[0].from='' 不在 functions 中"))
+  assert.ok(result.errors.includes("calls[1].from='same' 不在 functions 中"))
+  assert.ok(result.errors.includes('calls[4].caller 必须是字符串'))
+})
+
+test('missing function kind remains explicitly partial and malformed notes remain diagnostic', () => {
+  const result = validateCallGraph({ format_version: CALL_GRAPH_FORMAT, root: 'a',
+    functions: [{ id: 'a' }], notes: { reason: 'unknown' } })
+  assert.equal(result.status, 'partial')
+  assert.match(result.errors.join('\n'), /kind='' 不是 function\|macro\|external/)
+  assert.ok(result.errors.includes('notes 必须是字符串数组'))
+  assert.deepEqual(result.graph.notes, [])
+})

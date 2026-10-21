@@ -1,6 +1,7 @@
 // call-graph-v1: function call graph with per-function variable flow.
 // Validation is structural only: it reports itemized Chinese errors, drops the
-// broken items from the sanitized graph and never invents content.
+// broken items from the display graph and never invents relationships. Explicit
+// field aliases are read-only compatibility: the authored record is not changed.
 
 export const CALL_GRAPH_FORMAT = 'call-graph-v1'
 export const CALL_GRAPH_KINDS = ['function', 'macro', 'external']
@@ -10,6 +11,29 @@ const str = value => typeof value === 'string' ? value.trim() : ''
 function textField(value, where, errors) {
   if (value != null && typeof value !== 'string') errors.push(`${where} 必须是字符串`)
   return str(value)
+}
+
+// References must still be exact function ids. Never resolve an alias by label,
+// source order or a single remaining candidate. Canonical fields take priority;
+// conflicting aliases cannot supply a missing canonical reference.
+function displayText(row, key, aliases, where, errors, reference = false) {
+  const canonical = textField(row[key], `${where}.${key}`, errors)
+  if (!reference && canonical) return canonical
+  if (row[key] != null && typeof row[key] !== 'string') return ''
+  const values = [key, ...aliases].flatMap(field => {
+    if (field === key) return canonical ? [{ field, value: canonical }] : []
+    if (row[field] == null) return []
+    const value = textField(row[field], `${where}.${field}`, errors)
+    return value ? [{ field, value }] : []
+  })
+  if (new Set(values.map(item => item.value)).size > 1) {
+    errors.push(`${where}.${key} 的字段 ${values.map(item => item.field).join('/')} 相互冲突，${canonical ? `保留标准字段 ${key}` : '未采用兼容值'}`)
+    return canonical
+  }
+  if (canonical) return canonical
+  if (!values.length) return ''
+  errors.push(`${where}.${key} 缺失，使用 ${values[0].field} 仅作兼容显示；原记录保留`)
+  return values[0].value
 }
 function lineField(value, where, errors) {
   if (value == null) return null
@@ -61,13 +85,13 @@ export function validateCallGraph(input) {
     const id = str(row.id)
     if (!id) { errors.push(`${where} 缺少 id`); continue }
     if (ids.has(id)) { errors.push(`${where}.id='${id}' 重复`); continue }
-    let kind = str(row.kind)
+    let kind = displayText(row, 'kind', ['type'], where, errors)
     if (!CALL_GRAPH_KINDS.includes(kind)) {
       errors.push(`${where}.kind='${kind}' 不是 function|macro|external，按 function 显示`)
       kind = 'function'
     }
     ids.add(id)
-    functions.push({ id, kind, label: textField(row.label, `${where}.label`, errors) || id,
+    functions.push({ id, kind, label: displayText(row, 'label', ['name'], where, errors) || id,
       signature: textField(row.signature, `${where}.signature`, errors), file: textField(row.file, `${where}.file`, errors), line: lineField(row.line, `${where}.line`, errors) })
   }
   if (Array.isArray(value.functions) && !functions.length) errors.push('functions 中没有有效函数')
@@ -77,12 +101,16 @@ export function validateCallGraph(input) {
     const where = `calls[${index}]`
     if (!isObject(row)) { errors.push(`${where} 不是对象`); continue }
     let broken = false
+    const endpoints = {
+      from: displayText(row, 'from', ['caller', 'source'], where, errors, true),
+      to: displayText(row, 'to', ['callee', 'target'], where, errors, true),
+    }
     for (const key of ['from', 'to']) {
-      const end = str(row[key])
+      const end = endpoints[key]
       if (!ids.has(end)) { errors.push(`${where}.${key}='${end}' 不在 functions 中`); broken = true }
     }
     if (broken) continue
-    calls.push({ from: str(row.from), to: str(row.to), file: textField(row.file, `${where}.file`, errors), line: lineField(row.line, `${where}.line`, errors),
+    calls.push({ ...endpoints, file: textField(row.file, `${where}.file`, errors), line: lineField(row.line, `${where}.line`, errors),
       args: stringList(row.args, `${where}.args`, errors, true), returns: textField(row.returns, `${where}.returns`, errors) })
   }
 
@@ -90,7 +118,7 @@ export function validateCallGraph(input) {
   for (const [index, row] of (Array.isArray(value.variables) ? value.variables : []).entries()) {
     const where = `variables[${index}]`
     if (!isObject(row)) { errors.push(`${where} 不是对象`); continue }
-    const fn = str(row.function)
+    const fn = displayText(row, 'function', ['function_id'], where, errors, true)
     const name = str(row.name)
     if (!ids.has(fn)) { errors.push(`${where}.function='${fn}' 不在 functions 中`); continue }
     if (!name) { errors.push(`${where} 缺少 name`); continue }
@@ -103,8 +131,12 @@ export function validateCallGraph(input) {
     if (functions.length) errors.push(`root='${root}' 不在 functions 中，改用 ${functions[0].id}`)
     root = functions[0]?.id ?? ''
   }
-  const graph = { format_version: CALL_GRAPH_FORMAT, title: textField(value.title, 'title', errors), root, functions, calls, variables,
-    notes: stringList(value.notes, 'notes', errors) }
+  let notes
+  if (typeof value.notes === 'string') {
+    errors.push('notes 必须是字符串数组；原字符串仅作说明显示，原记录保留')
+    notes = stringList(value.notes, 'notes', errors, true)
+  } else notes = stringList(value.notes, 'notes', errors)
+  const graph = { format_version: CALL_GRAPH_FORMAT, title: textField(value.title, 'title', errors), root, functions, calls, variables, notes }
   const status = !functions.length ? 'invalid' : errors.length ? 'partial' : 'ok'
   return { status, errors, graph }
 }
