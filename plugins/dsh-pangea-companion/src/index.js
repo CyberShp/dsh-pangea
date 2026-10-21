@@ -324,13 +324,14 @@ async function sourceRouteHandler(req, res) {
     let repositoryId
     let snapshotLayout
     if (runId && dataRoot) {
+      if (runId === '.' || runId === '..' || /[\\/]/.test(runId)) throw new Error('invalid Run identity')
       const sourceFirstManifestPath = path.join(dataRoot, 'runs', runId, 'inputs', 'source-manifest.json')
       try {
         const sourceFirstManifest = JSON.parse(await readFile(sourceFirstManifestPath, 'utf8'))
         if (sourceFirstManifest?.workflow_version === 'source-first-v1') {
           const parsed = parseEvidenceLocation(location)
           const repositoryLocation = /^([^:/\\]+):(.+)$/.exec(parsed.source)
-          if (!repositoryLocation) throw new Error('source-first 原文位置必须使用 repo_id:path:line')
+          if (!repositoryLocation || parsed.startLine === null) throw new Error('source-first 原文位置必须使用 repo_id:path:line')
           repositoryId = repositoryLocation[1]
           const known = (sourceFirstManifest.repositories ?? []).some(item => item?.repo_id === repositoryId)
           if (!known) throw new Error(`source-first 原文仓库不在当前冻结输入：${repositoryId}`)

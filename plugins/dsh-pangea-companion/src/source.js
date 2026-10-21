@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 function hasText(value) {
@@ -27,6 +27,9 @@ export function parseEvidenceLocation(location) {
 
 export function resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout }) {
   const parsed = parseEvidenceLocation(location)
+  if (snapshotLayout === 'source-first' && (!hasText(repositoryId) || parsed.startLine === null || !/^([^:/\\]+):(.+)$/.test(parsed.source))) {
+    throw new Error('source-first 原文位置必须使用当前 Run 的 repo_id:path:line')
+  }
   if (path.isAbsolute(parsed.source)) {
     if (hasText(snapshotRoot)) throw new Error('frozen Run evidence must use repo_id:path:line locations')
     return { ...parsed, filePath: path.resolve(parsed.source) }
@@ -57,7 +60,14 @@ export function resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, rep
 
 export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout, contextLines = 3, contextBefore = contextLines, contextAfter = contextLines, maxLines = 160 }) {
   const resolved = resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout })
-  const raw = await readFile(resolved.filePath, 'utf8')
+  let readPath = resolved.filePath
+  if (hasText(snapshotRoot)) {
+    const [root, file] = await Promise.all([realpath(snapshotRoot), realpath(resolved.filePath)])
+    const relative = path.relative(root, file)
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) throw new Error('evidence path escapes the frozen source snapshot')
+    readPath = file
+  }
+  const raw = await readFile(readPath, 'utf8')
   if (raw.includes('\u0000')) throw new Error('evidence file is not readable text')
 
   const allLines = raw.split(/\r?\n/)

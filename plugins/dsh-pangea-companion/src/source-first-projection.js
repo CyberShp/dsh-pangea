@@ -71,12 +71,14 @@ export function coverageSummary(cases, gaps) {
     unverified_refs: known ? [...refs].filter(id => !known.has(id)).length : refs.size }
 }
 
-export function caseQualitySummary(cases) {
+export function caseQualitySummary(cases, scene) {
   const level = row => row.format_version === 'behavior-test-case-v1' ? row.test_level : null
   const count = (value, ready = false) => cases.filter(row => level(row) === value && (!ready || row.execution_readiness === 'ready')).length
   const readyBlackbox = count('business_blackbox', true), readyGraybox = count('developer_assisted', true)
   const hasLegacyGroups = cases.some(row => row.source_record?.kind === 'test_case_group')
-  return { total_cases: cases.length, business_blackbox: count('business_blackbox'), developer_assisted: count('developer_assisted'),
+  const target = scene?.presentation?.blackbox_target !== false
+  return { blackbox_target: target, blackbox_target_reason: target ? 'product-behavior' : scene?.id === 'risk-analysis' ? 'risk-scene' : 'interface-contract',
+    total_cases: cases.length, business_blackbox: count('business_blackbox'), developer_assisted: count('developer_assisted'),
     ready_blackbox: readyBlackbox, ready_graybox: readyGraybox, ready_cases: readyBlackbox + readyGraybox,
     has_legacy_groups: hasLegacyGroups, ready_ratio: cases.length && !hasLegacyGroups ? (readyBlackbox + readyGraybox) / cases.length : null }
 }

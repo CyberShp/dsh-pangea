@@ -4405,6 +4405,7 @@ window.__ModuleLoader__.load({
         source_scope: String(form.source_scope_text ?? '').split(/\r?\n/).map(value => value.trim()).filter(Boolean),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'module-analysis',
+        ...(form.objective ? { objective: form.objective } : {}),
         ...(form.analysis_profile ? { analysis_profile: form.analysis_profile, asset_revisions: form.asset_revisions ?? {} } : {}),
         ...(form.analysis_profile !== 'behavior-test-v2' && form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
           ? { kind: 'file', path: form.coverage_path }
@@ -5074,7 +5075,7 @@ window.__ModuleLoader__.load({
         diagramRecordDetails(flow?.sequence))
     }
 
-    function FunctionVariablesView({ flow, viewport, onSource }) {
+    function FunctionVariablesView({ flow, viewport, onSource, repositoryId }) {
       const raw = flow?.call_graph
       let authored = raw
       if (typeof raw === 'string') { try { authored = JSON.parse(raw) } catch { /* Structural warnings below retain the original record. */ } }
@@ -5090,13 +5091,13 @@ window.__ModuleLoader__.load({
         raw && !['unknown', 'not_applicable'].includes(declared) ? h(CallGraphView, {
           key: JSON.stringify([flow?.flow_id, flow?.revision, flow?.source_record?.revision, raw]),
           graph: checked.graph, status: checked.status, errors: checked.errors, authoredStatus: declared,
-          raw, viewport, onSource,
+          raw, viewport, onSource, repositoryId,
         }) : null,
         diagramRecordDetails(raw))
     }
 
     /** call-graph-v1 view: function nodes, merged call edges (×N) and per-function variable flow. */
-    function CallGraphView({ graph, status = 'ok', errors = [], svgUrl = '', authoredStatus = '', raw, viewport, onSource }) {
+    function CallGraphView({ graph, status = 'ok', errors = [], svgUrl = '', authoredStatus = '', raw, viewport, onSource, repositoryId }) {
       const identity = JSON.stringify([graph, authoredStatus])
       const [selection, setSelection] = React.useState({ identity: '', id: '', variable: '' })
       const selected = selection.identity === identity ? selection.id : ''
@@ -5127,7 +5128,15 @@ window.__ModuleLoader__.load({
       const tree = { ...baseTree, attrs: { ...baseTree.attrs, height, viewBox: `0 0 ${layout.width} ${height}` },
         children: [{ tag: 'metadata', children: [JSON.stringify(raw ?? { ...graph, status: authoredStatus || status, errors })] }, ...annotatedTree.children] }
       const choose = id => setSelection({ identity, id, variable: '' })
-      const source = item => item?.file ? diagramSource(`${item.file}${item.line ? `:${item.line}` : ''}`, `函数与变量 · ${fn?.label || item.from || ''}`, onSource) : '未提供源码位置'
+      const source = item => {
+        const file = item?.file
+        const line = Number(item?.line)
+        if (!hasText(file) || !Number.isSafeInteger(line) || line < 1) return '未提供完整源码位置'
+        const qualified = /^([^:/\\]+):(.+)$/.exec(file)
+        const location = qualified && !/^[A-Za-z]:[\\/]/.test(file) ? `${file}:${line}`
+          : hasText(repositoryId) && !/^(?:[\\/]|[A-Za-z]:)/.test(file) ? `${repositoryId}:${file}:${line}` : null
+        return location ? diagramSource(location, `函数与变量 · ${fn?.label || item.from || ''}`, onSource) : '未确认当前 Run 源码仓库'
+      }
       const cell = { padding: 4, borderBottom: '1px solid #eef1ec', verticalAlign: 'top' }
       return h('section', { className: 'pangea-call-graph', 'aria-label': '函数调用图', style: { padding: '8px 12px' } }, notice,
         h('div', { className: 'b04-canvas-actions', style: { margin: '8px 0', flexWrap: 'wrap' } }, controls,
@@ -5328,7 +5337,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', source_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', objective: '', source_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
       React.useEffect(() => {
         if (!cwd || screen.type !== 'create') return
         try {
@@ -7238,6 +7247,7 @@ window.__ModuleLoader__.load({
         const semantic = workbench?.capabilities?.source_first?.version === 'source-first-v1' || workbench?.capabilities?.workflow_versions?.includes('source-first-v1')
         const sceneOptions = workbench?.capabilities?.source_first?.analysis_options_by_profile?.['behavior-test-v2']
         const options = semantic ? sceneOptions ?? workbench.capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'] } : null
+        const objectiveReady = !sceneOptions?.objectives || sceneOptions.objectives.includes(createForm.objective)
         const supported = (kind, value) => !options || options[kind]?.includes(value)
         const compatible = workbench?.compatibility?.compatible === true
         const execution = analysisExecutionState(createForm, providerOptions, analysisAgentModels, cwd)
@@ -7249,6 +7259,7 @@ window.__ModuleLoader__.load({
           : !supported('scenarios', createForm.scenario) || !supported('modes', createForm.mode) ? '请选择当前环境支持的分析场景与模式。'
           : !createForm.repository ? '请先选择源码仓库。'
           : !createForm.target.trim() ? '请填写本次分析目标。'
+          : !objectiveReady ? '请选择产品行为或接口契约分析目标。'
           : sourceScope.length === 0 ? '请选择源码范围；分析整个仓库请明确选择根目录。'
           : !validScopePreview?.matched_file_count ? '请预览并确认命中的源码文件。'
           : sceneOptions && createForm.asset_ids.some(id => !(assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision) ? '所选资产版本尚未读取，请刷新资产后重新选择。'
@@ -7278,7 +7289,7 @@ window.__ModuleLoader__.load({
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
-        const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && sourceScope.length && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
+        const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && objectiveReady && sourceScope.length && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
         const inputsReady = coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
         const go = (next, nextView = 'inputs') => {
           if (creatingRun) return
@@ -7317,6 +7328,7 @@ window.__ModuleLoader__.load({
         if (step === 1) content = panel(h(React.Fragment, null,
           h('h2', { className: 'create-heading' }, '想分析什么？'), h('p', { className: 'create-copy' }, '选择源码仓库，并明确这次分析关注的行为与边界。'),
           h('div', { className: 'form-grid' }, field('源码仓库', h('div', { className: 'row', style: { flexWrap: 'nowrap' } }, h('select', { 'aria-label': '源码仓库', value: createForm.repository, onChange: event => update('repository', event.target.value) }, h('option', { value: '' }, '选择仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository))), button('添加', openRepositoryImport, 'ghost', 'Plus')), createForm.repository ? `本地工作区 / repositories / ${createForm.repository}` : '先添加或选择源码仓库'), input('分析目标', 'target', '使用具体的模块、功能或业务行为命名')),
+          sceneOptions?.objectives ? field('分析目标类型', h('select', { 'aria-label': '分析目标类型', value: createForm.objective, onChange: event => update('objective', event.target.value) }, h('option', { value: '' }, '请选择目标类型'), h('option', { value: 'product-behavior' }, '产品行为 · 产品入口、操作及外部结果'), h('option', { value: 'interface-contract' }, '接口契约 · API 输入、顺序、状态及资源责任')), '选择会随本次分析冻结。产品行为沿用可实施黑盒与灰盒70%目标；接口契约与风险场景不设该比例目标。') : null,
           h('div', { className: 'create-subhead' }, '分析场景 ', h('span', { className: 'small muted', style: { fontWeight: 400 } }, '选择本次分析的重点')),
           h('div', { className: 'choice-grid create-scenes', role: 'group', 'aria-label': '分析场景' }, Object.entries(scenes).map(([id, item]) => h('button', { key: id, type: 'button', className: `choice create-option ${createForm.scenario === id ? 'selected' : ''}`, 'aria-pressed': createForm.scenario === id, disabled: !supported('scenarios', id), 'data-scenario': id, onClick: () => update('scenario', id) }, runIcon(item[1]), h('div', null, h('strong', null, item[0]), h('p', null, item[2])), h('span', { className: 'create-scene-check' }, runIcon('CircleCheck'))))),
           h('div', { className: 'create-scope', style: { marginTop: 22 } }, input('源码冻结范围', 'source_scope_text', '相对仓库根目录，每行一个文件或目录；「.」代表整个仓库。', true)),
@@ -7369,7 +7381,7 @@ window.__ModuleLoader__.load({
         } else {
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
-            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库 · ' : ''}命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
+            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库 · ' : ''}命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
@@ -7882,7 +7894,7 @@ window.__ModuleLoader__.load({
             reader.view === 'reader' && !branch ? renderFlowReader(flow)
             : ['diagram', 'sequence', 'functions'].includes(reader.view) ? h('div', null,
               reader.view === 'sequence' ? h(SequenceGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).sequence, onSource: openFlowSource })
-              : reader.view === 'functions' ? h(FunctionVariablesView, { key: cardScope(flow), flow, viewport: panelState(flow).functions, onSource: openFlowSource })
+              : reader.view === 'functions' ? h(FunctionVariablesView, { key: cardScope(flow), flow, viewport: panelState(flow).functions, onSource: openFlowSource, repositoryId: current?.repository })
               : h(FlowGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).graph, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] }),
               renderHistoricalDiagrams(flow)) : branchBody)) : empty,
           renderFlowSourceDrawer())
@@ -8707,7 +8719,8 @@ window.__ModuleLoader__.load({
             metric('待补执行条件', readiness.needs_setup ?? '未知', '需核对执行准备条件'), riskEnabled ? metric('关联风险的用例', linkedCases, '按用例去重计数') : metric('已设计参数组合', designCounts.variants, '按变体记录计数，不计入独立用例数')),
           quality ? h('details', { className: 'b05-card', 'aria-label': '黑盒与灰盒可实施性' }, h('summary', null, '黑盒与灰盒可实施性'),
             h('p', null, `业务黑盒 ${quality.business_blackbox} 条（具备执行条件 ${quality.ready_blackbox} 条） · 业务灰盒 ${quality.developer_assisted} 条（具备执行条件 ${quality.ready_graybox} 条）`),
-            h('p', null, quality.has_legacy_groups ? '包含旧用例组，独立用例比例待复核。' : quality.ready_ratio == null ? '无可统计用例。' : `可实施黑盒与灰盒：${quality.ready_cases}/${quality.total_cases}（${(quality.ready_ratio * 100).toFixed(1)}%）；目标 ≥70%。`),
+            h('p', null, quality.has_legacy_groups ? '包含旧用例组，独立用例比例待复核。' : quality.ready_ratio == null ? '无可统计用例。' : `可实施黑盒与灰盒：${quality.ready_cases}/${quality.total_cases}（${(quality.ready_ratio * 100).toFixed(1)}%）。`),
+            h('p', null, quality.blackbox_target === false ? quality.blackbox_target_reason === 'risk-scene' ? '风险场景不设黑盒比例目标。' : '用户冻结目标为接口契约分析，不设产品黑盒与灰盒70%比例目标。' : '可实施黑盒与灰盒交付目标 ≥70%。'),
             h('p', { className: 'b05-subtle' }, '全部正式、辅助及未分类用例均计入分母。比例按作者声明汇总，具备执行条件不代表实测通过。')) : null,
           behaviorLedgers.length || current?.scenario === 'branch-analysis' ? h(BehaviorCoverageView, { ledgers: behaviorLedgers,
             onCase: link => navigate({ type: 'case', id: link.target_case_id, ...(link.variant_id != null ? { variant_id: link.variant_id } : {}) }) }) : null,

@@ -49,6 +49,29 @@ test('create form shows and can remove selected assets absent from its repositor
   assert.deepEqual(Array.from(changed.asset_ids), ['tagged'])
 })
 
+test('new analysis objective requires an explicit user choice and request preserves it', async () => {
+  const form = { repository: 'repo', target: 'driver library', objective: '', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '' }
+  const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'], source_first: { version: 'source-first-v1',
+    analysis_options_by_profile: { 'behavior-test-v2': { scenarios: ['module-analysis'], modes: ['depth'], objectives: ['product-behavior', 'interface-contract'] } } } } },
+    16: { type: 'create', createStep: 1 }, 33: form, 34: { assets: [] } }
+  let index = 0, changed
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states)
+    return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }]
+  } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const nodes = descendants(panel.type(panel.props))
+  const select = nodes.find(node => node.props['aria-label'] === '分析目标类型')
+  assert.equal(select.props.value, '')
+  assert.ok(nodes.find(node => node.type === 'button' && node.children.includes('下一步 · 输入资料')).props.disabled)
+  select.props.onChange({ target: { value: 'interface-contract' } })
+  assert.equal(changed.objective, 'interface-contract')
+  assert.equal(client.buildAnalysisRequest(changed).objective, 'interface-contract')
+  assert.equal(client.buildAnalysisRequest({ ...form, objective: 'product-behavior' }).objective, 'product-behavior')
+})
+
 test('new analysis target and confirmation steps show only the selected source scope', async () => {
   for (const createStep of [1, 4]) {
     const form = { repository: 'repo', target: 'CPU 使用率计算分析', source_scope_text: 'src/cpuload.c', context_scope_text: 'tests/old-reference.c', flow_baseline: { run_id: 'old-run', version_id: 'old-version' }, asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '' }

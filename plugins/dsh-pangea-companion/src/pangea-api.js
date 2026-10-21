@@ -237,7 +237,7 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     runtime_provenance: runProvenance(root),
     ...(input.analysis_profile ? { analysis_profile: input.analysis_profile } : {}),
     ...(input.asset_revisions ? { asset_revisions: input.asset_revisions } : {}),
-    analysis_settings: { scenario: input.scenario ?? 'module-analysis', mode: input.mode ?? 'depth' },
+    analysis_settings: { scenario: input.scenario ?? 'module-analysis', mode: input.mode ?? 'depth', ...(input.objective ? { objective: input.objective } : {}) },
     data_root: dataRoot,
     repository: input.repository,
     target: input.target,
@@ -265,6 +265,7 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
   if (request.flow_baseline && !capabilities.source_first?.contract_fields?.includes('flow_baseline')) throw new Error('当前分析引擎不支持流程基线，请更新配套组件')
   if (!capabilities.source_first?.contract_fields?.includes('model_settings')) delete request.model_settings
   const options = analysisOptions(capabilities, input.analysis_profile)
+  if (input.objective && !options.objectives?.includes(input.objective)) throw new Error('当前分析引擎不支持所选分析目标，请更新配套组件')
   if (!options.scenarios?.includes(request.analysis_settings.scenario) || !options.modes?.includes(request.analysis_settings.mode) || (input.coverage_input != null && options.coverage_input !== true)) throw new Error('当前分析引擎不支持所选分析设置')
   if (input.analysis_profile === SCENE_PROFILE && ['analysis_profile', 'analysis_settings', 'asset_revisions'].some(field => !capabilities.source_first?.contract_fields?.includes(field))) throw new Error('引擎缺少场景或资产修订合同支持')
   for (const field of ['analysis_settings', 'runtime_provenance']) if (!capabilities.source_first?.contract_fields?.includes(field)) delete request[field]

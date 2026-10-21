@@ -221,8 +221,10 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   const target = typeof value?.target === 'string' ? value.target.trim() : ''
   const scenario = typeof value?.scenario === 'string' && value.scenario.trim() ? value.scenario.trim() : 'module-analysis'
   const mode = typeof value?.mode === 'string' && value.mode.trim() ? value.mode.trim() : 'depth'
+  const objective = value?.objective
   if (semantic) {
     const options = analysisOptions(capabilities, value?.analysis_profile)
+    if (objective != null && !options.objectives?.includes(objective)) throw new Error('当前分析引擎不支持所选分析目标')
     if (!options.scenarios?.includes(scenario) || !options.modes?.includes(mode)) throw new Error('当前分析引擎不支持所选场景或模式，请更新配套组件或选择已支持的设置')
     if (value?.coverage_input != null && options.coverage_input !== true) throw new Error('当前分析引擎不支持独立覆盖率输入，请通过分析资产选择 Coverage')
   }
@@ -246,6 +248,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     ...(value?.flow_baseline != null ? { flow_baseline: normalizeFlowBaseline(value.flow_baseline) } : {}),
     scenario,
     mode,
+    ...(objective != null ? { objective } : {}),
     source_scope: sourceScope,
     ...(value?.expected_scope_revision ? { expected_scope_revision: value.expected_scope_revision } : {}),
     ...(value?.analysis_profile === SCENE_PROFILE ? { analysis_profile: SCENE_PROFILE, asset_revisions: value.asset_revisions ?? {} } : scenario === 'coverage-analysis' ? { coverage_input: value.coverage_input } : {}),
@@ -285,6 +288,7 @@ export function deriveAnalysisInput(parent, input, options) {
     repository: parent.repository,
     target: typeof input?.target === 'string' && input.target.trim() ? input.target.trim() : `${parent.target} · ${suffix}`,
     scenario: parent.scenario,
+    ...(parent.objective ? { objective: parent.objective } : {}),
     mode: parent.mode,
     analysis_profile: parent.analysis_profile,
     asset_revisions: parent.asset_revisions,

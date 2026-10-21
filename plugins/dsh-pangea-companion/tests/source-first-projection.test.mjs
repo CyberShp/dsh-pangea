@@ -166,6 +166,7 @@ test('case quality requires ready for both blackbox and graybox and retains all 
   cases.push({ test_level: 'business_blackbox', execution_readiness: 'ready' })
   const original = JSON.stringify(cases)
   assert.deepEqual(caseQualitySummary(cases), {
+    blackbox_target: true, blackbox_target_reason: 'product-behavior',
     total_cases: 21, business_blackbox: 4, developer_assisted: 4, ready_blackbox: 1, ready_graybox: 1, ready_cases: 2,
     has_legacy_groups: false, ready_ratio: 2 / 21,
   })

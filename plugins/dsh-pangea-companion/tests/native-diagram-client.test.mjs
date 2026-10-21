@@ -80,7 +80,7 @@ test('legacy and explicitly unknown views stay honest without generation buttons
 
 test('partial call graph keeps authored status in wrapper and downloaded SVG/HTML, with local function evidence', async () => {
   const app = await harness(), raw = { ...structuredClone(CALL_GRAPH_EXAMPLE), status: 'partial', notes: ['外部依赖尚未确认'] }
-  const wrapper = app.render('FunctionVariablesView', { flow: { call_graph: raw } })
+  const wrapper = app.render('FunctionVariablesView', { flow: { call_graph: raw }, repositoryId: 'current-repo' })
   assert.match(text(wrapper), /部分可用.*外部依赖尚未确认/)
   const child = nodes(wrapper).find(node => node.type?.name === 'CallGraphView')
   assert.equal(child.props.authoredStatus, 'partial')
@@ -90,8 +90,8 @@ test('partial call graph keeps authored status in wrapper and downloaded SVG/HTM
   find(tree, 'data-node-id', 'login_handler').props.onClick()
   tree = render()
   assert.match(text(find(tree, 'aria-label', '函数变量流')), /变量.*读取.*计算.*check_password.*返回：ok/)
-  button(tree, 'src/login.c:20').props.onClick()
-  assert.equal(source[0][0], 'src/login.c:20')
+  button(tree, 'current-repo:src/login.c:20').props.onClick()
+  assert.equal(source[0][0], 'current-repo:src/login.c:20')
   button(tree, '导出 SVG').props.onClick()
   button(tree, '导出 HTML').props.onClick()
   assert.match(await app.downloads[0].text(), /&quot;status&quot;:&quot;partial&quot;/)
@@ -113,6 +113,24 @@ test('malformed sequence preserves raw records and incomplete status in standalo
   const svg = await app.downloads[0].text()
   assert.match(svg, /不完整|待确认/)
   assert.match(svg, /broken/)
+})
+
+test('call graph needs an explicit current Run repository and line without guessing from labels', async () => {
+  for (const [repositoryId, file, line, expected] of [[undefined, 'src/login.c', 20, null],
+    ['known', 'src/login.c', 20, 'known:src/login.c:20'],
+    [undefined, 'explicit:src/login.c', 20, 'explicit:src/login.c:20'],
+    ['known', 'src/login.c', undefined, null], ['known', 'src/login.c', null, null],
+    ['known', 'src/login.c', -1, null], ['known', 'C:\\work\\login.c', 20, null]]) {
+    const app = await harness(), source = [], graph = structuredClone(CALL_GRAPH_EXAMPLE)
+    Object.assign(graph.functions[0], { file, line })
+    const render = () => app.render('CallGraphView', { graph, repositoryId, onSource: location => source.push(location) })
+    let tree = render()
+    find(tree, 'data-node-id', 'login_handler').props.onClick()
+    tree = render()
+    if (expected) { button(tree, expected).props.onClick(); assert.equal(source[0], expected) }
+    else assert.match(text(tree), /未确认当前 Run 源码仓库|未提供完整源码位置/)
+    assert.deepEqual(app.requests, [])
+  }
 })
 
 test('id-less interactions with explicit endpoints stay visible in the built client and exported SVG', async () => {
