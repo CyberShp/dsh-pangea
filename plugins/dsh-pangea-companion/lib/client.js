@@ -898,6 +898,208 @@ window.__ModuleLoader__.load({
     return { FLOW_NODE_KINDS, COMPAT_PREFIX, parseFlowText, unwrapFlows, normalizeFlows, normalizeFlow }
     })()
 
+    const __moduleOverview = (() => {
+    // Read-only projection of facts already published by this Run. No semantic
+    // stitching: local ids resolve only inside their unit; qualified ids must be exact.
+    function buildModuleOverview(run) {
+      const flows = run?.details?.business_flows ?? []
+      const rows = flows.map((flow, index) => ({ key: JSON.stringify([flow.unit_id ?? '', flow.flow_id ?? '', index]), flow, index }))
+      const units = (run?.workflow?.units ?? []).map(unit => ({ ...unit, flows: [] }))
+      const unitMap = new Map(units.map(unit => [unit.unit_id, unit]))
+      for (const row of rows) {
+        const raw = row.flow.source_record?.body
+        const attach = raw?.attach_to ?? row.flow.attach_to
+        const target = attach?.flow_id
+        let candidates = []
+        if (target) {
+          const matches = other => [other.flow.flow_id, other.flow.logical_flow_id, other.flow.display_id, other.flow.source_record?.body?.flow_id].includes(target)
+          const explicit = rows.filter(other => other !== row && matches(other))
+          candidates = attach.unit_id != null
+            ? explicit.filter(other => other.flow.unit_id === attach.unit_id)
+            : explicit.filter(other => other.flow.unit_id === row.flow.unit_id)
+          // attach_to is an explicit id reference, including ids without slashes.
+          // Cross-unit resolution requires a unique exact id, never a label match.
+          if (attach.unit_id == null && !candidates.length) candidates = explicit
+        }
+        row.parent_key = candidates.length === 1 ? candidates[0].key : null
+        row.relationship = !target ? '未声明挂接' : candidates.length !== 1 ? `挂接目标${candidates.length ? '不唯一' : '缺失'}：${target}` : `挂接到 ${candidates[0].flow.title || target}${attach.node_id ? ` / ${attach.node_id}` : ''}`
+        if (row.parent_key && attach.node_id) {
+          const parent = candidates[0].flow
+          const ids = (parent.nodes ?? parent.mainline_steps ?? []).map(node => node.id ?? node.step_id)
+          if (!ids.includes(attach.node_id)) row.relationship += '（节点引用缺失）'
+        }
+        row.entries = (row.flow.nodes ?? []).filter(node => node.kind === 'entry')
+        row.main_paths = (row.flow.paths ?? []).filter(path => Array.isArray(row.flow.main_path_ids) && row.flow.main_path_ids.includes(path.path_id))
+        row.main_path_ids = row.flow.main_path_ids ?? null
+        row.calls = Array.isArray(row.flow.call_graph?.calls) ? row.flow.call_graph.calls : []
+        row.call_root = row.flow.call_graph?.root ?? null
+        row.category = row.flow.role === 'main' ? '主干' : row.parent_key ? '子流程' : '未挂接项'
+        if (!unitMap.has(row.flow.unit_id)) {
+          const unit = { unit_id: row.flow.unit_id ?? '', title: row.flow.unit_id || '单元归属未提供', flows: [], unlisted: true }
+          unitMap.set(row.flow.unit_id, unit); units.push(unit)
+        }
+        unitMap.get(row.flow.unit_id).flows.push(row)
+      }
+      return { units, flows: rows, note: '仅汇总当前 Run 的冻结单元与已发布关系；未声明的跨单元关系和业务完整性保持未知。' }
+    }
+
+    return { buildModuleOverview }
+    })()
+
+    const __diagramContract = (() => {
+    // Pure advisory contract, aligned with pangea_agent.diagram_contract and the
+    // cross-language fixtures. No business completeness checks or write gates.
+    const DIAGRAM_CONTRACT = 'diagram-contract-v1'
+    const FORMATS = { flow: 'behavior-flow-v1', sequence: 'sequence-v1', call_graph: 'call-graph-v1' }
+    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+    function diagramDiagnostics(body, { strict = false } = {}) {
+      const out = []
+      const emit = (diagram, field, code, message, classification = 'invalid') => out.push({
+        kind: 'diagram_format_diagnostic', contract_version: DIAGRAM_CONTRACT, diagram, field, code,
+        classification, severity: classification === 'invalid' ? 'warning' : 'info', message,
+      })
+      const check = (diagram, row, key, kind, where, required = false, choices = null) => {
+        const field = where ? `${where}.${key}` : key, value = row[key]
+        if (value == null) {
+          if (strict && required) emit(diagram, field, 'missing_field', '字段未提供；保留已保存内容，请原 worker 确认', 'missing')
+          return null
+        }
+        const valid = { object: object(value), array: Array.isArray(value), string: typeof value === 'string', line: Number.isInteger(value) && value > 0 }[kind]
+        if (!valid) { emit(diagram, field, 'invalid_type', `字段必须是 ${kind}；原值保留`); return null }
+        if (choices && !choices.includes(value)) emit(diagram, field, 'invalid_enum', `字段应为 ${choices.join(' | ')}；原值保留`)
+        return value
+      }
+      const rows = (diagram, row, key, where, required = false) => {
+        const values = check(diagram, row, key, 'array', where, required)
+        return (values ?? []).flatMap((item, index) => {
+          const field = where ? `${where}.${key}[${index}]` : `${key}[${index}]`
+          if (!object(item)) { emit(diagram, field, 'invalid_type', '项目必须是 object；原值保留'); return [] }
+          return [[item, field]]
+        })
+      }
+      const strings = (diagram, row, key, where, required = false) => {
+        const values = check(diagram, row, key, 'array', where, required)
+        for (const [index, value] of (values ?? []).entries()) if (typeof value !== 'string') emit(diagram, `${where}.${key}[${index}]`, 'invalid_type', '项目必须是 string；原值保留')
+        return values ?? []
+      }
+      const identities = (diagram, items) => {
+        const ids = new Set()
+        for (const [item, where] of items) {
+          const value = check(diagram, item, 'id', 'string', where, true)
+          if (value == null) continue
+          if (!value.trim()) emit(diagram, `${where}.id`, 'empty_id', 'id 必须是非空字符串')
+          else if (ids.has(value)) emit(diagram, `${where}.id`, 'duplicate_id', 'id 重复，关系归属待确认')
+          ids.add(value)
+        }
+        return ids
+      }
+      const reference = (diagram, row, key, known, where) => {
+        const value = check(diagram, row, key, 'string', where, true)
+        if (value != null && !known.has(value)) emit(diagram, `${where}.${key}`, 'unknown_reference', '引用未声明的 id；原值保留')
+      }
+      if (!object(body)) { emit('flow', 'body', 'invalid_type', '流程 body 必须是 object；原值保留'); return out }
+      for (const diagram of Object.keys(FORMATS)) {
+        const value = diagram === 'flow' ? body : body[diagram], where = diagram === 'flow' ? '' : diagram
+        if (value == null) { if (strict) emit(diagram, where, 'missing_diagram', '附图资料未提供，不代表已完成', 'missing'); continue }
+        if (!object(value)) { emit(diagram, where || 'body', 'invalid_type', '图资料必须是 object；原值保留'); continue }
+        const version = check(diagram, value, 'format_version', 'string', where, true)
+        if (version != null && version !== FORMATS[diagram]) {
+          emit(diagram, where ? `${where}.format_version` : 'format_version', 'unsupported_version', '格式版本暂不支持，原始资料保留', 'valid_but_unsupported')
+          continue
+        }
+        if (diagram !== 'flow') {
+          const status = check(diagram, value, 'status', 'string', where, true, ['ready', 'partial', 'unknown', 'not_applicable'])
+          if (['unknown', 'not_applicable', 'partial'].includes(status)) emit(diagram, `${where}.status`, 'declared_status', `worker 声明 ${status}；保留原结论`, 'unknown')
+        }
+        check(diagram, value, 'title', 'string', where, true)
+        if (diagram === 'flow') {
+          const nodes = rows(diagram, value, 'nodes', where, true), ids = identities(diagram, nodes)
+          for (const [node, path] of nodes) {
+            check(diagram, node, 'label', 'string', path, true)
+            check(diagram, node, 'kind', 'string', path, false, ['entry', 'main', 'branch', 'error', 'propagation', 'recovery', 'exit'])
+          }
+          for (const [edge, path] of rows(diagram, value, 'edges', where, true)) for (const key of ['source_step_key', 'target_step_key']) reference(diagram, edge, key, ids, path)
+          for (const [row, path] of rows(diagram, value, 'paths', where, true)) {
+            for (const [index, ref] of strings(diagram, row, 'node_ids', path, true).entries()) if (typeof ref === 'string' && !ids.has(ref)) emit(diagram, `${path}.node_ids[${index}]`, 'unknown_reference', '引用未声明的 id；原值保留')
+          }
+        } else if (diagram === 'sequence') {
+          const participants = rows(diagram, value, 'participants', where, true), participantIds = identities(diagram, participants)
+          for (const [participant, path] of participants) check(diagram, participant, 'label', 'string', path, true)
+          const messages = rows(diagram, value, 'messages', where, true), messageIds = identities(diagram, messages)
+          const positions = new Map(messages.flatMap(([message], index) => typeof message.id === 'string' ? [[message.id, index]] : []))
+          for (const [message, path] of messages) {
+            for (const key of ['from', 'to']) reference(diagram, message, key, participantIds, path)
+            check(diagram, message, 'label', 'string', path, true)
+            check(diagram, message, 'kind', 'string', path, true, ['call', 'return', 'async', 'self'])
+            if (message.kind === 'self' && message.from !== message.to) emit(diagram, `${path}.kind`, 'self_endpoints', 'self 消息的 from/to 必须相同')
+            strings(diagram, message, 'source_evidence', path)
+          }
+          const fragments = rows(diagram, value, 'fragments', where, true), owned = new Set()
+          identities(diagram, fragments)
+          for (const [fragment, path] of fragments) {
+            const kind = check(diagram, fragment, 'kind', 'string', path, true, ['alt', 'opt', 'loop', 'par'])
+            const operands = rows(diagram, fragment, 'operands', path, true)
+            if (['alt', 'par'].includes(kind) && operands.length < 2 || ['opt', 'loop'].includes(kind) && operands.length !== 1) emit(diagram, `${path}.operands`, 'operand_count', '分支数量与片段类型不符')
+            const indexes = []
+            for (const [operand, operandPath] of operands) {
+              check(diagram, operand, 'condition', 'string', operandPath, true)
+              for (const [index, ref] of strings(diagram, operand, 'message_ids', operandPath, true).entries()) {
+                if (typeof ref !== 'string') continue
+                const refPath = `${operandPath}.message_ids[${index}]`
+                if (!messageIds.has(ref)) emit(diagram, refPath, 'unknown_reference', '引用未声明的 id；原值保留')
+                else indexes.push(positions.get(ref))
+                if (owned.has(ref)) emit(diagram, refPath, 'overlapping_fragment', '消息同时属于多个分支或片段；归属待确认')
+                owned.add(ref)
+              }
+            }
+            const ordered = [...new Set(indexes)].sort((a, b) => a - b)
+            if (ordered.length && ordered.at(-1) - ordered[0] + 1 !== ordered.length) emit(diagram, `${path}.operands`, 'noncontiguous_fragment', '片段消息在 messages 中不连续；保留原始关系')
+          }
+        } else {
+          const functions = rows(diagram, value, 'functions', where, true), ids = identities(diagram, functions)
+          reference(diagram, value, 'root', ids, where)
+          for (const [fn, path] of functions) {
+            check(diagram, fn, 'kind', 'string', path, true, ['function', 'macro', 'external'])
+            for (const key of ['label', 'signature', 'file']) check(diagram, fn, key, 'string', path, true)
+            check(diagram, fn, 'line', 'line', path)
+          }
+          for (const [call, path] of rows(diagram, value, 'calls', where, true)) {
+            for (const key of ['from', 'to']) reference(diagram, call, key, ids, path)
+            strings(diagram, call, 'args', path, true)
+            for (const key of ['file', 'returns']) check(diagram, call, key, 'string', path, true)
+            check(diagram, call, 'line', 'line', path)
+          }
+          for (const [variable, path] of rows(diagram, value, 'variables', where, true)) {
+            reference(diagram, variable, 'function', ids, path)
+            for (const key of ['name', 'compute']) check(diagram, variable, key, 'string', path, true)
+            strings(diagram, variable, 'reads', path, true)
+            if (!strict && Array.isArray(variable.writes) && variable.writes.every(item => typeof item === 'string')) emit(diagram, `${path}.writes`, 'legacy_writes_array', '旧冻结合同的 writes 数组按原项目兼容展示', 'valid_but_unsupported')
+            else check(diagram, variable, 'writes', 'string', path, true)
+            check(diagram, variable, 'line', 'line', path)
+          }
+        }
+        if (diagram !== 'flow') strings(diagram, value, 'notes', where, true)
+      }
+      return out
+    }
+
+    /** Persisted diagnostics are scoped to exact result + authored record revision. */
+    function activeDiagramDiagnostics(result) {
+      const records = Array.isArray(result?.records) ? result.records : []
+      const known = new Set(), retired = new Set()
+      for (const record of records) {
+        for (const id of Array.isArray(record.supersedes) ? record.supersedes : []) if (known.has(id)) retired.add(id)
+        known.add(record.record_id)
+      }
+      const active = new Map(records.filter(record => !retired.has(record.record_id)).map(record => [record.record_id, record]))
+      return (result?.warnings ?? []).filter(item => item.kind === 'diagram_format_diagnostic'
+        && active.has(item.record_id) && item.record_revision === active.get(item.record_id).created_revision)
+    }
+
+    return { DIAGRAM_CONTRACT, diagramDiagnostics, activeDiagramDiagnostics }
+    })()
+
     const __flowLayout = (() => {
     // Deterministic layout for behavior-flow-v1 and call-graph-v1 diagrams.
     // Ported from pangea-agent report/flow_diagram.py (BFS layering). The same
@@ -2345,6 +2547,8 @@ window.__ModuleLoader__.load({
     })()
 
     const { normalizeFlow: sharedNormalizeFlow } = __flowNormalize
+    const { buildModuleOverview } = __moduleOverview
+    const { diagramDiagnostics } = __diagramContract
     const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, pathsForNode, layoutCallGraph } = __flowLayout
     const { renderFlowTree, renderCallGraphTree, toSvgString, toInteractiveFlowSvg } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
@@ -6878,7 +7082,7 @@ window.__ModuleLoader__.load({
           anchor.click()
           anchor.remove()
           window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
-          showActionNotice(`测试用例 ${format.toUpperCase()} 已导出。`)
+          showActionNotice(`测试用例${format === 'csv-bundle' ? '及执行依据（ZIP）' : ` ${format.toUpperCase()}`} 已导出。`)
           return true
         } catch (reason) {
           const message = reason instanceof Error ? reason.message : String(reason)
@@ -6886,6 +7090,15 @@ window.__ModuleLoader__.load({
           showActionNotice(`导出失败：${message}`, true)
           return false
         }
+      }
+      async function exportOfflineReport() {
+        if (!current?.run_id || !snapshot?.data_root) return
+        try {
+          const result = await requestRunExport({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, format: 'report-bundle' })
+          if (!result.blob?.size) throw new Error('导出服务未返回文件内容')
+          downloadBlob(result.blob, result.filename)
+          showActionNotice('离线图文报告已导出。')
+        } catch (error) { showActionNotice(`报告导出失败：${error.message}`, true) }
       }
       async function copySelectedCases() {
         const selected = testCases.filter(item => selectedCaseIds.includes(caseIdentity(item)))
@@ -7680,14 +7893,15 @@ window.__ModuleLoader__.load({
       }
 
       function renderFlows() {
+        const moduleOverview = buildModuleOverview({ ...current, details: { ...current?.details, business_flows: businessFlows } })
         const query = flowQuery.trim().toLowerCase()
         const flowRank = item => item?.raw_text != null ? 2 : item?.role === 'main' ? 0 : 1
         const ranked = businessFlows.map((item, order) => ({ item, order })).sort((a, b) => flowRank(a.item) - flowRank(b.item) || a.order - b.order)
         const attached = ranked.map(entry => {
           const { item } = entry
-          const target = item.attach_to?.flow_id
-          const parents = target ? ranked.filter(({ item: parent }) => parent !== item && flowRank(parent) !== 2 && (parent.display_id === target || parent.flow_id === target)) : []
-          const parent = parents.find(({ item: parent }) => parent.unit_id === item.unit_id) ?? parents[0]
+          const relation = moduleOverview.flows.find(row => row.flow === item)
+          const parentFlow = moduleOverview.flows.find(row => row.key === relation?.parent_key)?.flow
+          const parent = ranked.find(entry => entry.item === parentFlow)
           const steps = parent?.item.mainline_steps ?? []
           const nodeIndex = steps.findIndex(step => step.step_id === item.attach_to?.node_id)
           return { ...entry, parentOrder: parent ? ranked.indexOf(parent) : -1, nodeOrder: nodeIndex < 0 ? steps.length : nodeIndex }
@@ -7698,15 +7912,16 @@ window.__ModuleLoader__.load({
         const filtered = ordered.filter(item => !query || [item.display_id, item.flow_id, item.title, item.description, item.entry].join(' ').toLowerCase().includes(query))
         const roleText = item => item?.raw_text != null ? '无法解析' : item?.role === 'main' ? '主流程'
           : item?.attach_to?.flow_id ? `挂接到 ${item.attach_to.flow_id}${item.attach_to.node_id ? ` / 节点 ${item.attach_to.node_id}` : ''}` : '未挂接'
-        const flow = filtered.find(item => item.flow_id === flowSelection) ?? filtered[0]
-        const cardScope = item => `${current?.run_id}:${item?.flow_id}`
+        const selectionKey = item => businessFlows.filter(other => other.flow_id === item?.flow_id).length > 1 ? JSON.stringify([item?.unit_id, item?.flow_id]) : item?.flow_id
+        const flow = filtered.find(item => selectionKey(item) === flowSelection) ?? filtered[0]
+        const cardScope = item => `${current?.run_id}:${selectionKey(item)}`
         const cardId = item => `pangea-flow-card-${encodeURIComponent(cardScope(item))}`
         const panelState = item => flowPanelsRef.current[cardScope(item)] ??= { scrollTop: 0, scrollLeft: 0, graph: {}, sequence: {}, functions: {} }
         const selectFlow = item => {
-          if (item.flow_id === flow?.flow_id) return
+          if (selectionKey(item) === selectionKey(flow)) return
           const scope = cardScope(item)
           if (flow) setFlowReaders(value => ({ ...value, [cardScope(flow)]: { reader, branchFilter } }))
-          setFlowSelection(item.flow_id); setFlowBranchDetail(''); setBranchSelection('')
+          setFlowSelection(selectionKey(item)); setFlowBranchDetail(''); setBranchSelection('')
           setFlowReader(flowReaders[scope]?.reader ?? { scope, view: 'reader', step: '', query: '', page: 1 })
           setBranchFilter(flowReaders[scope]?.branchFilter ?? '')
           setFlowSource(null)
@@ -7745,8 +7960,8 @@ window.__ModuleLoader__.load({
             style: { ...styles.search, width: 240, maxWidth: '100%', fontSize: 12, marginBottom: 10 } }),
           h('div', { className: 'b04-flow-tabs', role: 'tablist', 'aria-label': '业务流程' },
             filtered.map((item, index) => h('button', { key: cardScope(item), type: 'button', className: 'b04-flow-tab', role: 'tab', 'data-flow-parent': item.attach_to || undefined, style: { marginLeft: item.attach_to ? 20 : 0 },
-              id: `${cardId(item)}-tab`, 'aria-controls': cardId(item), 'aria-selected': item.flow_id === flow?.flow_id,
-              tabIndex: item.flow_id === flow?.flow_id ? 0 : -1, onClick: () => selectFlow(item),
+              id: `${cardId(item)}-tab`, 'aria-controls': cardId(item), 'aria-selected': selectionKey(item) === selectionKey(flow),
+              tabIndex: selectionKey(item) === selectionKey(flow) ? 0 : -1, onClick: () => selectFlow(item),
               onKeyDown: event => {
                 const next = event.key === 'ArrowRight' ? (index + 1) % filtered.length : event.key === 'ArrowLeft' ? (index - 1 + filtered.length) % filtered.length
                   : event.key === 'Home' ? 0 : event.key === 'End' ? filtered.length - 1 : -1
@@ -7764,8 +7979,8 @@ window.__ModuleLoader__.load({
             }, label)))) : null
         function renderFlowReader(flow) {
           const { scope, reader, steps, branches, unbound, filteredBranches, branchPages, branchPage, visibleBranches } = readingState(flow)
-          const updateReader = next => { setFlowSelection(flow.flow_id); setFlowReader(next) }
-          const openBranch = id => { setFlowSelection(flow.flow_id); setFlowBranchDetail(id); setBranchSelection(id); updateReader({ ...reader, view: 'reader' }) }
+          const updateReader = next => { setFlowSelection(selectionKey(flow)); setFlowReader(next) }
+          const openBranch = id => { setFlowSelection(selectionKey(flow)); setFlowBranchDetail(id); setBranchSelection(id); updateReader({ ...reader, view: 'reader' }) }
           const graphBacked = Boolean(flow.nodes?.length)
           const transitions = graphBacked ? (flow.edges ?? []).map((edge, index) => ({
             from_step_id: edge.source_step_key, to_step_id: edge.target_step_key, condition: edge.condition,
@@ -7900,7 +8115,18 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => navigate({ type: 'workflow' }) }, '查看运行过程'),
               current?.artifacts?.source_snapshot_manifest ? h('button', { type: 'button', style: styles.button,
                 onClick: () => openSidebarFile(current.artifacts.source_snapshot_manifest) }, '检查冻结输入') : null)))
-        return h(React.Fragment, null, renderFlowVersions(), tabs, flow ? h(React.Fragment, null, modebar,
+        const overviewPanel = h('details', { className: 'b04-module-overview', open: true }, h('summary', null, '模块总览 · 当前 Run'),
+          h('p', { style: styles.itemMeta }, moduleOverview.note),
+          moduleOverview.units.map((unit, index) => h('section', { key: `${unit.unit_id}:${index}`, style: { marginBottom: 12 } },
+            h('strong', null, unit.title || unit.unit_id || '单元归属未提供'),
+            unit.flows.length ? h('ul', null, unit.flows.map(row => h('li', { key: row.key },
+              h('button', { type: 'button', className: 'b04-link', onClick: () => { setFlowQuery(''); selectFlow(row.flow) } }, row.flow.title || row.flow.flow_id),
+              ` · ${row.category} · ${row.relationship}`,
+              h('div', { style: styles.itemMeta }, `入口：${row.entries.map(node => node.label || node.id).join('、') || row.flow.entry || '未声明'}；主干路径：${row.main_paths.map(path => path.path_id).join('、') || '未声明'}；调用入口：${row.call_root || '未声明'}；显式调用关系：${row.calls.length}`),
+              row.calls.length ? h('details', null, h('summary', null, '显式调用关系'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(row.calls, null, 2))) : null,
+              diagramDiagnostics(row.flow.source_record?.body ?? row.flow).length ? h('details', null, h('summary', null, '图形合同诊断'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(diagramDiagnostics(row.flow.source_record?.body ?? row.flow), null, 2))) : null,
+              sourceButton(row.flow, '查看流程证据 ↗', row.flow.title || row.flow.flow_id)))) : h('p', { style: styles.itemMeta }, '当前没有已发布流程；入口和关系未知。'))))
+        return h(React.Fragment, null, overviewPanel, renderFlowVersions(), tabs, flow ? h(React.Fragment, null, modebar,
           h('section', { key: cardScope(flow), id: cardId(flow), role: 'tabpanel', tabIndex: 0, 'aria-labelledby': `${cardId(flow)}-tab`,
             className: 'b04-flow-panel', 'data-flow-id': flow.flow_id,
             ref: element => { if (element) { element.scrollTop = panelState(flow).scrollTop; element.scrollLeft = panelState(flow).scrollLeft } },
@@ -8573,6 +8799,7 @@ window.__ModuleLoader__.load({
               h('section', { className: 'b03-overview-card' }, h('h3', null, '报告目录'),
                 outline.map(([id, label], index) => h('button', { key: id, type: 'button', className: 'b03-report-outline-link', style: { ...styles.backButton, minHeight: 0, padding: '14px 0', border: 0, borderBottom: index < outline.length - 1 ? '1px solid #e5e7e4' : 0, borderRadius: 0, background: 'transparent', color: '#25292e', fontSize: 14 }, onClick: () => scrollTo(id) }, label))),
               h('section', { className: 'b03-overview-card' }, h('h3', null, '交付文件'),
+                h('button', { type: 'button', className: 'b03-task-run', onClick: () => { void exportOfflineReport() } }, '导出离线图文报告（ZIP）'),
                 current.artifacts?.report_html ? h('div', { className: 'b03-unlinked-row b03-report-file' }, reportGlyph(), h('div', null, h('strong', { className: 'small' }, 'report.html'), h('div', { className: 'b03-task-subtitle' }, partial ? '当前交付版' : '完整阅读版')), h('button', { type: 'button', className: 'b03-task-open', onClick: () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html') }, '打开')) : null,
                 current.artifacts?.report_md ? h('div', { className: 'b03-unlinked-row b03-report-file' }, reportGlyph(), h('div', null, h('strong', { className: 'small' }, 'report.md'), h('div', { className: 'b03-task-subtitle' }, 'Markdown 原文')), h('button', { type: 'button', className: 'b03-task-open', onClick: () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md') }, '打开')) : null,
                 h('div', { className: 'b03-report-divider' }),
@@ -8782,7 +9009,7 @@ window.__ModuleLoader__.load({
           h('section', { role: 'dialog', 'aria-modal': 'true', 'aria-label': '导出测试用例', className: 'b05-export-modal', onKeyDown: event => { if (event.key === 'Escape') close(); if (event.key === 'Tab') { const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')]; if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus() } else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus() } } } },
             h('header', null, h('h2', null, '导出测试用例'), h('button', { type: 'button', onClick: close, autoFocus: true, 'aria-label': '关闭导出窗口' }, '关闭')),
             h('fieldset', null, h('legend', null, '导出范围'), [['all', '全部用例'], ['filtered', '当前筛选结果'], ['selected', '已勾选'], ['adopted', '已采纳']].map(([value, label]) => h('label', { key: value, className: 'pangea-export-scope-option' }, h('input', { type: 'radio', name: 'case-export-scope', value, checked: caseExportScope === value, disabled: caseExportBusy || value !== 'all' && !reviews, onChange: () => setCaseExportScope(value) }), `${label} · ${counts[value]} 条`))),
-            h('label', null, '文件格式', h('select', { 'aria-label': '文件格式', value: caseExportFormat, onChange: event => setCaseExportFormat(event.target.value) }, h('option', { value: 'xlsx' }, 'Excel 工作簿'), h('option', { value: 'csv' }, 'CSV'))),
+            h('label', null, '文件格式', h('select', { 'aria-label': '文件格式', value: caseExportFormat, onChange: event => setCaseExportFormat(event.target.value) }, h('option', { value: 'xlsx' }, 'Excel 工作簿及执行依据'), h('option', { value: 'csv-bundle' }, 'CSV及执行依据（ZIP）'))),
             h('p', { className: 'b05-subtle' }, '八列：用例ID、标题、类型、前置条件、操作步骤、预期结果、观察点、清理动作（环境恢复）。'),
             caseExportError ? h('p', { role: 'alert' }, caseExportError) : null,
             h('footer', null, h('button', { type: 'button', disabled: caseExportBusy, onClick: close }, '取消'), h('button', { type: 'button', className: 'primary', disabled: caseExportBusy || !counts[caseExportScope] || caseExportScope !== 'all' && !reviews, onClick: async () => { setCaseExportBusy(true); setCaseExportError(''); const success = await exportCurrentCases(caseExportFormat); setCaseExportBusy(false); if (success) close() } }, caseExportBusy ? '正在导出…' : `导出 ${counts[caseExportScope]} 条`))))

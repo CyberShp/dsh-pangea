@@ -11,6 +11,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     /* @inline-shared-modules */
     const { normalizeFlow: sharedNormalizeFlow } = __flowNormalize
+    const { buildModuleOverview } = __moduleOverview
+    const { diagramDiagnostics } = __diagramContract
     const { FLOW_KIND_COLORS, FLOW_KIND_LABELS, layoutFlow, pathMembers, pathsForNode, layoutCallGraph } = __flowLayout
     const { renderFlowTree, renderCallGraphTree, toSvgString, toInteractiveFlowSvg } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
@@ -4544,7 +4546,7 @@ window.__ModuleLoader__.load({
           anchor.click()
           anchor.remove()
           window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
-          showActionNotice(`测试用例 ${format.toUpperCase()} 已导出。`)
+          showActionNotice(`测试用例${format === 'csv-bundle' ? '及执行依据（ZIP）' : ` ${format.toUpperCase()}`} 已导出。`)
           return true
         } catch (reason) {
           const message = reason instanceof Error ? reason.message : String(reason)
@@ -4552,6 +4554,15 @@ window.__ModuleLoader__.load({
           showActionNotice(`导出失败：${message}`, true)
           return false
         }
+      }
+      async function exportOfflineReport() {
+        if (!current?.run_id || !snapshot?.data_root) return
+        try {
+          const result = await requestRunExport({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, format: 'report-bundle' })
+          if (!result.blob?.size) throw new Error('导出服务未返回文件内容')
+          downloadBlob(result.blob, result.filename)
+          showActionNotice('离线图文报告已导出。')
+        } catch (error) { showActionNotice(`报告导出失败：${error.message}`, true) }
       }
       async function copySelectedCases() {
         const selected = testCases.filter(item => selectedCaseIds.includes(caseIdentity(item)))
@@ -5346,14 +5357,15 @@ window.__ModuleLoader__.load({
       }
 
       function renderFlows() {
+        const moduleOverview = buildModuleOverview({ ...current, details: { ...current?.details, business_flows: businessFlows } })
         const query = flowQuery.trim().toLowerCase()
         const flowRank = item => item?.raw_text != null ? 2 : item?.role === 'main' ? 0 : 1
         const ranked = businessFlows.map((item, order) => ({ item, order })).sort((a, b) => flowRank(a.item) - flowRank(b.item) || a.order - b.order)
         const attached = ranked.map(entry => {
           const { item } = entry
-          const target = item.attach_to?.flow_id
-          const parents = target ? ranked.filter(({ item: parent }) => parent !== item && flowRank(parent) !== 2 && (parent.display_id === target || parent.flow_id === target)) : []
-          const parent = parents.find(({ item: parent }) => parent.unit_id === item.unit_id) ?? parents[0]
+          const relation = moduleOverview.flows.find(row => row.flow === item)
+          const parentFlow = moduleOverview.flows.find(row => row.key === relation?.parent_key)?.flow
+          const parent = ranked.find(entry => entry.item === parentFlow)
           const steps = parent?.item.mainline_steps ?? []
           const nodeIndex = steps.findIndex(step => step.step_id === item.attach_to?.node_id)
           return { ...entry, parentOrder: parent ? ranked.indexOf(parent) : -1, nodeOrder: nodeIndex < 0 ? steps.length : nodeIndex }
@@ -5364,15 +5376,16 @@ window.__ModuleLoader__.load({
         const filtered = ordered.filter(item => !query || [item.display_id, item.flow_id, item.title, item.description, item.entry].join(' ').toLowerCase().includes(query))
         const roleText = item => item?.raw_text != null ? '无法解析' : item?.role === 'main' ? '主流程'
           : item?.attach_to?.flow_id ? `挂接到 ${item.attach_to.flow_id}${item.attach_to.node_id ? ` / 节点 ${item.attach_to.node_id}` : ''}` : '未挂接'
-        const flow = filtered.find(item => item.flow_id === flowSelection) ?? filtered[0]
-        const cardScope = item => `${current?.run_id}:${item?.flow_id}`
+        const selectionKey = item => businessFlows.filter(other => other.flow_id === item?.flow_id).length > 1 ? JSON.stringify([item?.unit_id, item?.flow_id]) : item?.flow_id
+        const flow = filtered.find(item => selectionKey(item) === flowSelection) ?? filtered[0]
+        const cardScope = item => `${current?.run_id}:${selectionKey(item)}`
         const cardId = item => `pangea-flow-card-${encodeURIComponent(cardScope(item))}`
         const panelState = item => flowPanelsRef.current[cardScope(item)] ??= { scrollTop: 0, scrollLeft: 0, graph: {}, sequence: {}, functions: {} }
         const selectFlow = item => {
-          if (item.flow_id === flow?.flow_id) return
+          if (selectionKey(item) === selectionKey(flow)) return
           const scope = cardScope(item)
           if (flow) setFlowReaders(value => ({ ...value, [cardScope(flow)]: { reader, branchFilter } }))
-          setFlowSelection(item.flow_id); setFlowBranchDetail(''); setBranchSelection('')
+          setFlowSelection(selectionKey(item)); setFlowBranchDetail(''); setBranchSelection('')
           setFlowReader(flowReaders[scope]?.reader ?? { scope, view: 'reader', step: '', query: '', page: 1 })
           setBranchFilter(flowReaders[scope]?.branchFilter ?? '')
           setFlowSource(null)
@@ -5411,8 +5424,8 @@ window.__ModuleLoader__.load({
             style: { ...styles.search, width: 240, maxWidth: '100%', fontSize: 12, marginBottom: 10 } }),
           h('div', { className: 'b04-flow-tabs', role: 'tablist', 'aria-label': '业务流程' },
             filtered.map((item, index) => h('button', { key: cardScope(item), type: 'button', className: 'b04-flow-tab', role: 'tab', 'data-flow-parent': item.attach_to || undefined, style: { marginLeft: item.attach_to ? 20 : 0 },
-              id: `${cardId(item)}-tab`, 'aria-controls': cardId(item), 'aria-selected': item.flow_id === flow?.flow_id,
-              tabIndex: item.flow_id === flow?.flow_id ? 0 : -1, onClick: () => selectFlow(item),
+              id: `${cardId(item)}-tab`, 'aria-controls': cardId(item), 'aria-selected': selectionKey(item) === selectionKey(flow),
+              tabIndex: selectionKey(item) === selectionKey(flow) ? 0 : -1, onClick: () => selectFlow(item),
               onKeyDown: event => {
                 const next = event.key === 'ArrowRight' ? (index + 1) % filtered.length : event.key === 'ArrowLeft' ? (index - 1 + filtered.length) % filtered.length
                   : event.key === 'Home' ? 0 : event.key === 'End' ? filtered.length - 1 : -1
@@ -5430,8 +5443,8 @@ window.__ModuleLoader__.load({
             }, label)))) : null
         function renderFlowReader(flow) {
           const { scope, reader, steps, branches, unbound, filteredBranches, branchPages, branchPage, visibleBranches } = readingState(flow)
-          const updateReader = next => { setFlowSelection(flow.flow_id); setFlowReader(next) }
-          const openBranch = id => { setFlowSelection(flow.flow_id); setFlowBranchDetail(id); setBranchSelection(id); updateReader({ ...reader, view: 'reader' }) }
+          const updateReader = next => { setFlowSelection(selectionKey(flow)); setFlowReader(next) }
+          const openBranch = id => { setFlowSelection(selectionKey(flow)); setFlowBranchDetail(id); setBranchSelection(id); updateReader({ ...reader, view: 'reader' }) }
           const graphBacked = Boolean(flow.nodes?.length)
           const transitions = graphBacked ? (flow.edges ?? []).map((edge, index) => ({
             from_step_id: edge.source_step_key, to_step_id: edge.target_step_key, condition: edge.condition,
@@ -5566,7 +5579,18 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => navigate({ type: 'workflow' }) }, '查看运行过程'),
               current?.artifacts?.source_snapshot_manifest ? h('button', { type: 'button', style: styles.button,
                 onClick: () => openSidebarFile(current.artifacts.source_snapshot_manifest) }, '检查冻结输入') : null)))
-        return h(React.Fragment, null, renderFlowVersions(), tabs, flow ? h(React.Fragment, null, modebar,
+        const overviewPanel = h('details', { className: 'b04-module-overview', open: true }, h('summary', null, '模块总览 · 当前 Run'),
+          h('p', { style: styles.itemMeta }, moduleOverview.note),
+          moduleOverview.units.map((unit, index) => h('section', { key: `${unit.unit_id}:${index}`, style: { marginBottom: 12 } },
+            h('strong', null, unit.title || unit.unit_id || '单元归属未提供'),
+            unit.flows.length ? h('ul', null, unit.flows.map(row => h('li', { key: row.key },
+              h('button', { type: 'button', className: 'b04-link', onClick: () => { setFlowQuery(''); selectFlow(row.flow) } }, row.flow.title || row.flow.flow_id),
+              ` · ${row.category} · ${row.relationship}`,
+              h('div', { style: styles.itemMeta }, `入口：${row.entries.map(node => node.label || node.id).join('、') || row.flow.entry || '未声明'}；主干路径：${row.main_paths.map(path => path.path_id).join('、') || '未声明'}；调用入口：${row.call_root || '未声明'}；显式调用关系：${row.calls.length}`),
+              row.calls.length ? h('details', null, h('summary', null, '显式调用关系'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(row.calls, null, 2))) : null,
+              diagramDiagnostics(row.flow.source_record?.body ?? row.flow).length ? h('details', null, h('summary', null, '图形合同诊断'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(diagramDiagnostics(row.flow.source_record?.body ?? row.flow), null, 2))) : null,
+              sourceButton(row.flow, '查看流程证据 ↗', row.flow.title || row.flow.flow_id)))) : h('p', { style: styles.itemMeta }, '当前没有已发布流程；入口和关系未知。'))))
+        return h(React.Fragment, null, overviewPanel, renderFlowVersions(), tabs, flow ? h(React.Fragment, null, modebar,
           h('section', { key: cardScope(flow), id: cardId(flow), role: 'tabpanel', tabIndex: 0, 'aria-labelledby': `${cardId(flow)}-tab`,
             className: 'b04-flow-panel', 'data-flow-id': flow.flow_id,
             ref: element => { if (element) { element.scrollTop = panelState(flow).scrollTop; element.scrollLeft = panelState(flow).scrollLeft } },
@@ -6239,6 +6263,7 @@ window.__ModuleLoader__.load({
               h('section', { className: 'b03-overview-card' }, h('h3', null, '报告目录'),
                 outline.map(([id, label], index) => h('button', { key: id, type: 'button', className: 'b03-report-outline-link', style: { ...styles.backButton, minHeight: 0, padding: '14px 0', border: 0, borderBottom: index < outline.length - 1 ? '1px solid #e5e7e4' : 0, borderRadius: 0, background: 'transparent', color: '#25292e', fontSize: 14 }, onClick: () => scrollTo(id) }, label))),
               h('section', { className: 'b03-overview-card' }, h('h3', null, '交付文件'),
+                h('button', { type: 'button', className: 'b03-task-run', onClick: () => { void exportOfflineReport() } }, '导出离线图文报告（ZIP）'),
                 current.artifacts?.report_html ? h('div', { className: 'b03-unlinked-row b03-report-file' }, reportGlyph(), h('div', null, h('strong', { className: 'small' }, 'report.html'), h('div', { className: 'b03-task-subtitle' }, partial ? '当前交付版' : '完整阅读版')), h('button', { type: 'button', className: 'b03-task-open', onClick: () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html') }, '打开')) : null,
                 current.artifacts?.report_md ? h('div', { className: 'b03-unlinked-row b03-report-file' }, reportGlyph(), h('div', null, h('strong', { className: 'small' }, 'report.md'), h('div', { className: 'b03-task-subtitle' }, 'Markdown 原文')), h('button', { type: 'button', className: 'b03-task-open', onClick: () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md') }, '打开')) : null,
                 h('div', { className: 'b03-report-divider' }),
@@ -6448,7 +6473,7 @@ window.__ModuleLoader__.load({
           h('section', { role: 'dialog', 'aria-modal': 'true', 'aria-label': '导出测试用例', className: 'b05-export-modal', onKeyDown: event => { if (event.key === 'Escape') close(); if (event.key === 'Tab') { const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled)')]; if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus() } else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus() } } } },
             h('header', null, h('h2', null, '导出测试用例'), h('button', { type: 'button', onClick: close, autoFocus: true, 'aria-label': '关闭导出窗口' }, '关闭')),
             h('fieldset', null, h('legend', null, '导出范围'), [['all', '全部用例'], ['filtered', '当前筛选结果'], ['selected', '已勾选'], ['adopted', '已采纳']].map(([value, label]) => h('label', { key: value, className: 'pangea-export-scope-option' }, h('input', { type: 'radio', name: 'case-export-scope', value, checked: caseExportScope === value, disabled: caseExportBusy || value !== 'all' && !reviews, onChange: () => setCaseExportScope(value) }), `${label} · ${counts[value]} 条`))),
-            h('label', null, '文件格式', h('select', { 'aria-label': '文件格式', value: caseExportFormat, onChange: event => setCaseExportFormat(event.target.value) }, h('option', { value: 'xlsx' }, 'Excel 工作簿'), h('option', { value: 'csv' }, 'CSV'))),
+            h('label', null, '文件格式', h('select', { 'aria-label': '文件格式', value: caseExportFormat, onChange: event => setCaseExportFormat(event.target.value) }, h('option', { value: 'xlsx' }, 'Excel 工作簿及执行依据'), h('option', { value: 'csv-bundle' }, 'CSV及执行依据（ZIP）'))),
             h('p', { className: 'b05-subtle' }, '八列：用例ID、标题、类型、前置条件、操作步骤、预期结果、观察点、清理动作（环境恢复）。'),
             caseExportError ? h('p', { role: 'alert' }, caseExportError) : null,
             h('footer', null, h('button', { type: 'button', disabled: caseExportBusy, onClick: close }, '取消'), h('button', { type: 'button', className: 'primary', disabled: caseExportBusy || !counts[caseExportScope] || caseExportScope !== 'all' && !reviews, onClick: async () => { setCaseExportBusy(true); setCaseExportError(''); const success = await exportCurrentCases(caseExportFormat); setCaseExportBusy(false); if (success) close() } }, caseExportBusy ? '正在导出…' : `导出 ${counts[caseExportScope]} 条`))))

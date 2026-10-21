@@ -1,4 +1,4 @@
-import { CASE_TYPE_LABELS } from './case-review-projection.js'
+import { CASE_TYPE_LABELS, caseIdentity } from './case-review-projection.js'
 function cell(value) {
   if (Array.isArray(value)) return value.map(item => cell(item)).join('；')
   if (value === null || value === undefined) return ''
@@ -65,6 +65,20 @@ export function buildTestCaseCsv(run) {
   return `\uFEFF${rows.map(row => row.map(csvCell).join(',')).join('\r\n')}\r\n`
 }
 
+export function caseEvidenceRows(run) {
+  const fields = ['execution_readiness', 'readiness_reason', 'test_level', 'purpose', 'source_evidence', 'entry', 'oracle', 'oracles', 'oracle_source', 'oracle_evidence', 'entry_source', 'entry_evidence', 'test_entry', 'test_oracle', 'readiness']
+  const items = run?.details?.test_cases ?? []
+  // Preserve additional entry/oracle fields verbatim as the contract evolves.
+  const extras = [...new Set(items.flatMap(item => Object.keys(item).filter(key => /entry|oracle/.test(key) && !fields.includes(key))))].sort()
+  const keys = [...fields, ...extras]
+  return [['序号', '用例身份', '单元ID', '用例ID', ...keys], ...items.map((item, index) => [index + 1, caseIdentity(item), item.unit_id, item.display_id ?? item.test_case_id, ...keys.map(key => item[key])])]
+}
+
+export function buildTestCaseCsvBundle(run) {
+  const evidence = `\uFEFF${caseEvidenceRows(run).map(row => row.map(csvCell).join(',')).join('\r\n')}\r\n`
+  return zipStore([['cases.csv', buildTestCaseCsv(run)], ['case-evidence.csv', evidence], ['manifest.json', JSON.stringify({ run_id: run.run_id, publication: run.publication, case_order: (run.details?.test_cases ?? []).map(caseIdentity) }, null, 2)]])
+}
+
 function xml(value) {
   return cell(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;')
 }
@@ -94,7 +108,7 @@ function worksheetXml(rows) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
     `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`+
     `<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>`+
-    `<sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="32" customWidth="1"/><col min="3" max="3" width="16" customWidth="1"/><col min="4" max="8" width="48" customWidth="1"/></cols>`+
+    `<sheetFormatPr defaultRowHeight="18"/><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="32" customWidth="1"/><col min="3" max="3" width="16" customWidth="1"/><col min="4" max="${Math.max(8, rows[0]?.length ?? 8)}" width="48" customWidth="1"/></cols>`+
     `<sheetData>${sheetRows}</sheetData></worksheet>`
 }
 
@@ -119,7 +133,7 @@ function u32(value) {
   return output
 }
 
-function zipStore(entries) {
+export function zipStore(entries) {
   const localParts = []
   const centralParts = []
   let offset = 0
@@ -151,14 +165,15 @@ function zipStore(entries) {
 export function buildTestCaseXlsx(run) {
   const rows = testCaseRows(run)
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
-    `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="测试用例" sheetId="1" r:id="rId1"/></sheets></workbook>`
+    `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="测试用例" sheetId="1" r:id="rId1"/><sheet name="执行条件与依据" sheetId="2" r:id="rId3"/></sheets></workbook>`
   const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs></styleSheet>`
   return zipStore([
-    ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
+    ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
     ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
     ['xl/workbook.xml', workbook],
-    ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`],
+    ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>`],
     ['xl/worksheets/sheet1.xml', worksheetXml(rows)],
+    ['xl/worksheets/sheet2.xml', worksheetXml(caseEvidenceRows(run))],
     ['xl/styles.xml', styles],
   ])
 }

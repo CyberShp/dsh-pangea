@@ -17,6 +17,8 @@ const SHARED = [
   ['__runInsights', 'src/run-insights.js'],
   ['__behaviorCoverage', 'src/behavior-coverage.js'],
   ['__flowNormalize', 'src/flow-normalize.js'],
+  ['__moduleOverview', 'src/module-overview.js'],
+  ['__diagramContract', 'src/diagram-contract.js'],
   ['__flowLayout', 'src/flow-graph/layout.js'],
   ['__flowRender', 'src/flow-graph/render.js'],
   ['__callGraph', 'src/call-graph.js'],

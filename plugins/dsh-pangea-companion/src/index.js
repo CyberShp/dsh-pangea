@@ -9,9 +9,10 @@ import { listViews, viewArtifact } from './architecture-views.js'
 import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
-import { buildTestCaseCsv, buildTestCaseXlsx } from './export.js'
+import { buildTestCaseCsv, buildTestCaseXlsx, buildTestCaseCsvBundle } from './export.js'
+import { buildOfflineReport, reportSnapshotHash } from './offline-report.js'
 import { CaseReviewStore, selectExportCases } from './case-review-store.js'
-import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
+import { readFile, writeFile, mkdtemp, rm, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createRuntimeMonitor } from './monitor.js'
@@ -515,17 +516,58 @@ export async function exportRouteHandler(req, res, { readRun = summarizeRun, res
     const input = req.method === 'POST' ? await requestJson(req) : Object.fromEntries(url.searchParams)
     const runId = input.run_id ?? '', format = input.format ?? 'csv'
     if (!/^[A-Za-z0-9._-]+$/.test(runId)) return json(res, 400, { status: 'error', error: 'run_id is required' })
-    if (!['csv', 'xlsx'].includes(format)) return json(res, 400, { status: 'error', error: '仅支持 CSV 或 XLSX 用例导出' })
+    if (!['csv', 'xlsx', 'csv-bundle', 'report-bundle'].includes(format)) return json(res, 400, { status: 'error', error: '不支持的导出格式' })
     const dataRoot = await resolveRoot({ cwd: input.cwd, dataRoot: input.data_root })
     const run = await readRun(dataRoot, runId, { includeDetails: true })
     if (run.run_id !== runId) return json(res, 409, { status: 'error', code: 'run_mismatch', error: '导出内容不属于请求 Run' })
+    if (format === 'report-bundle') {
+      let originalText = '', originalTextDiagnostic = ''
+      let textFile = null, markerFile = null, markerText = null, publicationManifest = null
+      const initialHash = reportSnapshotHash(run)
+      try {
+        if (run.artifacts?.report_md) {
+          const root = await realpath(path.join(dataRoot, 'runs', runId))
+          const file = await realpath(run.artifacts.report_md)
+          const relative = path.relative(root, file)
+          if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('文字报告路径越出当前 Run')
+          textFile = file
+          originalText = await readFile(file, 'utf8')
+          if (run.artifacts.report_complete) {
+            const markerCandidate = await realpath(run.artifacts.report_complete)
+            const markerRelative = path.relative(root, markerCandidate)
+            if (!markerRelative || markerRelative.startsWith('..') || path.isAbsolute(markerRelative)) throw new Error('发布记录路径越出当前 Run')
+            markerFile = markerCandidate
+            markerText = await readFile(markerFile, 'utf8')
+            publicationManifest = JSON.parse(markerText)
+          }
+        } else originalTextDiagnostic = '当前 Run 未提供文字报告；完整快照与图形事实已保留。'
+      } catch (error) { originalTextDiagnostic = `原文字报告不可读取：${error.message}` }
+      const finalRun = await readRun(dataRoot, runId, { includeDetails: true })
+      if (initialHash !== reportSnapshotHash(finalRun)
+        || (textFile && originalText !== await readFile(textFile, 'utf8'))
+        || (markerFile && markerText !== await readFile(markerFile, 'utf8'))) {
+        return json(res, 409, { status: 'error', code: 'publication_changed', error: '导出期间发布版本发生变化，请重试以获取同一版本的报告和图形。' })
+      }
+      const accepted = Object.fromEntries((run.workflow?.actions ?? []).filter(action => action.accepted_revision != null).map(action => [action.action_id, action.accepted_revision]))
+      const published = publicationManifest?.accepted_revisions
+      const revisionMatch = publicationManifest?.run_id === runId && published && Object.entries(accepted).every(([id, revision]) => published[id] === revision)
+        && Object.entries(published).every(([id, revision]) => accepted[id] === revision)
+      // Old publication markers carry revision ids but no content digest. State
+      // that limitation explicitly while retaining the exact original text.
+      const versionNote = !revisionMatch ? '原文字报告缺少匹配当前结果的发布版本记录；原文作为独立附件保留，图形与事实使用本次同一快照。'
+        : '发布记录的接受版本已核对；旧发布记录未保存文字内容哈希，原文字报告的生成版本仅能核对至结果版本。'
+      originalTextDiagnostic = [originalTextDiagnostic, versionNote].filter(Boolean).join('\n')
+      const report = buildOfflineReport(run, { originalText, originalTextDiagnostic, publicationManifest,
+        consistency: { snapshot_window: 'verified_before_after', original_text_version: revisionMatch ? 'accepted_revisions_match_no_original_digest' : 'unverified', accepted_revisions: accepted } })
+      return textResponse(res, 200, 'application/zip', report.bytes, { 'content-disposition': `attachment; filename="pangea-${runId}-offline-report.zip"` })
+    }
     if (run.reader_health?.collection_status?.test_cases === 'unavailable') return json(res, 422, { status: 'error', error: '用例暂不可读取，无法导出' })
     const items = run.details?.test_cases ?? []
     const selected = req.method === 'POST' ? await selectExportCases(items, input, new CaseReviewStore({ dataRoot, runId })) : items
     const snapshot = { ...run, details: { ...run.details, test_cases: selected } }
-    const filename = `pangea-${runId}-test-cases.${format}`
-    const body = format === 'xlsx' ? buildTestCaseXlsx(snapshot) : buildTestCaseCsv(snapshot)
-    return textResponse(res, 200, format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv; charset=utf-8', body, {
+    const filename = `pangea-${runId}-test-cases.${format === 'csv-bundle' ? 'zip' : format}`
+    const body = format === 'xlsx' ? buildTestCaseXlsx(snapshot) : format === 'csv-bundle' ? buildTestCaseCsvBundle(snapshot) : buildTestCaseCsv(snapshot)
+    return textResponse(res, 200, format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : format === 'csv-bundle' ? 'application/zip' : 'text/csv; charset=utf-8', body, {
       'content-disposition': `attachment; filename="${filename}"`,
     })
   } catch (reason) { return json(res, reason.statusCode ?? (reason.code === 'ENOENT' ? 404 : 500), { status: 'error', code: reason.code ?? 'export_failed', error: reason.message }) }
