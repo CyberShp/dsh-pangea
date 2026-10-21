@@ -6,6 +6,12 @@ import { normalizeSequence, layoutSequence, renderSequenceTree } from '../src/se
 import { validateCallGraph } from '../src/call-graph.js'
 import { layoutFlow } from '../src/flow-graph/layout.js'
 import { toSvgString } from '../src/flow-graph/render.js'
+import { sourceFirstProjection } from '../src/source-first-projection.js'
+import { summarizeRun } from '../src/reader.js'
+import { writeArchitectureRun } from './architecture-source-first-fixture.mjs'
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/diagram-contract-v1.json', import.meta.url), 'utf8'))
 const candidate = scenario => {
@@ -79,4 +85,48 @@ test('declared main paths without a layout version never fall back to paths arra
   assert.deepEqual(layoutFlow(input).main_path, [])
   input.main_path_ids = ['success']
   assert.deepEqual(layoutFlow(input).main_path, ['send', 'done'])
+})
+
+test('reader exposes frozen strict current diagnostics per flow and clears only retired revisions', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'diagram-reader-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const run = await writeArchitectureRun(root)
+  const taskPath = path.join(run.run, 'agent-tasks', 'analysis.json')
+  const task = JSON.parse(await readFile(taskPath, 'utf8'))
+  task.record_contracts = { diagram: 'diagram-contract-v1' }
+  await writeFile(taskPath, JSON.stringify(task))
+  const result = JSON.parse(await readFile(run.resultPath, 'utf8'))
+  const broken = structuredClone(fixture.base)
+  broken.sequence.title = null
+  broken.call_graph.variables[0].writes = ['result']
+  result.records = [
+    { record_id: 'retired', kind: 'flow', body: broken, created_revision: 1 },
+    { record_id: 'fixed', kind: 'flow', body: structuredClone(fixture.base), created_revision: 2, supersedes: ['retired'] },
+    { record_id: 'current', kind: 'flow', body: broken, created_revision: 2 },
+  ]
+  result.warnings = ['retired', 'current'].map(recordId => ({ ...result.binding, kind: 'diagram_format_diagnostic',
+    record_id: recordId, record_revision: recordId === 'retired' ? 1 : 2, diagram: 'sequence',
+    field: 'sequence.title', code: 'missing_field', classification: 'missing', message: 'persisted diagnostic marker' }))
+  await writeFile(run.resultPath, JSON.stringify(result))
+  const view = await summarizeRun(root, run.task.run_id, { includeDetails: true })
+  assert.equal(view.details.business_flows.length, 2)
+  const fixed = view.details.business_flows.find(flow => flow.source_record.record_id === 'fixed')
+  const current = view.details.business_flows.find(flow => flow.source_record.record_id === 'current')
+  assert.deepEqual(fixed.diagram_diagnostics, [])
+  assert.equal(current.record_contracts.diagram, 'diagram-contract-v1')
+  assert.ok(current.diagram_diagnostics.some(item => item.message === 'persisted diagnostic marker'))
+  assert.ok(current.diagram_diagnostics.some(item => item.field === 'call_graph.variables[0].writes' && item.classification === 'invalid'))
+  assert.ok(current.diagram_diagnostics.every(item => item.record_id === 'current' && item.record_revision === 2))
+  assert.deepEqual(current.source_record.body, broken)
+  assert.ok(view.source_first_records[0].diagram_diagnostics.every(item => item.record_id === 'current'))
+})
+
+test('old flow projection retains the tolerant presentation fallback without new strict requirements', () => {
+  const body = structuredClone(fixture.base)
+  delete body.sequence
+  body.call_graph.variables[0].writes = ['result']
+  const view = sourceFirstProjection([{ action_id: 'a', stage: 'unit_analysis', status: 'accepted', task: { unit_id: 'u' },
+    records: [{ record_id: 'flow', kind: 'flow', created_revision: 1, body }] }])
+  assert.equal(Object.hasOwn(view.business_flows[0], 'diagram_diagnostics'), false)
+  assert.deepEqual(view.business_flows[0].source_record.body, body)
 })

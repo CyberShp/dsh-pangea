@@ -146,7 +146,7 @@ export function activeDiagramDiagnostics(result) {
     known.add(record.record_id)
   }
   const active = new Map(records.filter(record => !retired.has(record.record_id)).map(record => [record.record_id, record]))
-  return (result?.warnings ?? []).filter(item => item.kind === 'diagram_format_diagnostic'
+  return (Array.isArray(result?.warnings) ? result.warnings : []).filter(item => item && item.kind === 'diagram_format_diagnostic'
     && active.has(item.record_id) && item.record_revision === active.get(item.record_id).created_revision
     && ['run_id', 'action_id', 'task_id'].every(key => item[key] === result.binding?.[key]))
 }

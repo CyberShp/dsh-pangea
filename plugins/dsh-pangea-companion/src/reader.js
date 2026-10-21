@@ -6,6 +6,7 @@ import path from 'node:path'
 import { sourceFirstProjection, coverageSummary, caseQualitySummary, mainlineNodes } from './source-first-projection.js'
 import { parseFlowText, unwrapFlows, normalizeFlows } from './flow-normalize.js'
 import { readableNotesEnvelope, sourceFirstExecutionView, sourceFirstUnitRows } from './runtime-view.js'
+import { activeDiagramDiagnostics } from './diagram-contract.js'
 
 const STEP_TITLES = [
   '范围和任务契约',
@@ -821,6 +822,7 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
       modified_records: records.filter(record => record.created_revision > (task.base_revision ?? 0)).length,
       finding_count: task.correction_record_ids?.length ?? 0,
       records,
+      diagram_diagnostics: activeDiagramDiagnostics(result),
     })
   }
   return { artifacts, issues, diagnostics, deliveryUnavailable }
@@ -931,6 +933,8 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     revision: item.revision,
     completion: item.completion,
     records: item.records,
+    record_contracts: item.task?.record_contracts ?? {},
+    diagram_diagnostics: item.diagram_diagnostics,
   }))
   const steps = sourceFirstStepRows(progress, runDirectory, actionView.artifacts, contract?.analysis_settings?.mode)
   const workflow = {

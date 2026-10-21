@@ -3,6 +3,7 @@
 import { normalizeFlow, normalizeFlows } from './flow-normalize.js'
 import { behaviorCoverageProjection } from './behavior-coverage.js'
 import { pathMembers } from './flow-graph/layout.js'
+import { activeDiagramDiagnostics, diagramDiagnostics, DIAGRAM_CONTRACT } from './diagram-contract.js'
 const list = value => Array.isArray(value) ? value : value == null ? [] : [value]
 const plain = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value, null, 2)
 const strings = value => list(value).map(plain)
@@ -102,8 +103,21 @@ export function sourceFirstProjection(artifacts) {
     const unit = action.task?.unit_id ?? action.action_id
     return bodies.map((body, index) => {
       const originalId = record.kind === 'check' ? body.check_id ?? record.record_id : body.risk_id ?? body.case_id ?? body.test_case_id ?? body.flow_id ?? body.coverage_id ?? record.record_id
+      const recordContracts = action.task?.record_contracts ?? {}
+      const persisted = action.diagram_diagnostics ?? activeDiagramDiagnostics(action.runtime_result)
+      const current = persisted.filter(item => item.record_id === record.record_id && item.record_revision === record.created_revision)
+      // Freeze-aware fallback also covers a new-contract Run saved by an older
+      // writer. Inspect raw authored facts, never the tolerant normalized view.
+      const computed = record.kind === 'flow' && recordContracts.diagram === DIAGRAM_CONTRACT
+        ? diagramDiagnostics(record.body, { strict: true }).map(item => ({ ...item,
+          record_id: record.record_id, record_revision: record.created_revision, revision: record.created_revision,
+          action_id: action.action_id, task_id: action.task_id, result_path: action.result_path })) : []
+      const diagnostics = [...current]
+      for (const item of computed) if (!diagnostics.some(other => other.field === item.field && other.code === item.code && other.classification === item.classification)) diagnostics.push(item)
       return {
         ...body, unit_id: unit, display_id: plain(originalId),
+        ...(record.kind === 'flow' ? { record_contracts: recordContracts,
+          ...(recordContracts.diagram === DIAGRAM_CONTRACT || current.length ? { diagram_diagnostics: diagnostics } : {}) } : {}),
         projection_id: `${unit}/${record.record_id}${index ? `#${index + 1}` : ''}`,
         title: recordTitle(record, body.raw_text != null && !body.title ? {} : body),
         source_record: { ...record, action_id: action.action_id, task_id: action.task_id, revision: action.revision, status: action.status, result_path: action.result_path },
