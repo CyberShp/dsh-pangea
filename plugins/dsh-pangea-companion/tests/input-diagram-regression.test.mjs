@@ -2,11 +2,9 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { Readable } from 'node:stream'
 import test from 'node:test'
 import { readFlowDocuments, readInputMaterials } from '../src/reader.js'
 import { TaskStore } from '../src/task-store.js'
-import { workbenchRouteHandler } from '../src/index.js'
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-input-diagram-'))
@@ -85,86 +83,7 @@ test('background diagram conversation preserves active analysis conversation', a
   assert.equal((await tasks.get(task.task_id)).active_conversation_id, 'diagram')
 })
 
-test('diagram API captures Job output, isolates missing Jobs and preserves validated artifacts', async t => {
-  const root = await fixture(t)
-  const run = path.join(root, 'runs/run')
-  const views = path.join(run, '派生视图/archify')
-  const task = { task_id: 'task', workspace: root, data_root: root, run_id: 'run' }
-  for (const id of ['live', 'missing', 'ready']) {
-    const folder = path.join(views, id)
-    await mkdir(folder, { recursive: true })
-    await writeFile(path.join(folder, 'manifest.json'), JSON.stringify({ view_id: id, task_id: 'task', run_id: 'run', status: 'generating',
-      job_id: id, job_started_at: 100, owner_session_id: 'owner', created_at: '2026-01-01' }))
-    if (id === 'ready') {
-      await writeFile(path.join(folder, 'validation-receipt.json'), '{"ok":true}')
-      await writeFile(path.join(folder, 'diagram.html'), '<svg></svg>')
-    }
-  }
-  const request = Readable.from([JSON.stringify({ action: 'architecture-list', task_id: 'task' })])
-  Object.assign(request, { method: 'POST', url: '/api/pangea-companion/workbench?' + new URLSearchParams({ cwd: root }), headers: { 'sec-fetch-site': 'same-origin' } })
-  let code, body
-  await workbenchRouteHandler(request, { writeHead(value) { code = value }, end(value) { body = JSON.parse(value) } }, {}, { get: async () => task }, new Set(), {},
-    { agents: { get: () => ({ id: 'owner' }) }, jobs: {
-      get(id) { if (id !== 'live') throw new Error(`unknown job ${id}`); return { startedAt: 100, status: 'running' } },
-      read() { return { text: 'Reading implementation and preparing diagram' } },
-    } }, {})
-  assert.equal(code, 200, JSON.stringify(body))
-  assert.equal(body.views.find(v => v.view_id === 'missing').status, 'interrupted')
-  assert.equal(body.views.find(v => v.view_id === 'ready').available, true)
-  assert.match(body.views.find(v => v.view_id === 'live').output, /Reading implementation/)
-  assert.match(JSON.parse(await readFile(path.join(views, 'live/manifest.json'), 'utf8')).output, /Reading implementation/)
-})
 
-test('diagram validation retries remain live until the Job ends and a later delivery clears the error', async t => {
-  const root = await fixture(t)
-  const folder = path.join(root, 'runs/run/派生视图/archify/view')
-  await mkdir(folder, { recursive: true })
-  await writeFile(path.join(folder, 'manifest.json'), JSON.stringify({ view_id: 'view', task_id: 'task', run_id: 'run',
-    status: 'generating', job_id: 'job', job_started_at: 100, owner_session_id: 'owner', created_at: '2026-01-01' }))
-  const diagnostic = { code: 'workflow/node-overlap', severity: 'error', message: 'Nodes overlap' }
-  await writeFile(path.join(folder, 'validation-receipt.json'), JSON.stringify({ ok: false, error: 'Nodes overlap', diagnostics: [diagnostic] }))
-  const task = { task_id: 'task', workspace: root, data_root: root, run_id: 'run' }
-  let status = 'running'
-  const runtime = { agents: { get: () => ({ id: 'owner' }) }, jobs: {
-    get: () => ({ startedAt: 100, status }), read: () => ({ text: 'Adjusting the candidate layout' }),
-  } }
-  async function list() {
-    const req = Readable.from([JSON.stringify({ action: 'architecture-list', task_id: 'task' })])
-    Object.assign(req, { method: 'POST', url: '/api/pangea-companion/workbench?' + new URLSearchParams({ cwd: root }), headers: { 'sec-fetch-site': 'same-origin' } })
-    let body
-    await workbenchRouteHandler(req, { writeHead(code) { assert.equal(code, 200) }, end(value) { body = JSON.parse(value) } },
-      {}, { get: async () => task }, new Set(), {}, runtime, {})
-    return body.views[0]
-  }
-  const repairing = await list()
-  assert.equal(repairing.status, 'generating')
-  assert.equal(repairing.execution_status, 'running')
-  assert.equal(repairing.available, false)
-  assert.equal(repairing.validation_error, 'Nodes overlap')
-  assert.deepEqual(repairing.validation_diagnostics, [diagnostic])
-  assert.match(repairing.output, /Adjusting/)
-
-  // The renderer exhausts its attempts before the host Job settles.
-  const manifestPath = path.join(folder, 'manifest.json')
-  const exhausted = JSON.parse(await readFile(manifestPath, 'utf8'))
-  await writeFile(manifestPath, JSON.stringify({ ...exhausted, status: 'failed', error: 'Nodes overlap' }))
-  status = 'completed'
-  const failed = await list()
-  assert.equal(failed.status, 'failed')
-  assert.equal(failed.execution_status, 'completed')
-  assert.equal(failed.error, 'Nodes overlap')
-  assert.equal(failed.available, false)
-
-  await writeFile(path.join(folder, 'validation-receipt.json'), '{"ok":true}')
-  assert.equal((await list()).available, false, 'a receipt alone is not a viewable artifact')
-  await writeFile(path.join(folder, 'diagram.html'), '<svg></svg>')
-  const ready = await list()
-  assert.equal(ready.status, 'ready')
-  assert.equal(ready.available, true)
-  assert.equal(ready.error, null)
-  assert.equal(ready.validation_error, null)
-  assert.deepEqual(ready.validation_diagnostics, [])
-})
 
 test('frozen asset items expose conditions and problems without borrowing the live asset catalog', async t => {
   const root = await fixture(t)

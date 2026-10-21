@@ -1,21 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createView, listViews, updateView, viewArtifact } from '../src/architecture-views.js'
-import { normalizeRunInput, launchArchitectureSession } from '../src/workbench-api.js'
+import { normalizeRunInput } from '../src/workbench-api.js'
 import { createRun } from '../src/pangea-api.js'
-import { TaskStore } from '../src/task-store.js'
 
 const capabilities = { repositories: ['repo'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
-test('retired Claude Code diagram execution fails before creating a DSH session or dispatching work', async () => {
-  await assert.rejects(launchArchitectureSession({ sessions: { create() { assert.fail('must not create an empty diagram session') } } },
-    { cwd: '/unused', task: { provider: 'pangea-claude-code', target: 'saved run' }, prompt: 'regenerate' },
-    { subagents: { getProvider() { assert.fail('must not load retired provider') }, start() { assert.fail('must not dispatch work') } } }, {}), /Claude Code 支持已移除/)
-})
-
 test('coverage request preserves exact query version and optional scope end to end', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'coverage-input-'))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -32,122 +23,4 @@ test('coverage request preserves exact query version and optional scope end to e
   })
   assert.equal(captured.coverage_input.query.c_version, ' VERSION A ')
   assert.deepEqual(captured.source_scope, [])
-})
-
-test('external diagram execution inherits selected model and never inspects main Run', async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'diagram-session-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
-  await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
-  await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# synthetic')
-  const ok = value => ({ result: { ok: true, value } })
-  let agentOptions, hooks, session, bound
-  const parent = { id: 'diagram-session' }
-  const api = { sessions: {
-    create: async () => ok({ sessionId: parent.id }), rename: async () => ok({}),
-    selectModel: async () => { throw new Error('external route must not select internal model') },
-  } }
-  const runtime = { agents: { get: id => id === parent.id ? parent : null },
-    subagents: { getProvider: () => ({}), start: async (_provider, input) => {
-      agentOptions = input.agentOptions
-      return { id: 'external-session', result: Promise.resolve({ stopReason: 'completed', output: [] }), dispose() {} }
-    } },
-    jobs: { start: options => { hooks = options.run(); return 'diagram-job' }, get: () => ({ startedAt: 42 }), wait: async () => ({ status: 'completed' }) },
-  }
-  const result = await launchArchitectureSession(api, { cwd: root, task: { target: 'synthetic', provider: 'pangea-opencode', agent_model: 'selected-model' }, prompt: 'Draw synthetic workflow',
-    onSession: id => { session = id }, onJob: value => { bound = value } }, runtime)
-  assert.equal(result.session_id, session)
-  assert.equal(bound.jobId, 'diagram-job')
-  assert.equal((await hooks.done).status, 'completed')
-  assert.deepEqual(agentOptions, { model: 'selected-model' })
-})
-
-test('view creation and failure keep main artifacts and previous good view unchanged', async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'archify-view-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
-  const run = path.join(root, 'runs', 'run')
-  await mkdir(path.join(run, '内部索引'), { recursive: true })
-  const original = JSON.stringify({ run_id: 'run', publication: { revision: 3 }, business_flows: [{ flow_id: 'FLOW-1', title: 'synthetic' }], risks: [], test_cases: [], evidence: [] })
-  await writeFile(path.join(run, '内部索引/工作台投影.json'), original)
-  await writeFile(path.join(run, '内部索引/运行状态.json'), 'unchanged')
-  const skill = path.join(root, 'archify')
-  await mkdir(path.join(skill, 'bin'), { recursive: true })
-  await writeFile(path.join(skill, 'SKILL.md'), '# Synthetic fixture')
-  await writeFile(path.join(skill, 'bin/archify.mjs'), '')
-  const task = { task_id: 'task', run_id: 'run', data_root: root, target: 'synthetic' }
-  const env = { PANGEA_ARCHIFY_ROOT: skill }
-  const first = await createView(task, { flow_id: 'FLOW-1' }, env)
-  const firstDir = path.join(run, '派生视图/archify', first.view.view_id)
-  await writeFile(path.join(firstDir, 'candidate.json'), '{}')
-  await writeFile(path.join(firstDir, 'diagram.html'), '<html>synthetic</html>')
-  await writeFile(path.join(firstDir, 'validation-receipt.json'), JSON.stringify({ ok: true, candidate_sha256: createHash('sha256').update('{}').digest('hex') }))
-  const second = await createView(task, { previous_view_id: first.view.view_id }, env)
-  await updateView(task, second.view.view_id, { status: 'failed', error: 'synthetic failure' })
-  const views = await listViews(task)
-  assert.equal(views.find(v => v.view_id === first.view.view_id).status, 'ready')
-  assert.equal(views.find(v => v.view_id === second.view.view_id).status, 'failed')
-  assert.equal((await viewArtifact(task, first.view.view_id, 'html')).toString(), '<html>synthetic</html>')
-  assert.equal(await readFile(path.join(run, '内部索引/工作台投影.json'), 'utf8'), original)
-  assert.equal(await readFile(path.join(run, '内部索引/运行状态.json'), 'utf8'), 'unchanged')
-  await assert.rejects(viewArtifact(task, '../run', 'html'))
-  await assert.rejects(viewArtifact({ ...task, task_id: 'other' }, first.view.view_id, 'html'), /binding/)
-})
-
-test('branch detail diagrams persist their exact scope and inherit it when revised', async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'archify-branch-scope-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
-  const run = path.join(root, 'runs/run'), skill = path.join(root, 'archify')
-  await mkdir(path.join(run, '内部索引'), { recursive: true })
-  await mkdir(path.join(skill, 'bin'), { recursive: true })
-  await writeFile(path.join(skill, 'SKILL.md'), '# Synthetic')
-  await writeFile(path.join(skill, 'bin/archify.mjs'), '')
-  const original = JSON.stringify({ business_flows: [{ flow_id: 'F1', mainline_steps: [{ step_id: 'S1' }], branches: [{ branch_id: 'B1' }, { branch_id: 'B2' }] }] })
-  await writeFile(path.join(run, '内部索引/工作台投影.json'), original)
-  const task = { task_id: 'task', run_id: 'run', data_root: root }, env = { PANGEA_ARCHIFY_ROOT: skill }
-  const first = await createView(task, { flow_id: 'F1', branch_ids: ['B2'] }, env)
-  assert.deepEqual(first.view.branch_ids, ['B2'])
-  const folder = path.join(run, '派生视图/archify', first.view.view_id)
-  const context = JSON.parse(await readFile(path.join(folder, 'context.json'), 'utf8'))
-  assert.deepEqual(context.business_flows[0].branches.map(b => b.branch_id), ['B2'])
-  assert.equal(context.business_flows[0].mainline_steps.length, 1)
-  assert.match(first.prompt, /局部分支图/)
-  await writeFile(path.join(folder, 'candidate.json'), '{}')
-  const revision = await createView(task, { flow_id: 'F1', previous_view_id: first.view.view_id }, env)
-  assert.deepEqual(revision.view.branch_ids, ['B2'])
-  assert.deepEqual((await listViews(task)).find(v => v.view_id === first.view.view_id).branch_ids, ['B2'])
-  await assert.rejects(createView(task, { flow_id: 'F1', branch_ids: ['other'] }, env), /branch scope/)
-  await assert.rejects(createView(task, { branch_ids: ['B1'] }, env), /branch scope/)
-  assert.equal(await readFile(path.join(run, '内部索引/工作台投影.json'), 'utf8'), original)
-})
-
-test('function diagrams persist their profile and flow across listing and revisions', async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'function-view-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
-  const run = path.join(root, 'runs/run'), skill = path.join(root, 'archify')
-  await mkdir(path.join(run, '内部索引'), { recursive: true })
-  await mkdir(path.join(skill, 'bin'), { recursive: true })
-  await writeFile(path.join(skill, 'SKILL.md'), '# Fixture')
-  await writeFile(path.join(skill, 'bin/archify.mjs'), '')
-  const original = JSON.stringify({ business_flows: [{ flow_id: 'F1' }, { flow_id: 'F2' }] })
-  await writeFile(path.join(run, '内部索引/工作台投影.json'), original)
-  const task = { task_id: 'task', run_id: 'run', data_root: root }, env = { PANGEA_ARCHIFY_ROOT: skill }
-  const first = await createView(task, { flow_id: 'F1', profile: 'function_variables' }, env)
-  assert.equal(first.view.profile, 'function_variables')
-  assert.equal(first.view.type, 'workflow')
-  assert.match(first.prompt, /实参到形参/)
-  assert.match(first.prompt, /待确认/)
-  assert.match(first.prompt, /相对路径与行号/)
-  const folder = path.join(run, '派生视图/archify', first.view.view_id)
-  const context = JSON.parse(await readFile(path.join(folder, 'context.json'), 'utf8'))
-  assert.equal(context.flow_locator.flow_id, 'F1')
-  assert.equal(context.business_flows, undefined)
-  await writeFile(path.join(folder, 'candidate.json'), '{"title":"fixture"}')
-  const revision = await createView(task, { flow_id: 'F1', previous_view_id: first.view.view_id }, env)
-  assert.equal(revision.view.profile, 'function_variables')
-  assert.equal((await listViews(task)).find(v => v.view_id === first.view.view_id).profile, 'function_variables')
-  await assert.rejects(createView(task, { profile: 'function_variables' }, env), /requires a flow/)
-  await assert.rejects(createView(task, { flow_id: 'F1', profile: 'unknown' }, env), /profile/)
-  await assert.rejects(createView(task, { flow_id: 'F1', profile: 'function_variables', type: 'sequence' }, env), /workflow type/)
-  await assert.rejects(createView(task, { flow_id: 'F2', previous_view_id: first.view.view_id }, env), /flow mismatch/)
-  await assert.rejects(createView(task, { flow_id: 'F1', profile: 'standard', previous_view_id: first.view.view_id }, env), /profile mismatch/)
-  assert.equal(await readFile(path.join(run, '内部索引/工作台投影.json'), 'utf8'), original)
 })

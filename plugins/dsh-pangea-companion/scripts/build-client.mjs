@@ -17,6 +17,7 @@ const SHARED = [
   ['__flowLayout', 'src/flow-graph/layout.js'],
   ['__flowRender', 'src/flow-graph/render.js'],
   ['__callGraph', 'src/call-graph.js'],
+  ['__sequenceDiagram', 'src/sequence-diagram.js'],
 ]
 
 export function inlineModule(name, code, modules) {

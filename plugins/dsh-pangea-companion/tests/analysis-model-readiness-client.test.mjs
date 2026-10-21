@@ -24,7 +24,7 @@ function nodes(node) {
 }
 function harness({ providerId = 'pangea-nga', state, storage, selectionEffects = false } = {}) {
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: providers }, 16: { type: 'create', createStep: 3 },
-    33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: providerId, agent_model: '' }, ...(state ? { 87: state } : {}) }
+    33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: providerId, agent_model: '' }, ...(state ? { 82: state } : {}) }
   let index = 0, effectDeps, cleanup, pendingEffect
   const calls = []
   const react = { ...baseReact, useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] },
@@ -71,9 +71,9 @@ test('pending discovery blocks next, wizard navigation and direct submit, then f
   assert.match(JSON.stringify(tree), /native（Agent 默认，已确认）/)
   assert.equal(button(tree, '创建并开始分析').props.disabled, false)
   const submit = button(tree, '创建并开始分析').props.onClick
-  h.states[87].status = 'loading'; submit(); await tick()
+  h.states[82].status = 'loading'; submit(); await tick()
   assert.equal(h.calls.length, 1, 'submit handler independently checks current readiness')
-  h.states[87].status = 'ready'; submit()
+  h.states[82].status = 'ready'; submit()
   assert.equal(h.calls[1].body.action, 'task-create')
   assert.equal(h.calls[1].body.input.agent_model, 'native')
   assert.equal(h.calls[1].body.input.agent_catalog_id, 'receipt-pangea-nga')
@@ -105,11 +105,11 @@ test('rapid Agent switches and workspace changes ignore late responses even when
   tree = h.render(); assert.equal(h.calls[0].signal.aborted, true)
   await h.reply(h.calls[1], catalog('pangea-codeagent'))
   await h.reply(h.calls[0], catalog('pangea-nga'))
-  tree = h.render(); assert.equal(h.states[87].provider_id, 'pangea-codeagent'); assert.equal(button(tree, '下一步 · 确认创建').props.disabled, false)
+  tree = h.render(); assert.equal(h.states[82].provider_id, 'pangea-codeagent'); assert.equal(button(tree, '下一步 · 确认创建').props.disabled, false)
   button(tree, '刷新模型').props.onClick(); h.render()
   h.setCwd('/other'); tree = h.render(); assert.equal(button(tree, '下一步 · 确认创建').props.disabled, true)
   await h.reply(h.calls[2], catalog('pangea-codeagent'))
-  assert.equal(h.states[87].cwd, '/other'); assert.equal(h.states[87].status, 'loading')
+  assert.equal(h.states[82].cwd, '/other'); assert.equal(h.states[82].status, 'loading')
   await h.reply(h.calls[3], catalog('pangea-codeagent'))
   assert.equal(button(h.render(), '下一步 · 确认创建').props.disabled, false)
   h.cleanup()

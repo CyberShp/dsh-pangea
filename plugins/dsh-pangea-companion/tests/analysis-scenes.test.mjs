@@ -6,7 +6,6 @@ import os from 'node:os'
 import { analysisOptions, SCENE_PROFILE } from '../src/analysis-scenes.js'
 import { summarizeRun, readInputMaterials } from '../src/reader.js'
 import { buildTestCaseCsv, buildTestCaseXlsx } from '../src/export.js'
-import { createView } from '../src/architecture-views.js'
 import { writeArchitectureRun } from './architecture-source-first-fixture.mjs'
 
 const json = async (file, value) => writeFile(file, JSON.stringify(value))
@@ -95,36 +94,6 @@ test('all scenes read text-only flow and export the same eight user-facing colum
   }
 })
 
-test('manual text-flow diagram captures exact records; explicit regeneration keeps old snapshot', async t => {
-  const f = await fixture(t, 'branch-analysis')
-  const archify = path.join(f.root, 'archify')
-  await mkdir(path.join(archify, 'bin'), { recursive: true })
-  await writeFile(path.join(archify, 'SKILL.md'), '# fixture')
-  await writeFile(path.join(archify, 'bin/archify.mjs'), '')
-  const env = { PANGEA_ARCHIFY_ROOT: archify }
-  const first = await createView(f.task, { flow_id: f.flowId, profile: 'function_variables' }, env)
-  const contextPath = path.join(f.run, '派生视图/archify', first.view.view_id, 'context.json')
-  const originalContext = await readFile(contextPath, 'utf8')
-  const functionContext = JSON.parse(originalContext)
-  assert.equal(functionContext.flow_locator.flow_id, f.flowId)
-  assert.equal(functionContext.flow_locator.unit_id, 'tls')
-  for (const key of ['business_flows', 'risks', 'test_cases', 'evidence', 'notes']) assert.equal(key in functionContext, false)
-  assert.equal(JSON.parse(originalContext).coverage_match.sources[0].input_revision, 'original')
-  assert.equal(JSON.parse(originalContext).coverage_match.unmatched, 1)
-  assert.equal(first.view.logical_flow_id, 'tls-main')
-  assert.equal(first.view.flow_unit_id, 'tls')
-  const old = f.result.records.find(r => r.record_id === 'flow')
-  f.result.records.push({ ...old, record_id: 'flow-fixed', supersedes: ['flow'], body: { ...old.body, text: '修正后的流程' } })
-  f.result.revision = 4
-  await json(f.resultPath, f.result)
-  const progress = JSON.parse(await readFile(path.join(f.run, 'progress.json'), 'utf8'))
-  progress.accepted_revisions[f.actionId] = 4
-  await json(path.join(f.run, 'progress.json'), progress)
-  const next = await createView(f.task, { flow_id: 'tls/flow-fixed', profile: 'function_variables', previous_view_id: first.view.view_id }, env)
-  assert.equal(next.view.logical_flow_id, 'tls-main')
-  assert.equal(next.view.source_records.find(r => r.record_id === 'flow-fixed').revision, 4)
-  assert.equal(await readFile(contextPath, 'utf8'), originalContext)
-})
 
 test('v2 Run request carries exact scene and selected asset revision through capability negotiation', async t => {
   const { createRun } = await import('../src/pangea-api.js')

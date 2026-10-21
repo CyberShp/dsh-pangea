@@ -514,7 +514,7 @@ for (const providerId of ['pangea-nga', 'pangea-opencode', 'pangea-codeagent']) 
       16: { type: 'create', createStep: 3 }, 33: form }
     const client = await loadClientExports({ ...fakeReact(), useState(initial) {
       const key = index++
-      if (key === 87) return [{ status: 'ready', cwd: '/workspace', provider_id: providerId, catalog: { catalog_id: 'receipt', provider_id: providerId, models: [{ id: 'wire/selected', label: 'Selected' }] } }, () => {}]
+      if (key === 82) return [{ status: 'ready', cwd: '/workspace', provider_id: providerId, catalog: { catalog_id: 'receipt', provider_id: providerId, models: [{ id: 'wire/selected', label: 'Selected' }] } }, () => {}]
       return [Object.hasOwn(states, key) ? states[key] : initial, value => { if (key === 33) changed = typeof value === 'function' ? value(form) : value }]
     } })
     const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
@@ -1446,8 +1446,7 @@ test('dense flow reader pages branches, focuses a step and keeps search, destina
     { branch_id: 'B32', from_step_id: 'missing', condition: '来源待确认' },
   ] }
   const current = { run_id: 'run', data_root: '/data', details: { business_flows: [flow], test_cases: [{ test_case_id: 'TC1', title: '验收' }] } }
-  // Experimental Archify export is enabled here; the flag-off path is covered below.
-  const states = { 0: { current }, 1: { tasks: { items: [task] }, archify_experimental: true }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
+  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
   let index = 0
   const requests = []
   const openedSessions = []
@@ -1457,7 +1456,7 @@ test('dense flow reader pages branches, focuses a step and keeps search, destina
     return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
   } }, async (_url, options) => {
     requests.push(JSON.parse(options.body))
-    return { ok: true, async json() { return { status: 'ok', views: [], session_id: requests.at(-1).action === 'architecture-create' ? 'diagram-session' : undefined } } }
+    return { ok: true, async json() { return { status: 'ok', views: [] } } }
   })
   const pages = [], ctx = { sessions: { open(id) { openedSessions.push(id) } }, pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
@@ -1486,20 +1485,19 @@ test('dense flow reader pages branches, focuses a step and keeps search, destina
   assert.equal(rows().length, 3)
   assert.ok(rows().every(node => Number(node.props['aria-label'].match(/B(\d+)/)[1]) % 2 === 1))
   await find('绘制本页分支').props.onClick()
-  const drawing = requests.find(request => request.action === 'architecture-create')
-  assert.ok(drawing)
-  assert.equal(drawing.flow_id, 'F1')
-  assert.match(drawing.instruction, /B25、B27、B29/)
-  assert.match(drawing.instruction, /本页 3 条.*筛选结果 15 条/)
-  assert.doesNotMatch(drawing.instruction, /B1、/)
-  assert.equal(openedSessions.length, 0, 'background drawing must keep the user in the flow page')
+  assert.equal(requests.length, 0, 'drawing a branch page must not request an Agent or historical diagrams')
+  const graph = render().find(node => node.type?.name === 'FlowGraphView')
+  assert.ok(graph)
+  assert.equal(graph.props.flow, flow)
+  assert.deepEqual(Array.from(graph.props.highlightBranchIds), ['B25', 'B27', 'B29'])
+  assert.equal(openedSessions.length, 0, 'local drawing must keep the current conversation')
   assert.equal(rows().length, 0)
-  assert.ok(render().some(node => node.type === 'nav' && node.props['aria-label'] === '图表类型'))
+  assert.equal(find('流程图视图').props['aria-pressed'], true)
   find('流程阅读视图').props.onClick()
   assert.equal(rows().length, 3)
 })
 
-test('flow page draws natively when experimental export is off and orders main, attached and unparseable flows', async () => {
+test('flow page draws natively and orders main, attached and unparseable flows', async () => {
   const task = { task_id: 'task', run_id: 'run', data_root: '/data', target: 'native', status: 'complete' }
   const sub = { flow_id: 'U/F2', title: '重试子流程', role: 'sub', attach_to: { flow_id: 'F1', node_id: 'S1' }, mainline_steps: [{ step_id: 'R1', title: '重试' }], branches: [] }
   const main = { flow_id: 'U/F1', title: '请求主流程', role: 'main', description: '校验后持久化请求。', source_evidence: ['src/request.c:10'], attach_to: null, structure_errors: ["edges[0].target_step_key='X' 不是节点 id；可用 id：S1, S2"],
@@ -1699,7 +1697,7 @@ test('new analysis binds no Run while preparing and registers the analysis desti
   const task = { provider: 'external', task_id: 'new-task', title: 'New analysis', run_id: null, data_root: '/data', status: 'preparing' }
   const workbench = { compatibility: { compatible: true }, tasks: { items: [] }, acp_providers: [{ id: 'external', registered: true }] }
   const states = { 1: workbench, 4: 'previous-run', 16: { type: 'create', createStep: 4 }, 33: { repository: 'repo', target: 'synthetic', source_scope_text: 'request.c', asset_ids: [], scenario: 'module-analysis', mode: 'speed', provider_id: 'external', model_route_key: '', agent_model: 'selected' } }
-  states[87] = { cwd: '/workspace', provider_id: 'external', status: 'ready', catalog: { catalog_id: 'receipt', provider_id: 'external', models: [{ id: 'selected', label: 'Selected' }] } }
+  states[82] = { cwd: '/workspace', provider_id: 'external', status: 'ready', catalog: { catalog_id: 'receipt', provider_id: 'external', models: [{ id: 'selected', label: 'Selected' }] } }
   let index = 0, releaseStart, enteredStart, refreshed
   const preparing = new Promise(resolve => { enteredStart = resolve })
   const started = new Promise(resolve => { releaseStart = resolve })
@@ -2177,7 +2175,7 @@ test('create form explains the next missing requirement and enables only a ready
   states[33] = { ...states[33], repository: 'demo' }
   assert.ok(render().some(n => n.props.id === 'pangea-create-hint' && n.children.includes('请填写本次分析目标。')))
   states[33] = { ...states[33], target: 'TLS', provider_id: 'agent' }
-  states[87] = { cwd: '/workspace', provider_id: 'agent', status: 'ready', catalog: { catalog_id: 'receipt', provider_id: 'agent', current_model: 'native', models: [{ id: 'native', label: 'Native' }] } }
+  states[82] = { cwd: '/workspace', provider_id: 'agent', status: 'ready', catalog: { catalog_id: 'receipt', provider_id: 'agent', current_model: 'native', models: [{ id: 'native', label: 'Native' }] } }
   const nodes = render()
   assert.equal(nodes.find(n => n.type === 'button' && n.children.includes('创建并开始分析')).props.disabled, false)
   assert.ok(!nodes.some(n => n.props.id === 'pangea-create-hint'))
@@ -2406,61 +2404,23 @@ test('execution diagnostics stay off the analysis overview', async () => {
   assert.ok(!nodes.some(node => node.props['aria-label'] === '耗时与往返'))
 })
 
-test('flow views default to text and isolate function diagrams by flow, run and profile', async () => {
-  const task = { task_id: 'task', run_id: 'run', status: 'complete' }
-  const current = { run_id: 'run', details: { business_flows: [{ flow_id: 'F1', title: 'One' }, { flow_id: 'F2', title: 'Two' }] } }
-  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
-  const views = [
-    { view_id: 'standard', flow_id: 'F1' },
-    { view_id: 'functions', flow_id: 'F1', profile: 'function_variables' },
-    { view_id: 'other-flow', flow_id: 'F2', profile: 'function_variables' },
-    { view_id: 'other-run', flow_id: 'F1', profile: 'function_variables', run_id: 'old' },
-  ].map(v => ({ task_id: 'task', run_id: 'run', type: 'workflow', available: true, status: 'ready', ...v }))
-  const requests = []
-  let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
-    if (!Object.hasOwn(states, key)) states[key] = initial
-    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
-  } }, async (_url, options) => {
-    requests.push(JSON.parse(options.body))
-    return { ok: true, async json() { return { status: 'ok', views } } }
-  })
-  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
-  client.apply(ctx)
-  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
-  const render = () => { index = 0; return descendants(panel.type(panel.props)) }
-  const find = label => render().find(n => n.props['aria-label'] === label)
-  const button = label => render().find(n => n.type === 'button' && n.children[0] === label)
+test('flow views default to text and keep historical diagrams scoped to the current task, Run and flow', async () => {
+  const { find, render, requests } = await diagramWorkspace()
   assert.equal(find('流程阅读视图').props['aria-pressed'], true)
-  assert.ok(render().some(n => n.props['aria-label'] === '业务流程文字阅读'))
-  find('函数与变量流程图视图').props.onClick()
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(render().find(n => n.type === 'iframe').props.title, '函数与变量图预览')
-  assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=functions&/)
-  assert.equal(find('架构图类型'), undefined)
-  button('版本与修改').props.onClick()
-  assert.equal(button('生成修改版').props.disabled, true)
-  find('架构图修改要求').props.onChange({ target: { value: '标注关键变量变化' } })
-  assert.equal(button('生成修改版').props.disabled, false)
-  render().find(n => n.type === 'form' && descendants(n).some(child => child.props['aria-label'] === '架构图修改要求')).props.onSubmit({ preventDefault() {} })
-  await new Promise(resolve => setImmediate(resolve))
-  const request = requests.filter(r => r.action === 'architecture-create').at(-1)
-  assert.equal(request.profile, 'function_variables')
-  assert.equal(request.flow_id, 'F1')
-  assert.equal(request.type, 'workflow')
-  assert.equal(request.previous_view_id, 'functions')
-  assert.equal(request.instruction, '标注关键变量变化')
-  button('返回图表').props.onClick()
-  find('流程图视图').props.onClick()
-  await new Promise(resolve => setImmediate(resolve))
-  assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=standard&/)
+  assert.ok(find('业务流程文字阅读'))
+  await find('函数与变量流程图视图').props.onClick()
+  assert.equal(requests.length, 0)
+  await find('历史图表（只读）').props.onToggle({ currentTarget: { open: true } })
+  const historyVersions = () => descendants(find('历史图表版本')).filter(node => node.type === 'button')
+  assert.equal(historyVersions().length, 4, 'exclude versions from another task, Run or flow')
+  assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=functions-v2&/)
   find('流程阅读视图').props.onClick()
-  render().find(n => n.props.role === 'tab' && JSON.stringify(n).includes('Two')).props.onClick()
+  render().find(node => node.props.role === 'tab' && JSON.stringify(node).includes('Initialization')).props.onClick()
   assert.equal(find('流程阅读视图').props['aria-pressed'], true)
-  find('函数与变量流程图视图').props.onClick()
-  await new Promise(resolve => setImmediate(resolve))
-  assert.match(render().find(n => n.type === 'iframe').props.src, /view_id=other-flow&/)
+  await find('函数与变量流程图视图').props.onClick()
+  assert.equal(historyVersions().length, 1)
+  assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=functions-other-flow&/)
+  assert.equal(requests.length, 1, 'already-loaded history is filtered locally when selecting a flow')
 })
 
 async function diagramWorkspace(overrides = []) {
@@ -2477,7 +2437,8 @@ async function diagramWorkspace(overrides = []) {
   const task = { task_id: 'task', run_id: 'run', status: 'complete', title: 'CPU usage', active_conversation_id: 'analysis-session',
     conversations: [{ conversation_id: 'analysis-session', session_id: 'analysis-session', kind: 'analysis' },
       ...views.filter(view => view.session_id).map(view => ({ conversation_id: view.session_id, session_id: view.session_id, kind: 'architecture' }))] }
-  const current = { run_id: 'run', details: { business_flows: [{ flow_id: 'F1', title: 'Calculation' }, { flow_id: 'F2', title: 'Initialization' }] } }
+  const nativeFlow = JSON.parse(await readFile(new URL('./fixtures/native-flow.json', import.meta.url), 'utf8'))
+  const current = { run_id: 'run', details: { business_flows: [{ ...nativeFlow, flow_id: 'F1', title: 'Calculation' }, { flow_id: 'F2', title: 'Initialization' }] } }
   const states = { 0: { current }, 1: { compatibility: { compatible: true }, tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
   const requests = [], opened = [], registered = [], refs = [], events = []
   let index = 0, refIndex = 0, publishContext
@@ -2525,7 +2486,7 @@ async function diagramWorkspace(overrides = []) {
     publishContext()
     return events.findLast(event => event.type === 'pangea:run-context').detail
   }
-  return { render, find, context, requests, opened, registered }
+  return { render, find, context, requests, opened, registered, current }
 }
 
 test('analysis record creates a separate discussion session through the companion task route', async () => {
@@ -2539,73 +2500,56 @@ test('analysis record creates a separate discussion session through the companio
   assert.equal(workspace.context().activeConversationKind, 'assistant')
 })
 
-test('native flow view stays local while explicit historical diagram selection activates its conversation', async () => {
-  const workspace = await diagramWorkspace()
-  const { find, render, requests, opened, registered } = workspace
-  const selectedView = () => new URL(render().find(node => node.type === 'iframe').props.src, 'http://localhost').searchParams.get('view_id')
-  const versionItems = () => render().filter(node => node.props.className === 'b04-version-item')
-  const expectSession = session => {
-    assert.equal(requests.filter(request => request.action === 'task-conversation-activate').at(-1).conversation_id, session)
-    assert.equal(opened.at(-1), session)
-    assert.deepEqual(registered.at(-1), [session, 'analysis'])
+test('native flow, sequence and function tabs use the same analysis facts without fetching or activating sessions', async () => {
+  const { find, render, requests, opened, current } = await diagramWorkspace()
+  const source = JSON.stringify(current)
+  for (const [label, component] of [
+    ['流程图视图', 'FlowGraphView'], ['时序图视图', 'SequenceGraphView'], ['函数与变量流程图视图', 'FunctionVariablesView'],
+    ['流程图视图', 'FlowGraphView'],
+  ]) {
+    await find(label).props.onClick()
+    const native = render().find(node => node.type?.name === component)
+    assert.ok(native, `${label} renders a native component`)
+    assert.equal(native.props.flow, current.details.business_flows[0])
+    assert.equal(find(label).props['aria-pressed'], true)
+    assert.ok(!render().some(node => node.type === 'iframe'))
+    assert.equal(find('历史图表（只读）').props.open, undefined)
   }
-  await find('函数与变量流程图视图').props.onClick()
-  assert.equal(selectedView(), 'functions-v2')
-  expectSession('function-session-2')
-  render().find(node => node.type === 'button' && node.children.includes('版本与修改')).props.onClick()
-  assert.equal(versionItems().length, 2)
-  await versionItems()[1].props.onClick()
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(selectedView(), 'functions-v1')
-  expectSession('function-session-1')
-  const beforeNative = requests.length
-  await find('流程图视图').props.onClick()
-  assert.equal(requests.length, beforeNative, 'native flow view must neither fetch architecture-list nor activate a conversation')
-  const history = render().find(node => node.props?.['aria-label'] === '历史图表与实验导出')
-  assert.equal(history.type, 'details')
-  assert.ok(!history.props.open, 'historical scrollable previews stay collapsed behind the native graph')
-  assert.equal(selectedView(), 'archify-v1')
-  assert.equal(opened.at(-1), 'function-session-1')
-  await render().find(node => node.type === 'button' && node.children.includes('时序')).props.onClick()
-  assert.equal(selectedView(), 'archify-v2')
-  assert.ok(render().some(node => node.type === 'button' && node.children.includes('全屏')))
-  assert.ok(render().some(node => node.type === 'a' && node.children.includes('导出交互 HTML')))
-  expectSession('archify-session-2')
-  render().find(node => node.type === 'button' && node.children.includes('版本与修改')).props.onClick()
-  assert.equal(versionItems().length, 1, 'versions are scoped to the selected graph type')
-  render().find(node => node.type === 'button' && node.children.includes('返回图表')).props.onClick()
-  await find('流程图视图').props.onClick()
-  await render().find(node => node.type === 'button' && node.children.includes('业务流程') && node.props['aria-pressed'] === false).props.onClick()
-  assert.equal(selectedView(), 'archify-v1')
-  expectSession('archify-session-1')
-  await find('流程阅读视图').props.onClick()
-  render().find(node => node.props.role === 'tab' && JSON.stringify(node).includes('Initialization')).props.onClick()
-  assert.equal(find('流程阅读视图').props['aria-pressed'], true)
-  await find('函数与变量流程图视图').props.onClick()
-  assert.equal(selectedView(), 'functions-other-flow')
-  expectSession('other-flow-session')
+  assert.equal(requests.length, 0, 'tab switches must not fetch history or start a diagram job')
+  assert.equal(opened.length, 0)
+  assert.equal(JSON.stringify(current), source, 'opening diagrams preserves the authored records')
 })
 
-test('native call graphs and native flow tabs never activate a session until explicitly requested', async () => {
-  const workspace = await diagramWorkspace([{ view_id: 'functions-v2', renderer: 'call-graph', call_graph_status: 'ok',
-    call_graph: { root: 'main', functions: [{ id: 'main', kind: 'function', label: 'main' }], calls: [], variables: [] } }])
-  const { find, render, requests, opened } = workspace
-  await find('流程图视图').props.onClick()
-  assert.equal(requests.length, 0)
-  assert.equal(opened.length, 0)
+test('history loads only on explicit expansion and selecting versions never activates a conversation', async () => {
+  const { find, render, requests, opened, registered, context } = await diagramWorkspace()
+  const selectedView = () => new URL(render().find(node => node.type === 'iframe').props.src, 'http://localhost').searchParams.get('view_id')
+  const versions = () => descendants(find('历史图表版本')).filter(node => node.type === 'button')
   await find('函数与变量流程图视图').props.onClick()
-  assert.ok(render().some(node => node.type?.name === 'CallGraphView'))
-  assert.equal(render().filter(node => node.props.className === 'b04-canvas').length, 0, 'native SVG owns its only viewport')
-  assert.equal(requests.filter(request => request.action === 'task-conversation-activate').length, 0)
+  await find('历史图表（只读）').props.onToggle({ currentTarget: { open: false } })
+  assert.equal(requests.length, 0)
+  await find('历史图表（只读）').props.onToggle({ currentTarget: { open: true } })
+  assert.deepEqual(requests.map(request => request.action), ['architecture-list'])
+  assert.equal(selectedView(), 'functions-v2')
+  await versions()[1].props.onClick()
+  assert.equal(selectedView(), 'functions-v1')
   assert.equal(opened.length, 0)
-  const selected = render().find(node => node.type === 'button' && node.children.includes('查看图表会话'))
-  assert.ok(selected)
-  await selected.props.onClick()
-  assert.equal(opened.at(-1), 'function-session-2')
-  const before = requests.length
-  await find('流程图视图').props.onClick()
-  assert.equal(requests.length, before)
-  assert.equal(opened.at(-1), 'function-session-2')
+  assert.equal(registered.length, 0)
+  assert.equal(context().activeConversationSessionId, 'analysis-session')
+  await find('时序图视图').props.onClick()
+  assert.equal(selectedView(), 'functions-v1', 'changing the native tab preserves the chosen historical record')
+  await find('历史图表（只读）').props.onToggle({ currentTarget: { open: true } })
+  assert.equal(requests.length, 1, 'reopening loaded history does not fetch it again')
+  const viewSession = render().find(node => node.type === 'button' && node.children.includes('查看历史图表会话'))
+  await viewSession.props.onClick()
+  assert.equal(requests.at(-1).action, 'task-conversation-activate')
+  assert.equal(requests.at(-1).conversation_id, 'function-session-1')
+  assert.deepEqual(opened, ['function-session-1'])
+  assert.deepEqual(registered, [['function-session-1', 'analysis']])
+  assert.equal(context().activeConversationSessionId, 'function-session-1')
+  assert.equal(context().phase, '历史图表记录')
+  const downloads = descendants(find('历史图表记录')).filter(node => node.type === 'a' && node.props.download)
+  assert.equal(downloads.length, 2)
+  assert.ok(downloads.every(node => node.props.href.includes('view_id=functions-v1&')))
 })
 
 test('historical flows show the first flow by default and tabs select one flow at a time', async () => {
@@ -2617,18 +2561,17 @@ test('historical flows show the first flow by default and tabs select one flow a
   assert.deepEqual(cards().map(node => node.props['data-flow-id']), ['F2'])
 })
 
-test('right-panel diagram conversation selection updates the left flow, profile and version', async () => {
+test('explicit right-panel historical conversation selection locates its flow and saved version', async () => {
   const { find, render, context, opened } = await diagramWorkspace()
   await find('函数与变量流程图视图').props.onClick()
+  await find('历史图表（只读）').props.onToggle({ currentTarget: { open: true } })
   await context().onSelectConversation('archify-session-2')
   assert.equal(find('时序图视图').props['aria-pressed'], true)
   assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=archify-v2&/)
-  assert.ok(render().some(node => node.props['aria-label'] === '时序图工作区'))
+  assert.ok(render().some(node => node.type?.name === 'SequenceGraphView'))
   await context().onSelectConversation('archify-session-1')
   assert.equal(find('流程图视图').props['aria-pressed'], true)
   assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=archify-v1&/)
-  assert.equal(render().find(node => node.type === 'button' && node.children.includes('业务流程')).props['aria-pressed'], true)
-  assert.equal(render().find(node => node.type === 'iframe').props.title, '业务流程图预览')
   assert.equal(opened.at(-1), 'archify-session-1')
   await context().onSelectConversation('other-flow-session')
   assert.match(JSON.stringify(render().find(node => node.props.className === 'b04-modebar')), /Initialization/)
@@ -2640,38 +2583,20 @@ test('right-panel diagram conversation selection updates the left flow, profile 
   assert.equal(context().activeConversationSessionId, 'function-session-1')
 })
 
-test('a diagram still generating after layout validation shows repair progress in both panels', async () => {
-  const validationError = 'node_overflow: label extends past the viewport'
-  const { find, render, context } = await diagramWorkspace([{ view_id: 'functions-v2', available: false,
-    status: 'generating', execution_status: 'running', validation_error: validationError }])
-  await find('函数与变量流程图视图').props.onClick()
-  const workspace = find('函数与变量图工作区')
-  const nodes = descendants(workspace)
-  const progress = nodes.find(node => node.props.className === 'b04-progress-art')
-  assert.ok(progress)
-  assert.match(JSON.stringify(workspace), /正在修正布局/)
-  assert.match(JSON.stringify(progress), /后台进行/)
-  assert.ok(!nodes.some(node => node.props.role === 'alert'))
-  assert.ok(!render().some(node => node.type === 'iframe'))
-  const diagnostics = nodes.find(node => node.props.className === 'b04-progress-log')
-  assert.ok(diagnostics)
-  assert.equal(context().phase, '正在修正布局')
-  assert.equal(context().process.status, 'running')
-  assert.ok(nodes.some(node => node.type === 'button' && node.children.includes('停止生成')))
-})
-
-test('a terminal diagram failure remains actionable instead of showing layout repair', async () => {
-  const { find, context } = await diagramWorkspace([{ view_id: 'functions-v2', available: false,
-    status: 'failed', execution_status: 'failed', validation_error: 'node_overflow', error: 'Layout generation ended without a usable artifact' }])
-  await find('函数与变量流程图视图').props.onClick()
-  const nodes = descendants(find('函数与变量图工作区'))
-  const failure = nodes.find(node => node.props.className === 'b04-progress-art')
-  assert.ok(failure)
-  assert.match(JSON.stringify(failure), /node_overflow/)
-  assert.doesNotMatch(JSON.stringify(failure), /正在修正布局/)
-  assert.ok(!nodes.some(node => node.type === 'button' && node.children.includes('停止生成')))
-  assert.equal(context().phase, '需要处理')
-  assert.equal(context().process.status, 'failed')
+test('old generating and failed diagram records remain read-only and never restart jobs', async () => {
+  for (const status of ['generating', 'failed']) {
+    const { find, render, requests, context } = await diagramWorkspace([{ view_id: 'functions-v2', available: false,
+      status, execution_status: status === 'generating' ? 'running' : 'failed', validation_error: 'node_overflow: saved historical diagnostic' }])
+    await find('函数与变量流程图视图').props.onClick()
+    await find('历史图表（只读）').props.onToggle({ currentTarget: { open: true } })
+    const history = find('历史图表记录')
+    assert.match(JSON.stringify(history), /node_overflow: saved historical diagnostic/)
+    assert.match(JSON.stringify(history), /此历史记录没有可预览图/)
+    assert.ok(!render().some(node => node.type === 'iframe'))
+    assert.ok(!render().some(node => node.type === 'button' && node.children.some(child => ['停止生成', '生成修改版', '验证最新候选'].includes(child))))
+    assert.equal(context().activeConversationKind, 'analysis')
+    assert.deepEqual(requests.map(request => request.action), ['architecture-list'])
+  }
 })
 
 
@@ -2702,40 +2627,46 @@ test('flow reader hides nested source evidence without changing stored records o
   assert.ok(JSON.stringify(c.renderReadableBody(body)).includes('private.c'))
 })
 
-test('renderable draft has visible warning and draft exports without claiming ready', async () => {
-  const { find, render } = await diagramWorkspace([{ view_id: 'functions-v2', available: false, status: 'failed',
+test('historical draft previews retain warnings and export the saved draft without generation controls', async () => {
+  const { find, render, requests } = await diagramWorkspace([{ view_id: 'functions-v2', available: false, status: 'failed',
     preview_available: true, preview_kind: 'draft', validation_error: 'phase overlap', validation_diagnostics: [{ code: 'workflow/phase-overlap' }] }])
   await find('函数与变量流程图视图').props.onClick()
-  const nodes = descendants(find('函数与变量图工作区'))
-  assert.match(JSON.stringify(nodes), /草稿：仍有 1 处布局问题/)
-  assert.match(render().find(n => n.type === 'iframe').props.src, /variant=draft/)
-  const exports = nodes.filter(n => n.type === 'a' && n.props.download)
-  assert.equal(exports.length, 1)
-  assert.ok(exports.every(n => n.props.href.includes('variant=draft')))
+  await find('历史图表（只读）').props.onToggle({ currentTarget: { open: true } })
+  const nodes = descendants(find('历史图表记录'))
+  assert.match(JSON.stringify(nodes), /草稿：存在未解决的布局问题/)
+  assert.match(JSON.stringify(nodes), /phase overlap/)
+  assert.match(render().find(node => node.type === 'iframe').props.src, /variant=draft/)
+  const downloads = nodes.filter(node => node.type === 'a' && node.props.download)
+  assert.equal(downloads.length, 2)
+  assert.ok(downloads.every(node => node.props.href.includes('variant=draft')))
+  assert.deepEqual(requests.map(request => request.action), ['architecture-list'])
 })
 
-test('uncompilable graph shows readable relationships without an empty iframe', async () => {
+test('historical records without previews retain candidate relationships and diagnostics', async () => {
   const { find, render } = await diagramWorkspace([{ view_id: 'functions-v2', available: false, status: 'failed',
     preview_available: false, candidate_summary: { nodes: [{ id: 'caller', label: 'caller' }], edges: [{ from: 'caller', to: 'missing' }] },
     validation_error: 'missing reference' }])
   await find('函数与变量流程图视图').props.onClick()
-  assert.ok(!render().some(n => n.type === 'iframe'))
-  const text = JSON.stringify(find('函数与变量图工作区'))
-  assert.match(text, /图表未能生成/)
+  await find('历史图表（只读）').props.onToggle({ currentTarget: { open: true } })
+  assert.ok(!render().some(node => node.type === 'iframe'))
+  const text = JSON.stringify(find('历史图表记录'))
+  assert.match(text, /此历史记录没有可预览图/)
   assert.match(text, /caller/)
-  assert.match(text, /missing/)
+  assert.match(text, /missing reference/)
 })
 
-test('unverified latest edits retain a labelled previous preview and local verification action', async () => {
-  const { find, render } = await diagramWorkspace([{ view_id: 'functions-v2', available: false, status: 'failed',
+test('unverified historical candidates preserve the last saved preview without offering verification or repair', async () => {
+  const { find, render, requests } = await diagramWorkspace([{ view_id: 'functions-v2', available: false, status: 'failed',
     preview_available: true, preview_kind: 'verified', candidate_unverified: true }])
   await find('函数与变量流程图视图').props.onClick()
-  assert.match(JSON.stringify(find('函数与变量图工作区')), /当前预览对应上次验证的候选/)
-  assert.ok(render().some(n => n.type === 'button' && n.children.includes('验证最新候选')))
-  assert.match(render().find(n => n.type === 'iframe').props.src, /variant=verified/)
-  render().find(n => n.type === 'button' && n.children.includes('版本与修改')).props.onClick()
-  await render().filter(n => n.props.className === 'b04-version-item')[1].props.onClick()
-  assert.match(JSON.stringify(find('函数与变量图工作区')), /历史版本：最新版本请在版本与修改中选择/)
+  await find('历史图表（只读）').props.onToggle({ currentTarget: { open: true } })
+  assert.match(JSON.stringify(find('历史图表记录')), /最新候选未验证；预览保留上次已保存版本/)
+  assert.ok(!render().some(node => node.type === 'button' && node.children.includes('验证最新候选')))
+  assert.match(render().find(node => node.type === 'iframe').props.src, /variant=verified/)
+  const versions = descendants(find('历史图表版本')).filter(node => node.type === 'button')
+  await versions[1].props.onClick()
+  assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=functions-v1&/)
+  assert.deepEqual(requests.map(request => request.action), ['architecture-list'])
 })
 
 test('legacy reader publication exposes collections and its Markdown report', async () => {
@@ -2965,31 +2896,22 @@ test('graph text follows explicit edges despite node ordering, flattened mainlin
 })
 
 
-test('sequence has a direct flow tab and create action with the experimental flag disabled', async () => {
-  const task = { task_id: 'task', run_id: 'run', status: 'complete' }
-  const current = { run_id: 'run', details: { business_flows: [{ flow_id: 'F1', title: 'Receive' }] } }
-  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'flows' } }
-  const requests = []
-  let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
-    const key = index++
-    if (!Object.hasOwn(states, key)) states[key] = initial
-    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
-  } }, async (_url, options) => {
-    requests.push(JSON.parse(options.body))
-    return { ok: true, async json() { return { status: 'ok', views: [], archify_experimental: false } } }
-  })
-  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
-  client.apply(ctx)
-  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
-  const render = () => { index = 0; return descendants(panel.type(panel.props)) }
-  await render().find(n => n.props['aria-label'] === '时序图视图').props.onClick()
-  assert.ok(render().some(n => n.props['aria-label'] === '时序图工作区'))
-  assert.ok(!render().some(n => n.props['aria-label'] === '图表类型'), 'sequence tab must not expose experimental diagram types')
-  render().find(n => n.type === 'button' && n.children.includes('生成时序图')).props.onClick()
-  await new Promise(resolve => setImmediate(resolve))
-  const request = requests.find(r => r.action === 'architecture-create')
-  assert.equal(request.type, 'sequence')
-  assert.equal(request.flow_id, 'F1')
-  assert.equal(request.profile, 'standard')
+test('flows without sequence or function facts explain missing data and offer no diagram generation actions', async () => {
+  const { find, render, requests, opened } = await diagramWorkspace()
+  render().find(node => node.props.role === 'tab' && JSON.stringify(node).includes('Initialization')).props.onClick()
+  const client = await loadClientExports()
+  for (const [label, component, missing] of [
+    ['时序图视图', 'SequenceGraphView', /本次分析未提供时序交互数据/],
+    ['函数与变量流程图视图', 'FunctionVariablesView', /本次分析未提供函数与变量关系数据/],
+  ]) {
+    await find(label).props.onClick()
+    const native = render().find(node => node.type?.name === component)
+    assert.ok(native)
+    const nodes = descendants(client[component](native.props))
+    assert.match(JSON.stringify(nodes), missing)
+    assert.ok(!nodes.some(node => node.type === 'svg'))
+    assert.ok(!render().some(node => node.type === 'button' && node.children.some(child => /^生成|修图|重试生成/.test(String(child)))))
+  }
+  assert.equal(requests.length, 0)
+  assert.equal(opened.length, 0)
 })

@@ -1,12 +1,11 @@
 import { inspectSourceFirstAcpRecovery, sourceFirstAcpUpdateBusy, stopSourceFirstAcpRun } from './source-first-acp.js'
 import { companionUpdateBusy, registerUpdateParticipant } from './update-admission.js'
-import { nativeDiagramUpdateBusy } from './workbench-api.js'
 import { AgentSessionStore } from './agent-sessions.js'
 import { runtimeObservation } from './runtime-observation.js'
 import { inspectSourceFirstChildren, interruptSourceFirstChildren } from './report-policy.js'
 import { processPresence } from './acp-recovery.js'
 import { randomUUID } from 'node:crypto'
-import { archifyExperimental, createView, listViews, loadView, updateView, viewArtifact, recordViewEvent, inspectView, validateView, cancelViewRender } from './architecture-views.js'
+import { listViews, viewArtifact } from './architecture-views.js'
 import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
@@ -24,7 +23,7 @@ import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, launchArchitectureSession, isNativeDiagramRunning, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 
 export const name = 'dsh-pangea-companion'
@@ -1061,7 +1060,6 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         selected_task_id: selectedTask?.task_id ?? null,
         acp_job: acpJob,
         launch_log: launchLog,
-        archify_experimental: archifyExperimental(),
       })
     }
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
@@ -1119,78 +1117,10 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
       if (!task.run_id) throw new Error('任务尚未关联 Run')
       if (body.action === 'architecture-list') {
-        const views = await listViews(task)
-        for (const view of views.filter(v => ['generating', 'ready'].includes(v.status) || ['starting', 'running', 'stopping'].includes(v.execution_status))) {
-          if (view.available && !view.job_id) continue
-          if (view.job_id) {
-            const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)
-            const jobs = runtimeService(runtime, 'jobs')
-            let job
-            try { job = owner ? jobs?.get?.(view.job_id, owner) : null } catch { job = null }
-            if (job?.startedAt === view.job_started_at) {
-              let output = view.output ?? ''
-              try { output = jobs.read(view.job_id, owner)?.text?.slice(-12000) || output } catch { /* Retain last captured output. */ }
-              const changed = output !== (view.output ?? '')
-              const changes = { execution_status: job.status, output,
-                ...(view.available ? { error: null } : {}),
-                ...(changed ? { last_activity_at: new Date().toISOString() } : {}) }
-              if (changed || view.execution_status !== job.status) Object.assign(view, await updateView(task, view.view_id, changes), { status: view.status })
-            }
-            if (view.available) continue
-            if (!job || job.startedAt !== view.job_started_at || ['failed', 'killed', 'completed'].includes(job.status)) {
-              Object.assign(view, await updateView(task, view.view_id, { status: !job || job.startedAt !== view.job_started_at ? 'interrupted' : job.status === 'killed' ? 'stopped' : 'failed', execution_status: job?.status ?? 'interrupted', error: !job ? view.error || '执行状态不可确认：画图 Job 已不可读取。已保留会话和输出。' : view.error || job.detail || view.validation_error || '画图执行已结束，尚无验证通过的产物。' }))
-            }
-          } else if (view.session_id && !isNativeDiagramRunning(view.session_id)) {
-            Object.assign(view, await updateView(task, view.view_id, { status: 'interrupted', error: '画图宿主已结束或重启；候选和已有产物保留，可本地验证最新候选。' }))
-          }
-        }
-        return json(res, 200, { status: 'ok', views, archify_experimental: archifyExperimental() })
+        return json(res, 200, { status: 'ok', views: await listViews(task), read_only: true })
       }
-      if (body.action === 'architecture-create') {
-        if (task.provider) acpProviderOption(task.provider)
-        if (!archifyExperimental()) {
-          const previous = body.previous_view_id ? await loadView(task, body.previous_view_id) : null
-          const profile = body.profile ?? (previous ? previous.profile ?? 'standard' : 'standard')
-          if (profile !== 'function_variables' && (body.type ?? previous?.type) !== 'sequence') throw new Error('精美导出（实验）未开启：设置 PANGEA_ARCHIFY_EXPERIMENTAL=1 后可用')
-        }
-        const prepared = await createView(task, { type: body.type, flow_id: body.flow_id, previous_view_id: body.previous_view_id, branch_ids: body.branch_ids, profile: body.profile })
-        try {
-          const launched = await launchArchitectureSession(api, { cwd, task, prompt: prepared.prompt + (body.instruction ? `\n用户修改要求：${body.instruction}` : ''),
-            budgetMs: prepared.view.budget_ms,
-            inspect: options => validateView(task, prepared.view.view_id, options),
-            check: () => inspectView(task, prepared.view.view_id),
-            onEvent: event => recordViewEvent(task, prepared.view.view_id, event),
-            onSession: async sessionId => {
-              await updateView(task, prepared.view.view_id, { session_id: sessionId })
-              await tasks.addConversation(task.task_id, { sessionId, title: `架构视图 · ${task.target}`, kind: 'architecture', activate: false })
-            },
-            onJob: details => updateView(task, prepared.view.view_id, { job_id: details.jobId, job_started_at: details.jobStartedAt, owner_session_id: details.ownerSessionId }),
-          }, runtime)
-          return json(res, 200, { status: 'ok', ...launched, view: await loadView(task, prepared.view.view_id) })
-        } catch (error) {
-          await updateView(task, prepared.view.view_id, { status: 'failed', error: error.message })
-          throw error
-        }
-      }
-      if (body.action === 'architecture-validate') {
-        const view = await loadView(task, body.view_id)
-        if (view.status === 'generating' || ['starting', 'running', 'stopping'].includes(view.execution_status)) throw new Error('请等待当前图表执行结束后验证最新候选')
-        const receipt = await validateView(task, body.view_id, { manual: true })
-        return json(res, 200, { status: 'ok', receipt, views: await listViews(task) })
-      }
-      if (body.action === 'architecture-stop') {
-        cancelViewRender(task, body.view_id)
-        const view = await loadView(task, body.view_id)
-        if (view.job_id) {
-          const owner = runtimeService(runtime, 'agents')?.get?.(view.owner_session_id)
-          if (!owner) throw new Error('图会话所有者不可用，未确认停止')
-          const jobs = runtimeService(runtime, 'jobs')
-          const job = jobs?.get?.(view.job_id, owner)
-          if (!job || job.startedAt !== view.job_started_at) throw new Error('图任务绑定不可验证')
-          await jobs.kill(view.job_id, owner)
-        }
-        if (view.session_id) apiValue(await api.sessions.cancel(rpc({ sessionId: view.session_id })))
-        return json(res, 200, { status: 'ok', view: await updateView(task, body.view_id, { status: 'stopped' }) })
+      if (['architecture-create', 'architecture-validate', 'architecture-stop'].includes(body.action)) {
+        throw new Error('独立生图已移除：流程图、时序图和函数与变量图使用分析 Agent 随流程记录提供的结构化内容，历史图仅供查看。')
       }
       throw new Error('Unknown architecture action')
     }
@@ -1809,7 +1739,7 @@ export function apply(ctx) {
   const ssh = new PangeaSshRuntime(environments)
   registerUpdateParticipant(ctx, 'companion', () => companionUpdateBusy({
     operations: taskOperationState(tasks), launchLocks, sourceFirstBusy: sourceFirstAcpUpdateBusy,
-    nativeDiagramBusy: nativeDiagramUpdateBusy, ssh,
+    ssh,
   }))
 
   const toolDisposers = [ctx.tools.register({

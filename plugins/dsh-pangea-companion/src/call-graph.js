@@ -30,33 +30,14 @@ function stringList(value, where, errors, allowString = false) {
   })
 }
 
-/** Empty skeleton seeded into candidate.json. */
-export function callGraphSkeleton(title = '', root = '') {
+/** Empty result used when an Agent record cannot be parsed. */
+function callGraphSkeleton(title = '', root = '') {
   return { format_version: CALL_GRAPH_FORMAT, title, root, functions: [], calls: [], variables: [], notes: [] }
 }
 
-export const CALL_GRAPH_EXAMPLE = {
-  format_version: CALL_GRAPH_FORMAT,
-  title: '登录请求处理',
-  root: 'login_handler',
-  functions: [
-    { id: 'login_handler', kind: 'function', label: 'login_handler', signature: 'int login_handler(req_t *req)', file: 'src/login.c', line: 20 },
-    { id: 'check_password', kind: 'function', label: 'check_password', signature: 'bool check_password(const char *user, const char *pw)', file: 'src/auth.c', line: 41 },
-    { id: 'MAX_RETRY', kind: 'macro', label: 'MAX_RETRY', signature: '#define MAX_RETRY 5', file: 'src/auth.h', line: 8 },
-    { id: 'strcmp', kind: 'external', label: 'strcmp', signature: '', file: '', line: null },
-  ],
-  calls: [
-    { from: 'login_handler', to: 'check_password', file: 'src/login.c', line: 33, args: ['user', 'pw'], returns: 'ok' },
-    { from: 'check_password', to: 'strcmp', file: 'src/auth.c', line: 47, args: ['hash', 'stored'], returns: '' },
-  ],
-  variables: [
-    { function: 'login_handler', name: 'ok', reads: ['user', 'pw'], compute: 'check_password(user, pw)', writes: 'ok', line: 33 },
-  ],
-  notes: [],
-}
 
 /**
- * Validate a call-graph-v1 candidate.
+ * Normalize and validate a call-graph-v1 analysis record.
  * @returns {{status:'ok'|'partial'|'invalid', errors:string[], graph:object}}
  */
 export function validateCallGraph(input) {
@@ -126,17 +107,6 @@ export function validateCallGraph(input) {
     notes: stringList(value.notes, 'notes', errors) }
   const status = !functions.length ? 'invalid' : errors.length ? 'partial' : 'ok'
   return { status, errors, graph }
-}
-
-/** Repair instructions handed back to the model when validation finds errors. */
-export function callGraphRepairPrompt(errors, candidatePath = 'candidate.json') {
-  if (!errors?.length) return ''
-  return [
-    `${candidatePath} 的 call-graph-v1 结构有以下问题，请只修改该文件：`,
-    ...errors.slice(0, 40).map(error => `- ${error}`),
-    errors.length > 40 ? `- 另有 ${errors.length - 40} 条同类问题` : '',
-    '规则：calls 的 from/to 与 variables 的 function 必须是 functions 中已有的 id；不要删除已正确的内容；不要自行运行校验。',
-  ].filter(Boolean).join('\n')
 }
 
 /** Variable flow helper: call indexes whose args/returns mention a variable. */

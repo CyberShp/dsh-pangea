@@ -2,7 +2,6 @@ import { requireAgentModel, requireExternalAnalysisProvider } from './agent-mode
 import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import path from 'node:path'
 import { readFile, readdir, stat } from 'node:fs/promises'
-import { createDiagramRun } from './diagram-acp.js'
 import { attentionRequiredOutcome } from './acp-outcome.js'
 import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
 import { createSourceFirstAcpRun } from './source-first-acp.js'
@@ -1085,78 +1084,3 @@ export async function resumeAnalysisRun({ cwd, dataRoot, runId, runner = runPang
 }
 
 export { dataRootFor }
-
-const nativeDiagramSessions = new Set()
-export const isNativeDiagramRunning = sessionId => nativeDiagramSessions.has(sessionId)
-export const nativeDiagramUpdateBusy = () => nativeDiagramSessions.size > 0
-
-// Derived sessions have no dependency on the main Run's completion state.
-export async function launchArchitectureSession(api, { cwd, task, prompt, onSession, onJob, inspect, check, budgetMs = 1200000, onEvent = async () => {} }, runtime, env = process.env) {
-  const provider = task.provider
-  if (provider && !acpProviderOption(provider, env)) throw new Error(`未知的 ACP 执行 Agent：${provider}`)
-  const model = provider ? null : await requireInternalModel(api, task.model_route)
-  const sessionId = await createDshSession(api, workspaceRoot(cwd), `架构视图 · ${task.target}`)
-  if (!provider) apiValue(await api.sessions.selectModel(rpc({ sessionId, provider: model.provider, model: model.model,
-    ...(model.reasoning_effort ? { reasoningEffort: model.reasoning_effort } : {}) })))
-  if (!provider) nativeDiagramSessions.add(sessionId)
-  try { await onSession(sessionId) } catch (error) { nativeDiagramSessions.delete(sessionId); throw error }
-  if (provider) {
-    const parent = runtimeService(runtime, 'agents')?.get?.(sessionId)
-    const jobId = await startAcpJob(runtime, parent, provider, prompt, `架构视图 · ${task.target}`, onEvent, {
-      onTurnEvent: onEvent,
-      startRun: ({ subagents, parent, signal }) => createDiagramRun({ subagents, parent, signal, provider, prompt, agentModel: task.agent_model, onEvent, inspect, budgetMs }),
-      onJobCreated: async details => {
-        await onJob(details)
-        // The view consumes completion. Register before releasing ACP startup so
-        // tool-jobs cannot wake this owner as an unconfigured internal API Agent.
-        // Jobs requires a finite timeout; its waiter releases on actual settlement.
-        void runtimeService(runtime, 'jobs').wait(details.jobId, 2_147_483_647, parent)
-      },
-    }, task.agent_model)
-    return { session_id: sessionId, job_id: jobId }
-  }
-  const controller = new AbortController()
-  const deadline = setTimeout(() => controller.abort(new Error('图表生成达到执行预算')), budgetMs)
-  deadline.unref?.()
-  const submit = text => api.sessions.prompt(rpc({ sessionId, mode: 'queue', content: [{ type: 'text', text }] })).then(apiValue)
-  try { await submit(prompt) } catch (error) { clearTimeout(deadline); nativeDiagramSessions.delete(sessionId); throw error }
-  // Native sessions expose turn completion through history; the host owns all three candidates.
-  void (async () => {
-    let previousEnd = null
-    try {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        for (;;) {
-          controller.signal.throwIfAborted()
-          const state = await check?.()
-          if (state?.terminal) return
-          const history = apiValue(await api.sessions.history(rpc({ sessionId, maxMessages: 12 })))
-          const event = [...(history?.events ?? [])].reverse().find(item => {
-            const value = item.event ?? item
-            return ['turn/start', 'turn/end'].includes(value.type ?? value.name)
-          })
-          const value = event?.event ?? event
-          const identity = JSON.stringify(event)
-          if ((value?.type ?? value?.name) === 'turn/end' && identity !== previousEnd) {
-            const reason = value.data?.reason
-            if (reason?.kind !== 'completed') throw new Error(`图表回合未正常结束：${reason?.kind || 'unknown'}${reason?.message ? ` · ${reason.message}` : ''}`)
-            previousEnd = identity
-            break
-          }
-          await new Promise(resolve => { const timer = setTimeout(resolve, 1000); timer.unref?.() })
-        }
-        const receipt = await inspect?.({ signal: controller.signal, attempt })
-        // A partial call graph is delivered but still gets repair rounds while they remain.
-        if ((receipt?.ok && (!receipt.repairable || attempt === 3)) || receipt?.terminal) return
-        if (attempt === 3 || receipt?.attempts_exhausted) throw new Error(receipt?.error || '三个候选均未通过校验')
-        if ((await check?.())?.terminal) return
-        controller.signal.throwIfAborted()
-        await submit(receipt?.repair_prompt ? `${receipt.repair_prompt}
-修正后结束本回合，由宿主验证。` : '读取 validation-receipt.json 的精确诊断，仅修正 candidate.json 后结束本回合。由宿主验证，不自行调用渲染命令。')
-      }
-    } catch (error) {
-      await api.sessions.cancel(rpc({ sessionId })).catch(() => {})
-      await onEvent({ stage: 'diagram_failed', status: 'error', terminal: true, error: error.message })
-    } finally { clearTimeout(deadline); nativeDiagramSessions.delete(sessionId) }
-  })()
-  return { session_id: sessionId, job_id: null }
-}

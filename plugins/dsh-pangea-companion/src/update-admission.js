@@ -33,7 +33,7 @@ export function guardUpdateMethods(ctx, target, methods, { synchronous = false }
   }
 }
 
-export function companionUpdateBusy({ operations, launchLocks, sourceFirstBusy, nativeDiagramBusy, ssh }) {
+export function companionUpdateBusy({ operations, launchLocks, sourceFirstBusy, ssh }) {
   return Boolean(launchLocks.size || operations.launches.size || operations.stops.size || operations.deletions.size
-    || sourceFirstBusy() || nativeDiagramBusy() || [...(ssh?.jobs?.values() ?? [])].some(job => job.running))
+    || sourceFirstBusy() || [...(ssh?.jobs?.values() ?? [])].some(job => job.running))
 }

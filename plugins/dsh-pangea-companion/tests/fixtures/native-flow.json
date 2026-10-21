@@ -1,0 +1,70 @@
+{
+  "format_version": "behavior-flow-v1",
+  "flow_id": "receive-request",
+  "title": "请求接收与拒绝清理",
+  "role": "main",
+  "nodes": [
+    { "id": "receive", "kind": "entry", "label": "接收请求", "source_evidence": ["repo:receive.c:10"] },
+    { "id": "check", "kind": "branch", "label": "校验请求" },
+    { "id": "enqueue", "kind": "main", "label": "入队" },
+    { "id": "reject", "kind": "error", "label": "返回拒绝并清理资源" },
+    { "id": "finish", "kind": "exit", "label": "处理结束" }
+  ],
+  "edges": [
+    { "source_step_key": "receive", "target_step_key": "check" },
+    { "source_step_key": "check", "target_step_key": "enqueue", "condition": "请求有效" },
+    { "source_step_key": "check", "target_step_key": "reject", "condition": "请求无效" },
+    { "source_step_key": "enqueue", "target_step_key": "finish" },
+    { "source_step_key": "reject", "target_step_key": "finish" }
+  ],
+  "paths": [{ "path_id": "normal", "node_ids": ["receive", "check", "enqueue", "finish"] }],
+  "source_evidence": ["repo:receive.c:10-50"],
+  "sequence": {
+    "format_version": "sequence-v1",
+    "title": "请求接收：有效与拒绝分支",
+    "status": "ready",
+    "participants": [
+      { "id": "host", "label": "主机", "description": "发起请求" },
+      { "id": "receiver", "label": "连接接收侧", "description": "校验并派发" },
+      { "id": "queue", "label": "处理队列", "description": "接收有效请求" }
+    ],
+    "messages": [
+      { "id": "request", "from": "host", "to": "receiver", "label": "发送请求", "kind": "call", "source_evidence": ["repo:receive.c:10"] },
+      { "id": "validate", "from": "receiver", "to": "receiver", "label": "校验长度与状态", "kind": "self", "source_evidence": ["repo:receive.c:15"] },
+      { "id": "dispatch", "from": "receiver", "to": "queue", "label": "派发有效请求", "kind": "async", "source_evidence": ["repo:receive.c:20"] },
+      { "id": "ready", "from": "queue", "to": "receiver", "label": "确认接收", "kind": "return", "source_evidence": ["repo:receive.c:25"] },
+      { "id": "ack", "from": "receiver", "to": "host", "label": "返回成功", "kind": "return", "source_evidence": ["repo:receive.c:30"] },
+      { "id": "invalid", "from": "receiver", "to": "receiver", "label": "记录长度 < 下限 & 状态不合法", "kind": "self", "source_evidence": ["repo:receive.c:35"] },
+      { "id": "refuse", "from": "receiver", "to": "host", "label": "返回拒绝响应", "kind": "return", "source_evidence": ["repo:receive.c:40"] },
+      { "id": "cleanup", "from": "receiver", "to": "receiver", "label": "清理本次请求资源", "kind": "self", "source_evidence": ["repo:receive.c:45"] }
+    ],
+    "fragments": [{
+      "id": "result", "kind": "alt", "label": "请求校验结果",
+      "operands": [
+        { "condition": "请求有效", "message_ids": ["dispatch", "ready", "ack"] },
+        { "condition": "请求无效", "message_ids": ["invalid", "refuse", "cleanup"] }
+      ]
+    }],
+    "notes": ["仅表示冻结源码中已确认的交互，不表示实测耗时。"]
+  },
+  "call_graph": {
+    "format_version": "call-graph-v1",
+    "title": "接收处理函数与变量",
+    "status": "partial",
+    "root": "receive",
+    "functions": [
+      { "id": "receive", "kind": "function", "label": "receive", "signature": "int receive(request *req)", "file": "receive.c", "line": 10 },
+      { "id": "check", "kind": "function", "label": "check_request", "signature": "bool check_request(request *req)", "file": "receive.c", "line": 60 },
+      { "id": "enqueue", "kind": "function", "label": "enqueue", "signature": "int enqueue(request *req)", "file": "queue.c", "line": 12 }
+    ],
+    "calls": [
+      { "from": "receive", "to": "check", "file": "receive.c", "line": 15, "args": ["req → req"], "returns": "valid" },
+      { "from": "receive", "to": "enqueue", "file": "receive.c", "line": 20, "args": ["req → req"], "returns": "rc" }
+    ],
+    "variables": [
+      { "function": "receive", "name": "valid", "reads": ["req"], "compute": "check_request(req)", "writes": "valid", "line": 15 },
+      { "function": "receive", "name": "rc", "reads": ["req"], "compute": "enqueue(req)", "writes": "rc", "line": 20 }
+    ],
+    "notes": ["外部调用者未在当前冻结范围内，待确认。"]
+  }
+}

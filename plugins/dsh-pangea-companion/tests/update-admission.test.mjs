@@ -35,9 +35,9 @@ test('direct guards preserve standalone return values and resolve a replaced adm
   assert.equal(tracked, 1)
 })
 
-test('companion busy includes every in-flight task operation, diagram and SSH work', () => {
+test('companion busy includes every in-flight task operation and SSH work', () => {
   const state = { operations: { launches: new Map(), stops: new Map(), deletions: new Map() }, launchLocks: new Set(),
-    sourceFirstBusy: () => false, nativeDiagramBusy: () => false, ssh: { jobs: new Map() } }
+    sourceFirstBusy: () => false, ssh: { jobs: new Map() } }
   assert.equal(companionUpdateBusy(state), false)
   for (const map of Object.values(state.operations)) {
     map.set('task', {})
@@ -47,7 +47,6 @@ test('companion busy includes every in-flight task operation, diagram and SSH wo
   state.launchLocks.add('task'); assert.equal(companionUpdateBusy(state), true); state.launchLocks.clear()
   state.ssh.jobs.set('remote', { running: true }); assert.equal(companionUpdateBusy(state), true)
   state.ssh.jobs.get('remote').running = false; assert.equal(companionUpdateBusy(state), false)
-  assert.equal(companionUpdateBusy({ ...state, nativeDiagramBusy: () => true }), true)
   assert.equal(companionUpdateBusy({ ...state, sourceFirstBusy: () => true }), true)
 })
 
