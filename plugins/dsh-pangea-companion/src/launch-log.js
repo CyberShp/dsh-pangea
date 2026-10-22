@@ -88,7 +88,7 @@ function compactEvent(value = {}) {
     'remote_session_id', 'stop_reason', 'protocol_stop_reason', 'phase', 'error_summary', 'stderr_summary',
     'review_status', 'review_request_id', 'producer_session_id', 'reviewer_session_id', 'semantic_verdict',
     'diagnostic_path', 'state_path', 'agent_version', 'last_tool_id', 'last_tool_status', 'last_tool_name', 'action_id', 'unit_id', 'execution_id', 'action_stage', 'tool_kind', 'exit_signal', 'kind', 'decision',
-    'request_id', 'host_call_id', 'request_kind', 'model_request_timing', 'model_source',
+    'request_id', 'host_call_id', 'request_kind', 'prompt_kind', 'model_request_timing', 'model_source',
   ]) {
     if (typeof value[key] === 'string' && value[key].trim() !== '') event[key] = diagnosticText(value[key].trim())
   }
