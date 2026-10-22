@@ -2949,3 +2949,25 @@ test('flows without sequence or function facts explain missing data and offer no
   assert.equal(requests.length, 0)
   assert.equal(opened.length, 0)
 })
+
+
+test('native report and risk footer use frozen source count, never asset or requested-scope counts', async () => {
+  for (const screenType of ['report', 'risks']) for (const [count, materials] of [[52, []], [128, [{}, {}]], [0, [{}]], [null, [{}]]]) {
+    const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true,
+      report_available: true, artifacts: { report_md: '/data/report.md' }, source_snapshot: { file_count: count }, input_materials: materials,
+      details: { risks: [{ risk_id: 'r', title: 'Declared risk', evidence: [] }] }, workflow: { units: [], steps: [], unresolved: [] } }
+    const task = { task_id: 'task', run_id: 'run', status: 'complete', source_scope: ['src'] }
+    const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: screenType } }
+    let index = 0
+    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+    client.apply(ctx)
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    const nodes = descendants(panel.type(panel.props))
+    const section = nodes.find(node => screenType === 'report' ? node.props?.id === 'b03-report-scope' : node.props?.className === 'result-footer-note')
+    assert.ok(section, screenType)
+    const expected = count == null ? '源码文件数未记录' : screenType === 'report' ? `冻结的 ${count} 个源码文件` : `${count} 个冻结源码文件`
+    assert.ok(metricsText(section).includes(expected), metricsText(section))
+    if (count == null) assert.doesNotMatch(metricsText(section), /[01] 个(?:冻结)?源码文件/)
+  }
+})

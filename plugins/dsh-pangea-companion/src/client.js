@@ -6211,8 +6211,9 @@ window.__ModuleLoader__.load({
           ...risks.map((risk, index) => ({ key: riskKeyByItem.get(risk) ?? index, body: risk.narrative || risk.trigger || risk.residual_effect })),
           ...findingNotes.map((item, index) => ({ key: item.source_record?.record_id ?? item.record_id ?? `note-${index}`, body: findingNoteText(item) })),
         ].filter(item => hasText(item.body))
-        const inputCount = current.input_materials?.length ?? 0
-        const inputCountLabel = inputCount === 2 ? '两个' : inputCount === 1 ? '一个' : `${inputCount} 个`
+        const sourceFileCount = current.source_snapshot?.file_count
+        const sourceScopeText = Number.isInteger(sourceFileCount) && sourceFileCount >= 0
+          ? `输入为本次冻结的 ${sourceFileCount} 个源码文件。` : '本次冻结的源码文件数未记录。'
         const reportArtifact = current.artifacts?.report_html ?? current.artifacts?.report_md
         const reportArtifactTitle = current.artifacts?.report_html ? 'PANGEA report.html' : 'PANGEA report.md'
         const reportNavigation = [
@@ -6251,7 +6252,7 @@ window.__ModuleLoader__.load({
                 h('div', null, h('span', null, '测试用例'), h('strong', null, displayCount('test_cases', testCases.length)))),
               h('div', { className: 'b03-report-divider' }),
               h('section', { id: outline[0][0] }, h('h3', null, '01 / 分析范围'),
-                h('p', null, summaryText + `输入为本次冻结的${inputCountLabel}源码文件。`)),
+                h('p', null, summaryText + sourceScopeText)),
               h('section', { id: outline[1][0] }, h('h3', null, '02 / 主要发现'),
                 reportFindings.length ? h('ol', { className: 'b03-report-findings' }, reportFindings.slice(0, 5).map(item => h('li', { key: item.key }, item.body)))
                   : h('p', null, riskEnabled ? collectionEmpty('risks', '本次分析没有形成风险记录。') : '本次未启用风险分析。')),
@@ -6305,7 +6306,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => jump('overview') }, '查看分析总结'),
               h('button', { type: 'button', onClick: () => jump('flows') }, '查看业务流程')),
             h('div', { className: 'b05-metrics', style: { textAlign: 'left', gridTemplateColumns: 'repeat(3,1fr)', margin: '35px 0 0' } },
-              metric('本次源码范围', `${current?.source_snapshot?.file_count ?? selectedTask?.source_scope?.length ?? 0} 个文件`, '当前 Run 冻结输入'),
+              metric('本次源码范围', Number.isInteger(current?.source_snapshot?.file_count) && current.source_snapshot.file_count >= 0 ? `${current.source_snapshot.file_count} 个文件` : '未记录', '当前 Run 冻结输入'),
               metric('已分析单元', current?.analysis?.completed ?? 0, '逐项结论见单元总结'),
               metric('业务流程', businessFlows.length, '可继续查看路径与测试目标'))),
           h('div', { className: 'b05-detail-bottom' },
@@ -6339,7 +6340,7 @@ window.__ModuleLoader__.load({
                 h('div', null, h('strong', null, `${risk.evidence?.length ?? 0} 条源码依据`), h('small', null, risk.evidence?.[0]?.observation || '查看来源位置')),
                 h('span', { 'aria-hidden': true }, '↗'))))
           }) : h('div', { className: 'b05-card', role: collectionWarning(health, 'risks') ? 'alert' : 'status' }, collectionEmpty('risks', '没有符合条件的风险。')),
-          h('p', { className: 'result-footer-note' }, `分析记录基于本次 ${current?.source_snapshot?.file_count ?? selectedTask?.source_scope?.length ?? 0} 个冻结源码文件。风险处置与结论以完整分析原文为准。`))
+          h('p', { className: 'result-footer-note' }, `${Number.isInteger(current?.source_snapshot?.file_count) && current.source_snapshot.file_count >= 0 ? `分析记录基于本次 ${current.source_snapshot.file_count} 个冻结源码文件。` : '本次冻结的源码文件数未记录。'}风险处置与结论以完整分析原文为准。`))
       }
 
       function renderRiskDetail() {

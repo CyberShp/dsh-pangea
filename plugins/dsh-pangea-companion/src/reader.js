@@ -830,6 +830,38 @@ async function sourceFirstActionArtifacts(runDirectory, progress) {
   return { artifacts, issues, diagnostics, deliveryUnavailable }
 }
 
+// Count only explicit frozen file identities, never requested scopes or live source.
+export function frozenSourceFileCount(manifest, frozenIndex = null) {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return null
+  const groups = manifest.scope_expansion?.groups
+  if (Array.isArray(groups) && (groups.length || !Number.isInteger(manifest.file_count))) {
+    const files = new Set()
+    for (const group of groups) {
+      if (typeof group?.repo_id !== 'string' || !group.repo_id || !Array.isArray(group.code_paths)
+        || (group.context_paths != null && !Array.isArray(group.context_paths))) return null
+      for (const file of [...group.code_paths, ...(group.context_paths ?? [])]) {
+        if (typeof file !== 'string' || !file) return null
+        files.add(JSON.stringify([group.repo_id, file]))
+      }
+    }
+    return files.size
+  }
+  // Older manifests can declare a count without an expanded path catalogue.
+  if (Number.isInteger(manifest.file_count) && manifest.file_count >= 0) return manifest.file_count
+  if (Array.isArray(manifest.files)) {
+    const files = new Set()
+    for (const file of manifest.files) {
+      const relative = typeof file === 'string' ? file : file?.path
+      if (typeof relative !== 'string' || !relative) return null
+      files.add(JSON.stringify([typeof file === 'string' ? '' : file.repo_id ?? '', relative]))
+    }
+    return files.size
+  }
+  // Early source-first manifests kept their explicit file catalogue in source-index.
+  // A missing manifest never uses this compatibility path.
+  return Array.isArray(frozenIndex?.files) ? frozenSourceFileCount({ files: frozenIndex.files }) : null
+}
+
 async function sourceFirstSnapshot(runDirectory, progress, contract, actionArtifacts) {
   const manifestPath = path.join(runDirectory, 'inputs', 'source-manifest.json')
   const indexPath = path.join(runDirectory, 'inputs', 'source-index.json')
@@ -854,9 +886,7 @@ async function sourceFirstSnapshot(runDirectory, progress, contract, actionArtif
     const canonicalIndexPath = await realpath(indexPath)
     if (canonicalRecordedIndexPath !== canonicalIndexPath) issues.push('source manifest 没有指向当前 Run 的 source index')
   }
-  const fileCount = Number.isInteger(index?.file_count)
-    ? index.file_count
-    : Array.isArray(index?.files) ? index.files.length : null
+  const fileCount = frozenSourceFileCount(manifest, index)
   return {
     status: issues.length ? 'corrupt' : manifest && index ? 'manifest_verified' : 'legacy_unavailable',
     snapshot_digest: null,
