@@ -71,6 +71,44 @@ test('offline report uses current persisted contract diagnostics, including stri
   assert.match(report.html, /新冻结合同缺少 messages/)
 })
 
+test('large offline facts stay complete in the ZIP while the HTML links locally and opens with a compact summary', () => {
+  const payload = 'snapshot-only-audit-marker <raw & "原始事实"> '.repeat(2048)
+  const records = Array.from({ length: 9 }, (_, index) => ({ action_id: `analysis-${index}`, unit_id: `unit-${index}`,
+    revision: 7, records: Array.from({ length: 8 }, (_, row) => ({ record_id: `rec-${row}`, kind: 'note', body: { content: payload } })) }))
+  const run = { run_id: 'large<&>', lifecycle_status: 'complete', quality_status: 'UNRESOLVED',
+    counts: { test_cases: 103, business_flows: 20, risks: 0 }, publication: { state: 'final', revision: 8 },
+    source_first_records: records, workflow: { actions: records.map(({ action_id, revision }) => ({ action_id, accepted_revision: revision, revision })) },
+    details: { source_first_records: records, business_flows: Array.from({ length: 20 }, (_, index) => flow(`unit-${index % 9}`, `flow-${index}`)) } }
+  const originalText = '# 完整原文字报告\n正文原样保留 <details>'
+  const report = buildOfflineReport(run, { originalText }), files = entries(report.bytes)
+  assert.deepEqual(JSON.parse(files.get('facts.json')), run)
+  assert.equal(files.get('report.md'), originalText)
+  assert.equal(files.get('report.html'), report.html)
+  assert.deepEqual(JSON.parse(files.get('manifest.json')), report.manifest)
+  assert.equal(report.manifest.run_id, run.run_id)
+  assert.equal(report.manifest.publication.revision, 8)
+  assert.equal(report.manifest.published_versions.length, 9)
+  assert.equal(report.manifest.records.length, 20)
+  assert.equal([...files.keys()].filter(name => name.endsWith('.svg')).length, 60)
+  assert.equal((report.html.match(/<img\b/g) ?? []).length, 60)
+  assert.match(report.html, /href="facts\.json" target="_blank" rel="noopener"/)
+  assert.match(report.html, /打开完整快照（facts\.json）/)
+  assert.match(report.html, /浏览器中另存为/)
+  assert.doesNotMatch(report.html, /snapshot-only-audit-marker|<script\b|fetch\(/)
+  assert.ok(Buffer.byteLength(report.html) < Buffer.byteLength(files.get('facts.json')) / 2)
+  assert.ok(report.html.indexOf('id="run-summary"') < report.html.indexOf('<summary>版本与校验信息</summary>'))
+  assert.match(report.html, /Run：large&lt;&amp;&gt;/)
+  assert.match(report.html, /运行状态：complete · 质量状态：UNRESOLVED/)
+  assert.match(report.html, /用例：103 · 流程：20 · 风险：0/)
+  assert.match(report.html, /<details><summary>版本与校验信息<\/summary><pre>/)
+  assert.match(report.html, /<details><summary>原文字报告<\/summary><pre># 完整原文字报告/)
+  assert.equal((report.html.match(/<details><summary>完整流程事实与证据<\/summary>/g) ?? []).length, 20)
+  assert.doesNotMatch(report.html, /<details\s+open\b/)
+  const missing = buildOfflineReport({ run_id: 'missing', details: { business_flows: [] } })
+  assert.match(missing.html, /运行状态：未记录 · 质量状态：未记录/)
+  assert.match(missing.html, /用例：未记录 · 流程：未记录 · 风险：未记录/)
+})
+
 test('CSV bundle and XLSX append execution evidence without changing the eight-column main table or selected identities', async t => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'offline-export-')); t.after(() => rm(dataRoot, { recursive: true, force: true }))
   const items = [0, 1, 2].map(index => ({ projection_id: `u${index}/same`, unit_id: `u${index}`, display_id: 'same', title: `case${index}`, execution_readiness: 'needs_instrumentation', readiness_reason: '需要抓包', test_level: 'interface_contract', purpose: '验证边界', source_evidence: ['repo:a.c:12'], entry: '网络入口', expected_oracle: '响应长度' }))
