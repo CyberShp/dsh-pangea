@@ -30,7 +30,7 @@ function nodes(node) {
 }
 function harness({ providerId = 'pangea-nga', state, storage, selectionEffects = false } = {}) {
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: providers }, 16: { type: 'create', createStep: 3 },
-    33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: providerId, agent_model: '' }, ...(state ? { 82: state } : {}) }
+    33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], scenario: 'branch-analysis', mode: 'depth', provider_id: providerId, agent_model: '' }, ...(state ? { 82: state } : {}) }
   let index = 0, effectDeps, cleanup, pendingEffect
   const calls = []
   const react = { ...baseReact, useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); if (!(key in states)) states[key] = initial; return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }] },

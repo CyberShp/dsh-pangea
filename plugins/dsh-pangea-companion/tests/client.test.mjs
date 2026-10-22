@@ -452,12 +452,12 @@ test('stage insights expose omitted pending rows and stale state in Chinese with
   assert.equal(descendants(pendingSection).filter(node => node.type === 'article').length, 9)
 })
 
-test('module analysis queries coverage, selects partial results and removes stale selection on failed requery', async () => {
+test('branch analysis queries coverage, selects partial results and removes stale selection on failed requery', async () => {
   let index = 0, resolveQuery
-  const form = { repository: 'repo', target: 'TLS', source_scope_text: 'tls', asset_ids: ['design'], scenario: 'module-analysis', mode: 'depth',
+  const form = { repository: 'repo', target: 'TLS', source_scope_text: 'tls', asset_ids: ['design'], scenario: 'branch-analysis', mode: 'depth',
     provider_id: 'pangea-opencode', coverage_product: 'PANGEA', coverage_version: ' V600R013C00 ', coverage_module: 'nvme tcp', coverage_b_version: '' }
   const states = { 1: { data_root: '/workspace/custom-data', compatibility: { compatible: true }, capabilities: {
-    repositories: ['repo'], workflow_versions: ['source-first-v1'], coverage_query_skill: { available: true } },
+    repositories: ['repo'], workflow_versions: ['source-first-v1'], source_first: { analysis_options: { scenarios: ['branch-analysis'], modes: ['depth'] } }, coverage_query_skill: { available: true } },
     acp_providers: [{ id: 'pangea-opencode', registered: true }] }, 16: { type: 'create', createStep: 2, createView: 'coverage' }, 33: form }
   const calls = []
   const react = { ...fakeReact(), useState(initial) {
@@ -1035,6 +1035,26 @@ test('returns from a run detail to its selected Run overview', async () => {
   }), 'tasks')
 })
 
+test('new analysis offers only branch, risk and coverage even when the engine supports legacy module analysis', async () => {
+  const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'], source_first: {
+    version: 'source-first-v1', analysis_options_by_profile: { 'behavior-test-v2': {
+      scenarios: ['module-analysis', 'branch-analysis', 'risk-analysis', 'coverage-analysis'], modes: ['depth'],
+    } },
+  } }, acp_providers: [] }, 16: { type: 'create', createStep: 1 } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    return [Object.hasOwn(states, key) ? states[key] : initial, () => {}]
+  } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const scenes = descendants(panel.type(panel.props)).filter(node => node.props['data-scenario'])
+  assert.deepEqual(scenes.map(node => node.props['data-scenario']), ['branch-analysis', 'risk-analysis', 'coverage-analysis'])
+  assert.equal(scenes.find(node => node.props['aria-pressed']).props['data-scenario'], 'branch-analysis')
+  assert.ok(scenes.every(node => !node.props.disabled))
+})
+
 test('builds analysis requests with explicit scenario and mode', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported
@@ -1050,7 +1070,7 @@ test('builds analysis requests with explicit scenario and mode', async () => {
     source_scope: ['src/auth', 'src/session'], asset_ids: ['asset-1'],
     scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route: null, agent_model: 'native/selected',
   })
-  assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).scenario, 'module-analysis')
+  assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).scenario, 'branch-analysis')
   assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).mode, 'depth')
 })
 
