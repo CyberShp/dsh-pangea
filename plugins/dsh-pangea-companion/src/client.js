@@ -2087,7 +2087,7 @@ window.__ModuleLoader__.load({
         ...(form.scope_preview_id ? { scope_preview_id: form.scope_preview_id, expected_scope_revision: form.expected_scope_revision } : {}),
         source_scope: String(form.source_scope_text ?? '').split(/\r?\n/).map(value => value.trim()).filter(Boolean),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
-        scenario: form.scenario || 'module-analysis',
+        scenario: form.scenario || 'branch-analysis',
         ...(form.objective ? { objective: form.objective } : {}),
         ...(form.analysis_profile ? { analysis_profile: form.analysis_profile, asset_revisions: form.asset_revisions ?? {} } : {}),
         ...(form.analysis_profile !== 'behavior-test-v2' && form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
@@ -3020,7 +3020,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', objective: '', source_scope_text: '', asset_ids: [], scenario: 'module-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', objective: '', source_scope_text: '', asset_ids: [], scenario: 'branch-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
       React.useEffect(() => {
         if (!cwd || screen.type !== 'create') return
         try {
@@ -4940,7 +4940,7 @@ window.__ModuleLoader__.load({
         const sceneOptions = workbench?.capabilities?.source_first?.analysis_options_by_profile?.['behavior-test-v2']
         const options = semantic ? sceneOptions ?? workbench.capabilities.source_first?.analysis_options ?? { scenarios: ['module-analysis'], modes: ['depth'] } : null
         const objectiveReady = !sceneOptions?.objectives || sceneOptions.objectives.includes(createForm.objective)
-        const supported = (kind, value) => !options || options[kind]?.includes(value)
+        const supported = (kind, value) => (kind !== 'scenarios' || ['branch-analysis', 'risk-analysis', 'coverage-analysis'].includes(value)) && (!options || options[kind]?.includes(value))
         const compatible = workbench?.compatibility?.compatible === true
         const execution = analysisExecutionState(createForm, providerOptions, analysisAgentModels, cwd)
         const executionReady = execution.ready
@@ -4975,9 +4975,8 @@ window.__ModuleLoader__.load({
         const step = screen.createStep ?? 1
         const view = screen.createView ?? 'inputs'
         const scenes = {
-          'module-analysis': ['模块分析', 'ScanSearch', '业务分支、轻量风险与可选覆盖补测。', '模块流程、关键分支、轻量风险与测试用例'],
-          'risk-analysis': ['风险分析', 'ShieldAlert', '聚焦有依据的失效风险及验证用例。', '有源码依据的失效风险、触发条件与验证用例'],
           'branch-analysis': ['分支分析', 'GitBranch', '分析业务条件、配置组合、状态与操作顺序。', '业务行为清单、独立用例与参数组合及未决缺口'],
+          'risk-analysis': ['风险分析', 'ShieldAlert', '聚焦有依据的失效风险及验证用例。', '有源码依据的失效风险、触发条件与验证用例'],
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
@@ -5032,7 +5031,7 @@ window.__ModuleLoader__.load({
           pendingAssetDetails.length ? notice('正在读取资产资料', `正在按资产 ID 读取 ${pendingAssetDetails.length} 份资料的名称与输入版本。`, 'blue') : null,
           failedAssetDetails.length ? notice('资产详情读取失败', '无法确认所选资料的名称与输入版本，请重试后再继续。', 'warn', button('重试读取', retryAssetDetails, '', 'RefreshCw')) : null,
           h('div', { className: 'stack', style: { gap: 10 } }, selectedAssets.length ? selectedAssets.map(assetCard) : h('p', { className: 'create-copy' }, '未选择资产，可直接分析源码。')),
-          h('div', { className: 'divider' }), h('div', { className: 'row between' }, h('div', null, h('strong', { className: 'small' }, '覆盖率输入'), h('p', { className: 'create-copy', style: { margin: '7px 0 0' } }, '模块、风险与分支分析可按需添加覆盖率；覆盖率分析需要一份可用输入。')), button('添加覆盖率', () => go(2, 'coverage'), '', 'ChartNoAxesCombined')),
+          h('div', { className: 'divider' }), h('div', { className: 'row between' }, h('div', null, h('strong', { className: 'small' }, '覆盖率输入'), h('p', { className: 'create-copy', style: { margin: '7px 0 0' } }, '分支与风险分析可按需添加覆盖率；覆盖率分析需要一份可用输入。')), button('添加覆盖率', () => go(2, 'coverage'), '', 'ChartNoAxesCombined')),
           h('div', { className: 'callout', style: { marginTop: 20 } }, h('div', { className: 'row' }, runIcon('Info'), h('span', { className: 'small' }, `补充资料将用于约束条件与用例设计。${scene[3]}。`))), footer(() => go(1), () => go(3), '下一步 · 执行设置', !inputsReady)))
         else if (step === 2) {
           const acquisition = coverageQueryResult
