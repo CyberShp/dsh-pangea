@@ -146,6 +146,7 @@ test('keeps launch duration and source copy metrics', async () => {
     await store.append('task-metrics', {
       stage: 'skill_run_create', status: 'ok', duration_ms: 31,
       file_count: 7, total_bytes: 8192, snapshot_duration_ms: 29, prompt_chars: 100, prompt_bytes: 260,
+      prompt_kind: 'continuation',
     })
     const event = (await store.read('task-metrics')).events[0]
     assert.equal(event.duration_ms, 31)
@@ -154,6 +155,7 @@ test('keeps launch duration and source copy metrics', async () => {
     assert.equal(event.snapshot_duration_ms, 29)
     assert.equal(event.prompt_chars, 100)
     assert.equal(event.prompt_bytes, 260)
+    assert.equal(event.prompt_kind, 'continuation')
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

@@ -649,7 +649,9 @@ window.__ModuleLoader__.load({
 
     function updateStatusCopy(status) {
       if (!status) return '正在读取 Desktop 版本信息…'
-      if (status.phase === 'checking') return '正在读取并校验升级包…'
+      if (status.phase === 'up-to-date') return '当前通道已是最新版本。'
+      if (status.phase === 'checking') return status.source === 'github' ? '正在检查 GitHub 更新…' : '正在读取并校验升级包…'
+      if (status.phase === 'downloading' && status.activity === 'download') return `正在下载升级包 ${Math.round(status.percent ?? 0)}%`
       if (status.phase === 'downloading') return `正在校验升级包 ${Math.round(status.percent ?? 0)}%`
       if (status.phase === 'downloaded') return `${status.availableVersion ?? '升级包'} 已就绪`
       if (status.phase === 'install-error') return status.message ?? '升级未完成，当前版本已保留。'
@@ -674,6 +676,7 @@ window.__ModuleLoader__.load({
       const updateAvailable = typeof bridge?.getUpdateStatus === 'function'
         && typeof bridge?.importUpdatePackage === 'function'
         && typeof bridge?.installUpdate === 'function'
+      const onlineAvailable = updateAvailable && typeof bridge?.checkForUpdates === 'function'
       const [updateStatus, setUpdateStatus] = React.useState(null)
       const [busyAction, setBusyAction] = React.useState(null)
       const [helperHandoff, setHelperHandoff] = React.useState(false)
@@ -712,6 +715,19 @@ window.__ModuleLoader__.load({
       }, [bridge, updateAvailable])
 
       const openModels = (providerId, create = false) => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal', providerId: typeof providerId === 'string' ? providerId : undefined, create } }))
+      const checkOnline = async () => {
+        if (!onlineAvailable || busyAction) return
+        setBusyAction('check')
+        setActionError('')
+        try {
+          const status = await bridge.checkForUpdates()
+          if (status) setUpdateStatus(status)
+        } catch (error) {
+          setActionError(error instanceof Error ? error.message : String(error))
+        } finally {
+          setBusyAction(null)
+        }
+      }
       const importPackage = async () => {
         if (!updateAvailable || busyAction) return
         setBusyAction('import')
@@ -767,14 +783,14 @@ window.__ModuleLoader__.load({
       const updateAction = (label, action, primary = false, icon = 'ArrowRight', disabled = false) => h('button', {
         type: 'button', className: `btn ${primary ? 'primary' : ''}`,
         'data-pangea-update-action': action, disabled,
-        onClick: action === 'import' ? importPackage : action === 'refresh' ? refreshUpdateStatus : installPackage,
+        onClick: action === 'check' ? checkOnline : action === 'import' ? importPackage : action === 'refresh' ? refreshUpdateStatus : installPackage,
       }, settingsIcon(icon), label)
       const updateNotice = (title, message, tone = 'warn') => h('div', {
         className: `settings-update-notice ${tone}`, role: tone === 'danger' ? 'alert' : 'status',
       }, h('strong', null, title), h('p', null, message))
       const updatePackageFile = status => node('div', 'settings-update-file',
         settingsIcon('FileArchive'),
-        h('div', null, h('strong', null, status?.packageName ?? '本地 ZIP 升级包'), h('p', null, status?.packageType === 'patch' ? '增量补丁 · 本地导入' : '完整升级 ZIP · 本地导入')),
+        h('div', null, h('strong', null, status?.packageName ?? (status?.source === 'github' ? 'GitHub Release' : '本地 ZIP 升级包')), h('p', null, status?.source === 'github' ? '完整升级 ZIP · GitHub' : status?.packageType === 'patch' ? '增量补丁 · 本地导入' : '完整升级 ZIP · 本地导入')),
         badge(status?.packageName ? '已选择' : '正在读取'))
       const updateRoute = (status, patch = status?.packageType === 'patch', tone = 'good') => node('div', 'settings-update-route',
         node('div', '', h('p', null, tone === 'danger' ? '当前安装' : '当前版本'), h('strong', null, status?.currentVersion ?? '正在读取')),
@@ -782,20 +798,23 @@ window.__ModuleLoader__.load({
         node('div', '', h('p', null, tone === 'danger' ? '补丁要求基线' : patch ? '目标版本 · 基线' : '目标版本'), h('strong', null, tone === 'danger' ? status?.baseVersion ?? '—' : status?.availableVersion ?? '—'), patch && tone !== 'danger' && status?.baseVersion ? h('span', { className: 'settings-update-base' }, `补丁基线 ${status.baseVersion}`) : null),
         badge(patch ? tone === 'danger' ? '不匹配' : '增量补丁' : '完整升级包', tone))
       const updatePanel = () => {
+        const online = updateStatus?.source === 'github'
+        const transferring = updateStatus?.activity === 'download'
         const phase = updateStatus?.phase ?? (actionError ? 'status-error' : updateAvailable ? 'loading' : 'unsupported')
         const unpackagedEnvironment = phase === 'unsupported' && /已打包的 Windows/.test(updateStatus?.message ?? '')
         const baseMismatch = phase === 'error' && updateStatus?.packageType === 'patch' && Boolean(updateStatus.baseVersion) && updateStatus.baseVersion !== updateStatus.currentVersion
         const activeBlocked = phase === 'downloaded' && !blockedDismissed && /分析.*(?:运行|进行)/.test(updateStatus?.message ?? '')
         const phaseTitle = helperHandoff ? '正在准备重启' : activeBlocked ? '先完成正在运行的分析' : phase === 'downloaded' && busyAction === 'install' ? '正在检查安装条件' : ({
-          loading: '正在读取版本状态', idle: '当前没有待安装的升级包', checking: '正在读取升级包',
-          downloading: '正在校验升级包', downloaded: '升级已就绪', error: baseMismatch ? '补丁基线与当前版本不一致' : '这个升级包未通过校验',
+          loading: '正在读取版本状态', idle: '当前没有待安装的升级包', checking: online ? '正在检查 GitHub 更新' : '正在读取升级包', 'up-to-date': '已是最新版本',
+          downloading: transferring ? '正在下载升级包' : '正在校验升级包', downloaded: '升级已就绪', error: online ? '在线更新未完成' : baseMismatch ? '补丁基线与当前版本不一致' : '这个升级包未通过校验',
           'install-error': '升级未完成，当前版本可继续使用', unsupported: '当前环境不支持应用内升级', 'status-error': '暂时无法读取版本状态',
         }[phase] ?? '版本状态暂不可用')
         const descriptions = {
           loading: '正在读取当前 Desktop 与本地升级包状态。',
-          idle: '从本机选择完整升级包或增量补丁。',
-          checking: '正在识别包类型并准备校验。',
-          downloading: '检查包的完整性、签名与版本兼容性。',
+          idle: onlineAvailable ? '检查 GitHub 更新，或从本机导入签名升级包。' : '从本机选择完整升级包或增量补丁。',
+          'up-to-date': '当前发布通道没有更高版本。',
+          checking: online ? '正在查找当前通道的新版本并验证更新清单。' : '正在识别包类型并准备校验。',
+          downloading: transferring ? '正在从 GitHub 下载已锁定版本的完整包，完成后自动校验。' : '检查包的完整性、签名与版本兼容性。',
           downloaded: '升级包已验证。完成当前工作后，可以安排安装并重启。',
           error: baseMismatch
             ? `请选择以 ${updateStatus.currentVersion} 为基线的补丁，或使用完整升级包。`
@@ -805,7 +824,7 @@ window.__ModuleLoader__.load({
           'status-error': '尚未确认是否有准备完成的升级包。',
         }
         const content = []
-        const busyImport = busyAction === 'import' || phase === 'checking' || phase === 'downloading'
+        const busyImport = (busyAction === 'import' || busyAction === 'check') || phase === 'checking' || phase === 'downloading'
         const busyInstall = busyAction === 'install'
         const hasError = Boolean(updateError)
         if (helperHandoff) {
@@ -821,10 +840,10 @@ window.__ModuleLoader__.load({
           content.push(updatePackageFile(updateStatus))
           if (phase === 'downloading') {
             const percent = Math.round(Math.max(0, Math.min(100, updateStatus?.percent ?? 0)))
-            content.push(h('div', { className: 'settings-update-progress', role: 'progressbar', 'aria-label': '本地升级包校验进度', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': percent }, h('span', { style: { width: `${percent}%` } })))
-            content.push(node('div', 'settings-update-progress-label', h('span', null, '校验中'), h('strong', null, `${percent}%`)))
+            content.push(h('div', { className: 'settings-update-progress', role: 'progressbar', 'aria-label': transferring ? '升级包下载进度' : '升级包校验进度', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': percent }, h('span', { style: { width: `${percent}%` } })))
+            content.push(node('div', 'settings-update-progress-label', h('span', null, transferring ? '下载中' : '校验中'), h('strong', null, `${percent}%`)))
           } else {
-            content.push(h('div', { className: 'settings-update-progress indeterminate', role: 'progressbar', 'aria-label': '正在读取本地升级包', 'aria-busy': 'true' }, h('span')))
+            content.push(h('div', { className: 'settings-update-progress indeterminate', role: 'progressbar', 'aria-label': online ? '正在检查在线更新' : '正在读取本地升级包', 'aria-busy': 'true' }, h('span')))
             content.push(h('p', { className: 'settings-form-note' }, '请保持 PANGEA Desktop 打开。'))
           }
         } else if (phase === 'downloaded') {
@@ -840,11 +859,11 @@ window.__ModuleLoader__.load({
           if (baseMismatch) content.push(updateRoute(updateStatus, true, 'danger'))
           else if (phase === 'error' && updateStatus?.packageName) content.push(updatePackageFile(updateStatus))
           const signatureFailure = phase === 'error' && /签名/.test(updateStatus?.message ?? '')
-          content.push(updateNotice(phase === 'unsupported' ? '升级能力不可用' : phase === 'install-error' ? '安装助手报告升级失败' : baseMismatch ? '不能应用这份补丁' : signatureFailure ? '签名校验失败' : '升级包没有通过校验', unpackagedEnvironment ? '当前运行环境没有提供升级包导入与安装能力。' : baseMismatch ? '增量包仅适用于它声明的原始版本。当前安装尚未发生变更。' : phase === 'install-error' ? updateStatus?.message ?? '安装助手未返回失败详情。' : signatureFailure ? '请选择由 PANGEA Desktop 构建生成的签名完整包或补丁包。' : updateStatus?.message ?? updateError ?? descriptions[phase], phase === 'unsupported' ? 'info' : baseMismatch || phase === 'install-error' ? 'warn' : 'danger'))
+          content.push(updateNotice(phase === 'unsupported' ? '升级能力不可用' : phase === 'install-error' ? '安装助手报告升级失败' : baseMismatch ? '不能应用这份补丁' : signatureFailure ? '签名校验失败' : online ? '在线更新失败' : '升级包没有通过校验', unpackagedEnvironment ? '当前运行环境没有提供升级包导入与安装能力。' : baseMismatch ? '增量包仅适用于它声明的原始版本。当前安装尚未发生变更。' : phase === 'install-error' ? updateStatus?.message ?? '安装助手未返回失败详情。' : signatureFailure ? '请选择由 PANGEA Desktop 构建生成的签名完整包或补丁包。' : updateStatus?.message ?? updateError ?? descriptions[phase], phase === 'unsupported' ? 'info' : baseMismatch || phase === 'install-error' ? 'warn' : 'danger'))
         } else if (phase === 'status-error') {
           content.push(updateNotice('状态读取失败', '请重新读取最新版本状态。', 'warn'))
-        } else if (phase === 'idle') {
-          content.push(node('div', 'callout settings-update-idle', node('div', 'row', settingsIcon('FolderOpen'), h('span', { className: 'small' }, '选择原始 ZIP 文件，无需提前解压。'))))
+        } else if (phase === 'idle' || phase === 'up-to-date') {
+          content.push(node('div', 'callout settings-update-idle', node('div', 'row', settingsIcon('FolderOpen'), h('span', { className: 'small' }, onlineAvailable ? '启动后自动检查并下载；安装仍由你确认。也可导入离线 ZIP。' : '选择原始 ZIP 文件，无需提前解压。'))))
         } else {
           content.push(node('div', 'settings-update-progress indeterminate', h('span')))
         }
@@ -869,8 +888,9 @@ window.__ModuleLoader__.load({
           actions.push(updateAction(busyInstall ? '正在准备重启…' : updateStatus?.message ? '重试安装' : '安装并重启', 'install', true, 'PackageCheck', busyInstall || busyImport || !baseMatches))
           actions.push(updateAction(busyImport ? '正在读取…' : '重新导入', 'import', false, 'FileArchive', busyImport || busyInstall))
         } else if (phase === 'checking' || phase === 'downloading' || busyInstall) {
-          actions.push(updateAction(phase === 'downloading' ? '正在校验…' : busyInstall ? '正在准备重启…' : '正在读取…', 'import', true, 'PackageCheck', true))
+          actions.push(updateAction(phase === 'downloading' ? (transferring ? '正在下载…' : '正在校验…') : busyInstall ? '正在准备重启…' : '正在读取…', 'import', true, 'PackageCheck', true))
         } else if (phase !== 'unsupported') {
+          if (onlineAvailable) actions.push(updateAction('检查在线更新', 'check', true, 'PackageCheck', phase === 'loading' || busyImport || busyInstall))
           actions.push(updateAction(busyImport ? (phase === 'checking' ? '正在读取…' : '正在打开…') : baseMismatch ? '选择兼容升级包' : phase === 'install-error' ? '重新导入升级包' : phase === 'error' ? '重新选择升级包' : '导入升级包', 'import', true, phase === 'error' || baseMismatch ? 'FolderOpen' : 'Upload', phase === 'loading' || !updateAvailable || busyImport || busyInstall))
           if (phase === 'install-error') actions.push(h('button', { type: 'button', className: 'settings-update-return', onClick: () => service.openPage(scope, 'workbench') }, '返回工作台'))
         } else {
@@ -878,7 +898,7 @@ window.__ModuleLoader__.load({
         }
 
         return h(React.Fragment, null,
-          node('div', 'settings-section-head', node('div', '', h('h2', null, '版本与升级'), h('p', null, '导入签名升级包，校验后选择合适的时间安装。'))),
+          node('div', 'settings-section-head', node('div', '', h('h2', null, '版本与升级'), h('p', null, onlineAvailable ? '从 GitHub 获取更新，或导入签名升级包；校验后选择合适的时间安装。' : '导入签名升级包，校验后选择合适的时间安装。'))),
           node('div', 'settings-main-cols',
             h('section', { className: 'panel settings-update-card', 'data-pangea-update-state': phase },
               node('div', 'settings-version-hero', node('div', 'settings-version-mark', 'P.'), node('div', '', h('h3', null, 'PANGEA Desktop'), h('p', null, '当前版本 ', h('strong', null, updateStatus?.currentVersion ?? (hasError ? '读取失败' : '正在读取')), ' · Windows'))),

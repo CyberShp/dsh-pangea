@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createSourceFirstAcpRun, workerPrompt } from '../src/source-first-acp.js'
+import { createSourceFirstAcpRun, workerContinuationPrompt, workerPrompt } from '../src/source-first-acp.js'
 import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
@@ -40,6 +40,27 @@ test('16 and 2000 file scopes do not inflate ACP prompts, including repairs and 
   assert.match(make(2000), /task-open.*精简视图/)
 })
 
+test('same-action repair keeps only binding, saved-result recovery, and bounded diagnostics', () => {
+  const make = count => {
+    const paths = Array.from({ length: count }, (_, i) => ({ path: `src/file-${i}.c` }))
+    return workerContinuationPrompt({ action: { action_id: 'r:review', action: 'continue_agent', role: 'review', stage: 'comparison_review',
+      pending_repair: { error: { code: 'IncompleteSourceFirstResult', message: `missing completion ${'x'.repeat(20000)} REPAIR_TAIL`, details: paths } } },
+    opened: { task: { version_set_id: 'already-known-version', allowed_paths: paths } }, cwd: '/work', dataRoot: '/data',
+    runId: 'r', taskId: 'original', python: 'python', scratchDirectory: '/scratch/original', sameAction: true })
+  }
+  const prompt = make(2000)
+  assert.equal(make(16), prompt)
+  assert.ok(prompt.length < 2600)
+  assert.match(prompt, /result-read/)
+  assert.match(prompt, /IncompleteSourceFirstResult.*missing completion/)
+  assert.match(prompt, /work-finish/)
+  assert.match(prompt, /当前 worker 临时目录：\/scratch\/original/)
+  assert.match(prompt, /source-first-cli-worker\.md/)
+  assert.match(prompt, /"--action-id","r:review","--task-id","original"/)
+  assert.doesNotMatch(prompt, /身份绑定已完成|REPAIR_TAIL|file-1999|allowed_paths|prepared_source|review-decide --expected-revision|按 task\.rubric_paths/)
+  assert.doesNotMatch(prompt, /先调用 task-open|PowerShell 直接执行 task-open|先读取客户端无关 CLI 合同/)
+})
+
 for (const failureMode of ['throw', 'diagnostic', 'completed-with-error']) {
   test(`input-too-long ${failureMode} pauses original action without empty settlement or retries`, async () => {
     let turns = 0, created = 0
@@ -60,7 +81,10 @@ for (const failureMode of ['throw', 'diagnostic', 'completed-with-error']) {
       subagents: { start: async () => {
         created++
         return { id: `${runId}-original`, result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {},
-          readDiagnostics: () => failureMode === 'completed-with-error' ? { errorSummary: message } : {},
+          // The real driver reports zero calls and clears errorSummary at the next prompt.
+          // Detection must happen before a zero-tool followup can erase this error.
+          readDiagnostics: () => ({ toolCalls: 0, activeToolCount: 0,
+            errorSummary: failureMode === 'completed-with-error' && turns === 1 ? message : null }),
           continuePrompt: async () => {
             turns++
             if (failureMode === 'throw') throw new Error(message)
@@ -77,6 +101,7 @@ for (const failureMode of ['throw', 'diagnostic', 'completed-with-error']) {
       assert.ok(calls.some(args => args.includes('paused')))
       assert.ok(events.some(event => event.stage === 'source_first_prompt_ready' && event.prompt_bytes > event.prompt_chars))
       assert.ok(events.some(event => event.error_code === 'INPUT_TOO_LONG'))
+      assert.ok(!events.some(event => ['source_first_zero_tool_turn', 'source_first_recovering'].includes(event.stage)))
     } finally { controller.abort(); await run.dispose() }
   })
 }
@@ -233,6 +258,10 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) 
     assert.equal(finished.length, steps.length)
     assert.ok(finished.every(event => event.model === 'selected/model' && event.stop_reason === 'completed'))
     assert.deepEqual(prompts.map(p => p[0]), ['worker-1', 'worker-2', 'worker-3', 'worker-3', 'worker-2'])
+    assert.deepEqual(events.filter(event => event.stage === 'source_first_prompt_ready').map(event => event.prompt_kind),
+      ['initial', 'initial', 'initial', 'action_transition', 'action_transition'])
+    assert.deepEqual(events.filter(event => event.stage === 'source_first_acp_request' && event.status === 'start').map(event => event.phase),
+      ['task', 'task', 'task', 'action_transition', 'action_transition'])
     for (const stage of ['source_first_file_permission', 'source_first_tool_event']) {
       assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.action_id), ['run:0', 'run:1', 'run:2', 'run:3', 'run:4'])
       assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.action_stage), steps.map(step => step[1]))
@@ -248,6 +277,11 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) 
     for (const [step, [, prompt]] of prompts.entries()) {
       assert.doesNotMatch(prompt, /\.opencode|\.agents\/pangea|pangea_action_dispatch/)
       assert.match(prompt, /source-first-cli-worker\.md/)
+      if (steps[step][2]) {
+        assert.doesNotMatch(prompt, /身份绑定已完成|按 task\.rubric_paths|常规 CLI 调用直接使用预置入口/)
+        assert.match(prompt, /task-open/)
+        assert.match(prompt, new RegExp(`当前角色：${steps[step][0]}；阶段：${steps[step][1]}`))
+      }
       if (steps[step][1] === 'comparison_review') {
         assert.match(prompt, /review-decide --expected-revision N --decision JSON对象.*最后 work-finish/)
         assert.match(prompt, /decision 回显 task\.version_set_id/)
@@ -265,9 +299,11 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) 
 }
 
 test('malformed output returns to the same worker and attention does not fabricate completion', async () => {
-  let attempts = 0, creations = 0, prompts = 0
+  let attempts = 0, creations = 0
+  const prompts = [], events = []
   const controller = new AbortController()
   const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: testDataRoot, runId: 'repair-test', signal: controller.signal,
+    onEvent: async event => events.push(event),
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
       if (args[1] === 'next') return { run_id: 'repair-test', lifecycle_status: 'running', actions: [{ action_id: 'repair:planning', role: 'planning', stage: 'planning', task_path: '/task.json',
@@ -276,9 +312,19 @@ test('malformed output returns to the same worker and attention does not fabrica
       return {}
     },
     subagents: { start: async () => { creations++; return { id: 'original', result: Promise.resolve({ stopReason: 'completed' }),
-      continuePrompt: async value => { if (prompts++) assert.match(value[0].text, /bad JSON/); return { stopReason: 'completed' } }, dispose: async () => {} } } } })
+      continuePrompt: async value => { prompts.push(value[0].text); return { stopReason: 'completed' } }, dispose: async () => {} } } } })
   const result = await run.result
-  assert.equal(creations, 1); assert.equal(prompts, 2)
+  assert.equal(creations, 1); assert.equal(prompts.length, 2)
+  assert.match(prompts[0], /身份绑定已完成/)
+  assert.match(prompts[1], /bad JSON/)
+  assert.match(prompts[1], /result-read/)
+  assert.match(prompts[1], /work-finish/)
+  assert.doesNotMatch(prompts[1], /身份绑定已完成|先调用 task-open|PowerShell 直接执行 task-open|按 task\.rubric_paths/)
+  assert.ok(prompts[1].length < prompts[0].length / 2)
+  assert.deepEqual(events.filter(event => event.stage === 'source_first_prompt_ready').map(event => event.prompt_kind), ['initial', 'continuation'])
+  assert.deepEqual(events.filter(event => event.stage === 'source_first_acp_request' && event.status === 'start').map(event => event.phase), ['task', 'continuation'])
+  const saved = JSON.parse(await readFile(path.join(testDataRoot, 'runs', 'repair-test', 'acp-workers.json'), 'utf8'))
+  assert.equal(saved.workers.original.last_prompt_action_id, 'repair:planning')
   assert.match(result.output[0].text, /attention_required/)
   controller.abort(); await run.dispose()
 })
@@ -508,10 +554,11 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
 for (const contextError of [false, true]) test(`a ${contextError ? 'context-limited' : 'crashed'} transport is disposed and explicit continuation restores persisted identities`, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'pangea-acp-resume-'))
   let taskId, complete = false, starts = 0, disposals = 0
-  const scratchDirectories = []
+  const scratchDirectories = [], prompts = [], events = []
   const controller = new AbortController()
   let run
   const options = { providerId: 'pangea-codeagent', agentModel: 'model', parent: {}, cwd: root, dataRoot: root, runId: 'resume', signal: controller.signal,
+    onEvent: async event => events.push(event),
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
       if (args[1] === 'next') return { run_id: 'resume', lifecycle_status: complete ? 'complete' : 'running', actions: complete ? [] : [
@@ -527,7 +574,7 @@ for (const contextError of [false, true]) test(`a ${contextError ? 'context-limi
       else assert.equal(request.resume, undefined)
       return { id: 'original', remoteSessionId: 'remote-original', result: Promise.resolve({ stopReason: 'completed' }),
         readDiagnostics: () => ({ errorSummary: null, stderrSummary: contextError ? 'old turn: input too long' : '' }),
-        continuePrompt: async () => { if (starts === 1) throw new Error(contextError ? 'input too long' : 'ACP connection closed'); return { stopReason: 'completed' } },
+        continuePrompt: async prompt => { prompts.push(prompt[0].text); if (starts === 1) throw new Error(contextError ? 'input too long' : 'ACP connection closed'); return { stopReason: 'completed' } },
         dispose: async () => { disposals++ } }
     } } }
   try {
@@ -535,6 +582,8 @@ for (const contextError of [false, true]) test(`a ${contextError ? 'context-limi
     if (contextError) assert.equal((await run.result).attentionRequired, true)
     else await assert.rejects(run.result, /ACP connection closed/)
     assert.equal(disposals, 1)
+    const pausedBinding = JSON.parse(await readFile(path.join(root, 'runs', 'resume', 'acp-workers.json'), 'utf8'))
+    assert.equal(pausedBinding.workers.original.last_prompt_action_id, 'resume:planning')
     run = createSourceFirstAcpRun(options)
     assert.equal((await run.result).stopReason, 'completed')
     assert.equal(taskId, 'original')
@@ -542,19 +591,26 @@ for (const contextError of [false, true]) test(`a ${contextError ? 'context-limi
     assert.equal(scratchDirectories[0], scratchDirectories[1])
     const saved = JSON.parse(await readFile(path.join(root, 'runs', 'resume', 'acp-workers.json'), 'utf8'))
     assert.equal(saved.workers.original.scratchDirectory, scratchDirectories[0])
+    assert.equal(saved.workers.original.last_prompt_action_id, 'resume:planning')
+    assert.equal(prompts.length, 2)
+    assert.match(prompts[1], /result-read/)
+    assert.doesNotMatch(prompts[1], /身份绑定已完成|先调用 task-open|按 task\.rubric_paths/)
+    assert.deepEqual(events.filter(event => event.stage === 'source_first_prompt_ready').map(event => event.prompt_kind), ['initial', 'continuation'])
     // The host allocates a path; only a real provider creates its temporary directory.
     await assert.rejects(stat(scratchDirectories[0]), { code: 'ENOENT' })
   } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
-test('an older persisted worker gets one scratch directory before restoration and keeps its original session', async () => {
+for (const hasPromptMarker of [false, true]) test(`a persisted worker ${hasPromptMarker ? 'with' : 'without'} its last prompt marker keeps its original session and receives the correct compact prompt`, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'pangea-acp-old-scratch-'))
   const bindingPath = path.join(root, 'runs', 'old', 'acp-workers.json')
   await mkdir(path.dirname(bindingPath), { recursive: true })
-  await writeFile(bindingPath, JSON.stringify({ runId: 'old', workers: { original: { providerId: 'pangea-nga', remoteSessionId: 'remote', quiescent: true } } }))
-  const controller = new AbortController(), directories = []
+  await writeFile(bindingPath, JSON.stringify({ runId: 'old', workers: { original: { providerId: 'pangea-nga', remoteSessionId: 'remote', quiescent: true,
+    ...(hasPromptMarker ? { last_prompt_action_id: 'old:a' } : {}) } } }))
+  const controller = new AbortController(), directories = [], prompts = [], events = []
   let starts = 0, complete = false, run
   const options = { providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId: 'old', signal: controller.signal,
+    onEvent: async event => events.push(event),
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
       if (args[1] === 'next') return { run_id: 'old', lifecycle_status: complete ? 'complete' : 'running', actions: complete ? [] : [
@@ -569,7 +625,7 @@ test('an older persisted worker gets one scratch directory before restoration an
       directories.push(request.scratchDirectory)
       if (++starts === 1) throw new Error('fixture restoration failed')
       return { id: 'original', remoteSessionId: 'remote', result: Promise.resolve({ stopReason: 'completed' }),
-        continuePrompt: async () => ({ stopReason: 'completed' }), dispose: async () => {} }
+        continuePrompt: async prompt => { prompts.push(prompt[0].text); return { stopReason: 'completed' } }, dispose: async () => {} }
     } } }
   try {
     run = createSourceFirstAcpRun(options)
@@ -579,6 +635,13 @@ test('an older persisted worker gets one scratch directory before restoration an
     assert.equal(starts, 2)
     assert.ok(path.isAbsolute(directories[0]))
     assert.equal(directories[0], directories[1])
+    assert.equal(prompts.length, 1)
+    assert.doesNotMatch(prompts[0], /身份绑定已完成|按 task\.rubric_paths/)
+    assert.match(prompts[0], hasPromptMarker ? /result-read/ : /task-open/)
+    assert.deepEqual(events.filter(event => event.stage === 'source_first_prompt_ready').map(event => event.prompt_kind),
+      [hasPromptMarker ? 'continuation' : 'action_transition'])
+    const saved = JSON.parse(await readFile(bindingPath, 'utf8'))
+    assert.equal(saved.workers.original.last_prompt_action_id, 'old:a')
     await assert.rejects(stat(directories[0]), { code: 'ENOENT' })
   } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
 })

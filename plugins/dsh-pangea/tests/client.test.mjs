@@ -302,6 +302,7 @@ async function updateSettingsPageHarness(updateStatus, options = {}) {
     subscribeUpdateStatus: () => 1,
     unsubscribeUpdateStatus() {},
   }
+  if (options.online) bridge.checkForUpdates = async () => { calls.push('check'); return updateStatus }
   const { exported } = await loadClient(react, { dshDesktop: options.bridgeMissing ? undefined : bridge })
   const sidebar = fakeSidebar()
   let service
@@ -1054,4 +1055,26 @@ test('task assistant fences old todos until the selected task session is availab
     assert.equal(scroll.dataset.pangeaSessionMismatch, undefined)
     assert.equal(card.inert, false)
   }
+})
+
+ test('online update settings exposes check, download, verify, latest and retry states', async () => {
+  const idle = await updateSettingsPageHarness({ phase: 'idle', currentVersion: '2.0.21', manual: false }, { online: true })
+  const check = idle.nodes.find(node => node.props?.['data-pangea-update-action'] === 'check')
+  assert.equal(check.props.disabled, false)
+  await check.props.onClick()
+  assert.deepEqual(idle.calls, ['check'])
+  const onlineStatus = { currentVersion: '2.0.21', source: 'github', manual: true }
+  const downloading = await updateSettingsPageHarness({ ...onlineStatus, phase: 'downloading', activity: 'download', percent: 47 }, { online: true })
+  assert.match(downloading.text, /下载中47%/)
+  assert.doesNotMatch(downloading.text, /本地导入/)
+  assert.ok(downloading.nodes.filter(node => node.props?.['data-pangea-update-action']).every(node => node.props.disabled))
+  const verifying = await updateSettingsPageHarness({ ...onlineStatus, phase: 'downloading', activity: 'verify', percent: 81 }, { online: true })
+  assert.match(verifying.text, /校验中81%/)
+  const latest = await updateSettingsPageHarness({ ...onlineStatus, phase: 'up-to-date' }, { online: true })
+  assert.match(latest.text, /已是最新版本/)
+  assert.equal(latest.nodes.some(node => node.props?.role === 'progressbar'), false)
+  const failed = await updateSettingsPageHarness({ ...onlineStatus, phase: 'error', message: 'HTTP 403' }, { online: true })
+  assert.match(failed.text, /在线更新失败/)
+  assert.match(failed.text, /HTTP 403/)
+  assert.ok(failed.nodes.some(node => node.props?.['data-pangea-update-action'] === 'check' && !node.props.disabled))
 })

@@ -1,6 +1,6 @@
 export function createSourceScopePicker(React) {
   const h = React.createElement
-  return function SourceScopePicker({ cwd, dataRoot, repository, value, preview, onChange, onPreview }) {
+  return function SourceScopePicker({ cwd, dataRoot, repository, value, preview, onChange, onPreview, renderIcon = () => null }) {
     const [open, setOpen] = React.useState(false), [tree, setTree] = React.useState(null)
     const [busy, setBusy] = React.useState(false), [error, setError] = React.useState('')
     const root = React.useRef(null), trigger = React.useRef(null), sequence = React.useRef(0)
@@ -25,10 +25,10 @@ export function createSourceScopePicker(React) {
     }
     const toggle = path => onChange(scope.includes(path) ? scope.filter(item => item !== path).join('\n') : [...scope.filter(item => item !== '.'), path].join('\n'))
     return h('section', { className: 'pangea-scope-picker', 'aria-label': '源码范围选择与预览' },
-      h('div', { className: 'pangea-page-actions' },
-        h('button', { type: 'button', ref: trigger, disabled: !repository || busy, onClick: () => { setOpen(true); void request({ path: '.' }, true) } }, '选择目录或文件'),
-        h('button', { type: 'button', disabled: !repository || busy, onClick: () => onChange('.') }, '选择整个仓库'),
-        h('button', { type: 'button', disabled: !repository || !scope.length || busy, onClick: () => { void request({}) } }, busy ? '正在读取范围…' : '预览命中文件')),
+      h('div', { className: 'pangea-page-actions', style: { marginTop: 12, marginBottom: 12 } },
+        h('button', { type: 'button', className: 'btn', ref: trigger, disabled: !repository || busy, onClick: () => { setOpen(true); void request({ path: '.' }, true) } }, renderIcon('FolderOpen'), '选择目录或文件'),
+        h('button', { type: 'button', className: 'btn ghost', disabled: !repository || busy, onClick: () => onChange('.') }, renderIcon('FolderGit2'), '选择整个仓库'),
+        h('button', { type: 'button', className: 'btn', 'aria-busy': busy, disabled: !repository || !scope.length || busy, onClick: () => { void request({}) } }, renderIcon(busy ? 'LoaderCircle' : 'Search'), busy ? '正在读取范围…' : '预览命中文件')),
       error ? h('p', { role: 'alert' }, `范围预览失败：${error}`) : null,
       preview ? h('div', { className: 'pangea-scope-preview', role: 'status' },
         h('strong', null, `${preview.is_entire_repository ? '整个仓库' : '指定范围'} · 命中 ${preview.matched_file_count} 个源码文件`),
