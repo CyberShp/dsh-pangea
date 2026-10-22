@@ -63,7 +63,7 @@ test('new analysis objective requires an explicit user choice and request preser
   client.apply(ctx)
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
   const nodes = descendants(panel.type(panel.props))
-  const select = nodes.find(node => node.props['aria-label'] === '分析目标类型')
+  const select = nodes.find(node => node.props['aria-label'] === '测试对象层级')
   assert.equal(select.props.value, '')
   assert.ok(nodes.find(node => node.type === 'button' && node.children.includes('下一步 · 输入资料')).props.disabled)
   select.props.onChange({ target: { value: 'interface-contract' } })
