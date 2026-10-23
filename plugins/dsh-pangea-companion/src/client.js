@@ -1529,8 +1529,21 @@ window.__ModuleLoader__.load({
       .b04-flow-screen .b04-page-hero h1 { margin: 0; color: #25292e; font-size: 27px; font-weight: 650; line-height: 1.4; }
       .b04-flow-screen .b03-overview-nav { margin-bottom: 25px !important; }
       .b04-flow-nav-label { margin: 3px 0 13px; }
-      .b04-flow-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 4px 2px 10px; margin-bottom: 16px; border-bottom: 1px solid #e1e6df; }
-      .b04-flow-tab { flex: 0 0 auto; max-width: 320px; padding: 12px 16px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #59625d; cursor: pointer; text-align: left; }
+      .b04-flow-workspace { display: grid; grid-template-columns: 252px minmax(0,1fr); gap: 20px; align-items: start; }
+      .b04-flow-directory { min-width: 0; padding: 12px; border: 1px solid #e1e6df; border-radius: 9px; background: #fff; }
+      .b04-flow-directory-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 2px 2px 12px; font-size: 13px; }
+      .b04-flow-directory-heading small { color: #717972; }
+      .b04-flow-detail { min-width: 0; }
+      .b04-flow-tabs { display: flex; flex-direction: column; gap: 4px; max-height: max(240px, calc(100vh - 390px)); overflow-y: auto; overflow-x: hidden; padding: 3px; scrollbar-gutter: stable; }
+      .b04-module-overview { margin-bottom: 16px; padding: 12px 16px; border: 1px solid #e1e6df; border-radius: 9px; background: #fff; }
+      .b04-module-overview > summary { cursor: pointer; font-size: 13px; color: #59625d; }
+      .b04-module-overview-content { max-height: 320px; overflow: auto; }
+      @media (max-width: 900px) {
+        .b04-flow-workspace { grid-template-columns: minmax(0,1fr); }
+        .b04-flow-tabs { max-height: 180px; }
+        .b04-flow-detail .b04-modebar { flex-wrap: wrap; }
+      }
+      .b04-flow-tab { flex: 0 0 auto; width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #59625d; cursor: pointer; text-align: left; }
       .b04-flow-tab strong { display: block; font-size: 14px; white-space: normal; overflow-wrap: anywhere; }
       .b04-flow-tab small { display: block; margin-top: 5px; font-size:12px; }
       .b04-flow-tab[aria-selected="true"] { border-color: #e9c7cb; background: #faf0f0; color: #922532; }
@@ -5419,15 +5432,16 @@ window.__ModuleLoader__.load({
         }
         const { scope, reader, steps, branches } = readingState(flow)
         const branch = branches.find(item => item.branch_id === flowBranchDetail || item.branch_id === branchSelection || item.branch_id === reader.query)
-        const tabs = ordered.length ? h(React.Fragment, null,
+        const tabs = ordered.length ? h('aside', { className: 'b04-flow-directory', 'aria-label': '流程目录' },
+          h('div', { className: 'b04-flow-directory-heading' }, h('strong', null, '流程目录'), h('small', { role: 'status' }, query ? `${filtered.length} / ${ordered.length}` : `共 ${ordered.length} 个`)),
           h('input', { 'aria-label': '搜索业务流程', value: flowQuery, placeholder: '搜索流程…', onChange: event => setFlowQuery(event.target.value),
-            style: { ...styles.search, width: 240, maxWidth: '100%', fontSize: 12, marginBottom: 10 } }),
-          h('div', { className: 'b04-flow-tabs', role: 'tablist', 'aria-label': '业务流程' },
-            filtered.map((item, index) => h('button', { key: cardScope(item), type: 'button', className: 'b04-flow-tab', role: 'tab', 'data-flow-parent': item.attach_to || undefined, style: { marginLeft: item.attach_to ? 20 : 0 },
+            style: { ...styles.search, width: '100%', boxSizing: 'border-box', fontSize: 12, marginBottom: 10 } }),
+          h('div', { className: 'b04-flow-tabs', role: 'tablist', 'aria-label': '业务流程', 'aria-orientation': 'vertical' },
+            filtered.map((item, index) => h('button', { key: cardScope(item), type: 'button', className: 'b04-flow-tab', role: 'tab', 'data-flow-parent': item.attach_to || undefined, style: { paddingLeft: item.attach_to ? 24 : 12 },
               id: `${cardId(item)}-tab`, 'aria-controls': cardId(item), 'aria-selected': selectionKey(item) === selectionKey(flow),
               tabIndex: selectionKey(item) === selectionKey(flow) ? 0 : -1, onClick: () => selectFlow(item),
               onKeyDown: event => {
-                const next = event.key === 'ArrowRight' ? (index + 1) % filtered.length : event.key === 'ArrowLeft' ? (index - 1 + filtered.length) % filtered.length
+                const next = ['ArrowDown', 'ArrowRight'].includes(event.key) ? (index + 1) % filtered.length : ['ArrowUp', 'ArrowLeft'].includes(event.key) ? (index - 1 + filtered.length) % filtered.length
                   : event.key === 'Home' ? 0 : event.key === 'End' ? filtered.length - 1 : -1
                 if (next < 0) return
                 event.preventDefault(); selectFlow(filtered[next])
@@ -5579,7 +5593,8 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', onClick: () => navigate({ type: 'workflow' }) }, '查看运行过程'),
               current?.artifacts?.source_snapshot_manifest ? h('button', { type: 'button', style: styles.button,
                 onClick: () => openSidebarFile(current.artifacts.source_snapshot_manifest) }, '检查冻结输入') : null)))
-        const overviewPanel = h('details', { className: 'b04-module-overview', open: true }, h('summary', null, '模块总览 · 当前 Run'),
+        const overviewPanel = h('details', { className: 'b04-module-overview' }, h('summary', null, `模块总览 · ${ordered.length} 个流程`),
+          h('div', { className: 'b04-module-overview-content' },
           h('p', { style: styles.itemMeta }, moduleOverview.note),
           moduleOverview.units.map((unit, index) => h('section', { key: `${unit.unit_id}:${index}`, style: { marginBottom: 12 } },
             h('strong', null, unit.title || unit.unit_id || '单元归属未提供'),
@@ -5589,8 +5604,9 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.itemMeta }, `入口：${row.entries.map(node => node.label || node.id).join('、') || row.flow.entry || '未声明'}；主干路径：${row.main_paths.map(path => path.path_id).join('、') || '未声明'}；调用入口：${row.call_root || '未声明'}；显式调用关系：${row.calls.length}`),
               row.calls.length ? h('details', null, h('summary', null, '显式调用关系'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(row.calls, null, 2))) : null,
               flowContractDiagnostics(row.flow).length ? h('details', null, h('summary', null, '图形合同诊断'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify(flowContractDiagnostics(row.flow), null, 2))) : null,
-              sourceButton(row.flow, '查看流程证据 ↗', row.flow.title || row.flow.flow_id)))) : h('p', { style: styles.itemMeta }, '当前没有已发布流程；入口和关系未知。'))))
-        return h(React.Fragment, null, overviewPanel, renderFlowVersions(), tabs, flow ? h(React.Fragment, null, modebar,
+              sourceButton(row.flow, '查看流程证据 ↗', row.flow.title || row.flow.flow_id)))) : h('p', { style: styles.itemMeta }, '当前没有已发布流程；入口和关系未知。')))))
+        return h(React.Fragment, null, overviewPanel, renderFlowVersions(),
+          h('div', { className: ordered.length ? 'b04-flow-workspace' : undefined }, tabs, h('div', { className: 'b04-flow-detail' }, flow ? h(React.Fragment, null, modebar,
           h('section', { key: cardScope(flow), id: cardId(flow), role: 'tabpanel', tabIndex: 0, 'aria-labelledby': `${cardId(flow)}-tab`,
             className: 'b04-flow-panel', 'data-flow-id': flow.flow_id,
             ref: element => { if (element) { element.scrollTop = panelState(flow).scrollTop; element.scrollLeft = panelState(flow).scrollLeft } },
@@ -5600,7 +5616,7 @@ window.__ModuleLoader__.load({
               reader.view === 'sequence' ? h(SequenceGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).sequence, onSource: openFlowSource })
               : reader.view === 'functions' ? h(FunctionVariablesView, { key: cardScope(flow), flow, viewport: panelState(flow).functions, onSource: openFlowSource, repositoryId: current?.repository })
               : h(FlowGraphView, { key: cardScope(flow), flow, viewport: panelState(flow).graph, highlightBranchIds: flowHighlight.scope === scope ? flowHighlight.ids : [] }),
-              renderHistoricalDiagrams(flow)) : branchBody)) : empty,
+              renderHistoricalDiagrams(flow)) : branchBody)) : query ? h('section', { className: 'b04-flow-card', role: 'status' }, h('h3', null, '没有匹配的业务流程'), h('p', null, '请调整搜索条件。'), h('button', { type: 'button', style: styles.button, onClick: () => setFlowQuery('') }, '清空搜索')) : empty)),
           renderFlowSourceDrawer())
       }
 

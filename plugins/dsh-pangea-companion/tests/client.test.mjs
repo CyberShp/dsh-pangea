@@ -1700,7 +1700,7 @@ test('four flow tabs isolate content and restore each flow reader, scroll and vi
   const keyboard = key => ({ key, preventDefault() { prevented = true }, currentTarget: { parentElement: {
     querySelectorAll() { return flows.map((_, i) => ({ focus() { focused = i } })) },
   } } })
-  tabs()[3].props.onKeyDown(keyboard('ArrowRight'))
+  tabs()[3].props.onKeyDown(keyboard('ArrowDown'))
   assert.equal(focused, 0)
   assert.equal(prevented, true)
   assert.equal(panel().props['data-flow-id'], 'F1')
@@ -1708,6 +1708,21 @@ test('four flow tabs isolate content and restore each flow reader, scroll and vi
   assert.equal(panel().props['data-flow-id'], 'F4')
   tabs()[3].props.onKeyDown(keyboard('Home'))
   assert.equal(panel().props['data-flow-id'], 'F1')
+  tabs()[0].props.onKeyDown(keyboard('ArrowUp'))
+  assert.equal(panel().props['data-flow-id'], 'F4')
+  assert.equal(render().find(node => node.props.role === 'tablist').props['aria-orientation'], 'vertical')
+  assert.equal(render().find(node => node.props.className === 'b04-module-overview').props.open, undefined)
+  assert.ok(find('流程目录'))
+  find('搜索业务流程').props.onChange({ target: { value: '不存在的流程' } })
+  assert.equal(tabs().length, 0)
+  assert.equal(panel(), undefined)
+  render().find(node => node.type === 'button' && node.children.includes('清空搜索')).props.onClick()
+  assert.equal(panel().props['data-flow-id'], 'F4')
+  find('搜索业务流程').props.onChange({ target: { value: '采样' } })
+  assert.equal(tabs().length, 1)
+  assert.equal(panel().props['data-flow-id'], 'F2')
+  find('搜索业务流程').props.onChange({ target: { value: '' } })
+  assert.equal(panel().props['data-flow-id'], 'F4')
   states[0] = { current: { run_id: 'other-run', details: { business_flows: flows } } }
   states[4] = 'other-run'
   states[1] = { tasks: { items: [{ ...task, run_id: 'other-run' }] } }
@@ -1715,6 +1730,15 @@ test('four flow tabs isolate content and restore each flow reader, scroll and vi
   const element = {}
   panel().props.ref(element)
   assert.deepEqual(element, { scrollTop: 0, scrollLeft: 0 })
+  states[0].current.details.business_flows = Array.from({ length: 80 }, (_, index) => ({
+    ...flows[0], flow_id: `many-${index}`, title: `批量流程 ${index}`, description: `流程正文 ${index}`,
+  }))
+  assert.equal(tabs().length, 80)
+  assert.equal(render().filter(node => node.props.role === 'tabpanel').length, 1)
+  assert.equal(render().find(node => node.props.className === 'b04-module-overview').props.open, undefined)
+  tabs()[79].props.onClick()
+  assert.equal(panel().props['data-flow-id'], 'many-79')
+  assert.ok(JSON.stringify(panel()).includes('流程正文 79'))
 })
 
 test('selected task overview shows loading until its workbench request settles and preserves real errors', async () => {
