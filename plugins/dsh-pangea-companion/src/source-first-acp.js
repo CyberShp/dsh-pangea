@@ -6,6 +6,7 @@ import { acpBindingsPath, inspectAcpBindings, readAcpBindings } from './acp-reco
 import { writeTaskStoreFile } from './task-store.js'
 import { createAgentSessionRecorder } from './agent-sessions.js'
 import { compactToolLifecycle } from './launch-log.js'
+import { contextLimitError, createAcpRequestErrors } from './acp-request-errors.js'
 
 // This host routes Graph identities; all content/quality decisions stay with
 // the worker. Live handles are retained on a recoverable pause so continuing
@@ -24,12 +25,6 @@ export async function inspectSourceFirstAcpRecovery({ dataRoot, runId }) {
   const state = liveRuns.get(JSON.stringify([path.resolve(dataRoot), runId]))
   if (state?.busy) return { can_resume: false, blocked_reason: '当前 Run 仍由宿主执行，不能重复派发', summary: '当前执行仍在进行' }
   return inspectAcpBindings(await readAcpBindings(dataRoot, runId), { currentInstanceId: instanceId })
-}
-
-// Inspect transport diagnostics only, never source text or semantic results.
-function contextLimitError(value) {
-  const message = typeof value === 'string' ? value : value?.message ?? ''
-  return /input too long|exceed max input length|payload too large/i.test(message)
 }
 
 export async function stopSourceFirstAcpRun({ dataRoot, runId }) {
@@ -119,6 +114,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   state ??= { providerId, agentModel, workers: new Map(), actionContexts: new Map(), closed: new Set(), busy: false, terminal: false }
   state.blockedReconciliations ??= new Map()
   state.sessionRequestContexts ??= new Map()
+  state.requestErrors ??= createAcpRequestErrors()
   liveRuns.set(key, state)
   state.busy = true
   const generation = randomUUID()
@@ -236,6 +232,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     let worker = action.task_id ? state.workers.get(action.task_id) : null
     const initialContext = { action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, role: action.role, attempt_id: attemptId }
     const onSessionEvent = value => {
+      state.requestErrors.observe(worker?.id ?? value.agent_session_id, value)
       const currentContext = state.actionContexts.get(String(worker?.id)) ?? initialContext
       const requestKey = value.request_id && JSON.stringify([value.remote_session_id ?? worker?.remoteSessionId, value.request_id])
       if (requestKey && !state.sessionRequestContexts.has(requestKey)) state.sessionRequestContexts.set(requestKey, { ...currentContext })
@@ -344,7 +341,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         prompt_chars: promptText.length, prompt_bytes: Buffer.byteLength(promptText, 'utf8'),
         model_request_timing: 'unavailable', first_token_ms: null }
       await event({ ...details, stage: 'source_first_acp_request', status: 'start', model: before.model ?? null })
-      let outcome, dispatched = false, status = 'ok'
+      let outcome, requestWindow, dispatched = false, status = 'ok'
       try {
         turnSignal.throwIfAborted()
         // Persist before dispatch, including uncertain transport failures. A
@@ -352,11 +349,15 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         await remember(worker, undefined, { last_prompt_action_id: action.action_id })
         turnSignal.throwIfAborted()
         dispatched = true
+        requestWindow = state.requestErrors.begin(taskId, worker.remoteSessionId, actionContext.request_id)
         outcome = await worker.continuePrompt(content)
+        const failure = state.requestErrors.contextError(taskId)
+        if (failure) throw Object.assign(new Error(failure.message), { name: failure.name })
         return outcome
       }
       catch (error) { status = 'error'; throw error }
       finally {
+        if (requestWindow) state.requestErrors.end(requestWindow)
         const diagnostics = worker.readDiagnostics?.() ?? {}
         await event({ ...details, stage: 'source_first_acp_request',
           status: outcome?.stopReason === 'error' || contextLimitError(outcome?.diagnostic) || contextLimitError(diagnostics.errorSummary) ? 'error' : status, finished_at_ms: Date.now(),
@@ -505,7 +506,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         const toolsBefore = toolCalls()
         let turn = submitPrompt(text(prompt), promptKind === 'initial' ? 'task' : promptKind)
         let disconnected = false
-        const inputError = outcome => [outcome?.diagnostic, worker.readDiagnostics?.()?.errorSummary].find(contextLimitError)
+        const inputError = outcome => [state.requestErrors.contextError(taskId), outcome?.diagnostic, worker.readDiagnostics?.()?.errorSummary].find(contextLimitError)
         const reconcileEndedTools = async outcome => {
           // A context rejection is terminal for this dispatch, even when the
           // provider reports completed/end_turn. Never turn it into recovery.
@@ -695,8 +696,8 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false })
     // stderrSummary may contain earlier turns; only current-turn failures can
     // pause this action (in particular after a user compacts and resumes it).
-    const inputError = [result.diagnostic, diagnostics.errorSummary].find(contextLimitError)
-    if (inputError) return await pauseForContext(inputError)
+    const inputError = [state.requestErrors.contextError(taskId), result.diagnostic, diagnostics.errorSummary].find(contextLimitError)
+    if (inputError) return await pauseForContext(inputError.message ?? inputError)
     await execution('finished')
     await event({ ...actionContext, stage: 'source_first_worker_finished', model: diagnostics.model ?? null,
       tool_calls: diagnostics.toolCalls, message_chunks: diagnostics.messageChunks, tool_failures: diagnostics.toolFailures,

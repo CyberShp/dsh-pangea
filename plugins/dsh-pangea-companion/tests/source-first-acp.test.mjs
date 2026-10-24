@@ -61,7 +61,7 @@ test('same-action repair keeps only binding, saved-result recovery, and bounded 
   assert.doesNotMatch(prompt, /先调用 task-open|PowerShell 直接执行 task-open|先读取客户端无关 CLI 合同/)
 })
 
-for (const failureMode of ['throw', 'diagnostic', 'completed-with-error']) {
+for (const failureMode of ['throw', 'diagnostic', 'completed-with-error', 'event-only', 'structured-event-only', 'update-event-only']) {
   test(`input-too-long ${failureMode} pauses original action without empty settlement or retries`, async () => {
     let turns = 0, created = 0
     const calls = [], events = []
@@ -78,15 +78,25 @@ for (const failureMode of ['throw', 'diagnostic', 'completed-with-error']) {
         if (args[1] === 'settle') assert.fail('transport failure must not settle an empty result')
         return {}
       },
-      subagents: { start: async () => {
+      subagents: { start: async (_provider, request) => {
         created++
-        return { id: `${runId}-original`, result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {},
+        return { id: `${runId}-original`, remoteSessionId: `${runId}-remote`, result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {},
           // The real driver reports zero calls and clears errorSummary at the next prompt.
           // Detection must happen before a zero-tool followup can erase this error.
           readDiagnostics: () => ({ toolCalls: 0, activeToolCount: 0,
             errorSummary: failureMode === 'completed-with-error' && turns === 1 ? message : null }),
           continuePrompt: async () => {
             turns++
+            const identity = { agent_session_id: `${runId}-original`, remote_session_id: `${runId}-remote`, request_id: 'driver-1' }
+            request.onSessionEvent({ ...identity, type: 'prompt' })
+            if (failureMode.endsWith('event-only')) {
+              const error = failureMode === 'structured-event-only'
+                ? { name: 'ContextOverflowError', data: { message: 'input capacity exhausted' } } : { message }
+              request.onSessionEvent(failureMode === 'update-event-only'
+                ? { ...identity, type: 'session_update', update: { sessionUpdate: 'session.error', error } }
+                : { ...identity, type: 'session.error', error })
+              request.onSessionEvent({ ...identity, type: 'turn_end', stop_reason: 'completed' })
+            }
             if (failureMode === 'throw') throw new Error(message)
             return { stopReason: failureMode === 'diagnostic' ? 'error' : 'completed', diagnostic: failureMode === 'diagnostic' ? message : '' }
           } }
@@ -99,6 +109,7 @@ for (const failureMode of ['throw', 'diagnostic', 'completed-with-error']) {
       assert.equal(turns, 1)
       assert.equal(created, 1)
       assert.ok(calls.some(args => args.includes('paused')))
+      assert.ok(!calls.some(args => args.includes('finished')))
       assert.ok(events.some(event => event.stage === 'source_first_prompt_ready' && event.prompt_bytes > event.prompt_chars))
       assert.ok(events.some(event => event.error_code === 'INPUT_TOO_LONG'))
       assert.ok(!events.some(event => ['source_first_zero_tool_turn', 'source_first_recovering'].includes(event.stage)))
