@@ -6,6 +6,10 @@ import os from 'node:os'
 import { createSourceFirstAcpRun, inspectSourceFirstAcpRecovery, stopSourceFirstAcpRun } from '../src/source-first-acp.js'
 import { inspectAcpBindings } from '../src/acp-recovery.js'
 const progressPolicy = { readyWarnMs: 5, readyIdleMs: 20, warnMs: 5, idleMs: 20, cancelMs: 10, pollMs: 2 }
+// These scenarios test process-tree/result reconciliation, not idle deadlines.
+// Their real log/binding I/O must not race a 20 ms liveness watchdog on Windows.
+// Keep the short policy above for tests that deliberately exercise idle recovery.
+const reconciliationPolicy = { readyWarnMs: 1000, readyIdleMs: 5000, warnMs: 1000, idleMs: 5000, cancelMs: 200, pollMs: 10 }
 const completed = { stopReason: 'completed', protocolStopReason: 'end_turn' }
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
 
@@ -45,7 +49,14 @@ for (const mode of ['saved', 'resume', 'stale-revision', 'second-pending', 'reje
       quiesceForRecovery: async () => { restoredDisposed.resolve(); return { confirmed: true, processTreeStopped: true } },
     }
     const options = { dataRoot, cwd: dataRoot, runId: 'run', providerId: mode === 'wrong-provider' ? 'pangea-nga' : 'pangea-codeagent',
-      signal: controller.signal, progressPolicy, onEvent: event => events.push(event),
+      signal: controller.signal, progressPolicy: reconciliationPolicy, onEvent: async event => {
+        events.push(event)
+        // Model Windows/loaded-runner latency while the completed request log
+        // is being persisted. This must not turn a result-read test into idle recovery.
+        if (mode === 'result-read-error' && event.stage === 'source_first_acp_request' && event.finished_at_ms) {
+          await new Promise(resolve => setTimeout(resolve, 80))
+        }
+      },
       subagents: { start: async (_, request) => {
         starts.push(request)
         if (starts.length === 1) return oldWorker
