@@ -797,3 +797,26 @@ test('closure allows one mechanical repair then pauses instead of looping', asyn
     assert.equal(repairs, 2)
   } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('paused run disposal closes its owned process tree, retains remote identity and is idempotent', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'pangea-terminal-cleanup-'))
+  const controller = new AbortController()
+  let quiesced = 0, disposed = 0
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', agentModel: 'm', parent: {}, cwd: root, dataRoot: root,
+    runId: 'cleanup', signal: controller.signal,
+    runner: async ({ args }) => args[1] === 'next' ? { run_id: 'cleanup', lifecycle_status: 'running', actions: [
+      { action_id: 'cleanup:planning', action: 'dispatch_agent', role: 'planning', stage: 'unit_planning' }] } : {},
+    subagents: { start: async () => ({ id: 'owned', remoteSessionId: 'remote-owned', result: Promise.resolve({ stopReason: 'completed' }),
+      continuePrompt: async () => { throw new Error('input too long') }, dispose: async () => { disposed++ },
+      quiesceForRecovery: async () => { quiesced++; return { confirmed: true, processTreeStopped: true } } }) } })
+  try {
+    assert.equal((await run.result).attentionRequired, true)
+    await Promise.all([run.dispose(), run.dispose()])
+    assert.equal(quiesced, 1)
+    assert.equal(disposed, 0)
+    const saved = JSON.parse(await readFile(path.join(root, 'runs', 'cleanup', 'acp-workers.json'), 'utf8'))
+    assert.equal(saved.workers.owned.remoteSessionId, 'remote-owned')
+    assert.equal(saved.workers.owned.quiescent, true)
+    assert.equal(saved.workers.owned.requires_process_tree_confirmation, false)
+  } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
+})

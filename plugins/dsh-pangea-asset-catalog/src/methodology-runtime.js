@@ -131,6 +131,19 @@ export class MethodologyCandidateRuntime {
     return { session_id: sessionId, task: prepared.task, execution: 'direct-skill' }
   }
 
+  async stopForUpdate() {
+    for (const job of this.jobs.values()) {
+      if (['completed', 'failed'].includes(job.status)) continue
+      // Block idle callbacks from publishing a completion after cancellation.
+      const finalizing = job.status === 'finalizing'
+      if (finalizing) throw new Error('方法论结果正在提交，请稍后重试升级')
+      job.status = 'failed'
+      job.error = '用户强制停止并升级；已保存的派生任务可重新打开'
+      job.completedAt = new Date().toISOString()
+      apiValue(await this.api.sessions.cancel(rpc({ sessionId: job.sessionId })))
+    }
+  }
+
   async finish(job) {
     if (!job || ['completed', 'failed', 'finalizing'].includes(job.status)) return
     job.status = 'finalizing'

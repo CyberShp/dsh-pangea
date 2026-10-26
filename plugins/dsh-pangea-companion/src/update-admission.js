@@ -7,12 +7,12 @@ export function updateAdmission(ctx) {
   return ctx?.pangeaUpdateAdmission
 }
 
-export function registerUpdateParticipant(ctx, id, check) {
+export function registerUpdateParticipant(ctx, id, check, stop) {
   const register = owner => {
     const service = updateAdmission(owner)
     if (!service) return
-    if (owner.effect) owner.effect(() => service.registerParticipant(id, check), `${id}: update admission`)
-    else return service.registerParticipant(id, check)
+    if (owner.effect) owner.effect(() => service.registerParticipant(id, check, stop), `${id}: update admission`)
+    else return service.registerParticipant(id, check, stop)
   }
   // An optional injection follows both late service activation and disposal.
   if (ctx.inject) return ctx.inject(['pangeaUpdateAdmission'], register)

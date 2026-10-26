@@ -9,8 +9,8 @@ import { compactToolLifecycle } from './launch-log.js'
 import { contextLimitError, createAcpRequestErrors } from './acp-request-errors.js'
 
 // This host routes Graph identities; all content/quality decisions stay with
-// the worker. Live handles are retained on a recoverable pause so continuing
-// a reviewer or closure never silently creates a replacement session.
+// the worker. Persisted remote identities survive cleanup; idle processes do not.
+// Explicit continuation restores the original remote session from its binding.
 const liveRuns = new Map()
 const instanceId = randomUUID()
 const text = value => [{ type: 'text', text: value }]
@@ -31,10 +31,10 @@ export async function stopSourceFirstAcpRun({ dataRoot, runId }) {
   const state = liveRuns.get(JSON.stringify([path.resolve(dataRoot), runId]))
   if (!state) return false
   state.controller?.abort(new Error('用户结束当前执行'))
-  await state.promise?.catch(() => {})
   const results = await Promise.allSettled([...state.workers.values()].map(worker => state.disposeWorker?.(worker) ?? worker.dispose?.()))
   const failed = results.find(result => result.status === 'rejected')
   if (failed) throw failed.reason
+  await state.promise?.catch(() => {})
   liveRuns.delete(JSON.stringify([path.resolve(dataRoot), runId]))
   return true
 }
@@ -117,6 +117,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   state.requestErrors ??= createAcpRequestErrors()
   liveRuns.set(key, state)
   state.busy = true
+  state.failed = false
   const generation = randomUUID()
   state.controller = new AbortController()
   signal = AbortSignal.any([signal, state.controller.signal])
@@ -145,10 +146,17 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       ...(Number.isInteger(worker.processId ?? diagnostics.processId) ? { process_id: worker.processId ?? diagnostics.processId } : {}), ...facts }
     await persist()
   })
-  const disposed = async worker => {
+  const disposals = new Map()
+  const disposeOwnedWorker = async worker => {
     const taskId = String(worker.id)
+    // A late restored handle can share an id with an already closed worker.
+    // Release that exact new handle without changing the old binding.
+    if (state.workers.get(taskId) !== worker) { await worker.dispose?.(); return }
+    if (state.closed.has(taskId)) return
     const needsTreeProof = bindings[taskId]?.requires_process_tree_confirmation === true
-    if (needsTreeProof) {
+    if (needsTreeProof || typeof worker.quiesceForRecovery === 'function') {
+      await remember(worker, undefined, { requires_process_tree_confirmation: true, quiescent: false, blocked: true })
+      state.blockedReconciliations.set(taskId, true)
       const stoppedExecution = bindings[taskId]?.execution_id
       if (state.workers.get(taskId) !== worker || typeof worker.quiesceForRecovery !== 'function') throw new Error('无法确认旧执行进程树停止，保留阻塞状态')
       let timer
@@ -162,9 +170,16 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       } finally { clearTimeout(timer) }
     } else await worker.dispose?.()
     state.blockedReconciliations.delete(taskId)
-    state.closed.add(taskId)
     await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false,
-      ...(needsTreeProof ? { requires_process_tree_confirmation: false } : {}) })
+      requires_process_tree_confirmation: false })
+    state.closed.add(taskId)
+  }
+  const disposed = worker => {
+    if (disposals.has(worker)) return disposals.get(worker)
+    const operation = disposeOwnedWorker(worker)
+    disposals.set(worker, operation)
+    operation.catch(() => { if (disposals.get(worker) === operation) disposals.delete(worker) })
+    return operation
   }
   const check = () => { if (signal.aborted) throw signal.reason ?? new Error('执行已取消') }
   const cli = args => {
@@ -771,6 +786,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         // writes remain serialized and stage dependencies stay Graph-owned.
       }
     } catch (error) {
+      state.failed = true
       // Failed transports cannot keep child processes alive indefinitely.
       // Persisted remote IDs allow an explicit later resume; no auto restart loop.
       const cleanup = claimed ? await Promise.allSettled([...state.workers.values()].map(disposed)) : []
@@ -797,7 +813,10 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     }).filter(Boolean).join(''),
     readDiagnostics: () => current?.readDiagnostics?.() ?? {},
     async dispose() {
-      if (!state.terminal && !signal.aborted) return { retained: true }
+      // An attention pause with an unconfirmed tool is still live work, not a
+      // terminal task. Explicit stop/upgrade aborts it before tree cleanup.
+      if (!state.terminal && !state.failed && !signal.aborted && [...state.workers.values()].some(worker =>
+        !state.closed.has(String(worker.id)) && hasUnconfirmedAcpTools(worker.readDiagnostics?.()))) return { retained: true }
       const results = await Promise.allSettled([...state.workers.values()].map(disposed))
       await sessionRecorder.flush()
       const failed = results.find(result => result.status === 'rejected')

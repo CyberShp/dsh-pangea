@@ -10,7 +10,7 @@ const catalogProvider = { async discoverModels() { return { current_model: 'nati
 
 const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
 
-test('managed depth job pauses Producer, dispatches Reviewer and reuses both sessions until formal review', async () => {
+for (const cleanupFails of [false, true]) test(`managed depth job preserves sessions and reports cleanup failure=${cleanupFails}`, async () => {
   const root = await workspace()
   try {
     const runRoot = path.join(root, 'run'), decisionFile = path.join(runRoot, '内部索引', '独立审查状态.json')
@@ -35,7 +35,7 @@ test('managed depth job pauses Producer, dispatches Reviewer and reuses both ses
             async continuePrompt(p) { producerTurns++; assert.match(p[0].text, producerTurns === 1 ? /定向修订/ : /正式交付/); return { stopReason: 'completed' } },
             async dispose() { disposed++ } }
         }
-        return { id: 'reviewer', result: answerReview(request.prompt[0].text), continuePrompt: p => answerReview(p[0].text), async dispose() { disposed++; throw new Error('review cleanup failed') } }
+        return { id: 'reviewer', result: answerReview(request.prompt[0].text), continuePrompt: p => answerReview(p[0].text), async dispose() { disposed++; if (cleanupFails) throw new Error('review cleanup failed') } }
       } },
     }
     const api = { workspace: { list: async () => ok({ items: [{ workspaceId: 'w', path: root }] }) }, sessions: { create: async () => ok({ sessionId: 'owner' }), rename: async () => ok({}) } }
@@ -45,7 +45,7 @@ test('managed depth job pauses Producer, dispatches Reviewer and reuses both ses
       : { run_id: 'run', run_root: runRoot, request_path: path.join(root, 'request.md') }
     await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo-one', target: 'depth', mode: 'depth', provider_id: 'pangea-opencode' } }, runner,
       async () => {}, async () => {}, runtime, process.env, { reviewBinding: { task_id: 'task', attempt_id: 'attempt' }, onReviewState: async value => records.push(value) })
-    assert.equal((await hooks.done).status, 'completed')
+    if (cleanupFails) await assert.rejects(hooks.done, /任务进程清理未完成/); else assert.equal((await hooks.done).status, 'completed')
     assert.equal(starts, 2)
     assert.equal(producerTurns, 2)
     assert.equal(reviewerTurns, 3)

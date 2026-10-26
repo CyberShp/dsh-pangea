@@ -575,7 +575,12 @@ export class AssetActionRuntime {
   async disposeWorker(job) {
     if (job.cleanupPending) return job.cleanupPending
     if (job.cleanupConfirmed) { this.persist(job); return }
-    job.cleanupPending = Promise.resolve().then(() => job.worker.dispose())
+    job.cleanupPending = Promise.resolve().then(async () => {
+      if (typeof job.worker.quiesceForRecovery === 'function') {
+        const proof = await job.worker.quiesceForRecovery()
+        if (proof?.confirmed !== true || proof.processTreeStopped !== true) throw new Error('执行器进程树停止尚未确认')
+      } else await job.worker.dispose()
+    })
     try { await job.cleanupPending; job.cleanupConfirmed = true; this.persist(job) }
     finally { job.cleanupPending = null }
   }

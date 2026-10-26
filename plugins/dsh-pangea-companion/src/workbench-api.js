@@ -759,7 +759,10 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
         ...(cleanup[1]?.value?.retained === true ? { message: '已保留暂停 worker 的原会话与进程，等待工具确认或手动停止' } : {}),
         ...(run.kind === 'source_first_coordinator' ? {} : acpRunDiagnostics(run)),
       })
-    } catch { /* job settlement retains the failure */ }
+    } catch { /* preserve the cleanup failure below */ }
+    const cleanupFailures = cleanup.filter(item => item.status === 'rejected')
+    if (cleanupFailures.length) throw new AggregateError(cleanupFailures.map(item => item.reason),
+      `任务进程清理未完成：${cleanupFailures.map(item => item.reason?.message ?? String(item.reason)).join('；')}`)
   }
 }
 

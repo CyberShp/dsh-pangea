@@ -42,7 +42,7 @@ for (const mode of ['saved', 'resume', 'stale-revision', 'second-pending', 'reje
         recoveredActive = mode === 'second-pending' ? 4 : 0
         return completed
       },
-      quiesceForRecovery: async () => { assert.fail('must not quiesce twice for one action') },
+      quiesceForRecovery: async () => { restoredDisposed.resolve(); return { confirmed: true, processTreeStopped: true } },
     }
     const options = { dataRoot, cwd: dataRoot, runId: 'run', providerId: mode === 'wrong-provider' ? 'pangea-nga' : 'pangea-codeagent',
       signal: controller.signal, progressPolicy, onEvent: event => events.push(event),

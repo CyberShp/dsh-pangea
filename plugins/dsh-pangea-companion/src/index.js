@@ -1829,7 +1829,21 @@ export function apply(ctx) {
   registerUpdateParticipant(ctx, 'companion', () => companionUpdateBusy({
     operations: taskOperationState(tasks), launchLocks, sourceFirstBusy: sourceFirstAcpUpdateBusy,
     ssh,
-  }))
+  }), async () => {
+    // Cancel the pending launches before awaiting persistence or stop requests.
+    const operations = taskOperationState(tasks)
+    for (const launch of operations.launches.values()) launch.cancelled = true
+    const pending = (await tasks.list()).filter(task =>
+      ['starting', 'running', 'stopping'].includes(task.execution_status)
+      || ['preparing', 'running', 'needs_attention'].includes(task.status))
+    const results = await Promise.allSettled(pending.map(task => requestTaskStop({
+      api: ctx.apiProxy, tasks, task, launchLocks, launchLogs, runtime: ctx, runner: runPangea,
+    })))
+    await ssh.dispose()
+    const failures = results.filter(result => result.status === 'rejected' || !result.value.stop_confirmed)
+    if (failures.length) throw new Error(`部分分析任务停止尚未确认：${failures.map(result =>
+      result.status === 'rejected' ? result.reason?.message : result.value.error).join('；')}`)
+  })
 
   const toolDisposers = [ctx.tools.register({
     name: 'pangea_run_create',

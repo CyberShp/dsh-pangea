@@ -58,3 +58,16 @@ test('standalone asset plugin runs without Desktop admission service', async () 
   assert.equal(await value.start(), 'started')
   assert.equal(await value.methodologies.start(), 'methodology')
 })
+
+test('force upgrade cancels waiting assets before stopping active jobs and methodologies', async () => {
+  const value = runtime(), order = []
+  let stop
+  value.queue.pending = [{ state: 'waiting', params: { assetId: 'queued' } }]
+  value.queue.stop = async params => { order.push(params.assetId); if (params.assetId === 'queued') value.queue.pending[0].state = 'terminal' }
+  value.queue.schedule = () => order.push('schedule')
+  value.jobs.set('active', { status: 'running', cwd: '/tmp', dataRoot: '/tmp', assetId: 'active' })
+  value.methodologies.stopForUpdate = async () => order.push('methodology')
+  installAssetUpdateAdmission({ get: () => ({ registerParticipant(_id, _check, callback) { stop = callback } }) }, value)
+  await stop()
+  assert.deepEqual(order, ['queued', 'active', 'methodology', 'schedule'])
+})
