@@ -1,9 +1,23 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { waitForAcpTurn, AcpStalled } from '../src/acp-progress.js'
+import { waitForAcpTurn, AcpStalled, continuationNotIdleError, hasUnconfirmedAcpTools } from '../src/acp-progress.js'
 const policy = { readyWarnMs: 10, readyIdleMs: 30, warnMs: 10, idleMs: 30, cancelMs: 15, pollMs: 2 }
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
 const signal = () => new AbortController().signal
+
+test('unclosed tool lifecycle blocks idle admission even when activeToolCount is zero', () => {
+  assert.equal(hasUnconfirmedAcpTools({ activeToolCount: 0, toolLifecycle: { unclosed_count: 1 } }), true)
+  assert.equal(hasUnconfirmedAcpTools({ activeToolCount: 0, toolLifecycle: { unclosed_count: 0 } }), false)
+  assert.equal(hasUnconfirmedAcpTools({ activeToolCount: 2 }), true)
+  assert.equal(hasUnconfirmedAcpTools({ lastToolStatus: 'pending' }), true)
+  assert.equal(hasUnconfirmedAcpTools({ activeToolCount: 0, lastToolStatus: 'pending' }), false)
+})
+
+test('continuationNotIdleError recognizes Desktop admission rejections', () => {
+  assert.equal(continuationNotIdleError({ code: 'ACP_CONTINUATION_NOT_IDLE' }), true)
+  assert.equal(continuationNotIdleError(new Error('ACP turn is not idle for continuation; 1 tool(s) still lack a terminal status')), true)
+  assert.equal(continuationNotIdleError(new Error('network reset')), false)
+})
 
 test('readiness text without a protocol return cannot release the request', async () => {
   const turn = deferred(), events = []

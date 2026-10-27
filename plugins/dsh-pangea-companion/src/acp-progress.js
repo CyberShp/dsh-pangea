@@ -16,7 +16,16 @@ export class AcpStalled extends Error {
 }
 
 export function hasUnconfirmedAcpTools(diagnostics = {}) {
-  return diagnostics.activeToolCount > 0 || (diagnostics.activeToolCount === undefined && ['pending', 'in_progress'].includes(diagnostics.lastToolStatus))
+  const unclosed = diagnostics.toolLifecycle?.unclosed_count
+  if (Number.isInteger(unclosed) && unclosed > 0) return true
+  if (diagnostics.activeToolCount > 0) return true
+  // Older ACP handles may only expose the last tool status.
+  return diagnostics.activeToolCount === undefined && ['pending', 'in_progress'].includes(diagnostics.lastToolStatus)
+}
+
+export function continuationNotIdleError(error) {
+  return error?.code === 'ACP_CONTINUATION_NOT_IDLE'
+    || /not idle for continuation/i.test(String(error?.message ?? ''))
 }
 
 export async function waitForAcpTurn({ worker, turn, signal, ready = false, policy = {}, emit = async () => {} }) {

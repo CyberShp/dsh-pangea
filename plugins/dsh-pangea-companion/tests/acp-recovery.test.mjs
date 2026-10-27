@@ -226,16 +226,23 @@ test('an ended ready turn with unclosed tools pauses Graph without inventing a f
 test('completed planning turn retains two unclosed pending tools with compact evidence even when a saved result exists', async () => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-pending-evidence-'))
   const events = [], toolIds = ['chatcmpl-tool-a873a78f7e539d5e', 'chatcmpl-tool-9e4b74cbae3ac799']
+  const pendingTools = toolIds.map(tool_id => ({ tool_id, status: 'pending', kind: 'execute', request_id: 'driver-request', remote_session_id: 'remote',
+    first_seen_at_ms: 1000, last_update_at_ms: 1000, seen_in_progress: false, input_observed: true, input_nonempty: false,
+    output_observed: false, received_update_count: 1, accepted_update_count: 1, rawInput: { command: 'private command' } }))
   const toolLifecycle = { schema_version: 1, request_id: 'driver-request', remote_session_id: 'remote',
-    unclosed_count: 2, pending_count: 2, in_progress_count: 0, unknown_count: 0,
-    received_tool_events: 4, accepted_tool_events: 4, unaccepted_tool_events: 0, validation_error_count: 0,
-    tools: toolIds.map(tool_id => ({ tool_id, status: 'pending', kind: 'execute', request_id: 'driver-request', remote_session_id: 'remote',
-      first_seen_at_ms: 1000, last_update_at_ms: 1000, seen_in_progress: false, input_observed: true, input_nonempty: false,
-      output_observed: false, received_update_count: 1, accepted_update_count: 1, rawInput: { command: 'private command' } })) }
+    unclosed_count: 0, pending_count: 0, in_progress_count: 0, unknown_count: 0,
+    received_tool_events: 0, accepted_tool_events: 0, unaccepted_tool_events: 0, validation_error_count: 0, tools: [] }
   let activeToolCount = 0, prompts = 0, settled = false, taskId, disposed = false
   const worker = { id: 'worker', remoteSessionId: 'remote', result: Promise.resolve(completed),
     readDiagnostics: () => ({ activeToolCount, toolLifecycle }), dispose: async () => { disposed = true },
-    continuePrompt: async () => { prompts++; activeToolCount = 2; return completed },
+    continuePrompt: async () => {
+      prompts++
+      activeToolCount = 2
+      Object.assign(toolLifecycle, {
+        unclosed_count: 2, pending_count: 2, received_tool_events: 4, accepted_tool_events: 4, tools: pendingTools,
+      })
+      return completed
+    },
   }
   const options = { dataRoot, cwd: dataRoot, runId: 'run', providerId: 'fixture', signal: new AbortController().signal,
     onEvent: event => events.push(event), subagents: { start: async () => worker },
@@ -267,6 +274,100 @@ test('completed planning turn retains two unclosed pending tools with compact ev
     assert.equal(disposed, false)
     assert.equal(activeToolCount, 2)
     assert.ok(events.some(event => event.stage === 'source_first_saved_result_checked' && event.phase === 'saved_complete'))
+  } finally {
+    await stopSourceFirstAcpRun(options)
+    await rm(dataRoot, { recursive: true, force: true })
+  }
+})
+
+test('unclosed lifecycle alone rejects continuation before another prompt is dispatched', async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-unclosed-admit-'))
+  const events = []
+  let prompts = 0, taskId, settled = false
+  let diagnostics = { activeToolCount: 0, toolCalls: 0, toolLifecycle: { unclosed_count: 0, tools: [] } }
+  const worker = {
+    id: 'worker', remoteSessionId: 'remote', result: Promise.resolve(completed),
+    readDiagnostics: () => diagnostics,
+    dispose: async () => {},
+    continuePrompt: async () => {
+      prompts++
+      // A bare end_turn with no counted tool call still leaves unclosed evidence.
+      // The zero-tool follow-up must not dispatch another prompt over it.
+      diagnostics = {
+        activeToolCount: 0,
+        toolCalls: 0,
+        toolLifecycle: { unclosed_count: 1, pending_count: 1, tools: [{ tool_id: 'stuck-read', status: 'pending' }] },
+      }
+      return completed
+    },
+  }
+  const options = {
+    dataRoot, cwd: dataRoot, runId: 'run', providerId: 'pangea-nga', signal: new AbortController().signal,
+    onEvent: event => events.push(event), progressPolicy, subagents: { start: async () => worker },
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[0] === 'result-read') return { revision: 1, completion_complete: false }
+      if (args[1] === 'bind') taskId = args.at(-1)
+      if (args[1] === 'settle') settled = true
+      if (args[1] === 'next') return { run_id: 'run', actions: [
+        { action_id: 'run:planning', action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId, role: 'planning', stage: 'unit_planning' },
+      ] }
+      return {}
+    },
+  }
+  try {
+    const run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).attentionRequired, true)
+    assert.equal(prompts, 1)
+    assert.equal(settled, false)
+    assert.ok(events.some(event => event.stage === 'source_first_zero_tool_turn'))
+    const rejected = events.find(event => event.stage === 'source_first_continuation_rejected')
+    assert.equal(rejected?.reason, 'unclosed_tools')
+    assert.equal(rejected?.unclosed_count, 1)
+    assert.match(rejected.message, /未发送续接/)
+  } finally {
+    await stopSourceFirstAcpRun(options)
+    await rm(dataRoot, { recursive: true, force: true })
+  }
+})
+
+test('Desktop ACP continuation admission rejection pauses without a follow-up prompt', async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-desktop-admit-'))
+  const events = []
+  let prompts = 0, taskId, settled = false
+  const worker = {
+    id: 'worker', remoteSessionId: 'remote', result: Promise.resolve(completed),
+    readDiagnostics: () => ({ activeToolCount: 0, toolLifecycle: { unclosed_count: 0, tools: [] } }),
+    dispose: async () => {},
+    continuePrompt: async () => {
+      prompts++
+      throw Object.assign(new Error('ACP turn is not idle for continuation; 1 tool(s) still lack a terminal status'), {
+        code: 'ACP_CONTINUATION_NOT_IDLE',
+      })
+    },
+  }
+  const options = {
+    dataRoot, cwd: dataRoot, runId: 'run', providerId: 'pangea-nga', signal: new AbortController().signal,
+    onEvent: event => events.push(event), progressPolicy, subagents: { start: async () => worker },
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[0] === 'result-read') return { revision: 1, completion_complete: false }
+      if (args[1] === 'bind') taskId = args.at(-1)
+      if (args[1] === 'settle') settled = true
+      if (args[1] === 'next') return { run_id: 'run', actions: [
+        { action_id: 'run:planning', action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId, role: 'planning', stage: 'unit_planning' },
+      ] }
+      return {}
+    },
+  }
+  try {
+    const run = createSourceFirstAcpRun(options)
+    assert.equal((await run.result).attentionRequired, true)
+    assert.equal(prompts, 1)
+    assert.equal(settled, false)
+    assert.equal(events.filter(event => event.stage === 'source_first_continuation_rejected').length, 1)
+    assert.match(events.find(event => event.stage === 'source_first_continuation_rejected').message, /not idle for continuation/)
+    assert.equal(events.filter(event => event.stage === 'source_first_acp_request' && event.request_dispatched === true).length, 1)
   } finally {
     await stopSourceFirstAcpRun(options)
     await rm(dataRoot, { recursive: true, force: true })

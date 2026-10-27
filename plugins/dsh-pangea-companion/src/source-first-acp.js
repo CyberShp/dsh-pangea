@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { writeFile, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { ACP_PROGRESS_DEFAULTS, AcpStalled, hasUnconfirmedAcpTools, waitForAcpTurn } from './acp-progress.js'
+import { ACP_PROGRESS_DEFAULTS, AcpStalled, continuationNotIdleError, hasUnconfirmedAcpTools, waitForAcpTurn } from './acp-progress.js'
 import { acpBindingsPath, inspectAcpBindings, readAcpBindings } from './acp-recovery.js'
 import { writeTaskStoreFile } from './task-store.js'
 import { createAgentSessionRecorder } from './agent-sessions.js'
@@ -355,6 +355,22 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       const details = { ...actionContext, phase, request_kind: 'session_prompt', model_source: 'acp_session_config', started_at_ms: Date.now(),
         prompt_chars: promptText.length, prompt_bytes: Buffer.byteLength(promptText, 'utf8'),
         model_request_timing: 'unavailable', first_token_ms: null }
+      // Admit a new prompt only when the prior turn's tools are idle. end_turn
+      // and a closed session index are not enough; NGA/OpenCode can still be
+      // mid-read when the host otherwise thinks the session has finished.
+      if (hasUnconfirmedAcpTools(before)) {
+        const count = Number.isInteger(before.activeToolCount) && before.activeToolCount > 0
+          ? before.activeToolCount
+          : before.toolLifecycle?.unclosed_count
+        const stall = new AcpStalled(
+          `原回合工具记录尚无结束确认${Number.isInteger(count) && count > 0 ? `（${count} 条）` : ''}；未发送续接，避免打断进行中的读取`,
+          false
+        )
+        await event({ ...details, stage: 'source_first_continuation_rejected', status: 'error',
+          reason: 'unclosed_tools', active_tool_count: before.activeToolCount ?? null,
+          unclosed_count: before.toolLifecycle?.unclosed_count ?? null, message: stall.message })
+        throw stall
+      }
       await event({ ...details, stage: 'source_first_acp_request', status: 'start', model: before.model ?? null })
       let outcome, requestWindow, dispatched = false, status = 'ok'
       try {
@@ -369,9 +385,22 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         const failure = state.requestErrors.contextError(taskId)
         if (failure) throw Object.assign(new Error(failure.message), { name: failure.name })
         return outcome
-      }
-      catch (error) { status = 'error'; throw error }
-      finally {
+      } catch (error) {
+        status = 'error'
+        if (continuationNotIdleError(error)) {
+          const diagnostics = worker.readDiagnostics?.() ?? {}
+          const stall = new AcpStalled(
+            error.message || 'ACP 回合尚未空闲，未发送续接',
+            false,
+            outcome
+          )
+          await event({ ...details, stage: 'source_first_continuation_rejected', status: 'error',
+            reason: 'unclosed_tools', active_tool_count: diagnostics.activeToolCount ?? null,
+            unclosed_count: diagnostics.toolLifecycle?.unclosed_count ?? null, message: stall.message })
+          throw stall
+        }
+        throw error
+      } finally {
         if (requestWindow) state.requestErrors.end(requestWindow)
         const diagnostics = worker.readDiagnostics?.() ?? {}
         await event({ ...details, stage: 'source_first_acp_request',
