@@ -869,7 +869,19 @@ async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, ru
   }
   let sourceDrained = false
   if (task.run_id) {
-    try { sourceDrained = await stopSourceFirstAcpRun({ dataRoot: task.data_root, runId: task.run_id }) }
+    try { sourceDrained = await stopSourceFirstAcpRun({ dataRoot: task.data_root, runId: task.run_id,
+      onStopped: async () => {
+        const current = await tasks.get(task.task_id)
+        if (!current || current.attempt_id !== task.attempt_id || current.run_id !== task.run_id
+          || current.execution_status !== 'stopping' || Number.isFinite(current.deleted_at)) return
+        // The original stop may still be settling; reconcile after it completes.
+        await state.stops.get(task.task_id)?.catch(() => {})
+        const latest = await tasks.get(task.task_id)
+        if (latest?.attempt_id === task.attempt_id && latest.execution_status === 'stopping') {
+          await requestTaskStop({ api, tasks, task: latest, launchLocks, launchLogs, runtime, runner })
+        }
+      },
+    }) }
     catch (error) { await recordFailure('acp_children_stop', error) }
     try { await interruptSourceFirstChildren({ dataRoot: task.data_root, runId: task.run_id }) }
     catch (error) { await recordFailure('native_children_stop', error) }

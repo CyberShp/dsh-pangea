@@ -680,6 +680,7 @@ function acpRunDiagnostics(run) {
 }
 
 async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
+  let operationError
   let run
   try {
     run = await start
@@ -744,6 +745,7 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
       result = await run.continuePrompt([{ type: 'text', text: reviewTurn?.prompt ?? lifecycle.continuationPrompt?.(state) ?? continuationPrompt(state) }])
     }
   } catch (error) {
+    operationError = error
     return wasCancelled()
       ? { status: 'killed' }
       : { status: 'failed', detail: error instanceof Error ? error.message : String(error) }
@@ -761,8 +763,11 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
       })
     } catch { /* preserve the cleanup failure below */ }
     const cleanupFailures = cleanup.filter(item => item.status === 'rejected')
-    if (cleanupFailures.length) throw new AggregateError(cleanupFailures.map(item => item.reason),
-      `任务进程清理未完成：${cleanupFailures.map(item => item.reason?.message ?? String(item.reason)).join('；')}`)
+    if (cleanupFailures.length) throw new AggregateError(
+      [...(operationError ? [operationError] : []), ...cleanupFailures.map(item => item.reason)],
+      [...(operationError ? [`执行错误：${operationError.message ?? String(operationError)}`] : []),
+        `任务进程清理未完成：${cleanupFailures.map(item => item.reason?.message ?? String(item.reason)).join('；')}`].join('；'),
+      operationError ? { cause: operationError } : undefined)
   }
 }
 

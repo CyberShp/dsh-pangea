@@ -27,9 +27,10 @@ export async function inspectSourceFirstAcpRecovery({ dataRoot, runId }) {
   return inspectAcpBindings(await readAcpBindings(dataRoot, runId), { currentInstanceId: instanceId })
 }
 
-export async function stopSourceFirstAcpRun({ dataRoot, runId }) {
+export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped }) {
   const state = liveRuns.get(JSON.stringify([path.resolve(dataRoot), runId]))
   if (!state) return false
+  if (onStopped) state.onStopped = onStopped
   state.controller?.abort(new Error('用户结束当前执行'))
   const results = await Promise.allSettled([...state.workers.values()].map(worker => state.disposeWorker?.(worker) ?? worker.dispose?.()))
   const failed = results.find(result => result.status === 'rejected')
@@ -153,21 +154,49 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     // Release that exact new handle without changing the old binding.
     if (state.workers.get(taskId) !== worker) { await worker.dispose?.(); return }
     if (state.closed.has(taskId)) return
+    const stopWorker = worker.stopExecution ?? worker.quiesceForRecovery
     const needsTreeProof = bindings[taskId]?.requires_process_tree_confirmation === true
-    if (needsTreeProof || typeof worker.quiesceForRecovery === 'function') {
+    if (needsTreeProof || typeof stopWorker === 'function') {
       await remember(worker, undefined, { requires_process_tree_confirmation: true, quiescent: false, blocked: true })
       state.blockedReconciliations.set(taskId, true)
       const stoppedExecution = bindings[taskId]?.execution_id
-      if (state.workers.get(taskId) !== worker || typeof worker.quiesceForRecovery !== 'function') throw new Error('无法确认旧执行进程树停止，保留阻塞状态')
+      if (state.workers.get(taskId) !== worker || typeof stopWorker !== 'function') throw new Error('停止检查失败：执行身份已变化或执行器缺少停止接口')
+      const confirmStopped = proof => serial(async () => {
+        if (proof?.confirmed !== true || proof.processTreeStopped !== true) return false
+        if (state.workers.get(taskId) !== worker || bindings[taskId]?.execution_id !== stoppedExecution) return false
+        Object.assign(bindings[taskId], { inflight: false, quiescent: true, blocked: false,
+          requires_process_tree_confirmation: false })
+        await persist()
+        state.closed.add(taskId)
+        state.blockedReconciliations.delete(taskId)
+        return true
+      })
+      const stopping = Promise.resolve().then(() => stopWorker.call(worker))
       let timer
       try {
         const proof = await Promise.race([
-          Promise.resolve().then(() => worker.quiesceForRecovery()),
-          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('确认旧执行进程树停止超时，保留阻塞状态')), progressPolicy?.cancelMs ?? ACP_PROGRESS_DEFAULTS.cancelMs) }),
+          stopping,
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('停止超时：等待执行器返回进程树退出结果')), progressPolicy?.cancelMs ?? ACP_PROGRESS_DEFAULTS.cancelMs) }),
         ])
-        if (proof?.confirmed !== true || proof.processTreeStopped !== true) throw new Error('无法确认旧执行进程树停止，保留阻塞状态')
-        if (state.workers.get(taskId) !== worker || bindings[taskId]?.execution_id !== stoppedExecution) throw new Error('执行身份已变化，未清除新执行的阻塞状态')
+        if (proof?.confirmed !== true || proof.processTreeStopped !== true) throw new Error(`停止检查失败：${proof?.reason ?? '执行器未返回进程树退出结果'}`)
+        if (!await confirmStopped(proof)) throw new Error('停止检查失败：执行身份已变化')
+      } catch (error) {
+        // Timeout ends the caller's wait, not the owned termination operation.
+        // A late exit releases only this exact execution and never dispatches work.
+        void stopping.then(async proof => {
+          if (await confirmStopped(proof)) {
+            await event({ stage: 'source_first_late_response', process_tree_stopped: true, message: '执行已停止，已解除占用' })
+            await state.promise?.catch(() => {})
+            if (!state.pendingStarts?.() && [...state.workers.keys()].every(id => state.closed.has(String(id)))) {
+              const notify = state.onStopped
+              state.onStopped = undefined
+              await notify?.()
+            }
+          }
+        }).catch(() => {})
+        throw error
       } finally { clearTimeout(timer) }
+      return
     } else await worker.dispose?.()
     state.blockedReconciliations.delete(taskId)
     await remember(worker, undefined, { inflight: false, quiescent: true, blocked: false,

@@ -101,8 +101,8 @@ for (const mode of ['saved', 'resume', 'stale-revision', 'second-pending', 'reje
         if (prompts.length === 2) assert.match(prompts[1], /先 result-read.*核对已有临时文件/)
         if (stopped) assert.ok(events.some(event => event.stage === 'source_first_tool_recovery' && event.process_tree_stopped === true))
         if (mode === 'rejected-proof') {
-          await assert.rejects(stopSourceFirstAcpRun(options), /无法确认旧执行进程树停止/)
-          await assert.rejects(run.dispose(), /无法确认旧执行进程树停止/)
+          await assert.rejects(stopSourceFirstAcpRun(options), /停止检查失败/)
+          await assert.rejects(run.dispose(), /停止检查失败/)
           const blocked = JSON.parse(await readFile(path.join(dataRoot, 'runs/run/acp-workers.json'), 'utf8'))
           assert.equal(blocked.workers.worker.requires_process_tree_confirmation, true)
           assert.equal(inspectAcpBindings(blocked, { presence: () => 'absent' }).can_resume, false)
@@ -579,4 +579,51 @@ test('attention stores full diagnostic beyond launch log limit and keeps user me
   assert.equal(saved.settled.validation.details, detail)
   assert.equal(saved.result_snapshot.total_count, 38)
   await run.dispose()
+})
+
+for (const delayed of [false, true]) test(`explicit stop bypasses recovery eligibility and reconciles exit (delayed=${delayed})`, async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'explicit-worker-stop-'))
+  const started = deferred(), stopped = deferred(), reconciled = deferred()
+  let taskId, stops = 0, recoveryCalls = 0
+  const worker = { id: 'worker', remoteSessionId: 'remote', result: Promise.resolve(completed),
+    readDiagnostics: () => ({ activeToolCount: 1, promptPending: true }),
+    continuePrompt: () => { started.resolve(); return new Promise(() => {}) },
+    quiesceForRecovery: async () => { recoveryCalls++; return { confirmed: false, processTreeStopped: false } },
+    stopExecution: () => { stops++; return stopped.promise },
+  }
+  const options = { dataRoot, cwd: dataRoot, runId: 'run', providerId: 'pangea-nga',
+    signal: new AbortController().signal, progressPolicy: { ...reconciliationPolicy, cancelMs: 30 },
+    onEvent: e => { if (e.stage === 'source_first_late_response' && e.process_tree_stopped) reconciled.resolve() },
+    subagents: { start: async () => worker }, runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: {} }
+      if (args[1] === 'bind') taskId = args.at(-1)
+      if (args[1] === 'next') return { run_id: 'run', actions: [{ action_id: 'planning',
+        action: taskId ? 'continue_agent' : 'dispatch_agent', task_id: taskId, role: 'planning', stage: 'unit_planning' }] }
+      return {}
+    } }
+  const run = createSourceFirstAcpRun(options)
+  const result = run.result.catch(() => {})
+  try {
+    // Ready-phase pending tools pause before a formal prompt; either path remains stoppable.
+    await run.result.catch(() => {})
+    if (!delayed) stopped.resolve({ confirmed: true, processTreeStopped: true })
+    const stopping = stopSourceFirstAcpRun(options)
+    if (delayed) {
+      await assert.rejects(stopping, /停止超时/)
+      stopped.resolve({ confirmed: true, processTreeStopped: true })
+      await reconciled.promise
+    } else assert.equal(await stopping, true)
+    const saved = JSON.parse(await readFile(path.join(dataRoot, 'runs/run/acp-workers.json'), 'utf8'))
+    assert.equal(saved.workers.worker.blocked, false)
+    assert.equal(saved.workers.worker.requires_process_tree_confirmation, false)
+    assert.equal(stops, 1)
+    assert.equal(recoveryCalls, 0)
+    await stopSourceFirstAcpRun(options)
+    assert.equal(stops, 1)
+  } finally {
+    stopped.resolve({ confirmed: true, processTreeStopped: true })
+    await result
+    await stopSourceFirstAcpRun(options)
+    await rm(dataRoot, { recursive: true, force: true })
+  }
 })
