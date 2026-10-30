@@ -7,6 +7,162 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
+    // Render the supported document notation as React nodes. Source HTML and
+// unsupported notation remain text; no source value becomes an HTML attribute.
+function createAssetContentRenderer(h) {
+  function inline(text) {
+    const nodes = []
+    let plain = ''
+    const flush = () => { if (plain) { nodes.push(plain); plain = '' } }
+    for (let index = 0; index < text.length;) {
+      if (text[index] === '\\' && /[\\`*_\[\]|]/.test(text[index + 1] ?? '')) {
+        plain += text[index + 1]; index += 2; continue
+      }
+      const marker = text[index] === '`' ? text.slice(index).match(/^`+/)[0]
+        : text.startsWith('**', index) ? '**' : text.startsWith('__', index) ? '__' : null
+      if (marker) {
+        const end = text.indexOf(marker, index + marker.length)
+        if (end > index + marker.length) {
+          flush()
+          const value = text.slice(index + marker.length, end)
+          nodes.push(h(marker[0] === '`' ? 'code' : 'strong', { key: nodes.length }, marker[0] === '`' ? value : inline(value)))
+          index = end + marker.length; continue
+        }
+      }
+      plain += text[index++]
+    }
+    flush()
+    return nodes
+  }
+
+  function tableCells(line) {
+    let text = line.trim()
+    if (text.startsWith('|')) text = text.slice(1)
+    if (text.endsWith('|') && !text.endsWith('\\|')) text = text.slice(0, -1)
+    const cells = []
+    let cell = '', code = ''
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index]
+      if (char === '\\' && index + 1 < text.length) { cell += char + text[++index]; continue }
+      if (char === '`') {
+        const run = text.slice(index).match(/^`+/)[0]
+        if (!code) code = run
+        else if (code === run) code = ''
+        cell += run; index += run.length - 1; continue
+      }
+      if (char === '|' && !code) { cells.push(cell.trim()); cell = '' }
+      else cell += char
+    }
+    cells.push(cell.trim())
+    return cells
+  }
+
+  const listMatch = line => line.match(/^(\s*)([-+*]|\d+[.)])\s+(.+)$/)
+  function blocks(lines) {
+    const result = []
+    let index = 0
+    const isTable = at => Boolean(lines[at]?.includes('|') && lines[at + 1]?.includes('|')
+      && tableCells(lines[at + 1]).every(cell => /^:?-{3,}:?$/.test(cell))
+      && tableCells(lines[at]).length === tableCells(lines[at + 1]).length)
+    const isBlock = at => /^(?:\s*(`{3,}|~{3,})|#{1,6}\s+| {0,3}>)/.test(lines[at] ?? '') || Boolean(listMatch(lines[at] ?? '')) || isTable(at)
+    while (index < lines.length) {
+      const line = lines[index]
+      if (!line.trim()) { index += 1; continue }
+      const key = result.length
+      const fence = line.match(/^\s*(`{3,}|~{3,})(.*)$/)
+      if (fence) {
+        const content = []
+        index += 1
+        const closing = new RegExp(`^\\s*${fence[1][0]}{${fence[1].length},}\\s*$`)
+        while (index < lines.length && !closing.test(lines[index])) content.push(lines[index++])
+        if (index < lines.length) index += 1
+        result.push(h('pre', { key }, h('code', null, content.join('\n'))))
+        continue
+      }
+      const heading = line.match(/^(#{1,6})\s+(.+)$/)
+      if (heading) {
+        result.push(h(`h${Math.min(6, heading[1].length + 2)}`, { key }, inline(heading[2])))
+        index += 1; continue
+      }
+      if (/^ {0,3}>/.test(line)) {
+        const quote = []
+        while (index < lines.length && /^ {0,3}>/.test(lines[index])) quote.push(lines[index++].replace(/^ {0,3}> ?/, ''))
+        result.push(h('blockquote', { key }, blocks(quote)))
+        continue
+      }
+      if (isTable(index)) {
+        const header = tableCells(line), rows = []
+        index += 2
+        while (index < lines.length && lines[index].trim() && lines[index].includes('|')) rows.push(tableCells(lines[index++]))
+        const width = Math.max(header.length, ...rows.map(row => row.length))
+        result.push(h('div', { key, className: 'pangea-asset-rich-table' }, h('table', null,
+          h('thead', null, h('tr', null, Array.from({ length: width }, (_, cell) => h('th', { key: cell, scope: 'col' }, inline(header[cell] ?? ''))))),
+          h('tbody', null, rows.map((row, rowIndex) => h('tr', { key: rowIndex }, Array.from({ length: width }, (_, cell) => h('td', { key: cell }, inline(row[cell] ?? '')))))))))
+        continue
+      }
+      const first = listMatch(line)
+      if (first) {
+        const ordered = /^\d/.test(first[2]), indent = first[1].length, items = []
+        while (index < lines.length) {
+          const match = listMatch(lines[index])
+          if (!match || match[1].length !== indent || /^\d/.test(match[2]) !== ordered) break
+          const content = [match[3]]
+          index += 1
+          while (index < lines.length && lines[index].trim() && /^\s+/.test(lines[index]) && (lines[index].match(/^\s*/)[0].length > indent)) {
+            content.push(lines[index].slice(Math.min(lines[index].match(/^\s*/)[0].length, indent + 2)))
+            index += 1
+          }
+          items.push(h('li', { key: items.length, ...(ordered ? { value: Number.parseInt(match[2], 10) } : {}) }, blocks(content)))
+        }
+        result.push(h(ordered ? 'ol' : 'ul', { key, ...(ordered ? { start: Number.parseInt(first[2], 10) } : {}) }, items))
+        continue
+      }
+      const paragraph = [line]
+      index += 1
+      while (index < lines.length && lines[index].trim() && !isBlock(index)) paragraph.push(lines[index++])
+      result.push(h('p', { key }, inline(paragraph.join('\n'))))
+    }
+    return result
+  }
+
+  function body(text) {
+    return h('div', { className: 'pangea-asset-rich-text' }, blocks(String(text ?? '').split(/\r?\n/)))
+  }
+
+  const literalFields = new Set(['path', 'file_path', 'source_path', 'source_name', 'location', 'url', 'uri', 'code', 'id', 'item_id', 'asset_id'])
+  function value(input, { literal = false } = {}) {
+    if (Array.isArray(input)) return input.length
+      ? h('ul', { className: 'pangea-asset-value-list' }, input.map((entry, index) => h('li', { key: index }, value(entry, { literal })))) : '[]'
+    if (input && typeof input === 'object') return Object.keys(input).length
+      ? h('dl', { className: 'pangea-asset-value-fields' }, Object.entries(input).map(([key, entry]) => h('div', { key }, h('dt', null, key), h('dd', null, value(entry, { literal: literal || literalFields.has(key) }))))) : '{}'
+    if (literal) return h('span', { className: 'pangea-asset-literal-value' }, input === null ? 'null' : String(input ?? ''))
+    return body(input === null ? 'null' : String(input ?? ''))
+  }
+  return { body, value }
+}
+
+const assetContentStyles = `
+.pangea-asset-rich-text{font:inherit;line-height:1.75;white-space:normal;overflow-wrap:anywhere;min-width:0}
+.pangea-asset-rich-text p{margin:0 0 .8em;white-space:pre-wrap;font-size:inherit;line-height:inherit}
+.pangea-asset-rich-text :is(h3,h4,h5,h6){font-weight:650;line-height:1.45;margin:1.35em 0 .65em;font-size:1em}
+.pangea-asset-rich-text h3{font-size:1.2em}.pangea-asset-rich-text h4{font-size:1.08em}
+.pangea-asset-rich-text :is(ol,ul),.pangea-asset-value-list{margin:.5em 0 .9em;padding-left:1.6em}
+.pangea-asset-rich-text ul,.pangea-asset-value-list{list-style:disc outside}.pangea-asset-rich-text ol{list-style:decimal outside}
+.pangea-asset-rich-text li,.pangea-asset-value-list>li{margin:.3em 0;padding-left:.15em}
+.pangea-asset-rich-text li>p{margin:0}.pangea-asset-rich-text li>:is(ol,ul){margin:.35em 0}
+.pangea-asset-rich-text code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.92em;background:#eef0ed;border-radius:3px;padding:.12em .3em;color:inherit}
+.pangea-asset-rich-text pre{margin:.9em 0;padding:14px 16px;background:#f4f5f2;border:1px solid #e1e5df;border-radius:6px;overflow-x:auto;white-space:pre;line-height:1.6}
+.pangea-asset-rich-text pre code{padding:0;background:none;border-radius:0;white-space:pre}
+.pangea-asset-rich-text blockquote{margin:.9em 0;padding:.2em 0 .2em 1em;border-left:3px solid #c9d3c3;color:#637384}
+.pangea-asset-rich-table{overflow-x:auto;margin:.9em 0}.pangea-asset-rich-table table{border-collapse:collapse;width:100%;font-size:inherit;line-height:1.6}
+.pangea-asset-rich-table :is(th,td){text-align:left;padding:9px 12px;border:1px solid #dfe4dc;vertical-align:top;min-width:90px;white-space:pre-wrap}.pangea-asset-rich-table th{background:#f3f5f0;font-weight:600}
+.pangea-asset-rich-text>:first-child{margin-top:0}.pangea-asset-rich-text>:last-child{margin-bottom:0}
+.pangea-asset-value-fields{display:grid;gap:6px;margin:0}.pangea-asset-value-fields>div{display:grid;grid-template-columns:minmax(0,112px) minmax(0,1fr);align-items:baseline;gap:4px 12px;min-width:0}.pangea-asset-value-fields dt{font-size:.88em;color:#637384;overflow-wrap:anywhere;min-width:0}.pangea-asset-value-fields dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.pangea-asset-value-list{margin-top:0;margin-bottom:0}.pangea-asset-detail-source-note>.pangea-asset-value-list,.pangea-asset-detail-source-note>.pangea-asset-value-fields{margin-top:8px}
+.pangea-asset-literal-value{white-space:pre-wrap;overflow-wrap:anywhere}
+`
+
+    const { body: renderBody, value: renderValue } = createAssetContentRenderer(h)
     const inject = ['pangea', 'sessions']
     const API_PATH = '/api/pangea-asset-catalog/state'
     const ACP_SETTINGS_API_PATH = '/api/pangea-companion/acp-settings'
@@ -181,6 +337,9 @@ window.__ModuleLoader__.load({
       if (value && typeof value === 'object') return value.path && value.location ? `${value.path} · ${value.location}` : JSON.stringify(value, null, 2)
       return String(value ?? '')
     }
+    function sourceReferences(value) {
+      return value ? h('div', { className: 'pangea-asset-detail-source-note' }, h('strong', null, '原文出处'), renderValue(value, { literal: true })) : null
+    }
     function renderStructuredResult(result) {
       const items = structuredItems(result)
       if (items.length && items.every(item => item.coverage_type)) return h('section', { 'aria-label': '提取内容' },
@@ -193,18 +352,18 @@ window.__ModuleLoader__.load({
             h('td', null, `${item.path || item.file_path || '未提供路径'}${item.line ? `:${item.line}` : ''}`),
             h('td', null, item.function || item.condition || (item.branch != null ? `块 ${item.block ?? '—'} · 分支 ${item.branch}` : '—')),
             h('td', null, item.true_count != null || item.false_count != null ? `真 ${item.true_count ?? '—'} / 假 ${item.false_count ?? '—'}` : item.count ?? '—')))))),
-        result.warnings?.length ? h('p', { style: styles.meta }, readable(result.warnings)) : null,
+        result.warnings?.length ? h('div', { style: styles.meta }, renderValue(result.warnings)) : null,
         h('details', { style: { marginTop: 20 } }, h('summary', { style: styles.meta }, '完整提取记录'), h('pre', { style: styles.pre }, JSON.stringify(result, null, 2))))
       return h('section', { 'aria-label': '提取内容' },
         h('h2', { style: styles.title }, '提取内容'),
-        result.summary ? h('p', { style: { lineHeight: 1.7 } }, result.summary) : null,
+        result.summary ? renderBody(result.summary) : null,
         items.map((item, index) => h('details', { key: item.item_id ?? index, style: styles.card, open: items.length === 1 },
           h('summary', { style: { ...styles.itemTitle, cursor: 'pointer' } }, item.title ?? item.topic ?? item.name ?? `条目 ${index + 1}`),
           h('dl', { className: 'pangea-asset-fields', style: { display: 'grid', gridTemplateColumns: 'minmax(100px, 140px) minmax(0, 1fr)', gap: '16px 20px', lineHeight: 1.7 } },
             Object.entries(fieldLabels).filter(([key]) => readable(item[key]).trim()).map(([key, label]) => h(React.Fragment, { key },
-              h('dt', { style: { fontWeight: 650 } }, label), h('dd', { style: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, readable(item[key]))))),
+              h('dt', { style: { fontWeight: 650 } }, label), h('dd', { style: { margin: 0, overflowWrap: 'anywhere' } }, renderValue(item[key]))))),
           !['constraints', 'trigger', 'preconditions', 'applicable_modules', 'modules'].some(key => readable(item[key]).trim()) ? h('p', { style: styles.meta }, '适用条件：原文未明确，待确认。') : null)),
-        result.warnings?.length ? h('section', { style: styles.card }, h('h3', null, '待确认事项'), h('div', { style: { whiteSpace: 'pre-wrap', lineHeight: 1.7 } }, readable(result.warnings))) : null,
+        result.warnings?.length ? h('section', { style: styles.card }, h('h3', null, '待确认事项'), renderValue(result.warnings)) : null,
         h('details', null, h('summary', { style: styles.meta }, '完整提取记录'), h('pre', { style: styles.pre }, JSON.stringify(result, null, 2))))
     }
 
@@ -702,14 +861,17 @@ window.__ModuleLoader__.load({
       const job = assistantAsset?.extraction_job
       const jobLabel = { waiting: '等待空闲执行位', preparing: '准备中', queued: '排队中', running: '正在提取', finalizing: '保存结果', repairing: '修正类型', stopping: '正在停止', needs_attention: '需要处理', completed: '已完成', failed: '处理失败', interrupted: '已停止 / 中断', stopped: '已停止' }
       const modelLabel = job?.model ? typeof job.model === 'string' ? job.model : `${job.model.provider} / ${job.model.model}` : ''
-      function jobProgress(value) {
+      function jobProgress(value, { showStatus = true } = {}) {
         if (!value) return null
         const active = ACTIVE_JOB_STATUSES.has(value.status)
         const elapsed = Number.isFinite(value.elapsed_ms) ? elapsedTime(0, value.elapsed_ms) : value.started_at || value.queued_at ? elapsedTime(value.started_at || value.queued_at, value.completed_at || Date.now()) : ''
         const activity = value.last_activity_at || value.events?.at(-1)?.at
         const idle = Number.isFinite(value.idle_ms) ? elapsedTime(0, value.idle_ms) : activity ? elapsedTime(activity, value.completed_at || Date.now()) : ''
+        const phase = showStatus ? value.phase_label || jobLabel[value.status] || '等待处理' : value.phase_label !== jobLabel[value.status] ? value.phase_label : ''
+        const summary = [phase, value.queue_position ? `队列第 ${value.queue_position} 个` : '', elapsed ? `已用时 ${elapsed}` : ''].filter(Boolean).join(' · ')
+        if (!summary && !(active && idle) && !value.warning) return null
         return h('div', { 'aria-label': '提取进度', style: { ...styles.meta, marginBottom: 12 } },
-          h('div', null, `${value.phase_label || jobLabel[value.status] || '等待处理'}${value.queue_position ? ` · 队列第 ${value.queue_position} 个` : ''}${elapsed ? ` · 已用时 ${elapsed}` : ''}`),
+          summary ? h('div', null, summary) : null,
           active && idle ? h('div', null, `最近活动距今 ${idle}${value.diagnostics?.toolCalls ? ` · 已调用工具 ${value.diagnostics.toolCalls} 次` : ''}`) : null,
           value.warning ? h('p', { role: 'status', style: { color: '#875400' } }, value.warning) : null)
       }
@@ -721,11 +883,7 @@ window.__ModuleLoader__.load({
         if (['waiting', 'queued'].includes(value.status)) return '任务已进入队列，轮到后会自动开始；可以返回资产库继续导入。'
         return '尚未收到文字处理记录。阶段与最近活动时间会持续更新，可以返回资产库或手动停止。'
       }
-      const renderJob = value => h(React.Fragment, null,
-        value.error ? h('p', { role: 'alert', style: styles.error }, value.error) : null,
-        jobProgress(value),
-        h('ol', { style: { paddingLeft: 24, lineHeight: 1.8 } }, (value.events ?? []).map((event, index) => h('li', { key: index }, event.label))),
-        value.output ? h('pre', { style: { ...styles.pre, maxHeight: '48vh', fontFamily: 'inherit', lineHeight: 1.75 } }, value.output) : h('p', { style: styles.meta }, jobEmptyText(value)))
+      const renderJob = value => detailLog(value)
 
       const coverageOnly = (importOpen ? importType : activeAsset?.asset_type) === 'coverage'
       const importTypes = TYPES.filter(([value]) => value && (!state?.asset_types?.length || state.asset_types.includes(value)))
@@ -779,25 +937,31 @@ window.__ModuleLoader__.load({
           renderJob(job),
           job.status === 'needs_attention' ? h('button', { type: 'button', style: styles.button, disabled: busy, onClick: () => { void act('extract', { asset_id: assistantAsset.asset_id, provider_id: job.provider_id, ...(job.provider_id ? { agent_model: job.model } : { model_route: job.model }) }) } }, '原会话继续修正') : null,
           ['failed', 'interrupted', 'stopped', 'needs_attention'].includes(job.status) ? h('button', { type: 'button', style: { ...styles.button, ...styles.primary }, disabled: busy, onClick: () => { void act('extract', { asset_id: assistantAsset.asset_id, restart: true }) } }, '重新处理资产') : null,
-          (job.history ?? []).map((past, index) => h('details', { key: index, style: { marginTop: 20 } }, h('summary', { style: styles.itemTitle }, `历史处理 · ${assetTime(past.started_at)}`), renderJob(past))))
+          (job.history ?? []).map((past, index) => h('details', { key: index, open: past.status !== 'completed' || Boolean(past.error || past.warning), style: { marginTop: 20 } }, h('summary', { style: styles.itemTitle }, `${assetTime(past.started_at)} · ${jobLabel[past.status] ?? past.status}`), detailLog(past, { collapsible: false }))))
           : !importOpen ? h('p', { style: { ...styles.meta, marginTop: 20 } }, '处理结果保存在左侧详情中。') : null) : null
       function detailPairs(rows) {
-        return h('dl', { className: 'pangea-asset-detail-kv' }, rows.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value ?? '未提供'))))
+        return h('dl', { className: 'pangea-asset-detail-kv' }, rows.map(([label, value, literal = false]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, renderValue(value ?? '未提供', { literal })))))
       }
-      function detailLog(record) {
+      function detailLog(record, { showProgress = true, collapsible = true } = {}) {
         const events = record?.events ?? []
-        return h(React.Fragment, null, jobProgress(record),
+        const content = h('div', { className: 'pangea-asset-record-body' },
           events.length ? h('ol', { className: 'pangea-asset-detail-log' }, events.map((event, index) => h('li', { key: index },
             event.at || event.timestamp ? h('time', null, assetTime(event.at ?? event.timestamp)) : null,
             event.label ?? event.message ?? '处理事件'))) : null,
-          record?.output ? h('pre', { style: { ...styles.pre, fontFamily: 'inherit' } }, record.output) : h('p', { style: styles.meta }, record ? jobEmptyText(record) : '尚无处理事件。'))
+          record?.output ? renderBody(record.output) : h('p', { style: styles.meta }, record ? jobEmptyText(record) : '尚无处理事件。'))
+        return h(React.Fragment, null,
+          showProgress ? jobProgress(record, { showStatus: false }) : null,
+          record?.error ? h('p', { role: 'alert', style: styles.error }, record.error) : null,
+          collapsible && record?.status === 'completed' && !record.error && !record.warning
+            ? h('details', { className: 'pangea-asset-log-disclosure' }, h('summary', null, '查看处理记录'), content) : content)
       }
       function detailItems(result) {
         const items = structuredItems(result)
-        return items.map((item, index) => h('details', { key: item.item_id ?? index, className: 'pangea-asset-detail-item', open: index === 0 },
+        return h(React.Fragment, null, items.map((item, index) => h('details', { key: item.item_id ?? index, className: 'pangea-asset-detail-item', open: index === 0 },
           h('summary', null, `${item.item_id ?? `条目 ${index + 1}`} · ${item.title ?? item.topic ?? item.name ?? '未命名内容'}`),
-          detailPairs(Object.entries(fieldLabels).filter(([key]) => readable(item[key]).trim() && key !== 'source_references').map(([key, label]) => [label, readable(item[key])])),
-          item.source_references ? h('div', { className: 'pangea-asset-detail-source-note' }, `原文出处 · ${readable(item.source_references)}`) : null))
+          detailPairs(Object.entries(fieldLabels).filter(([key]) => readable(item[key]).trim() && key !== 'source_references').map(([key, label]) => [label, item[key]])),
+          sourceReferences(item.source_references))),
+          h('details', { style: { marginTop: 20 } }, h('summary', { style: styles.meta }, '完整提取记录'), h('pre', { style: styles.pre }, JSON.stringify(result, null, 2))))
       }
       function detailCoverageTable(result) {
         return h('div', { className: 'pangea-asset-detail-table-wrap' }, h('table', { className: 'pangea-asset-table', 'aria-label': '覆盖率记录' },
@@ -809,20 +973,7 @@ window.__ModuleLoader__.load({
             h('td', null, item.true_count != null || item.false_count != null ? `真 ${item.true_count ?? '未提供'} / 假 ${item.false_count ?? '未提供'}` : item.count ?? '未提供'))))))
       }
       function normalizedSource(text) {
-        const lines = String(text).split(/\r?\n/)
-        const blocks = []
-        let paragraph = []
-        const flush = () => { if (paragraph.length) { blocks.push(h('p', { key: blocks.length }, paragraph.join('\n'))); paragraph = [] } }
-        for (const line of lines) {
-          const value = line.trim()
-          if (!value) { flush(); continue }
-          const heading = value.match(/^#{1,6}\s+(.+)$/)
-          const numbered = value.match(/^(?:\d+\.)*\d+\.?\s+.+$/)
-          if (heading || numbered) { flush(); blocks.push(h(heading ? 'h3' : 'h4', { key: blocks.length }, heading ? heading[1] : value)) }
-          else paragraph.push(line)
-        }
-        flush()
-        return h('article', { className: 'pangea-asset-normalized-source' }, blocks)
+        return h('article', { className: 'pangea-asset-normalized-source' }, renderBody(text))
       }
       function detailEditDialog(asset) {
         if (editingAssetId !== asset.asset_id) return null
@@ -851,73 +1002,74 @@ window.__ModuleLoader__.load({
         const usable = asset.status === 'available' && !stale && Boolean(detail?.asset?.input_revision)
         const assetId = asset.asset_id
         const restart = () => { void act('extract', { asset_id: assetId, restart: true }) }
-        const side = (title, content) => h('section', { className: 'pangea-asset-detail-panel' }, h('h3', null, title), content)
+        const side = (title, content, status) => h('section', { className: 'pangea-asset-detail-panel' },
+          status ? h('div', { className: 'pangea-asset-record-heading' }, h('h3', null, title), h('span', { style: styles.meta }, status)) : h('h3', null, title), content)
         const sourceAndRevision = side('原始材料与修订', detailPairs([['文件', filename], ['当前修订', `r${asset.revision ?? 1}`], ['关联仓库', (asset.repository_ids ?? []).join('、') || '未设置'], ['模块', (asset.module_tags ?? []).join('、') || '未设置']]))
         const processingSide = h('aside', { className: 'pangea-asset-detail-side' },
           side('本次资料', detailPairs([['文件', filename], ['资料分类', assetTypeLabel], ['当前修订', `r${asset.revision ?? 1}`], ['原始材料', asset.source_path ? '已保存' : '未提供']])),
-          failed ? side('失败记录', h(React.Fragment, null,
-            h('p', { style: styles.meta }, asset.last_error ?? assetJob?.error ?? '本次处理未完成。'),
-            h('hr', { style: { border: 0, borderTop: '1px solid #e5e7e4', margin: '17px 0' } }),
+          failed ? side('处理修订', h(React.Fragment, null,
             h('p', { style: styles.meta }, `最近尝试 · ${assetTime(assetJob?.started_at)}`),
             items.length ? h('details', { style: { marginTop: 16 } }, h('summary', null, `前次成果 · ${items.length} 条，只读`), detailItems(detail.result)) : null))
             : side('如何使用处理结果', h(React.Fragment, null,
               h('p', { style: styles.meta }, noItems ? '当前分类未提取出可用内容。核对原文与资料分类后可重新处理。' : '提取成功后，可在详情中核对内容。历史缺陷经审核后才能进入新分析。'),
               noItems && state?.features?.metadata !== false ? h('button', { type: 'button', style: styles.button, onClick: event => startEdit(asset, event) }, '编辑资料分类') : null)))
-        const title = failed ? '处理未完成，原材料已保留' : attention ? '提取结果需要修正' : noItems ? '这份材料未提取出可用内容' : '正在提取资料中的可用内容'
         const processCopy = failed ? '本次提取未能完整保存结果。可以查看失败记录，调整处理设置后重新尝试。' : attention ? '提取内容与资料分类尚未一致。可在原会话继续修正，或发起新的处理。' : noItems ? '核对原文与资料分类后，可以调整信息并重新处理；原始材料仍然保留。' : '原始材料已经保存。提取将在后台继续，可返回资产库导入其他文件；也可以手动停止。'
         const processMain = h('div', null,
           h('section', { className: 'pangea-asset-process-hero' },
-            h('div', { style: styles.row },
+            h('div', { className: 'pangea-asset-process-heading' },
               h('span', { className: 'pangea-asset-process-symbol', 'aria-hidden': true }, assetFileIcon(failed ? 'failed' : attention ? 'design' : noItems ? 'requirement' : asset.asset_type)),
+              h('h2', null, asset.title),
               h('span', { className: 'pangea-asset-detail-badges' }, h('span', { className: failed ? 'is-error' : attention || noItems ? 'is-warn' : '' }, noItems ? '无可用内容' : jobLabel[assetJob?.status] ?? STATUS[asset.status] ?? asset.status))),
-            h('h2', null, title), h('p', null, processCopy),
-            h('div', { className: 'pangea-asset-process-steps' },
-              h('div', { className: 'done' }, '01 · 读取材料', h('small', null, asset.source_path ? '文件已保存' : '等待文件')),
-              h('div', { className: noItems ? 'done' : 'active' }, '02 · 提取内容', h('small', null, failed ? '本次未完成' : attention ? '等待修正' : noItems ? '已完成检查' : jobLabel[assetJob?.status] ?? '当前进行中')),
-              h('div', null, '03 · 保存与核对', h('small', null, noItems ? '0 条可用内容' : '等待提取完成'))),
+            h('p', null, processCopy), jobProgress(assetJob, { showStatus: false }),
             h('div', { style: styles.wrap },
               attention ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: () => { void act('extract', { asset_id: assetId, provider_id: assetJob.provider_id, ...(assetJob.provider_id ? { agent_model: assetJob.model } : { model_route: assetJob.model }) }) } }, '原会话继续修正') : null,
               failed || attention || noItems ? h('button', { type: 'button', disabled: busy, style: failed ? { ...styles.button, ...styles.primary } : styles.button, onClick: restart }, '重新处理资产') : h('button', { type: 'button', disabled: detailLoading, style: styles.button, onClick: () => { void toggle(assetId, true) } }, '刷新状态'),
               failed && detail?.failure_record ? h('button', { type: 'button', style: styles.button, onClick: () => downloadFailureRecord(detail) }, '下载失败记录') : null)),
-          failed && items.length ? h('div', { className: 'pangea-asset-detail-callout is-blue', style: { marginTop: 18 } }, h('div', null, h('strong', null, '已有结果可继续查阅'), h('p', null, `上一次保存的 ${items.length} 条内容仍保留；本次失败记录与新的尝试分别显示。`))) : null,
+          failed && items.length ? h('div', { className: 'pangea-asset-detail-callout is-blue', style: { marginTop: 18 } }, h('div', null, h('strong', null, '已有结果可继续查阅'), h('p', null, '上一次保存的内容仍保留；本次失败记录与新的尝试分别显示。'))) : null,
           noItems ? h('section', { className: 'pangea-asset-detail-panel', style: { marginTop: 18 } }, h('h3', null, '处理结论与原文'), h('p', null, '当前分类未提取出可用条目。这不代表原始材料没有参考价值。'), detail?.normalized_preview ? h('details', { open: true }, h('summary', null, '原文件内容'), h('div', { className: 'pangea-asset-detail-source-note' }, detail.normalized_preview)) : null)
-            : failed ? null : h('section', { className: 'pangea-asset-detail-panel', style: { marginTop: 18, minHeight: 270 } }, h('h3', null, '当前处理记录'), detailLog(assetJob)))
+            : h('section', { className: 'pangea-asset-detail-panel', style: { marginTop: 18 } }, h('h3', null, failed ? '失败记录' : '当前处理记录'),
+              failed && asset.last_error && asset.last_error !== assetJob?.error ? h('p', { role: 'alert', style: styles.error }, asset.last_error) : null,
+              detailLog(assetJob, { showProgress: false, collapsible: false })))
         const historyView = h('div', { className: 'pangea-asset-detail-grid' }, side('处理记录', h(React.Fragment, null,
-          h('div', { style: styles.row }, h('strong', null, `最近处理 · ${jobLabel[assetJob?.status] ?? '暂无记录'}`)), detailLog(assetJob),
-          (assetJob?.history ?? []).map((record, index) => h('details', { key: index, open: index === 0, style: { marginTop: 24, borderTop: '1px solid #e5e7e4', paddingTop: 18 } },
-            h('summary', null, `${assetTime(record.started_at)} · 历史处理`),
-            h('div', { className: 'pangea-asset-history-record' },
-              h('div', { style: styles.row }, h('strong', null, ['failed', 'interrupted', 'stopped'].includes(record.status) ? '处理未完成' : jobLabel[record.status] ?? record.status),
-                h('span', { className: 'pangea-asset-detail-badges' }, h('span', { className: ['failed', 'interrupted', 'stopped'].includes(record.status) ? 'is-warn' : '' }, record.error || jobLabel[record.status] || record.status))),
-              h('p', null, ['failed', 'interrupted', 'stopped'].includes(record.status) ? '本次处理记录已保留，完成前未保存新的提取结果。' : '本次处理记录已保留，可与当前结果核对。')))))),
+          h('div', { className: 'pangea-asset-record-heading' }, h('strong', null, '最近处理'), h('time', { style: styles.meta }, assetTime(assetJob?.started_at)), h('span', { style: styles.meta }, jobLabel[assetJob?.status] ?? '暂无记录')), detailLog(assetJob),
+          (assetJob?.history ?? []).map((record, index) => h('details', { key: index, className: 'pangea-asset-history-entry', open: record.status !== 'completed' || Boolean(record.error || record.warning) },
+            h('summary', null, h('span', { className: 'pangea-asset-history-summary' }, h('time', null, assetTime(record.started_at)), h('span', null, jobLabel[record.status] ?? record.status))),
+            h('div', { className: 'pangea-asset-history-record' }, detailLog(record, { collapsible: false })))))),
           h('aside', { className: 'pangea-asset-detail-side' }, side('记录与修订', h(React.Fragment, null, h('p', { style: styles.meta }, '这里展示每次提取的处理记录。当前可用内容以最新结果为准。'), h('button', { type: 'button', style: styles.button, onClick: () => setDetailTab('content') }, '查看当前提取内容')))))
         if (!processState && !stale && detailTab === 'content' && ['requirement', 'reference', 'test_case_example'].includes(asset.asset_type)) {
-          const sourceNote = item => item.source_references ? h('div', { className: 'pangea-asset-detail-source-note' }, `原文出处 · ${readable(item.source_references)}`) : null
-          const facts = item => Array.isArray(item.key_facts) ? item.key_facts.map(readable).join('；') : readable(item.key_facts ?? item.summary ?? '')
-          const requirement = item => h(React.Fragment, null, detailPairs([['输入', readable(item.inputs) || '待确认'], ['输出', readable(item.outputs) || '待确认'], ['约束', readable(item.constraints) || '待确认'], ['验收条件', readable(item.acceptance_criteria) || '待确认']]), sourceNote(item))
+          const sourceNote = item => sourceReferences(item.source_references)
+          const facts = item => renderValue(item.key_facts ?? item.summary ?? '原文未提供关键事实。')
+          const requirement = item => h(React.Fragment, null, detailPairs([['输入', item.inputs ?? '待确认'], ['输出', item.outputs ?? '待确认'], ['约束', item.constraints ?? '待确认'], ['验收条件', item.acceptance_criteria ?? '待确认']]), sourceNote(item))
           const example = item => {
             const steps = Array.isArray(item.steps) ? item.steps : item.steps ? [item.steps] : []
             const results = Array.isArray(item.expected_results) ? item.expected_results : item.expected_results ? [item.expected_results] : []
             return h(React.Fragment, null,
-              detailPairs([['前置条件', readable(item.preconditions) || '待确认'], ['关联问题', readable(item.related_problems) || '未提供']]),
-              h('div', { className: 'pangea-b07-example-table' }, h('table', null, h('thead', null, h('tr', null, ['步骤', '操作', '预期结果'].map(label => h('th', { key: label }, label)))), h('tbody', null, Array.from({ length: Math.max(steps.length, results.length) }, (_, index) => h('tr', { key: index }, h('td', null, String(index + 1).padStart(2, '0')), h('td', null, readable(steps[index]) || '待确认'), h('td', null, readable(results[index]) || '待确认')))))), sourceNote(item))
+              detailPairs([['前置条件', item.preconditions ?? '待确认'], ['关联问题', item.related_problems ?? '未提供']]),
+              h('div', { className: 'pangea-b07-example-table' }, h('table', null,
+                h('thead', null, h('tr', null, ['步骤', '操作', '预期结果'].map(label => h('th', { key: label }, label)))),
+                h('tbody', null, Array.from({ length: Math.max(steps.length, results.length) }, (_, index) => h('tr', { key: index },
+                  h('td', null, String(index + 1).padStart(2, '0')),
+                  h('td', null, renderValue(steps[index] ?? '待确认')),
+                  h('td', null, renderValue(results[index] ?? '待确认'))))))), sourceNote(item))
           }
           const content = asset.asset_type === 'reference'
-            ? h('section', { className: 'pangea-asset-detail-panel pangea-b07-reference' }, h('h3', null, '提取的关键事实'), items.map(item => h('div', { key: item.item_id, className: 'pangea-b07-fact' }, h('h4', null, `${item.item_id ?? '条目'} · ${item.title ?? '未命名事实'}`), h('p', null, facts(item) || '原文未提供关键事实。'), sourceNote(item))))
+            ? h('section', { className: 'pangea-asset-detail-panel pangea-b07-reference' }, h('h3', null, '提取的关键事实'), items.map(item => h('div', { key: item.item_id, className: 'pangea-b07-fact' }, h('h4', null, `${item.item_id ?? '条目'} · ${item.title ?? '未命名事实'}`), facts(item), sourceNote(item))))
             : h(React.Fragment, null, items.map((item, index) => index === 0
               ? h('section', { key: item.item_id ?? index, className: 'pangea-asset-detail-panel pangea-b07-structured' }, h('div', { className: 'pangea-b07-structured-title' }, h('h3', null, `${item.item_id ?? '条目'} · ${item.title ?? '未命名内容'}`), asset.asset_type === 'test_case_example' ? h('span', { className: 'pangea-b08-badge' }, '示例用例') : null), asset.asset_type === 'requirement' ? requirement(item) : example(item))
               : h('details', { key: item.item_id ?? index, className: 'pangea-b07-structured-collapsed' }, h('summary', null, `${item.item_id ?? `条目 ${index + 1}`} · ${item.title ?? '未命名内容'}`), asset.asset_type === 'requirement' ? requirement(item) : example(item))),
               asset.asset_type === 'test_case_example' ? h('div', { className: 'pangea-asset-detail-callout is-blue pangea-b07-example-note' }, h('div', null, h('strong', null, '保留示例中的测试表达'), h('p', null, '这些条目来自导入的用例资料，可为新分析提供步骤与预期结果参考。'))) : null)
           return h('section', { className: 'pangea-asset-detail', 'aria-label': '资产详情' },
-            h('div', { className: 'pangea-asset-detail-top' }, h('div', null, h('div', { className: 'pangea-asset-detail-badges' }, h('span', null, assetTypeLabel), h('span', { className: 'is-good' }, '可用于分析'), `修订 r${asset.revision ?? 1}`), h('h2', null, asset.title), h('div', { style: styles.meta }, `${filename} · ${(asset.repository_ids ?? []).join('、') || '未限定仓库'} / ${(asset.module_tags ?? []).join('、') || '未限定模块'} · ${items.length} 条提取内容`)),
+            h('div', { className: 'pangea-asset-detail-top' }, h('div', null,
+              h('div', { className: 'pangea-asset-detail-heading' }, h('h2', null, asset.title), h('div', { className: 'pangea-asset-detail-badges' }, h('span', null, assetTypeLabel), h('span', { className: 'is-good' }, '可用于分析'), h('span', null, `${items.length} 条提取内容`))),
+              h('div', { style: styles.meta }, `${filename} · 修订 r${asset.revision ?? 1} · ${(asset.repository_ids ?? []).join('、') || '未限定仓库'} / ${(asset.module_tags ?? []).join('、') || '未限定模块'}`)),
               usable ? h('button', { type: 'button', style: styles.button, onClick: () => ctx.pangea?.requestRunCreation?.(scope, { assetIds: [assetId] }) }, '用于新分析') : null),
             h('div', { className: 'pangea-asset-detail-grid' }, h('div', { className: 'pangea-b07-structured-stack' }, content),
               h('aside', { className: 'pangea-asset-detail-side' }, side('原始材料与来源', h(React.Fragment, null, h('strong', null, filename), h('p', { style: styles.meta }, `当前修订 r${asset.revision ?? 1}`), h('details', { open: true, className: 'pangea-b07-source-preview' }, h('summary', null, '原文件内容'), detail?.normalized_preview ? normalizedSource(detail.normalized_preview) : h('p', null, '当前修订没有可显示的规范化原文。')), h('hr'), detailPairs([['关联仓库', (asset.repository_ids ?? []).join('、') || '未设置'], ['模块', (asset.module_tags ?? []).join('、') || '未设置'], ['语言', (asset.language_tags ?? []).join('、') || '未设置']]))))), detailEditDialog(asset))
         }
         return h('section', { className: 'pangea-asset-detail', 'aria-label': '资产详情' },
           !processState ? h('div', { className: 'pangea-asset-detail-top' }, h('div', null,
-            h('div', { className: 'pangea-asset-detail-badges' }, h('span', null, assetTypeLabel), h('span', { className: stale ? 'is-warn' : asset.status === 'available' ? 'is-good' : '' }, stale ? '需要重新处理' : STATUS[asset.status] ?? asset.status), `修订 r${asset.revision ?? 1}`),
-            h('h2', null, asset.title), h('div', { style: styles.meta }, `${filename} · ${(asset.repository_ids ?? []).join('、') || '未限定仓库'} / ${(asset.module_tags ?? []).join('、') || '未限定模块'} · ${assetTime(asset.updated_at)} 更新`)),
+            h('div', { className: 'pangea-asset-detail-heading' }, h('h2', null, asset.title), h('div', { className: 'pangea-asset-detail-badges' }, h('span', null, assetTypeLabel), h('span', { className: stale ? 'is-warn' : asset.status === 'available' ? 'is-good' : '' }, stale ? '需要重新处理' : STATUS[asset.status] ?? asset.status))),
+            h('div', { style: styles.meta }, `${filename} · 修订 r${asset.revision ?? 1} · ${(asset.repository_ids ?? []).join('、') || '未限定仓库'} / ${(asset.module_tags ?? []).join('、') || '未限定模块'} · ${assetTime(asset.updated_at)} 更新`)),
             usable ? h('button', { type: 'button', style: styles.button, onClick: () => ctx.pangea?.requestRunCreation?.(scope, { assetIds: [assetId] }) }, '用于新分析') : null) : null,
           stale ? h('div', { className: 'pangea-asset-detail-callout' }, h('div', null, h('strong', null, '提取内容需要更新'), h('p', null, '资料分类已变化。原提取内容保留供查阅，重新处理后才能作为新的分析输入。')),
             h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary }, onClick: restart }, '重新处理')) : null,
@@ -927,11 +1079,11 @@ window.__ModuleLoader__.load({
               detailTab === 'source' ? h(React.Fragment, null,
                   h('div', { style: styles.row }, h('span', { style: styles.meta }, filename), h('span', { className: 'pangea-asset-detail-badges' }, h('span', null, '已规范化文本'))),
                   detail?.normalized_preview ? h(React.Fragment, null, normalizedSource(detail.normalized_preview), h('div', { className: 'pangea-asset-detail-source-note' }, `原始材料的规范化内容，与当前修订 r${asset.revision ?? 1} 的提取结果对应。`)) : h('p', { role: 'status' }, '当前修订没有可显示的规范化原文。'))
-                : detailTab === 'version' ? h(React.Fragment, null, h('h3', null, '当前材料与内容版本'), detailPairs([['资产编号', assetId], ['当前修订', `r${asset.revision ?? 1} · 分析输入版本 ${detail?.asset?.input_revision ?? '未提供'}`], ['原始文件', filename], ['资料位置', asset.source_path], ['关联仓库', (asset.repository_ids ?? []).join('、') || '未设置'], ['模块标签', (asset.module_tags ?? []).join('、') || '未设置'], ['语言标签', (asset.language_tags ?? []).join('、') || '未设置'], ['最后更新', assetTime(asset.updated_at)]]), h('div', { className: 'pangea-asset-detail-callout is-blue', style: { marginTop: 24 } }, h('div', null, h('strong', null, '在创建分析时绑定版本'), h('p', null, '新分析冻结当前资产输入版本。已有 Run 按各自冻结输入查看。'))))
+                : detailTab === 'version' ? h(React.Fragment, null, h('h3', null, '当前材料与内容版本'), detailPairs([['资产编号', assetId, true], ['当前修订', `r${asset.revision ?? 1} · 分析输入版本 ${detail?.asset?.input_revision ?? '未提供'}`], ['原始文件', filename, true], ['资料位置', asset.source_path, true], ['关联仓库', (asset.repository_ids ?? []).join('、') || '未设置'], ['模块标签', (asset.module_tags ?? []).join('、') || '未设置'], ['语言标签', (asset.language_tags ?? []).join('、') || '未设置'], ['最后更新', assetTime(asset.updated_at)]]), h('div', { className: 'pangea-asset-detail-callout is-blue', style: { marginTop: 24 } }, h('div', null, h('strong', null, '在创建分析时绑定版本'), h('p', null, '新分析冻结当前资产输入版本。已有 Run 按各自冻结输入查看。'))))
                   : asset.asset_type === 'coverage' ? h(React.Fragment, null, h('div', { style: styles.row }, h('h3', null, '覆盖率记录'), h('span', { style: styles.meta }, '导入文件中的执行次数')), detailCoverageTable(detail?.result ?? {}), h('div', { className: 'pangea-asset-detail-callout is-blue', style: { marginTop: 18 } }, h('div', null, h('strong', null, '数值来自所导入的覆盖率资料'), h('p', null, '0 次执行保留为有效记录；与特定 Run 的版本是否适配，需要在分析时核对。'))))
-                    : h(React.Fragment, null, stale ? h('div', { className: 'pangea-asset-stale-content-heading' }, h('h3', null, '上一次提取内容'), h('span', { className: 'pangea-asset-detail-badges' }, h('span', null, '旧成果 · 只读'))) : h('div', { style: styles.meta, marginBottom: 18 }, `${items.length} 条${assetTypeLabel}内容 · 每项保留原文出处`), !items.length && detail?.result?.summary ? h('p', null, detail.result.summary) : null, detail?.result ? detailItems(detail.result) : h('p', { role: 'status' }, detailLoading ? '正在加载资产详情…' : '尚无提取内容。'))),
+                    : h(React.Fragment, null, stale ? h('div', { className: 'pangea-asset-stale-content-heading' }, h('h3', null, '上一次提取内容'), h('span', { className: 'pangea-asset-detail-badges' }, h('span', null, '旧成果 · 只读'))) : null, !items.length && detail?.result?.summary ? h('p', null, detail.result.summary) : null, detail?.result ? detailItems(detail.result) : h('p', { role: 'status' }, detailLoading ? '正在加载资产详情…' : '尚无提取内容。'))),
             h('aside', { className: 'pangea-asset-detail-side' }, detailTab === 'source' ? side('从原文到分析输入', h(React.Fragment, null,
-                h('ol', { className: 'pangea-asset-detail-log' }, [['原始材料', filename], ['当前资产修订', `r${asset.revision ?? 1} · ${assetTime(asset.updated_at)}`], ['提取结果', `${items.length} 条${assetTypeLabel}内容`]].map(([label, value]) => h('li', { key: label }, h('time', null, label), value))),
+                h('ol', { className: 'pangea-asset-detail-log' }, [['原始材料', filename], ['当前资产修订', `r${asset.revision ?? 1} · ${assetTime(asset.updated_at)}`]].map(([label, value]) => h('li', { key: label }, h('time', null, label), value))),
                 h('button', { type: 'button', style: { ...styles.button, marginTop: 18 }, onClick: () => setDetailTab('content') }, '返回提取内容')))
               : detailTab === 'version' ? side('材料与提取结果', h(React.Fragment, null,
                   h('div', { style: { display: 'grid', placeItems: 'center', width: 34, height: 38, margin: '13px 0 17px', border: '1px solid #dce6d3', borderRadius: 7, color: '#82966e' } }, assetFileIcon(asset.asset_type)),
@@ -940,8 +1092,8 @@ window.__ModuleLoader__.load({
                   h('hr', { style: { border: 0, borderTop: '1px solid #e5e7e4', margin: '17px 0' } }),
                   h('button', { type: 'button', style: styles.button, onClick: () => setDetailTab('source') }, '查看原始材料')))
                 : stale ? side('当前资料信息', detailPairs([['资料分类', assetTypeLabel], ['内容状态', '等待重新处理'], ['上次结果', `${items.length} 条内容`]]))
-                  : asset.asset_type === 'coverage' ? h(React.Fragment, null, sourceAndRevision, side('处理完成', h(React.Fragment, null, detailLog(assetJob), detail?.normalization ? h('details', null, h('summary', null, '解析信息与字段映射'), h('pre', { style: styles.pre }, JSON.stringify(detail.normalization, null, 2))) : null)))
-                    : h(React.Fragment, null, side('处理记录', h(React.Fragment, null, h('strong', null, jobLabel[assetJob?.status] ?? '暂无处理记录'), detailLog(assetJob), h('button', { type: 'button', style: styles.button, onClick: () => setDetailTab('history') }, '查看处理历史'), h('details', { style: { marginTop: 16 } }, h('summary', null, '重新处理设置'), processingSettings), h('button', { type: 'button', disabled: busy, style: { ...styles.button, marginTop: 12 }, onClick: restart }, '重新处理'))), side('资产关联', detailPairs([['仓库', (asset.repository_ids ?? []).join('、') || '未设置'], ['模块', (asset.module_tags ?? []).join('、') || '未设置'], ['语言', (asset.language_tags ?? []).join('、') || '未设置'], ['当前修订', `r${asset.revision ?? 1}`]]))))),
+                  : asset.asset_type === 'coverage' ? h(React.Fragment, null, sourceAndRevision, side('处理记录', h(React.Fragment, null, detailLog(assetJob), detail?.normalization ? h('details', null, h('summary', null, '解析信息与字段映射'), h('pre', { style: styles.pre }, JSON.stringify(detail.normalization, null, 2))) : null), jobLabel[assetJob?.status] ?? '暂无处理记录'))
+                    : h(React.Fragment, null, side('处理记录', h(React.Fragment, null, detailLog(assetJob), h('button', { type: 'button', style: styles.button, onClick: () => setDetailTab('history') }, '查看处理历史'), h('details', { style: { marginTop: 16 } }, h('summary', null, '重新处理设置'), processingSettings), h('button', { type: 'button', disabled: busy, style: { ...styles.button, marginTop: 12 }, onClick: restart }, '重新处理')), jobLabel[assetJob?.status] ?? '暂无处理记录'), side('资产关联', detailPairs([['仓库', (asset.repository_ids ?? []).join('、') || '未设置'], ['模块', (asset.module_tags ?? []).join('、') || '未设置'], ['语言', (asset.language_tags ?? []).join('、') || '未设置'], ['当前修订', `r${asset.revision ?? 1}`]]))))),
           detailEditDialog(asset))
       }
       function b08View() {
@@ -978,7 +1130,7 @@ window.__ModuleLoader__.load({
               reviewed.map(item => h('section', { key: item.item_id, className: 'pangea-b08-review-item' },
                 h('div', { className: 'pangea-b08-row-top' }, h('h3', null, `${item.item_id} · ${item.title ?? '未命名缺陷'}`), badge(item.decision === 'accepted' ? '已接受' : item.decision === 'rejected' ? '已拒绝' : '待定', item.decision === 'accepted' ? 'good' : item.decision === 'pending' ? 'warn' : '')),
                 detailPairs([['问题表现', item.symptom ?? '未提供'], ['问题机理', item.defect_mechanism ?? '未提供']]),
-                item.source_references ? h('div', { className: 'pangea-asset-detail-source-note' }, `原文出处 · ${readable(item.source_references)}`) : null,
+                sourceReferences(item.source_references),
                 pending && state?.features?.item_review !== false ? h('div', { className: 'pangea-b08-review-fields' },
                   h('label', null, '审核结论', h('select', { 'aria-label': `审核状态 ${item.item_id}`, value: item.decision, onChange: event => updateReviewDraft(asset.asset_id, item.item_id, 'decision', event.target.value) }, [['pending', '待定'], ['accepted', '接受'], ['rejected', '拒绝']].map(([value, label]) => h('option', { key: value, value }, label)))),
                   h('label', null, '审核备注 · 可选', h('input', { 'aria-label': `审核备注 ${item.item_id}`, value: item.note ?? '', placeholder: '接受、拒绝或保留疑问的原因', onChange: event => updateReviewDraft(asset.asset_id, item.item_id, 'note', event.target.value) }))) : null)),
@@ -1030,6 +1182,7 @@ window.__ModuleLoader__.load({
       }
       return h('div', { className: 'pangea-asset-root', style: styles.root, role: 'region', 'aria-label': 'PANGEA 资产管理' },
         h('style', null, `
+          ${assetContentStyles}
           .pangea-asset-root{container-type:inline-size;container-name:pangea-assets}
           .pangea-asset-root *{box-sizing:border-box}
           .pangea-asset-layout{display:grid;grid-template-columns:minmax(0,1fr);min-height:100%}
@@ -1042,7 +1195,8 @@ window.__ModuleLoader__.load({
           .pangea-asset-assistant{padding:24px;border-left:1px solid var(--dsw-alias-border-l2,#dce1e7);position:sticky;top:0;align-self:start;max-height:100vh;overflow:auto;background:var(--dsw-alias-bg-layer-1,#fff)}
           .pangea-asset-detail{margin-right:1px}
           .pangea-asset-detail-top{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:24px}
-          .pangea-asset-detail-top h2{font-size:23px;line-height:1.4;margin:13px 0 4px;color:#24282d}
+          .pangea-asset-detail-top h2{font-size:23px;line-height:1.4;margin:0;color:#24282d}
+          .pangea-asset-detail-heading{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;margin-bottom:8px}
           .pangea-asset-detail-grid{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:24px;align-items:start}
           .pangea-asset-detail-panel{min-width:0;padding:25px 26px;border:1px solid #e1e5df;border-radius:10px;background:#fff}
           .pangea-asset-detail-side{display:grid;gap:18px}
@@ -1060,7 +1214,7 @@ window.__ModuleLoader__.load({
           .pangea-asset-detail-kv dt{color:#71808d}.pangea-asset-detail-kv dd{margin:0;overflow-wrap:anywhere}
           .pangea-asset-detail-item{border:1px solid #e1e5df;border-radius:8px;margin-top:12px;padding:18px 19px;background:#fff}
           .pangea-asset-detail-item summary{cursor:pointer;font-size:14px;font-weight:650}
-          .pangea-asset-detail-item .pangea-asset-detail-kv{margin-top:21px;grid-template-columns:90px minmax(0,1fr)}
+          .pangea-asset-detail-item .pangea-asset-detail-kv{margin-top:21px;grid-template-columns:112px minmax(0,1fr)}
           .pangea-asset-detail-source-note{margin-top:18px;padding:14px 16px;border-left:2px solid #bed1b0;background:#f7f8f5;color:#637384;font-size:12px;overflow-wrap:anywhere}
           .pangea-asset-normalized-source{font-size:14px;line-height:1.9;white-space:pre-wrap;overflow-wrap:anywhere}
           .pangea-asset-normalized-source h3{font-size:17px;margin:28px 0 17px}
@@ -1075,10 +1229,10 @@ window.__ModuleLoader__.load({
           .pangea-asset-detail-log li:before{content:'';position:absolute;left:-29px;top:5px;width:6px;height:6px;border-radius:50%;background:#829a78}
           .pangea-asset-detail-log time{display:block;color:#8e999c;font-size:12px}
           .pangea-asset-process-hero{padding:30px;border:1px solid #e1e5df;border-radius:10px;background:#fff}
-          .pangea-asset-process-hero{min-height:330px}
+          .pangea-asset-process-heading{display:flex;align-items:center;flex-wrap:wrap;gap:12px}
           .pangea-asset-process-symbol{display:grid;place-items:center;width:50px;height:50px;border:1px solid #dce6d3;border-radius:11px;background:#f7faf4;color:#82966e}
           .pangea-asset-process-symbol svg{width:22px;height:22px}
-          .pangea-asset-process-hero h2{font-size:21px;margin:25px 0 7px}
+          .pangea-asset-process-hero h2{font-size:21px;margin:0;flex:1;min-width:160px;overflow-wrap:anywhere}
           .pangea-asset-process-hero p{font-size:14px;line-height:1.7;color:#667383}
           .pangea-asset-process-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:31px 0 20px}
           .pangea-asset-process-steps div{border-top:2px solid #e2e6e0;padding-top:11px;font-size:12px;color:#6b747e}
@@ -1100,6 +1254,13 @@ window.__ModuleLoader__.load({
           .pangea-asset-history-record{margin-top:14px;padding:16px;border-radius:7px;background:#f2f3f1;font-size:12px}
           .pangea-asset-history-record .pangea-asset-detail-badges{margin-left:auto}
           .pangea-asset-history-record p{margin:11px 0 0;color:#70767d;line-height:1.8}
+          .pangea-asset-record-heading{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;margin-bottom:14px}
+          .pangea-asset-record-heading h3{margin:0}.pangea-asset-record-heading>span:last-child{margin-left:auto}
+          .pangea-asset-log-disclosure{margin:12px 0 16px}.pangea-asset-log-disclosure summary{cursor:pointer;font-size:13px;color:#637384}
+          .pangea-asset-log-disclosure[open]>.pangea-asset-record-body{margin-top:14px}
+          .pangea-asset-record-body>.pangea-asset-detail-log{margin-bottom:18px}
+          .pangea-asset-history-entry{margin-top:18px;border-top:1px solid #e5e7e4;padding-top:16px}.pangea-asset-history-entry>summary{cursor:pointer}
+          .pangea-asset-history-summary{display:inline-flex;align-items:center;flex-wrap:wrap;gap:12px;font-size:13px}.pangea-asset-history-summary>span{color:#637384}
           .pangea-b08-intro,.pangea-b08-detail-top,.pangea-b08-row-top{display:flex;align-items:center;justify-content:space-between;gap:18px}
           .pangea-b08-intro{margin:1px 0 23px}.pangea-b08-intro h2,.pangea-b08-detail-top h2{font-size:20px;margin:0}.pangea-b08-intro p,.pangea-b08-detail-top p{font-size:12px;color:#70767d;margin:9px 0 0}
           .pangea-b08-badges{display:flex;align-items:center;gap:8px;margin-bottom:13px;color:#70767d;font-size:12px}.pangea-b08-badge{display:inline-flex;padding:5px 8px;border-radius:4px;background:#f1f3f1;font-size:12px;color:#69717d}.pangea-b08-badge.warn{background:#fcf3e3;color:#a46510}.pangea-b08-badge.good{background:#e9f4ee;color:#23724b}.pangea-b08-badge.blue{background:#edf3f8;color:#496988}

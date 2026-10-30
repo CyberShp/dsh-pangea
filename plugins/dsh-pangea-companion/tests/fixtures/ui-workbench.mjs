@@ -5,6 +5,7 @@ export function uiWorkbenchFixture(dataRoot, scene = 'running', count = 40) {
     verification_goal: '观察异常后的连接状态与恢复能力。此为界面验证数据。',
     readiness_reason: index % 5 ? '通过主机命令与外部连接状态进行验证。' : '需要准备链路故障注入环境。',
     preconditions: ['主机与测试阵列网络可达', '已准备有效的测试密钥与独立测试子系统'],
+    variants: index === 0 ? [{ variant_id: 'timeout', input: '握手超过配置的超时阈值，随后恢复链路', expected: '释放失败连接，允许重新建链；记录错误原因与恢复时间' }, { variant_id: 'expired-key', input: '使用已过期的测试密钥', expected: '拒绝本次连接并保留可操作的恢复入口' }] : [],
     step_pairs: [{ action: '使用有效参数建立连接并确认业务可用', expected: '连接成功，业务读写正常' }, { action: '注入测试条件并记录主机侧错误及连接状态', expected: '失败原因可识别，既有连接按预期清理' }, { action: '恢复测试条件后重新发起连接', expected: '连接恢复，后续业务可继续' }],
     observability: ['主机连接状态与错误日志', '阵列端连接计数及资源释放情况'], cleanup: ['撤销故障注入，清理测试连接'],
     linked_risk_ids: ['risk-cleanup'], linked_flow_ids: ['flow-tls'], evidence: [{ location: 'storage:tls/handshake.c:1', quote: '/* UI verification fixture */' }] }))
@@ -30,8 +31,15 @@ export function uiWorkbenchFixture(dataRoot, scene = 'running', count = 40) {
     started_at: '2026-10-21T04:00:00Z', ...(failed || complete ? { ended_at: '2026-10-21T04:16:00Z' } : {}),
     publication: { state: complete ? 'final' : 'draft', revision: 1 }, partial_delivery: scene === 'partial',
     analysis: { total: 12, completed: complete ? 12 : 8 }, source_snapshot: { file_count: 42, status: 'manifest_verified' }, input_materials: [{ asset_id: 'design', title: 'TLS 设计资料', revision: 2 }],
+    execution_progress: [{ action_id: 'action-tls', unit_id: 'unit-tls', stage: 'unit_analysis', status: failed ? 'paused' : 'dispatched', elapsed_ms: 840000, worker_turns: 3, auto_continuations: 1, finding_count: 2, modified_records: 5, last_saved_at_ms: Date.now() - 30000, reason: '界面验证示例：已保存现有记录，正在核对异常恢复条件。' }],
     counts: { business_flows: 1, risks: 1, test_cases: cases.length }, details: { test_cases: cases, risks, business_flows: [flow], notes: [], evidence: [] },
     workflow: { steps, current_step: complete ? 5 : 3, units, actions: [{ action_id: 'action-tls', unit_id: 'unit-tls', stage: 'unit_analysis', status: failed ? 'failed' : 'running', title: 'TLS 握手与失败恢复' }], unresolved: scene === 'partial' ? [{ id: 'pending-1', message: '异常条件仍需在测试环境中验证' }] : [] },
+    source_first_records: [{ action_id: 'action-tls', unit_id: 'unit-tls', stage: 'unit_analysis', revision: 1, records: [{ record_id: 'ui-reading-note', kind: 'note', body: {
+      title: '握手失败后的验证要点',
+      summary: '## 验证范围\n以下为 **界面排版示例**，用于检查长正文的阅读层级。\n\n### 操作步骤\n1. 使用有效参数建立连接。\n2. 注入握手超时，并记录 `connection_state`。\n3. 恢复链路，再次发起连接。\n\n### 观察依据\n- 主机端错误日志与连接状态\n- 阵列端资源计数\n\n> 这些内容尚未在真实环境执行，不代表验证通过。\n\n| 检查点 | 预期观察 |\n| --- | --- |\n| 超时返回 | 有明确错误原因 |\n| 恢复重连 | 可以重新建立连接 |\n\n```text\nconnection_state = disconnected\nretry_available = true\n```',
+      preconditions: ['准备隔离测试环境', '记录初始连接计数'],
+      evidence: [{ path: 'tls/handshake.c', line: 1, note: 'UI verification fixture' }],
+    } }] }],
     reader_health: { status: 'ok', collection_status: { test_cases: 'readable', risks: 'readable', business_flows: 'readable' }, count_checks: {} },
     state_read: { observed_at: Date.now(), updated_at: '2026-10-21T04:12:00Z' }, report_available: complete, artifacts: complete ? { report_html: 'report.html' } : {},
     summary: '界面验证场景：优先检查握手失败清理、密钥过期和重新建链行为。此数据不代表实际测试结论。' }

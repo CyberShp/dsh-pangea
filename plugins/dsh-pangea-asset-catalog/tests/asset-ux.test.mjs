@@ -79,6 +79,97 @@ test('asset navigation separates catalog, methodology, import and one asset deta
   assert.ok(ui.field('选择资产文件'))
 })
 
+test('asset detail renders original material, structured values and processing output as readable document blocks', async () => {
+  const asset = { ...available, extraction_job: { status: 'completed', events: [], output: '**已保存**\n\n1. 读取材料\n2. 保存结果' } }
+  const listing = { ...catalog, assets: [asset] }
+  const detail = { status: 'ok', asset, result: { items: [{ item_id: 'D-1', title: '字段保留',
+    inputs: ['**请求**包含 `id`', '允许值为 0'], constraints: { timeout_ms: 0, enabled: false },
+    source_references: [{ path: '设计.md', location: '第 2 节', quote: '保留原始引文' }] }] },
+    normalized_preview: '# 模块说明\n\n1. **读取输入**\n2. 返回 `false`\n\n|字段|类型|\n|---|---|\n|id|integer|\n\n```js\nif (a < b) return 0;\n```' }
+  const ui = await mount(listing, { fetcher: async url => ({ ok: true, async json() {
+    return new URL(url, 'http://localhost').searchParams.get('asset_id') ? detail : listing
+  } }) })
+  await ui.click('查看详情')
+  assert.ok(ui.nodes().some(node => node.type === 'ul' && node.props.className === 'pangea-asset-value-list'))
+  assert.ok(ui.nodes().some(node => node.type === 'dl' && node.props.className === 'pangea-asset-value-fields'))
+  for (const value of ['timeout_ms', 'enabled', 'false', 'quote', '保留原始引文']) assert.ok(ui.text().includes(value), value)
+  assert.ok(ui.nodes().some(node => node.type === 'strong' && node.children.flat().includes('已保存')))
+  assert.ok(ui.nodes().some(node => node.type === 'pre' && node.children.includes(JSON.stringify(detail.result, null, 2))), 'original JSON remains available')
+  assert.ok(ui.nodes().some(node => node.type === 'ol' && node.props.start === 1), 'processing output is an ordered list')
+  await ui.click('原始材料')
+  assert.ok(ui.nodes().some(node => node.type === 'article' && node.props.className === 'pangea-asset-normalized-source'))
+  assert.ok(ui.nodes().some(node => node.type === 'table'))
+  assert.ok(ui.nodes().some(node => node.type === 'th' && node.children.flat().includes('字段')))
+  assert.ok(ui.nodes().some(node => node.type === 'code' && node.children.includes('if (a < b) return 0;')))
+  assert.ok(ui.nodes().some(node => node.type === 'strong' && node.children.flat().includes('读取输入')))
+  assert.equal(ui.nodes().some(node => node.type === 'h4' && node.children.flat().includes('1. **读取输入**')), false)
+})
+
+test('completed asset detail keeps one item count and collapses the successful log without dropping content', async () => {
+  const asset = { ...available, extraction_job: { status: 'completed', phase_label: '已完成', output: '已保存的处理正文', events: [] } }
+  const listing = { ...catalog, assets: [asset] }
+  const detail = { status: 'ok', asset, result: { items: [{ item_id: 'D-1', title: '设计条目', inputs: ['已保存输入'] }] } }
+  const ui = await mount(listing, { fetcher: async url => ({ ok: true, async json() {
+    return new URL(url, 'http://localhost').searchParams.get('asset_id') ? detail : listing
+  } }) })
+  await ui.click('查看详情')
+  const disclosure = ui.nodes().find(node => node.type === 'details' && node.props.className === 'pangea-asset-log-disclosure')
+  assert.ok(disclosure)
+  assert.ok(!disclosure.props.open, 'success output is collapsed by default')
+  assert.ok(ui.text().includes('已保存的处理正文'), 'collapsed content remains available')
+  assert.equal((ui.text().match(/已完成/g) ?? []).length, 1, 'header and progress do not repeat the same status')
+  assert.ok(ui.button('提取内容 · 1'))
+  assert.equal(ui.text().includes('1 条设计内容'), false, 'body does not repeat the tab count')
+  const heading = ui.nodes().find(node => node.props.className === 'pangea-asset-detail-heading')
+  assert.ok(heading.children.flat().some(node => node?.type === 'h2'))
+  assert.ok(heading.children.flat().some(node => node?.props?.className === 'pangea-asset-detail-badges'))
+})
+
+test('failed and attention processing records stay visible with a single status and no decorative fixed-height steps', async () => {
+  for (const status of ['failed', 'needs_attention']) {
+    const asset = { ...available, status: status === 'failed' ? 'failed' : 'extracting', extraction_job: {
+      status, phase_label: status === 'failed' ? '处理失败' : '需要处理', events: [], output: `可核对记录 ${status}`, error: status === 'failed' ? '读取文件失败' : null,
+    } }
+    const listing = { ...catalog, assets: [asset] }
+    const detail = { status: 'ok', asset, result: { items: [] } }
+    const ui = await mount(listing, { fetcher: async url => ({ ok: true, async json() {
+      return new URL(url, 'http://localhost').searchParams.get('asset_id') ? detail : listing
+    } }) })
+    await ui.click('查看详情')
+    assert.equal(ui.nodes().some(node => node.props.className === 'pangea-asset-log-disclosure'), false)
+    assert.ok(ui.text().includes(`可核对记录 ${status}`))
+    assert.equal(ui.nodes().some(node => node.props.className === 'pangea-asset-process-steps'), false)
+    assert.equal(ui.nodes().some(node => node.props.style?.minHeight === 270), false)
+    const heading = ui.nodes().find(node => node.props.className === 'pangea-asset-process-heading')
+    assert.ok(heading.children.flat().some(node => node?.type === 'h2'))
+    if (status === 'failed') assert.ok(ui.nodes().some(node => node.props.role === 'alert' && node.children.includes('读取文件失败')))
+    else assert.ok(ui.button('原会话继续修正'))
+  }
+})
+
+test('asset history puts each date and status together and opens only records that need attention', async () => {
+  const asset = { ...available, extraction_job: { status: 'completed', events: [], output: '最新结果', started_at: '2026-10-31T00:00:00Z', history: [
+    { status: 'completed', started_at: '2026-10-30T00:00:00Z', output: '历史成功正文' },
+    { status: 'failed', started_at: '2026-10-29T00:00:00Z', output: '历史失败正文', error: '历史错误详情' },
+    { status: 'needs_attention', started_at: '2026-10-28T00:00:00Z', output: '需要核对分类' },
+  ] } }
+  const listing = { ...catalog, assets: [asset] }
+  const detail = { status: 'ok', asset, result: { items: [] } }
+  const ui = await mount(listing, { fetcher: async url => ({ ok: true, async json() {
+    return new URL(url, 'http://localhost').searchParams.get('asset_id') ? detail : listing
+  } }) })
+  await ui.click('查看详情')
+  await ui.click('查看处理历史')
+  const entries = ui.nodes().filter(node => node.type === 'details' && node.props.className === 'pangea-asset-history-entry')
+  assert.equal(entries.length, 3)
+  assert.deepEqual(entries.map(node => node.props.open), [false, true, true])
+  const headings = ui.nodes().filter(node => node.props.className === 'pangea-asset-history-summary')
+  assert.equal(headings.length, 3)
+  assert.ok(headings.every(node => node.children.some(child => child?.type === 'time') && node.children.some(child => child?.type === 'span')))
+  for (const value of ['历史成功正文', '历史失败正文', '历史错误详情', '需要核对分类']) assert.ok(ui.text().includes(value), value)
+  assert.equal(ui.text().includes('本次处理记录已保留'), false, 'preservation explanation is not repeated for every record')
+})
+
 test('asset page keeps scrolling without reserving a visible scrollbar gutter', async () => {
   const ui = await mount()
   const root = ui.nodes().find(node => node.props.className === 'pangea-asset-root')

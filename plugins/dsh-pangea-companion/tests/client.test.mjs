@@ -106,6 +106,41 @@ test('new analysis target and confirmation steps show only the selected source s
   }
 })
 
+test('source scope drawer opens file and directory rows with the real product icon renderer', async () => {
+  const panelStates = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] } }, 16: { type: 'create', createStep: 1 },
+    33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], scenario: 'branch-analysis', mode: 'depth' }, 34: { assets: [] } }
+  const pickerStates = {}
+  let mode = 'panel', index = 0, requests = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++, states = mode === 'panel' ? panelStates : pickerStates
+    if (!Object.hasOwn(states, key)) states[key] = typeof initial === 'function' ? initial() : initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } }, async () => {
+    requests++
+    return { ok: true, json: async () => ({ status: 'ok', path: '.', cursor: 0, has_more: false, entries: [
+      { path: 'src', name: 'src', kind: 'directory', selectable: true }, { path: 'README.md', name: 'README.md', kind: 'file', selectable: true },
+    ] }) }
+  })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const picker = descendants(panel.type(panel.props)).find(node => node.type?.name === 'SourceScopePicker')
+  assert.equal(picker.props.renderIcon('FolderOpen').type, 'svg')
+  mode = 'picker'
+  const render = () => { index = 0; return descendants(picker.type(picker.props)) }
+  render().find(node => node.type === 'button' && node.children.includes('选择目录或文件')).props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  const opened = render()
+  assert.equal(requests, 1)
+  assert.ok(opened.some(node => node.props.role === 'dialog' && node.props['aria-label'] === '选择源码范围'))
+  const rows = opened.filter(node => node.props.className === 'pangea-scope-tree-row')
+  assert.equal(rows.length, 2)
+  assert.ok(rows.every(row => descendants(row).some(node => node.type === 'svg')))
+  assert.ok(opened.some(node => node.type === 'button' && node.children.includes('上一级')))
+  opened.find(node => node.type === 'button' && node.children.includes('完成选择')).props.onClick()
+  assert.equal(render().some(node => node.props.role === 'dialog'), false)
+})
+
 test('saved internal API settings do not restore an analysis route or show internal model controls', async () => {
   let index = 0
   const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: [], model_routing: { status: 'ok', models: [{ provider: 'openai', model: 'internal', credential_configured: true }] } },
@@ -402,6 +437,10 @@ test('stage insights replace host-event repetition and open the exact saved flow
   assert.match(serialized, /DH 组协商用例/)
   assert.match(serialized, /已保存草稿/)
   assert.match(serialized, /执行中/)
+  const outputRows = nodes.filter(node => node.type === 'details' && node.props.className === 'run-output-row')
+  assert.equal(outputRows.length, 2)
+  assert.ok(outputRows.every(node => node.props.open === false && node.children[0].type === 'summary'))
+  assert.ok(outputRows.every(node => descendants(node).some(child => child.type === 'button' && /^查看业务流程|查看测试用例/.test(metricsText(child)))))
   const visible = nodes.flatMap(node => node.children.filter(child => typeof child === 'string')).join('\n')
   assert.doesNotMatch(visible, /agent_resume|unformatted raw host summary|活动记录|dispatched/)
   nodes.find(node => node.type === 'button' && node.children.includes('查看业务流程')).props.onClick()
@@ -426,6 +465,67 @@ test('actual review stage shows Chinese structured verdict and preserves origina
   assert.match(serialized, /复核摘要/)
   assert.match(serialized, /历史 English explanation stays verbatim/)
   assert.match(serialized, /查看原始复核记录/)
+  const decision = nodes.find(node => node.type === 'details' && node.props.className === 'run-output-row')
+  assert.equal(decision.props.open, true, 'review decisions remain visible without requiring disclosure')
+  assert.equal(decision.children[0].type, 'summary')
+})
+
+test('stage navigation preserves the task tab and restores exact output navigation context', async () => {
+  let index = 0
+  const states = []
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!(key in states)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } })
+  const current = insightWorkspaceRun([{ record_id: 'flow-1', kind: 'flow', body: { title: '算法协商流程' } }])
+  const review = { action_id: 'review-action', unit_id: 'unit-1', stage: 'comparison_review', status: 'dispatched', saved_revision: 3, title: '复核动作' }
+  current.stage = 'reviewing'
+  current.workflow.steps = [{ step: '03', stage: 'analyzing', title: '单元分析', status: 'completed' }, { step: '04', stage: 'reviewing', title: '结果复核', status: 'running' }]
+  current.workflow.actions.push(review)
+  current.source_first_records.push({ ...review, revision: 3, records: [{ record_id: 'decision', kind: 'review_decision', body: { disposition: 'unresolved', summary: '需要补充设备能力' } }] })
+  const opened = [], props = { current, openFlow: (...args) => opened.push(args), navigate() {} }
+  const render = () => { index = 0; return descendants(client.RunWorkspace(props)) }
+  let nodes = render()
+  assert.ok(nodes.some(node => node.type === 'h2' && node.children.includes('结果复核')))
+  nodes.find(node => node.type === 'button' && node.children.includes('阶段任务')).props.onClick()
+  nodes = render()
+  assert.ok(nodes.some(node => node.props['aria-label'] === '结果复核 · 阶段任务'))
+  nodes.find(node => node.type === 'button' && /^stage /.test(node.props.className) && metricsText(node).includes('单元分析')).props.onClick()
+  nodes = render()
+  assert.ok(nodes.some(node => node.props['aria-label'] === '单元分析 · 阶段任务'))
+  assert.ok(nodes.some(node => node.type === 'button' && node.props['aria-pressed'] === true && node.children.includes('阶段任务')))
+  assert.match(metricsText(nodes.find(node => node.props['aria-label'] === '单元分析 · 阶段任务')), /认证协商/)
+  nodes.find(node => node.type === 'button' && node.children.includes('阶段进展')).props.onClick()
+  nodes = render()
+  const row = nodes.find(node => node.type === 'details' && node.props.className === 'run-output-row')
+  assert.equal(row.props.open, false)
+  descendants(row).find(node => node.type === 'button' && node.children.includes('查看业务流程')).props.onClick()
+  assert.equal(opened[0][0], 'unit-1/flow-1')
+  assert.equal(opened[0][1].selection, '03')
+  assert.equal(opened[0][1].tab, 'insights')
+  nodes.find(node => node.type === 'button' && /^stage /.test(node.props.className) && metricsText(node).includes('结果复核')).props.onClick()
+  nodes = render()
+  assert.ok(nodes.some(node => node.props['aria-label'] === '结果复核 · 阶段进展'))
+  assert.equal(nodes.find(node => node.type === 'details' && node.props.className === 'run-output-row').props.open, true)
+})
+
+test('partial and unreadable stage output never turns the compact pending summary into a completion claim', async () => {
+  const client = await loadClientExports()
+  const current = insightWorkspaceRun([{ record_id: 'note-1', kind: 'note', body: { summary: '已保存的局部观察' } }])
+  current.partial_delivery = true
+  current.workflow.actions.push({ action_id: 'unreadable-action', unit_id: 'unit-2', stage: 'unit_analysis', status: 'paused', saved_revision: 1 })
+  const nodes = descendants(client.RunWorkspace({ current }))
+  const insights = nodes.find(node => node.props['aria-label'] === '阶段进展')
+  assert.match(metricsText(insights), /本次为部分交付；已保存内容不代表全部分析或修正完成/)
+  assert.match(metricsText(insights), /1 个阶段结果暂不可读取，数量仅代表当前可读取内容/)
+  const noPending = descendants(insights).find(node => node.props.className === 'run-no-pending')
+  assert.equal(metricsText(noPending), '已读记录未列出待办')
+  assert.match(noPending.props.title, /已读取记录中没有明确列出/)
+  delete current.source_first_records
+  const unavailable = descendants(client.RunWorkspace({ current })).find(node => node.props['aria-label'] === '阶段进展')
+  assert.match(metricsText(unavailable), /阶段产物暂不可读取/)
+  assert.ok(!descendants(unavailable).some(node => node.props.className === 'run-no-pending'))
 })
 
 test('stage insights expose omitted pending rows and stale state in Chinese without losing stored records', async () => {
@@ -1366,6 +1466,49 @@ test('client source request encodes the evidence location and returns a line-awa
   assert.equal(calls[0].options.cache, 'no-store')
 })
 
+test('source preview rejects successful envelopes that do not contain valid source lines', async () => {
+  const client = await loadClientExports()
+  for (const body of [{ status: 'ok', assets: [], items: [] }, { status: 'ok', lines: null }, { status: 'ok', lines: [null] }, { status: 'ok', lines: [{ number: 1, text: {} }] }]) {
+    await assert.rejects(client.requestSourceSnippet({ cwd: '/workspace', dataRoot: '/isolated', location: 'repo:test.c:1',
+      fetcher: async () => ({ ok: true, status: 200, json: async () => body }) }), /源码响应.*逐行内容/)
+  }
+  const line = { number: 1, text: 'return 0;', target: true }
+  const valid = await client.requestSourceSnippet({ cwd: '/workspace', dataRoot: '/isolated', location: 'repo:test.c:1',
+    fetcher: async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', lines: [line] }) }) })
+  assert.equal(valid.lines[0], line)
+})
+
+test('risk detail keeps its result and case navigation when source preview returns a malformed success', async () => {
+  const { uiWorkbenchFixture } = await import('./fixtures/ui-workbench.mjs')
+  const { run, task } = uiWorkbenchFixture('/isolated', 'complete', 2)
+  const states = { 0: { current: run, data_root: '/isolated' }, 1: { tasks: { items: [task] } }, 4: run.run_id, 5: task.task_id, 16: { type: 'risk', id: 'risk-cleanup' } }
+  const effects = []
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = typeof initial === 'function' ? initial() : initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  }, useEffect(effect) { if (String(effect).includes('requestSourceSnippet') && String(effect).includes('setSourcePreview')) effects.push(effect) } }, async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', assets: [], items: [] }) }))
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const render = () => {
+    index = 0
+    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+    return descendants(panel.type(panel.props))
+  }
+  render()
+  assert.equal(effects.length, 1)
+  const cleanup = effects[0]()
+  await new Promise(resolve => setImmediate(resolve))
+  const nodes = render()
+  assert.ok(nodes.some(node => node.type === 'h2' && node.children.includes(run.details.risks[0].title)))
+  assert.ok(nodes.some(node => node.props.role === 'alert' && /源码暂不可读.*逐行内容/.test(metricsText(node))))
+  nodes.find(node => node.type === 'button' && metricsText(node).startsWith('TC-001')).props.onClick()
+  assert.equal(states[16].type, 'case')
+  assert.equal(states[16].id, run.details.test_cases[0].test_case_id)
+  cleanup()
+})
+
 test('client export request returns a downloadable CSV response and filename', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported
@@ -1596,7 +1739,8 @@ test('flow page draws natively and orders main, attached and unparseable flows',
   const pageNodes = render()
   assert.ok(pageNodes.findIndex(node => node.props.role === 'tablist') < pageNodes.findIndex(node => node.props.role === 'tabpanel'))
   const reading = descendants(cards()[0])
-  assert.deepEqual(reading.filter(node => node.type === 'h3').map(node => node.children[0]), ['概述', '节点与流转', '分支与异常', '路径', '图示'])
+  assert.deepEqual(reading.filter(node => node.type === 'h3').map(node => node.children[0]), ['节点与流转', '分支与异常', '路径', '图示'])
+  assert.equal(reading.filter(node => node.type === 'p' && metricsText(node) === main.description).length, 1, 'flow description stays readable without a duplicate overview heading')
   assert.ok(reading.findIndex(node => node.props['aria-label'] === '流程图示') < reading.findIndex(node => node.props['aria-label'] === '流程源码依据'))
   assert.match(JSON.stringify(reading.find(node => node.props['aria-label'] === '业务路径阅读')), /请求合法 → 请求校验 → 持久化/)
   const graphs = render().filter(node => node.type?.name === 'FlowGraphView')
@@ -1977,6 +2121,69 @@ test('record renderer makes tables and JSON fields readable without HTML executi
   assert.equal(c.artifactLabel('C:\\run\\inputs\\source-index.json'), '源码索引')
 })
 
+test('record prose keeps paragraphs, nested lists, quotes and code semantically separate', async () => {
+  const client = await loadClientExports()
+  const tree = client.renderReadableBody('# 阶段说明\n第一行\n第二行\n\n### 操作步骤\n3. 准备输入\n   - 子条件 A\n   - 子条件 B\n7. 验证结果\n\n> 仅使用已保存记录\n>\n> 不推断执行成功\n\n```text\n<script>raw()</script>\n1. not a list\n```')
+  const nodes = descendants(tree)
+  const text = node => typeof node === 'string' ? node : Array.isArray(node) ? node.map(text).join('') : (node?.children ?? []).map(text).join('')
+  assert.ok(nodes.some(node => node.type === 'p' && text(node) === '第一行\n第二行'))
+  const ordered = nodes.find(node => node.type === 'ol')
+  assert.equal(ordered.props.start, 3)
+  assert.deepEqual(Array.from(ordered.children[0], node => node.props.value), [3, 7])
+  assert.ok(descendants(ordered.children[0][0]).some(node => node.type === 'ul' && text(node) === '子条件 A子条件 B'))
+  const quote = nodes.find(node => node.type === 'blockquote')
+  assert.equal(descendants(quote).filter(node => node.type === 'p').length, 2)
+  assert.ok(nodes.some(node => node.type === 'h4' && text(node) === '操作步骤'))
+  assert.equal(text(nodes.find(node => node.type === 'pre')), '<script>raw()</script>\n1. not a list')
+  assert.ok(nodes.every(node => node.type !== 'script' && !node.props.dangerouslySetInnerHTML))
+})
+
+test('record fields retain literal scalar values and distinguish empty values from missing fields', async () => {
+  const client = await loadClientExports()
+  const value = { count: 0, enabled: false, nullable: null, literal: '["keep as text"]', markdown: '**literal**', nested: { path: 'src/a.c', empty: '' }, list: [false, 0, null], noItems: [], noFields: {} }
+  const before = JSON.stringify(value)
+  const tree = client.renderReadableBody(value), nodes = descendants(tree)
+  const values = nodes.filter(node => node.props.className === 'pangea-reader-value').flatMap(node => node.children)
+  for (const expected of ['0', 'false', 'null', '["keep as text"]', '**literal**', 'src/a.c', '', '[]', '{}']) assert.ok(values.includes(expected), expected)
+  assert.equal(nodes.filter(node => node.type === 'dl').length, 2)
+  assert.equal(JSON.stringify(value), before)
+  assert.equal(nodes.filter(node => node.type === 'strong').length, 0)
+})
+
+test('record narrative fields use prose blocks while evidence and prototype-named fields stay literal', async () => {
+  const client = await loadClientExports()
+  const body = JSON.parse('{"summary":"## 范围\\n- 检查状态\\n- 记录输出","constructor":"original","__proto__":"original prototype","snippet":{"status":"pass"},"description":"[1,2]"}')
+  const before = JSON.stringify(body), nodes = descendants(client.renderReadableBody(body))
+  assert.ok(nodes.some(node => node.type === 'h3' && node.children.includes('范围')))
+  assert.ok(nodes.some(node => node.type === 'ul'))
+  assert.ok(nodes.some(node => node.type === 'dt' && node.children.includes('constructor')))
+  assert.ok(nodes.some(node => node.type === 'dt' && node.children.includes('__proto__')))
+  assert.ok(nodes.some(node => node.type === 'code' && node.children.includes('{\n  "status": "pass"\n}')))
+  assert.ok(nodes.some(node => node.type === 'p' && node.children.includes('[1,2]')))
+  assert.equal(JSON.stringify(body), before)
+})
+
+test('record long prose and complex collections span the content width while short values retain paired labels', async () => {
+  const client = await loadClientExports()
+  const body = { summary: '## 验证范围\n正文内容', count: 0, tags: ['one', 'two'], evidence: [{ path: 'src/test.c', line: 8, note: '原样说明' }], sequence: ['one', 'two', 'three'], detail: { title: '标题', line: 8, note: '备注' } }
+  const nodes = descendants(client.renderReadableBody(body))
+  const field = label => nodes.find(node => String(node.props.className).split(' ').includes('pangea-reader-field') && node.children[0]?.children.includes(label))
+  for (const label of ['总结', '依据', 'sequence', 'detail']) assert.match(field(label).props.className, /pangea-reader-field-block/)
+  for (const label of ['count', 'tags', '行号', '备注']) assert.doesNotMatch(field(label).props.className, /pangea-reader-field-block/)
+  assert.equal(metricsText(field('行号')), '行号8')
+  assert.equal(metricsText(field('备注')), '备注原样说明')
+})
+
+test('record table preserves escaped pipes and renders inline emphasis with column alignment', async () => {
+  const client = await loadClientExports()
+  const nodes = descendants(client.renderReadableBody('| 条件 | 结果 |\n| :--- | ---: |\n| **A** \\| B | `a|b` |'))
+  const cells = nodes.filter(node => node.type === 'td')
+  assert.equal(cells.length, 2)
+  assert.equal(cells[1].props.style.textAlign, 'right')
+  assert.ok(descendants(cells[0]).some(node => node.type === 'strong' && node.children.includes('A')))
+  assert.ok(descendants(cells[1]).some(node => node.type === 'code' && node.children.includes('a|b')))
+})
+
 test('task filters can reset a no-results state without changing the selected task', async () => {
   let index = 0
   const states = {
@@ -2192,6 +2399,10 @@ test('overview status variants separate analysis quality from test execution and
     const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
     const nodes = descendants(panel.type(panel.props))
     assert.ok(nodes.some(node => node.type === 'h2' && node.children.includes(variant.expected)), variant.expected)
+    const statusBlock = nodes.find(node => String(node.props.className).split(' ').includes('b03-overview-hero'))
+    const statusHint = metricsText(descendants(statusBlock).find(node => node.type === 'p'))
+    assert.ok(statusHint)
+    assert.equal(nodes.filter(node => node.type === 'p' && metricsText(node) === statusHint).length, 1, 'missing summary must not repeat the status hint as analysis narrative')
     const texts = nodes.flatMap(node => node.children.filter(child => typeof child === 'string'))
     if (variant.lifecycle_status === 'running' && !variant.needsUser) {
       assert.ok(texts.some(value => value.includes('已接受 4 / 6 个源码单元')))
@@ -2358,8 +2569,9 @@ test('built case view shows declared ready ratio and the reason for a ready case
   assert.match(metricsText(section), /业务黑盒 2 条（具备执行条件 1 条）/)
   assert.match(metricsText(section), /1\/4（25.0%）/)
   const detail = await caseMetricsView(records, [], { type: 'case', id: 'u/ready' })
-  const notice = detail.find(node => node.props.className === 'b05-case-notice')
+  const notice = detail.find(node => String(node.props.className).split(' ').includes('b05-case-notice'))
   assert.match(metricsText(notice), /具备执行条件.*已核实 CLI 与观测日志/)
+  assert.equal(detail.filter(node => node.props.role === 'status' && metricsText(node).includes('已核实 CLI 与观测日志')).length, 1)
   const empty = await caseMetricsView([], [], { type: 'cases' })
   assert.match(metricsText(empty.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')), /无可统计用例/)
   const legacy = await caseMetricsView([...records, { record_id: 'group', kind: 'test_case_group', body: 'Historical group' }], [], { type: 'cases' })
@@ -2380,7 +2592,10 @@ test('closure diagnostics remain available and delivery has one primary control'
   const nodes = descendants(panel.type(panel.props))
   const progress = nodes.find(node => node.props['aria-label'] === '实际执行进度')
   assert.ok(progress)
-  assert.match(JSON.stringify(progress), /worker 回合 2 · 自动续接 1/)
+  assert.ok(descendants(progress).some(node => node.props.className === 'badge warn' && node.children.includes('修正暂停')))
+  const metrics = descendants(progress).find(node => node.type === 'dl' && node.props.className === 'pangea-correction-metrics')
+  assert.deepEqual(Object.fromEntries(Array.from(metrics.children[0], row => [metricsText(row.children[0]), metricsText(row.children[1])])),
+    { '累计时间': '15 分钟', 'worker 回合': '2', '自动续接': '1', '关联复核发现': '4 项', '已新增或替换记录': '3 条' })
   assert.match(JSON.stringify(progress), /不代表已解决数量/)
   assert.equal(nodes.filter(node => node.type === 'button' && node.children.includes('交付已有结果')).length, 1)
 })
@@ -2403,6 +2618,12 @@ async function executionMetricsView(metrics, { detailRunId = 'run', screen = 'wo
 
 const metricsText = node => typeof node === 'string' || typeof node === 'number' ? String(node)
   : (Array.isArray(node) ? node : node?.children ?? []).map(metricsText).join('')
+
+test('workflow page mounts the shared body styles alongside its run workspace', async () => {
+  const nodes = await executionMetricsView({})
+  assert.ok(nodes.some(node => node.type === 'section' && node.props.className === 'pangea-ui pangea-run-workspace'))
+  assert.ok(nodes.some(node => node.type === 'style' && metricsText(node).includes('.pangea-reader-field')))
+})
 
 test('risk method UI shows external observations, literal quotes, ledger and empty-narrative findings', async () => {
   const risk = { risk_id: 'u/r', display_id: 'R1', title: 'Declared risk', narrative: '', trigger: 'Declared trigger', external_observation: 'Visible external observation', evidence: [{ location: 'r:a.c:2', quote: ' * literal source comment' }] }
@@ -2652,7 +2873,8 @@ test('explicit right-panel historical conversation selection locates its flow an
   assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=archify-v1&/)
   assert.equal(opened.at(-1), 'archify-session-1')
   await context().onSelectConversation('other-flow-session')
-  assert.match(JSON.stringify(render().find(node => node.props.className === 'b04-modebar')), /Initialization/)
+  assert.ok(render().some(node => node.type === 'h2' && metricsText(node) === 'Initialization'))
+  assert.ok(render().some(node => node.props.role === 'tab' && node.props['aria-selected'] === true && metricsText(node).includes('Initialization')))
   assert.equal(find('函数与变量流程图视图').props['aria-pressed'], true)
   assert.match(render().find(node => node.type === 'iframe').props.src, /view_id=functions-other-flow&/)
   assert.equal(context().activeConversationSessionId, 'other-flow-session')
@@ -2962,7 +3184,9 @@ test('graph text follows explicit edges despite node ordering, flattened mainlin
   assert.equal(result['节点 exit 的去向'], undefined)
   assert.ok(initial.some(n => n.children.includes('结束当前流程。')))
   assert.ok(initial.some(n => n.children.includes('未记录后续连线，不推断下一步。')))
-  assert.equal(initial.filter(n => n.props.className === 'b04-flow-step').length, nodes.length)
+  const nodeRows = initial.filter(n => String(n.props.className).split(' ').includes('b04-flow-step'))
+  assert.equal(nodeRows.length, nodes.length)
+  assert.deepEqual(new Set(nodeRows.flatMap(row => descendants(row).filter(node => node.type === 'h4').map(metricsText))), new Set(nodes.map(node => node.label)))
   assert.equal(initial.filter(n => n.props.className === 'b04-flow-step-num').length, 0)
   const paths = JSON.stringify(initial.find(n => n.props['aria-label'] === '业务路径阅读'))
   assert.doesNotMatch(paths, /处理协商消息 → 标记失败/)
