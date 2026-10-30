@@ -21,7 +21,7 @@ window.__ModuleLoader__.load({
     const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
     const { renderReviewPresentation, reviewStatusLabel, isReviewRecord } = __reviewPresentation
     const { buildRunInsights } = __runInsights
-    const { buildOverviewFindings } = __overviewFindings
+    const { buildOverviewFindings, summaryText } = __overviewFindings
     const { caseIdentity, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
     const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
     function sourceFirstRecordBody(body) {
@@ -64,7 +64,7 @@ window.__ModuleLoader__.load({
           detail: typeof body === 'string' ? body : body?.description || body?.summary,
           summary: body?.summary, evidence: record.evidence ?? [], relates_to: record.relates_to ?? [] })
       }
-      return result
+      return result.map(event => ({ ...event, title: summaryText(event.title), detail: summaryText(event.detail), summary: summaryText(event.summary) }))
     }
     function CreateAssetPicker({ items, selectedAssets, loading, error, pagination, query, type, repositoryOnly, repository, typeLabels, onQuery, onSearch, onType, onRepository, onPage, onRefresh, onClose, onConfirm }) {
       const [pending, setPending] = React.useState(() => Object.fromEntries(selectedAssets.map(item => [item.asset_id, item])))
@@ -6902,6 +6902,7 @@ window.__ModuleLoader__.load({
     exports.collectionWarning = collectionWarning
     exports.showRunHealth = showRunHealth
     exports.artifactLabel = artifactLabel
+    exports.workflowEvents = workflowEvents
     exports.apply = apply
     return module.exports
   },

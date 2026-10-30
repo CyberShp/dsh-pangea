@@ -3015,3 +3015,40 @@ test('native report and risk footer use frozen source count, never asset or requ
     if (count == null) assert.doesNotMatch(metricsText(section), /[01] 个(?:冻结)?源码文件/)
   }
 })
+
+test('workflow timeline converts structured record and launch summaries to text', async () => {
+  const client = await loadClientExports()
+  const summary = { total: 4, designed: 1, missing: 1, unresolved: 2, not_applicable: 0 }
+  const current = { source_first_records: [{ action_id: 'a', records: [{ record_id: 'n', kind: 'note', body: { summary } }] }] }
+  const before = JSON.stringify(current)
+  for (const events of [[], [{ action_id: 'a', detail: summary, message: { text: 'saved' } }]]) {
+    const rows = client.workflowEvents(current, events)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].detail, '总计 4 · 已设计 1 · 待补用例 1 · 待确认 2 · 不适用 0')
+    assert.equal(typeof rows[0].title, 'string')
+    assert.equal(typeof rows[0].summary, 'string')
+  }
+  assert.equal(JSON.stringify(current), before)
+})
+
+test('overview renders a behavior statistics note without plain object children', async () => {
+  const summary = { total: 4, designed: 1, missing: 1, unresolved: 2, not_applicable: 0 }
+  const current = { run_id: 'run', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true,
+    details: { notes: [{ record_id: 'n', kind: 'note', body: { summary } }] }, workflow: { units: [], steps: [], unresolved: [] } }
+  const task = { task_id: 'task', run_id: 'run', status: 'complete', source_scope: ['src'] }
+  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'overview' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const tree = panel.type(panel.props)
+  const check = node => {
+    if (Array.isArray(node)) return node.forEach(check)
+    if (node == null || typeof node !== 'object') return
+    assert.ok('type' in node && Array.isArray(node.children), 'plain object reached React children')
+    node.children.forEach(check)
+  }
+  check(tree)
+  assert.match(metricsText(tree), /总计 4 · 已设计 1 · 待补用例 1 · 待确认 2 · 不适用 0/)
+})

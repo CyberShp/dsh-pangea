@@ -8,3 +8,18 @@ test('overview findings keep provenance and never turn expected case outcomes in
   assert.doesNotMatch(JSON.stringify(rows), /测试应该通过/)
   assert.equal(buildOverviewFindings({ current: { details: current.details } }).length, 0)
 })
+
+test('structured summaries remain readable text without mutating source records', () => {
+  const summary = { total: 4, designed: 1, missing: 1, unresolved: 2, not_applicable: 0 }
+  const notes = [{ record_id: 'n', kind: 'note', body: { summary } }]
+  const before = JSON.stringify(notes)
+  const rows = buildOverviewFindings({ notes, current: { workflow: { unresolved: [{ summary }] } },
+    risks: [{ risk_id: 'r', title: { message: 'risk' }, narrative: { conditions: ['a', 'b'] } }] })
+  for (const row of rows) {
+    assert.equal(typeof row.title, 'string')
+    assert.equal(typeof row.summary, 'string')
+  }
+  assert.equal(rows.find(row => row.kind === 'note').summary, '总计 4 · 已设计 1 · 待补用例 1 · 待确认 2 · 不适用 0')
+  assert.equal(rows.find(row => row.kind === 'risk').summary, '{"conditions":["a","b"]}')
+  assert.equal(JSON.stringify(notes), before)
+})

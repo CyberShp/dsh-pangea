@@ -66,14 +66,29 @@ window.__ModuleLoader__.load({
 
     const __overviewFindings = (() => {
     const list = value => Array.isArray(value) ? value : []
-    const bodyText = value => typeof value === 'string' ? value : value?.message ?? value?.summary ?? value?.title ?? ''
+    // Text-only projection; keep structured source records unchanged.
+    function summaryText(value) {
+      if (value == null) return ''
+      if (typeof value === 'string') return value
+      if (typeof value !== 'object') return String(value)
+      const labels = { total: '总计', designed: '已设计', missing: '待补用例', unresolved: '待确认', not_applicable: '不适用' }
+      const keys = Object.keys(value)
+      if (keys.length && keys.every(key => Object.hasOwn(labels, key)) &&
+          keys.every(key => typeof value[key] === 'number' && Number.isFinite(value[key]))) {
+        return Object.entries(labels).filter(([key]) => Object.hasOwn(value, key))
+          .map(([key, label]) => `${label} ${value[key]}`).join(' · ')
+      }
+      return JSON.stringify(value)
+    }
+    const bodyText = value => summaryText(typeof value === 'object' && value !== null
+      ? value.message ?? value.summary ?? value.title ?? value : value)
 
     // Projection only: preserve the original findings and their provenance.
     function buildOverviewFindings({ current = {}, risks = [], notes = [] } = {}) {
       const found = [], seen = new Set()
       const add = item => {
         if (!item.id || seen.has(item.id)) return
-        seen.add(item.id); found.push(item)
+        seen.add(item.id); found.push({ ...item, title: summaryText(item.title), summary: summaryText(item.summary) })
       }
       for (const [index, value] of list(current.workflow?.unresolved).entries()) {
         const title = bodyText(value)
@@ -97,7 +112,7 @@ window.__ModuleLoader__.load({
       return found
     }
 
-    return { buildOverviewFindings }
+    return { summaryText, buildOverviewFindings }
     })()
 
     const __caseReviewProjection = (() => {
@@ -2560,7 +2575,7 @@ window.__ModuleLoader__.load({
     const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
     const { renderReviewPresentation, reviewStatusLabel, isReviewRecord } = __reviewPresentation
     const { buildRunInsights } = __runInsights
-    const { buildOverviewFindings } = __overviewFindings
+    const { buildOverviewFindings, summaryText } = __overviewFindings
     const { caseIdentity, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
     const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
     function sourceFirstRecordBody(body) {
@@ -2603,7 +2618,7 @@ window.__ModuleLoader__.load({
           detail: typeof body === 'string' ? body : body?.description || body?.summary,
           summary: body?.summary, evidence: record.evidence ?? [], relates_to: record.relates_to ?? [] })
       }
-      return result
+      return result.map(event => ({ ...event, title: summaryText(event.title), detail: summaryText(event.detail), summary: summaryText(event.summary) }))
     }
     function CreateAssetPicker({ items, selectedAssets, loading, error, pagination, query, type, repositoryOnly, repository, typeLabels, onQuery, onSearch, onType, onRepository, onPage, onRefresh, onClose, onConfirm }) {
       const [pending, setPending] = React.useState(() => Object.fromEntries(selectedAssets.map(item => [item.asset_id, item])))
@@ -9441,6 +9456,7 @@ window.__ModuleLoader__.load({
     exports.collectionWarning = collectionWarning
     exports.showRunHealth = showRunHealth
     exports.artifactLabel = artifactLabel
+    exports.workflowEvents = workflowEvents
     exports.apply = apply
     return module.exports
   },
