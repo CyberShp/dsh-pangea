@@ -35,9 +35,73 @@ test('16 and 2000 file scopes do not inflate ACP prompts, including repairs and 
     cwd: '/work', dataRoot: testDataRoot, runId: 'r', taskId: 't' })
   }
   assert.equal(make(16), make(2000))
-  assert.ok(make(2000).length < 4000)
+  assert.ok(make(2000).length < 5500)
   assert.doesNotMatch(make(2000), /file-1999|allowed_paths|prepared_source/)
   assert.match(make(2000), /task-open.*精简视图/)
+})
+
+test('analysis and closure preserve submission guidance after compaction without importing a new schema', () => {
+  for (const stage of ['unit_analysis', 'targeted_closure']) {
+    const args = { action: { action_id: 'r:a', role: 'analysis', stage }, opened: { task: {} }, cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 'original' }
+    for (const prompt of [workerPrompt(args), workerContinuationPrompt({ ...args, sameAction: true }), workerContinuationPrompt({ ...args, sameAction: false })]) {
+      assert.match(prompt, /旧任务未返回 write_contract 或未声明 record_contracts，不表示合同丢失/)
+      assert.match(prompt, /仍须完整执行冻结 rubric/)
+      assert.match(prompt, /不允许用 note 替代必须交付的结构化记录/)
+      assert.match(prompt, /result-write --expected-revision N --records-file/)
+      assert.match(prompt, /result-supersede.*--target-record-ids-file.*--replacement-file/)
+      assert.match(prompt, /已执行必须保留实际 argv、cwd、退出码、stdout\/stderr/)
+      assert.match(prompt, /图表诊断按当前冻结要求逐项核实/)
+      assert.match(prompt, /有未确认项如实记录 unresolved，交由 Reviewer 裁决/)
+      assert.ok(prompt.length < 5500)
+    }
+  }
+  assert.doesNotMatch(workerPrompt({ action: { stage: 'unit_planning' }, opened: { task: {} }, cwd: '/work' }), /Analysis\/closure 交付说明/)
+  const args = { action: { stage: 'unit_analysis' }, cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 't' }
+  const legacy = workerPrompt({ ...args, opened: { task: { analysis_profile: 'behavior-test-v1' } } })
+  assert.match(legacy, /实际执行过用 executed（不等于 passed）/)
+  assert.match(legacy, /path_id,title,node_ids,case_ids/)
+  assert.ok(legacy.length < 6500)
+  assert.doesNotMatch(workerPrompt({ ...args, opened: { task: { analysis_profile: 'behavior-test-v2', record_contracts: { risk: 'behavior-risk-v2' } } } }), /同一冻结 profile 的 flow.body/)
+})
+
+test('Planning carries its public write contract across initial and compacted turns', () => {
+  const args = { action: { action_id: 'r:p', stage: 'unit_planning' }, opened: { task: {} }, cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 'original' }
+  for (const prompt of [workerPrompt(args), workerContinuationPrompt({ ...args, sameAction: true }), workerContinuationPrompt({ ...args, sameAction: false })]) {
+    assert.match(prompt, /plan-write --expected-revision N --unit-file/)
+    assert.match(prompt, /真实 region ID 字符串组成 owned_regions\/context_regions/)
+    assert.match(prompt, /不包 units\/plan\/kind\/body，不自造 unit_id/)
+    assert.match(prompt, /最终仍按 target 核对冻结候选范围内的主责归属、重叠、依赖、排除依据及全部 planning rubric 义务/)
+    assert.match(prompt, /compact 后先 result-read 复用真实 unit_id/)
+    assert.ok(prompt.length < 6500)
+  }
+  assert.doesNotMatch(workerPrompt({ ...args, action: { stage: 'unit_analysis' } }), /Planning 写入说明/)
+})
+
+test('closure resumes finding-by-finding corrections without discarding global obligations', () => {
+  const args = { action: { action_id: 'r:c', stage: 'targeted_closure' }, opened: { task: {} }, cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 'original' }
+  for (const prompt of [workerPrompt(args), workerContinuationPrompt({ ...args, sameAction: true }), workerContinuationPrompt({ ...args, sameAction: false })]) {
+    assert.match(prompt, /先核实该反例、保存对应替换记录与实际证据，再处理下一项/)
+    assert.match(prompt, /新增具体反证必须处理/)
+    assert.match(prompt, /仍需完成引用、汇总及冻结规则要求的全局自检/)
+    assert.match(prompt, /path 从 body 内部起算/)
+    assert.match(prompt, /不与 replacement 同传/)
+  }
+  assert.doesNotMatch(workerPrompt({ ...args, action: { stage: 'unit_planning' } }), /Closure 按 correction_records/)
+})
+
+test('multi-unit comparison checkpoints real review evidence without weakening global review', () => {
+  const args = { action: { action_id: 'r:review', role: 'review', stage: 'comparison_review' }, opened: { task: { version_set_id: 'frozen-v1' } }, cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 'original-reviewer' }
+  for (const prompt of [workerPrompt(args), workerContinuationPrompt({ ...args, sameAction: true }), workerContinuationPrompt({ ...args, sameAction: false })]) {
+    assert.match(prompt, /comparison-read --version-set-id <当前版本> --unit-id <当前单元> --view compact/)
+    assert.match(prompt, /读全该单元全部记录及诊断/)
+    assert.match(prompt, /立即通过 result-write 保存真实审查依据/)
+    assert.match(prompt, /最后仍须完成全局一致性、覆盖与比例复核/)
+    assert.match(prompt, /compact 后先 result-read/)
+    assert.match(prompt, /不新增机器合同/)
+    assert.match(prompt, /全部冻结审查义务完成后才提交真实 decision 和 work-finish/)
+    assert.match(prompt, /有反证必须 finding.*不能为了结束而 pass/)
+  }
+  assert.doesNotMatch(workerPrompt({ ...args, action: { stage: 'unit_planning' } }), /多单元审查按/)
 })
 
 test('same-action review repair retains delivery contract with bounded diagnostics', () => {
@@ -119,6 +183,57 @@ for (const failureMode of ['throw', 'diagnostic', 'completed-with-error', 'event
       assert.ok(events.some(event => event.error_code === 'INPUT_TOO_LONG'))
       assert.ok(!events.some(event => ['source_first_zero_tool_turn', 'source_first_recovering'].includes(event.stage)))
     } finally { controller.abort(); await run.dispose() }
+  })
+}
+
+for (const scenario of ['throw', 'diagnostic', 'event-only', 'unclosed-tools', 'stale-completion', 'changed-after-fence', 'no-proof', 'rejected-proof', 'invalid-delivery']) {
+  test(`context error after saved completion reconciles only a fenced validated delivery: ${scenario}`, async () => {
+    const runId = `saved-context-${scenario}`, actionId = `${runId}:a`, controller = new AbortController()
+    let prompts = 0, settled = 0, fenced = false, done = false
+    const calls = [], events = []
+    const run = createSourceFirstAcpRun({ providerId: 'pangea-opencode', cwd: '/work', dataRoot: testDataRoot, runId,
+      signal: controller.signal, onEvent: e => events.push(e),
+      runner: async ({ args }) => {
+        calls.push(args)
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[0] === 'result-read') return { revision: 4, completion_complete: true,
+          completion_declared_revision: scenario === 'stale-completion' || (scenario === 'changed-after-fence' && fenced) ? 3 : 4 }
+        if (args[1] === 'next') return { run_id: runId, lifecycle_status: done ? 'complete' : 'running', actions: done ? [] : [{ action_id: actionId, action: 'dispatch_agent', role: 'analysis', stage: 'unit_analysis' }] }
+        if (args[1] === 'settle') {
+          assert.equal(fenced, true); settled++; done = true
+          return scenario === 'invalid-delivery' ? { attention_required: true, validation: { status: 'invalid', recoverable: false, error: { code: 'SEMANTIC_CONTRACT', message: 'required result is missing' } } } : { accepted_revisions: { [actionId]: 4 } }
+        }
+        return {}
+      },
+      subagents: { start: async (_provider, request) => ({ id: `${runId}-original`, remoteSessionId: `${runId}-remote`,
+        result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {},
+        ...(scenario === 'no-proof' ? {} : { stopExecution: async () => { fenced = true; return { confirmed: scenario !== 'rejected-proof', processTreeStopped: scenario !== 'rejected-proof' } } }),
+        readDiagnostics: () => ({ toolCalls: prompts ? 1 : 0, activeToolCount: scenario === 'unclosed-tools' && prompts ? 1 : 0, processExited: fenced }),
+        continuePrompt: async () => {
+          prompts++
+          if (scenario === 'event-only') {
+            request.onSessionEvent({ type: 'prompt', agent_session_id: `${runId}-original`, remote_session_id: `${runId}-remote`, request_id: 'current' })
+            request.onSessionEvent({ type: 'session.error', agent_session_id: `${runId}-original`, remote_session_id: `${runId}-remote`, request_id: 'current', error: { message: 'context window exceeds limit (2013)' } })
+            return { stopReason: 'completed', protocolStopReason: 'end_turn' }
+          }
+          if (scenario === 'diagnostic') return { stopReason: 'error', diagnostic: 'context window exceeds limit (2013)' }
+          throw new Error('context window exceeds limit (2013)')
+        },
+      }) },
+    })
+    try {
+      if (scenario === 'rejected-proof') { await assert.rejects(run.result, /停止检查失败/); assert.equal(settled, 0) }
+      else {
+        const outcome = await run.result
+        const reconciled = ['throw', 'diagnostic', 'event-only', 'unclosed-tools', 'invalid-delivery'].includes(scenario)
+        assert.equal(settled, reconciled ? 1 : 0)
+        assert.equal(Boolean(outcome.attentionRequired), !reconciled || scenario === 'invalid-delivery')
+        assert.equal(events.some(e => e.stage === 'source_first_saved_delivery_reconciled'), reconciled)
+        assert.equal(calls.some(a => a.includes('paused')), !reconciled)
+        if (scenario === 'invalid-delivery') assert.ok(events.some(e => e.stage === 'source_first_action_attention'))
+      }
+      assert.equal(prompts, 1)
+    } finally { controller.abort(); await run.dispose().catch(() => {}) }
   })
 }
 
@@ -558,6 +673,27 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
               const decisionFile = path.join(request.scratchDirectory, 'decision.json')
               await writeFile(decisionFile, JSON.stringify({ version_set_id: task.version_set_id, disposition: closure ? 'finding' : 'pass', correction_record_ids: correctionRecordIds, summary: '协议回归 fixture 完成，不代表模型质量验证' }))
               saved = await call('review-decide', ['--expected-revision', String(revision), '--decision-file', decisionFile])
+            } else if (task.task_type === 'source_first_analysis') {
+              const file = path.join(request.scratchDirectory, 'analysis-records.json')
+              await writeFile(file, JSON.stringify([{ kind: 'note', body: '协议 fixture 范围依据；不是模型质量验收。', evidence: ['sample:tls.c:1'] }]))
+              const first = await call('result-write', ['--expected-revision', String(current.revision), '--records-file', file])
+              assert.equal((await call('result-read')).completion, null, 'incremental save must not declare completion')
+              await writeFile(file, JSON.stringify([{ kind: 'test_case', body: { format_version: 'behavior-test-case-v1', case_id: 'fixture-case', steps: [{ action: '调用冻结 fixture 的连接入口', expected: '开启 TLS 时返回成功' }], external_observations: [], execution_status: 'not_run' } }]))
+              saved = await call('result-write', ['--expected-revision', String(first.revision), '--records-file', file])
+              const persisted = await call('result-read')
+              assert.equal(persisted.records.length, 2)
+              assert.equal(persisted.records[1].body.execution_status, 'not_run')
+            } else if (task.task_type === 'source_first_closure') {
+              const before = JSON.parse(await readFile(task.result_path, 'utf8'))
+              const targets = path.join(request.scratchDirectory, 'targets.json'), replacement = path.join(request.scratchDirectory, 'replacement.json')
+              await writeFile(targets, JSON.stringify([current.records[0].record_id]))
+              await writeFile(replacement, JSON.stringify({ kind: 'note', body: '协议 fixture 定向更正，保留其他记录与原历史。' }))
+              saved = await call('result-supersede', ['--expected-revision', String(current.revision), '--target-record-ids-file', targets, '--replacement-file', replacement])
+              const persisted = await call('result-read')
+              const after = JSON.parse(await readFile(task.result_path, 'utf8'))
+              for (const record of before.records) assert.deepEqual(after.records.find(r => r.record_id === record.record_id), record)
+              assert.equal(persisted.records.find(r => r.record_id === current.records[0].record_id).active, false)
+              assert.equal(persisted.records.length, current.records.length + 1)
             } else {
               saved = await call('result-write', ['--expected-revision', String(current.revision), '--records', JSON.stringify([{ kind: 'note', body: '固定回归 fixture：已启用 TLS 时连接成功，未启用时返回失败。', evidence: ['sample:tls.c:1'] }])])
             }
