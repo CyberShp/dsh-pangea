@@ -16,6 +16,7 @@ export class AcpStalled extends Error {
 }
 
 export function hasUnconfirmedAcpTools(diagnostics = {}) {
+  if (['unaccepted_tool_events', 'validation_error_count', 'observer_error_count'].some(key => diagnostics.toolLifecycle?.[key] > 0)) return true
   const unclosed = diagnostics.toolLifecycle?.unclosed_count
   if (Number.isInteger(unclosed) && unclosed > 0) return true
   if (diagnostics.activeToolCount > 0) return true

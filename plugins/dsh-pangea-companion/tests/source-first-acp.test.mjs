@@ -40,7 +40,7 @@ test('16 and 2000 file scopes do not inflate ACP prompts, including repairs and 
   assert.match(make(2000), /task-open.*精简视图/)
 })
 
-test('same-action repair keeps only binding, saved-result recovery, and bounded diagnostics', () => {
+test('same-action review repair retains delivery contract with bounded diagnostics', () => {
   const make = count => {
     const paths = Array.from({ length: count }, (_, i) => ({ path: `src/file-${i}.c` }))
     return workerContinuationPrompt({ action: { action_id: 'r:review', action: 'continue_agent', role: 'review', stage: 'comparison_review',
@@ -50,14 +50,19 @@ test('same-action repair keeps only binding, saved-result recovery, and bounded 
   }
   const prompt = make(2000)
   assert.equal(make(16), prompt)
-  assert.ok(prompt.length < 2600)
+  assert.ok(prompt.length < 4600)
   assert.match(prompt, /result-read/)
   assert.match(prompt, /IncompleteSourceFirstResult.*missing completion/)
   assert.match(prompt, /work-finish/)
+  assert.match(prompt, /review-decide --expected-revision N --decision-file/)
+  assert.match(prompt, /version_set_id.*already-known-version/)
+  assert.match(prompt, /result-write --expected-revision N --records-file/)
+  assert.match(prompt, /未声明 behavior-review-check-v1/)
+  assert.match(prompt, /有反证必须 finding.*不能为了结束而 pass/)
   assert.match(prompt, /当前 worker 临时目录：\/scratch\/original/)
   assert.match(prompt, /source-first-cli-worker\.md/)
   assert.match(prompt, /"--action-id","r:review","--task-id","original"/)
-  assert.doesNotMatch(prompt, /身份绑定已完成|REPAIR_TAIL|file-1999|allowed_paths|prepared_source|review-decide --expected-revision|按 task\.rubric_paths/)
+  assert.doesNotMatch(prompt, /身份绑定已完成|REPAIR_TAIL|file-1999|allowed_paths|prepared_source|按 task\.rubric_paths/)
   assert.doesNotMatch(prompt, /先调用 task-open|PowerShell 直接执行 task-open|先读取客户端无关 CLI 合同/)
 })
 
@@ -488,18 +493,19 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
     for (let i = 1; i < fileCount; i++) await writeFile(path.join(repository, `dependency-${i}.c`), `int dependency_${i}(void) { return ${i}; }\n`)
     const created = await createRun(cwd, { repository: 'sample', target: 'TLS connect', source_scope: [fileCount > 1 ? '.' : 'tls.c'], mode, effective_context_budget: 204800 })
     let count = 0
-    const stages = []
+    const stages = [], hostEvents = []
     let unitId
     run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd, dataRoot: created.data_root, runId: created.run_id,
-      signal: controller.signal, runner: runPangea,
-      subagents: { start: async () => {
+      signal: controller.signal, runner: runPangea, onEvent: e => hostEvents.push(e),
+      subagents: { start: async (_provider, request) => {
+        await mkdir(request.scratchDirectory, { recursive: true })
         const id = `real-cli-worker-${++count}`
         return { id, result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => {},
           continuePrompt: async prompt => {
             const binding = JSON.parse(prompt[0].text.split('\n').find(line => line.startsWith('每次 CLI')).split('：').slice(1).join('：'))
             const call = (command, args = []) => runPangea({ cwd, args: [command, ...binding, ...args] })
             const { task } = await call('task-open')
-            assert.ok(prompt[0].text.length < 5000)
+            assert.ok(prompt[0].text.length < 7000)
             assert.ok(JSON.stringify(task).length < 14000)
             assert.equal(task.allowed_paths, undefined)
             assert.equal(task.all_scope_paths, undefined)
@@ -534,12 +540,24 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
               const compared = await call('comparison-read', ['--version-set-id', task.version_set_id])
               assert.ok(JSON.stringify(compared).includes('analysis'))
               assert.equal(JSON.stringify(compared).includes('independent_review'), mode === 'depth')
-              let revision = current.revision
+              const recordsFile = path.join(request.scratchDirectory, 'review-records.json')
+              await writeFile(recordsFile, JSON.stringify([{ kind: 'summary', body: '协议 fixture 的审查依据，不代表模型语义验收。' }]))
+              const recorded = await call('result-write', ['--expected-revision', String(current.revision), '--records-file', recordsFile])
+              let revision = recorded.revision
+              const correctionRecordIds = []
               if (closure) {
-                const finding = await call('comparison-finding-write', ['--expected-revision', String(revision), '--unit-ids', JSON.stringify([unitId]), '--finding', JSON.stringify({ summary: '清理说明', body: '补充连接失败后的清理说明' })])
+                const findingFile = path.join(request.scratchDirectory, 'finding.json'), unitIdsFile = path.join(request.scratchDirectory, 'units.json')
+                await writeFile(findingFile, JSON.stringify({ summary: '清理说明', body: '补充连接失败后的清理说明' }))
+                await writeFile(unitIdsFile, JSON.stringify([unitId]))
+                const finding = await call('comparison-finding-write', ['--expected-revision', String(revision), '--unit-ids-file', unitIdsFile, '--finding-file', findingFile])
                 revision = finding.revision
+                const persisted = await call('result-read')
+                correctionRecordIds.push(...persisted.records.filter(r => r.kind === 'finding').map(r => r.record_id))
+                assert.equal(correctionRecordIds.length, 1)
               }
-              saved = await call('review-decide', ['--expected-revision', String(revision), '--decision', JSON.stringify({ version_set_id: task.version_set_id, disposition: closure ? 'finding' : 'pass', ...(closure ? { closure_units: [unitId] } : {}), summary: '协议回归 fixture 完成，不代表模型质量验证' })])
+              const decisionFile = path.join(request.scratchDirectory, 'decision.json')
+              await writeFile(decisionFile, JSON.stringify({ version_set_id: task.version_set_id, disposition: closure ? 'finding' : 'pass', correction_record_ids: correctionRecordIds, summary: '协议回归 fixture 完成，不代表模型质量验证' }))
+              saved = await call('review-decide', ['--expected-revision', String(revision), '--decision-file', decisionFile])
             } else {
               saved = await call('result-write', ['--expected-revision', String(current.revision), '--records', JSON.stringify([{ kind: 'note', body: '固定回归 fixture：已启用 TLS 时连接成功，未启用时返回失败。', evidence: ['sample:tls.c:1'] }])])
             }
@@ -550,6 +568,9 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
     const completed = await run.result
     assert.equal(completed.stopReason, 'completed')
     assert.equal(count, 3)
+    const acceptedEvents = hostEvents.filter(e => e.stage === 'source_first_action_settled')
+    assert.equal(acceptedEvents.length, stages.length)
+    assert.ok(acceptedEvents.every(e => e.validation === 'valid' && Number.isInteger(e.accepted_revision)))
     assert.equal(stages.length, (mode === 'depth' ? 4 : 3) + Number(closure))
     if (mode === 'depth') assert.equal(stages[2][2], stages[3][2])
     else assert.equal(stages.some(stage => stage[1] === 'independent_review'), false)

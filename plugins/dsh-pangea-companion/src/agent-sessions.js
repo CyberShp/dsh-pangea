@@ -155,7 +155,7 @@ export class AgentSessionStore {
       if (value.type === 'error') current.status = 'error'
       if (value.type === 'process_exit') current.status = 'exited'
       if (value.type === 'host_event' && /paused|attention/.test(value.stage || '')) current.status = 'paused'
-      if (value.type === 'host_event' && value.stage === 'source_first_action_settled') current.status = 'completed'
+      if (value.type === 'host_event' && value.stage === 'source_first_action_settled') current.status = value.validation === 'valid' ? 'completed' : 'idle'
       const update = value.update || {}
       if (update.toolCallId && !value.replay) current.last_tool_id = update.toolCallId
       if (update.status && !value.replay) current.last_tool_status = update.status

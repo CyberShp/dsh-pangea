@@ -51,3 +51,7 @@ test('user stop interrupts cancellation wait', async () => {
   const worker = { cancelTurn: async () => { controller.abort(new Error('user stop')); return new Promise(() => {}) } }
   await assert.rejects(waitForAcpTurn({ worker, turn: new Promise(() => {}), signal: controller.signal, policy }), /user stop/)
 })
+
+test('unaccepted or invalid tool evidence blocks continuation even with zero active tools', () => {
+ for(const key of ['unaccepted_tool_events','validation_error_count','observer_error_count']) assert.equal(hasUnconfirmedAcpTools({activeToolCount:0,toolLifecycle:{unclosed_count:0,[key]:1}}),true)
+})

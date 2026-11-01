@@ -1,6 +1,7 @@
 // Inspect protocol error envelopes only, never tool output or model/source text.
 export function contextLimitError(value) {
-  if (typeof value === 'string') return /input too long|exceed max input length|payload too large/i.test(value)
+  if (typeof value === 'string') return /input too long|exceed max input length|payload too large|max input is\s*\d+|maximum context length|context window.*exceed|context.*overflow/i.test(value)
+  if (value?.data && value.data !== value && contextLimitError(value.data.message)) return true
   return value?.name === 'ContextOverflowError' || value?.code === 'ContextOverflowError'
     || contextLimitError(typeof value?.message === 'string' ? value.message : '')
 }

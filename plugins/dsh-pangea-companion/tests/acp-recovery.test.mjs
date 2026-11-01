@@ -521,7 +521,7 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
       assert.equal((await resumed.result).attentionRequired, true)
       assert.equal(turns, 1)
     }
-    if (turns === 2) assert.match(prompts[1], /保留已保存内容/)
+    if (turns === 2) assert.match(prompts[1], /保留已保存(?:内容|正文)/)
   } finally {
     pending.resolve(completed)
     // Releasing the test's pending response starts a real persisted-state write.

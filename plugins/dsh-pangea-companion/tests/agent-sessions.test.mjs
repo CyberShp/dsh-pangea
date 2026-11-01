@@ -400,3 +400,11 @@ test('automatic transport recovery keeps capturing the exact remote session and 
     assert.equal(session.requested_model, 'requested/model')
   } finally { controller.abort(); await run.dispose() }
 })
+
+test('turn end and rejected delivery never become accepted completion', async t => {
+ const {store} = await fixture(t)
+ assert.equal((await store.append(meta,{type:'turn_end',protocol_stop_reason:'end_turn'})).status,'idle')
+ assert.equal((await store.append(meta,{type:'host_event',stage:'source_first_action_settled',validation:'incomplete'})).status,'idle')
+ assert.equal((await store.append(meta,{type:'host_event',stage:'source_first_action_settled',validation:'valid'})).status,'completed')
+ assert.equal((await store.append(meta,{type:'prompt'})).status,'running')
+})

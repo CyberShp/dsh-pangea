@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createAcpRequestErrors } from '../src/acp-request-errors.js'
+import { contextLimitError, createAcpRequestErrors } from '../src/acp-request-errors.js'
 
 const event = (type, extra = {}) => ({ type, agent_session_id: 'a', remote_session_id: 'remote-a', request_id: 'driver-1', ...extra })
 const error = { name: 'ContextOverflowError', message: 'input too long' }
@@ -44,4 +44,10 @@ test('parallel workers, reused callbacks and subsequent prompts do not share fai
   tracker.end(second)
   tracker.begin('a', 'remote-a', 'host-3')
   assert.equal(tracker.contextError('a'), null)
+})
+
+test('recognizes numeric input limits and nested provider errors', () => {
+ assert.equal(contextLimitError('max input is 169984, current is 186265'), true)
+ assert.equal(contextLimitError({data:{message:'maximum context length exceeded'}}), true)
+ assert.equal(contextLimitError('ordinary tool failure'), false)
 })
