@@ -3276,3 +3276,44 @@ test('overview renders a behavior statistics note without plain object children'
   check(tree)
   assert.match(metricsText(tree), /总计 4 · 已设计 1 · 待补用例 1 · 待确认 2 · 不适用 0/)
 })
+
+test('case detail shows authored basis and all frozen input matches without treating positive counts as gaps', async () => {
+  const records = [{ record_id: 'c', kind: 'test_case', body: { purpose: 'branch', summary: '普通操作未触发拒绝路径，增加拒绝请求', coverage_refs: ['G', { coverage_id: 'G' }, 'missing', {}] } }]
+  const gaps = [{ coverage_id: 'G', path: 'auth.c', count: 8, meaning: 'covered context' }, { coverage_id: 'G', path: 'auth.c', branch_id: 'reject', count: 0, meaning: 'uncovered branch' }]
+  const nodes = await caseMetricsView(records, gaps, { type: 'case', id: 'u/c' })
+  const section = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
+  const rendered = JSON.stringify(section)
+  for (const value of ['普通操作未触发拒绝路径', '正计数记录可能只是已覆盖上下文', '重复或冲突', 'covered context', 'uncovered branch', '没有此引用', '无效覆盖引用']) assert.ok(rendered.includes(value), value)
+  assert.equal(descendants(section).filter(node => node.type === 'h4' && node.children.includes('G')).length, 1)
+})
+
+for (const gaps of [null, []]) test(`case detail marks missing frozen reference unverified (${gaps === null ? 'unreadable' : 'empty'})`, async () => {
+  const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', coverage_refs: 'G' } }], gaps, { type: 'case', id: 'u/c' })
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  assert.ok(rendered.includes('未提供逐用例 summary'))
+  assert.ok(rendered.includes(gaps === null ? '冻结覆盖输入不可读取' : '冻结覆盖输入中没有此引用'))
+})
+
+test('coverage case without refs remains visible but unverified; legacy branch case needs no new fields', async () => {
+  for (const purpose of ['coverage', 'branch']) {
+    const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose, title: '保留原始用例' } }], [], { type: 'case', id: 'u/c' })
+    assert.ok(JSON.stringify(nodes).includes('保留原始用例'))
+    const section = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
+    if (purpose === 'coverage') assert.ok(JSON.stringify(section).includes('未提供有效覆盖引用'))
+    else assert.equal(section, undefined)
+  }
+})
+
+for (const refs of ['G', { coverage_id: 'G' }]) test(`case detail flags original non-array refs despite a matching frozen input (${typeof refs})`, async () => {
+  const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', summary: '依据', coverage_refs: refs } }], [{ coverage_id: 'G', condition: '冻结拒绝分支' }], { type: 'case', id: 'u/c' })
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  assert.ok(rendered.includes('原始 coverage_refs 不是数组'))
+  assert.ok(rendered.includes('不作为有效引用'))
+  assert.ok(rendered.includes('冻结拒绝分支'))
+})
+
+for (const summary of ['', ' \n\t ']) test('case detail does not treat blank summary as an explanation', async () => {
+  const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', summary, coverage_refs: ['G'] } }], [{ coverage_id: 'G' }], { type: 'case', id: 'u/c' })
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  assert.ok(rendered.includes('未提供逐用例 summary'))
+})

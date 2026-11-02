@@ -48,9 +48,22 @@ test('source-first read model exposes coverage case counts and declared readines
   const run = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
   assert.deepEqual(run.coverage_summary, { valid_gaps: 2, coverage_cases: 1, linked_cases: 2, linked_coverage_cases: 1, linked_valid_gaps: 2, unverified_refs: 1 })
   assert.deepEqual(run.case_quality_summary, { blackbox_target: true, blackbox_target_reason: 'product-behavior', total_cases: 3, business_blackbox: 1, developer_assisted: 1, ready_blackbox: 1, ready_graybox: 0, ready_cases: 1, has_legacy_groups: false, ready_ratio: 1 / 3 })
+  assert.deepEqual(run.details.coverage_gaps, [{ coverage_id: 'C1' }, { coverage_id: 'C2' }])
   assert.equal(run.details.test_cases[0].readiness_reason, 'CLI entry exists')
   assert.equal(run.lifecycle_status, 'complete')
   assert.equal(await readFile(f.resultPath, 'utf8'), before)
+})
+
+test('case details preserve unavailable versus empty frozen coverage inputs', async t => {
+  const f = await fixture(t, 'coverage-analysis')
+  let run = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
+  assert.equal(run.details.coverage_gaps, null)
+  await json(path.join(f.run, 'inputs/coverage-gaps.json'), [])
+  run = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
+  assert.deepEqual(run.details.coverage_gaps, [])
+  await json(path.join(f.run, 'inputs/coverage-gaps.json'), { invalid: true })
+  run = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
+  assert.equal(run.details.coverage_gaps, null)
 })
 
 test('review stage label follows the frozen speed/depth contract', async t => {

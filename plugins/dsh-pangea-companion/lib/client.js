@@ -9300,6 +9300,33 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', style: { ...styles.environmentSecondaryButton, color: '#c7000b' }, onClick: () => { void deleteEnvironment(environment.id) } }, '删除')))))) : null)
       }
 
+      function renderCaseCoverageBasis(item) {
+        const nonArrayRefs = item.coverage_refs != null && !Array.isArray(item.coverage_refs)
+        const refs = Array.isArray(item.coverage_refs) ? item.coverage_refs : item.coverage_refs == null ? [] : [item.coverage_refs]
+        if (item.summary == null && item.purpose !== 'coverage' && !refs.length) return null
+        const frozen = Array.isArray(details.coverage_gaps) ? details.coverage_gaps : null
+        const ids = [...new Set(refs.map(ref => typeof ref === 'string' ? ref : ref?.coverage_id).filter(id => typeof id === 'string' && id.trim()))]
+        const invalid = refs.some(ref => { const id = typeof ref === 'string' ? ref : ref?.coverage_id; return typeof id !== 'string' || !id.trim() })
+        return h('section', { className: 'b05-card', 'aria-label': '补测依据与冻结覆盖输入' },
+          h('h3', null, '补测依据说明'),
+          item.summary != null && sourceFirstRecordBody(item.summary).trim()
+            ? renderReadableBody(item.summary)
+            : h('p', null, '未提供逐用例 summary；具体缺口、普通操作不足及新增触发条件尚未说明。'),
+          h('p', { className: 'b05-subtle' }, '以下仅按显式引用关联冻结覆盖输入；引用匹配不代表已确认缺口或已完成补测，正计数记录可能只是已覆盖上下文。'),
+          !ids.length ? h('p', null, '未核实：未提供有效覆盖引用，不能据此认定为补测。') : null,
+          nonArrayRefs ? h('div', null, h('p', null, '未核实：原始 coverage_refs 不是数组；以下仅保留原文与候选匹配，不作为有效引用。'), renderReadableBody(item.coverage_refs)) : null,
+          invalid ? h('p', null, '未核实：存在无效覆盖引用，请核对原始记录。') : null,
+          ids.map(id => {
+            const matches = frozen?.filter(row => row && (row.coverage_id ?? row.gap_id) === id) ?? []
+            return h('div', { key: id, className: 'pangea-case-coverage-reference' }, h('h4', null, id),
+              !frozen ? h('p', null, '未核实：冻结覆盖输入不可读取。')
+                : !matches.length ? h('p', null, '未核实：冻结覆盖输入中没有此引用。')
+                  : h(React.Fragment, null,
+                    matches.length > 1 ? h('p', null, '未核实：引用 ID 重复或冲突，无法唯一核实；以下保留全部记录。') : null,
+                    matches.map((row, index) => h('div', { key: index }, renderReadableBody(row)))))
+          }))
+      }
+
       function renderCaseDetail() {
         const item = caseById.get(screen.id)
         if (!item) return h('div', { className: 'b05-card', role: 'alert' }, '当前 Run 中找不到这条测试用例，可能是 Run 已刷新或切换。')
@@ -9340,6 +9367,7 @@ window.__ModuleLoader__.load({
             h('main', null,
               h('div', { className: 'b05-case-notice pangea-case-readiness', role: 'status', 'data-ready': item.readiness === 'ready' ? 'true' : undefined }, h('strong', null, readiness),
                 h('p', null, sourceFirstRecordBody(item.readiness_reason) || (item.missing_execution_conditions ?? []).join('；') || '当前记录未提供执行条件依据。')),
+              renderCaseCoverageBasis(item),
               h('div', { className: 'b05-card pangea-case-setup' },
                 h('section', null, h('h3', null, '前置条件'), values(item.preconditions, '原文未记录前置条件。')),
                 h('section', null, h('h3', null, '清理动作'), values(item.cleanup, '未记录清理动作。'))),

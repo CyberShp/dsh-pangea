@@ -1096,6 +1096,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   if (includeDetails) {
     summary.details = {
       ...projection,
+      coverage_gaps: Array.isArray(coverageGaps) ? coverageGaps : null,
       source_first_records: records,
     }
     summary.workflow = workflow
