@@ -2788,16 +2788,16 @@ window.__ModuleLoader__.load({
       const units = !Number.isFinite(info.unitCounts.total) ? '规划单元总数尚未读取'
         : info.unitCounts.total === 0 && ['preparing', 'planning'].includes(current.execution_view.stage ?? current.stage)
           ? '尚未生成分析单元' : `${count(info.unitCounts.completed)} / ${count(info.unitCounts.total)}`
-      const field = (label, value, note) => h('div', { key: label, style: { minWidth: 0 } }, h('dt', { style: muted }, label), h('dd', { style: { margin: '5px 0 0', fontSize: 14, lineHeight: 1.7, overflowWrap: 'anywhere' } }, value), note ? h('p', { style: { ...muted, margin: '4px 0 0' } }, note) : null)
+      const field = (label, value, note) => h('div', { key: label, className: 'execution-metric' }, h('dt', { style: muted }, label), h('dd', { style: { margin: '5px 0 0', fontSize: 14, lineHeight: 1.7, overflowWrap: 'anywhere' } }, value), note ? h('p', { style: { ...muted, margin: '4px 0 0' } }, note) : null)
       const acceptance = { accepted: '已接受', delivered: '已交付', draft: '已保存草稿', seed: '继承参考' }
-      return h('section', { 'aria-label': compact ? '执行进展摘要' : '运行进展与恢复', style: { border: '1px solid #e5e7e4', borderRadius: 10, background: '#fff', padding: compact ? 18 : 22, marginBottom: 22 } },
+      return h('section', { className: 'execution-summary', 'aria-label': compact ? '执行进展摘要' : '运行进展与恢复', style: { border: '1px solid #e5e7e4', borderRadius: 10, background: '#fff', padding: compact ? 18 : 22, marginBottom: 22 } },
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 16 } }, h('h2', { style: { margin: 0, fontSize: 15, fontWeight: 600 } }, compact ? '执行进展' : '运行进展与恢复'), stale ? h('span', { style: muted }, '上次成功读取的记录') : null),
-        h('dl', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,210px),1fr))', gap: 20, margin: 0 } },
+        h('dl', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(min(100%,210px),1fr))', gap: 10, margin: 0 } },
           field('当前阶段与活动', `${info.stage} · ${info.activity}`),
           field('最近有效进展', time(info.lastProgressAt), info.lastProgressAt == null ? '尚无结果保存时间；不据此推断执行卡住。' : `${info.lastProgressUnit ? `${info.lastProgressUnit} · ` : ''}结果已保存（北京时间）`),
           field('业务单元提交', units, '按单元完成提交计数；复核结论单独展示。'),
           field('最近通信', time(info.lastCommunicationAt), `${info.connection}；通信更新不代表成果增加。`)),
-        h('p', { style: { margin: '18px 0 0', fontSize: 14, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('strong', null, info.finished ? '交付状态：' : '续接位置：'), info.recovery),
+        h('div', { className: 'execution-handoff' }, h('strong', null, info.finished ? '交付状态' : '续接位置'), h('p', null, info.recovery)),
         compact ? null : h(React.Fragment, null,
           h('p', { style: { ...muted, margin: '8px 0 0' } }, `${info.diagnostics.length ? '已读取' : '保留'} ${info.preserved.length} 份结果记录 · ${info.unresolved.length} 项执行待处理。已保存草稿与已接受结果分别标注。`),
           info.preserved.length || info.unresolved.length ? h('details', { style: { marginTop: 15 } },
@@ -3337,7 +3337,7 @@ window.__ModuleLoader__.load({
             node('div', 'metrics', stat('阶段已完成', h(React.Fragment, null, current.workflow?.completed_steps?.length ?? steps.filter(step => step.status === 'completed').length, node('span', 'small muted', ` / ${steps.length}`))), stat('运行时长', duration), stat('用户介入', attention || p.failed ? '需要' : '无需'))),
           p.failed && !error ? h('p', { role: 'alert', className: 'notice danger' }, failureReason) : null,
           attention && !error ? h('div', { className: 'notice warn', style: { marginBottom: 24 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, '选择接下来的处理方式'), h('p', null, !task ? '此 Run 未关联任务记录，无法继续执行或交付；可查看已有结果。' : sourceFirstRecordBody(current.blocking_reason) || '查看未解决事项，继续处理或交付已有结果。'))), node('div', 'row', button('交付已有结果', () => perform('deliver', deliver), '', !task), button('继续修正', () => perform('resume', resume), '', !task?.can_resume))) : null,
-          h('details', { className: 'run-execution-details' }, h('summary', null, '执行详情与 Agent 会话'), h('button', { type: 'button', className: 'btn', disabled: !current?.run_id || !cwd, onClick: () => setSessionsOpen(true) }, 'Agent 会话管理'), h(RunExecutionSummary, { current, task, stale: Boolean(error) })),
+          h('details', { className: 'run-execution-details' }, h('summary', null, '执行详情与 Agent 会话'), h('div', { className: 'execution-tools' }, h('button', { type: 'button', className: 'btn', disabled: !current?.run_id || !cwd, onClick: () => setSessionsOpen(true) }, 'Agent 会话管理')), h(RunExecutionSummary, { current, task, stale: Boolean(error) })),
           node('div', 'run-layout', node('section', 'run-stages', heading('运行阶段', node('span', 'tiny muted', `${steps.length} 个阶段`)),
             steps.map(step => h('button', { key: step.step, type: 'button', className: `stage ${step.status === 'completed' ? 'done' : ''} ${step === selected ? 'current' : ''}`, 'aria-pressed': step === selected, onClick: () => setSelection(step.step) },
               h('b', null, step.status === 'completed' ? '✓' : step.step), h('div', null, step.title, h('p', null, error && step === active ? '上次记录' : step.status === 'pending' ? '等待前序完成' : step.status === 'running' ? p.failed && step === active ? '本次执行失败' : '当前正在执行' : step.status === 'paused' ? '等待你的决定' : step.status === 'stopped' && p.canResume ? '已停止 · 可继续' : STAGE_STATUS[step.status] ?? step.status)))), node('p', 'aside-note', '选择阶段，查看对应任务与产物。')),
@@ -4292,6 +4292,38 @@ window.__ModuleLoader__.load({
         .pangea-page-hero { flex-wrap: wrap; gap: 16px !important; }
         .pangea-create-form .pangea-input-grid { grid-template-columns: minmax(0,1fr) !important; }
       }
+      .pangea-companion :is(.task-tabs,.b03-overview-nav,.b03-report-tabs) {
+        display:flex !important; align-items:center; flex-wrap:wrap; gap:4px !important; padding:4px;
+        width:fit-content; max-width:100%; box-sizing:border-box; border:0; border-radius:12px; background:#e9eef3;
+      }
+      .pangea-companion :is(.task-tabs,.b03-overview-nav,.b03-report-tabs) button,
+      .pangea-companion :is(.b03-task-filter,.b03-task-filter-chip) {
+        display:inline-flex; align-items:center; justify-content:center; flex:none; height:auto; min-height:34px;
+        padding:6px 13px !important; border:0 !important; border-radius:8px; color:#46576a !important;
+        background:transparent; font-size:14px; line-height:1.5; cursor:pointer; white-space:nowrap;
+      }
+      .pangea-companion .b03-task-filters { flex-wrap:wrap; gap:4px; padding:4px; border-radius:12px; background:#edf1f5; }
+      .pangea-companion :is(.task-tabs,.b03-overview-nav,.b03-report-tabs) button:not(:disabled):hover,
+      .pangea-companion :is(.b03-task-filter,.b03-task-filter-chip):not(:disabled):hover {
+        background:#dce5ee; box-shadow:none;
+      }
+      .pangea-companion :is(.task-tabs,.b03-overview-nav,.b03-report-tabs) button[aria-current="page"],
+      .pangea-companion :is(.b03-task-filter,.b03-task-filter-chip)[aria-pressed="true"] {
+        background:#fff !important; color:#17486e !important; font-weight:650; box-shadow:0 1px 4px #23394e30;
+      }
+      .pangea-companion .pangea-task-row:is(:hover,:focus-within) { background:#eff5fa !important; }
+      .pangea-companion .pangea-task-row button:not(:disabled):hover { color:#20577f; box-shadow:none; text-decoration:underline; text-underline-offset:3px; }
+      .pangea-companion :is(.task-tabs,.b03-overview-nav,.b03-report-tabs,.b03-task-controls,.pangea-task-row,.run-execution-details) :is(button,summary):focus-visible {
+        outline:2px solid #376a91 !important; outline-offset:1px; border-radius:6px;
+      }
+      .pangea-companion .run-execution-details > summary { padding:6px 2px; font-weight:600; color:#354758; }
+      .pangea-companion .execution-tools { display:flex; justify-content:flex-end; padding:10px 0; border-top:1px solid #e3e8ed; margin-top:8px; }
+      .pangea-companion .execution-tools .btn { min-height:34px; border-radius:8px; background:#f0f5f9; border:1px solid #cedbe6; color:#285372; }
+      .pangea-companion .execution-metric { min-width:0; padding:12px 14px; border-radius:8px; background:#f3f6f8; }
+      .pangea-companion .execution-metric dd { font-weight:600; font-variant-numeric:tabular-nums; }
+      .pangea-companion .execution-handoff { display:grid; gap:5px; margin-top:18px; border-top:1px solid #dce4ea; padding-top:15px; font-size:14px; line-height:1.6; }
+      .pangea-companion .execution-handoff p { margin:0; overflow-wrap:anywhere; }
+      .pangea-companion .execution-summary details > summary { padding:6px 0; color:#305c7e; }
       @container pangea-panel (max-width: 700px) {
         .pangea-content { padding: 20px 16px 32px !important; }
         .pangea-table-heading { display: none !important; }
