@@ -922,6 +922,10 @@ test('closure budget pauses only its original worker, other units complete, expl
   await writeFile(path.join(root, 'runs', runId, 'acp-workers.json'), JSON.stringify({ runId, workers: bindings }))
   const done = new Set(), paused = new Set(), resumed = [], events = []
   let active = 0, peak = 0, allowSlow = false
+  const firstWaveIds = new Set(actions.slice(0, 3).map(action => action.task_id))
+  const firstWaveEntered = new Set()
+  let releaseFirstWave
+  const firstWaveReady = new Promise(resolve => { releaseFirstWave = resolve })
   const options = { providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId, signal: controller.signal, closureBudgetMs: 1000, // Allow binding persistence before testing the slow-worker deadline.
 
     runner: async ({ args }) => {
@@ -934,14 +938,23 @@ test('closure budget pauses only its original worker, other units complete, expl
     }, subagents: { start: async (_provider, request) => {
       resumed.push(request.resume)
       const id = request.resume.taskId
+      if (id === 'original-3') assert.ok(done.size + paused.size > 0, 'fourth worker waits for a free slot')
       let running = false
       return { id, remoteSessionId: request.resume.remoteSessionId,
         dispose: async () => { if (running) { active--; running = false } },
         continuePrompt: async () => {
           running = true; active++; peak = Math.max(peak, active)
+          // Binding and event persistence precede each prompt and can take
+          // longer than a fast fake turn, especially on Windows. Hold the
+          // initial wave until all three prompts enter instead of assuming
+          // their startup I/O fits inside a five-millisecond overlap window.
+          if (!allowSlow && firstWaveIds.has(id)) {
+            firstWaveEntered.add(id)
+            if (firstWaveEntered.size === firstWaveIds.size) releaseFirstWave()
+            await firstWaveReady
+          }
           if (id === 'original-0' && !allowSlow) return new Promise(() => {})
-          await new Promise(resolve => setTimeout(resolve, 5))
-          active--; running = false
+          if (running) { active--; running = false }
           return { stopReason: 'completed' }
         } }
     } } }
@@ -949,6 +962,7 @@ test('closure budget pauses only its original worker, other units complete, expl
   try {
     run = createSourceFirstAcpRun(options)
     assert.equal((await run.result).attentionRequired, true)
+    assert.deepEqual([...firstWaveEntered].sort(), [...firstWaveIds].sort())
     assert.equal(peak, 3)
     assert.equal(done.size, 3)
     assert.deepEqual([...paused], [`${runId}:0`])
@@ -958,7 +972,13 @@ test('closure budget pauses only its original worker, other units complete, expl
     assert.equal((await run.result).attentionRequired, false)
     assert.equal(done.size, 4)
     assert.deepEqual(resumed.at(-1), { taskId: 'original-0', remoteSessionId: 'remote-0' })
-  } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
+  } finally {
+    releaseFirstWave() // Also release waiting fake turns when an assertion fails.
+    controller.abort()
+    await run?.result.catch(() => {})
+    await run?.dispose()
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('closure allows one mechanical repair then pauses instead of looping', async () => {
