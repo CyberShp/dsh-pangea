@@ -95,3 +95,22 @@ test('stable mainline and parallel-edge path associations follow explicit identi
   assert.deepEqual(mismatch.paths[0].node_ids, ['b', 'a'])
   assert.deepEqual(mismatch.paths[0].edge_ids, ['yes'])
 })
+
+test('behavior board uses analysis-unit columns and declared statuses, keeping unknown data unknown', async () => {
+  const { behaviorCoverageBoard } = await import('../src/behavior-coverage.js')
+  const units = [{ unit_id: 'u1', title: '连接', status: 'dispatched' }, { unit_id: 'u2', title: '清理', status: 'accepted' }]
+  const ledgers = behaviorCoverageProjection([{ ...ledger(), projection_id: 'n' }, { ...ledger({ unit_id: 'u3', items: [] }), projection_id: 'n3' }], [])
+  const before = JSON.stringify({ units, ledgers })
+  const board = behaviorCoverageBoard(units, ledgers)
+  assert.deepEqual(board.map(column => column.unit_id), ['u1', 'u2', 'u3'])
+  assert.deepEqual(board.map(column => column.status), ['dispatched', 'accepted', null])
+  assert.equal(board[0].declared_counts.designed, 1)
+  assert.equal(board[0].items[0].status, 'designed')
+  assert.equal(board[0].items[0].view_key, 'n/item-0')
+  assert.equal(board[1].declared_counts, null)
+  assert.equal(board[1].ledger_status, 'unknown')
+  assert.equal(board[2].declared_counts.designed, 0)
+  assert.equal(JSON.stringify({ units, ledgers }), before)
+  const malformed = behaviorCoverageProjection([{ ...ledger({ items: 'bad' }), projection_id: 'bad' }], [])
+  assert.equal(behaviorCoverageBoard(units, malformed)[0].declared_counts, null)
+})

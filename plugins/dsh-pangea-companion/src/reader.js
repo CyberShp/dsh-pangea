@@ -1,3 +1,5 @@
+import { AgentSessionStore } from './agent-sessions.js'
+import { buildExecutionTimeline } from './execution-timeline.js'
 import { riskApplicable } from './analysis-scenes.js'
 import { readFlowMetadata } from './flow-baseline.js'
 import { readdir, readFile, realpath, stat } from 'node:fs/promises'
@@ -1100,6 +1102,8 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       source_first_records: records,
     }
     summary.workflow = workflow
+    try { summary.execution_timeline = await new AgentSessionStore({ dataRoot, runId }).timeline(progress) }
+    catch (error) { summary.execution_timeline = buildExecutionTimeline({ progress, diagnostics: [`会话时间线不可读取：${error.message}`] }) }
   }
   return summary
 }

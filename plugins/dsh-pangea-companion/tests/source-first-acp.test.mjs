@@ -6,6 +6,7 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRun, runPangea } from '../src/pangea-api.js'
 import { companionSnapshot } from '../src/reader.js'
+import { AgentSessionStore } from '../src/agent-sessions.js'
 
 const testDataRoot = await mkdtemp(path.join(tmpdir(), 'pangea-acp-unit-'))
 test.after(() => rm(testDataRoot, { recursive: true, force: true }))
@@ -194,6 +195,12 @@ for (const failureMode of ['throw', 'diagnostic', 'completed-with-error', 'event
       assert.equal(created, 1)
       assert.ok(calls.some(args => args.includes('paused')))
       assert.ok(!calls.some(args => args.includes('finished')))
+      const timeline = await new AgentSessionStore({ dataRoot: testDataRoot, runId }).timeline()
+      const segments = timeline.lanes.flatMap(lane => lane.segments)
+      assert.equal(segments.length, 1)
+      assert.equal(segments[0].status, 'paused')
+      assert.ok(segments[0].start_at_ms > 0)
+      assert.ok(segments[0].end_at_ms >= segments[0].start_at_ms)
       assert.ok(events.some(event => event.stage === 'source_first_prompt_ready' && event.prompt_bytes > event.prompt_chars))
       assert.ok(events.some(event => event.error_code === 'INPUT_TOO_LONG'))
       assert.ok(!events.some(event => ['source_first_zero_tool_turn', 'source_first_recovering'].includes(event.stage)))
@@ -287,6 +294,11 @@ test('ACP output polling emits only new worker text, with no idle session labels
     releaseTurn()
     assert.equal((await run.result).stopReason, 'completed')
     assert.equal(run.readOutput(), '')
+    const timeline = await new AgentSessionStore({ dataRoot: testDataRoot, runId: 'output-polling' }).timeline()
+    const segments = timeline.lanes.flatMap(lane => lane.segments)
+    assert.equal(segments.length, 1)
+    assert.equal(segments[0].status, 'finished')
+    assert.ok(segments[0].end_at_ms >= segments[0].start_at_ms)
   } finally {
     releaseTurn()
     controller.abort()
@@ -1010,3 +1022,40 @@ test('workers can discover direct and budget-deferred tool reference indexes on 
   }
   assert.doesNotMatch(workerPrompt({ action: {}, opened: { task: {} }, cwd: '/fixture' }), /本 Run 具有测试工具参考/)
 })
+
+for (const ignored of ['duplicate_execution', 'already_started', 'stale_execution', 'already_settled', 'already_finished']) {
+  test(`ignored execution boundary ${ignored} never creates a new timeline boundary`, async () => {
+    const runId = `timeline-ignored-${ignored}`
+    let settled = false
+    const executionCalls = []
+    const controller = new AbortController()
+    const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: '/work', dataRoot: testDataRoot, runId,
+      signal: controller.signal,
+      runner: async ({ args }) => {
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[1] === 'next') return { run_id: runId, lifecycle_status: settled ? 'complete' : 'running',
+          actions: settled ? [] : [{ action_id: `${runId}:a`, role: 'planning', stage: 'unit_planning', action: 'dispatch_agent' }] }
+        if (args[1] === 'execution') { executionCalls.push(args); return { event_ignored: true, reason: ignored } }
+        if (args[1] === 'settle') settled = true
+        return {}
+      },
+      subagents: { start: async () => ({ id: `${runId}-worker`, remoteSessionId: `${runId}-remote`,
+        result: Promise.resolve({ stopReason: 'completed' }), continuePrompt: async () => ({ stopReason: 'completed' }),
+        dispose: async () => {}, readOutput: () => '' }) },
+    })
+    try {
+      await run.result
+      assert.ok(executionCalls.some(args => args[args.indexOf('--event') + 1] === 'finished'))
+      assert.ok(executionCalls.every(args => args.includes('--execution-id')))
+      assert.equal(new Set(executionCalls.map(args => args[args.indexOf('--execution-id') + 1])).size, 1)
+      const store = new AgentSessionStore({ dataRoot: testDataRoot, runId })
+      const timeline = await store.timeline()
+      assert.equal(timeline.lanes.flatMap(lane => lane.segments).length, 0)
+      assert.equal(timeline.lanes.flatMap(lane => lane.events).filter(event => event.kind.startsWith('execution_')).length, 0)
+      for (const session of (await store.list()).items) {
+        const page = await store.read(session.session_id, { limit: 200 })
+        assert.equal(page.events.filter(event => event.stage === 'source_first_execution').length, 0)
+      }
+    } finally { controller.abort(); await run.dispose() }
+  })
+}

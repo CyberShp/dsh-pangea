@@ -18,8 +18,11 @@ window.__ModuleLoader__.load({
     const { renderFlowTree, renderCallGraphTree, toSvgString, toInteractiveFlowSvg } = __flowRender
     const { validateCallGraph, callsForVariable } = __callGraph
     const { normalizeSequence, layoutSequence, renderSequenceTree } = __sequenceDiagram
-    const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
+    const { caseDesignCounts, caseSearchText, caseVariantLines, behaviorCoverageProjection, behaviorCoverageForCase, behaviorCoverageBoard, BEHAVIOR_STATUS_LABELS } = __behaviorCoverage
     const { renderReviewPresentation, reviewStatusLabel, isReviewRecord } = __reviewPresentation
+    const { caseEvidenceProjection, caseCoverageBasisProjection, caseFeasibilityProjection, caseFeasibilitySummary } = __caseEvidence
+    const ResultDrawer = __resultDrawers.createResultDrawer(React)
+    const ExecutionTimelineView = __executionTimelineView.createExecutionTimelineView(React)
     const { buildRunInsights } = __runInsights
     const { buildOverviewFindings, summaryText } = __overviewFindings
     const { caseIdentity, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
@@ -559,7 +562,7 @@ window.__ModuleLoader__.load({
       }))
     }
 
-    function AgentSessionsDialog({ cwd, dataRoot, runId, onClose, request = requestWorkbench, initialSessionId, initialUnitId, initialActionId, initialAttemptId, unitTitles = {} }) {
+    function AgentSessionsDialog({ cwd, dataRoot, runId, onClose, request = requestWorkbench, initialSessionId, initialUnitId, initialActionId, initialAttemptId, initialExecutionId, unitTitles = {} }) {
       const scope = `${cwd}\u0000${dataRoot ?? ''}\u0000${runId}`
       const [snapshot, setSnapshot] = React.useState(null)
       const reader = React.useRef(null), dialog = React.useRef(null)
@@ -575,9 +578,11 @@ window.__ModuleLoader__.load({
       }, [])
       const state = snapshot?.scope === scope ? snapshot : { items: [], events: [], listLoading: true }
       const session = state.session
+      const [executionFilter, setExecutionFilter] = React.useState(initialExecutionId || '')
       const [sessionQuery, setSessionQuery] = React.useState(''), [statusFilter, setStatusFilter] = React.useState(''), [unitFilter, setUnitFilter] = React.useState(''), [stageFilter, setStageFilter] = React.useState('')
       const visibleSessions = state.items.filter(item => (!statusFilter || item.status === statusFilter) && (!unitFilter || item.unit_id === unitFilter) && (!stageFilter || item.stage === stageFilter))
-      const visibleEvents = sessionQuery.trim() ? state.events.filter(event => JSON.stringify(event).toLowerCase().includes(sessionQuery.trim().toLowerCase())) : state.events
+      const scopedEvents = executionFilter ? state.events.filter(event => event.execution_id === executionFilter) : state.events
+      const visibleEvents = sessionQuery.trim() ? scopedEvents.filter(event => JSON.stringify(event).toLowerCase().includes(sessionQuery.trim().toLowerCase())) : scopedEvents
       const keyDown = event => {
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
         if (event.key !== 'Tab') return
@@ -603,7 +608,7 @@ window.__ModuleLoader__.load({
               state.listLoading ? h('p', { className: 'agent-sessions-empty', role: 'status' }, '正在读取会话列表…') : null,
               !state.listLoading && !state.items.length && !state.listError ? h('p', { className: 'agent-sessions-empty' }, '此 Run 暂无 Agent 会话记录。历史版本的会话可能只有运行日志，无法还原未记录的会话正文。') : null,
               !state.listLoading && state.items.length > 0 && !visibleSessions.length ? h('p', { role: 'status', className: 'agent-sessions-empty' }, '没有符合筛选条件的会话。') : null,
-              visibleSessions.map(item => h('button', { type: 'button', key: item.session_id, className: 'agent-session-option', 'aria-pressed': item.session_id === state.selectedId, onClick: () => reader.current?.select(item.session_id) },
+              visibleSessions.map(item => h('button', { type: 'button', key: item.session_id, className: 'agent-session-option', 'aria-pressed': item.session_id === state.selectedId, onClick: () => { setExecutionFilter(''); reader.current?.select(item.session_id) } },
                 h('strong', null, agentSessionRole(item)), h('span', null, unitTitles[item.unit_id] || item.unit_id || item.action_ids?.join(' · ') || item.stage || '待关联任务'),
                 h('span', null, item.provider || '执行器未记录'), h('small', null, item.model || '模型未记录'), h('small', null, `${agentSessionStatus(item.status)} · ${item.event_count ?? 0} 条事件`), item.history_status === 'metadata_only' ? h('small', null, '历史会话 · 仅元数据') : null))),
             h('main', { className: 'agent-session-main', 'aria-label': 'Agent 会话内容', tabIndex: 0 },
@@ -616,6 +621,7 @@ window.__ModuleLoader__.load({
                 state.detailError ? h('div', { role: 'alert', className: 'agent-session-alert' }, `会话内容读取失败：${state.detailError}。已读取的内容仍保留，可点击“刷新记录”重试。`) : null,
                 state.historyError ? h('div', { role: 'alert', className: 'agent-session-alert' }, `更早历史读取失败：${state.historyError}。最新记录继续同步，可重试加载历史。`) : null,
                 sessionQuery.trim() && !visibleEvents.length ? h('p', { role: 'status' }, '已加载记录中没有匹配内容，可加载更早记录或调整搜索。') : null,
+                executionFilter ? h('div', { className: 'agent-session-alert', role: 'status' }, `时间轴定位到执行 ${executionFilter}。只筛选已加载事件，不代表完整回合。`, h('button', { type: 'button', className: 'agent-button', onClick: () => setExecutionFilter('') }, '显示整个会话'), !visibleEvents.length ? h('p', null, state.hasMore ? '该执行不在已加载记录中，请加载更早会话事件。' : '没有已采集的匹配事件，时间边界仍以宿主记录为准。') : null) : null,
                 h(AgentSessionTranscript, { events: visibleEvents }),
                 !state.events.length && !state.detailLoading && !state.detailError && (state.historyStatus || session.history_status) !== 'metadata_only' ? h('p', { className: 'agent-sessions-empty' }, '会话已关联，尚未收到可显示的事件；这不表示 Agent 已完成。') : null,
                 state.detailLoading ? h('p', { role: 'status', className: 'agent-session-muted' }, '正在读取会话事件…') : null,
@@ -811,7 +817,7 @@ window.__ModuleLoader__.load({
             node('div', 'metrics', stat('阶段已完成', h(React.Fragment, null, current.workflow?.completed_steps?.length ?? steps.filter(step => step.status === 'completed').length, node('span', 'small muted', ` / ${steps.length}`))), stat('运行时长', duration), stat('用户介入', attention || p.failed ? '需要' : '无需'))),
           p.failed && !error ? h('p', { role: 'alert', className: 'notice danger' }, failureReason) : null,
           attention && !error ? h('div', { className: 'notice warn', style: { marginBottom: 24 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, '选择接下来的处理方式'), h('p', null, !task ? '此 Run 未关联任务记录，无法继续执行或交付；可查看已有结果。' : sourceFirstRecordBody(current.blocking_reason) || '查看未解决事项，继续处理或交付已有结果。'))), node('div', 'row', button('交付已有结果', () => perform('deliver', deliver), '', !task), button('继续修正', () => perform('resume', resume), '', !task?.can_resume))) : null,
-          h('details', { className: 'run-execution-details' }, h('summary', null, '执行详情与 Agent 会话'), h('div', { className: 'execution-tools' }, h('button', { type: 'button', className: 'btn', disabled: !current?.run_id || !cwd, onClick: () => setSessionsOpen(true) }, 'Agent 会话管理')), h(RunExecutionSummary, { current, task, stale: Boolean(error) })),
+          h('details', { className: 'run-execution-details' }, h('summary', null, '执行详情与 Agent 会话'), h('div', { className: 'execution-tools' }, h('button', { type: 'button', className: 'btn', disabled: !current?.run_id || !cwd, onClick: () => setSessionsOpen(true) }, 'Agent 会话管理')), h(RunExecutionSummary, { current, task, stale: Boolean(error) }), h(ExecutionTimelineView, { timeline: current.execution_timeline, stale: Boolean(error), onSession: selection => setSessionsOpen(selection) })),
           node('div', 'run-layout', node('section', 'run-stages', heading('运行阶段', node('span', 'tiny muted', `${steps.length} 个阶段`)),
             steps.map(step => h('button', { key: step.step, type: 'button', className: `stage ${step.status === 'completed' ? 'done' : ''} ${step === selected ? 'current' : ''}`, 'aria-pressed': step === selected, onClick: () => setSelection(step.step) },
               h('b', null, step.status === 'completed' ? '✓' : step.step), h('div', null, step.title, h('p', null, error && step === active ? '上次记录' : step.status === 'pending' ? '等待前序完成' : step.status === 'running' ? p.failed && step === active ? '本次执行失败' : '当前正在执行' : step.status === 'paused' ? '等待你的决定' : step.status === 'stopped' && p.canResume ? '已停止 · 可继续' : STAGE_STATUS[step.status] ?? step.status)))), node('p', 'aside-note', '选择阶段，查看对应任务与产物。')),
@@ -1756,7 +1762,25 @@ window.__ModuleLoader__.load({
       .b05-coverage-notice { border: 1px solid #dce8f1; background: #f3f8fb; border-radius: 7px; padding: 14px 18px; color: #53758b; font-size: 12px; line-height: 1.7; margin-bottom: 20px; }.b05-coverage-notice p { margin: 4px 0 0; }.b05-coverage-grid { display: grid; grid-template-columns: minmax(0,1.5fr) minmax(275px,1fr); gap: 18px; }.b05-gap-row { display: grid; grid-template-columns: 78px minmax(0,1.2fr) minmax(0,1fr) 78px; align-items: center; gap: 12px; padding: 16px 0; border-bottom: 1px solid #e9ede7; font-size:12px; }.b05-gap-row strong { display: block; font-size: 12px; }.b05-gap-row small { display: block; color: #9ba49e; margin-top: 5px; overflow-wrap: anywhere; }.b05-gap-row button { display: block; margin: 4px 0; }.b05-coverage-source { padding: 16px; border: 1px solid #e7ebe5; border-radius: 5px; margin-bottom: 17px; font-size: 12px; overflow-wrap: anywhere; }
       @container pangea-panel (max-width: 900px) { .b05-coverage-grid { grid-template-columns: minmax(0,1fr); }.b05-gap-row { grid-template-columns: 65px minmax(0,1fr) minmax(0,1fr) 70px; } }
       @container pangea-panel (max-width: 900px) { .b05-case-layout { grid-template-columns: minmax(0,1fr); }.b05-section-head { flex-wrap: wrap; } }
-      .b05-source-layer { position: fixed; inset: 0; z-index: 70; display: flex; justify-content: flex-end; background: rgba(19,24,25,.2); }.b05-source-drawer { box-sizing: border-box; width: min(650px, 82vw); height: 100%; overflow: auto; background: #fff; padding: 28px; box-shadow: -12px 0 30px rgba(0,0,0,.12); }.b05-source-drawer header { display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid #e5e7e4; padding-bottom: 22px; }.b05-source-drawer header button { width: 32px; height: 32px; padding: 0; }.b05-source-drawer header small { color: #b62836; letter-spacing: .8px; font-size:12px; }.b05-source-drawer h2 { font-size: 20px; margin: 8px 0 2px; }.b05-source-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e5e7e4; padding: 18px 0; font-size: 12px; overflow-wrap: anywhere; }.b05-source-context { background: #f5f6f4; border-radius: 6px; padding: 15px; margin: 20px 0; font-size: 12px; line-height: 1.7; }.b05-source-code { background: #f7f8f6; border: 1px solid #e4e8e2; border-radius: 6px; overflow: auto; padding: 12px 0; font: 11px/2.05 Consolas,monospace; }.b05-source-code-line { display: grid; grid-template-columns: 44px minmax(max-content,1fr); white-space: pre; }.b05-source-code-line[data-target="true"] { background: #fcebec; color: #a52b35; }.b05-source-code-line span { text-align: right; padding: 0 10px; color: #929aa0; }.b05-source-code-line code { padding: 0 10px; }.b05-source-failure { background: #fff7e8; color: #9b651a; border-radius: 6px; padding: 18px; margin: 20px 0; }.b05-source-drawer footer { display: flex; justify-content: space-between; border-top: 1px solid #e5e7e4; margin-top: 20px; padding-top: 20px; }.b05-source-drawer button { border: 1px solid #e0e4df; background: #fff; border-radius: 6px; padding: 8px 11px; cursor: pointer; }
+
+
+      .pangea-execution-timeline { margin: 18px 0 4px; }.pangea-timeline-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }.pangea-timeline-heading h3 { font-size: 14px; margin: 0; }.pangea-timeline-heading > span { font-size: 11px; color: #66736b; }.pangea-timeline-scroll { overflow-x: auto; margin: 18px 0 10px; border: 1px solid #dce3dc; border-radius: 8px; }.pangea-timeline-grid { min-width: 820px; padding: 14px 28px 8px 0; background: #fff; }.pangea-timeline-axis,.pangea-timeline-row { display: grid; grid-template-columns: 190px minmax(600px,1fr); }.pangea-timeline-axis { padding-bottom: 16px; font-size: 10px; color: #718075; }.pangea-timeline-axis > span { padding: 0 12px; }.pangea-timeline-axis > div { position: relative; }.pangea-timeline-axis time { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+      .pangea-timeline-row { border-top: 1px solid #e8ede6; min-height: 100px; }.pangea-timeline-label { position: sticky; left: 0; background: #f8faf6; z-index: 2; padding: 12px; font-size: 11px; min-width: 0; overflow-wrap: anywhere; }.pangea-timeline-label button { border: 0; background: transparent; color: #345d49; font-weight: 600; cursor: pointer; text-align: left; }.pangea-timeline-label small { display: block; margin-top: 5px; color: #788475; font-size: 10px; }
+      .pangea-timeline-track { position: relative; min-height: 100px; background: repeating-linear-gradient(90deg,transparent 0,transparent calc(25% - 1px),#eef1eb calc(25% - 1px),#eef1eb 25%); }.pangea-timeline-segment { position: absolute; top: 13px; height: 26px; min-width: 3px; padding: 0 6px; border: 1px solid #9cbaab; border-radius: 5px; background: #dcebe2; color: #315c46; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; font-size: 10px; }.pangea-timeline-segment.running { background: #4e7a67; color: white; }.pangea-timeline-segment.paused { background: repeating-linear-gradient(135deg,#f2e5cb 0,#f2e5cb 5px,#faf1de 5px,#faf1de 10px); color: #885d25; border-color: #d6bd8f; }.pangea-timeline-event { position: absolute; top: 42px; transform: translateX(-50%); padding: 0; border: 0; background: transparent; color: #708678; font-size: 10px; cursor: pointer; }.pangea-timeline-event.error,.pangea-timeline-event.process_exit { color: #a64045; }.pangea-timeline-now { position: absolute; top: -18px; bottom: 0; width: 2px; background: #b63c45; pointer-events: none; }.pangea-timeline-unknown { position: relative; padding: 65px 4px 8px; display: flex; flex-wrap: wrap; gap: 5px; }.pangea-timeline-unknown button { font-size: 10px; color: #6e756b; background: #f7f8f5; border: 1px dashed #b9c2b4; padding: 4px 6px; border-radius: 4px; }
+      .pangea-bottom-layer { position: fixed; inset: 0; z-index: 65; display: flex; align-items: flex-end; background: rgba(19,24,25,.2); }
+      .pangea-bottom-drawer { box-sizing: border-box; width: 100%; height: min(64vh,780px); min-height: 280px; background: #fff; color: #25292e; border-radius: 14px 14px 0 0; box-shadow: 0 -8px 35px #0002; display: flex; flex-direction: column; }
+      .pangea-bottom-drawer > header { display: flex; justify-content: space-between; gap: 20px; padding: 20px 28px 16px; border-bottom: 1px solid #e5e7e4; flex-shrink: 0; }
+      .pangea-bottom-drawer h2 { margin: 0; font-size: 19px; }.pangea-bottom-drawer header p { margin: 7px 0 0; color: #6c756e; font-size: 12px; }
+      .pangea-bottom-drawer button { cursor: pointer; }.pangea-bottom-drawer header > button { border: 1px solid #dce2db; border-radius: 6px; padding: 8px 16px; background: #fff; align-self: flex-start; }
+      .pangea-bottom-content { overflow: auto; min-height: 0; padding: 8px 28px 28px; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; overscroll-behavior: contain; }
+      .pangea-case-drawer-links,.pangea-feasibility-entry { display: flex; gap: 20px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 16px; margin-bottom: 18px; border: 1px solid #dfe5dd; border-radius: 8px; background: #fff; }
+      .pangea-case-code-links button { display: block; margin: 8px 0; text-align: left; }.pangea-evidence-options { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; }.pangea-evidence-options button { text-align: left; overflow-wrap: anywhere; }.pangea-evidence-options button[aria-pressed="true"] { border-color: #ab3340; background: #fff3f4; }
+      .pangea-feasibility-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; margin: 18px 0; }.pangea-feasibility-metrics > div { background: #f6f8f5; padding: 16px; border-radius: 8px; }.pangea-feasibility-metrics strong { display: block; font-size: 24px; margin: 8px 0; }.pangea-feasibility-row { padding: 14px 0; border-top: 1px solid #e5e7e4; }
+      .pangea-behavior-columns { display: grid; grid-auto-flow: column; grid-auto-columns: 360px; gap: 16px; overflow-x: auto; padding: 4px 2px 16px; align-items: start; overscroll-behavior-x: contain; }
+      .pangea-behavior-column { background: #f5f7f3; border: 1px solid #e3e8df; border-radius: 8px; padding: 14px; overflow-wrap: anywhere; }.pangea-behavior-column > header { border-bottom: 1px solid #dfe5db; margin-bottom: 12px; }.pangea-behavior-column h3 { margin: 0; font-size: 14px; }.pangea-behavior-column summary { cursor: pointer; }.pangea-behavior-column p { margin: 6px 0; font-size: 12px; line-height: 1.6; }
+      .pangea-behavior-card { background: #fff; border: 1px solid #dfe6db; border-radius: 7px; padding: 14px; margin-top: 12px; font-size: 12px; }.pangea-behavior-card h4 { margin: 10px 0; font-size: 14px; }.pangea-behavior-card-head { display: flex; gap: 8px; justify-content: space-between; }.pangea-behavior-card-head span { color: #596851; background: #eff3eb; border-radius: 4px; padding: 2px 6px; }.pangea-behavior-card[data-status="missing"] { border-left: 3px solid #b87930; }.pangea-behavior-card[data-status="unresolved"] { border-left: 3px solid #8d79ad; }.pangea-behavior-card details { border-top: 1px solid #edf0e9; margin-top: 12px; padding-top: 10px; }.pangea-behavior-card pre { white-space: pre-wrap; }.pangea-behavior-empty { padding: 20px 4px; color: #687560; }
+      @media (max-width: 600px) { .pangea-bottom-drawer > header { padding: 15px; }.pangea-bottom-content { padding: 8px 15px 24px; }.pangea-feasibility-metrics { grid-template-columns: 1fr; }.pangea-behavior-columns { grid-auto-columns: minmax(280px,85vw); } }
+      .b05-source-layer { position: fixed; inset: 0; z-index: 70; display: flex; justify-content: flex-end; background: rgba(19,24,25,.2); }.b05-source-drawer { box-sizing: border-box; width: min(650px, 82vw); height: 100%; overflow: auto; overscroll-behavior: contain; background: #fff; padding: 28px; box-shadow: -12px 0 30px rgba(0,0,0,.12); }.b05-source-drawer header { display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid #e5e7e4; padding-bottom: 22px; }.b05-source-drawer header button { width: 32px; height: 32px; padding: 0; }.b05-source-drawer header small { color: #b62836; letter-spacing: .8px; font-size:12px; }.b05-source-drawer h2 { font-size: 20px; margin: 8px 0 2px; }.b05-source-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e5e7e4; padding: 18px 0; font-size: 12px; overflow-wrap: anywhere; }.b05-source-context { background: #f5f6f4; border-radius: 6px; padding: 15px; margin: 20px 0; font-size: 12px; line-height: 1.7; }.b05-source-code { background: #f7f8f6; border: 1px solid #e4e8e2; border-radius: 6px; overflow: auto; padding: 12px 0; font: 11px/2.05 Consolas,monospace; }.b05-source-code-line { display: grid; grid-template-columns: 44px minmax(max-content,1fr); white-space: pre; }.b05-source-code-line[data-target="true"] { background: #fcebec; color: #a52b35; }.b05-source-code-line span { text-align: right; padding: 0 10px; color: #929aa0; }.b05-source-code-line code { padding: 0 10px; }.b05-source-failure { background: #fff7e8; color: #9b651a; border-radius: 6px; padding: 18px; margin: 20px 0; }.b05-source-drawer footer { display: flex; justify-content: space-between; border-top: 1px solid #e5e7e4; margin-top: 20px; padding-top: 20px; }.b05-source-drawer button { border: 1px solid #e0e4df; background: #fff; border-radius: 6px; padding: 8px 11px; cursor: pointer; }
       @container pangea-panel (max-width: 760px) { .b05-detail-grid,.b05-detail-bottom { grid-template-columns: 1fr; }.b05-risk-row { grid-template-columns: minmax(0,1fr) 110px 110px 14px; gap: 10px; }.b05-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); row-gap: 16px; }.b05-metric:nth-child(2) { border: 0; } }
       .b04-source-overlay { position: fixed; inset: 0; z-index: 110; background: #17201866; }.b04-source-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(650px, 88vw); background: #fff; box-shadow: -16px 0 50px #18201424; display: flex; flex-direction: column; }.b04-source-drawer header, .b04-source-drawer footer { padding: 20px 24px; border-bottom: 1px solid #e6ebe3; }.b04-source-drawer footer { margin-top: auto; border-top: 1px solid #e6ebe3; border-bottom: 0; }.b04-source-drawer main { padding: 22px 24px; overflow: auto; }.b04-source-drawer .b04-code { overflow: auto; border: 1px solid #e2e7e0; border-radius: 8px; background: #fafcf8; font: 12px/1.7 Consolas,monospace; }.b04-source-drawer .b04-code-line { display: grid; grid-template-columns: 48px minmax(max-content,1fr); white-space: pre; }.b04-source-drawer .b04-code-line span:first-child { color: #9da69b; text-align: right; padding-right: 12px; border-right: 1px solid #e2e7e0; }.b04-source-drawer .b04-code-line code { padding: 0 12px; }.b04-source-drawer .b04-code-line[data-target="true"] { background: #f4e9e9; }
       .pangea-diagram-dialog.b04-fullscreen[open] { display: flex; flex-direction: column; }.b04-fullscreen .b04-canvas { flex: 1; min-height: 0; }.b04-fullscreen .b04-canvas iframe { height: 100%; min-height: 0; }
@@ -2740,33 +2764,26 @@ window.__ModuleLoader__.load({
         warnings.map((warning, index) => h('li', { key: index }, warning))) : null
     }
 
-    function BehaviorCoverageView({ ledgers = [], onCase }) {
+    function BehaviorCoverageView({ ledgers = [], units = [], onCase }) {
       const show = value => sourceFirstRecordBody(value) || '未提供'
       const lines = values => Array.isArray(values) && values.length ? values.map((value, index) => h('p', { key: index }, show(value))) : h('p', { className: 'b05-subtle' }, '未提供')
-      return h('details', { className: 'b05-card', 'aria-label': '业务行为覆盖清单', 'data-view-key': 'behavior-coverage' },
-        h('summary', { style: { cursor: 'pointer', fontSize: 15, fontWeight: 600 } }, '业务行为覆盖清单'),
-        h('p', { className: 'b05-subtle' }, '状态来自本次分析声明；用例关联不代表已执行，也不代表实测代码覆盖率。'),
-        !ledgers.length ? h('p', null, '本次记录未提供业务行为清单；已有用例与分析原文仍可查看。') : ledgers.map(ledger => h('details', { key: ledger.projection_id, 'data-view-key': `behavior-ledger:${ledger.projection_id}`, open: true },
-          h('summary', null, `${ledger.unit_id || '未提供分析单元'} · ${show(ledger.scope)}`),
-          h('p', null, `组合选择依据：${show(ledger.combination_strategy)}`),
-          h('p', { className: 'b05-subtle' }, Object.entries(ledger.declared_counts ?? {}).map(([status, count]) => `${BEHAVIOR_STATUS_LABELS[status] || '未标注'} ${count}`).join(' · ')),
-          warningList(ledger.projection_warnings, '行为清单提示'),
-          Array.isArray(ledger.unresolved_dependencies) && ledger.unresolved_dependencies.length
-            ? h('div', { role: 'status' }, h('strong', null, '未决依赖'), lines(ledger.unresolved_dependencies)) : null,
-          h('div', { className: 'b05-table-scroll' }, h('table', { className: 'b05-case-table' },
-            h('thead', null, h('tr', null, ['业务行为', '条件与约束', '预期行为', '关联用例 / 参数组合', '状态与依据'].map(label => h('th', { key: label }, label)))),
-            h('tbody', null, (ledger.items ?? []).map(item => h('tr', { key: item.display_key },
-              h('td', null, h('strong', null, show(item.item_id)), h('p', null, show(item.operation)),
-                Array.isArray(item.source_evidence) && item.source_evidence.length ? h('details', null, h('summary', null, '来源依据'), lines(item.source_evidence)) : null),
-              h('td', null, h('strong', null, '条件'), lines(item.conditions), h('strong', null, '约束'), lines(item.constraints)),
-              h('td', null, show(item.expected_behavior)),
-              h('td', null, item.case_links?.length ? item.case_links.map((link, index) => h('p', { key: index },
-                link.target_case_id && onCase ? h('button', { type: 'button', className: 'b05-text-link', onClick: () => onCase(link) }, `${link.case_id}${link.variant_id != null ? ` / ${link.variant_id}` : ''}`)
-                  : show(link.case_id ?? link.reference),
-                link.issue ? h('small', { className: 'b05-subtle' }, ` · ${link.issue}`) : null)) : h('span', { className: 'b05-subtle' }, '未关联')),
-              h('td', null, h('strong', null, BEHAVIOR_STATUS_LABELS[item.status] || `未标注${item.status ? `（${item.status}）` : ''}`),
-                h('p', null, show(item.reason)), warningList(item.projection_warnings, '行为项提示'),
-                item.projection_warnings?.length ? h('details', null, h('summary', null, '行为项原文'), h('pre', null, show(item.source_item))) : null)))))))))
+      const columns = behaviorCoverageBoard(units, ledgers)
+      return h('details', { className: 'b05-card pangea-behavior-board', 'aria-label': '业务行为覆盖清单', 'data-view-key': 'behavior-coverage' },
+        h('summary', { style: { cursor: 'pointer', fontSize: 15, fontWeight: 600 } }, '业务行为覆盖看板'),
+        h('p', { className: 'b05-subtle' }, '一列一个分析单元。状态来自本次分析声明；用例关联不代表已执行，也不代表实测代码覆盖率。'),
+        !columns.length ? h('p', null, '本次记录未提供业务行为清单；已有用例与分析原文仍可查看。') : h('div', { className: 'pangea-behavior-columns', 'data-scroll-key': 'behavior-board', tabIndex: 0, role: 'region', 'aria-label': '按分析单元横向浏览业务行为' }, columns.map(column => h('section', { key: column.key, className: 'pangea-behavior-column' },
+          h('header', null, h('h3', null, column.title || column.unit_id || '未提供分析单元'), h('p', { className: 'b05-subtle' }, `单元状态：${({ accepted: '已接受', settled: '待接受', dispatched: '执行中', pending: '等待', failed: '失败', paused: '已暂停' })[column.status] || column.status || '未知'}`)),
+          !column.ledgers.length ? h('p', { className: 'pangea-behavior-empty' }, '未提供分析记录；不推断为全部待补。') : column.ledgers.map(ledger => h('details', { key: ledger.projection_id, 'data-view-key': `behavior-ledger:${ledger.projection_id}`, open: true },
+            h('summary', null, show(ledger.scope)),
+            h('p', { className: 'b05-subtle' }, Object.entries(ledger.declared_counts ?? {}).map(([status, count]) => `${BEHAVIOR_STATUS_LABELS[status] || '未标注'} ${count}`).join(' · ')),
+            h('details', { 'data-view-key': `behavior-strategy:${ledger.projection_id}` }, h('summary', null, '组合选择依据与未决依赖'), h('p', null, show(ledger.combination_strategy)), warningList(ledger.projection_warnings, '行为清单提示'), lines(ledger.unresolved_dependencies)),
+            (ledger.items ?? []).map(item => h('article', { key: item.display_key, className: 'pangea-behavior-card', 'data-status': item.status },
+              h('div', { className: 'pangea-behavior-card-head' }, h('strong', null, show(item.item_id)), h('span', null, BEHAVIOR_STATUS_LABELS[item.status] || `未标注${item.status ? `（${item.status}）` : ''}`)),
+              h('h4', null, show(item.operation)), h('div', null, h('strong', null, '条件'), lines(item.conditions)),
+              h('div', null, h('strong', null, '预期行为'), h('p', null, show(item.expected_behavior))),
+              h('div', { className: 'pangea-behavior-case-links' }, item.case_links?.length ? item.case_links.map((link, index) => h('p', { key: index },
+                link.target_case_id && onCase ? h('button', { type: 'button', className: 'b05-text-link', onClick: () => onCase(link) }, `${link.case_id}${link.variant_id != null ? ` / ${link.variant_id}` : ''}`) : show(link.case_id ?? link.reference), link.issue ? h('small', { className: 'b05-subtle' }, ` · ${link.issue}`) : null)) : h('span', { className: 'b05-subtle' }, '未关联用例')),
+              h('details', { 'data-view-key': `behavior-item:${ledger.projection_id}:${item.display_key}` }, h('summary', null, '约束、状态依据与来源'), h('strong', null, '约束'), lines(item.constraints), h('strong', null, '状态依据'), h('p', null, show(item.reason)), h('strong', null, '来源依据'), lines(item.source_evidence), warningList(item.projection_warnings, '行为项提示'), item.projection_warnings?.length ? h('pre', null, show(item.source_item)) : null)))))))))
     }
 
     function FlowComparisonView({ stability, comparison }) {
@@ -3286,6 +3303,16 @@ window.__ModuleLoader__.load({
       const [taskActions, setTaskActions] = React.useState({})
       const [analysisAgentModels, setAnalysisAgentModels] = React.useState({ status: 'idle' })
       const [analysisAgentModelRefresh, setAnalysisAgentModelRefresh] = React.useState(0)
+      const sourceDrawerRef = React.useRef(null)
+      React.useEffect(() => {
+        if (!sourceDrawerOpen) return undefined
+        const previous = typeof document === 'undefined' ? null : document.activeElement
+        const body = typeof document === 'undefined' ? null : document.body
+        const overflow = body?.style?.overflow
+        if (body?.style) body.style.overflow = 'hidden'
+        sourceDrawerRef.current?.querySelector?.('button')?.focus?.({ preventScroll: true })
+        return () => { if (body?.style) body.style.overflow = overflow || ''; if (previous?.isConnected) previous.focus?.({ preventScroll: true }) }
+      }, [sourceDrawerOpen])
       const analysisProviderRegistered = workbench?.acp_providers?.some(item => item.id === createForm.provider_id && item.registered === true) === true
       React.useEffect(() => {
         if (!visible || screen.type !== 'create' || !cwd || !createForm.provider_id || !analysisProviderRegistered) {
@@ -3873,6 +3900,8 @@ window.__ModuleLoader__.load({
       }
       function openCaseDetail(key) { setCaseReviewOrder(filteredCaseRows.map(item => caseKeyByItem.get(item))); navigate({ type: 'case', id: key }) }
       const [scopePreview, setScopePreview] = React.useState(null)
+      const [caseDrawer, setCaseDrawer] = React.useState(null)
+      const [caseEvidenceSelection, setCaseEvidenceSelection] = React.useState({ scope: '', key: '' })
       const createScopeKey = JSON.stringify([cwd, workbench?.data_root, createForm.repository, createForm.source_scope_text])
       const validScopePreview = scopePreview?.key === createScopeKey && scopePreview.preview_state === 'complete' ? scopePreview : null
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
@@ -3898,13 +3927,17 @@ window.__ModuleLoader__.load({
       }
       const riskScreenKey = screen.type === 'risk' ? `${current?.run_id ?? ''}\u0000${screen.id}` : ''
       const riskEvidenceOptions = screen.type === 'risk' ? (riskById.get(screen.id)?.evidence ?? []).filter(item => hasText(item?.location)) : []
-      const caseEvidenceOptions = screen.type === 'case' ? (caseById.get(screen.id)?.evidence ?? []).filter(item => hasText(item?.location)) : []
+      const caseScreenKey = JSON.stringify([cwd, current?.run_id, screen.type, screen.id])
+      React.useEffect(() => { setCaseDrawer(null); setSourceDrawerOpen(false) }, [caseScreenKey])
+      const caseEvidence = screen.type === 'case' ? caseEvidenceProjection(caseById.get(screen.id), evidence, details.coverage_gaps) : { items: [], unresolved: [] }
+      const caseEvidenceOptions = caseEvidence.items.filter(item => hasText(item?.location))
+      const selectedCaseEvidenceKey = caseEvidenceSelection.scope === caseScreenKey ? caseEvidenceSelection.key : ''
       const selectedRiskEvidenceKey = riskEvidenceSelection.riskKey === riskScreenKey ? riskEvidenceSelection.evidenceKey : ''
       const previewEvidence = screen.type === 'risk'
         ? riskEvidenceOptions.find(item => evidenceIdentity(item) === selectedRiskEvidenceKey) ?? riskEvidenceOptions[0]
-        : screen.type === 'case' ? caseEvidenceOptions[0]
+        : screen.type === 'case' ? caseEvidenceOptions.find(item => item.key === selectedCaseEvidenceKey) ?? caseEvidenceOptions[0]
         : screen.type === 'evidence-detail' ? evidenceByKey.get(screen.key) : undefined
-      const previewKey = previewEvidence ? `${current?.run_id ?? ''}\u0000${evidenceIdentity(previewEvidence)}` : ''
+      const previewKey = previewEvidence ? `${current?.run_id ?? ''}\u0000${screen.type === 'case' ? previewEvidence.key : evidenceIdentity(previewEvidence)}` : ''
       const riskClaims = screen.type === 'risk' ? splitRiskClaims(riskById.get(screen.id)?.system_result) : []
       const selectedRiskClaim = riskClaimSelection.riskKey === riskScreenKey && riskClaims.includes(riskClaimSelection.claim)
         ? riskClaimSelection.claim : riskClaims[0]
@@ -3922,9 +3955,9 @@ window.__ModuleLoader__.load({
         requestSourceSnippet({ cwd, dataRoot: snapshot.data_root, runId: current?.run_id, location: previewEvidence.location,
           contextBefore: ['risk', 'case'].includes(screen.type) ? 8 : undefined,
           contextAfter: ['risk', 'case'].includes(screen.type) ? 12 : undefined, signal: controller.signal })
-          .then(value => setSourcePreview({ key: previewKey, status: 'ready', value }))
+          .then(value => { if (!controller.signal.aborted) setSourcePreview({ key: previewKey, status: 'ready', value }) })
           .catch(reason => {
-            if (reason?.name !== 'AbortError') setSourcePreview({ key: previewKey, status: 'error', error: reason instanceof Error ? reason.message : String(reason) })
+            if (!controller.signal.aborted && reason?.name !== 'AbortError') setSourcePreview({ key: previewKey, status: 'error', error: reason instanceof Error ? reason.message : String(reason) })
           })
         return () => controller.abort()
       }, [visible, cwd, snapshot?.data_root, previewKey, sourceRetry, screen.type])
@@ -3934,14 +3967,15 @@ window.__ModuleLoader__.load({
         const value = capturePanelViewport(panelRootRef.current)
         const saved = value ? { ...from, viewport: { scopeKey: viewportScopeKey, value } } : from
         pendingViewportRef.current = next.type === 'case' ? { screen: next, scopeKey: viewportScopeKey, value: null } : null
-        setSourceDrawerOpen(false); setCaseExportOpen(false)
+        setSourceDrawerOpen(false); setCaseDrawer(null); setCaseExportOpen(false)
         setHistory(previous => [...previous, saved]); setScreen(next)
       }, [screen, viewportScopeKey])
-      function selectReviewCase(id) { const next = { type: 'case', id }; pendingViewportRef.current = { screen: next, scopeKey: viewportScopeKey, value: null }; setSourceDrawerOpen(false); setScreen(next) }
-      const jump = React.useCallback((type) => { pendingViewportRef.current = null; setSourceDrawerOpen(false); setCaseExportOpen(false); setScreen({ type }); setHistory([]) }, [])
+      function selectReviewCase(id) { const next = { type: 'case', id }; pendingViewportRef.current = { screen: next, scopeKey: viewportScopeKey, value: null }; setSourceDrawerOpen(false); setCaseDrawer(null); setScreen(next) }
+      const jump = React.useCallback((type) => { pendingViewportRef.current = null; setSourceDrawerOpen(false); setCaseDrawer(null); setCaseExportOpen(false); setScreen({ type }); setHistory([]) }, [])
       const goBack = React.useCallback(() => {
         const target = analysisBackTarget(screen.type, { pageMode, selectedTaskId, hasHistory: history.length > 0, initialScreen })
         pendingViewportRef.current = null
+        setSourceDrawerOpen(false); setCaseDrawer(null)
         if (target !== 'history') { setScreen({ type: target }); return }
         const previous = history[history.length - 1]
         if (previous.viewport) pendingViewportRef.current = { screen: previous, ...previous.viewport }
@@ -4899,10 +4933,12 @@ window.__ModuleLoader__.load({
         const snippet = preview.status === 'ready' ? preview.value : null
         const title = kind === 'risk' ? `风险 ${item?.display_id || item?.risk_id || '未编号'}` : `用例 ${item?.display_id || item?.test_case_id || '未编号'}`
         return h('div', { className: 'b05-source-layer', onClick: event => { if (event.target === event.currentTarget) setSourceDrawerOpen(false) } },
-          h('aside', { className: 'b05-source-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '源码依据', onKeyDown: event => { if (event.key === 'Escape') { event.stopPropagation(); setSourceDrawerOpen(false) } } },
+          h('aside', { ref: sourceDrawerRef, className: 'b05-source-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '源码依据', onKeyDown: event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setSourceDrawerOpen(false) }; if (event.key === 'Tab') { const nodes = [...(sourceDrawerRef.current?.querySelectorAll?.('button:not([disabled]), [tabindex="0"]') ?? [])]; const first = nodes[0], last = nodes.at(-1), active = sourceDrawerRef.current?.ownerDocument?.activeElement; if (event.shiftKey && active === first) { event.preventDefault(); last?.focus() } else if (!event.shiftKey && active === last) { event.preventDefault(); first?.focus() } } } },
             h('header', null, h('div', null, h('small', null, 'SOURCE / 冻结源码'), h('h2', null, '源码依据'), h('div', { style: styles.itemMeta }, title)),
               h('button', { type: 'button', 'aria-label': '关闭源码依据', autoFocus: true, onClick: () => setSourceDrawerOpen(false) }, '×')),
+            kind === 'case' && caseEvidenceOptions.length > 1 ? h('nav', { className: 'pangea-evidence-options', 'aria-label': '选择用例关联代码' }, caseEvidenceOptions.map((entry, index) => h('button', { key: entry.key, type: 'button', 'aria-pressed': entry.key === previewEvidence.key, onClick: () => setCaseEvidenceSelection({ scope: caseScreenKey, key: entry.key }) }, `${index + 1}. ${displayEvidenceLocation(entry.location)}`))) : null,
             h('div', { className: 'b05-source-meta' }, h('span', null, displayEvidenceLocation(previewEvidence.location)), h('span', { style: styles.badge }, `${taskRunLabel(current?.run_id)} 快照`)),
+            kind === 'case' && (previewEvidence.quote || previewEvidence.observation) ? h('section', { className: 'b05-source-context' }, h('strong', null, previewEvidence.evidence_id || '当前证据原文'), previewEvidence.observation ? renderReadableBody(previewEvidence.observation) : null, previewEvidence.quote ? h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, previewEvidence.quote) : null) : null,
             preview.status === 'error' ? h(React.Fragment, null,
               h('div', { className: 'b05-source-failure', role: 'alert' }, h('strong', null, '暂时无法读取源码片段'), h('p', null, `文件位置与结论已保留，可重试读取，或关闭预览继续阅读。${preview.error ? ` ${preview.error}` : ''}`)),
               h('button', { type: 'button', onClick: () => setSourceRetry(value => value + 1) }, '重试读取')) : null,
@@ -4915,7 +4951,7 @@ window.__ModuleLoader__.load({
             h('footer', null, h('span', { style: styles.itemMeta }, title),
               h('div', { style: styles.row }, snippet?.file_path ? h('button', { type: 'button', onClick: () => openSidebarFile(snippet.file_path) }, '打开完整文件') : null,
                 snippet && kind === 'case' ? h('button', { type: 'button', onClick: () => { void addToConversation('case', item, 'evidence', snippet) } }, '检查这段源码') : null,
-                h('button', { type: 'button', onClick: () => setSourceDrawerOpen(false) }, kind === 'risk' ? '返回风险' : '返回用例')))))
+                h('button', { type: 'button', onClick: () => setSourceDrawerOpen(false) }, kind === 'risk' ? '返回风险' : caseDrawer?.scope === caseScreenKey && caseDrawer?.type === 'basis' ? '返回拟覆盖依据' : '返回用例')))))
       }
 
       const total = current?.analysis?.total ?? 0
@@ -6637,12 +6673,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'b05-metrics' },
             metric('全部测试用例', testCases.length, `分布在 ${unitCount} 个分析单元`), metric('具备执行条件', readiness.ready ?? '未知', '条件来自用例分析记录'),
             metric('待补执行条件', readiness.needs_setup ?? '未知', '需核对执行准备条件'), riskEnabled ? metric('关联风险的用例', linkedCases, '按用例去重计数') : metric('已设计参数组合', designCounts.variants, '按变体记录计数，不计入独立用例数')),
-          quality ? h('details', { className: 'b05-card', 'aria-label': '黑盒与灰盒可实施性' }, h('summary', null, '黑盒与灰盒可实施性'),
-            h('p', null, `业务黑盒 ${quality.business_blackbox} 条（具备执行条件 ${quality.ready_blackbox} 条） · 业务灰盒 ${quality.developer_assisted} 条（具备执行条件 ${quality.ready_graybox} 条）`),
-            h('p', null, quality.has_legacy_groups ? '包含旧用例组，独立用例比例待复核。' : quality.ready_ratio == null ? '无可统计用例。' : `可实施黑盒与灰盒：${quality.ready_cases}/${quality.total_cases}（${(quality.ready_ratio * 100).toFixed(1)}%）。`),
-            h('p', null, quality.blackbox_target === false ? quality.blackbox_target_reason === 'risk-scene' ? '风险场景不设黑盒比例目标。' : '用户冻结目标为接口契约分析，不设产品黑盒与灰盒70%比例目标。' : '可实施黑盒与灰盒交付目标 ≥70%。'),
-            h('p', { className: 'b05-subtle' }, '全部正式、辅助及未分类用例均计入分母。比例按作者声明汇总，具备执行条件不代表实测通过。')) : null,
-          behaviorLedgers.length || current?.scenario === 'branch-analysis' ? h(BehaviorCoverageView, { ledgers: behaviorLedgers,
+          h('div', { className: 'b05-card pangea-feasibility-entry' }, h('div', null, h('strong', null, '黑盒与灰盒可实施性'), h('p', { className: 'b05-subtle' }, '查看分类数量、适用目标与待补执行条件。未提供的旧数据保持未知。')), h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'feasibility', scope: JSON.stringify([cwd, current?.run_id, 'cases']) }) }, '查看可实施性 ↗')),
+          behaviorLedgers.length || current?.scenario === 'branch-analysis' ? h(BehaviorCoverageView, { ledgers: behaviorLedgers, units: workflow.units,
             onCase: link => navigate({ type: 'case', id: link.target_case_id, ...(link.variant_id != null ? { variant_id: link.variant_id } : {}) }) }) : null,
           reviewError ? h('p', { role: 'alert', className: 'pangea-review-error' }, `评审记录：${reviewError}`) : null,
           h('div', { className: 'pangea-case-filters', 'aria-label': '测试用例筛选' },
@@ -6680,7 +6712,8 @@ window.__ModuleLoader__.load({
             h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: () => setSelectedCaseIds([]) }, '清空选择'),
               h('button', { type: 'button', disabled: selectedCaseIds.length === 0, onClick: () => { void copySelectedCases() } }, '复制选中用例'), h('button', { type: 'button', onClick: () => { setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true); setCaseExportScope('selected') } }, '导出所选')) ) : null,
           h('p', { className: 'b05-subtle' }, '执行条件反映用例准备情况；实际验证结果需由测试执行记录确认。'),
-          renderCaseExportDialog())
+          renderCaseExportDialog(),
+          renderCaseDrawer())
       }
 
       function renderCaseExportDialog() {
@@ -6735,7 +6768,8 @@ window.__ModuleLoader__.load({
               match?.note ? h('p', { className: 'b05-coverage-notice' }, match.note) : null,
               match?.ambiguous_preview?.length ? h('div', { className: 'b05-coverage-notice' }, h('strong', null, `歧义记录 ${match.ambiguous_preview.length} 条`),
                 match.ambiguous_preview.map((row, index) => h('p', { key: index }, row.reason || row.location || JSON.stringify(row)))) : null)),
-          renderCaseExportDialog())
+          renderCaseExportDialog(),
+          renderCaseDrawer())
       }
 
       function renderExecutionResults() {
@@ -6820,21 +6854,65 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', style: { ...styles.environmentSecondaryButton, color: '#c7000b' }, onClick: () => { void deleteEnvironment(environment.id) } }, '删除')))))) : null)
       }
 
+      function renderCaseCodeLinks() {
+        return h('section', { className: 'pangea-case-code-links' }, h('h4', null, '关联代码'),
+          caseEvidenceOptions.length ? caseEvidenceOptions.map((entry, index) => h('button', { key: entry.key || evidenceIdentity(entry), type: 'button', className: 'b05-text-link', onClick: () => { setCaseEvidenceSelection({ scope: caseScreenKey, key: entry.key }); setSourceDrawerOpen(true) } }, `${index + 1}. ${displayEvidenceLocation(entry.location)} ↗`)) : h('p', null, '未记录可定位的源码引用。'),
+          caseEvidence.unresolved.length ? h('details', null, h('summary', null, `${caseEvidence.unresolved.length} 条未解析引用（保留原文）`), caseEvidence.unresolved.map((entry, index) => h('div', { key: index }, h('p', null, entry.issue), renderReadableBody(entry.reference)))) : null)
+      }
+      function renderFeasibilityContent(item) {
+        if (item) {
+          const view = caseFeasibilityProjection(item)
+          const label = { ready: '具备执行条件', needs_setup: '待补环境条件', needs_instrumentation: '需要观测或注入手段', unknown: '执行条件未知' }[view.declared_status] || view.label
+          return h(React.Fragment, null, h('h3', null, label),
+            h('p', { className: 'b05-subtle' }, view.disclaimer),
+            h('h4', null, '条件依据'), renderReadableBody(view.reason ?? '当前记录未提供执行条件依据。'),
+            h('h4', null, '待补条件'), view.missing_conditions.length ? renderReadableBody(view.missing_conditions) : h('p', null, '未提供具体待补条件，不等同于没有阻碍。'),
+            h('h4', null, '测试入口'), renderReadableBody(view.entry ?? '未提供'),
+            h('p', null, `用例类型：${CASE_TYPE_LABELS[view.test_level] || view.test_level || '未标注'}`))
+        }
+        const quality = caseFeasibilitySummary(current?.case_quality_summary)
+        const number = value => value == null ? '未知' : value
+        const followups = testCases.filter(value => caseFeasibilityProjection(value).status !== 'ready')
+        return h(React.Fragment, null,
+          h('p', { className: 'b05-subtle' }, quality.disclaimer),
+          h('div', { className: 'pangea-feasibility-metrics' }, [
+            ['业务黑盒', quality.business_blackbox, `具备执行条件 ${number(quality.ready_blackbox)} 条`],
+            ['业务灰盒', quality.developer_assisted, `具备执行条件 ${number(quality.ready_graybox)} 条`],
+            ['可实施比例', quality.ready_ratio == null ? null : `${(quality.ready_ratio * 100).toFixed(1)}%`, `${number(quality.ready_cases)} / ${number(quality.total_cases)} 条`],
+          ].map(([label, value, note]) => h('div', { key: label }, h('small', null, label), h('strong', null, number(value)), h('p', null, note)))),
+          h('p', null, quality.has_legacy_groups ? '包含旧用例组，独立用例比例待复核。' : '分母包含全部正式、辅助及未分类用例。'),
+          h('p', null, quality.blackbox_target === false ? quality.blackbox_target_reason === 'risk-scene' ? '风险场景不设黑盒比例目标。' : '冻结目标不适用产品黑盒与灰盒比例目标。' : quality.blackbox_target === true ? '可实施黑盒与灰盒交付目标 ≥70%。' : '本次记录未提供可实施比例目标。'),
+          h('h3', null, `需要核对执行条件 · ${followups.length} 条`),
+          followups.length ? followups.map(value => { const view = caseFeasibilityProjection(value); return h('article', { key: caseKeyByItem.get(value), className: 'pangea-feasibility-row' },
+            h('button', { type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'case', id: caseKeyByItem.get(value) }) }, `${value.display_id || value.test_case_id || '待编号'} · ${value.title || '测试用例'} ↗`),
+            h('p', null, view.label), renderReadableBody(view.reason ?? (view.missing_conditions.length ? view.missing_conditions : '未提供条件依据。'))) }) : h('p', null, testCases.length ? '现有用例均声明具备执行条件，仍需由实际执行确认。' : '当前没有可读取的用例，不能据此认定无待补条件。'))
+      }
+      function renderCaseDrawer(item) {
+        const scope = item ? caseScreenKey : JSON.stringify([cwd, current?.run_id, 'cases'])
+        if (!caseDrawer || caseDrawer.scope !== scope) return null
+        const basis = caseDrawer.type === 'basis'
+        return h(ResultDrawer, { title: basis ? '拟覆盖依据' : '黑盒与灰盒可实施性',
+          subtitle: item ? `${item.display_id || item.test_case_id || '待编号'} · ${item.title || '测试用例'}` : '依据本次分析声明，逐条核对执行准备条件',
+          onClose: () => setCaseDrawer(null), obscured: sourceDrawerOpen },
+          basis ? renderCaseCoverageBasis(item) : renderFeasibilityContent(item))
+      }
+
       function renderCaseCoverageBasis(item) {
         const nonArrayRefs = item.coverage_refs != null && !Array.isArray(item.coverage_refs)
         const refs = Array.isArray(item.coverage_refs) ? item.coverage_refs : item.coverage_refs == null ? [] : [item.coverage_refs]
         const hasCoverage = item.purpose === 'coverage' || refs.length > 0
         const hasSummary = item.summary != null && sourceFirstRecordBody(item.summary).trim()
         const hasEvidence = Array.isArray(item.source_evidence) ? item.source_evidence.length > 0 : item.source_evidence != null && sourceFirstRecordBody(item.source_evidence).trim()
-        if (!hasSummary && !hasCoverage && !hasEvidence) return null
+        if (!hasSummary && !hasCoverage && !hasEvidence && !caseEvidence.items.length && !caseEvidence.unresolved.length) return h('p', { role: 'status' }, '当前用例未提供拟覆盖目标或分析依据；不推断函数或分支覆盖范围。')
         const frozen = Array.isArray(details.coverage_gaps) ? details.coverage_gaps : null
         const ids = [...new Set(refs.map(ref => typeof ref === 'string' ? ref : ref?.coverage_id).filter(id => typeof id === 'string' && id.trim()))]
         const invalid = refs.some(ref => { const id = typeof ref === 'string' ? ref : ref?.coverage_id; return typeof id !== 'string' || !id.trim() })
-        return h('details', { key: caseIdentity(item), className: 'b05-card pangea-case-basis', 'aria-label': '补测依据与冻结覆盖输入' },
-          h('summary', null, '补测依据'),
+        return h('div', { key: caseIdentity(item), className: 'pangea-case-basis', 'aria-label': '拟覆盖依据与冻结覆盖输入' },
+          h('p', { className: 'b05-subtle' }, '以下是测试设计意图与来源记录，不是本用例的实测覆盖结果。'),
           hasSummary ? h('section', null, h('h4', null, '用例说明（原文）'), renderReadableBody(item.summary))
             : item.purpose === 'coverage' ? h('p', null, '未提供逐用例 summary；具体缺口、普通操作不足及新增触发条件尚未说明。') : null,
-          hasEvidence ? h('section', null, h('h4', null, '源码依据'), renderReadableBody(item.source_evidence)) : null,
+          hasEvidence ? h('section', null, h('h4', null, '源码依据（原文）'), renderReadableBody(item.source_evidence)) : null,
+          renderCaseCodeLinks(),
           hasCoverage ? h('section', null, h('h4', null, '冻结覆盖输入'),
           h('p', { className: 'b05-subtle' }, '以下仅按显式引用关联冻结覆盖输入；引用匹配不代表已确认缺口或已完成补测，正计数记录可能只是已覆盖上下文。'),
           !ids.length ? h('p', null, '未核实：未提供有效覆盖引用，不能据此认定为补测。') : null,
@@ -6898,7 +6976,11 @@ window.__ModuleLoader__.load({
                     h('td', null, text(step.action, '未提供操作')), h('td', null, text(step.expected, '未提供逐步预期，请核对整体预期及原文')))))))
                 : h('p', null, '原文未提供可识别的操作步骤，请核对分析原文。'),
                 item.expected_results?.length ? h('p', { className: 'b05-subtle' }, `整体预期：${item.expected_results.join('；')}`) : null),
-              renderCaseCoverageBasis(item),
+              h('section', { className: 'pangea-case-drawer-links', 'aria-label': '用例依据与代码' },
+                h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'basis', scope: caseScreenKey }) }, '拟覆盖依据 ↗'),
+                h('button', { type: 'button', className: 'b05-text-link', disabled: !caseEvidenceOptions.length, onClick: () => setSourceDrawerOpen(true) }, `关联代码 · ${caseEvidenceOptions.length} 处 ↗`),
+                h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'case-feasibility', scope: caseScreenKey }) }, '可实施性详情 ↗')),
+              !caseEvidenceOptions.length ? h('p', { className: 'b05-subtle' }, caseEvidence.unresolved.length ? '源码引用未能解析为明确位置，原文保留在拟覆盖依据中。' : '当前用例未记录明确源码引用。') : null,
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
@@ -6914,6 +6996,7 @@ window.__ModuleLoader__.load({
               h('section', { className: 'b05-card' }, h('h3', null, '分析原文'), h('p', null, '参数、步骤与结论均保留原文追溯入口。'),
                 h('button', { type: 'button', className: 'b05-text-link', onClick: () => jump('report') }, '查看完整用例记录 ↗')))),
           item.source_record ? h('details', { className: 'b05-raw-record' }, h('summary', null, '查看本轮原始用例记录'), renderRecordBody(item, true)) : null,
+          renderCaseDrawer(item),
           renderB05SourceDrawer('case', item))
         return h('div', { className: 'pangea-case-review-shell' }, h('aside', { className: 'pangea-case-review-list', 'aria-label': '当前筛选用例' }, h('h3', null, `当前筛选 · ${order.length} 条`), order.slice(Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50), Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50) + 50).map(key => h('button', { key, type: 'button', 'aria-current': key === screen.id ? 'true' : undefined, onClick: () => selectReviewCase(key) }, caseById.get(key)?.display_id || key, h('span', null, caseById.get(key)?.title)))), h('div', { className: 'pangea-case-review-detail' }, detailContent))
       }
@@ -7068,6 +7151,8 @@ window.__ModuleLoader__.load({
     exports.PangeaPanel = PangeaPanel
     exports.TaskInfoAction = TaskInfoAction
     exports.RunExecutionSummary = RunExecutionSummary
+    exports.ExecutionTimelineView = ExecutionTimelineView
+    exports.ResultDrawer = ResultDrawer
     exports.executionObservation = executionObservation
     exports.inject = inject
     exports.requestSnapshot = requestSnapshot

@@ -172,7 +172,7 @@ test('business behavior coverage starts collapsed and keeps its ledger content a
   try {
     assert.ok(h.coverage(), 'coverage must use a native disclosure')
     assert.equal(h.coverage().open, false)
-    assert.ok(h.nodes().some(node => node.type === 'summary' && content(node).includes('业务行为覆盖清单')))
+    assert.ok(h.nodes().some(node => node.type === 'summary' && content(node).includes('业务行为覆盖看板')))
     assert.match(h.text(), /超时重试/)
   } finally { h.cleanup() }
 })

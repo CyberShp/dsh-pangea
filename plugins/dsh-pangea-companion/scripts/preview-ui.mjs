@@ -1,9 +1,9 @@
 // Real browser rendering of shipped components against isolated deterministic fixtures.
 import { createServer } from 'node:http'
-import { readFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -13,6 +13,8 @@ import { uiWorkbenchFixture } from '../tests/fixtures/ui-workbench.mjs'
 
 const plugin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const option = (name, fallback) => { const index = process.argv.indexOf(name); return index < 0 ? fallback : process.argv[index + 1] }
+// Optional, explicit synthetic fixture extension for CI. Default behavior is unchanged.
+const fixtureModule = option('--fixture-module') ? await import(pathToFileURL(path.resolve(option('--fixture-module'))).href) : null
 const desktop = path.resolve(option('--desktop', path.join(plugin, '../../../pangea-desktop')))
 const agent = path.resolve(option('--agent', path.join(desktop, '../pangea-agent')))
 const tools = path.resolve(option('--tools', path.join(desktop, '../../visual-tools/node_modules')))
@@ -21,10 +23,8 @@ const require = createRequire(path.join(desktop, 'package.json'))
 const { build } = require('esbuild')
 const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'pangea-ui-preview-'))
 await mkdir(path.join(dataRoot, 'repositories/storage/tls'), { recursive: true })
-await Promise.all(Array.from({ length: 42 }, (_, index) => readFile(path.join(agent, 'AGENTS.md')).then(async () => {
-  const { writeFile } = await import('node:fs/promises')
-  await writeFile(path.join(dataRoot, 'repositories/storage/tls', index ? `unit-${index}.c` : 'handshake.c'), '/* UI verification fixture */\nint handshake(void) { return 0; }\n')
-})))
+await Promise.all(Array.from({ length: 42 }, (_, index) =>
+  writeFile(path.join(dataRoot, 'repositories/storage/tls', index ? `unit-${index}.c` : 'handshake.c'), '/* UI verification fixture */\nint handshake(void) { return 0; }\n')))
 const css = await readFile(path.join(plugin, '../dsh-pangea/src/product-ui.css'), 'utf8')
 const uiSource = await readFile(path.join(plugin, '../dsh-pangea/src/ui-components.js'), 'utf8')
 const bundle = await build({ stdin: { contents: `
@@ -40,7 +40,10 @@ window.addEventListener('pangea:query-model-onboarding',()=>window.dispatchEvent
 window.addEventListener('pangea:open-assistant',()=>{document.body.classList.toggle('preview-assistant');});
 `, resolveDir: desktop, sourcefile: 'ui-preview.jsx', loader: 'jsx' }, bundle: true, write: false, platform: 'browser', nodePaths: [path.join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': '"development"' } })
 let scene = 'running', count = 40
-const fixture = () => uiWorkbenchFixture(dataRoot, scene, count)
+const fixture = () => {
+  const value = uiWorkbenchFixture(dataRoot, scene, count)
+  return fixtureModule?.transformFixture ? fixtureModule.transformFixture(value, { dataRoot, scene, count }) : value
+}
 const assetFixture = {
   asset_id: 'typography-design', title: '连接模块设计说明', asset_type: 'design', status: 'available', source_name: '连接设计.md', revision: 1,
   repository_ids: ['storage'], module_tags: ['TLS'], language_tags: [],
@@ -60,6 +63,8 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost'), { run, task } = fixture()
     if (url.pathname === '/fixture') { scene = url.searchParams.get('scene') || 'running'; count = Number(url.searchParams.get('count') || 40); return send(res, { status: 'ok', scene, count }) }
+    const customResponse = fixtureModule?.responseFor?.({ url, run, task, scene, count })
+    if (customResponse !== undefined) return send(res, customResponse)
     if (url.pathname === '/api/pangea-companion/case-reviews') return await caseReviewRouteHandler(req, res, { resolveRoot: async () => dataRoot, readRun: async () => run })
     if (url.pathname === '/api/pangea-companion/export') return await exportRouteHandler(req, res, { resolveRoot: async () => dataRoot, readRun: async () => run })
     if (url.pathname === '/api/pangea-companion/repositories') {

@@ -418,7 +418,16 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         // exact action/task binding, without inventing a formal worker turn.
         ...(executionIds && (eventName === 'started' || executionStarted) ? ['--execution-id', executionId] : []),
         ...(reason ? ['--reason', reason] : []), ...(budget ? ['--budget-ms', String(budget)] : []), ...(automatic ? ['--automatic'] : [])])
+      // Preserve the existing execution-ID fence even when the engine ignores
+      // a duplicate start. Ignored replies suppress telemetry, not binding.
       if (eventName === 'started') executionStarted = true
+      if (result?.event_ignored === true) return result
+      // Record the successful workflow boundary durably, independent of launch
+      // log tail retention. A turn response alone is not this boundary.
+      await sessionRecorder.record(sessionMeta({ ...actionContext, execution_id: executionStarted ? executionId : null }), { ...actionContext, type: 'host_event',
+        stage: 'source_first_execution', execution_event: eventName,
+        execution_id: executionStarted ? executionId : null,
+        at_ms: (eventName === 'started' ? result?.execution_started_at_ms : result?.execution_finished_at_ms) || Date.now() })
       return result
     }
     const isClosure = action.stage === 'targeted_closure'
@@ -429,7 +438,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       await execution('paused', reason)
       if (!retain) await disposed(worker)
       pausedReasons.push(reason)
-      await event({ ...details, stage: 'source_first_worker_paused', action_id: action.action_id, reason, message: reason })
+      await event({ ...details, stage: 'source_first_worker_paused', execution_boundary_recorded: true, action_id: action.action_id, reason, message: reason })
     }
     const pauseForContext = async detail => {
       const reason = `执行器输入超限，已暂停当前 action，未提交空结果或替换会话。需在原会话压缩上下文后继续；若执行器不支持压缩，需用户决定后续处理。${String(detail).slice(0, 1200)}`
@@ -627,14 +636,14 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     window.turns++
     await execution('started', '', budget, automatic)
     await remember(worker, undefined, { execution_id: executionId, inflight: true, quiescent: false })
-    await event({ stage: 'source_first_worker_started', action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, execution_id: executionId, budget_ms: budget })
+    await event({ stage: 'source_first_worker_started', execution_boundary_recorded: true, action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, execution_id: executionId, budget_ms: budget })
     const startContinuation = async () => {
       await execution('finished')
       executionId = nextExecutionId()
       actionContext.execution_id = executionId
       await execution('started', '', budget, true)
       await remember(worker, undefined, { execution_id: executionId, inflight: true, quiescent: false })
-      await event({ stage: 'source_first_worker_started', action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, execution_id: executionId, budget_ms: budget })
+      await event({ stage: 'source_first_worker_started', execution_boundary_recorded: true, action_id: action.action_id, unit_id: action.unit_id, action_stage: action.stage, execution_id: executionId, budget_ms: budget })
     }
     let result, timer, softTimer, abortTurn, toolExecutionQuiesced = false, contextDeliveryReconciled = false
     const timeout = new Error('本单元定向修正达到执行预算，保留已保存结果')

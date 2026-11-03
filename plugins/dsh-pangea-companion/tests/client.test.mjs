@@ -2523,14 +2523,23 @@ async function caseMetricsView(records, gaps, screen, windowProperties = {}) {
   const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', scenario: 'coverage-analysis', lifecycle_status: 'complete', terminal: true, details,
     coverage_summary: coverageSummary(details.test_cases, gaps), case_quality_summary: caseQualitySummary(details.test_cases) }
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: screen }
-  const before = JSON.stringify(states)
+  const before = JSON.stringify({ current, task })
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } }, undefined, undefined, windowProperties)
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); if (!(key in states)) states[key] = typeof initial === 'function' ? initial() : initial; return [states[key], update => { states[key] = typeof update === 'function' ? update(states[key]) : update }] } }, undefined, undefined, windowProperties)
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
-  const nodes = descendants(panel.type(panel.props))
-  assert.equal(JSON.stringify(states), before)
+  const expand = node => {
+    if (Array.isArray(node)) return node.map(expand)
+    if (node?.type === client.ResultDrawer) return expand(node.type({ ...node.props, children: node.children }))
+    return node?.children ? { ...node, children: node.children.map(expand) } : node
+  }
+  const render = () => { index = 0; return descendants(expand(panel.type(panel.props))) }
+  let nodes = render()
+  const button = nodes.find(node => node.type === 'button' && node.children.includes(screen.type === 'cases' ? '查看可实施性 ↗' : '拟覆盖依据 ↗'))
+  if (button) { button.props.onClick(); nodes = render() }
+  assert.equal(JSON.stringify({ current, task }), before)
+  nodes.render = render
   return nodes
 }
 
@@ -2568,14 +2577,14 @@ test('built case view shows declared ready ratio and the reason for a ready case
   ]
   const overview = await caseMetricsView(records, [], { type: 'cases' })
   const section = overview.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')
-  assert.match(metricsText(section), /业务黑盒 2 条（具备执行条件 1 条）/)
-  assert.match(metricsText(section), /1\/4（25.0%）/)
+  assert.match(metricsText(section), /业务黑盒\s*2.*具备执行条件 1 条/s)
+  assert.match(metricsText(section), /25.0%.*1 \/ 4 条/s)
   const detail = await caseMetricsView(records, [], { type: 'case', id: 'u/ready' })
   const notice = detail.find(node => String(node.props.className).split(' ').includes('b05-case-notice'))
   assert.match(metricsText(notice), /具备执行条件.*已核实 CLI 与观测日志/)
   assert.equal(detail.filter(node => node.props.role === 'status' && metricsText(node).includes('已核实 CLI 与观测日志')).length, 1)
   const empty = await caseMetricsView([], [], { type: 'cases' })
-  assert.match(metricsText(empty.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')), /无可统计用例/)
+  assert.match(metricsText(empty.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')), /当前没有可读取的用例/)
   const legacy = await caseMetricsView([...records, { record_id: 'group', kind: 'test_case_group', body: 'Historical group' }], [], { type: 'cases' })
   const legacySection = legacy.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')
   assert.match(metricsText(legacySection), /包含旧用例组，独立用例比例待复核/)
@@ -3283,7 +3292,7 @@ test('case detail shows authored basis and all frozen input matches without trea
   const records = [{ record_id: 'c', kind: 'test_case', body: { purpose: 'branch', summary: '普通操作未触发拒绝路径，增加拒绝请求', coverage_refs: ['G', { coverage_id: 'G' }, 'missing', {}] } }]
   const gaps = [{ coverage_id: 'G', path: 'auth.c', count: 8, meaning: 'covered context' }, { coverage_id: 'G', path: 'auth.c', branch_id: 'reject', count: 0, meaning: 'uncovered branch' }]
   const nodes = await caseMetricsView(records, gaps, { type: 'case', id: 'u/c' })
-  const section = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
+  const section = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
   const rendered = JSON.stringify(section)
   for (const value of ['普通操作未触发拒绝路径', '正计数记录可能只是已覆盖上下文', '重复或冲突', 'covered context', 'uncovered branch', '没有此引用', '无效覆盖引用']) assert.ok(rendered.includes(value), value)
   assert.equal(descendants(section).filter(node => node.type === 'h4' && node.children.includes('G')).length, 1)
@@ -3291,7 +3300,7 @@ test('case detail shows authored basis and all frozen input matches without trea
 
 for (const gaps of [null, []]) test(`case detail marks missing frozen reference unverified (${gaps === null ? 'unreadable' : 'empty'})`, async () => {
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', coverage_refs: 'G' } }], gaps, { type: 'case', id: 'u/c' })
-  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
   assert.ok(rendered.includes('未提供逐用例 summary'))
   assert.ok(rendered.includes(gaps === null ? '冻结覆盖输入不可读取' : '冻结覆盖输入中没有此引用'))
 })
@@ -3300,7 +3309,7 @@ test('coverage case without refs remains visible but unverified; legacy branch c
   for (const purpose of ['coverage', 'branch']) {
     const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose, title: '保留原始用例' } }], [], { type: 'case', id: 'u/c' })
     assert.ok(JSON.stringify(nodes).includes('保留原始用例'))
-    const section = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
+    const section = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
     if (purpose === 'coverage') assert.ok(JSON.stringify(section).includes('未提供有效覆盖引用'))
     else assert.equal(section, undefined)
   }
@@ -3308,7 +3317,7 @@ test('coverage case without refs remains visible but unverified; legacy branch c
 
 for (const refs of ['G', { coverage_id: 'G' }]) test(`case detail flags original non-array refs despite a matching frozen input (${typeof refs})`, async () => {
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', summary: '依据', coverage_refs: refs } }], [{ coverage_id: 'G', condition: '冻结拒绝分支' }], { type: 'case', id: 'u/c' })
-  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
   assert.ok(rendered.includes('原始 coverage_refs 不是数组'))
   assert.ok(rendered.includes('不作为有效引用'))
   assert.ok(rendered.includes('冻结拒绝分支'))
@@ -3316,7 +3325,7 @@ for (const refs of ['G', { coverage_id: 'G' }]) test(`case detail flags original
 
 for (const summary of ['', ' \n\t ']) test('case detail does not treat blank summary as an explanation', async () => {
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', summary, coverage_refs: ['G'] } }], [{ coverage_id: 'G' }], { type: 'case', id: 'u/c' })
-  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
   assert.ok(rendered.includes('未提供逐用例 summary'))
 })
 
@@ -3345,11 +3354,11 @@ test('stop progress requires durable confirmation before displaying completion',
   assert.match(JSON.stringify(client.StopProgress({ task: { ...task, stop_confirmed_at: 1234 } })), /已停止，已保存结果保留/)
 })
 
-test('case basis follows steps, is collapsed and retains literal evidence; empty observations are omitted', async () => {
+test('case basis opens from the steps into a bottom drawer and retains literal evidence; empty observations are omitted', async () => {
   const summary = { gap: 'plain original', trigger: 'run request()', source_evidence: ['repo:src/long/path/request.c:123'] }
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { format_version: 'behavior-test-case-v1', purpose: 'coverage', summary, steps: [{ action: '操作', expected: '结果' }], observability: ['stale alias'], external_observations: [] } }], [], { type: 'case', id: 'u/c' })
-  const basis = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
-  assert.equal(basis.type, 'details')
+  const basis = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
+  assert.equal(basis.type, 'div')
   assert.ok(!basis.props.open)
   assert.ok(nodes.indexOf(basis) > nodes.findIndex(node => node.type === 'h3' && node.children.includes('操作步骤与逐步预期')))
   assert.ok(JSON.stringify(basis).includes('request()'))
@@ -3373,8 +3382,8 @@ test('copy case omits empty observations and keeps authored basis and source evi
 
 for (const content of [{ summary: '普通用例原文' }, { source_evidence: ['request() repo:src/request.c:123'] }, { summary: '普通用例原文', source_evidence: ['request() repo:src/request.c:123'] }]) test('ordinary case basis preserves standalone summary/evidence without coverage warnings', async () => {
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { format_version: 'behavior-test-case-v1', purpose: 'branch', ...content } }], [], { type: 'case', id: 'u/c' })
-  const basis = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
-  assert.equal(basis.type, 'details')
+  const basis = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
+  assert.equal(basis.type, 'div')
   assert.ok(!basis.props.open)
   const text = metricsText(basis)
   if (content.summary) assert.ok(text.includes(content.summary))
@@ -3408,4 +3417,37 @@ test('changing analysis repository clears source selection and receipt but same 
   render().find(node => node.type?.name === 'SourceScopePicker').props.onChange('')
   assert.equal(states[91], null)
   assert.equal(render().find(node => node.children.includes('下一步 · 输入资料')).props.disabled, true)
+})
+
+
+test('evidence-only case basis preserves all explicit references and unique same-location choices', async () => {
+  const nodes = await caseMetricsView([{ record_id: 'evidence-only', kind: 'test_case', evidence: [
+    { evidence_id: 'first', location: 'repo:src/a.c:7', observation: '同一行的不同依据', quote: 'FIRST AUTHORED QUOTE' },
+    { evidence_id: 'second', location: 'repo:src/a.c:7', observation: '同一行的不同依据', quote: 'SECOND AUTHORED QUOTE' },
+    'malformed evidence reference',
+  ], body: { title: '仅包含 envelope evidence', purpose: 'branch' } }], [], { type: 'case', id: 'u/evidence-only' })
+  const basis = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
+  assert.ok(basis)
+  assert.match(metricsText(basis), /malformed evidence reference/)
+  const links = descendants(basis).filter(node => node.type === 'button' && metricsText(node).includes('src/a.c'))
+  assert.equal(links.length, 2)
+  links[1].props.onClick()
+  let current = nodes.render()
+  let source = current.find(node => node.props.role === 'dialog' && node.props['aria-label'] === '源码依据')
+  assert.match(metricsText(source), /SECOND AUTHORED QUOTE/)
+  assert.doesNotMatch(metricsText(source), /FIRST AUTHORED QUOTE/)
+  let choices = descendants(source).find(node => node.props['aria-label'] === '选择用例关联代码')
+  const buttons = descendants(choices).filter(node => node.type === 'button')
+  assert.equal(buttons.filter(node => node.props['aria-pressed']).length, 1)
+  assert.equal(buttons[1].props['aria-pressed'], true)
+  buttons[0].props.onClick()
+  current = nodes.render()
+  source = current.find(node => node.props.role === 'dialog' && node.props['aria-label'] === '源码依据')
+  assert.match(metricsText(source), /FIRST AUTHORED QUOTE/)
+  assert.doesNotMatch(metricsText(source), /SECOND AUTHORED QUOTE/)
+  assert.ok(current.some(node => node.props.className === 'pangea-bottom-layer' && node.props['aria-hidden'] === 'true'))
+  descendants(source).find(node => node.type === 'button' && metricsText(node) === '返回拟覆盖依据').props.onClick()
+  current = nodes.render()
+  assert.ok(current.some(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
+  assert.ok(!current.some(node => node.props.role === 'dialog' && node.props['aria-label'] === '源码依据'))
 })
