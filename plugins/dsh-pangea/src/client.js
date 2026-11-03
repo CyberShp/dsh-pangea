@@ -677,6 +677,7 @@ window.__ModuleLoader__.load({
         && typeof bridge?.importUpdatePackage === 'function'
         && typeof bridge?.installUpdate === 'function'
       const onlineAvailable = updateAvailable && typeof bridge?.checkForUpdates === 'function'
+      const networkSettingsAvailable = typeof bridge?.openUpdateNetworkSettings === 'function'
       const [updateStatus, setUpdateStatus] = React.useState(null)
       const [busyAction, setBusyAction] = React.useState(null)
       const [helperHandoff, setHelperHandoff] = React.useState(false)
@@ -685,6 +686,7 @@ window.__ModuleLoader__.load({
       const [section, setSection] = React.useState('general')
       const [modelCatalog, setModelCatalog] = React.useState({ status: 'loading', connections: [] })
       const [modelCreating, setModelCreating] = React.useState(false)
+      const [networkSettingsError, setNetworkSettingsError] = React.useState('')
 
       React.useEffect(() => {
         const receive = event => setModelCreating(event.detail.open && event.detail.create)
@@ -715,6 +717,15 @@ window.__ModuleLoader__.load({
       }, [bridge, updateAvailable])
 
       const openModels = (providerId, create = false) => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal', providerId: typeof providerId === 'string' ? providerId : undefined, create } }))
+      const openUpdateNetworkSettings = async () => {
+        if (!networkSettingsAvailable) return
+        setNetworkSettingsError('')
+        try {
+          await bridge.openUpdateNetworkSettings()
+        } catch {
+          setNetworkSettingsError('更新网络设置未能打开，请重试。')
+        }
+      }
       const checkOnline = async () => {
         if (!onlineAvailable || busyAction) return
         setBusyAction('check')
@@ -898,7 +909,15 @@ window.__ModuleLoader__.load({
         }
 
         return h(React.Fragment, null,
-          node('div', 'settings-section-head', node('div', '', h('h2', null, '版本与升级'), h('p', null, onlineAvailable ? '从 GitHub 获取更新，或导入签名升级包；校验后选择合适的时间安装。' : '导入签名升级包，校验后选择合适的时间安装。'))),
+          node('div', 'settings-section-head', node('div', '', h('h2', null, '版本与升级'), h('p', null, onlineAvailable ? '从 GitHub 获取更新，或导入签名升级包；校验后选择合适的时间安装。' : '导入签名升级包，校验后选择合适的时间安装。')),
+            bridge ? h('button', {
+              type: 'button', className: 'btn', 'data-pangea-update-network-settings': true,
+              disabled: !networkSettingsAvailable,
+              title: networkSettingsAvailable ? '设置在线更新的代理连接' : '请升级 Desktop 后使用更新网络设置',
+              onClick: openUpdateNetworkSettings,
+            }, settingsIcon('Settings2'), '更新网络设置') : null),
+          bridge && !networkSettingsAvailable ? updateNotice('更新网络设置不可用', '当前 Desktop 尚不支持主动打开更新网络设置，请升级 Desktop 后使用。', 'info') : null,
+          networkSettingsError ? updateNotice('网络设置未打开', networkSettingsError, 'danger') : null,
           node('div', 'settings-main-cols',
             h('section', { className: 'panel settings-update-card', 'data-pangea-update-state': phase },
               node('div', 'settings-version-hero', node('div', 'settings-version-mark', 'P.'), node('div', '', h('h3', null, 'PANGEA Desktop'), h('p', null, '当前版本 ', h('strong', null, updateStatus?.currentVersion ?? (hasError ? '读取失败' : '正在读取')), ' · Windows'))),
