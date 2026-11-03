@@ -7,15 +7,18 @@ const fail = (statusCode, message) => Object.assign(new Error(message), { status
 const inside = (root, candidate) => { const value = path.relative(root, candidate); return value === '' || value !== '..' && !value.startsWith(`..${path.sep}`) && !path.isAbsolute(value) }
 
 async function repositoryRoot(dataRoot, repository) {
-  if (typeof repository !== 'string' || !repository || /[\\/\0]/.test(repository) || ['.', '..'].includes(repository)) throw fail(400, '仓库无效')
+  if (typeof repository !== 'string' || !repository || /[\\/\0]/.test(repository) || ['.', '..'].includes(repository) || path.win32.parse(repository).root) throw fail(400, '仓库无效')
   const parent = await realpath(path.join(dataRoot, 'repositories')), root = await realpath(path.join(parent, repository))
-  if (!inside(parent, root)) throw fail(403, '仓库越出受控目录')
+  if (root === parent || !inside(parent, root)) throw fail(403, '仓库越出受控目录')
   return root
 }
 async function resolveEntry(root, input) {
   if (typeof input !== 'string' || !input.trim() || input.includes('\0')) throw fail(400, '源码路径无效')
   const value = input.trim().replaceAll('\\', '/')
-  const candidate = await realpath(path.resolve(root, value))
+  if (path.posix.isAbsolute(value) || path.win32.isAbsolute(value) || path.win32.parse(value).root || value.split('/').includes('..')) throw fail(403, '请选择仓库内相对目录，不能使用绝对路径或上级路径')
+  let candidate
+  try { candidate = await realpath(path.resolve(root, value)) }
+  catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) throw fail(400, '源码目录不存在'); throw error }
   if (!inside(root, candidate)) throw fail(403, '源码范围越出仓库边界')
   const info = await stat(candidate)
   return { path: path.relative(root, candidate).split(path.sep).join('/') || '.', kind: info.isDirectory() ? 'directory' : 'file' }
@@ -24,6 +27,7 @@ export async function validateScope({ dataRoot, repository, source_scope }) {
   if (!Array.isArray(source_scope) || !source_scope.length) throw fail(400, '请选择源码范围')
   const root = await repositoryRoot(dataRoot, repository)
   const entries = await Promise.all(source_scope.map(value => resolveEntry(root, value)))
+  if (entries.some(item => item.path === '.' || item.kind !== 'directory')) throw fail(400, '请选择真实存在的非根下级目录，不能选择整个仓库或文件')
   const normalized_scope = [...new Set(entries.map(item => item.path))].sort()
   return { status: 'ok', normalized_scope, selected_entry_count: normalized_scope.length, entries }
 }
@@ -36,7 +40,7 @@ export async function scopeTree({ dataRoot, repository, path: relative = '.', cu
   if (!Number.isSafeInteger(offset) || offset < 0) throw fail(400, '分页位置无效')
   const entries = await Promise.all(names.slice(offset, offset + size).map(async item => {
     const relativePath = path.relative(root, path.join(directory, item.name)).split(path.sep).join('/')
-    try { const resolved = await resolveEntry(root, relativePath); return { name: item.name, ...resolved, selectable: true } }
+    try { const resolved = await resolveEntry(root, relativePath); return { name: item.name, ...resolved, selectable: resolved.kind === 'directory' && resolved.path !== '.' } }
     catch { return { name: item.name, path: relativePath, kind: item.isDirectory() ? 'directory' : 'file', selectable: false } }
   }))
   return { status: 'ok', repository, path: entry.path, entries, cursor: offset, total_entries: names.length, next_cursor: offset + entries.length, has_more: offset + entries.length < names.length }

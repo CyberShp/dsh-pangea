@@ -222,6 +222,11 @@ function normalizeTask(taskId, value) {
     updated_at: Number.isFinite(value?.updated_at) ? value.updated_at : null,
     deleted_at: Number.isFinite(value?.deleted_at) ? value.deleted_at : null,
     stop_confirmed_at: Number.isFinite(value?.stop_confirmed_at) ? value.stop_confirmed_at : null,
+    // A persisted in-flight operation is not evidence that this new host owns it.
+    stop_operation: value?.stop_operation && typeof value.stop_operation === 'object'
+      && value.stop_operation.attempt_id === (value?.attempt_id ?? null)
+      ? { ...structuredClone(value.stop_operation), ...(['running', 'waiting'].includes(value.stop_operation.status)
+        ? { status: 'interrupted', message: '宿主已重新加载，停止确认尚未完成；请检查停止状态。' } : {}) } : null,
   }
 }
 
@@ -303,6 +308,7 @@ export class TaskStore {
     this.writeStore = writeStore
     this.store = emptyStore()
     this.saveQueue = Promise.resolve()
+    this.pendingStopPublications = new Set()
     this.ready = this.load()
   }
 
@@ -378,13 +384,27 @@ export class TaskStore {
     return Object.values(this.store.tasks)
       .filter(task => (includeDeleted || task.deleted_at === null) && (!root || task.workspace === root))
       .sort((left, right) => (right.updated_at ?? 0) - (left.updated_at ?? 0))
-      .map(task => structuredClone(task))
+      .map(task => this.taskSnapshot(task))
   }
 
   async get(taskId) {
     await this.ready
     const task = this.store.tasks[text(taskId)]
-    return task ? structuredClone(task) : null
+    return task ? this.taskSnapshot(task) : null
+  }
+
+  taskSnapshot(task) {
+    const snapshot = structuredClone(task)
+    if (this.pendingStopPublications.has(task.task_id)) {
+      snapshot.execution_status = 'stopping'; snapshot.stop_confirmed_at = null
+      if (snapshot.stop_operation) {
+        snapshot.stop_operation.status = 'running'
+        snapshot.stop_operation.message = '执行退出已核验，正在保存停止确认。'
+        const step = snapshot.stop_operation.steps?.find(item => item.id === 'persist')
+        if (step) step.status = 'running'
+      }
+    }
+    return snapshot
   }
 
   async softDelete(taskId) {
@@ -411,7 +431,7 @@ export class TaskStore {
     const id = text(sessionId)
     if (!id) return null
     const task = Object.values(this.store.tasks).find(item => item.conversations.some(conversation => conversation.session_id === id))
-    return task ? structuredClone(task) : null
+    return task ? this.taskSnapshot(task) : null
   }
 
   async getByRun(runId, { dataRoot } = {}) {
@@ -424,7 +444,7 @@ export class TaskStore {
       && (!root || (item.data_root && path.resolve(item.data_root) === path.resolve(root)))
     ))
     if (matches.length > 1) throw new Error(`ambiguous Task binding for Run: ${id}`)
-    return matches[0] ? structuredClone(matches[0]) : null
+    return matches[0] ? this.taskSnapshot(matches[0]) : null
   }
 
   async addConversation(taskId, { sessionId, title, kind = 'assistant', activate = true }) {
@@ -521,6 +541,7 @@ export class TaskStore {
     task.last_activity_at = now
     task.status = 'preparing'
     task.stop_confirmed_at = null
+    task.stop_operation = null
     return attempt
   }
 
@@ -592,7 +613,7 @@ export class TaskStore {
     if (!ref.jobId) return null
     const matches = Object.values(this.store.tasks).filter(item => taskMatchesJob(item, ref))
     const task = matches.length === 1 ? matches[0] : null
-    return task ? structuredClone(task) : null
+    return task ? this.taskSnapshot(task) : null
   }
 
   async bindAgentRuntime(taskId, { agentSessionId, processId, attemptId }) {
@@ -668,7 +689,10 @@ export class TaskStore {
       attempt.last_activity_at = ended
     }
     if (attempt?.attempt_id === task.attempt_id) {
-      task.execution_status = status
+      // Job terminal facts alone do not finish an explicit stop transaction.
+      const stopping = task.stop_operation?.attempt_id === task.attempt_id
+        && task.stop_operation.status !== 'completed' && !Number.isFinite(task.stop_confirmed_at)
+      task.execution_status = stopping ? 'stopping' : status
       if (status === 'completed') task.status = 'completed'
       else task.status = attentionRequired ? 'needs_attention' : status
       task.terminal_error = status === 'failed' ? text(snapshot?.detail, 'ACP Agent 执行失败') : null
@@ -702,12 +726,25 @@ export class TaskStore {
     return structuredClone(task)
   }
 
+  async recordStopProgress(taskId, operation, { begin = false } = {}) {
+    await this.ready
+    const task = this.requireTask(taskId)
+    // Late worker callbacks cannot update a newer stop or execution attempt.
+    if ((task.attempt_id ?? null) !== operation.attempt_id || (task.run_id ?? null) !== operation.run_id
+      || Number.isFinite(task.deleted_at) || (!begin && task.stop_operation?.operation_id !== operation.operation_id)) return null
+    task.stop_operation = structuredClone(operation)
+    task.updated_at = this.now()
+    await this.persistQueued()
+    return structuredClone(task)
+  }
+
   async markStopping(taskId, error = null, { force = false } = {}) {
     await this.ready
     const task = this.requireTask(taskId)
     if (!force && ['completed', 'failed', 'stopped', 'interrupted'].includes(task.execution_status)) return structuredClone(task)
     task.execution_status = 'stopping'
     task.stop_confirmed_at = null
+    if (task.stop_operation && (error || task.stop_operation.status === 'completed')) task.stop_operation = { ...task.stop_operation, status: 'blocked', message: text(error) || '停止状态保存尚未确认。' }
     if (error) task.launch_error = text(error)
     const attempt = task.attempts.find(item => item.attempt_id === task.attempt_id)
     if (attempt && !['completed', 'failed', 'stopped', 'interrupted'].includes(attempt.execution_status)) {
@@ -721,10 +758,12 @@ export class TaskStore {
     return structuredClone(task)
   }
 
-  async markStopped(taskId, error = null, { force = false } = {}) {
+  async markStopped(taskId, error = null, { force = false, stopOperation } = {}) {
     await this.ready
     const task = this.requireTask(taskId)
     if (!force && ['completed', 'failed', 'interrupted', 'stopped'].includes(task.execution_status)) return structuredClone(task)
+    if (stopOperation && task.stop_operation?.operation_id === stopOperation.operation_id) task.stop_operation = structuredClone(stopOperation)
+    this.pendingStopPublications.add(taskId)
     const completed = task.status === 'completed'
     task.status = completed ? 'completed' : 'stopped'
     task.execution_status = completed ? 'completed' : 'stopped'
@@ -739,7 +778,12 @@ export class TaskStore {
       attempt.last_activity_at = attempt.ended_at
     }
     task.updated_at = this.now()
-    await this.persistQueued()
+    try { await this.persistQueued() }
+    catch (failure) {
+      task.execution_status = 'stopping'; task.stop_confirmed_at = null
+      if (task.stop_operation) task.stop_operation = { ...task.stop_operation, status: 'blocked', message: failure.message }
+      throw failure
+    } finally { this.pendingStopPublications.delete(taskId) }
     return structuredClone(task)
   }
 

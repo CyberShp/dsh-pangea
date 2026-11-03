@@ -174,11 +174,17 @@ test('analysis import success returns to tasks or the exact originating draft an
   h.click('analysis', '新建分析')
   h.bank('analysis').states[16] = { type: 'create', createStep: 1, createView: 'inputs' }
   h.bank('analysis').states[33].target = '保留分析目标'
+  Object.assign(h.bank('analysis').states[33], { repository: 'repo', source_scope_text: 'old-src', scope_preview_id: 'old', expected_scope_revision: 'old' })
+  h.bank('analysis').states[91] = { preview_id: 'old' }
   h.click('analysis', '添加')
   await h.importRepository('analysis')
   assert.deepEqual(clone(h.bank('analysis').states[16]), { type: 'create', createStep: 1, createView: 'inputs' })
   assert.equal(h.bank('analysis').states[33].repository, 'imported')
   assert.equal(h.bank('analysis').states[33].target, '保留分析目标')
+  assert.equal(h.bank('analysis').states[33].source_scope_text, '')
+  assert.equal(h.bank('analysis').states[33].scope_preview_id, undefined)
+  assert.equal(h.bank('analysis').states[33].expected_scope_revision, undefined)
+  assert.equal(h.bank('analysis').states[91], null)
 })
 
 test('late task bootstrap and changing task Run do not take over create or repository import', async () => {

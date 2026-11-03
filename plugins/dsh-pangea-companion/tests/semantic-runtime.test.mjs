@@ -21,13 +21,13 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     process.env.PANGEA_DATA_ROOT = path.join(cwd, 'pangea-data')
     await cp(path.join(runtime, '.agents'), path.join(cwd, '.agents'), { recursive: true })
     const repository = path.join(cwd, 'pangea-data', 'repositories', 'sample')
-    await mkdir(repository, { recursive: true })
-    await writeFile(path.join(repository, 'sample.c'), 'int add(int a, int b) { return a + b; }\n' + Array.from({ length: 100 }, (_, i) => `// frozen line ${i} ${'x'.repeat(60)}\n`).join(''))
+    await mkdir(path.join(repository, 'src'), { recursive: true })
+    await writeFile(path.join(repository, 'src/sample.c'), 'int add(int a, int b) { return a + b; }\n' + Array.from({ length: 100 }, (_, i) => `// frozen line ${i} ${'x'.repeat(60)}\n`).join(''))
     await mkdir(path.join(repository, 'docs'), { recursive: true })
     await writeFile(path.join(repository, 'docs/usage.md'), 'Frozen command: add 1 2\n')
     const run = await createRun(cwd, {
       repository: 'sample', target: 'DSH semantic interface fixture',
-      source_scope: ['sample.c'], context_scope: ['docs/usage.md'], effective_context_budget: 204800,
+      source_scope: ['src'], context_scope: ['docs/usage.md'], effective_context_budget: 204800,
     })
     const contractPath = path.join(run.data_root, 'runs', run.run_id, 'inputs', 'task-contract.json')
     const frozen = JSON.parse(await readFile(contractPath, 'utf8'))
@@ -49,10 +49,10 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     const opened = await call('pangea_task_open', binding)
     assert.equal(opened.binding.task_id, binding.task_id)
     const index = await call('pangea_source_index', binding)
-    assert.deepEqual(index.files.map(file => file.path).sort(), ['docs/usage.md', 'sample.c'])
+    assert.deepEqual(index.files.map(file => file.path).sort(), ['docs/usage.md', 'src/sample.c'])
     const saved = await call('pangea_plan_write', {
       ...binding, expected_revision: 0,
-      unit: { title: 'Add', purpose: 'Interface fixture', owned_files: [{ repo_id: 'sample', path: 'sample.c' }] },
+      unit: { title: 'Add', purpose: 'Interface fixture', owned_files: [{ repo_id: 'sample', path: 'src/sample.c' }] },
     })
     assert.equal(saved.diagnostics.ready, true)
     await call('pangea_work_finish', { ...binding, revision: saved.revision })
@@ -69,10 +69,10 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     assert.match(JSON.stringify(found), /Frozen command/)
     assert.equal(prepared.prepared_source.source_delivery_complete, true)
     assert.match(prepared.prepared_source.pages[0].source.text, /return a \+ b/)
-    const page = await call('pangea_source_read', { ...analysisBinding, repo_id: 'sample', path: 'sample.c' })
+    const page = await call('pangea_source_read', { ...analysisBinding, repo_id: 'sample', path: 'src/sample.c' })
     assert.equal(page.request_complete, true)
     assert.match(page.text, /return a \+ b/)
-    let paged = await call('pangea_source_read', { ...analysisBinding, repo_id: 'sample', path: 'sample.c', max_chars: 1400 })
+    let paged = await call('pangea_source_read', { ...analysisBinding, repo_id: 'sample', path: 'src/sample.c', max_chars: 1400 })
     assert.ok(paged.next_read)
     let delivered = paged.text
     while (paged.next_read) {
@@ -83,7 +83,7 @@ test('semantic runtime creates, binds, plans, settles and resumes the same Run t
     assert.equal(delivered.split('\n').length, 101)
     assert.match(delivered, /frozen line 99/)
     const note = await call('pangea_result_write', { ...analysisBinding, expected_revision: 0,
-      records: [{ kind: 'note', body: '输入 1 和 2，结果 4。', evidence: ['sample:sample.c:1'] }] })
+      records: [{ kind: 'note', body: '输入 1 和 2，结果 4。', evidence: ['sample:src/sample.c:1'] }] })
     const edits = [{ path: [], old: '结果 4', new: '结果 3' }]
     const corrected = await call('pangea_result_supersede', { ...analysisBinding, expected_revision: note.revision,
       target_record_ids: ['rec-000001'], edits, request_id: 'correction-1' })

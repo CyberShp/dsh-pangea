@@ -1,3 +1,4 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -27,6 +28,8 @@ test('accepts quoted file URIs and UNC paths copied from Windows Explorer', () =
 
 test('creates a frozen source-first contract and removes it after Run creation', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-run-api-'))
+  await writeSourceRepository(root, 'repo-one')
+  await writeSourceRepository(root, 'sample')
   const marker = path.join(root, '.agents', 'pangea')
   const nested = path.join(root, 'nested')
   let pending
@@ -37,7 +40,7 @@ test('creates a frozen source-first contract and removes it after Run creation',
     let observed
     const calls = []
     const result = await createRun(nested, {
-      repository: 'repo-one', target: 'session and retry', source_scope: ['src/session.c'],
+      repository: 'repo-one', target: 'session and retry', source_scope: ['src'],
       asset_ids: ['asset-1'],
       focus: ['recovery'], test_case_examples: ['TC-1'], context_scope: ['include/session.h', 'docs/usage.md'],
     }, async call => {
@@ -55,7 +58,7 @@ test('creates a frozen source-first contract and removes it after Run creation',
     assert.deepEqual(calls[0].args.slice(0, 2), ['system', 'capabilities'])
     assert.equal(observed.contract.repository, 'repo-one')
     assert.equal(observed.contract.target, 'session and retry')
-    assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
+    assert.deepEqual(observed.contract.source_scope, ['src'])
     assert.deepEqual(observed.contract.context_scope, ['include/session.h', 'docs/usage.md'])
     assert.equal(observed.contract.run_id, undefined)
     assert.equal(observed.contract.mode, undefined)
@@ -73,11 +76,13 @@ test('creates a frozen source-first contract and removes it after Run creation',
 
 test('refuses to create a Run against a backend without source-first-v1', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-skill-api-'))
+  await writeSourceRepository(root, 'repo-one')
+  await writeSourceRepository(root, 'sample')
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
     await assert.rejects(
-      () => createRun(root, { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] }, async () => ({ repositories: ['repo-one'] })),
+      () => createRun(root, { repository: 'repo-one', target: 'session', source_scope: ['src'] }, async () => ({ repositories: ['repo-one'] })),
       /codetalks-skill|source-first-v1/,
     )
   } finally {
@@ -87,13 +92,15 @@ test('refuses to create a Run against a backend without source-first-v1', async 
 
 test('preserves focus and test example fields in the source-first contract', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-legacy-input-'))
+  await writeSourceRepository(root, 'repo-one')
+  await writeSourceRepository(root, 'sample')
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
     let pending
     let contract
     await createRun(root, {
-      repository: 'repo-one', target: 'source-first', source_scope: [], focus: ['manual'], test_case_examples: ['TC-1'],
+      repository: 'repo-one', target: 'source-first', source_scope: ['src'], focus: ['manual'], test_case_examples: ['TC-1'],
     }, async call => {
       if (call.args[0] === 'system') return { workflow_versions: ['source-first-v1'] }
       pending = call.args.at(-1)
@@ -109,6 +116,8 @@ test('preserves focus and test example fields in the source-first contract', asy
 
 test('concurrent source-first creations keep separate request files and identities', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-concurrent-create-'))
+  await writeSourceRepository(root, 'repo-one')
+  await writeSourceRepository(root, 'sample')
   try {
     await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents/pangea/dsh.md'), 'rules')
@@ -125,7 +134,7 @@ test('concurrent source-first creations keep separate request files and identiti
       targets.push(contract.target)
       return { run_id: contract.target }
     }
-    const results = await Promise.all(['first', 'second'].map(target => createRun(root, { repository: 'sample', target, source_scope: ['sample.c'] }, runner)))
+    const results = await Promise.all(['first', 'second'].map(target => createRun(root, { repository: 'sample', target, source_scope: ['src'] }, runner)))
     assert.deepEqual(results.map(r => r.run_id), ['first', 'second'])
     assert.deepEqual(targets.sort(), ['first', 'second'])
     assert.notEqual(paths[0], paths[1])

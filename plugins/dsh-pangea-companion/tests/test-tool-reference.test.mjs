@@ -49,10 +49,10 @@ test('directory picker cancel and unchanged confirmation do not alter selection'
   const previous = globalThis.fetch; globalThis.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok', entries: [], path: '.' }) })
   try {
     let tree = render(Component, props)
-    nodes(tree).find(n => n.type === 'button' && text(n) === '选择目录或文件').props.onClick(); await Promise.resolve()
+    nodes(tree).find(n => n.type === 'button' && text(n) === '选择下级目录').props.onClick(); await Promise.resolve()
     tree = render(Component, props); nodes(tree).find(n => n.type === 'button' && text(n) === '取消').props.onClick()
     tree = render(Component, props); assert.equal(nodes(tree).some(n => n.props.role === 'dialog'), false)
-    nodes(tree).find(n => n.type === 'button' && text(n) === '选择目录或文件').props.onClick(); await Promise.resolve()
+    nodes(tree).find(n => n.type === 'button' && text(n) === '选择下级目录').props.onClick(); await Promise.resolve()
     tree = render(Component, props); nodes(tree).find(n => n.type === 'button' && text(n) === '完成选择').props.onClick()
     assert.equal(changes, 0)
   } finally { globalThis.fetch = previous }
@@ -131,5 +131,99 @@ test('tool preview errors stay visible and retry can establish a new confirmatio
     nodes(render(Component, props)).find(n => n.type === 'button' && text(n) === '预览最终工具参考文件').props.onClick()
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(preview.preview_id, 'fresh'); assert.doesNotMatch(text(render(Component, props)), /工具参考预览失败/)
+  } finally { globalThis.fetch = previous }
+})
+
+test('directory picker rejects root-shaped drafts and invalid relative paths before preview or confirmation', async () => {
+  const { isSubdirectoryPath } = await import('../src/source-scope-picker.js')
+  for (const value of ['', ' ', '.', './', './/.', '../src', 'src/..', '/src', '\\src', 'C:src', 'C:\\src', '\\\\host\\src', 'bad\0path']) assert.equal(isSubdirectoryPath(value), false, value)
+  for (const value of ['src', './src', 'src/.', '中文 空格,目录', 'src\\nested']) assert.equal(isSubdirectoryPath(value), true, value)
+  const { React, render } = harness(), Component = createSourceScopePicker(React)
+  let changes = 0
+  const props = { cwd: '/fixture', repository: 'repo', value: '.', onChange() { changes++ }, onPreview() {} }
+  const previous = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok', path: '.', entries: [] }) })
+  try {
+    let tree = render(Component, props)
+    assert.equal(nodes(tree).find(n => n.type === 'button' && text(n) === '预览命中文件').props.disabled, true)
+    nodes(tree).find(n => n.type === 'button' && text(n) === '选择下级目录').props.onClick()
+    await new Promise(resolve => setImmediate(resolve))
+    tree = render(Component, props)
+    const finish = nodes(tree).find(n => n.type === 'button' && text(n) === '完成选择')
+    assert.equal(finish.props.disabled, true)
+    finish.props.onClick()
+    assert.equal(changes, 0)
+    assert.equal(nodes(render(Component, props)).some(n => n.props.role === 'dialog'), true)
+  } finally { globalThis.fetch = previous }
+})
+
+test('selected ghosts and legacy files can be removed, cancelled, cleared, and replaced', async () => {
+  const { React, render } = harness(), Component = createSourceScopePicker(React)
+  const changes = [], previews = []
+  let props = { cwd: '/fixture', repository: 'repo', value: 'missing-dir\nold/file.c', onChange(value) { changes.push(value); props = { ...props, value } }, onPreview(value) { previews.push(value) } }
+  const previous = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok', path: '.', entries: [{ name: 'new-src', path: 'new-src', kind: 'directory', selectable: true }] }) })
+  const draw = () => render(Component, props)
+  const button = label => nodes(draw()).find(n => n.type === 'button' && (text(n) === label || n.props['aria-label'] === label))
+  const open = async () => { button('选择下级目录').props.onClick(); await new Promise(resolve => setImmediate(resolve)) }
+  try {
+    await open()
+    button('移除已选范围 missing-dir').props.onClick()
+    button('取消').props.onClick()
+    assert.deepEqual(changes, []); assert.deepEqual(previews, [])
+    await open()
+    assert.ok(button('移除已选范围 missing-dir'))
+    button('移除已选范围 missing-dir').props.onClick()
+    button('移除已选范围 old/file.c').props.onClick()
+    assert.equal(button('清空选择').props.disabled, false)
+    button('清空选择').props.onClick()
+    assert.deepEqual(changes, ['']); assert.deepEqual(previews, [null])
+    assert.equal(button('预览命中文件').props.disabled, true)
+    // Direct invocation cannot turn the empty selection into a preview.
+    button('预览命中文件').props.onClick()
+    assert.match(text(draw()), /请选择真实存在/)
+    await open()
+    nodes(draw()).find(n => n.type === 'input' && n.props.type === 'checkbox').props.onChange()
+    button('完成选择').props.onClick()
+    assert.equal(props.value, 'new-src'); assert.equal(button('预览命中文件').props.disabled, false)
+    await open()
+    button('移除已选范围 new-src').props.onClick()
+    button('取消').props.onClick()
+    assert.equal(props.value, 'new-src')
+    await open(); assert.ok(button('移除已选范围 new-src'))
+  } finally { globalThis.fetch = previous }
+})
+
+function effectHarness() {
+  const hooks = [], effects = []; let index = 0, pending = []
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState(initial) { const key = index++; if (!(key in hooks)) hooks[key] = initial; return [hooks[key], value => { hooks[key] = value }] },
+    useRef(initial) { const key = index++; return hooks[key] ??= { current: initial } },
+    useEffect(effect, deps) { const key = index++, previous = effects[key]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) pending.push(() => { previous?.cleanup?.(); effects[key] = { deps, cleanup: effect() } }) },
+  }
+  return { React, render(Component, props) { index = 0; pending = []; const tree = Component(props); for (const run of pending) run(); return tree }, unmount() { for (const effect of effects) effect?.cleanup?.() } }
+}
+
+test('late source previews cannot revive after repository changes, clearing, or picker unmount', async () => {
+  const h = effectHarness(), Component = createSourceScopePicker(h.React), previews = [], pending = []
+  const previous = globalThis.fetch
+  globalThis.fetch = () => new Promise(resolve => pending.push(resolve))
+  let props = { cwd: '/fixture', repository: 'old', value: 'old-src', onChange() {}, onPreview(value) { if (value) previews.push(value) } }
+  const render = () => h.render(Component, props)
+  const preview = () => nodes(render()).find(n => n.type === 'button' && text(n) === '预览命中文件').props.onClick()
+  const finish = resolve => resolve({ ok: true, json: async () => ({ status: 'ok', matched_file_count: 1, files: [] }) })
+  try {
+    render(); preview()
+    props = { ...props, repository: 'new', value: '' }; render(); render()
+    finish(pending.shift()); await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(previews, [])
+    props = { ...props, value: 'new-src' }; render(); preview()
+    props = { ...props, value: '' }; render(); render()
+    finish(pending.shift()); await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(previews, [])
+    props = { ...props, value: 'new-src' }; render(); preview()
+    h.unmount(); finish(pending.shift()); await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(previews, [])
   } finally { globalThis.fetch = previous }
 })

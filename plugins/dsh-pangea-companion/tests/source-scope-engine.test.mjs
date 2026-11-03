@@ -22,11 +22,11 @@ test('real engine preview matches frozen source set, honors ignores and rejects 
     const value = JSON.parse(stdout); assert.equal(value.ok, true, JSON.stringify(value.error)); return value.result
   }
   const preview = scopes => cli('source-scope-preview', '--data-root', dataRoot, '--repository', 'repo', '--source-scope', JSON.stringify(scopes))
-  const selected = [scope, `${scope}/握手-0.c`], result = await preview(selected)
+  const selected = [scope], result = await preview(selected)
   assert.equal(result.matched_file_count, 62)
   assert.equal(new Set(result.files.map(item => item.relative_path)).size, 62)
   assert.ok(result.files.every(item => !item.relative_path.includes('/build/')))
-  assert.equal((await preview(['.'])).matched_file_count, 62)
+  await assert.rejects(preview(['.']))
   assert.equal((await preview(['空目录'])).matched_file_count, 0)
   for (const scopes of [[], ['不存在'], ['../'], ['']]) await assert.rejects(preview(scopes))
   const contract = path.join(dataRoot, 'contract.json')

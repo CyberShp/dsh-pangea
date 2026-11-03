@@ -54,3 +54,56 @@ test('delete confirmation explains retained data and unresolved stops, preserves
   assert.ok(nodes(pending).filter(item => item.type === 'button').every(item => item.props.disabled))
   assert.match(text(pending), /正在停止并删除/)
 })
+
+// Execute the actual event-handler bodies, with their React state/network boundaries
+// substituted. Component rendering alone cannot catch async response-path exceptions.
+async function handler(name, next, context) {
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const start = source.indexOf(`async function ${name}(`)
+  const end = source.indexOf(`\n      ${next}`, start)
+  assert.ok(start >= 0 && end > start)
+  return vm.runInNewContext(`(${source.slice(start, end)})`, { ...context, Error })
+}
+
+for (const status of ['completed', 'blocked', 'running', 'waiting']) {
+  test(`Run stop click handler consumes ${status} task responses without masking them as JavaScript failures`, async () => {
+    const notices = []
+    const task = { task_id: 'task', run_id: 'run', attempt_id: 'attempt', stop_operation: { status } }
+    const response = { status: status === 'completed' ? 'ok' : 'stopping', task,
+      stop_confirmed: status === 'completed', error: status === 'blocked' ? 'fixture process proof unavailable' : null }
+    const stop = await handler('stopCurrentRun', 'function toggleCase(', {
+      cwd: '/fixture', current: { run_id: 'run' }, selectedTask: task, snapshot: { data_root: '/fixture/data' },
+      requestWorkbenchAction: async () => response, load: async () => {}, loadWorkbench: async () => {},
+      showActionNotice: (...args) => notices.push(args),
+    })
+    if (status === 'blocked') await assert.rejects(stop(true), /fixture process proof unavailable/)
+    else await stop(true)
+    const messages = notices.map(item => item[0]).join('\n')
+    assert.doesNotMatch(messages, /undefined|ReferenceError|TypeError|not defined/)
+    if (status === 'completed') assert.match(messages, /已停止 run/)
+    else if (status === 'blocked') assert.match(messages, /停止尚未确认/)
+    else { assert.match(messages, /已收到停止请求/); assert.ok(notices.every(item => item[1] !== true)) }
+  })
+
+  test(`Task dialog click handler consumes ${status} task responses and keeps waiting separate from errors`, async () => {
+    const task = { task_id: 'task', run_id: 'run', attempt_id: 'attempt', stop_operation: { status } }
+    let dialog = { task, action: 'stop', cwd: '/fixture', busy: false }, actions = {}
+    const response = { status: status === 'completed' ? 'ok' : 'stopping', task,
+      stop_confirmed: status === 'completed', error: status === 'blocked' ? 'fixture stop blocked' : null }
+    const confirm = await handler('confirmTaskAction', 'function taskActionButtons(', {
+      taskActionDialog: dialog, taskActionPendingRef: { current: new Map() },
+      taskActionScopeRef: { current: { cwd: '/fixture', pageMode: 'analysis' } },
+      workbenchRequestRef: { current: { sequence: 1 } },
+      latestTaskRefreshRef: { current: { loadWorkbench: async () => {}, load: async () => {} } },
+      setTaskActionDialog: update => { dialog = update(dialog) }, setTaskActions: update => { actions = update(actions) },
+      setWorkbench: update => update({ tasks: { items: [task] } }), setWorkbenchLoading() {},
+      requestWorkbenchAction: async () => response,
+    })
+    await confirm()
+    if (status === 'completed') assert.equal(dialog, null)
+    else if (status === 'blocked') assert.equal(dialog.error, 'fixture stop blocked')
+    else assert.equal(dialog.error, '')
+    assert.equal(actions.task.busy, false)
+    assert.doesNotMatch(actions.task.error ?? '', /undefined|ReferenceError|TypeError|not defined/)
+  })
+}

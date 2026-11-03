@@ -204,7 +204,7 @@ test('appendix supports columns beyond Z and preserves nested entry/oracle value
   const files = entries(buildTestCaseXlsx({ details: { test_cases: [item] } }))
   const sheet = files.get('xl/worksheets/sheet2.xml')
   assert.match(sheet, /r="AA2"/)
-  assert.match(sheet, /max="31"/)
+  assert.match(sheet, /max="33"/)
   assert.match(sheet, /&quot;channel&quot;:&quot;socket&quot;/)
   assert.match(sheet, /&quot;response&quot;:\{&quot;expected&quot;:&quot;&lt;ok&gt;&quot;\}/)
   assert.doesNotMatch(sheet, /\[object Object\]/)

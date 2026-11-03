@@ -223,7 +223,7 @@ npm test
 
 ### UI/UX 开发分支：范围预览与用例评审
 
-新建分析要求明确选择源码范围并预览实际命中文件。`source_scope` 仍为相对路径数组，整个仓库需显式选择 `.`。范围校验和预览位于 `src/repositories/scope.js`，复用 Agent 的只读 `source-scope-preview`；提交前重新确认 `scope_preview_id` / `expected_scope_revision`。工作台与冻结引擎版本需配套。
+新建分析要求明确选择源码范围并预览实际命中文件。`source_scope` 为真实存在的非根下级目录相对路径数组，不接受全仓、文件、绝对路径或越界路径；工具源码选择遵守相同限制。历史已冻结 Run 继续使用原冻结范围，不迁移或重写数据。范围校验和预览位于 `src/repositories/scope.js`，复用 Agent 的只读 `source-scope-preview`；提交前重新确认 `scope_preview_id` / `expected_scope_revision`。工作台与冻结引擎版本需配套。
 
 用例用户决定独立存放在 `<dataRoot>/.pangea/case-reviews/<runId>.json`，通过 `/api/pangea-companion/case-reviews` GET/POST 读取和 CAS 保存。源码 Run 保持只读。`projection_id` 或唯一 `test_case_id` 用于持久身份，重复/缺失身份只允许阅读和全部导出。内容变化后需重新评审。
 

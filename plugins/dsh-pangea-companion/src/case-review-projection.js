@@ -40,3 +40,11 @@ export function reviewProjection(items = [], decisions = {}, hashes = {}) {
   })
   return { cases, counts }
 }
+
+// Versioned records select one authored field, including intentional emptiness.
+// Unknown/legacy records retain their original precedence; never merge aliases.
+export function caseField(item, canonical, legacy) {
+  return item?.format_version === 'behavior-test-case-v1'
+    ? item[canonical]
+    : item?.[legacy] ?? item?.[canonical]
+}

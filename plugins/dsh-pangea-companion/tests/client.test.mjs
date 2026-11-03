@@ -74,7 +74,7 @@ test('new analysis objective requires an explicit user choice and request preser
 
 test('new analysis target and confirmation steps show only the selected source scope', async () => {
   for (const createStep of [1, 4]) {
-    const form = { repository: 'repo', target: 'CPU 使用率计算分析', source_scope_text: 'src/cpuload.c', context_scope_text: 'tests/old-reference.c', flow_baseline: { run_id: 'old-run', version_id: 'old-version' }, asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '' }
+    const form = { repository: 'repo', target: 'CPU 使用率计算分析', source_scope_text: 'src', context_scope_text: 'tests/old-reference.c', flow_baseline: { run_id: 'old-run', version_id: 'old-version' }, asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: '', model_route_key: '' }
     const states = {
       1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] }, acp_providers: [], flow_baseline_options: [{ repository: 'repo', run_id: 'old-run', version_id: 'old-version' }] },
       16: { type: 'create', createStep },
@@ -93,10 +93,11 @@ test('new analysis target and confirmation steps show only the selected source s
     const nodes = descendants(panel.type(panel.props))
     assert.doesNotMatch(JSON.stringify(nodes), /参考源码范围|流程基线|tests\/old-reference\.c|old-run|old-version/, `create step ${createStep}`)
     if (createStep === 1) {
-      const sourceScope = nodes.find(node => node.type === 'textarea' && node.props['aria-label'] === '源码冻结范围')
-      assert.equal(sourceScope.props.value, 'src/cpuload.c')
+      const sourceScope = nodes.find(node => node.type === 'textarea' && node.props['aria-label'] === '源码冻结目录')
+      assert.equal(sourceScope.props.value, 'src')
+      assert.equal(sourceScope.props.readOnly, true)
       const picker = nodes.find(node => node.type?.name === 'SourceScopePicker')
-      assert.equal(picker.props.value, 'src/cpuload.c')
+      assert.equal(picker.props.value, 'src')
       assert.equal(picker.props.repository, 'repo')
       assert.equal(picker.props.preview.matched_file_count, 1)
     } else {
@@ -108,7 +109,7 @@ test('new analysis target and confirmation steps show only the selected source s
 
 test('source scope drawer opens file and directory rows with the real product icon renderer', async () => {
   const panelStates = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['repo'] } }, 16: { type: 'create', createStep: 1 },
-    33: { repository: 'repo', target: 'TLS', source_scope_text: '.', asset_ids: [], scenario: 'branch-analysis', mode: 'depth' }, 34: { assets: [] } }
+    33: { repository: 'repo', target: 'TLS', source_scope_text: 'src', asset_ids: [], scenario: 'branch-analysis', mode: 'depth' }, 34: { assets: [] } }
   const pickerStates = {}
   let mode = 'panel', index = 0, requests = 0
   const client = await loadClientExports({ ...fakeReact(), useState(initial) {
@@ -128,13 +129,16 @@ test('source scope drawer opens file and directory rows with the real product ic
   assert.equal(picker.props.renderIcon('FolderOpen').type, 'svg')
   mode = 'picker'
   const render = () => { index = 0; return descendants(picker.type(picker.props)) }
-  render().find(node => node.type === 'button' && node.children.includes('选择目录或文件')).props.onClick()
+  render().find(node => node.type === 'button' && node.children.includes('选择下级目录')).props.onClick()
   await new Promise(resolve => setImmediate(resolve))
   const opened = render()
   assert.equal(requests, 1)
   assert.ok(opened.some(node => node.props.role === 'dialog' && node.props['aria-label'] === '选择源码范围'))
   const rows = opened.filter(node => node.props.className === 'pangea-scope-tree-row')
   assert.equal(rows.length, 2)
+  assert.equal(descendants(rows[0]).find(node => node.type === 'input').props.disabled, false)
+  assert.equal(descendants(rows[1]).find(node => node.type === 'input').props.disabled, true)
+  assert.equal(opened.some(node => node.type === 'button' && node.children.includes('选择整个仓库')), false)
   assert.ok(rows.every(row => descendants(row).some(node => node.type === 'svg')))
   assert.ok(opened.some(node => node.type === 'button' && node.children.includes('上一级')))
   opened.find(node => node.type === 'button' && node.children.includes('完成选择')).props.onClick()
@@ -158,7 +162,7 @@ test('saved internal API settings do not restore an analysis route or show inter
 async function loadClientExports(react = fakeReact(), fetcher = async () => { throw new Error('fetch must not run during registration') }, onEvent = () => {}, windowProperties = {}) {
   const source = await readFile(clientPath, 'utf8')
   let exported
-  const sandbox = { URLSearchParams, AbortController, console, fetch: fetcher, setInterval, clearInterval,
+  const sandbox = { URLSearchParams, AbortController, console, fetch: fetcher, setInterval, clearInterval, navigator: windowProperties.navigator,
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail } } }
   sandbox.window = { dispatchEvent: onEvent, setInterval, clearInterval, setTimeout: (...args) => setTimeout(...args).unref(), clearTimeout, ...windowProperties, __ModuleLoader__: { load(spec) { exported = spec.factory(name => name === 'react' ? react : {}) } } }
   vm.runInNewContext(source, sandbox, { filename: clientPath })
@@ -2054,7 +2058,7 @@ test('source-first create form disables unsupported analysis options', async () 
 })
 
 
-test('short case detail renders variants, opens unit notes and navigates to the explicit flow', async () => {
+test('short case detail renders variants without unit notes or context navigation', async () => {
   const { sourceFirstProjection } = await import('../src/source-first-projection.js')
   const details = sourceFirstProjection([{ action_id: 'run:a', task: { unit_id: 'a' }, stage: 'unit_analysis', status: 'accepted', records: [
     { record_id: 'c', kind: 'test_case', body: { case_id: 'TC-1', entry: '共用操作', variants: [{ input: 'sha256', expected: '连接成功' }] } },
@@ -2071,11 +2075,9 @@ test('short case detail renders variants, opens unit notes and navigates to the 
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
   const nodes = descendants(panel.type(panel.props))
   const rendered = JSON.stringify(nodes)
-  for (const text of ['参数变体', 'sha256', '连接成功', '本分析单元说明', 'connect --digest sha256']) assert.ok(rendered.includes(text), text)
-  const link = nodes.find(n => n.type === 'button' && n.children.some(value => String(value).includes('F-1')))
-  assert.ok(link)
-  link.props.onClick()
-  assert.equal(nextScreen.type, 'flows')
+  for (const text of ['参数变体', 'sha256', '连接成功']) assert.ok(rendered.includes(text), text)
+  for (const text of ['本分析单元说明', '关联上下文', '未解析的关联引用', '未记录观察点']) assert.ok(!rendered.includes(text), text)
+
 })
 
 test('analysis request excludes retired inputs from an existing draft and preserves active inputs', async () => {
@@ -2513,7 +2515,7 @@ test('path-only flow renders complete entry and path content without inventing g
   assert.ok(JSON.stringify(nodes).includes('暂不能据此绘制流程图'))
 })
 
-async function caseMetricsView(records, gaps, screen) {
+async function caseMetricsView(records, gaps, screen, windowProperties = {}) {
   const { sourceFirstProjection, coverageSummary, caseQualitySummary } = await import('../src/source-first-projection.js')
   const details = sourceFirstProjection([{ stage: 'unit_analysis', status: 'accepted', task: { unit_id: 'u' }, records }])
   details.coverage_gaps = gaps
@@ -2523,7 +2525,7 @@ async function caseMetricsView(records, gaps, screen) {
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: screen }
   const before = JSON.stringify(states)
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } }, undefined, undefined, windowProperties)
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
@@ -3316,4 +3318,94 @@ for (const summary of ['', ' \n\t ']) test('case detail does not treat blank sum
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', summary, coverage_refs: ['G'] } }], [{ coverage_id: 'G' }], { type: 'case', id: 'u/c' })
   const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
   assert.ok(rendered.includes('未提供逐用例 summary'))
+})
+
+test('Run write fence never overrides an unconfirmed execution stop, including a blocked stop', async () => {
+  const client = await loadClientExports()
+  for (const status of ['running', 'waiting', 'blocked', 'interrupted']) {
+    const task = { task_id: 'task-stop', run_id: 'run-stop', attempt_id: 'attempt-stop', status: 'stopped', execution_status: 'stopping', stop_confirmed_at: null,
+      stop_operation: { task_id: 'task-stop', run_id: 'run-stop', attempt_id: 'attempt-stop', status, message: '实际后台状态', steps: [{ id: 'workers', status: 'waiting', message: '等待原工具退出证据' }] } }
+    const current = { run_id: task.run_id, lifecycle_status: 'stopped', terminal: true, workflow: { steps: [] } }
+    const presentation = client.deriveRunPresentation(task, current, {})
+    assert.equal(presentation.stopping, true, status)
+    assert.equal(presentation.stopped, false, status)
+    assert.equal(presentation.canResume, false, status)
+    const panel = client.StopProgress({ task })
+    assert.match(JSON.stringify(panel), /等待原工具退出证据/)
+    assert.doesNotMatch(JSON.stringify(panel), /\d+%/)
+    assert.equal(client.currentStopOperation({ ...task, attempt_id: 'new-attempt' }), null)
+  }
+})
+
+test('stop progress requires durable confirmation before displaying completion', async () => {
+  const client = await loadClientExports()
+  const task = { task_id: 'task', run_id: 'run', attempt_id: 'attempt', stop_confirmed_at: null,
+    stop_operation: { task_id: 'task', run_id: 'run', attempt_id: 'attempt', status: 'completed', steps: [] } }
+  assert.doesNotMatch(JSON.stringify(client.StopProgress({ task })), /已停止，已保存结果保留/)
+  assert.match(JSON.stringify(client.StopProgress({ task: { ...task, stop_confirmed_at: 1234 } })), /已停止，已保存结果保留/)
+})
+
+test('case basis follows steps, is collapsed and retains literal evidence; empty observations are omitted', async () => {
+  const summary = { gap: 'plain original', trigger: 'run request()', source_evidence: ['repo:src/long/path/request.c:123'] }
+  const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { format_version: 'behavior-test-case-v1', purpose: 'coverage', summary, steps: [{ action: '操作', expected: '结果' }], observability: ['stale alias'], external_observations: [] } }], [], { type: 'case', id: 'u/c' })
+  const basis = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
+  assert.equal(basis.type, 'details')
+  assert.ok(!basis.props.open)
+  assert.ok(nodes.indexOf(basis) > nodes.findIndex(node => node.type === 'h3' && node.children.includes('操作步骤与逐步预期')))
+  assert.ok(JSON.stringify(basis).includes('request()'))
+  assert.ok(JSON.stringify(basis).includes('repo:src/long/path/request.c:123'))
+  assert.ok(!nodes.some(node => node.type === 'h3' && node.children.includes('补充观测')))
+})
+
+
+test('copy case omits empty observations and keeps authored basis and source evidence', async () => {
+  let copied = ''
+  const summary = '原样依据\nrequest() 没有触发错误分支'
+  const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { format_version: 'behavior-test-case-v1', summary, source_evidence: ['repo:src/file.c:123'], steps: [{ action: '点击', expected: '完成' }], external_observations: [], observability: ['stale'] } }], [], { type: 'case', id: 'u/c' }, { navigator: { clipboard: { async writeText(text) { copied = text } } } })
+  nodes.find(node => node.type === 'button' && node.children.includes('复制用例')).props.onClick()
+  await Promise.resolve()
+  assert.ok(copied.includes(summary))
+  assert.ok(copied.includes('repo:src/file.c:123'))
+  assert.ok(copied.includes('点击 → 完成'))
+  assert.ok(!copied.includes('补充观测'))
+  assert.ok(!copied.includes('stale'))
+})
+
+for (const content of [{ summary: '普通用例原文' }, { source_evidence: ['request() repo:src/request.c:123'] }, { summary: '普通用例原文', source_evidence: ['request() repo:src/request.c:123'] }]) test('ordinary case basis preserves standalone summary/evidence without coverage warnings', async () => {
+  const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { format_version: 'behavior-test-case-v1', purpose: 'branch', ...content } }], [], { type: 'case', id: 'u/c' })
+  const basis = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
+  assert.equal(basis.type, 'details')
+  assert.ok(!basis.props.open)
+  const text = metricsText(basis)
+  if (content.summary) assert.ok(text.includes(content.summary))
+  if (content.source_evidence) assert.ok(text.includes(content.source_evidence[0]))
+  for (const absent of ['冻结覆盖输入', '未提供有效覆盖引用', '未提供逐用例 summary']) assert.ok(!text.includes(absent), absent)
+})
+
+test('changing analysis repository clears source selection and receipt but same repository preserves them', async () => {
+  let index = 0
+  const states = { 1: { compatibility: { compatible: true }, capabilities: { repositories: ['old', 'new'] } },
+    16: { type: 'create', createStep: 1 }, 33: { repository: 'old', target: 'keep target', source_scope_text: 'old-src', asset_ids: [], scenario: 'branch-analysis', mode: 'depth', scope_preview_id: 'old-receipt', expected_scope_revision: 'old-revision' } }
+  states[91] = scopePreviewFixture(states)
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (!(key in states)) states[key] = initial; return [states[key], update => { states[key] = typeof update === 'function' ? update(states[key]) : update }] } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const render = () => { index = 0; const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true }); return descendants(panel.type(panel.props)) }
+  render().find(node => node.props['aria-label'] === '源码仓库').props.onChange({ target: { value: 'old' } })
+  assert.equal(states[33].source_scope_text, 'old-src'); assert.ok(states[91])
+  render().find(node => node.props['aria-label'] === '源码仓库').props.onChange({ target: { value: 'new' } })
+  assert.equal(states[33].source_scope_text, ''); assert.equal(states[91], null)
+  assert.equal(states[33].scope_preview_id, undefined); assert.equal(states[33].expected_scope_revision, undefined)
+  assert.equal(states[33].target, 'keep target')
+  let nodes = render()
+  assert.equal(nodes.find(node => node.children.includes('下一步 · 输入资料')).props.disabled, true)
+  let picker = nodes.find(node => node.type?.name === 'SourceScopePicker')
+  picker.props.onChange('new-src')
+  nodes = render(); picker = nodes.find(node => node.type?.name === 'SourceScopePicker')
+  assert.equal(picker.props.value, 'new-src'); assert.equal(picker.props.preview, null)
+  picker.props.onPreview({ preview_state: 'complete', matched_file_count: 1, preview_id: 'new-receipt', scope_revision: 'new-revision', files: [] })
+  assert.equal(render().find(node => node.children.includes('下一步 · 输入资料')).props.disabled, false)
+  render().find(node => node.type?.name === 'SourceScopePicker').props.onChange('')
+  assert.equal(states[91], null)
+  assert.equal(render().find(node => node.children.includes('下一步 · 输入资料')).props.disabled, true)
 })

@@ -27,15 +27,26 @@ export async function inspectSourceFirstAcpRecovery({ dataRoot, runId }) {
   return inspectAcpBindings(await readAcpBindings(dataRoot, runId), { currentInstanceId: instanceId })
 }
 
-export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped }) {
+export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped, onProgress }) {
   const state = liveRuns.get(JSON.stringify([path.resolve(dataRoot), runId]))
   if (!state) return false
   if (onStopped) state.onStopped = onStopped
   state.controller?.abort(new Error('用户结束当前执行'))
-  const results = await Promise.allSettled([...state.workers.values()].map(worker => state.disposeWorker?.(worker) ?? worker.dispose?.()))
+  const progress = async () => {
+    // A display observer must never prevent the already-requested cleanup.
+    try { await onProgress?.({ total: state.workers.size,
+      stopped: [...state.workers.keys()].filter(id => state.closed.has(String(id))).length,
+      pending_starts: state.pendingStarts?.() ?? 0 }) } catch {}
+  }
+  await progress()
+  const results = await Promise.allSettled([...state.workers.values()].map(async worker => {
+    try { return await (state.disposeWorker?.(worker) ?? worker.dispose?.()) }
+    finally { await progress() }
+  }))
   const failed = results.find(result => result.status === 'rejected')
   if (failed) throw failed.reason
   await state.promise?.catch(() => {})
+  await progress()
   liveRuns.delete(JSON.stringify([path.resolve(dataRoot), runId]))
   return true
 }
@@ -60,6 +71,7 @@ const planningRecordInstructions = action => action.stage === 'unit_planning' ? 
 // this on initial, compacted, repaired and cross-action closure prompts alike.
 const analysisRecordInstructions = (action, opened) => ['unit_analysis', 'targeted_closure'].includes(action.stage) ? [
   'Analysis/closure 交付说明：当前 task 的冻结 rubric 与 record_contracts 是本次分析的规则来源。旧任务未返回 write_contract 或未声明 record_contracts，不表示合同丢失；仍须完整执行冻结 rubric，不追补安装目录中的新版合同。框架模型、result_store、Graph 和 report 渲染源码不是补充写入合同，不为猜格式或完成条件去搜索这些实现。',
+  '若当前冻结生成 rubric 含 FIRST-CASE-DELIVERY，每条 test_case 首次 result-write 前由本 worker 在当前 action 完成逐例语义组织，写好一条即保存，不等 Reviewer；未提供该段的旧 Run 沿用原合同，不追补历史记录。续接/压缩/修复先恢复缺失的 analysis_settings、target/focus、单元 purpose/归属及工具参考：task-open 后沿 deferred_fields 的 input_id 用 input-read 分页读取，复用已读冻结依据。',
   '普通记录的 --records-file 是 UTF-8 JSON 数组，每项外壳仅为 {"kind":"当前冻结规则要求的记录类型","body":由你撰写的正文}，可带 evidence/relates_to/supersedes。note/summary/evidence 的 body 可为中文 Markdown；test_case/flow/risk/check 的 body 按本任务冻结样例和声明的合同填写，不包第二层 body，不写 binding/revision/completion 整个结果外壳，不自行生成 record_id。此说明不允许用 note 替代必须交付的结构化记录。',
   '先 result-read --view compact 获取当前 revision；完成一组有依据的分析即 result-write --expected-revision N --records-file <scratch内文件> 增量保存，携带全部 binding 参数，下一次 N 使用成功返回的 revision。不要把已核实内容留到全部探索结束才一次性提交。保存成功不等于语义完整，继续完成冻结规则要求的全部流程、用例、证据及自检。',
   'execution_readiness 表示可实施性，不代表已执行。execution_status：未执行用 not_run；冻结规则未另定枚举时，实际执行过用 executed（不等于 passed），成功、失败及预期比较写在执行证据中。已执行必须保留实际 argv、cwd、退出码、stdout/stderr 与证据引用，不能由预期推造观测。该未限定的展示字段不需要寻找额外枚举；有明确冻结枚举时以冻结枚举为准，不搜索框架来猜测。',

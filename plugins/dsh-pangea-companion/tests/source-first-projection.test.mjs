@@ -326,3 +326,20 @@ test('operation references use real record ids even when business aliases collid
   assert.deepEqual(item.linked_notes.map(note => note.source_record.record_id), ['actual-note'])
   assert.deepEqual(item.unresolved_related_refs, [{ unit_id: 'a', record_id: 'alias-only' }])
 })
+
+
+test('frozen case version selects canonical observations and type without merging aliases', () => {
+  for (const [format_version, observability, external_observations, expected] of [
+    ['behavior-test-case-v1', [], ['new observation'], ['new observation']],
+    ['behavior-test-case-v1', ['stale'], [], []],
+    ['behavior-test-case-v1', ['stale'], undefined, []],
+    [undefined, ['legacy'], ['new'], ['legacy']],
+    [undefined, undefined, ['fallback'], ['fallback']],
+  ]) {
+    const body = { format_version, observability, external_observations, case_type: 'legacy-type', test_level: 'business_blackbox' }
+    const result = sourceFirstProjection([action('u', [record('c', 'test_case', body)])]).test_cases[0]
+    assert.deepEqual(result.observability, expected)
+    assert.equal(result.case_type, format_version ? 'business_blackbox' : 'legacy-type')
+    assert.equal(result.source_record.body, body)
+  }
+})

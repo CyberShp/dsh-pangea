@@ -3,7 +3,7 @@ import { companionUpdateBusy, registerUpdateParticipant } from './update-admissi
 import { AgentSessionStore } from './agent-sessions.js'
 import { runtimeObservation } from './runtime-observation.js'
 import { inspectSourceFirstChildren, interruptSourceFirstChildren } from './report-policy.js'
-import { processPresence } from './acp-recovery.js'
+import { processPresence, readAcpBindings } from './acp-recovery.js'
 import { randomUUID } from 'node:crypto'
 import { listViews, viewArtifact } from './architecture-views.js'
 import { supportsHostReview } from './analysis-review.js'
@@ -90,7 +90,7 @@ const RUN_CREATE_PARAMETERS = {
   properties: {
     repository: { type: 'string', minLength: 1, description: '当前冻结输入中的仓库 ID。创建前只做确定性目录/文件名范围准备。' },
     target: { type: 'string', minLength: 1, description: '用户确认的分析对象原文。' },
-    source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '相对仓库根目录的源码范围。' },
+    source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '真实存在的非根下级目录，使用仓库相对路径。' },
     focus: { type: 'array', items: { type: 'string', minLength: 1 } },
     asset_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
     test_case_examples: { type: 'array', items: { type: 'string', minLength: 1 } },
@@ -250,6 +250,7 @@ export function applyTaskExecutionState(snapshot, task, observation) {
     snapshot = { ...snapshot, current }
   }
   const executionStatus = task.execution_status
+  if (executionStatus === 'stopping') return { ...snapshot, current: { ...current, run_lifecycle_status: current.lifecycle_status, lifecycle_status: 'stopping', terminal: false, phase: 'STOPPING', phase_title: '正在停止', stop_operation: task.stop_operation, external_execution: { status: 'stopping', task_id: task.task_id, attempt_id: task.attempt_id } } }
   const failed = task.status === 'failed' || ['failed', 'interrupted'].includes(executionStatus)
   const stopped = task.status === 'stopped' || executionStatus === 'stopped'
   if (!failed && !stopped) return snapshot
@@ -447,6 +448,9 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, runtime,
   const timeoutMs = 5 * 60 * 1000
   for (const task of taskItems) {
     if (!task.provider && task.workflow_version === 'source-first-v1' && task.execution_status === 'stopping') {
+      // Explicit stops own write fencing, errors and durable publication. A
+      // quiet native session alone must not bypass that transaction on GET.
+      if (task.stop_operation || taskOperationState(tasks).stops.has(task.task_id)) continue
       const recovery = await nativeRecovery(runtime, task)
       if (recovery.can_resume) await tasks.markStopped(task.task_id)
       continue
@@ -624,7 +628,7 @@ function readJobSnapshot(runtime, task) {
     if (error instanceof Error && error.message === `unknown job ${task.job_id}`) return null
     throw error
   }
-  if (snapshot && task.job_started_at !== snapshot.startedAt) throw new Error('ACP Job 身份不匹配，旧执行停止尚未确认')
+  if (snapshot) { const issue = jobIdentityIssue(task, snapshot); if (issue) throw Object.assign(new Error(issue), { code: 'ACP_JOB_IDENTITY_UNVERIFIED' }) }
   return snapshot
 }
 
@@ -751,17 +755,33 @@ export async function assessTaskResumeEligibility(runtime, task) {
   return deriveTaskResumeEligibility(runtime, task, recovery)
 }
 
+async function readStopJob(runtime, task) {
+  try { return readJobSnapshot(runtime, task) }
+  catch (error) {
+    // A new host can reuse subagent-N. Never cancel that new Job. Only independent
+    // evidence for the exact old Run/attempt may make the obsolete reference irrelevant.
+    if (error?.code !== 'ACP_JOB_IDENTITY_UNVERIFIED'
+      || task.workflow_version !== 'source-first-v1' || !task.runtime_instance_id
+      || task.runtime_instance_id === hostInstanceId || processPresence(task.host_process_id) !== 'absent') throw error
+    const saved = await readAcpBindings(task.data_root, task.run_id)
+    if (!task.attempt_id || saved?.owner?.attempt_id !== task.attempt_id) throw error
+    const proof = await inspectSourceFirstAcpRecovery({ dataRoot: task.data_root, runId: task.run_id })
+    if (!proof.can_resume) throw error
+    return null
+  }
+}
+
 async function taskStopEvidence(runtime, task, launchLocks, sourceDrained, launch, previouslyConfirmed = false) {
   const blocked = reason => ({ confirmed: false, reason })
-  if (launchLocks.has(task.task_id)) return blocked('启动请求尚未结束，正在等待取消确认')
+  if (launchLocks.has(task.task_id)) return { ...blocked('启动请求尚未结束，正在等待取消确认'), pending: true }
   if (task.job_id) {
     let job
-    try { job = readJobSnapshot(runtime, task) }
+    try { job = await readStopJob(runtime, task) }
     catch (error) { return blocked(error.message) }
     if (job) {
       const issue = jobIdentityIssue(task, job)
       if (issue) return blocked(issue)
-      if (!['completed', 'failed', 'killed'].includes(job.status)) return blocked('原 ACP Job 尚未确认结束')
+      if (!['completed', 'failed', 'killed'].includes(job.status)) return { ...blocked('原 ACP Job 尚未确认结束'), pending: true }
     } else if (!sourceDrained && !previouslyConfirmed) {
       if (task.workflow_version !== 'source-first-v1') {
         if (processPresence(task.process_id) !== 'absent') return blocked('原 ACP Job 已不可读取，进程结束尚未确认')
@@ -814,6 +834,18 @@ async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, ru
     errors.push(message)
     return appendLaunchSafe(launchLogs, task.task_id, { stage, status: 'error', error: message })
   }
+  const operation = { operation_id: randomUUID(), task_id: task.task_id, run_id: task.run_id ?? null,
+    attempt_id: task.attempt_id ?? null, runtime_instance_id: hostInstanceId, status: 'running',
+    started_at: Date.now(), updated_at: Date.now(), message: '已收到停止请求，正在停止本次分析。',
+    steps: ['run_fence', 'job_cancel', 'workers', 'session', 'verify', 'persist'].map(id => ({ id, status: 'pending' })) }
+  let progressPublished = false
+  const progress = async (id, status, message, details = {}) => {
+    Object.assign(operation, { updated_at: Date.now(), message })
+    if (id) Object.assign(operation.steps.find(step => step.id === id), { status, message, ...details })
+    try { await tasks.recordStopProgress?.(task.task_id, operation, { begin: !progressPublished }); progressPublished = true }
+    catch (error) { await recordFailure('task_stop_progress_persist', error) }
+  }
+  await progress(null, 'running', operation.message)
   const wasCompleted = task.status === 'completed'
   const previouslyConfirmed = Number.isFinite(task.stop_confirmed_at)
   try { task = await tasks.markStopping(task.task_id, null, { force: true }) }
@@ -823,6 +855,7 @@ async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, ru
     await recordFailure('task_stop_persist', error)
     task = await tasks.get(task.task_id) ?? task
   }
+  await progress('run_fence', 'running', '正在关闭本次分析的结果写入入口。')
   let stopped = { data_root: task.data_root, run: null }
   let runStop = { status: 'not_bound', error: null }
   if (task.run_id && !wasCompleted && !previouslyConfirmed) {
@@ -845,18 +878,21 @@ async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, ru
       }
     }
   }
+  await progress('run_fence', runStop.status === 'error' ? 'blocked' : 'done', runStop.error || (task.run_id ? '本次分析已停止接收结果。' : '尚无 Run，已取消未放行的启动。'))
   // Close admission in the Run first, then cancel each exact execution. Failed
   // cancellation must not fabricate a stopped Run or hide its task record.
+  await progress('job_cancel', 'running', '正在核对并取消本次执行任务。')
   let jobStop = { status: 'not_bound', job_id: task.job_id, error: null }
   if (task.job_id) {
     try {
       const jobs = runtimeService(runtime, 'jobs')
       const owner = jobOwner(runtime, task)
-      const job = readJobSnapshot(runtime, task)
+      const job = await readStopJob(runtime, task)
       if (job) {
         const issue = jobIdentityIssue(task, job)
         if (issue) throw new Error(issue)
-        if (!['completed', 'failed', 'killed'].includes(job.status)) {
+        if (job.status === 'stopping') jobStop = { status: 'requested', job_id: task.job_id, result: 'already-requested', error: null }
+        else if (!['completed', 'failed', 'killed'].includes(job.status)) {
           if (!owner || typeof jobs?.kill !== 'function') throw new Error('原 ACP Job 所有者不可用，停止尚未确认')
           const result = await jobs.kill(task.job_id, owner, '用户请求停止 PANGEA 分析')
           jobStop = { status: 'requested', job_id: task.job_id, result, error: null }
@@ -867,9 +903,13 @@ async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, ru
       await recordFailure('acp_job_stop', error)
     }
   }
+  await progress('job_cancel', jobStop.status === 'error' ? 'blocked' : 'done', jobStop.error || (jobStop.status === 'requested' ? '已向本次执行任务发送取消请求；尚未确认退出。' : '执行任务身份检查已结束，继续核验工具退出。'))
+  await progress('workers', 'running', '正在停止本次分析的 Agent 和工具进程。')
+  const workerErrorStart = errors.length
   let sourceDrained = false
   if (task.run_id) {
     try { sourceDrained = await stopSourceFirstAcpRun({ dataRoot: task.data_root, runId: task.run_id,
+      onProgress: details => progress('workers', 'running', details.pending_starts ? '正在等待已取消的 Agent 启动结束。' : `已确认 ${details.stopped}/${details.total} 个 Agent 执行单元停止。`, { workers: details }),
       onStopped: async () => {
         const current = await tasks.get(task.task_id)
         if (!current || current.attempt_id !== task.attempt_id || current.run_id !== task.run_id
@@ -886,6 +926,8 @@ async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, ru
     try { await interruptSourceFirstChildren({ dataRoot: task.data_root, runId: task.run_id }) }
     catch (error) { await recordFailure('native_children_stop', error) }
   }
+  await progress('workers', errors.length > workerErrorStart ? 'blocked' : sourceDrained ? 'done' : 'waiting', errors.length > workerErrorStart ? errors.slice(workerErrorStart).join('；') : sourceDrained ? '本次分析的 Agent 和工具进程已确认退出。' : '未取得在线执行句柄，将核验已保存的退出证据。')
+  await progress('session', 'running', '正在停止本次分析的宿主会话。')
   const sessionId = nativeOwnerBinding(task).owner_session_id
   let sessionCancel = { status: 'not_bound', session_id: null, error: null }
   if (sessionId) {
@@ -906,15 +948,27 @@ async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, ru
       await recordFailure('session_stop', error)
     }
   }
+  await progress('session', sessionCancel.status === 'error' ? 'blocked' : 'done', sessionCancel.error || '宿主会话取消处理已完成，继续核验停止状态。')
+  await progress('verify', 'running', '正在核验原执行及其工具均已停止。')
   task = await tasks.get(task.task_id)
   const evidence = await taskStopEvidence(runtime, task, launchLocks, sourceDrained, launch, previouslyConfirmed)
-  if (!evidence.confirmed) errors.push(evidence.reason)
+  if (!evidence.confirmed && !evidence.pending) errors.push(evidence.reason)
+  if (evidence.confirmed && errors.length === workerErrorStart && !sourceDrained) await progress('workers', 'done', '已通过保存的执行记录核验 Agent 和工具退出。')
+  await progress('verify', evidence.confirmed ? 'done' : evidence.pending ? 'waiting' : 'blocked', evidence.confirmed ? '原执行退出证据核验完成。' : evidence.reason)
   let confirmed = evidence.confirmed && errors.length === 0
   let error = [...new Set(errors.filter(Boolean))].join('；') || null
+  await progress('persist', 'running', '正在保存停止确认与已完成结果的记录。')
+  // Progress persistence can fail as well; keep the overall result conservative.
+  confirmed = confirmed && errors.length === 0
+  error = [...new Set(errors.filter(Boolean))].join('；') || null
   let updated
+  if (confirmed) {
+    operation.status = 'completed'; operation.message = '已停止。已保存结果保留。'; operation.updated_at = Date.now()
+    Object.assign(operation.steps.find(step => step.id === 'persist'), { status: 'done', message: operation.message })
+  }
   try {
     updated = confirmed
-      ? await tasks.markStopped(task.task_id, null, { force: true })
+      ? await tasks.markStopped(task.task_id, null, { force: true, stopOperation: operation })
       : await tasks.markStopping(task.task_id, error, { force: true })
   } catch (failure) {
     await recordFailure('task_stop_persist', failure)
@@ -927,9 +981,17 @@ async function stopTaskExecution({ api, tasks, task, launchLocks, launchLogs, ru
     updated = { ...await tasks.get(task.task_id), execution_status: 'stopping', stop_confirmed_at: null,
       launch_error: error, launch_error_code: 'STOP_PERSIST_FAILED' }
   }
-  await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_stop', status: confirmed ? 'ok' : 'info', message: error ?? '原执行已确认停止' })
+  operation.status = confirmed ? 'completed' : evidence.pending && !errors.length ? 'waiting' : 'blocked'
+  if (!confirmed) await progress('persist', operation.status === 'waiting' ? 'pending' : 'blocked', error || evidence.reason || '停止尚未确认，请检查停止状态。')
+  if (!confirmed && errors.length) {
+    operation.status = 'blocked'; error = [...new Set(errors)].join('；')
+    operation.message = error; Object.assign(operation.steps.find(step => step.id === 'persist'), { status: 'blocked', message: error })
+    try { updated = await tasks.markStopping(task.task_id, error, { force: true }) } catch {}
+  }
+  updated = { ...(await tasks.get(task.task_id) ?? updated), ...(confirmed ? {} : { execution_status: 'stopping', stop_confirmed_at: null }), stop_operation: operation }
+  await appendLaunchSafe(launchLogs, task.task_id, { stage: 'task_stop', status: confirmed ? 'ok' : 'info', message: error ?? operation.message })
   return { ...stopped, status: confirmed ? 'ok' : 'stopping', stop_confirmed: confirmed,
-    stopping: !confirmed, error, job_stop: jobStop, run_stop: runStop, session_cancel: sessionCancel, task: updated }
+    stopping: !confirmed, pending: operation.status === 'waiting', error, job_stop: jobStop, run_stop: runStop, session_cancel: sessionCancel, task: updated }
 }
 
 function requestTaskStop(options) {
@@ -949,7 +1011,7 @@ async function waitForTaskStop(operation, tasks, taskId) {
   try {
     const result = await Promise.race([operation, new Promise(resolve => { timer = setTimeout(() => resolve(null), 3000) })])
     return result ?? { status: 'stopping', stopping: true, stop_confirmed: false,
-      error: '已请求停止，正在等待原执行和工具释放；可稍后重试确认', task: await tasks.get(taskId) }
+      pending: true, error: null, message: '已收到停止请求，正在等待原执行和工具释放。', task: await tasks.get(taskId) }
   } finally { clearTimeout(timer) }
 }
 
@@ -1056,7 +1118,7 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
         stage: 'acp_job_reconcile', status: 'error', job_id: task.job_id,
         attempt_id: task.attempt_id, error_code: 'ACP_JOB_LOST', error: message,
       })
-      await tasks.markInterrupted(task.task_id, message)
+      if (task.execution_status !== 'stopping') await tasks.markInterrupted(task.task_id, message)
       continue
     }
     if (!snapshot) {
@@ -1065,7 +1127,7 @@ async function reconcileAcpJobs(runtime, tasks, taskItems, launchLogs) {
         stage: 'acp_job_reconcile', status: 'error', job_id: task.job_id,
         attempt_id: task.attempt_id, error_code: 'ACP_JOB_LOST', error: message,
       })
-      await tasks.markInterrupted(task.task_id, message)
+      if (task.execution_status !== 'stopping') await tasks.markInterrupted(task.task_id, message)
       continue
     }
     if (snapshot && ['completed', 'killed', 'failed'].includes(snapshot.status)) {
@@ -1132,6 +1194,16 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       await tasks.reconcileRuns(snapshot.runs?.items, { dataRoot: snapshot.data_root })
       let taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       await reconcileAcpJobs(runtime, tasks, taskItems, launchLogs)
+      taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
+      for (const task of taskItems) {
+        if (task.execution_status !== 'stopping' || task.stop_operation?.status !== 'waiting'
+          || taskOperationState(tasks).stops.has(task.task_id)) continue
+        let job
+        try { job = await readStopJob(runtime, task) } catch { continue }
+        if (job && ['completed', 'failed', 'killed'].includes(job.status)) {
+          await waitForTaskStop(requestTaskStop({ api, tasks, task, launchLocks, launchLogs, runtime, runner }), tasks, task.task_id)
+        }
+      }
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
       await reconcileTaskLaunches(api, tasks, taskItems, launchLogs, runtime)
       taskItems = await tasks.list({ workspace: workspaceRoot(cwd) })
@@ -1225,6 +1297,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       requireCurrentAnalysisInputs(body.input)
       if (body.input?.incremental_request != null) throw new Error('定向补充或变更分析请从来源任务发起')
       if (body.input?.source_task_id) requireWorkspaceTask(await tasks.get(body.input.source_task_id), cwd, body.input.source_task_id)
+      await validateScope({ ...body.input, dataRoot: dataRootFor(root, actionDataRoot) })
       if (body.input?.scope_preview_id || body.input?.expected_scope_revision) { const checked = await confirmScope({ ...body.input, cwd: root, dataRoot: dataRootFor(root, actionDataRoot) }, runner); body.input.source_scope = checked.normalized_scope }
       if (body.input?.test_tool_sources?.length) { const checked = await confirmTestTools({ ...body.input, cwd: root, dataRoot: dataRootFor(root, actionDataRoot) }, runner); body.input.test_tool_sources = checked.normalized_sources }
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''

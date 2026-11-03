@@ -1,3 +1,4 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import assert from 'node:assert/strict'
 import { realpath, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -169,6 +170,7 @@ test('new-analysis coverage query uses literal arguments and returns acquisition
 
 async function fixture() {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-workbench-route-')))
+  await writeSourceRepository(root, 'repo-one')
   await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), '# DSH\n', 'utf8')
   const dataRoot = path.join(root, 'pangea-data')
@@ -178,7 +180,7 @@ async function fixture() {
   const launchLocks = new Set()
   const task = await tasks.create({
     workspace: root, dataRoot,
-    input: { repository: 'repo-one', target: 'ACP route regression', source_scope: ['src/session.c'], provider_id: 'pangea-nga', agent_model: 'native/selected' },
+    input: { repository: 'repo-one', target: 'ACP route regression', source_scope: ['src'], provider_id: 'pangea-nga', agent_model: 'native/selected' },
   })
   const owner = { id: 'session-06' }
   let jobHooks
@@ -377,6 +379,7 @@ test('new-analysis HTTP admission rejects retired inputs before creating tasks o
 
 test('new-analysis HTTP admission rejects internal APIs and pending catalogues before creating a task, then freezes a proven default', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'analysis-admission-'))
+  await writeSourceRepository(root)
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
@@ -385,11 +388,11 @@ test('new-analysis HTTP admission rejects internal APIs and pending catalogues b
   const provider = { async discoverModels() { return { current_model: 'model-one', models: [{ id: 'model-one' }] } } }
   const runtime = { subagents: { getProvider: () => provider } }
   for (const scenario of ['risk-analysis', 'branch-analysis', 'coverage-analysis', 'module-analysis']) {
-    const result = await analysisRequest(root, { action: 'task-create', input: { scenario, model_route: { provider: 'api', model: 'configured' } } }, { tasks, runtime })
+    const result = await analysisRequest(root, { action: 'task-create', input: { repository: 'repo', target: 'test', source_scope: ['src'], scenario, model_route: { provider: 'api', model: 'configured' } } }, { tasks, runtime })
     assert.equal(result.code, 400)
     assert.match(result.body.error, /内部 API 分析支持已移除/)
   }
-  const input = { repository: 'repo', target: 'test', provider_id: 'pangea-nga', agent_model: '' }
+  const input = { repository: 'repo', target: 'test', source_scope: ['src'], provider_id: 'pangea-nga', agent_model: '' }
   assert.equal((await analysisRequest(root, { action: 'task-create', input }, { tasks, runtime })).code, 400)
   assert.equal(creates, 0)
   const catalog = await discoverAgentModels(runtime, { providerId: 'pangea-nga', cwd: root })

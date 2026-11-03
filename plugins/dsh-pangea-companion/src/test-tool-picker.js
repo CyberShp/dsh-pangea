@@ -26,7 +26,7 @@ export function createTestToolPicker(React, SourceScopePicker) {
     }
     return h('section', { className: 'create-scope', 'aria-label': '测试工具代码参考', style: { marginTop: 24 } },
       h('h3', null, '测试工具代码（可选，仅参考）'),
-      h('p', { className: 'create-copy' }, '选择同仓库的工具目录，或其他已登记仓库中的文件。Agent 将阅读工具代码编写具体操作说明，不会把工具本身作为被测对象，也不会执行工具。无需手写工具说明。'),
+      h('p', { className: 'create-copy' }, '选择同仓库的工具目录，或其他已登记仓库中的下级目录。Agent 将阅读工具代码编写具体操作说明，不会把工具本身作为被测对象，也不会执行工具。无需手写工具说明。'),
       h('label', { className: 'field' }, '工具参考仓库', h('select', { 'aria-label': '工具参考仓库', value: repository, onChange: event => setRepository(event.target.value) }, h('option', { value: '' }, '选择已登记仓库'), repositories.map(id => h('option', { key: id, value: id }, id)))),
       repository && h(SourceScopePicker, { key: repository, cwd, dataRoot, repository, value: sources.find(source => source.repo_id === repository)?.paths.join('\n') || '', selectionOnly: true, onChange: value => update(repository, value), renderIcon }),
       h('ul', null, sources.map(source => h('li', { key: source.repo_id }, h('strong', null, source.repo_id), ' · 参考代码：', source.paths.join('、'), h('button', { type: 'button', className: 'btn ghost', onClick: () => onChange(sources.filter(item => item.repo_id !== source.repo_id)) }, `移除 ${source.repo_id}`)))),

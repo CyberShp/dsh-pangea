@@ -1,3 +1,4 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -8,6 +9,7 @@ import { createLaunchLogStore } from '../src/launch-log.js'
 
 test('logs remote identity and completed turns and supplies Python for initialization', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-acp-diagnostics-'))
+  await writeSourceRepository(root, 'repo')
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), '# fixture')
@@ -41,7 +43,7 @@ test('logs remote identity and completed turns and supplies Python for initializ
     const runner = async ({ args }) => args[0] === 'system'
       ? { repositories: ['repo'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
       : { run_id: 'run', request_path: path.join(root, 'request.md'), run_root: path.join(root, 'run') }
-    await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo', target: 'diagnosis', source_scope: [], provider_id: 'pangea-nga' } },
+    await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo', target: 'diagnosis', source_scope: ['src'], provider_id: 'pangea-nga' } },
       runner, async () => {}, event => events.push(event), runtime, { PANGEA_PYTHON: 'C:\\Python Path\\python.exe' })
     await hooks.done
     assert.match(firstPrompt, /C:\\Python Path\\python\.exe/)
@@ -60,6 +62,7 @@ test('logs remote identity and completed turns and supplies Python for initializ
 
 test('bounds and redacts persisted diagnostic text while retaining structured fields', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-acp-log-'))
+  await writeSourceRepository(root, 'repo')
   try {
     const logs = createLaunchLogStore({ root })
     await logs.append('task', {
@@ -80,6 +83,7 @@ test('bounds and redacts persisted diagnostic text while retaining structured fi
 
 test('persists protocol timing identities and explicit unknown model metrics', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-acp-timing-log-'))
+  await writeSourceRepository(root, 'repo')
   try {
     const logs = createLaunchLogStore({ root })
     await logs.append('task', { stage: 'source_first_acp_request', status: 'ok', run_id: 'run', attempt_id: 'attempt',

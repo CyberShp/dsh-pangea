@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
         }
         return h('section', { className: 'create-scope', 'aria-label': '测试工具代码参考', style: { marginTop: 24 } },
           h('h3', null, '测试工具代码（可选，仅参考）'),
-          h('p', { className: 'create-copy' }, '选择同仓库的工具目录，或其他已登记仓库中的文件。Agent 将阅读工具代码编写具体操作说明，不会把工具本身作为被测对象，也不会执行工具。无需手写工具说明。'),
+          h('p', { className: 'create-copy' }, '选择同仓库的工具目录，或其他已登记仓库中的下级目录。Agent 将阅读工具代码编写具体操作说明，不会把工具本身作为被测对象，也不会执行工具。无需手写工具说明。'),
           h('label', { className: 'field' }, '工具参考仓库', h('select', { 'aria-label': '工具参考仓库', value: repository, onChange: event => setRepository(event.target.value) }, h('option', { value: '' }, '选择已登记仓库'), repositories.map(id => h('option', { key: id, value: id }, id)))),
           repository && h(SourceScopePicker, { key: repository, cwd, dataRoot, repository, value: sources.find(source => source.repo_id === repository)?.paths.join('\n') || '', selectionOnly: true, onChange: value => update(repository, value), renderIcon }),
           h('ul', null, sources.map(source => h('li', { key: source.repo_id }, h('strong', null, source.repo_id), ' · 参考代码：', source.paths.join('、'), h('button', { type: 'button', className: 'btn ghost', onClick: () => onChange(sources.filter(item => item.repo_id !== source.repo_id)) }, `移除 ${source.repo_id}`)))),
@@ -57,6 +57,13 @@ window.__ModuleLoader__.load({
     })()
 
     const __sourceScopePicker = (() => {
+    function isSubdirectoryPath(value) {
+      if (typeof value !== 'string' || !value.trim() || value.includes('\0')) return false
+      const path = value.trim().replaceAll('\\', '/')
+      const parts = path.split('/').filter(part => part && part !== '.')
+      return !path.startsWith('/') && !/^[A-Za-z]:/.test(path) && parts.length > 0 && !parts.includes('..')
+    }
+
     function createSourceScopePicker(React) {
       const h = React.createElement
       return function SourceScopePicker({ cwd, dataRoot, repository, value, preview, onChange, onPreview, renderIcon = () => null, selectionOnly = false }) {
@@ -65,10 +72,11 @@ window.__ModuleLoader__.load({
         const [draft, setDraft] = React.useState(null)
         const root = React.useRef(null), trigger = React.useRef(null), sequence = React.useRef(0)
         const scope = String(open && draft !== null ? draft : value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean)
-        React.useEffect(() => { sequence.current += 1; setTree(null); setError(''); setBusy(false) }, [cwd, dataRoot, repository])
+        React.useEffect(() => { sequence.current += 1; setTree(null); setDraft(null); setOpen(false); setError(''); setBusy(false); return () => { sequence.current += 1 } }, [cwd, dataRoot, repository])
         React.useEffect(() => { sequence.current += 1; setError(''); setBusy(false) }, [value])
         React.useEffect(() => { if (!open) return; root.current?.querySelector('button')?.focus(); return () => trigger.current?.focus?.() }, [open])
         async function request(input, treeQuery = false) {
+          if (!treeQuery && (!scope.length || !scope.every(isSubdirectoryPath))) { onPreview?.(null); setError('请选择真实存在的非根下级目录'); return }
           const token = ++sequence.current
           if (!treeQuery && !input.preview_id) onPreview(null)
           setBusy(true); setError('')
@@ -83,15 +91,14 @@ window.__ModuleLoader__.load({
           } catch (reason) { if (sequence.current === token) setError(reason.message) }
           finally { if (sequence.current === token) setBusy(false) }
         }
-        const toggle = path => setDraft(scope.includes(path) ? scope.filter(item => item !== path).join('\n') : [...scope.filter(item => item !== '.'), path].join('\n'))
+        const toggle = path => isSubdirectoryPath(path) && setDraft(scope.includes(path) ? scope.filter(item => item !== path).join('\n') : [...scope.filter(item => item !== '.'), path].join('\n'))
         return h('section', { className: 'pangea-scope-picker', 'aria-label': '源码范围选择与预览' },
           h('div', { className: 'pangea-page-actions pangea-scope-toolbar' },
-            h('button', { type: 'button', className: 'btn', ref: trigger, disabled: !repository || busy, onClick: () => { setDraft(value || ''); setOpen(true); void request({ path: '.' }, true) } }, renderIcon('FolderOpen'), '选择目录或文件'),
-            h('button', { type: 'button', className: 'btn ghost', disabled: !repository || busy, onClick: () => onChange('.') }, renderIcon('FolderGit2'), '选择整个仓库'),
-            !selectionOnly && h('button', { type: 'button', className: 'btn', 'aria-busy': busy, disabled: !repository || !scope.length || busy, onClick: () => { void request({}) } }, renderIcon(busy ? 'LoaderCircle' : 'Search'), busy ? '正在读取范围…' : '预览命中文件')),
+            h('button', { type: 'button', className: 'btn', ref: trigger, disabled: !repository || busy, onClick: () => { setDraft(value || ''); setOpen(true); void request({ path: '.' }, true) } }, renderIcon('FolderOpen'), '选择下级目录'),
+            !selectionOnly && h('button', { type: 'button', className: 'btn', 'aria-busy': busy, disabled: !repository || !scope.length || !scope.every(isSubdirectoryPath) || busy, onClick: () => { void request({}) } }, renderIcon(busy ? 'LoaderCircle' : 'Search'), busy ? '正在读取范围…' : '预览命中文件')),
           error ? h('p', { role: 'alert', className: 'notice danger pangea-scope-feedback' }, `范围预览失败：${error}`) : null,
           selectionOnly ? null : preview ? h('div', { className: 'pangea-scope-preview', role: 'status' },
-            h('div', { className: 'pangea-scope-preview-summary' }, renderIcon('Files'), h('strong', null, `${preview.is_entire_repository ? '整个仓库' : '指定范围'} · 命中 ${preview.matched_file_count} 个源码文件`)),
+            h('div', { className: 'pangea-scope-preview-summary' }, renderIcon('Files'), h('strong', null, `已选目录 · 命中 ${preview.matched_file_count} 个源码文件`)),
             preview.matched_file_count === 0 ? h('p', { className: 'notice warn pangea-scope-feedback' }, '没有匹配源码，请调整范围后重试。') : null,
             h('details', null, h('summary', null, '查看命中文件清单'), h('ul', { className: 'pangea-scope-path-list' }, preview.files.map(item => h('li', { key: item.relative_path }, h('code', null, item.relative_path)))),
               h('div', { className: 'pangea-page-actions pangea-scope-pagination' }, h('button', { type: 'button', className: 'btn', disabled: busy || Number(preview.next_cursor) <= 50, onClick: () => { void request({ preview_id: preview.preview_id, cursor: Math.max(0, Number(preview.next_cursor) - 100) }) } }, '上一页'),
@@ -100,9 +107,10 @@ window.__ModuleLoader__.load({
           open ? h('div', { className: 'pangea-info-overlay' }, h('section', { className: 'pangea-ui pangea-info-drawer pangea-scope-drawer', ref: root, role: 'dialog', 'aria-modal': true, 'aria-label': '选择源码范围', onKeyDown: event => {
             if (event.key === 'Escape') { sequence.current += 1; setBusy(false); setOpen(false) }
             if (event.key === 'Tab') { const controls = [...root.current.querySelectorAll('button:not(:disabled),input:not(:disabled)')]; if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus() } else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus() } }
-          } }, h('div', { className: 'pangea-page-actions pangea-scope-drawer-head' }, h('h2', null, '选择源码范围'), h('button', { type: 'button', className: 'btn ghost', onClick: () => { sequence.current += 1; setBusy(false); setOpen(false) } }, '取消'), h('button', { type: 'button', className: 'btn primary', onClick: () => { sequence.current += 1; setBusy(false); if (draft !== value) onChange(draft); setOpen(false) } }, '完成选择')),
+          } }, h('div', { className: 'pangea-page-actions pangea-scope-drawer-head' }, h('h2', null, '选择源码范围'), h('button', { type: 'button', className: 'btn ghost', onClick: () => { sequence.current += 1; setBusy(false); setOpen(false) } }, '取消'), h('button', { type: 'button', className: 'btn primary', disabled: busy || !scope.every(isSubdirectoryPath), onClick: () => { if (busy || !scope.every(isSubdirectoryPath)) return; sequence.current += 1; setBusy(false); if (draft !== value) { onPreview?.(null); onChange(draft ?? '') }; setOpen(false) } }, scope.length ? '完成选择' : '清空选择')),
+          h('div', { 'aria-label': '当前已选范围' }, h('strong', null, '当前已选范围'), scope.length ? h('ul', { className: 'pangea-scope-path-list' }, scope.map(path => h('li', { key: path }, h('code', null, path), h('button', { type: 'button', className: 'btn ghost', 'aria-label': `移除已选范围 ${path}`, onClick: () => setDraft(scope.filter(item => item !== path).join('\n')) }, '移除')))) : h('p', { className: 'b05-subtle' }, '尚未选择目录；空范围不能开始分析。')),
           h('div', { className: 'pangea-scope-path-bar' }, h('code', { 'aria-label': '当前目录' }, tree?.path || '.'), h('button', { type: 'button', className: 'btn ghost', disabled: busy || !tree || tree.path === '.', onClick: () => { void request({ path: tree.path.split('/').slice(0, -1).join('/') || '.' }, true) } }, renderIcon('ArrowLeft'), '上一级')),
-          h('ul', { className: 'pangea-scope-tree' }, (tree?.entries || []).map(item => h('li', { key: item.path, className: 'pangea-scope-tree-row' }, h('label', { className: 'pangea-scope-tree-name' }, h('input', { type: 'checkbox', checked: scope.includes(item.path), disabled: !item.selectable, onChange: () => toggle(item.path) }), renderIcon(item.kind === 'directory' ? 'FolderOpen' : 'FileText'), h('span', null, item.name)), item.kind === 'directory' ? h('button', { type: 'button', className: 'btn ghost', disabled: busy || !item.selectable, onClick: () => { void request({ path: item.path }, true) } }, '打开') : null))),
+          h('ul', { className: 'pangea-scope-tree' }, (tree?.entries || []).map(item => h('li', { key: item.path, className: 'pangea-scope-tree-row' }, h('label', { className: 'pangea-scope-tree-name' }, h('input', { type: 'checkbox', checked: scope.includes(item.path), disabled: !item.selectable || item.kind !== 'directory' || item.path === '.', onChange: () => toggle(item.path) }), renderIcon(item.kind === 'directory' ? 'FolderOpen' : 'FileText'), h('span', null, item.name)), item.kind === 'directory' ? h('button', { type: 'button', className: 'btn ghost', disabled: busy || !item.selectable, onClick: () => { void request({ path: item.path }, true) } }, '打开') : null))),
           busy ? h('p', { className: 'pangea-scope-feedback small muted', role: 'status' }, '正在读取目录…') : tree && !tree.entries?.length ? h('p', { className: 'pangea-scope-feedback small muted', role: 'status' }, '当前目录没有可显示的目录项。') : null,
           tree ? h('div', { className: 'pangea-page-actions pangea-scope-pagination' }, h('button', { type: 'button', className: 'btn', disabled: busy || !tree.cursor, onClick: () => { void request({ path: tree.path, cursor: Math.max(0, tree.cursor - 100) }, true) } }, '上一页目录项'),
             tree.has_more ? h('button', { type: 'button', className: 'btn', disabled: busy, onClick: () => { void request({ path: tree.path, cursor: tree.next_cursor }, true) } }, '下一页目录项') : null) : null,
@@ -110,7 +118,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    return { createSourceScopePicker }
+    return { isSubdirectoryPath, createSourceScopePicker }
     })()
 
     const __overviewFindings = (() => {
@@ -208,7 +216,15 @@ window.__ModuleLoader__.load({
       return { cases, counts }
     }
 
-    return { CASE_TYPE_LABELS, REVIEW_LABELS, caseIdentity, filterTestCases, reviewProjection }
+    // Versioned records select one authored field, including intentional emptiness.
+    // Unknown/legacy records retain their original precedence; never merge aliases.
+    function caseField(item, canonical, legacy) {
+      return item?.format_version === 'behavior-test-case-v1'
+        ? item[canonical]
+        : item?.[legacy] ?? item?.[canonical]
+    }
+
+    return { CASE_TYPE_LABELS, REVIEW_LABELS, caseIdentity, filterTestCases, reviewProjection, caseField }
     })()
 
     const __reviewPresentation = (() => {
@@ -2871,7 +2887,31 @@ window.__ModuleLoader__.load({
         || ['preparing', 'starting', 'running', 'stopping', 'needs_attention', 'failed'].includes(task?.status)
     }
 
-    function TaskLifecycleDialog({ state, onClose, onConfirm }) {
+    function currentStopOperation(task) {
+      const operation = task?.stop_operation
+      return operation && operation.task_id === task.task_id
+        && operation.attempt_id === (task.attempt_id ?? null) && operation.run_id === (task.run_id ?? null) ? operation : null
+    }
+
+    function StopProgress({ task, onRefresh, onRetry }) {
+      const operation = currentStopOperation(task)
+      if (!operation) return null
+      const complete = operation.status === 'completed' && Number.isFinite(task.stop_confirmed_at)
+      const blocked = !complete && ['blocked', 'interrupted', 'completed'].includes(operation.status)
+      const labels = { run_fence: '关闭结果写入', job_cancel: '通知执行任务取消', workers: '停止 Agent 和工具', session: '停止宿主会话', verify: '核验退出证据', persist: '保存停止状态' }
+      const states = { pending: '尚未开始', running: '处理中', waiting: '等待核验', blocked: '未确认', done: '已完成' }
+      return h('section', { className: 'pangea-stop-progress', 'aria-label': '停止进度', style: { border: '1px solid #d9dfdc', borderRadius: 10, padding: 16, margin: '16px 0', overflowWrap: 'anywhere' } },
+        h('strong', { role: 'status', 'aria-live': 'polite' }, complete ? '已停止，已保存结果保留' : blocked ? '停止尚未确认' : '已收到停止请求，正在处理'),
+        h('p', { style: { fontSize: 13, lineHeight: 1.7 } }, operation.message),
+        h('ol', { style: { paddingLeft: 22, fontSize: 13, lineHeight: 1.9 } }, (operation.steps ?? []).map(step => h('li', { key: step.id },
+          h('span', null, `${labels[step.id] ?? step.id} · ${states[step.status] ?? '状态未知'}`),
+          step.message && step.status !== 'pending' ? h('div', { style: { color: '#68746c', fontSize: 12 } }, step.message) : null))),
+        h('p', { style: { color: '#68746c', fontSize: 12 } }, '只有本次执行及工具退出并保存确认后，才显示已停止。关闭页面不会取消停止操作。'),
+        !complete && onRefresh ? h('button', { type: 'button', style: styles.button, onClick: onRefresh }, '检查停止状态') : null,
+        blocked && onRetry ? h('button', { type: 'button', style: { ...styles.button, marginLeft: 8 }, onClick: onRetry }, '重试停止') : null)
+    }
+
+    function TaskLifecycleDialog({ state, onClose, onConfirm, onRefresh }) {
       const dialog = React.useRef(null)
       React.useEffect(() => {
         const trigger = document.activeElement
@@ -2879,6 +2919,8 @@ window.__ModuleLoader__.load({
         return () => { if (trigger?.isConnected) trigger.focus?.({ preventScroll: true }) }
       }, [])
       const deleting = state.action === 'task-delete'
+      const operation = currentStopOperation(state.task)
+      const waiting = ['running', 'waiting'].includes(operation?.status) && !Number.isFinite(state.task.stop_confirmed_at)
       const title = deleting ? '删除分析任务？' : '停止分析任务？'
       const keyDown = event => {
         if (event.key === 'Escape' && !state.busy) { event.preventDefault(); event.stopPropagation(); onClose() }
@@ -2895,11 +2937,12 @@ window.__ModuleLoader__.load({
           h('p', { style: { fontWeight: 600, overflowWrap: 'anywhere' } }, state.task.title || state.task.task_id),
           h('p', null, deleting ? '仅从分析任务列表移除；Run、报告、会话和日志仍保留。' : '停止当前分析执行，保留已保存的结果、报告、会话和日志。'),
           deleting && taskCanStop(state.task) ? h('p', null, '此任务尚未确认停止。会先停止执行，确认结束后才移除；停止失败时任务仍保留，可重试。') : null,
+          h(StopProgress, { task: state.task, onRefresh }),
           state.error ? h('p', { role: 'alert', style: { color: '#a14035' } }, state.error) : null,
           h('div', { className: 'pangea-task-action-footer' },
             h('button', { type: 'button', style: styles.button, disabled: state.busy, onClick: onClose }, '取消'),
-            h('button', { type: 'button', style: { ...styles.button, color: '#a14035', borderColor: '#e4b8b1' }, disabled: state.busy, onClick: onConfirm },
-              state.busy ? deleting ? taskCanStop(state.task) ? '正在停止并删除…' : '正在删除…' : '正在请求停止…' : state.error ? deleting ? '重试删除' : '重试停止' : deleting ? '确认删除' : '确认停止'))))
+            h('button', { type: 'button', style: { ...styles.button, color: '#a14035', borderColor: '#e4b8b1' }, disabled: state.busy || waiting || (!deleting && operation?.status === 'completed' && Number.isFinite(state.task.stop_confirmed_at)), onClick: onConfirm },
+              !deleting && operation?.status === 'completed' && Number.isFinite(state.task.stop_confirmed_at) ? '已停止' : waiting ? '正在等待停止确认' : state.busy ? deleting ? taskCanStop(state.task) ? '正在停止并删除…' : '正在删除…' : '正在发送停止请求…' : state.error ? deleting ? '重试删除' : '重试停止' : deleting ? '确认删除' : '确认停止'))))
     }
 
     function agentSessionContent(content) {
@@ -3311,12 +3354,12 @@ window.__ModuleLoader__.load({
       }
       const p = deriveRunPresentation(task, current, current?.reader_health)
       const observation = executionObservation(current, task, Boolean(error))
-      const stopBlockedReason = error ? '当前状态读取失败，请先重试读取后再停止。' : !current?.run_id ? '当前运行身份尚未读取。' : p.stopping ? '停止请求已发出，正在等待执行端确认。' : current.terminal || p.stopped || p.failed ? '当前运行已结束，无需再次停止。' : ''
+      const stopBlockedReason = error ? '当前状态读取失败，请先重试读取后再停止。' : !current?.run_id ? '当前运行身份尚未读取。' : p.stopping && !['blocked', 'interrupted'].includes(currentStopOperation(task)?.status) ? '停止请求已发出，正在等待执行端确认。' : !p.stopping && (current.terminal || p.stopped || p.failed) ? '当前运行已结束，无需再次停止。' : ''
       const snapshotStatus = current?.source_snapshot?.status
       const snapshotLabel = ['manifest_verified', 'frozen', 'verified'].includes(snapshotStatus) ? '已冻结' : ['corrupt', 'invalid'].includes(snapshotStatus) ? '资料损坏，待检查' : snapshotStatus === 'legacy_unavailable' ? '历史 Run 未冻结' : '尚未验证'
       const attention = Boolean(current?.needs_user || p.needsAttention)
       const failureReason = sourceFirstRecordBody(current?.terminal_error || task?.launch_error || current?.blocking_reason || current?.workflow?.error || '未记录具体原因，请展开执行详情查看诊断。')
-      const finished = current?.lifecycle_status === 'complete' || (!current?.lifecycle_status && current?.terminal && current?.phase === 'COMPLETE')
+      const finished = !p.stopping && (current?.lifecycle_status === 'complete' || (!current?.lifecycle_status && current?.terminal && current?.phase === 'COMPLETE'))
       const outcome = outcomePresentation(current)
       const reportPath = current?.report_available ? current.artifacts?.report_html ?? current.artifacts?.report_md : null
       const completionSummary = current?.partial_delivery ? '本次流程已结束，未解决事项随已有结果保留，请查看交付范围。' : reportPath ? '结果已汇总并保存，可以查看报告与完整运行记录。' : '本次流程已结束，当前没有已验证可读取的分析报告。'
@@ -3368,7 +3411,7 @@ window.__ModuleLoader__.load({
           error ? button('重试读取', retry, 'primary') : null,
           !error && p.canResume ? button('继续分析', () => perform('resume', resume), 'primary') : null,
           !error && !p.canResume && outputs.length ? button('查看已生成结果', outputs[0].action, 'primary') : null,
-          !error && current && !current.terminal && !finished && !p.stopped && !p.failed ? button(p.stopping ? '等待停止确认' : '停止', () => setConfirmStop(true), 'danger', p.stopping, { ref: stopTrigger }) : null,
+          !error && current && (!current.terminal || p.stopping) && !finished && !p.stopped && !p.failed ? button(p.stopping ? '重试停止' : '停止', () => setConfirmStop(true), 'danger', Boolean(stopBlockedReason), { ref: stopTrigger }) : null,
           reportPath ? button('查看报告', () => openFile(reportPath)) : null,
           button('AI 助手', () => perform('discuss', discuss), '', !task)),
         node('nav', 'task-tabs', [['overview', '概览'], ['flows', '业务流程', 'business_flows'], ...(riskApplicable(current) ? [['risks', '风险', 'risks']] : []), ['cases', '测试用例', 'test_cases'], ['workflow', '运行过程']].map(([target, label, key]) => h('button', { key: target, type: 'button', className: target === 'workflow' ? 'active' : '', 'aria-current': target === 'workflow' ? 'page' : undefined, disabled: target === 'overview' && !task, 'aria-describedby': target === 'overview' && !task ? 'run-task-unavailable' : undefined, onClick: () => navigate(target) }, label, key && current?.counts?.[key] != null ? h('small', { title: current.reader_health?.collection_status?.[key] === 'unavailable' ? '产物暂不可读取' : undefined }, current.reader_health?.collection_status?.[key] === 'unavailable' ? '—' : current.counts[key]) : null))),
@@ -3377,11 +3420,12 @@ window.__ModuleLoader__.load({
         analysisExecutorBlockedReason(task) ? h('p', { role: 'status', className: 'small muted' }, analysisExecutorBlockedReason(task)) : null,
         current?.reader_health?.status === 'warning' ? h('div', { className: 'notice warn', role: 'alert' }, node('div', '', h('strong', null, '部分运行资料暂不可读取'), h('p', null, (current.reader_health.issues ?? []).join('；') || '请检查运行资料。不可读取的产物不计为零。')), button('重试读取', retry)) : null,
         legacy && (current.validation?.status === 'failed' || current.workflow?.unresolved?.length) ? h('div', { role: 'alert', className: 'notice warn' }, '当前运行有校验失败或未解决事项，请展开运行信息查看完整原因。') : null,
+        h(StopProgress, { task: current?.external_execution?.status === 'stopping' ? { ...task, stop_confirmed_at: null, stop_operation: current.stop_operation ?? task?.stop_operation } : task, onRefresh: retry, onRetry: !error ? () => setConfirmStop(true) : undefined }),
         actionError ? h('div', { role: 'alert', className: 'notice danger' }, actionError) : null,
         !current ? node('div', 'stack', !error ? h('div', { className: 'notice blue', role: 'status' }, node('div', 'notice-main', runIcon('Info'), node('div', '', h('strong', null, loading ? '正在读取当前运行' : '当前尚无运行记录'), h('p', null, '正在读取阶段状态与已保存产物。首次读取完成后显示本次运行信息。')))) : null,
           loading ? node('section', 'panel', node('div', 'skeleton large'), h('div', { className: 'skeleton', style: { width: '75%' } }), node('div', 'divider'), node('div', 'grid3', [0, 1, 2].map(i => h('div', { key: i }, h('div', { className: 'skeleton', style: { width: '60%' } }), h('div', { className: 'skeleton', style: { height: 120 } }), h('div', { className: 'skeleton', style: { width: '80%' } }))))) : null,
           node('p', 'small muted', '阶段状态尚未读取，不推断运行成功或失败。')) : h(React.Fragment, null,
-          node('div', 'hero-band', node('div', '', node('div', 'row', h('h2', null, error ? `上次记录：${current.phase_title ?? ''}` : finished ? '本次分析已完成' : p.stopped ? '本次运行已停止' : attention ? `${current.phase_title ?? '当前阶段'}需要处理` : p.failed ? '本次分析失败' : units.some(unit => unit.status === 'dispatched') ? units.filter(unit => unit.status === 'dispatched').map(unit => unit.title || unit.unit_id).join('、') : observation ? observation.activity : `正在进行${current.phase_title ?? active?.title ?? '当前阶段'}`), badge(status, tone)),
+          node('div', 'hero-band', node('div', '', node('div', 'row', h('h2', null, error ? `上次记录：${current.phase_title ?? ''}` : p.stopping ? p.executionLabel : finished ? '本次分析已完成' : p.stopped ? '本次运行已停止' : attention ? `${current.phase_title ?? '当前阶段'}需要处理` : p.failed ? '本次分析失败' : units.some(unit => unit.status === 'dispatched') ? units.filter(unit => unit.status === 'dispatched').map(unit => unit.title || unit.unit_id).join('、') : observation ? observation.activity : `正在进行${current.phase_title ?? active?.title ?? '当前阶段'}`), badge(status, tone)),
             h('p', null, error ? '当前状态未知，下方是最后成功读取的运行信息。' : p.failed ? '已有结果和失败会话已保留，可查看原因后继续分析。' : current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : finished ? completionSummary : p.stopped ? '源码快照、已接受单元和运行记录均已保留。' : '选择阶段，查看已保存的产出和待处理事项；实时对话可在 Agent 会话管理中查看。')),
             node('div', 'metrics', stat('阶段已完成', h(React.Fragment, null, current.workflow?.completed_steps?.length ?? steps.filter(step => step.status === 'completed').length, node('span', 'small muted', ` / ${steps.length}`))), stat('运行时长', duration), stat('用户介入', attention || p.failed ? '需要' : '无需'))),
           p.failed && !error ? h('p', { role: 'alert', className: 'notice danger' }, failureReason) : null,
@@ -3655,13 +3699,14 @@ window.__ModuleLoader__.load({
       // The state endpoint already reconciles Run progress with its execution.
       // Do not undo that verdict with an older Task response from another poll.
       const runStatus = current?.lifecycle_status ?? (current?.terminal ? ({ COMPLETE: 'complete', FAILED: 'failed', STOPPED: 'stopped' })[current.phase] : undefined)
-      const failed = runStatus ? runStatus === 'failed' : ['failed', 'interrupted'].includes(executionStatus) || taskStatus === 'failed'
+      const stopOperation = currentStopOperation(executionTask)
+      const stopping = current?.external_execution?.status === 'stopping' || runStatus === 'stopping' || executionStatus === 'stopping' || Boolean(stopOperation && stopOperation.status !== 'completed' && !Number.isFinite(executionTask.stop_confirmed_at))
+      const failed = !stopping && (runStatus ? runStatus === 'failed' : ['failed', 'interrupted'].includes(executionStatus) || taskStatus === 'failed')
       const taskNeedsAttention = taskStatus === 'needs_attention' || executionStatus === 'paused'
-      const needsAttention = !failed && (runStatus
+      const needsAttention = !stopping && !failed && (runStatus
         ? runStatus === 'attention_required' || (runStatus === 'running' && current?.needs_user === true && taskNeedsAttention)
         : taskNeedsAttention)
-      const stopped = runStatus ? ['stopped', 'cancelled'].includes(runStatus) : executionStatus === 'stopped' || taskStatus === 'stopped'
-      const stopping = !failed && !needsAttention && !stopped && current?.terminal !== true && executionStatus === 'stopping'
+      const stopped = !stopping && (runStatus ? ['stopped', 'cancelled'].includes(runStatus) : executionStatus === 'stopped' || taskStatus === 'stopped')
       const running = !failed && !needsAttention && !stopped && !stopping && (runStatus
         ? ['preparing', 'running'].includes(runStatus)
         : executionStatus === 'starting' || executionStatus === 'running' || taskStatus === 'preparing' || taskStatus === 'running')
@@ -3669,7 +3714,7 @@ window.__ModuleLoader__.load({
       const healthStatus = health?.status ?? 'pending'
       const dataStateLabel = healthStatus === 'ok' ? '数据可读取' : healthStatus === 'warning' ? '有读取诊断' : healthStatus === 'pending' ? '尚待读取验证' : HEALTH[healthStatus] ?? healthStatus
       const publicationLabel = failed && publicationState === 'pending' ? '未发布（运行失败）' : needsAttention && publicationState === 'pending' ? '尚未发布（需要处理）' : stopped && publicationState === 'pending' ? '未发布（已停止）' : stopping && publicationState === 'pending' ? '未发布（停止中）' : publicationState === 'pending' && running ? '阶段结果待发布' : publicationState
-      const executionLabel = failed ? '分析失败' : needsAttention ? '需要处理' : stopped ? '已停止' : stopping ? '正在停止' : running ? '分析中' : runStatus === 'complete' || executionStatus === 'completed' ? '已完成' : '等待启动'
+      const executionLabel = failed ? '分析失败' : needsAttention ? '需要处理' : stopped ? '已停止' : stopping ? (['blocked', 'interrupted'].includes(stopOperation?.status) ? '停止待确认' : '正在停止') : running ? '分析中' : runStatus === 'complete' || executionStatus === 'completed' ? '已完成' : '等待启动'
       const dataTone = healthStatus === 'error' ? 'error' : publicationState === 'final' && healthStatus === 'ok' ? 'ok' : publicationState === 'draft' ? 'notice' : 'neutral'
       const countsAvailability = publicationState === 'pending' ? 'unpublished' : publicationState === 'draft' ? 'draft' : publicationState === 'final' ? 'verified' : publicationState === 'partial' ? 'partial' : 'unavailable'
       const qualityLabel = outcomePresentation(current).semantic
@@ -4325,6 +4370,7 @@ window.__ModuleLoader__.load({
       .b05-case-table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #e5e7e4; }.b05-case-table th { color: #828987; background: #fafbf8; font-size: 12px; font-weight: 500; text-align: left; padding: 12px 14px; }.b05-case-table td { border-top: 1px solid #eff0ed; padding: 12px 14px; font-size: 12px; line-height: 1.7; vertical-align: middle; }.b05-case-table a,.b05-case-table button { color: #466484; }.b05-case-table input { accent-color: #b62836; }
       .b05-head-actions { display: flex; align-items: center; gap: 9px; }.b05-head-actions button,.b05-selected-bar button { border: 1px solid #dfe4df; background: #fff; border-radius: 6px; padding: 9px 13px; font-size: 12px; color: #4b5d67; cursor: pointer; }.b05-head-actions button.primary,.b05-export-modal button.primary { background: #27372d; border-color: #27372d; color: #fff; }.b05-table-scroll { overflow-x: auto; border-radius: 8px; }.b05-case-table { min-width: 850px; }.b05-case-table td:nth-child(3) { min-width: 240px; }.b05-case-table td small { display: block; max-width: 350px; color: #929a98; margin-top: 4px; }.b05-text-link { border: 0; background: none; padding: 0; text-align: left; cursor: pointer; font: inherit; }.b05-mono { font-family: Consolas,monospace; color: #6b7580; }.b05-risk-chip,.b05-readiness { display: inline-block; padding: 4px 8px; border-radius: 4px; background: #f1f3f4; color: #6d777d; white-space: nowrap; }.b05-readiness.good { background: #edf5eb; color: #64855f; }.b05-readiness.warn { background: #fff5e6; color: #ad7a27; }.b05-selected-bar { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 14px 18px; background: #f4f5f2; border: 1px solid #e7ebe5; border-radius: 7px; margin-top: 17px; font-size: 12px; }.b05-selected-bar small { display: block; color: #949d99; margin-top: 4px; }.b05-subtle { color: #929a99; font-size:12px; }
       .b05-modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: #17201866; backdrop-filter: blur(2px); }.b05-export-modal { width: min(490px, 88vw); max-height: 88vh; overflow: auto; box-sizing: border-box; background: #fff; border-radius: 9px; box-shadow: 0 18px 60px #17201830; padding: 24px; }.b05-export-modal header,.b05-export-modal footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }.b05-export-modal header small { font-size:12px; color: #8a9490; }.b05-export-modal header h2 { font-size: 20px; margin: 6px 0 0; }.b05-export-modal header button { width: 30px; height: 30px; border: 1px solid #e0e5df; border-radius: 5px; background: #fff; cursor: pointer; }.b05-export-modal p { color: #7d8583; font-size: 12px; line-height: 1.7; }.b05-export-modal h3 { font-size: 12px; margin: 23px 0 11px; }.b05-export-scope { background: #f5f7f4; padding: 16px; border-radius: 6px; font-size: 12px; }.b05-export-scope span { float: right; color: #63825d; }.b05-export-scope p { margin: 8px 0; }.b05-export-scope small { color: #8f9894; }.b05-export-choice { display: grid; grid-template-columns: 18px 46px minmax(0,1fr) auto; gap: 12px; align-items: center; border: 1px solid #e3e7e2; border-radius: 7px; padding: 13px; margin: 8px 0; cursor: pointer; }.b05-export-choice.selected { border-color: #9eb6a1; background: #fbfdfb; }.b05-export-choice strong { font-size: 12px; }.b05-export-choice small { display: block; color: #929b96; font-size:12px; margin-top: 4px; }.b05-export-choice em { font-size:12px; color: #5c8b5d; font-style: normal; }.b05-file-icon { font: bold 10px Consolas,monospace; color: #508460; }.b05-export-modal footer { border-top: 1px solid #e6eae5; margin-top: 20px; padding-top: 18px; justify-content: flex-end; }.b05-export-modal footer button { border: 1px solid #dfe5de; border-radius: 5px; padding: 9px 15px; background: #fff; cursor: pointer; }.b05-export-error { color: #b62836 !important; }
+      .pangea-case-basis { overflow-wrap: anywhere; min-width: 0; }.pangea-case-basis > summary { cursor: pointer; font-weight: 600; }.pangea-case-basis pre { white-space: pre-wrap; overflow-wrap: anywhere; }.pangea-case-basis h4 { margin: 16px 0 8px; }
       .b05-case-layout { display: grid; grid-template-columns: minmax(0,1.75fr) minmax(275px,1fr); gap: 18px; align-items: start; }.b05-case-layout main,.b05-case-layout aside { display: grid; gap: 17px; min-width: 0; }.b05-case-layout .b05-card h3 { margin-bottom: 17px; }.b05-detail-label { color: #9a7770; font: 12px Consolas,monospace; }.b05-bullet { display: grid; grid-template-columns: 16px minmax(0,1fr); gap: 9px; align-items: start; margin: 12px 0; font-size: 12px; color: #6d7772; line-height: 1.7; }.b05-case-notice { padding: 15px 18px; border: 1px solid #f0dfba; background: #fff8e9; border-radius: 7px; color: #a37121; font-size: 12px; }.b05-case-notice p { margin: 5px 0 0; line-height: 1.7; }.b05-step-table { min-width: 520px; }.b05-step-table td:first-child { width: 50px; }.b05-step-table td:nth-child(2) { width: 46%; }.b05-case-kv { display: grid; grid-template-columns: 80px minmax(0,1fr); gap: 15px 7px; margin: 0; font-size: 12px; }.b05-case-kv dt { color: #929b98; }.b05-case-kv dd { margin: 0; line-height: 1.7; }.b05-case-kv button { display: block; margin-bottom: 4px; }.b05-raw-record { margin-top: 18px; font-size: 12px; color: #7c8881; }.b05-raw-record summary { cursor: pointer; }
       .b05-coverage-notice { border: 1px solid #dce8f1; background: #f3f8fb; border-radius: 7px; padding: 14px 18px; color: #53758b; font-size: 12px; line-height: 1.7; margin-bottom: 20px; }.b05-coverage-notice p { margin: 4px 0 0; }.b05-coverage-grid { display: grid; grid-template-columns: minmax(0,1.5fr) minmax(275px,1fr); gap: 18px; }.b05-gap-row { display: grid; grid-template-columns: 78px minmax(0,1.2fr) minmax(0,1fr) 78px; align-items: center; gap: 12px; padding: 16px 0; border-bottom: 1px solid #e9ede7; font-size:12px; }.b05-gap-row strong { display: block; font-size: 12px; }.b05-gap-row small { display: block; color: #9ba49e; margin-top: 5px; overflow-wrap: anywhere; }.b05-gap-row button { display: block; margin: 4px 0; }.b05-coverage-source { padding: 16px; border: 1px solid #e7ebe5; border-radius: 5px; margin-bottom: 17px; font-size: 12px; overflow-wrap: anywhere; }
       @container pangea-panel (max-width: 900px) { .b05-coverage-grid { grid-template-columns: minmax(0,1fr); }.b05-gap-row { grid-template-columns: 65px minmax(0,1fr) minmax(0,1fr) 70px; } }
@@ -6245,7 +6291,7 @@ window.__ModuleLoader__.load({
       const monitorPersistence = pageMode === 'home' ? workbench?.monitor_persistence
         : latestMonitorPersistence(workbench?.monitor_persistence, snapshot?.monitor?.persistence)
       const monitorPersistenceDegraded = monitorPersistence?.status === 'degraded'
-      const needsWorkbenchPolling = taskItems.some(task => ['preparing', 'running'].includes(task.status))
+      const needsWorkbenchPolling = taskItems.some(task => ['preparing', 'running'].includes(task.status) || task.execution_status === 'stopping')
         || (pageMode === 'home' && monitorPersistenceDegraded)
       React.useEffect(() => {
         if (!visible || pageMode === 'execution' || !needsWorkbenchPolling) return undefined
@@ -6632,8 +6678,9 @@ window.__ModuleLoader__.load({
             items: (value.tasks?.items ?? []).map(item => item.task_id === task.task_id ? result.task : item) } } : value)
           const errors = [result.run_stop, result.session_cancel, result.job_stop].filter(item => item?.status === 'error').map(item => item.error).filter(Boolean)
           if (action === 'task-delete' || result.stop_confirmed !== true || errors.length) {
-            const message = result.error || errors.join('；') || '已请求停止，执行端尚未确认结束。任务仍保留，请稍后重试确认。'
-            updateDialog({ error: message })
+            const pending = result.pending === true || ['running', 'waiting'].includes(result.task?.stop_operation?.status)
+            const message = pending ? '' : result.error || errors.join('；') || '停止尚未确认。任务仍保留，请查看停止进度。'
+            updateDialog({ task: result.task ?? task, error: message })
             setTaskActions(value => ({ ...value, [task.task_id]: { action, busy: false, error: message } }))
           } else {
             setTaskActionDialog(value => value?.task.task_id === task.task_id && value.cwd === operation.cwd ? null : value)
@@ -7010,7 +7057,7 @@ window.__ModuleLoader__.load({
           setRepositoryLoading(false)
           setRepositoryForm({ sourcePath: '', repositoryName: '' })
           if (pageMode === 'analysis' && returnTo.type === 'create') {
-            setCreateForm(form => ({ ...form, repository: result.repository.name }))
+            selectAnalysisRepository(result.repository.name)
           }
           setScreen(pageMode === 'home' ? { type: 'home' } : returnTo)
           setHistory(value => value.slice(0, -1))
@@ -7034,7 +7081,14 @@ window.__ModuleLoader__.load({
         setRepositoryError('')
         navigate({ type: 'repository-import' })
       }
+      function selectAnalysisRepository(repository) {
+        if (repository === createForm.repository) return
+        setScopePreview(null)
+        setCreateForm(form => ({ ...form, repository, source_scope_text: '', scope_preview_id: undefined, expected_scope_revision: undefined }))
+      }
       async function submitNewRun() {
+        const directories = String(createForm.source_scope_text || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean)
+        if (!directories.length || !directories.every(__sourceScopePicker.isSubdirectoryPath)) { showActionNotice('请选择真实存在的非根下级目录。', true); return }
         if (!validScopePreview?.matched_file_count) { showActionNotice('请先预览并确认源码范围。', true); return }
         if (pageMode !== 'analysis' || !cwd || creatingRun || coverageQueryBusy || workbench?.compatibility?.compatible !== true) return
         const execution = analysisExecutionState(createForm, workbench?.acp_providers, analysisAgentModels, cwd)
@@ -7179,28 +7233,22 @@ window.__ModuleLoader__.load({
         } catch (reason) { showActionNotice(`交付未完成：${reason instanceof Error ? reason.message : String(reason)}`, true); if (propagate) throw reason }
       }
       async function stopCurrentRun(propagate = false) {
-        if (!cwd || !current || current.terminal) return
+        if (!cwd || !current || (current.terminal && selectedTask?.execution_status !== 'stopping')) return
         try {
           const stopped = await requestWorkbenchAction({ cwd, action: 'stop', payload: { task_id: selectedTask?.task_id, run_id: current.run_id, data_root: snapshot?.data_root, attempt_id: selectedTask?.attempt_id } })
           const stopErrors = [stopped.run_stop, stopped.session_cancel, stopped.job_stop].filter(item => item?.status === 'error').map(item => item.error)
-          if (propagate && (stopErrors.length || stopped.stop_confirmed === false)) {
+          const pending = stopped.pending === true || ['running', 'waiting'].includes(stopped.task?.stop_operation?.status)
+          const failure = stopErrors.join('；') || stopped.error
+          if (!pending && (failure || stopped.stop_confirmed === false)) {
             await Promise.all([load(), loadWorkbench()])
-            throw new Error(stopErrors.join('；') || stopped.error || '已请求停止，执行端尚未确认结束，请稍后重试。')
-          }
-          if (stopped.run_stop?.status === 'error') {
-            showActionNotice(`Agent 已停止，但 PANGEA 状态同步失败：${stopped.run_stop.error}`, true)
-          } else if (stopped.session_cancel?.status === 'error') {
-            showActionNotice(`Run 已停止；DSH 会话取消失败：${stopped.session_cancel.error}`, true)
-          } else if (stopped.job_stop?.status === 'error') {
-            showActionNotice(`Run 已停止；ACP Agent 停止失败：${stopped.job_stop.error}`, true)
-          } else if (stopped.stop_confirmed === false || stopped.job_stop?.result === 'requested') {
-            showActionNotice(`已请求停止 ${current.run_id}，等待执行端确认`, true)
-          } else {
-            showActionNotice(`已停止 ${current.run_id}`)
-          }
+            const message = `停止尚未确认：${failure || '请查看停止进度与执行端诊断。'}`
+            showActionNotice(message, true)
+            if (propagate) throw new Error(message)
+          } else if (stopped.stop_confirmed === true) showActionNotice(`已停止 ${current.run_id}，已保存结果保留。`)
+          else showActionNotice('已收到停止请求，正在等待 Agent 和工具退出。')
           await Promise.all([load(), loadWorkbench()])
         } catch (reason) {
-          showActionNotice(`停止失败：${reason instanceof Error ? reason.message : String(reason)}`, true)
+          showActionNotice(`停止未完成：${reason instanceof Error ? reason.message : String(reason)}`, true)
           if (propagate) throw reason
         }
       }
@@ -7716,7 +7764,7 @@ window.__ModuleLoader__.load({
           : !createForm.repository ? '请先选择源码仓库。'
           : !createForm.target.trim() ? '请填写本次分析目标。'
           : !objectiveReady ? '请选择产品行为或接口契约分析目标。'
-          : sourceScope.length === 0 ? '请选择源码范围；分析整个仓库请明确选择根目录。'
+          : (sourceScope.length === 0 || !sourceScope.every(__sourceScopePicker.isSubdirectoryPath)) ? '请选择真实存在的非根下级目录，并预览命中文件。'
           : !validScopePreview?.matched_file_count ? '请预览并确认命中的源码文件。'
           : createForm.test_tool_sources?.length && !createForm.test_tool_preview?.matched_file_count ? '请预览并确认测试工具参考文件。'
           : sceneOptions && createForm.asset_ids.some(id => !(assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision) ? '所选资产版本尚未读取，请刷新资产后重新选择。'
@@ -7745,14 +7793,18 @@ window.__ModuleLoader__.load({
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
-        const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && objectiveReady && sourceScope.length && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
+        const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && objectiveReady && sourceScope.length && sourceScope.every(__sourceScopePicker.isSubdirectoryPath) && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
         const inputsReady = (!createForm.test_tool_sources?.length || createForm.test_tool_preview?.matched_file_count > 0) && coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
         const go = (next, nextView = 'inputs') => {
           if (creatingRun) return
           if (next > 1 && !targetReady || next > 2 && !inputsReady || next > 3 && !executionReady) { showActionNotice(submitBlockReason || '请先完成前面的设置。', true); return }
           setScreen(value => ({ ...value, createStep: next, createView: nextView }))
         }
-        const update = (key, value) => setCreateForm(form => ({ ...form, [key]: value }))
+        const update = (key, value) => {
+          if (key === 'repository') { selectAnalysisRepository(value); return }
+          if (key === 'source_scope_text') setScopePreview(null)
+          setCreateForm(form => ({ ...form, [key]: value }))
+        }
         const button = (text, onClick, variant = '', iconName, disabled = false) => h('button', { type: 'button', className: `btn ${variant}`, onClick, disabled: creatingRun || disabled }, iconName && runIcon(iconName), text)
         const badge = (text, kind = '') => h('span', { className: `badge ${kind}` }, text)
         const field = (label, control, hint) => h('label', { className: 'field' }, h('span', null, label), control, hint && h('span', { className: 'hint' }, hint))
@@ -7765,7 +7817,7 @@ window.__ModuleLoader__.load({
         let context = panel(h(React.Fragment, null,
           h('div', { className: 'create-side-title' }, '本次分析'), badge(createForm.repository || '待选择仓库', 'neutral'),
           h('h3', { className: 'create-context-title' }, createForm.target || '待填写分析目标'), h('p', { className: 'create-copy' }, scene[2]),
-          h('dl', { className: 'key-value' }, ['分析场景', scene[0], '分析模式', createForm.mode === 'depth' ? '标准型' : '速度型', '源码范围', validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库' : '指定范围'} · ${validScopePreview.matched_file_count} 个源码文件` : '尚未预览命中文件', '输入资料', step > 1 ? `${selectedAssets.length} 份已选资产` : '下一步选择', '执行 Agent', step > 2 ? selectedProviderLabel : '待选择'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
+          h('dl', { className: 'key-value' }, ['分析场景', scene[0], '分析模式', createForm.mode === 'depth' ? '标准型' : '速度型', '源码范围', validScopePreview ? `已选目录 · ${validScopePreview.matched_file_count} 个源码文件` : '尚未预览命中文件', '输入资料', step > 1 ? `${selectedAssets.length} 份已选资产` : '下一步选择', '执行 Agent', step > 2 ? selectedProviderLabel : '待选择'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
           h('div', { className: 'create-scene-focus' }, h('strong', null, '本次分析重点'), h('p', null, scene[3]), badge(createForm.scenario === 'coverage-analysis' ? '覆盖率输入必需' : '覆盖率输入可选', createForm.scenario === 'coverage-analysis' ? 'warn' : 'neutral')),
           step === 1 && h(React.Fragment, null, h('div', { className: 'create-subhead' }, '分析模式'), field('', h('select', { 'aria-label': '分析模式', value: createForm.mode, onChange: event => update('mode', event.target.value) }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '标准型 · 独立盲审 + 对照复核'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型 · 直接审核，跳过盲审')))),
           step === 3 && !executionReady && h('div', { style: { marginTop: 18 } }, badge('执行设置待完成', 'warn')), h('div', { className: 'divider' }), h('div', { className: 'create-check-item' }, runIcon('ShieldCheck'), h('span', null, '每次运行将保存独立的源码快照与资产版本。'))), 'create-side')
@@ -7787,7 +7839,7 @@ window.__ModuleLoader__.load({
           sceneOptions?.objectives ? field('测试对象层级', h('select', { 'aria-label': '测试对象层级', value: createForm.objective, onChange: event => update('objective', event.target.value) }, h('option', { value: '' }, '请选择测试对象层级'), h('option', { value: 'product-behavior' }, '产品行为 · 验证实际操作与外部结果（通常选此项）'), h('option', { value: 'interface-contract' }, '接口契约 · 验证公开 API 的调用规则与结果'))) : null,
           h('div', { className: 'create-subhead' }, '分析场景'),
           h('div', { className: 'choice-grid create-scenes', role: 'group', 'aria-label': '分析场景' }, Object.entries(scenes).map(([id, item]) => h('button', { key: id, type: 'button', className: `choice create-option ${createForm.scenario === id ? 'selected' : ''}`, 'aria-pressed': createForm.scenario === id, disabled: !supported('scenarios', id), 'data-scenario': id, onClick: () => update('scenario', id) }, runIcon(item[1]), h('div', null, h('strong', null, item[0]), h('p', null, item[2])), h('span', { className: 'create-scene-check' }, runIcon('CircleCheck'))))),
-          h('div', { className: 'create-scope', style: { marginTop: 22 } }, input('源码冻结范围', 'source_scope_text', undefined, true)),
+          h('div', { className: 'create-scope', style: { marginTop: 22 } }, field('源码冻结目录', h('textarea', { 'aria-label': '源码冻结目录', value: createForm.source_scope_text, readOnly: true, placeholder: '请通过下方目录选择器选择真实下级目录' }))),
           h(SourceScopePicker, { renderIcon: runIcon, cwd, dataRoot: workbench?.data_root, repository: createForm.repository, value: createForm.source_scope_text, preview: validScopePreview, onChange: value => update('source_scope_text', value), onPreview: value => setScopePreview({ ...value, key: createScopeKey }) }),
           footer(() => navigate({ type: 'tasks' }), () => go(2), '下一步 · 输入资料', !targetReady)), 'create-target-panel')
         else if (step === 2 && view === 'inputs') content = panel(h(React.Fragment, null,
@@ -7838,7 +7890,7 @@ window.__ModuleLoader__.load({
         } else {
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
-            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库 · ' : ''}命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
+            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
             row('测试工具代码（仅参考）', (createForm.test_tool_sources || []).map(source => `${source.repo_id}: ${source.paths.join('、')}`).join('\n') || '未选择', createForm.test_tool_preview ? `已确认 ${createForm.test_tool_preview.matched_file_count} 个参考文件；不作为被测对象` : '可选，不影响原有分析', 2),
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint', className: 'notice warn' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
@@ -9390,15 +9442,19 @@ window.__ModuleLoader__.load({
       function renderCaseCoverageBasis(item) {
         const nonArrayRefs = item.coverage_refs != null && !Array.isArray(item.coverage_refs)
         const refs = Array.isArray(item.coverage_refs) ? item.coverage_refs : item.coverage_refs == null ? [] : [item.coverage_refs]
-        if (item.summary == null && item.purpose !== 'coverage' && !refs.length) return null
+        const hasCoverage = item.purpose === 'coverage' || refs.length > 0
+        const hasSummary = item.summary != null && sourceFirstRecordBody(item.summary).trim()
+        const hasEvidence = Array.isArray(item.source_evidence) ? item.source_evidence.length > 0 : item.source_evidence != null && sourceFirstRecordBody(item.source_evidence).trim()
+        if (!hasSummary && !hasCoverage && !hasEvidence) return null
         const frozen = Array.isArray(details.coverage_gaps) ? details.coverage_gaps : null
         const ids = [...new Set(refs.map(ref => typeof ref === 'string' ? ref : ref?.coverage_id).filter(id => typeof id === 'string' && id.trim()))]
         const invalid = refs.some(ref => { const id = typeof ref === 'string' ? ref : ref?.coverage_id; return typeof id !== 'string' || !id.trim() })
-        return h('section', { className: 'b05-card', 'aria-label': '补测依据与冻结覆盖输入' },
-          h('h3', null, '补测依据说明'),
-          item.summary != null && sourceFirstRecordBody(item.summary).trim()
-            ? renderReadableBody(item.summary)
-            : h('p', null, '未提供逐用例 summary；具体缺口、普通操作不足及新增触发条件尚未说明。'),
+        return h('details', { key: caseIdentity(item), className: 'b05-card pangea-case-basis', 'aria-label': '补测依据与冻结覆盖输入' },
+          h('summary', null, '补测依据'),
+          hasSummary ? h('section', null, h('h4', null, '用例说明（原文）'), renderReadableBody(item.summary))
+            : item.purpose === 'coverage' ? h('p', null, '未提供逐用例 summary；具体缺口、普通操作不足及新增触发条件尚未说明。') : null,
+          hasEvidence ? h('section', null, h('h4', null, '源码依据'), renderReadableBody(item.source_evidence)) : null,
+          hasCoverage ? h('section', null, h('h4', null, '冻结覆盖输入'),
           h('p', { className: 'b05-subtle' }, '以下仅按显式引用关联冻结覆盖输入；引用匹配不代表已确认缺口或已完成补测，正计数记录可能只是已覆盖上下文。'),
           !ids.length ? h('p', null, '未核实：未提供有效覆盖引用，不能据此认定为补测。') : null,
           nonArrayRefs ? h('div', null, h('p', null, '未核实：原始 coverage_refs 不是数组；以下仅保留原文与候选匹配，不作为有效引用。'), renderReadableBody(item.coverage_refs)) : null,
@@ -9411,7 +9467,7 @@ window.__ModuleLoader__.load({
                   : h(React.Fragment, null,
                     matches.length > 1 ? h('p', null, '未核实：引用 ID 重复或冲突，无法唯一核实；以下保留全部记录。') : null,
                     matches.map((row, index) => h('div', { key: index }, renderReadableBody(row)))))
-          }))
+          })) : null)
       }
 
       function renderCaseDetail() {
@@ -9420,9 +9476,6 @@ window.__ModuleLoader__.load({
         const readiness = item.readiness === 'ready' ? '具备执行条件' : item.readiness === 'needs_setup' ? '待补执行条件' : '执行条件未标注'
         const pairs = Array.isArray(item.step_pairs) && item.step_pairs.length ? item.step_pairs
           : (Array.isArray(item.steps) ? item.steps : []).map((action, index) => ({ action, expected: item.expected_results?.[index] }))
-        const unit = unitById.get(item.unit_id)
-        const flowIds = idList(item.linked_flow_ids)
-        const linkedRisks = idList(item.linked_risk_ids)
         const behaviorItems = behaviorCoverageForCase(current?.details?.behavior_coverage ?? behaviorCoverageProjection(current?.details?.notes ?? current?.notes, testCases), item)
         const values = (values, empty) => Array.isArray(values) && values.length ? values.map((value, index) => h('div', { key: index, className: 'b05-bullet' }, h('span', { 'aria-hidden': true }, '•'), h('span', null, text(value, empty)))) : h('p', { className: 'b05-subtle' }, empty)
         const copyCase = () => { void copySingleCase(item) }
@@ -9454,7 +9507,6 @@ window.__ModuleLoader__.load({
             h('main', null,
               h('div', { className: 'b05-case-notice pangea-case-readiness', role: 'status', 'data-ready': item.readiness === 'ready' ? 'true' : undefined }, h('strong', null, readiness),
                 h('p', null, sourceFirstRecordBody(item.readiness_reason) || (item.missing_execution_conditions ?? []).join('；') || '当前记录未提供执行条件依据。')),
-              renderCaseCoverageBasis(item),
               h('div', { className: 'b05-card pangea-case-setup' },
                 h('section', null, h('h3', null, '前置条件'), values(item.preconditions, '原文未记录前置条件。')),
                 h('section', null, h('h3', null, '清理动作'), values(item.cleanup, '未记录清理动作。'))),
@@ -9465,10 +9517,9 @@ window.__ModuleLoader__.load({
                     h('td', null, text(step.action, '未提供操作')), h('td', null, text(step.expected, '未提供逐步预期，请核对整体预期及原文')))))))
                 : h('p', null, '原文未提供可识别的操作步骤，请核对分析原文。'),
                 item.expected_results?.length ? h('p', { className: 'b05-subtle' }, `整体预期：${item.expected_results.join('；')}`) : null),
+              renderCaseCoverageBasis(item),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
-              item.unresolved_related_refs?.length ? h('details', { className: 'b05-card' }, h('summary', null, '未解析的关联引用（不作为操作依据）'), h('pre', null, sourceFirstRecordBody(item.unresolved_related_refs))) : null,
-              item.unit_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '本分析单元说明'), item.unit_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('p', null, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
                 h('p', { className: 'b05-subtle' }, '以下为已设计参数组合，不单独计为独立用例，也不代表各组合已实测通过。'),
                 item.variants.map((variant, index) => h('article', { key: index, className: 'pangea-case-variant', 'data-variant-id': variant.variant_id,
@@ -9478,13 +9529,7 @@ window.__ModuleLoader__.load({
                   h('dl', { className: 'pangea-reading-fields' }, h('dt', null, '输入'), h('dd', null, variant.input || '输入未提供'), h('dt', null, '预期'), h('dd', null, variant.expected || '预期未提供'))))) : null,
               behaviorItems.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联业务行为'), behaviorItems.map((behavior, index) => h('p', { key: index }, `${behavior.item_id || '未编号'} · ${behavior.operation || '未提供业务操作'} · ${BEHAVIOR_STATUS_LABELS[behavior.status] || '未标注'}`))) : null),
             h('aside', null,
-              h('section', { className: 'b05-card' }, h('h3', null, '关联上下文'), h('dl', { className: 'b05-case-kv' },
-                h('dt', null, '分析单元'), h('dd', null, unit ? `${unit.unit_id} · ${unit.title || '未命名'}` : text(item.unit_id, '未记录')),
-                h('dt', null, '业务路径'), h('dd', null, flowIds.length ? linkedItems({ linked_flow_ids: flowIds }) : '未关联'),
-                h('dt', null, '关联风险'), h('dd', null, linkedRisks.length ? linkedRisks.map(id => h('button', { key: id, type: 'button', className: 'b05-text-link', onClick: () => navigate({ type: 'risk', id }) }, `${riskById.get(id)?.display_id || id} · ${riskById.get(id)?.title || '风险记录'}`)) : '未关联'),
-                h('dt', null, '源码位置'), h('dd', null, previewEvidence?.location ? h('button', { type: 'button', className: 'b05-text-link', onClick: () => setSourceDrawerOpen(true) }, displayEvidenceLocation(previewEvidence.location)) : '当前记录未提供源码引用'))),
-              h('section', { className: 'b05-card' }, h('h3', null, '观察点'), values(item.observability, '未记录观察点。'),
-                h('p', { className: 'b05-subtle' }, '本页是测试用例说明，尚未产生实测通过或失败结论。')),
+              item.observability?.some(value => sourceFirstRecordBody(value).trim()) ? h('section', { className: 'b05-card' }, h('h3', null, '补充观测'), values(item.observability, '')) : null,
               h('section', { className: 'b05-card' }, h('h3', null, '分析原文'), h('p', null, '参数、步骤与结论均保留原文追溯入口。'),
                 h('button', { type: 'button', className: 'b05-text-link', onClick: () => jump('report') }, '查看完整用例记录 ↗')))),
           item.source_record ? h('details', { className: 'b05-raw-record' }, h('summary', null, '查看本轮原始用例记录'), renderRecordBody(item, true)) : null,
@@ -9494,7 +9539,7 @@ window.__ModuleLoader__.load({
 
       async function copySingleCase(item) {
         const pairs = Array.isArray(item.step_pairs) && item.step_pairs.length ? item.step_pairs.map((step, index) => `${index + 1}. ${step.action || '未提供操作'} → ${step.expected || '未提供逐步预期'}`) : (Array.isArray(item.steps) ? item.steps : []).map((step, index) => `${index + 1}. ${step}`)
-        const content = [`${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`, `验证目标：${text(item.verification_goal, '未记录')}`, `前置条件：${(item.preconditions ?? []).join('；') || '未记录'}`, ...pairs, `整体预期：${(item.expected_results ?? []).join('；') || '未记录'}`, `观察点：${(item.observability ?? []).join('；') || '未记录'}`, `清理：${(item.cleanup ?? []).join('；') || '未记录'}`, ...caseVariantLines(item)].join('\n')
+        const content = [`${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`, `验证目标：${text(item.verification_goal, '未记录')}`, `前置条件：${(item.preconditions ?? []).join('；') || '未记录'}`, ...pairs, `整体预期：${(item.expected_results ?? []).join('；') || '未记录'}`, ...(item.observability?.some(value => sourceFirstRecordBody(value).trim()) ? [`补充观测：${item.observability.join('；')}`] : []), ...(item.summary != null ? [`补测依据：\n${sourceFirstRecordBody(item.summary)}`] : []), ...(item.source_evidence?.length ? [`源码依据：\n${sourceFirstRecordBody(item.source_evidence)}`] : []), `清理：${(item.cleanup ?? []).join('；') || '未记录'}`, ...caseVariantLines(item)].join('\n')
         try { await globalThis.navigator.clipboard.writeText(content); showActionNotice('已复制完整测试用例。') }
         catch (reason) { showActionNotice(`复制失败：${reason instanceof Error ? reason.message : String(reason)}`, true) }
       }
@@ -9590,7 +9635,7 @@ window.__ModuleLoader__.load({
       if (screen.type === 'workflow') return h('div', { ref: panelRootRef, className: 'pangea-companion', style: styles.root }, h('style', null, panelCss), monitorPersistenceNotice, renderSourceFirstWorkflow())
       return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : 'PANGEA 执行环境' },
         h('style', null, panelCss),
-        taskActionDialog ? h(TaskLifecycleDialog, { state: taskActionDialog,
+        taskActionDialog ? h(TaskLifecycleDialog, { state: { ...taskActionDialog, task: taskItems.find(task => task.task_id === taskActionDialog.task.task_id && task.attempt_id === taskActionDialog.task.attempt_id) ?? taskActionDialog.task }, onRefresh: () => { void loadWorkbench({ background: true }) },
           onClose: () => { if (!taskActionDialog.busy) setTaskActionDialog(null) }, onConfirm: () => { void confirmTaskAction() } }) : null,
         derivation ? h(RunDerivationDialog, { state: derivation, onChange: draft => setDerivation(value => value && ({ ...value, draft })),
           onClose: closeDerivation, onSubmit: input => { void submitDerivation(input) }, onRetry: () => { void openDerivation(null, derivation) } }) : null,
@@ -9675,6 +9720,8 @@ window.__ModuleLoader__.load({
     exports.workflowAckPresentation = workflowAckPresentation
     exports.deriveRunPresentation = deriveRunPresentation
     exports.outcomePresentation = outcomePresentation
+    exports.StopProgress = StopProgress
+    exports.currentStopOperation = currentStopOperation
     exports.configuredReviewMethod = configuredReviewMethod
     exports.semanticReviewStatusLabel = semanticReviewStatusLabel
     exports.previousAttemptFailures = previousAttemptFailures

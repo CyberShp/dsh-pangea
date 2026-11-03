@@ -1,10 +1,11 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import test from 'node:test'
-import { workbenchRouteHandler } from '../src/index.js'
+import { workbenchRouteHandler, applyTaskExecutionState } from '../src/index.js'
 import { createTaskStore } from '../src/task-store.js'
 
 const ok = value => ({ result: { ok: true, value } })
@@ -20,6 +21,7 @@ async function recordQuiescentWorkers(f, task) {
 
 async function fixture(t, input = {}) {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'pangea-task-actions-')))
+  await writeSourceRepository(root, 'repo-one')
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# test workspace')
@@ -143,7 +145,9 @@ test('kill acknowledgement is not stop confirmation and a failed stop remains vi
   assert.equal(result.body.deleted, false)
   assert.equal(result.body.stop_confirmed, false)
   assert.equal(result.body.task.execution_status, 'stopping')
-  assert.match(result.body.error, /Job 尚未确认结束/)
+  assert.equal(result.body.pending, true)
+  assert.equal(result.body.error, null)
+  assert.equal(result.body.task.stop_operation.status, 'waiting')
   assert.equal((await f.tasks.list()).length, 1)
   f.job.status = 'killed'
   result = await f.request({ action: 'task-delete', task_id: task.task_id })
@@ -265,7 +269,9 @@ for (const previouslyConfirmed of [false, true]) {
 
     assert.equal(first.body.deleted, false)
     assert.equal(first.body.stop_confirmed, false)
-    assert.match(first.body.error, /Job 尚未确认结束/)
+    assert.equal(first.body.pending, true)
+    assert.equal(first.body.error, null)
+    assert.match(first.body.task.stop_operation.message, /Job 尚未确认结束/)
     assert.equal((await f.tasks.list()).length, 1)
     assert.equal((await f.tasks.get(task.task_id)).stop_confirmed_at, null)
     assert.deepEqual(f.calls.map(call => call[0]), previouslyConfirmed ? ['kill'] : ['runs', 'kill'])
@@ -457,4 +463,167 @@ test('concurrent delete requests wait for durable publication and both retain th
     assert.notEqual(result.body.deleted, true)
   }
   assert.equal((await f.tasks.list()).length, 1)
+})
+
+test('async stops share one operation, expose factual progress and survive refresh without claiming success', async t => {
+  const f = await fixture(t)
+  const task = await f.bind()
+  const gate = deferred(), entered = deferred()
+  let calls = 0
+  f.runner = async ({ args }) => { calls++; entered.resolve(); await gate.promise; return { run_id: args.at(-1), lifecycle_status: 'stopped' } }
+  const first = f.request({ action: 'stop', task_id: task.task_id, attempt_id: task.attempt_id })
+  await entered.promise
+  const second = f.request({ action: 'stop', task_id: task.task_id, attempt_id: task.attempt_id })
+  const progress = await f.tasks.get(task.task_id)
+  assert.equal(progress.stop_operation.status, 'running')
+  assert.equal(progress.stop_operation.steps.find(step => step.id === 'run_fence').status, 'running')
+  assert.equal(progress.stop_confirmed_at, null)
+  const reloaded = createTaskStore({ storePath: f.storePath })
+  assert.equal((await reloaded.get(task.task_id)).stop_operation.status, 'interrupted')
+  const responses = await Promise.all([first, second])
+  for (const response of responses) {
+    assert.equal(response.body.pending, true)
+    assert.equal(response.body.error, null)
+    assert.equal(response.body.stop_confirmed, false)
+    assert.equal(response.body.task.stop_operation.operation_id, progress.stop_operation.operation_id)
+  }
+  assert.equal(calls, 1)
+  gate.resolve()
+  for (let i = 0; i < 100 && (await f.tasks.get(task.task_id)).stop_operation.status !== 'completed'; i++) await new Promise(resolve => setTimeout(resolve, 10))
+  const finished = await f.tasks.get(task.task_id)
+  assert.equal(finished.stop_operation.status, 'completed')
+  assert.ok(Number.isFinite(finished.stop_confirmed_at))
+  assert.equal(finished.stop_operation.steps.find(step => step.id === 'verify').status, 'done')
+})
+
+test('a reused Job is never killed; exact old-host and worker evidence can independently confirm stop', async t => {
+  const f = await fixture(t)
+  const task = await f.bind({ workflow: 'source-first-v1' })
+  await f.tasks.bindOwnerSession(task.task_id, { attemptId: task.attempt_id, ownerSessionId: f.owner.id,
+    runtimeInstanceId: 'previous-host-instance', hostProcessId: 2147483647 })
+  const folder = path.join(f.dataRoot, 'runs', task.run_id)
+  await mkdir(folder, { recursive: true })
+  await writeFile(path.join(folder, 'acp-workers.json'), JSON.stringify({ runId: task.run_id,
+    owner: { active: false, attempt_id: task.attempt_id }, workers: { original: { quiescent: true } } }))
+  f.job.startedAt = 9999
+  const result = await f.request({ action: 'stop', task_id: task.task_id, attempt_id: task.attempt_id })
+  assert.equal(result.body.stop_confirmed, true, JSON.stringify(result.body))
+  assert.equal(f.job.status, 'running')
+  assert.equal(f.calls.filter(call => call[0] === 'kill').length, 0)
+})
+
+test('unknown old host or mismatched worker attempt cannot bypass reused Job protection', async t => {
+  for (const kind of ['live-host', 'other-attempt', 'unconfirmed-tree']) {
+    const f = await fixture(t)
+    const task = await f.bind({ workflow: 'source-first-v1' })
+    await f.tasks.bindOwnerSession(task.task_id, { attemptId: task.attempt_id, ownerSessionId: f.owner.id,
+      runtimeInstanceId: 'previous-host-instance', hostProcessId: kind === 'live-host' ? process.pid : 2147483647 })
+    const folder = path.join(f.dataRoot, 'runs', task.run_id)
+    await mkdir(folder, { recursive: true })
+    await writeFile(path.join(folder, 'acp-workers.json'), JSON.stringify({ runId: task.run_id,
+      owner: { active: false, attempt_id: kind === 'other-attempt' ? 'other' : task.attempt_id },
+      workers: { original: { quiescent: true, requires_process_tree_confirmation: kind === 'unconfirmed-tree' } } }))
+    f.job.startedAt = 9999
+    const result = await f.request({ action: 'stop', task_id: task.task_id })
+    assert.equal(result.body.stop_confirmed, false, kind)
+    assert.equal(result.body.task.stop_operation.status, 'blocked')
+    assert.match(result.body.error, /身份不匹配/)
+    assert.equal(f.calls.filter(call => call[0] === 'kill').length, 0)
+  }
+})
+
+test('Job settlement does not override a pending stop and a stale progress callback cannot change a newer attempt', async t => {
+  const f = await fixture(t)
+  const task = await f.bind()
+  const operation = { operation_id: 'stop-1', task_id: task.task_id, run_id: task.run_id,
+    attempt_id: task.attempt_id, status: 'running', steps: [] }
+  await f.tasks.recordStopProgress(task.task_id, operation, { begin: true })
+  await f.tasks.markStopping(task.task_id)
+  await f.tasks.settleJob({ jobId: task.job_id, attemptId: task.attempt_id, ownerSessionId: task.owner_session_id,
+    jobStartedAt: task.job_started_at }, { status: 'killed', startedAt: task.job_started_at })
+  assert.equal((await f.tasks.get(task.task_id)).execution_status, 'stopping')
+  await f.tasks.markStopped(task.task_id, null, { force: true })
+  await f.tasks.prepareProviderLaunch(task.task_id, task.provider)
+  assert.equal(await f.tasks.recordStopProgress(task.task_id, { ...operation, status: 'completed' }), null)
+  assert.equal((await f.tasks.get(task.task_id)).stop_operation, null)
+})
+
+test('readers cannot see confirmed stop while the final durable publication is still pending', async t => {
+  const f = await fixture(t)
+  const task = await f.bind()
+  const entered = deferred(), gate = deferred(), write = f.tasks.writeStore
+  f.tasks.writeStore = async (target, content) => {
+    const saved = JSON.parse(content).tasks[task.task_id]
+    if (saved.stop_operation?.status === 'completed') { entered.resolve(); await gate.promise }
+    return write(target, content)
+  }
+  const request = f.request({ action: 'stop', task_id: task.task_id })
+  await entered.promise
+  const during = await f.tasks.get(task.task_id)
+  assert.equal(during.execution_status, 'stopping')
+  assert.equal(during.stop_confirmed_at, null)
+  assert.equal(during.stop_operation.steps.find(step => step.id === 'persist').status, 'running')
+  assert.equal((await f.tasks.list())[0].execution_status, 'stopping')
+  for (const found of [await f.tasks.getByRun(task.run_id), await f.tasks.getBySession(f.owner.id), await f.tasks.getByJob(task.job_id)]) {
+    assert.equal(found.execution_status, 'stopping')
+    assert.equal(found.stop_confirmed_at, null)
+    const view = applyTaskExecutionState({ current: { run_id: task.run_id, lifecycle_status: 'stopped', terminal: true } }, found)
+    assert.equal(view.current.lifecycle_status, 'stopping')
+    assert.equal(view.current.terminal, false)
+  }
+  gate.resolve()
+  const result = await request
+  assert.equal(result.body.stop_confirmed, true)
+  assert.equal((await f.tasks.get(task.task_id)).stop_operation.status, 'completed')
+})
+
+async function refreshWorkbench(f) {
+  const req = Readable.from([])
+  req.method = 'GET'; req.url = `/api/pangea-companion/workbench?${new URLSearchParams({ cwd: f.root })}`
+  req.headers = { 'sec-fetch-site': 'same-origin' }
+  const response = {}
+  await workbenchRouteHandler(req, { writeHead(code) { response.code = code }, end(body) { response.body = JSON.parse(body) } },
+    f.api, f.tasks, f.launchLocks, f.launchLogs, f.runtime, f.monitor, options => f.runner(options))
+  return response
+}
+
+test('ordinary refresh cannot turn a native stop with a failed write fence into confirmed success', async t => {
+  const f = await fixture(t)
+  const task = await f.bind({ provider: null, workflow: 'source-first-v1' })
+  await f.tasks.bindOwnerSession(task.task_id, { attemptId: task.attempt_id, ownerSessionId: f.owner.id, hostProcessId: 2147483647 })
+  f.runtime.agents.get = () => null
+  f.runner = async ({ args }) => {
+    if (args[0] === 'system') return {}
+    if (args[1] === 'list') return { items: [] }
+    throw new Error('Run write fence unavailable')
+  }
+  const stopped = await f.request({ action: 'stop', task_id: task.task_id })
+  assert.equal(stopped.body.stop_confirmed, false)
+  assert.equal(stopped.body.task.stop_operation.status, 'blocked')
+  const refreshed = await refreshWorkbench(f)
+  assert.equal(refreshed.code, 200, JSON.stringify(refreshed.body))
+  const actual = refreshed.body.tasks.items[0]
+  assert.equal(actual.execution_status, 'stopping')
+  assert.equal(actual.stop_confirmed_at, null)
+  assert.equal(actual.stop_operation.status, 'blocked')
+})
+
+test('refresh confirms an already-requested waiting stop after the exact Job finishes, without cancelling twice', async t => {
+  const f = await fixture(t)
+  const task = await f.bind()
+  let cancellations = 0
+  f.runtime.jobs.kill = () => { cancellations++; f.job.status = 'stopping'; return 'requested' }
+  const stopped = await f.request({ action: 'stop', task_id: task.task_id })
+  assert.equal(stopped.body.pending, true)
+  assert.equal(stopped.body.stop_confirmed, false)
+  f.job.status = 'killed'
+  f.runner = async ({ args }) => args[0] === 'system' ? {} : args[1] === 'list' ? { items: [] }
+    : { run_id: task.run_id, lifecycle_status: 'stopped' }
+  const refreshed = await refreshWorkbench(f)
+  assert.equal(refreshed.code, 200, JSON.stringify(refreshed.body))
+  const actual = refreshed.body.tasks.items[0]
+  assert.equal(actual.execution_status, 'stopped')
+  assert.ok(Number.isFinite(actual.stop_confirmed_at))
+  assert.equal(actual.stop_operation.status, 'completed')
+  assert.equal(cancellations, 1)
 })

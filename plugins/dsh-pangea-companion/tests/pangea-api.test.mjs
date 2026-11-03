@@ -1,3 +1,4 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -12,6 +13,7 @@ test('CLI failure locations survive subprocess transport and launch-log persiste
   skip: !process.env.PANGEA_PYTHON && 'Set PANGEA_PYTHON for the subprocess diagnostic test.',
 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-cli-error-'))
+  await writeSourceRepository(root, 'repo-one')
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules')
@@ -56,6 +58,7 @@ test('accepts quoted file URIs and UNC paths copied from Windows Explorer', () =
 
 test('creates a frozen 2.0 Skill request and removes it after Run creation', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-run-api-'))
+  await writeSourceRepository(root, 'repo-one')
   const marker = path.join(root, '.agents', 'pangea')
   const nested = path.join(root, 'nested')
   const pending = path.join(root, 'pangea-data', '.pangea', 'pending-skill-request.json')
@@ -66,7 +69,7 @@ test('creates a frozen 2.0 Skill request and removes it after Run creation', asy
     let observed
     const calls = []
     const result = await createRun(nested, {
-      repository: 'repo-one', target: 'session and retry', source_scope: ['src/session.c'],
+      repository: 'repo-one', target: 'session and retry', source_scope: ['src'],
       asset_ids: ['asset-1'], scenario: 'root-cause', mode: 'speed',
     }, async call => {
       calls.push(call)
@@ -82,7 +85,7 @@ test('creates a frozen 2.0 Skill request and removes it after Run creation', asy
     assert.deepEqual(calls[0].args.slice(0, 2), ['system', 'capabilities'])
     assert.equal(observed.contract.repository, 'repo-one')
     assert.equal(observed.contract.target, 'session and retry')
-    assert.deepEqual(observed.contract.source_scope, ['src/session.c'])
+    assert.deepEqual(observed.contract.source_scope, ['src'])
     assert.equal(observed.contract.run_id, undefined)
     assert.equal(observed.contract.scenario, 'root-cause')
     assert.equal(observed.contract.mode, 'speed')
@@ -99,11 +102,12 @@ test('creates a frozen 2.0 Skill request and removes it after Run creation', asy
 
 test('uses the depth module-analysis defaults and rejects unsupported modes', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-analysis-mode-'))
+  await writeSourceRepository(root, 'repo-one')
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
     let contract
-    await createRun(root, { repository: 'repo-one', target: 'default', source_scope: ['src/a.c'] }, async call => {
+    await createRun(root, { repository: 'repo-one', target: 'default', source_scope: ['src'] }, async call => {
       if (call.args[0] === 'system') return { analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
       contract = JSON.parse(await readFile(path.join(root, 'pangea-data', '.pangea', 'pending-skill-request.json'), 'utf8'))
       return { run_id: 'run-02' }
@@ -111,7 +115,7 @@ test('uses the depth module-analysis defaults and rejects unsupported modes', as
     assert.equal(contract.scenario, 'module-analysis')
     assert.equal(contract.mode, 'depth')
     await assert.rejects(
-      () => createRun(root, { repository: 'repo-one', target: 'invalid', source_scope: ['src/a.c'], mode: 'preview' }, async () => ({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } })),
+      () => createRun(root, { repository: 'repo-one', target: 'invalid', source_scope: ['src'], mode: 'preview' }, async () => ({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } })),
       /分析模式/,
     )
   } finally {
@@ -121,11 +125,12 @@ test('uses the depth module-analysis defaults and rejects unsupported modes', as
 
 test('refuses to create a Run against a backend without codetalks-skill 1.4.9', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-skill-api-'))
+  await writeSourceRepository(root, 'repo-one')
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
     await assert.rejects(
-      () => createRun(root, { repository: 'repo-one', target: 'session', source_scope: ['src/session.c'] }, async () => ({ repositories: ['repo-one'] })),
+      () => createRun(root, { repository: 'repo-one', target: 'session', source_scope: ['src'] }, async () => ({ repositories: ['repo-one'] })),
       /codetalks-skill 1\.4\.9/,
     )
   } finally {
@@ -135,12 +140,13 @@ test('refuses to create a Run against a backend without codetalks-skill 1.4.9', 
 
 test('rejects legacy focus and test example fields before writing a request', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-legacy-input-'))
+  await writeSourceRepository(root, 'repo-one')
   try {
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), 'rules\n', 'utf8')
     await assert.rejects(
       () => createRun(root, {
-        repository: 'repo-one', target: 'legacy', source_scope: [], focus: ['manual'],
+        repository: 'repo-one', target: 'legacy', source_scope: ['src'], focus: ['manual'],
       }, async () => ({ analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } })),
       /新建分析不支持字段|focus/,
     )

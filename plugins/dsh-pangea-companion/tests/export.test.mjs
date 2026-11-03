@@ -168,3 +168,19 @@ test('empty exports still contain the eight-column header and whole runs keep ev
   const rows = exportedRows({ details: { test_cases: cases } })
   assert.deepEqual(rows.slice(1).map(row => row[0]), cases.map(item => item.display_id))
 })
+
+
+test('canonical observation exports stay eight columns and preserve coverage rationale in evidence only', async () => {
+  const { caseEvidenceRows } = await import('../src/export.js')
+  for (const observations of [[], ['原文 request() at repo:src/file.c:123']]) {
+    const body = { format_version: 'behavior-test-case-v1', case_id: 'C', case_type: 'stale', test_level: 'business_blackbox', observability: ['stale'], external_observations: observations, summary: '原文依据\n第二行', coverage_refs: ['G'] }
+    const run = { details: sourceFirstProjection([{ stage: 'unit_analysis', task: { unit_id: 'u' }, records: [{ record_id: 'c', kind: 'test_case', body }] }]) }
+    const rows = csvRows(buildTestCaseCsv(run))
+    assert.equal(rows[1].length, 8)
+    assert.equal(rows[1][6], observations.join('\n'))
+    assert.equal(rows[1][2], '业务黑盒')
+    const evidence = caseEvidenceRows(run)
+    assert.equal(evidence[1][evidence[0].indexOf('summary')], body.summary)
+    assert.deepEqual(evidence[1][evidence[0].indexOf('coverage_refs')], ['G'])
+  }
+})

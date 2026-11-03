@@ -64,6 +64,21 @@ test('analysis and closure preserve submission guidance after compaction without
   assert.doesNotMatch(workerPrompt({ ...args, opened: { task: { analysis_profile: 'behavior-test-v2', record_contracts: { risk: 'behavior-risk-v2' } } } }), /同一冻结 profile 的 flow.body/)
 })
 
+test('first-case frozen guidance survives initial, continuation, compaction and repair without overriding old runs', () => {
+  const args = { action: { action_id: 'r:a', stage: 'unit_analysis' }, opened: { task: {} }, cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 'same-worker' }
+  for (const repair of [false, true]) {
+    const current = { ...args, action: { ...args.action, ...(repair ? { pending_repair: { error: 'exact field diagnostic' } } : {}) } }
+    for (const prompt of [workerPrompt(current), workerContinuationPrompt({ ...current, sameAction: true }), workerContinuationPrompt({ ...current, sameAction: false })]) {
+      assert.match(prompt, /若当前冻结生成 rubric 含 FIRST-CASE-DELIVERY/)
+      assert.match(prompt, /每条 test_case 首次 result-write 前由本 worker 在当前 action/)
+      assert.match(prompt, /写好一条即保存，不等 Reviewer/)
+      assert.match(prompt, /旧 Run 沿用原合同，不追补历史记录/)
+      assert.match(prompt, /analysis_settings、target\/focus、单元 purpose\/归属及工具参考/)
+      assert.match(prompt, /deferred_fields 的 input_id 用 input-read 分页读取/)
+    }
+  }
+})
+
 test('Planning carries its public write contract across initial and compacted turns', () => {
   const args = { action: { action_id: 'r:p', stage: 'unit_planning' }, opened: { task: {} }, cwd: '/work', dataRoot: '/data', runId: 'r', taskId: 'original' }
   for (const prompt of [workerPrompt(args), workerContinuationPrompt({ ...args, sameAction: true }), workerContinuationPrompt({ ...args, sameAction: false })]) {
@@ -602,11 +617,11 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
   const controller = new AbortController()
   try {
     await cp(path.join(runtime, '.agents'), path.join(cwd, '.agents'), { recursive: true })
-    const repository = path.join(cwd, 'pangea-data', 'repositories', 'sample')
+    const repository = path.join(cwd, 'pangea-data', 'repositories', 'sample', 'src')
     await mkdir(repository, { recursive: true })
     await writeFile(path.join(repository, 'tls.c'), 'int tls_connect(int enabled) { return enabled ? 0 : -1; }\n')
     for (let i = 1; i < fileCount; i++) await writeFile(path.join(repository, `dependency-${i}.c`), `int dependency_${i}(void) { return ${i}; }\n`)
-    const created = await createRun(cwd, { repository: 'sample', target: 'TLS connect', source_scope: [fileCount > 1 ? '.' : 'tls.c'], mode, effective_context_budget: 204800 })
+    const created = await createRun(cwd, { repository: 'sample', target: 'TLS connect', source_scope: ['src'], mode, effective_context_budget: 204800 })
     let count = 0
     const stages = [], hostEvents = []
     let unitId
@@ -634,7 +649,7 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
                 assert.ok(page.next_cursor)
                 assert.ok(page.text.length <= 777)
                 // Compact delivery must not remove legitimate dependency access.
-                const source = await call('source-read', ['--repo-id', 'sample', '--path', 'dependency-1999.c', '--view', 'text'])
+                const source = await call('source-read', ['--repo-id', 'sample', '--path', 'src/dependency-1999.c', '--view', 'text'])
                 assert.match(JSON.stringify(source), /dependency_1999/)
                 await assert.rejects(call('source-read', ['--repo-id', 'sample', '--path', '../outside.c', '--view', 'text']))
               }
@@ -650,7 +665,7 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
             const current = await call('result-read')
             let saved
             if (task.task_type === 'source_first_plan') {
-              saved = await call('plan-write', ['--expected-revision', String(current.revision), '--unit', JSON.stringify({ title: 'TLS 连接', purpose: '验证连接结果', owned_files: [{ repo_id: 'sample', path: 'tls.c' }] })])
+              saved = await call('plan-write', ['--expected-revision', String(current.revision), '--unit', JSON.stringify({ title: 'TLS 连接', purpose: '验证连接结果', owned_files: [{ repo_id: 'sample', path: 'src/tls.c' }] })])
             } else if (task.review_stage === 'comparison_review') {
               const compared = await call('comparison-read', ['--version-set-id', task.version_set_id])
               assert.ok(JSON.stringify(compared).includes('analysis'))
@@ -675,7 +690,7 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
               saved = await call('review-decide', ['--expected-revision', String(revision), '--decision-file', decisionFile])
             } else if (task.task_type === 'source_first_analysis') {
               const file = path.join(request.scratchDirectory, 'analysis-records.json')
-              await writeFile(file, JSON.stringify([{ kind: 'note', body: '协议 fixture 范围依据；不是模型质量验收。', evidence: ['sample:tls.c:1'] }]))
+              await writeFile(file, JSON.stringify([{ kind: 'note', body: '协议 fixture 范围依据；不是模型质量验收。', evidence: ['sample:src/tls.c:1'] }]))
               const first = await call('result-write', ['--expected-revision', String(current.revision), '--records-file', file])
               assert.equal((await call('result-read')).completion, null, 'incremental save must not declare completion')
               await writeFile(file, JSON.stringify([{ kind: 'test_case', body: { format_version: 'behavior-test-case-v1', case_id: 'fixture-case', steps: [{ action: '调用冻结 fixture 的连接入口', expected: '开启 TLS 时返回成功' }], external_observations: [], execution_status: 'not_run' } }]))
@@ -695,7 +710,7 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
               assert.equal(persisted.records.find(r => r.record_id === current.records[0].record_id).active, false)
               assert.equal(persisted.records.length, current.records.length + 1)
             } else {
-              saved = await call('result-write', ['--expected-revision', String(current.revision), '--records', JSON.stringify([{ kind: 'note', body: '固定回归 fixture：已启用 TLS 时连接成功，未启用时返回失败。', evidence: ['sample:tls.c:1'] }])])
+              saved = await call('result-write', ['--expected-revision', String(current.revision), '--records', JSON.stringify([{ kind: 'note', body: '固定回归 fixture：已启用 TLS 时连接成功，未启用时返回失败。', evidence: ['sample:src/tls.c:1'] }])])
             }
             await call('work-finish', ['--revision', String(saved.revision)])
             return { stopReason: 'completed' }

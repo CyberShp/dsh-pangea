@@ -1,3 +1,4 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
@@ -11,6 +12,7 @@ import { writeArchitectureRun } from './architecture-source-first-fixture.mjs'
 const json = async (file, value) => writeFile(file, JSON.stringify(value))
 async function fixture(t, scene) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'analysis-scenes-'))
+  await writeSourceRepository(root, 'repo')
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
@@ -112,7 +114,7 @@ test('v2 Run request carries exact scene and selected asset revision through cap
   const { createRun } = await import('../src/pangea-api.js')
   const f = await fixture(t, 'coverage-analysis')
   let contract
-  await createRun(f.root, { repository: 'repo', target: 'TLS', source_scope: ['.'], analysis_profile: SCENE_PROFILE, scenario: 'coverage-analysis', mode: 'speed', asset_ids: ['cov'], asset_revisions: { cov: 'selected-revision' } }, async ({ args }) => {
+  await createRun(f.root, { repository: 'repo', target: 'TLS', source_scope: ['src'], analysis_profile: SCENE_PROFILE, scenario: 'coverage-analysis', mode: 'speed', asset_ids: ['cov'], asset_revisions: { cov: 'selected-revision' } }, async ({ args }) => {
     if (args[0] === 'system') return { workflow_versions: ['source-first-v1'], source_first: { contract_fields: ['analysis_profile', 'analysis_settings', 'asset_revisions'], analysis_options_by_profile: { [SCENE_PROFILE]: { scenarios: ['coverage-analysis'], modes: ['speed'] } } } }
     contract = JSON.parse(await readFile(args.at(-1), 'utf8'))
     return { run_id: 'created' }
@@ -120,7 +122,7 @@ test('v2 Run request carries exact scene and selected asset revision through cap
   assert.equal(contract.analysis_profile, SCENE_PROFILE)
   assert.deepEqual(contract.analysis_settings, { scenario: 'coverage-analysis', mode: 'speed' })
   assert.deepEqual(contract.asset_revisions, { cov: 'selected-revision' })
-  assert.deepEqual(contract.source_scope, ['.'])
+  assert.deepEqual(contract.source_scope, ['src'])
   assert.ok(!('coverage_input' in contract))
 })
 

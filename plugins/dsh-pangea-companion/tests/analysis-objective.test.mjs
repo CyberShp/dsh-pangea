@@ -1,3 +1,4 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
@@ -14,16 +15,18 @@ const capabilities = { workflow_versions: ['source-first-v1'], repositories: ['r
 
 test('explicit objective survives task persistence and exact frozen Run request', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-objective-'))
+  await writeSourceRepository(root, 'repo')
+  await writeSourceRepository(root, 'tools', 'scripts')
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
-  const input = normalizeRunInput({ repository: 'repo', target: 'driver library lifecycle', source_scope: ['.'], focus: ['cleanup'],
+  const input = normalizeRunInput({ repository: 'repo', target: 'driver library lifecycle', source_scope: ['src'], focus: ['cleanup'],
     test_tool_sources: [{ repo_id: 'tools', paths: ['scripts'] }], expected_test_tool_revision: 'tool-revision',
     scenario: 'module-analysis', mode: 'speed', analysis_profile: 'behavior-test-v2', objective: 'product-behavior' }, capabilities)
-  const store = createTaskStore(path.join(root, 'tasks.json'))
+  const store = createTaskStore({ storePath: path.join(root, 'tasks.json') })
   const task = await store.create({ workspace: root, input })
   assert.equal(task.objective, 'product-behavior')
-  const reopened = createTaskStore(path.join(root, 'tasks.json'))
+  const reopened = createTaskStore({ storePath: path.join(root, 'tasks.json') })
   assert.equal((await reopened.get(task.task_id)).objective, 'product-behavior')
   let frozen
   await createRun(root, task, async request => {
@@ -35,7 +38,7 @@ test('explicit objective survives task persistence and exact frozen Run request'
   assert.deepEqual(frozen.focus, ['cleanup'])
   assert.deepEqual(frozen.test_tool_sources, [{ repo_id: 'tools', paths: ['scripts'] }])
   assert.equal(frozen.expected_test_tool_revision, 'tool-revision')
-  assert.deepEqual(frozen.source_scope, ['.'])
+  assert.deepEqual(frozen.source_scope, ['src'])
   assert.equal(frozen.target, 'driver library lifecycle')
   assert.throws(() => normalizeRunInput({ ...input, objective: 'auto' }, capabilities), /不支持所选分析目标/)
 })

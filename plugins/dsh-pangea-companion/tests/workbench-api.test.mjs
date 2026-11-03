@@ -1,3 +1,4 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -43,7 +44,7 @@ for (const cleanupFails of [false, true]) test(`managed depth job preserves sess
       ? (assert.ok(signal), { status: 'recorded', receipt_path: 'receipt.json', cases: [{ case_id: 'TC-1', status: 'executed', exit_code: 1 }] }) : args[1] === 'get'
       ? { run_id: 'run', completed_steps: producerTurns >= 2 ? ['01','02','03','04','05'] : ['01','02','03'], lifecycle_status: producerTurns >= 2 ? 'complete' : 'running', report_available: producerTurns >= 2 }
       : { run_id: 'run', run_root: runRoot, request_path: path.join(root, 'request.md') }
-    await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo-one', target: 'depth', mode: 'depth', provider_id: 'pangea-opencode' } }, runner,
+    await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo-one', target: 'depth', source_scope: ['src'], mode: 'depth', provider_id: 'pangea-opencode' } }, runner,
       async () => {}, async () => {}, runtime, process.env, { reviewBinding: { task_id: 'task', attempt_id: 'attempt' }, onReviewState: async value => records.push(value) })
     if (cleanupFails) await assert.rejects(hooks.done, /任务进程清理未完成/); else assert.equal((await hooks.done).status, 'completed')
     assert.equal(starts, 2)
@@ -62,6 +63,7 @@ const acpRuntimeConfig = {
 
 async function workspace() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-pangea-workbench-'))
+  await writeSourceRepository(root, 'repo-one')
   await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), '# DSH\n', 'utf8')
   return root
@@ -142,7 +144,7 @@ test('home reads only lifecycle metadata and reports without Python, assets or r
     const before = JSON.stringify(tasks)
     const snapshot = await homeSnapshot({ cwd: root, tasks })
     assert.deepEqual(snapshot.compatibility, { compatible: null, api_version: null, checked: false, source: 'local-metadata' })
-    assert.deepEqual(snapshot.capabilities.repositories, ['repo'])
+    assert.deepEqual(snapshot.capabilities.repositories, ['repo', 'repo-one'])
     assert.equal(snapshot.runs.items[0].report_available, true)
     assert.equal(snapshot.tasks.items[0].status, 'completed')
     assert.deepEqual(snapshot.tasks.items[0].conversations, tasks[0].conversations)
@@ -527,7 +529,7 @@ for (const agentModel of [null, 'native/selected']) test(`starts an ACP provider
     }
     const result = await launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: 'ACP', source_scope: [], provider_id: 'pangea-nga', scenario: 'root-cause', mode: 'speed', agent_model: agentModel },
+      input: { repository: 'repo-one', target: 'ACP', source_scope: ['src'], provider_id: 'pangea-nga', scenario: 'root-cause', mode: 'speed', agent_model: agentModel },
     }, runner, async () => {}, async () => {}, runtime, { PANGEA_ACP_RUNTIME_CONFIG: JSON.stringify(acpRuntimeConfig) })
     assert.equal(result.job_id, 'subagent-1')
     assert.equal(result.provider, 'pangea-nga')
@@ -572,7 +574,7 @@ test('records the local Job identity before releasing the ACP provider start', a
       : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     const result = await launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: 'ACP barrier', source_scope: [], provider_id: 'pangea-nga' },
+      input: { repository: 'repo-one', target: 'ACP barrier', source_scope: ['src'], provider_id: 'pangea-nga' },
     }, runner, async () => {}, async () => {}, runtime, process.env, {
       onJobCreated(info) {
         created = info
@@ -636,7 +638,7 @@ test('continues an incomplete Codetalks Run in the same ACP session before dispo
     }
     await launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: 'ACP continuation', source_scope: [], provider_id: 'pangea-nga' },
+      input: { repository: 'repo-one', target: 'ACP continuation', source_scope: ['src'], provider_id: 'pangea-nga' },
     }, runner, async () => {}, async () => {}, runtime)
 
     const result = await jobHooks.done
@@ -691,7 +693,7 @@ test('continues within one long module phase while flow progress advances', asyn
       return { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     }
     await launchAnalysisSession(api, {
-      cwd: root, input: { repository: 'repo-one', target: 'Long module phase', source_scope: [], provider_id: 'pangea-nga' },
+      cwd: root, input: { repository: 'repo-one', target: 'Long module phase', source_scope: ['src'], provider_id: 'pangea-nga' },
     }, runner, async () => {}, async () => {}, runtime)
     assert.equal((await jobHooks.done).status, 'completed')
     assert.equal(continued, 4)
@@ -729,7 +731,7 @@ test('stops automatic ACP continuation after two turns without Run progress', as
         ? { lifecycle_status: 'running', phase: 'STEP_05', report_available: false, analysis: { completed: 4 } }
         : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     await launchAnalysisSession(api, {
-      cwd: root, input: { repository: 'repo-one', target: 'ACP no progress', source_scope: [], provider_id: 'pangea-nga' },
+      cwd: root, input: { repository: 'repo-one', target: 'ACP no progress', source_scope: ['src'], provider_id: 'pangea-nga' },
     }, runner, async () => {}, async () => {}, runtime)
     const result = await jobHooks.done
     assert.equal(result.status, 'failed')
@@ -776,7 +778,7 @@ test('does not submit another ACP turn after cancellation during continuation', 
         ? { lifecycle_status: 'running', phase: 'STEP_05', report_available: false, analysis: { completed: 4 } }
         : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     await launchAnalysisSession(api, {
-      cwd: root, input: { repository: 'repo-one', target: 'ACP cancellation', source_scope: [], provider_id: 'pangea-nga' },
+      cwd: root, input: { repository: 'repo-one', target: 'ACP cancellation', source_scope: ['src'], provider_id: 'pangea-nga' },
     }, runner, async () => {}, async () => {}, runtime)
     await turnStarted
     jobHooks.cancel('test cancellation')
@@ -820,7 +822,7 @@ test('blocks ACP start when the durable lifecycle says the attempt is stopping',
     await assert.rejects(
       launchAnalysisSession(api, {
         cwd: root,
-        input: { repository: 'repo-one', target: 'ACP stopping', source_scope: [], provider_id: 'pangea-nga' },
+        input: { repository: 'repo-one', target: 'ACP stopping', source_scope: ['src'], provider_id: 'pangea-nga' },
       }, runner, async () => {}, async () => {}, runtime, process.env, {
         onJobCreated() {
           const error = new Error('PANGEA 分析已请求停止')
@@ -866,7 +868,7 @@ test('disposes a started ACP session when durable runtime binding fails', async 
       : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     const result = await launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: 'ACP callback failure', source_scope: [], provider_id: 'pangea-nga' },
+      input: { repository: 'repo-one', target: 'ACP callback failure', source_scope: ['src'], provider_id: 'pangea-nga' },
     }, runner, async () => {}, async () => {}, runtime, process.env, {
       onAgentStarted: async () => { throw new Error('task binding failed') },
     })
@@ -914,7 +916,7 @@ test('reports an ACP provider start failure as failed instead of user cancellati
       : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     await launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: 'ACP provider failure', source_scope: [], provider_id: 'pangea-nga' },
+      input: { repository: 'repo-one', target: 'ACP provider failure', source_scope: ['src'], provider_id: 'pangea-nga' },
     }, runner, async () => {}, event => { launchEvents.push(event) }, runtime)
     assert.deepEqual(await jobHooks.done, { status: 'failed', detail: 'spawn EINVAL' })
     assert.deepEqual(
@@ -960,7 +962,7 @@ test('does not release ACP when the real Job snapshot identity is unavailable', 
       : { run_id: 'skill-run-acp', request_path: '/runtime/request.md', run_root: '/runtime/run' }
     await assert.rejects(launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: 'Missing Job identity', source_scope: [], provider_id: 'pangea-nga' },
+      input: { repository: 'repo-one', target: 'Missing Job identity', source_scope: ['src'], provider_id: 'pangea-nga' },
     }, runner, async () => {}, async () => {}, runtime), /Job snapshot.*startedAt/)
     assert.deepEqual(await jobHooks.done, { status: 'failed', detail: 'ACP Job snapshot 缺少 startedAt：subagent-1' })
     assert.equal(providerStarted, false)
@@ -973,7 +975,7 @@ test('does not silently fall back to the internal model when an ACP runtime is m
     await assert.rejects(
       launchAnalysisSession({ sessions: {} }, {
         cwd: root,
-        input: { repository: 'repo-one', target: 'ACP missing', source_scope: [], provider_id: 'pangea-opencode' },
+        input: { repository: 'repo-one', target: 'ACP missing', source_scope: ['src'], provider_id: 'pangea-opencode' },
       }, async call => call.args[0] === 'system' ? capabilities : { run_id: 'unused' }),
       /外部执行 Agent 需要 DSH ACP runtime：pangea-opencode/,
     )

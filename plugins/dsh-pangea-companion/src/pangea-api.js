@@ -1,3 +1,4 @@
+import { validateScope } from './repositories/scope.js'
 import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import { runProvenance } from './runtime-provenance.js'
 import { normalizeIncrementalRequest } from './incremental-request.js'
@@ -136,6 +137,12 @@ export function runPangea({ cwd, args, signal }) {
 
 export async function createRun(cwd, input, runner = runPangea) {
   const root = workspaceRoot(cwd)
+  if (input.incremental_request?.mode !== 'supplement') {
+    const dataRoot = typeof input.data_root === 'string' && input.data_root.trim() ? path.resolve(root, input.data_root) : path.join(root, 'pangea-data')
+    const checked = await validateScope({ dataRoot, repository: input.repository, source_scope: input.source_scope })
+    input = { ...input, source_scope: checked.normalized_scope }
+    for (const source of input.incremental_request ? [] : input.test_tool_sources || []) await validateScope({ dataRoot, repository: source.repo_id, source_scope: source.paths })
+  }
   const detected = await runner({ cwd: root, args: ['system', 'capabilities', '--data-root', typeof input.data_root === 'string' ? path.resolve(root, input.data_root) : path.join(root, 'pangea-data')] })
   if (supportsSourceFirst(detected)) return createSourceFirstRun(cwd, input, runner)
   if (input.incremental_request != null) throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')

@@ -1,3 +1,4 @@
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -14,6 +15,7 @@ const capabilities = { workflow_versions: ['source-first-v1'], source_first: {
 } }
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-flow-baseline-'))
+  await writeSourceRepository(root, 'repo')
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# test workspace')

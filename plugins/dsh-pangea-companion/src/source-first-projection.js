@@ -1,3 +1,4 @@
+import { caseField } from './case-review-projection.js'
 // Project explicit Agent records into the workbench's existing collections.
 // Record bodies remain available verbatim; this layer makes no semantic judgments.
 import { normalizeFlow, normalizeFlows } from './flow-normalize.js'
@@ -154,14 +155,14 @@ export function sourceFirstProjection(artifacts) {
           ? { action: plain(step.action ?? step.step), expected: plain(step.expected ?? step.expected_result) }
           : { action: plain(step), expected: '' })
       result.test_cases.push({ ...row, test_case_id: row.projection_id,
-        case_type: plain(row.case_type ?? row.test_level),
+        case_type: plain(caseField(row, 'test_level', 'case_type')),
         readiness: row.execution_readiness === 'ready' ? 'ready' : ['needs_instrumentation', 'unknown'].includes(row.execution_readiness) ? 'needs_setup' : 'unclassified',
         missing_execution_conditions: row.execution_readiness === 'ready' ? [] : strings(row.readiness_reason),
-        linked_flow_ids: resolve(row, row.flow_refs, ['flow_id'], ['flow']), status: plain(row.status ?? row.execution_status) || '未标注',
+        linked_flow_ids: resolve(row, row.flow_refs, ['flow_id'], ['flow']), status: plain(caseField(row, 'execution_status', 'status')) || '未标注',
         preconditions: strings(row.preconditions ?? row.precondition), step_pairs: pairedSteps,
         steps: pairedSteps.map(step => `${step.action || '未提供操作'}${step.expected ? ` → ${step.expected}` : ''}`),
         variants: list(row.variants).map(value => value && typeof value === 'object' ? { ...value, input: plain(value.input), expected: plain(value.expected) } : { input: plain(value), expected: '' }),
-        expected_results: strings(row.expected_results), observability: strings(row.observability ?? row.external_observations), cleanup: strings(row.cleanup),
+        expected_results: strings(row.expected_results), observability: strings(caseField(row, 'external_observations', 'observability')), cleanup: strings(row.cleanup),
         linked_risk_ids: resolve(row, [...list(row.linked_risk_ids), ...list(row.risk_refs), ...list(row.source_record.relates_to)], ['risk_id'], ['risk']), evidence: [],
       })
     } else if (kind === 'flow') {

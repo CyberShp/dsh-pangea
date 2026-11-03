@@ -1,4 +1,4 @@
-import { CASE_TYPE_LABELS, caseIdentity } from './case-review-projection.js'
+import { CASE_TYPE_LABELS, caseIdentity, caseField } from './case-review-projection.js'
 function cell(value) {
   if (Array.isArray(value)) return value.map(item => cell(item)).join('；')
   if (value === null || value === undefined) return ''
@@ -41,7 +41,7 @@ function caseSteps(item) {
 function testCaseRows(run) {
   return [CASE_HEADERS, ...(run?.details?.test_cases ?? []).map(item => {
     const { actions, expected } = caseSteps(item)
-    const type = cell(item.case_type || item.test_level)
+    const type = cell(caseField(item, 'test_level', 'case_type'))
     return [
       item.display_id ?? item.test_case_id,
       item.title,
@@ -49,7 +49,7 @@ function testCaseRows(run) {
       lines(item.preconditions),
       actions,
       expected,
-      lines(item.observability ?? item.external_observations),
+      lines(caseField(item, 'external_observations', 'observability')),
       lines(item.cleanup),
     ]
   })]
@@ -66,7 +66,7 @@ export function buildTestCaseCsv(run) {
 }
 
 export function caseEvidenceRows(run) {
-  const fields = ['execution_readiness', 'readiness_reason', 'test_level', 'purpose', 'source_evidence', 'entry', 'oracle', 'oracles', 'oracle_source', 'oracle_evidence', 'entry_source', 'entry_evidence', 'test_entry', 'test_oracle', 'readiness']
+  const fields = ['execution_readiness', 'readiness_reason', 'test_level', 'purpose', 'source_evidence', 'entry', 'oracle', 'oracles', 'oracle_source', 'oracle_evidence', 'entry_source', 'entry_evidence', 'test_entry', 'test_oracle', 'readiness', 'summary', 'coverage_refs']
   const items = run?.details?.test_cases ?? []
   // Preserve additional entry/oracle fields verbatim as the contract evolves.
   const extras = [...new Set(items.flatMap(item => Object.keys(item).filter(key => /entry|oracle/.test(key) && !fields.includes(key))))].sort()
