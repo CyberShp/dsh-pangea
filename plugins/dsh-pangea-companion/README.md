@@ -217,6 +217,8 @@ cd plugins/dsh-pangea-companion
 npm test
 ```
 
+真实 Cordis 启动集成与打包后验收共用 `tests/cordis-launch.integration.mjs`。设置 `PANGEA_TEST_APP_ROOT` 为已准备好依赖的 Desktop app 根目录后运行 `npm run test:cordis`；同一环境变量也会让普通 `npm test` 执行该集成。未设置时，普通测试明确显示这一项跳过，不能据此声称完整集成通过；专用命令缺少配置会失败。
+
 当前测试覆盖：分析结果读取、报告/结构化计数核对、独立与对照复核合并、历史 Run 摘要、Run 分页/新建/停止、资产草稿传递、会话关联、环境保存、真实 DSH 执行会话启动、Executor Run 展示、SSH 工具注册和证据交互。
 
 风险方法 v1：独立只读检查账本、风险原样引文及外部观测；空 narrative 继续展示 trigger。检查记录不进入用例说明/导出，comparison 复核记录保持阶段隔离。

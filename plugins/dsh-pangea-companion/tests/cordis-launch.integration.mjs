@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { createTaskStore } from '../src/task-store.js'
 import { launchAnalysisSession } from '../src/workbench-api.js'
 import { inject as companionInject } from '../src/index.js'
+import { writeSourceRepository } from './fixtures/source-repository.mjs'
 
 const appRoot = process.env.PANGEA_TEST_APP_ROOT
 if (!appRoot) throw new Error('PANGEA_TEST_APP_ROOT must point to a built PANGEA Desktop app root')
@@ -30,7 +31,8 @@ async function sourceFirstAdmissionFixture(t, { provideAdmission, providerId }) 
   process.env.DSH_HOME = path.join(root, 'harness')
   const owner = { id: 'admission-owner', ctx: context }
   const admission = provideAdmission ? new UpdateAdmission() : undefined
-  let runtime, runCount = 0, workerStarts = 0, workerDisposals = 0
+  let runtime, runCount = 0, workerStarts = 0, workerDisposals = 0, sessionCreates = 0
+  const runnerCommands = []
   const provider = {
     async discoverModels() {
       return { current_model: 'fixture/default', models: [{ id: 'fixture/default', label: 'Default' }] }
@@ -82,19 +84,23 @@ async function sourceFirstAdmissionFixture(t, { provideAdmission, providerId }) 
   assert.equal(Boolean(runtime.get('pangeaUpdateAdmission')), provideAdmission)
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# Synthetic source-first workspace\n')
+  await writeSourceRepository(root, 'repo')
   const api = {
     workspace: { async list() { return ok({ items: [{ workspaceId: 'admission-workspace', path: root }] }) } },
-    sessions: { async create() { return ok({ sessionId: owner.id }) }, async rename() { return ok({}) } },
+    sessions: { async create() { sessionCreates++; return ok({ sessionId: owner.id }) }, async rename() { return ok({}) } },
   }
   return {
     admission,
     get workerStarts() { return workerStarts },
     get workerDisposals() { return workerDisposals },
-    async launch() {
+    get runnerCommands() { return runnerCommands },
+    get sessionCreates() { return sessionCreates },
+    async launch({ sourceScope = ['src'] } = {}) {
       const runId = `admission-run-${++runCount}`
       const events = [], commands = []
       let complete = false
       const runner = async ({ args }) => {
+        runnerCommands.push(args)
         commands.push(args)
         if (args[0] === 'system') return {
           repositories: ['repo'], workflow_versions: ['source-first-v1'], source_first: { version: 'source-first-v1' },
@@ -125,7 +131,7 @@ async function sourceFirstAdmissionFixture(t, { provideAdmission, providerId }) 
         assert.fail(`Unexpected CLI call: ${JSON.stringify(args)}`)
       }
       const result = await launchAnalysisSession(api, {
-        cwd: root, input: { repository: 'repo', target: 'Cordis admission', source_scope: ['src'], provider_id: providerId },
+        cwd: root, input: { repository: 'repo', target: 'Cordis admission', source_scope: sourceScope, provider_id: providerId },
       }, runner, async () => {}, async event => events.push(event), runtime, process.env)
       const snapshot = await jobs.wait(result.job_id, 5000, owner)
       return { snapshot, events, commands }
@@ -164,6 +170,17 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) 
     assert.ok(released.events.some(event => event.stage === 'source_first_action_settled'))
   })
 }
+
+
+test('real Cordis launch still rejects invalid source scopes before Run creation or worker dispatch', async t => {
+  const fixture = await sourceFirstAdmissionFixture(t, { provideAdmission: true, providerId: 'pangea-opencode' })
+  for (const sourceScope of [[], ['.'], ['src/fixture.c'], ['missing'], ['../repo']]) {
+    await assert.rejects(fixture.launch({ sourceScope }), error => [400, 403].includes(error.statusCode), JSON.stringify(sourceScope))
+    assert.ok(fixture.runnerCommands.every(args => args[0] === 'system' && args[1] === 'capabilities'), 'invalid scope permits read-only capability discovery, never Run mutation')
+    assert.equal(fixture.sessionCreates, 0, 'invalid scope must not create an owner session')
+    assert.equal(fixture.workerStarts, 0, 'invalid scope must not start an external worker')
+  }
+})
 
 
 test('uses real Cordis and Jobs to persist one exact ACP attempt through settlement', async () => {
@@ -208,6 +225,7 @@ test('uses real Cordis and Jobs to persist one exact ACP attempt through settlem
     await context.inject(['agents', 'subagents', 'jobs'], ctx => { runtime = ctx })
     await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
     await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), '# DSH\n', 'utf8')
+    await writeSourceRepository(root, 'repo-one')
     const api = {
       workspace: { async list() { return ok({ items: [{ workspaceId: 'workspace-1', path: root }] }) } },
       sessions: {
@@ -230,7 +248,7 @@ test('uses real Cordis and Jobs to persist one exact ACP attempt through settlem
     const created = await tasks.create({
       workspace: root,
       dataRoot: path.join(root, 'data'),
-      input: { repository: 'repo-one', target: '真实 Cordis', provider_id: 'pangea-opencode' },
+      input: { repository: 'repo-one', target: '真实 Cordis', source_scope: ['src'], provider_id: 'pangea-opencode' },
     })
     const prepared = await tasks.prepareProviderLaunch(created.task_id, 'pangea-opencode')
     const settledTask = new Promise((resolve, reject) => {
@@ -250,7 +268,7 @@ test('uses real Cordis and Jobs to persist one exact ACP attempt through settlem
     })
     const result = await launchAnalysisSession(api, {
       cwd: root,
-      input: { repository: 'repo-one', target: '真实 Cordis', source_scope: [], provider_id: 'pangea-opencode' },
+      input: { repository: 'repo-one', target: '真实 Cordis', source_scope: ['src'], provider_id: 'pangea-opencode' },
     }, runner, async session => tasks.addConversation(created.task_id, {
       sessionId: session.session_id,
       title: '真实 Cordis · 分析',
