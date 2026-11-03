@@ -23,6 +23,7 @@ window.__ModuleLoader__.load({
     const { buildRunInsights } = __runInsights
     const { buildOverviewFindings, summaryText } = __overviewFindings
     const { caseIdentity, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
+    const TestToolPicker = __testToolPicker.createTestToolPicker(React, __sourceScopePicker.createSourceScopePicker(React))
     const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
@@ -2244,6 +2245,7 @@ window.__ModuleLoader__.load({
         repository: form.repository,
         target: form.target,
         ...(form.scope_preview_id ? { scope_preview_id: form.scope_preview_id, expected_scope_revision: form.expected_scope_revision } : {}),
+        ...(form.test_tool_sources?.length ? { test_tool_sources: form.test_tool_sources, test_tool_preview_id: form.test_tool_preview?.preview_id, expected_test_tool_revision: form.test_tool_preview?.scope_revision } : {}),
         source_scope: String(form.source_scope_text ?? '').split(/\r?\n/).map(value => value.trim()).filter(Boolean),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'branch-analysis',
@@ -5113,6 +5115,7 @@ window.__ModuleLoader__.load({
           : !objectiveReady ? '请选择产品行为或接口契约分析目标。'
           : sourceScope.length === 0 ? '请选择源码范围；分析整个仓库请明确选择根目录。'
           : !validScopePreview?.matched_file_count ? '请预览并确认命中的源码文件。'
+          : createForm.test_tool_sources?.length && !createForm.test_tool_preview?.matched_file_count ? '请预览并确认测试工具参考文件。'
           : sceneOptions && createForm.asset_ids.some(id => !(assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision) ? '所选资产版本尚未读取，请刷新资产后重新选择。'
           : !coverageReady ? '请先查询、导入或选择可用覆盖率资产。'
           : unavailableProvider ? unavailableProviderMessage
@@ -5140,7 +5143,7 @@ window.__ModuleLoader__.load({
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
         const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && objectiveReady && sourceScope.length && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
-        const inputsReady = coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
+        const inputsReady = (!createForm.test_tool_sources?.length || createForm.test_tool_preview?.matched_file_count > 0) && coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
         const go = (next, nextView = 'inputs') => {
           if (creatingRun) return
           if (next > 1 && !targetReady || next > 2 && !inputsReady || next > 3 && !executionReady) { showActionNotice(submitBlockReason || '请先完成前面的设置。', true); return }
@@ -5186,6 +5189,7 @@ window.__ModuleLoader__.load({
           footer(() => navigate({ type: 'tasks' }), () => go(2), '下一步 · 输入资料', !targetReady)), 'create-target-panel')
         else if (step === 2 && view === 'inputs') content = panel(h(React.Fragment, null,
           h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '让分析理解更多上下文'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '选择与目标相关的需求、设计或已有测试资料。')), button('选择资产', () => openAssets(), '', 'Plus')),
+          h(TestToolPicker, { cwd, dataRoot: workbench?.data_root, repositories, sources: createForm.test_tool_sources || [], preview: createForm.test_tool_preview, onChange: sources => setCreateForm(form => ({ ...form, test_tool_sources: sources, test_tool_preview: null })), onPreview: preview => update('test_tool_preview', preview), renderIcon: runIcon }),
           h('div', { className: 'row between', style: { margin: '24px 0 12px' } }, h('strong', { className: 'small' }, `已选资料 ${selectedAssets.length}`), h('span', { className: 'small muted' }, '版本将在创建时绑定')),
           pendingAssetDetails.length ? notice('正在读取资产资料', `正在按资产 ID 读取 ${pendingAssetDetails.length} 份资料的名称与输入版本。`, 'blue') : null,
           failedAssetDetails.length ? notice('资产详情读取失败', '无法确认所选资料的名称与输入版本，请重试后再继续。', 'warn', button('重试读取', retryAssetDetails, '', 'RefreshCw')) : null,
@@ -5232,6 +5236,7 @@ window.__ModuleLoader__.load({
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
             row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库 · ' : ''}命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
+            row('测试工具代码（仅参考）', (createForm.test_tool_sources || []).map(source => `${source.repo_id}: ${source.paths.join('、')}`).join('\n') || '未选择', createForm.test_tool_preview ? `已确认 ${createForm.test_tool_preview.matched_file_count} 个参考文件；不作为被测对象` : '可选，不影响原有分析', 2),
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint', className: 'notice warn' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
@@ -5783,6 +5788,7 @@ window.__ModuleLoader__.load({
           onReload: loadWorkbench,
           onNewQuery: query => {
             setCreateForm(value => ({ ...value, source_task_id: selectedTask.task_id, repository: selectedTask.repository, target: selectedTask.target,
+              test_tool_sources: selectedTask.test_tool_sources || [], test_tool_preview: null,
               source_scope_text: selectedTask.source_scope.join('\n'), asset_ids: selectedTask.asset_ids,
               scenario: 'coverage-analysis', mode: selectedTask.mode, provider_id: selectedTask.provider || '',
               agent_model: selectedTask.provider ? selectedTask.agent_model || '' : '', model_route_key: '', external_selection_required: !selectedTask.provider,
@@ -6325,6 +6331,7 @@ window.__ModuleLoader__.load({
                   h('dt', null, '主要范围'), h('dd', null, selectedTask.source_scope?.length
                     ? selectedTask.source_scope.map(path => h('div', { key: path, className: 'b03-overview-file' }, path))
                     : current.target ?? '未记录'),
+                  selectedTask.test_tool_sources?.length ? h(React.Fragment, null, h('dt', null, '测试工具（仅参考）'), h('dd', null, selectedTask.test_tool_sources.map(source => h('div', { key: source.repo_id }, `${source.repo_id}: ${source.paths.join('、')}`)))) : null,
                   h('dt', null, '冻结文件'), h('dd', null, current.source_snapshot?.file_count == null ? '未记录' : `${current.source_snapshot.file_count} 个源码文件`),
                   h('dt', null, '分析单元'), h('dd', null, current.analysis?.total == null && workflow.units?.length == null ? '未记录' : `${current.analysis?.total ?? workflow.units.length} 个`)),
                 h('div', { className: 'b03-overview-aside-divider' }),
@@ -6856,6 +6863,8 @@ window.__ModuleLoader__.load({
                 : h('p', null, '原文未提供可识别的操作步骤，请核对分析原文。'),
                 item.expected_results?.length ? h('p', { className: 'b05-subtle' }, `整体预期：${item.expected_results.join('；')}`) : null),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
+              item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
+              item.unresolved_related_refs?.length ? h('details', { className: 'b05-card' }, h('summary', null, '未解析的关联引用（不作为操作依据）'), h('pre', null, sourceFirstRecordBody(item.unresolved_related_refs))) : null,
               item.unit_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '本分析单元说明'), item.unit_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('p', null, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
                 h('p', { className: 'b05-subtle' }, '以下为已设计参数组合，不单独计为独立用例，也不代表各组合已实测通过。'),

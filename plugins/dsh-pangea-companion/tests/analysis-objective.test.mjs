@@ -18,6 +18,7 @@ test('explicit objective survives task persistence and exact frozen Run request'
   await mkdir(path.join(root, '.agents/pangea'), { recursive: true })
   await writeFile(path.join(root, '.agents/pangea/dsh.md'), '# fixture')
   const input = normalizeRunInput({ repository: 'repo', target: 'driver library lifecycle', source_scope: ['.'], focus: ['cleanup'],
+    test_tool_sources: [{ repo_id: 'tools', paths: ['scripts'] }], expected_test_tool_revision: 'tool-revision',
     scenario: 'module-analysis', mode: 'speed', analysis_profile: 'behavior-test-v2', objective: 'product-behavior' }, capabilities)
   const store = createTaskStore(path.join(root, 'tasks.json'))
   const task = await store.create({ workspace: root, input })
@@ -32,6 +33,9 @@ test('explicit objective survives task persistence and exact frozen Run request'
   })
   assert.deepEqual(frozen.analysis_settings, { scenario: 'module-analysis', mode: 'speed', objective: 'product-behavior' })
   assert.deepEqual(frozen.focus, ['cleanup'])
+  assert.deepEqual(frozen.test_tool_sources, [{ repo_id: 'tools', paths: ['scripts'] }])
+  assert.equal(frozen.expected_test_tool_revision, 'tool-revision')
+  assert.deepEqual(frozen.source_scope, ['.'])
   assert.equal(frozen.target, 'driver library lifecycle')
   assert.throws(() => normalizeRunInput({ ...input, objective: 'auto' }, capabilities), /不支持所选分析目标/)
 })

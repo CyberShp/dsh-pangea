@@ -72,3 +72,35 @@ export async function confirmScope(input, runner) {
   if (!current.matched_file_count) throw fail(422, '范围中没有可分析的源码文件')
   return current
 }
+
+// Tool references have a separate receipt and never enlarge source_scope.
+export async function previewTestTools(input, runner) {
+  if (!Array.isArray(input.test_tool_sources) || !input.test_tool_sources.length) throw fail(400, '请选择测试工具代码')
+  const sources = []
+  for (const source of input.test_tool_sources) {
+    const checked = await validateScope({ dataRoot: input.dataRoot, repository: source.repo_id, source_scope: source.paths })
+    sources.push({ repo_id: source.repo_id, paths: checked.normalized_scope })
+  }
+  const root = await realpath(input.dataRoot)
+  const key = JSON.stringify(['test-tools', root, sources])
+  for (const [id, record] of previews) if (Date.now() - record.created > lifetime) previews.delete(id)
+  if (input.preview_id) {
+    const record = previews.get(input.preview_id)
+    if (!record || record.key !== key) throw fail(409, '工具参考预览已失效，请重新预览')
+    return paginate(record, input)
+  }
+  const value = await runner({ cwd: input.cwd, args: ['test-tool-scope-preview', '--data-root', root, '--test-tool-sources', JSON.stringify(sources)] })
+  if (value.preview_state !== 'complete' || !Array.isArray(value.files) || value.matched_file_count !== value.files.length || !value.scope_revision) throw fail(422, '工具参考预览未完整完成')
+  if (previews.size >= 100) previews.delete(previews.keys().next().value)
+  const record = { id: randomUUID(), key, created: Date.now(), scannedAt: new Date().toISOString(), value }
+  previews.set(record.id, record)
+  return paginate(record, input)
+}
+export async function confirmTestTools(input, runner) {
+  const prior = await previewTestTools({ ...input, preview_id: input.test_tool_preview_id }, runner)
+  if (!input.test_tool_preview_id || input.expected_test_tool_revision !== prior.scope_revision) throw fail(409, '请重新预览并确认测试工具代码')
+  const current = await previewTestTools({ ...input, preview_id: undefined }, runner)
+  if (current.scope_revision !== prior.scope_revision) throw fail(409, '工具参考文件集合已变化，请重新预览')
+  if (!current.matched_file_count) throw fail(422, '工具参考范围没有可读取文件')
+  return current
+}

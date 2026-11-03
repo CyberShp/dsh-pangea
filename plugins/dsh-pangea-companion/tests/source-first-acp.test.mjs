@@ -977,3 +977,21 @@ test('paused run disposal closes its owned process tree, retains remote identity
     assert.equal(saved.workers.owned.requires_process_tree_confirmation, false)
   } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('workers can discover direct and budget-deferred tool reference indexes on initial and resumed turns', () => {
+  for (const task of [
+    { test_tool_reference_paths: [{ repo_id: 'tools', path: 'scripts/tool.py' }] },
+    { deferred_fields: { test_tool_reference_paths: { input_id: 'task:test_tool_reference_paths', count: 2000 } } },
+  ]) {
+    const args = { action: { action_id: 'r:a', stage: 'unit_analysis', role: 'analysis' }, opened: { task }, cwd: '/fixture', dataRoot: '/fixture/data', runId: 'r', taskId: 'w' }
+    for (const prompt of [workerPrompt(args), workerContinuationPrompt({ ...args, sameAction: true }), workerContinuationPrompt({ ...args, sameAction: false })]) {
+      assert.match(prompt, /task\.test_tool_reference_paths/)
+      assert.match(prompt, /input-read --input-id task:test_tool_reference_paths/)
+      assert.match(prompt, /next_cursor/)
+      assert.match(prompt, /source-read --repo-id ID --path PATH --view text/)
+      assert.match(prompt, /仅参考，不扩张被测义务、不执行工具/)
+      assert.doesNotMatch(prompt, /scripts\/tool\.py/)
+    }
+  }
+  assert.doesNotMatch(workerPrompt({ action: {}, opened: { task: {} }, cwd: '/fixture' }), /本 Run 具有测试工具参考/)
+})

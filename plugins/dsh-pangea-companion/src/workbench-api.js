@@ -250,6 +250,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     mode,
     ...(objective != null ? { objective } : {}),
     source_scope: sourceScope,
+    ...(Array.isArray(value?.test_tool_sources) && value.test_tool_sources.length ? { test_tool_sources: structuredClone(value.test_tool_sources), expected_test_tool_revision: value.expected_test_tool_revision } : {}),
     ...(value?.expected_scope_revision ? { expected_scope_revision: value.expected_scope_revision } : {}),
     ...(value?.analysis_profile === SCENE_PROFILE ? { analysis_profile: SCENE_PROFILE, asset_revisions: value.asset_revisions ?? {} } : scenario === 'coverage-analysis' ? { coverage_input: value.coverage_input } : {}),
     asset_ids: stringList(value?.asset_ids),

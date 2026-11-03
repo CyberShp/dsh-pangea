@@ -9,14 +9,62 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
+    const __testToolPicker = (() => {
+    function createTestToolPicker(React, SourceScopePicker) {
+      const h = React.createElement
+      return function TestToolPicker({ cwd, dataRoot, repositories, sources, preview, onChange, onPreview, renderIcon }) {
+        const [repository, setRepository] = React.useState('')
+        const [busy, setBusy] = React.useState(false), [error, setError] = React.useState('')
+        const sequence = React.useRef(0)
+        const key = JSON.stringify([cwd, dataRoot, sources])
+        React.useEffect(() => { sequence.current++; setBusy(false); setError(''); return () => { sequence.current++ } }, [key])
+        const update = (repo_id, value) => {
+          const paths = [...new Set(value.split(/\r?\n/).map(item => item.trim()).filter(Boolean))]
+          const next = sources.flatMap(source => source.repo_id === repo_id ? paths.length ? [{ repo_id, paths }] : [] : [source])
+          if (paths.length && !sources.some(source => source.repo_id === repo_id)) next.push({ repo_id, paths })
+          if (JSON.stringify(next) !== JSON.stringify(sources)) onChange(next)
+        }
+        async function request(page = {}) {
+          const token = ++sequence.current
+          if (!page.preview_id) onPreview(null)
+          setBusy(true); setError('')
+          try {
+            const response = await fetch(`/api/pangea-companion/repositories?${new URLSearchParams({ cwd, ...(dataRoot ? { data_root: dataRoot } : {}) })}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'preview-test-tools', cwd, data_root: dataRoot, test_tool_sources: sources, ...page }) })
+            const value = await response.json()
+            if (!response.ok || value.status !== 'ok') throw new Error(value.error || `HTTP ${response.status}`)
+            if (sequence.current === token) onPreview(value)
+          } catch (reason) { if (sequence.current === token) setError(reason.message) }
+          finally { if (sequence.current === token) setBusy(false) }
+        }
+        return h('section', { className: 'create-scope', 'aria-label': '测试工具代码参考', style: { marginTop: 24 } },
+          h('h3', null, '测试工具代码（可选，仅参考）'),
+          h('p', { className: 'create-copy' }, '选择同仓库的工具目录，或其他已登记仓库中的文件。Agent 将阅读工具代码编写具体操作说明，不会把工具本身作为被测对象，也不会执行工具。无需手写工具说明。'),
+          h('label', { className: 'field' }, '工具参考仓库', h('select', { 'aria-label': '工具参考仓库', value: repository, onChange: event => setRepository(event.target.value) }, h('option', { value: '' }, '选择已登记仓库'), repositories.map(id => h('option', { key: id, value: id }, id)))),
+          repository && h(SourceScopePicker, { key: repository, cwd, dataRoot, repository, value: sources.find(source => source.repo_id === repository)?.paths.join('\n') || '', selectionOnly: true, onChange: value => update(repository, value), renderIcon }),
+          h('ul', null, sources.map(source => h('li', { key: source.repo_id }, h('strong', null, source.repo_id), ' · 参考代码：', source.paths.join('、'), h('button', { type: 'button', className: 'btn ghost', onClick: () => onChange(sources.filter(item => item.repo_id !== source.repo_id)) }, `移除 ${source.repo_id}`)))),
+          sources.length ? h('button', { type: 'button', className: 'btn', disabled: busy, onClick: () => { void request() } }, busy ? '正在预览工具参考…' : '预览最终工具参考文件') : h('p', null, '未选择工具代码；按原有方式分析。'),
+          error && h('p', { role: 'alert', className: 'notice danger' }, `工具参考预览失败：${error}`),
+          preview && h('div', { role: 'status' }, h('p', null, `参考代码 · ${preview.matched_file_count} 个文件；排除 ${preview.excluded_file_count || 0} 个文件`),
+            !preview.matched_file_count && h('p', { className: 'notice warn' }, '没有可读取的参考文件，请调整范围。'),
+            h('details', null, h('summary', null, '查看最终仓库、文件与角色'), h('ul', null, (preview.files || []).map(file => h('li', { key: `${file.repo_id}/${file.relative_path}` }, `${file.repo_id} / ${file.relative_path} · 参考（非被测对象）`))),
+              h('button', { type: 'button', className: 'btn', disabled: busy || Number(preview.next_cursor) <= 50, onClick: () => { void request({ preview_id: preview.preview_id, cursor: Math.max(0, Number(preview.next_cursor) - 100) }) } }, '上一页'),
+              h('button', { type: 'button', className: 'btn', disabled: busy || !preview.has_more, onClick: () => { void request({ preview_id: preview.preview_id, cursor: preview.next_cursor }) } }, '下一页')),
+            preview.excluded_files?.length ? h('details', null, h('summary', null, '查看排除原因'), h('ul', null, preview.excluded_files.map((file, i) => h('li', { key: i }, `${file.repo_id} / ${file.relative_path}：${file.reason}`)))) : null))
+      }
+    }
+
+    return { createTestToolPicker }
+    })()
+
     const __sourceScopePicker = (() => {
     function createSourceScopePicker(React) {
       const h = React.createElement
-      return function SourceScopePicker({ cwd, dataRoot, repository, value, preview, onChange, onPreview, renderIcon = () => null }) {
+      return function SourceScopePicker({ cwd, dataRoot, repository, value, preview, onChange, onPreview, renderIcon = () => null, selectionOnly = false }) {
         const [open, setOpen] = React.useState(false), [tree, setTree] = React.useState(null)
         const [busy, setBusy] = React.useState(false), [error, setError] = React.useState('')
+        const [draft, setDraft] = React.useState(null)
         const root = React.useRef(null), trigger = React.useRef(null), sequence = React.useRef(0)
-        const scope = String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean)
+        const scope = String(open && draft !== null ? draft : value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean)
         React.useEffect(() => { sequence.current += 1; setTree(null); setError(''); setBusy(false) }, [cwd, dataRoot, repository])
         React.useEffect(() => { sequence.current += 1; setError(''); setBusy(false) }, [value])
         React.useEffect(() => { if (!open) return; root.current?.querySelector('button')?.focus(); return () => trigger.current?.focus?.() }, [open])
@@ -35,14 +83,14 @@ window.__ModuleLoader__.load({
           } catch (reason) { if (sequence.current === token) setError(reason.message) }
           finally { if (sequence.current === token) setBusy(false) }
         }
-        const toggle = path => onChange(scope.includes(path) ? scope.filter(item => item !== path).join('\n') : [...scope.filter(item => item !== '.'), path].join('\n'))
+        const toggle = path => setDraft(scope.includes(path) ? scope.filter(item => item !== path).join('\n') : [...scope.filter(item => item !== '.'), path].join('\n'))
         return h('section', { className: 'pangea-scope-picker', 'aria-label': '源码范围选择与预览' },
           h('div', { className: 'pangea-page-actions pangea-scope-toolbar' },
-            h('button', { type: 'button', className: 'btn', ref: trigger, disabled: !repository || busy, onClick: () => { setOpen(true); void request({ path: '.' }, true) } }, renderIcon('FolderOpen'), '选择目录或文件'),
+            h('button', { type: 'button', className: 'btn', ref: trigger, disabled: !repository || busy, onClick: () => { setDraft(value || ''); setOpen(true); void request({ path: '.' }, true) } }, renderIcon('FolderOpen'), '选择目录或文件'),
             h('button', { type: 'button', className: 'btn ghost', disabled: !repository || busy, onClick: () => onChange('.') }, renderIcon('FolderGit2'), '选择整个仓库'),
-            h('button', { type: 'button', className: 'btn', 'aria-busy': busy, disabled: !repository || !scope.length || busy, onClick: () => { void request({}) } }, renderIcon(busy ? 'LoaderCircle' : 'Search'), busy ? '正在读取范围…' : '预览命中文件')),
+            !selectionOnly && h('button', { type: 'button', className: 'btn', 'aria-busy': busy, disabled: !repository || !scope.length || busy, onClick: () => { void request({}) } }, renderIcon(busy ? 'LoaderCircle' : 'Search'), busy ? '正在读取范围…' : '预览命中文件')),
           error ? h('p', { role: 'alert', className: 'notice danger pangea-scope-feedback' }, `范围预览失败：${error}`) : null,
-          preview ? h('div', { className: 'pangea-scope-preview', role: 'status' },
+          selectionOnly ? null : preview ? h('div', { className: 'pangea-scope-preview', role: 'status' },
             h('div', { className: 'pangea-scope-preview-summary' }, renderIcon('Files'), h('strong', null, `${preview.is_entire_repository ? '整个仓库' : '指定范围'} · 命中 ${preview.matched_file_count} 个源码文件`)),
             preview.matched_file_count === 0 ? h('p', { className: 'notice warn pangea-scope-feedback' }, '没有匹配源码，请调整范围后重试。') : null,
             h('details', null, h('summary', null, '查看命中文件清单'), h('ul', { className: 'pangea-scope-path-list' }, preview.files.map(item => h('li', { key: item.relative_path }, h('code', null, item.relative_path)))),
@@ -50,9 +98,9 @@ window.__ModuleLoader__.load({
                 h('span', null, `共 ${preview.matched_file_count} 个文件`), h('button', { type: 'button', className: 'btn', disabled: busy || !preview.has_more, onClick: () => { void request({ preview_id: preview.preview_id, cursor: preview.next_cursor }) } }, '下一页'))))
             : h('p', { className: 'b05-subtle' }, '选择范围后预览实际命中文件；范围变化后需要重新预览。'),
           open ? h('div', { className: 'pangea-info-overlay' }, h('section', { className: 'pangea-ui pangea-info-drawer pangea-scope-drawer', ref: root, role: 'dialog', 'aria-modal': true, 'aria-label': '选择源码范围', onKeyDown: event => {
-            if (event.key === 'Escape') setOpen(false)
+            if (event.key === 'Escape') { sequence.current += 1; setBusy(false); setOpen(false) }
             if (event.key === 'Tab') { const controls = [...root.current.querySelectorAll('button:not(:disabled),input:not(:disabled)')]; if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus() } else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus() } }
-          } }, h('div', { className: 'pangea-page-actions pangea-scope-drawer-head' }, h('h2', null, '选择源码范围'), h('button', { type: 'button', className: 'btn primary', onClick: () => setOpen(false) }, '完成选择')),
+          } }, h('div', { className: 'pangea-page-actions pangea-scope-drawer-head' }, h('h2', null, '选择源码范围'), h('button', { type: 'button', className: 'btn ghost', onClick: () => { sequence.current += 1; setBusy(false); setOpen(false) } }, '取消'), h('button', { type: 'button', className: 'btn primary', onClick: () => { sequence.current += 1; setBusy(false); if (draft !== value) onChange(draft); setOpen(false) } }, '完成选择')),
           h('div', { className: 'pangea-scope-path-bar' }, h('code', { 'aria-label': '当前目录' }, tree?.path || '.'), h('button', { type: 'button', className: 'btn ghost', disabled: busy || !tree || tree.path === '.', onClick: () => { void request({ path: tree.path.split('/').slice(0, -1).join('/') || '.' }, true) } }, renderIcon('ArrowLeft'), '上一级')),
           h('ul', { className: 'pangea-scope-tree' }, (tree?.entries || []).map(item => h('li', { key: item.path, className: 'pangea-scope-tree-row' }, h('label', { className: 'pangea-scope-tree-name' }, h('input', { type: 'checkbox', checked: scope.includes(item.path), disabled: !item.selectable, onChange: () => toggle(item.path) }), renderIcon(item.kind === 'directory' ? 'FolderOpen' : 'FileText'), h('span', null, item.name)), item.kind === 'directory' ? h('button', { type: 'button', className: 'btn ghost', disabled: busy || !item.selectable, onClick: () => { void request({ path: item.path }, true) } }, '打开') : null))),
           busy ? h('p', { className: 'pangea-scope-feedback small muted', role: 'status' }, '正在读取目录…') : tree && !tree.entries?.length ? h('p', { className: 'pangea-scope-feedback small muted', role: 'status' }, '当前目录没有可显示的目录项。') : null,
@@ -2578,6 +2626,7 @@ window.__ModuleLoader__.load({
     const { buildRunInsights } = __runInsights
     const { buildOverviewFindings, summaryText } = __overviewFindings
     const { caseIdentity, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
+    const TestToolPicker = __testToolPicker.createTestToolPicker(React, __sourceScopePicker.createSourceScopePicker(React))
     const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
@@ -4799,6 +4848,7 @@ window.__ModuleLoader__.load({
         repository: form.repository,
         target: form.target,
         ...(form.scope_preview_id ? { scope_preview_id: form.scope_preview_id, expected_scope_revision: form.expected_scope_revision } : {}),
+        ...(form.test_tool_sources?.length ? { test_tool_sources: form.test_tool_sources, test_tool_preview_id: form.test_tool_preview?.preview_id, expected_test_tool_revision: form.test_tool_preview?.scope_revision } : {}),
         source_scope: String(form.source_scope_text ?? '').split(/\r?\n/).map(value => value.trim()).filter(Boolean),
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'branch-analysis',
@@ -7668,6 +7718,7 @@ window.__ModuleLoader__.load({
           : !objectiveReady ? '请选择产品行为或接口契约分析目标。'
           : sourceScope.length === 0 ? '请选择源码范围；分析整个仓库请明确选择根目录。'
           : !validScopePreview?.matched_file_count ? '请预览并确认命中的源码文件。'
+          : createForm.test_tool_sources?.length && !createForm.test_tool_preview?.matched_file_count ? '请预览并确认测试工具参考文件。'
           : sceneOptions && createForm.asset_ids.some(id => !(assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.input_revision) ? '所选资产版本尚未读取，请刷新资产后重新选择。'
           : !coverageReady ? '请先查询、导入或选择可用覆盖率资产。'
           : unavailableProvider ? unavailableProviderMessage
@@ -7695,7 +7746,7 @@ window.__ModuleLoader__.load({
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
         const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && objectiveReady && sourceScope.length && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
-        const inputsReady = coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
+        const inputsReady = (!createForm.test_tool_sources?.length || createForm.test_tool_preview?.matched_file_count > 0) && coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
         const go = (next, nextView = 'inputs') => {
           if (creatingRun) return
           if (next > 1 && !targetReady || next > 2 && !inputsReady || next > 3 && !executionReady) { showActionNotice(submitBlockReason || '请先完成前面的设置。', true); return }
@@ -7741,6 +7792,7 @@ window.__ModuleLoader__.load({
           footer(() => navigate({ type: 'tasks' }), () => go(2), '下一步 · 输入资料', !targetReady)), 'create-target-panel')
         else if (step === 2 && view === 'inputs') content = panel(h(React.Fragment, null,
           h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '让分析理解更多上下文'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '选择与目标相关的需求、设计或已有测试资料。')), button('选择资产', () => openAssets(), '', 'Plus')),
+          h(TestToolPicker, { cwd, dataRoot: workbench?.data_root, repositories, sources: createForm.test_tool_sources || [], preview: createForm.test_tool_preview, onChange: sources => setCreateForm(form => ({ ...form, test_tool_sources: sources, test_tool_preview: null })), onPreview: preview => update('test_tool_preview', preview), renderIcon: runIcon }),
           h('div', { className: 'row between', style: { margin: '24px 0 12px' } }, h('strong', { className: 'small' }, `已选资料 ${selectedAssets.length}`), h('span', { className: 'small muted' }, '版本将在创建时绑定')),
           pendingAssetDetails.length ? notice('正在读取资产资料', `正在按资产 ID 读取 ${pendingAssetDetails.length} 份资料的名称与输入版本。`, 'blue') : null,
           failedAssetDetails.length ? notice('资产详情读取失败', '无法确认所选资料的名称与输入版本，请重试后再继续。', 'warn', button('重试读取', retryAssetDetails, '', 'RefreshCw')) : null,
@@ -7787,6 +7839,7 @@ window.__ModuleLoader__.load({
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
             row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `${validScopePreview.is_entire_repository ? '整个仓库 · ' : ''}命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
+            row('测试工具代码（仅参考）', (createForm.test_tool_sources || []).map(source => `${source.repo_id}: ${source.paths.join('、')}`).join('\n') || '未选择', createForm.test_tool_preview ? `已确认 ${createForm.test_tool_preview.matched_file_count} 个参考文件；不作为被测对象` : '可选，不影响原有分析', 2),
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint', className: 'notice warn' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }
@@ -8338,6 +8391,7 @@ window.__ModuleLoader__.load({
           onReload: loadWorkbench,
           onNewQuery: query => {
             setCreateForm(value => ({ ...value, source_task_id: selectedTask.task_id, repository: selectedTask.repository, target: selectedTask.target,
+              test_tool_sources: selectedTask.test_tool_sources || [], test_tool_preview: null,
               source_scope_text: selectedTask.source_scope.join('\n'), asset_ids: selectedTask.asset_ids,
               scenario: 'coverage-analysis', mode: selectedTask.mode, provider_id: selectedTask.provider || '',
               agent_model: selectedTask.provider ? selectedTask.agent_model || '' : '', model_route_key: '', external_selection_required: !selectedTask.provider,
@@ -8880,6 +8934,7 @@ window.__ModuleLoader__.load({
                   h('dt', null, '主要范围'), h('dd', null, selectedTask.source_scope?.length
                     ? selectedTask.source_scope.map(path => h('div', { key: path, className: 'b03-overview-file' }, path))
                     : current.target ?? '未记录'),
+                  selectedTask.test_tool_sources?.length ? h(React.Fragment, null, h('dt', null, '测试工具（仅参考）'), h('dd', null, selectedTask.test_tool_sources.map(source => h('div', { key: source.repo_id }, `${source.repo_id}: ${source.paths.join('、')}`)))) : null,
                   h('dt', null, '冻结文件'), h('dd', null, current.source_snapshot?.file_count == null ? '未记录' : `${current.source_snapshot.file_count} 个源码文件`),
                   h('dt', null, '分析单元'), h('dd', null, current.analysis?.total == null && workflow.units?.length == null ? '未记录' : `${current.analysis?.total ?? workflow.units.length} 个`)),
                 h('div', { className: 'b03-overview-aside-divider' }),
@@ -9411,6 +9466,8 @@ window.__ModuleLoader__.load({
                 : h('p', null, '原文未提供可识别的操作步骤，请核对分析原文。'),
                 item.expected_results?.length ? h('p', { className: 'b05-subtle' }, `整体预期：${item.expected_results.join('；')}`) : null),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
+              item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
+              item.unresolved_related_refs?.length ? h('details', { className: 'b05-card' }, h('summary', null, '未解析的关联引用（不作为操作依据）'), h('pre', null, sourceFirstRecordBody(item.unresolved_related_refs))) : null,
               item.unit_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '本分析单元说明'), item.unit_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('p', null, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
                 h('p', { className: 'b05-subtle' }, '以下为已设计参数组合，不单独计为独立用例，也不代表各组合已实测通过。'),

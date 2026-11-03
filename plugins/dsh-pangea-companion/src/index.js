@@ -27,7 +27,7 @@ import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
-import { scopeTree, validateScope, previewScope, confirmScope } from './repositories/scope.js'
+import { scopeTree, validateScope, previewScope, confirmScope, previewTestTools, confirmTestTools } from './repositories/scope.js'
 
 export const name = 'dsh-pangea-companion'
 export const inject = ['tools', 'webServer', 'agents', 'apiProxy', 'subagents', 'jobs']
@@ -1226,6 +1226,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       if (body.input?.incremental_request != null) throw new Error('定向补充或变更分析请从来源任务发起')
       if (body.input?.source_task_id) requireWorkspaceTask(await tasks.get(body.input.source_task_id), cwd, body.input.source_task_id)
       if (body.input?.scope_preview_id || body.input?.expected_scope_revision) { const checked = await confirmScope({ ...body.input, cwd: root, dataRoot: dataRootFor(root, actionDataRoot) }, runner); body.input.source_scope = checked.normalized_scope }
+      if (body.input?.test_tool_sources?.length) { const checked = await confirmTestTools({ ...body.input, cwd: root, dataRoot: dataRootFor(root, actionDataRoot) }, runner); body.input.test_tool_sources = checked.normalized_sources }
       const providerId = typeof body.input?.provider_id === 'string' ? body.input.provider_id.trim() : ''
       requireExternalAnalysisProvider(providerId)
       const agentModel = await requireAgentModel(runtime, { providerId, cwd: root, model: body.input?.agent_model,
@@ -1500,6 +1501,7 @@ export async function repositoryRouteHandler(req, res, runner = runPangea) {
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
     if (body.action === 'validate-scope') return json(res, 200, await validateScope({ ...body, dataRoot }))
+    if (body.action === 'preview-test-tools') return json(res, 200, await previewTestTools({ ...body, dataRoot, cwd }, runner))
     if (body.action === 'preview-scope') return json(res, 200, await previewScope({ ...body, dataRoot, cwd }, runner))
     const imported = await importRepository({
       dataRoot,

@@ -140,6 +140,7 @@ export async function createRun(cwd, input, runner = runPangea) {
   if (supportsSourceFirst(detected)) return createSourceFirstRun(cwd, input, runner)
   if (input.incremental_request != null) throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')
   if (input.flow_baseline != null) throw new Error('当前分析引擎不支持流程基线，请更新配套组件')
+  if (input.test_tool_sources?.length) throw new Error('测试工具代码参考需要 source-first 分析引擎')
   const rejectedFields = ['focus', 'test_case_examples', 'context_scope'].filter(field => Object.hasOwn(input ?? {}, field))
   if (rejectedFields.length) throw new Error(`新建分析不支持字段：${rejectedFields.join(', ')}`)
   const pendingPath = path.join(root, PENDING_REQUEST)
@@ -156,6 +157,7 @@ export async function createRun(cwd, input, runner = runPangea) {
     repository: input.repository,
     target: input.target,
     source_scope: normalizeSourceScope(input.source_scope, input.repository),
+    ...(input.test_tool_sources?.length ? { test_tool_sources: input.test_tool_sources, expected_test_tool_revision: input.expected_test_tool_revision } : {}),
     ...(input.expected_scope_revision ? { expected_scope_revision: input.expected_scope_revision } : {}),
     asset_ids: input.asset_ids ?? [],
     scenario,
@@ -245,6 +247,7 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     ...(input.flow_baseline != null ? { flow_baseline: normalizeFlowBaseline(input.flow_baseline) } : {}),
     ...(normalizeModelSettings(input.model_settings) ? { model_settings: normalizeModelSettings(input.model_settings) } : {}),
     source_scope: normalizeSourceScope(input.source_scope, input.repository),
+    ...(input.test_tool_sources?.length ? { test_tool_sources: input.test_tool_sources, expected_test_tool_revision: input.expected_test_tool_revision } : {}),
     ...(input.expected_scope_revision ? { expected_scope_revision: input.expected_scope_revision } : {}),
     ...(Array.isArray(input.context_scope) ? { context_scope: normalizeSourceScope(input.context_scope, input.repository) } : {}),
     asset_ids: input.asset_ids ?? [],

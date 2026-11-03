@@ -304,3 +304,25 @@ test('route projection shares exact SVG membership and diagnoses a missing tail 
   assert.deepEqual(flow.paths[1].node_ids, body.paths[1].node_ids)
   assert.deepEqual(body, original)
 })
+
+test('case operation notes resolve exact envelope references without crossing duplicate unit ids', () => {
+  const value = sourceFirstProjection([
+    action('a', [record('n', 'note', '# Tool operation\nDo not execute during analysis'), record('c', 'test_case', { case_id: 'C' }, { relates_to: ['n', 'unknown'] }), record('unrelated', 'note', 'Other context')]),
+    action('b', [record('n', 'note', 'Different unit'), record('c', 'test_case', { case_id: 'C' })]),
+  ])
+  assert.deepEqual(value.test_cases[0].linked_notes.map(note => note.projection_id), ['a/n'])
+  assert.deepEqual(value.test_cases[0].unit_notes.map(note => note.projection_id), ['a/unrelated'])
+  assert.deepEqual(value.test_cases[1].linked_notes, [])
+  assert.deepEqual(value.test_cases[0].source_record.relates_to, ['n', 'unknown'])
+})
+
+test('operation references use real record ids even when business aliases collide', () => {
+  const value = sourceFirstProjection([action('a', [
+    record('actual-note', 'note', { title: 'Tool instructions', case_id: 'alias-only' }),
+    record('other', 'test_case', { case_id: 'actual-note' }),
+    record('case', 'test_case', { case_id: 'C' }, { relates_to: [{ unit_id: 'a', record_id: 'actual-note' }, { unit_id: 'a', record_id: 'alias-only' }] }),
+  ])])
+  const item = value.test_cases.find(row => row.source_record.record_id === 'case')
+  assert.deepEqual(item.linked_notes.map(note => note.source_record.record_id), ['actual-note'])
+  assert.deepEqual(item.unresolved_related_refs, [{ unit_id: 'a', record_id: 'alias-only' }])
+})

@@ -10,6 +10,7 @@ const outputPath = path.join(root, 'lib', 'client.js')
 // Each module becomes an IIFE so local names never collide with client.js.
 const MARKER = '/* @inline-shared-modules */'
 const SHARED = [
+  ['__testToolPicker', 'src/test-tool-picker.js'],
   ['__sourceScopePicker', 'src/source-scope-picker.js'],
   ['__overviewFindings', 'src/overview-findings.js'],
   ['__caseReviewProjection', 'src/case-review-projection.js'],

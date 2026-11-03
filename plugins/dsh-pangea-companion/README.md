@@ -232,3 +232,13 @@ npm test
 浏览器开发预览使用真实 React 组件与隔离 fixture；源码范围、评审与导出走实际本地 API，其余 Agent/分析数据为示例，不代表完成真实分析。可运行 `scripts/preview-ui.mjs`，使用 `--desktop`、`--agent`、`--python` 指定配套工程/解释器。`scripts/verify-ui-browser.mjs` 使用外部开发测试工具 Playwright（`--playwright` 可指定其模块路径）；不增加产品依赖。截图和断言输出默认保存到 Desktop 的 `.pangea-build/uiux-verification`。Windows 使用系统字体；Linux 截图可通过 `--tools` 指向含 `@fontsource/noto-sans-sc` 的开发工具目录。
 
 引擎范围一致性回归在 `tests/source-scope-engine.test.mjs`，以 `PANGEA_TEST_PYTHON` / `PANGEA_AGENT_ROOT` 指向锁定的配套引擎。桌面集成与内网验收记录见 Desktop `feature-specs/2026-10-21-uiux-development.md`。
+
+### 测试工具代码参考（第一轮）
+
+新建分析的“输入资料”中可选“测试工具代码”，从已登记仓库选择目录或文件（支持同仓库其他目录与跨仓库）。此区域独立于被测源码范围，不要求手写工具说明；先预览展开后的仓库、文件清单、参考角色及排除原因，再创建分析。取消目录选择不改变原选择，移除全部工具恢复原有创建流程。无需 Desktop 原生文件选择器。
+
+工具预览通过 `test-tool-scope-preview`，输入 `test_tool_sources: [{repo_id, paths}]`，创建时传递 `expected_test_tool_revision`。预览凭据确认**展开文件集合**，不是对文件内容的版本审批；创建 Run 时冻结当时读取的内容。创建前文件集合改变或预览过期需重新确认。参考文件不扩张被测 `source_scope`，此流程不执行工具。
+
+操作说明复用 note 与 case 外壳 `relates_to`：同单元真实 `record_id` 字符串，或显式 `{unit_id, record_id}`。case 详情按精确记录身份展开关联说明；未解析的记录引用保留待核实提示，其他单元说明不会冒充专属操作依据。旧任务未带工具输入时按原样展示。
+
+回归：`npm test`；真实后端隔离集成可设置 `PANGEA_TEST_PYTHON`、`PANGEA_AGENT_ROOT` 后运行 `node --test tests/test-tool-reference.test.mjs`（只读源码并创建临时冻结 Run，不调用 Agent 模型、不执行参考工具）。

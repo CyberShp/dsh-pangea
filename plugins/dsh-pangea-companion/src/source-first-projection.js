@@ -197,8 +197,18 @@ export function sourceFirstProjection(artifacts) {
       testCase.linked_risk_ids = [...new Set([...testCase.linked_risk_ids, risk.risk_id])]
     }
   }
+  // Operation references must identify actual records, never business display aliases.
+  const exactRecord = (owner, ref) => {
+    const id = typeof ref === 'string' ? ref : ref?.record_id
+    const unit = typeof ref === 'object' ? ref?.unit_id ?? owner.unit_id : owner.unit_id
+    const matches = rows.filter(row => row.unit_id === unit && row.source_record.record_id === id)
+    return matches.length === 1 ? matches[0] : null
+  }
   for (const testCase of result.test_cases) {
-    testCase.unit_notes = result.notes.filter(note => note.unit_id === testCase.unit_id && note.source_record.kind === 'note')
+    testCase.unresolved_related_refs = list(testCase.source_record.relates_to).filter(ref => (typeof ref === 'string' || ref?.record_id != null) && !exactRecord(testCase, ref) && (typeof ref !== 'string' || !resolve(testCase, [ref], ['risk_id', 'case_id', 'test_case_id', 'flow_id'], ['risk', 'test_case', 'test_case_group', 'flow']).length))
+    const noteIds = list(testCase.source_record.relates_to).map(ref => exactRecord(testCase, ref)).filter(row => row?.source_record.kind === 'note').map(row => row.projection_id)
+    testCase.linked_notes = result.notes.filter(note => note.source_record.kind === 'note' && (noteIds.includes(note.projection_id) || list(note.source_record.relates_to).some(ref => exactRecord(note, ref)?.projection_id === testCase.projection_id)))
+    testCase.unit_notes = result.notes.filter(note => !testCase.linked_notes.includes(note) && note.unit_id === testCase.unit_id && note.source_record.kind === 'note')
     for (const flow of result.business_flows) {
       if (flow.paths.some(path => path.linked_test_case_ids.includes(testCase.test_case_id))) {
         testCase.linked_flow_ids = [...new Set([...testCase.linked_flow_ids, flow.flow_id])]
