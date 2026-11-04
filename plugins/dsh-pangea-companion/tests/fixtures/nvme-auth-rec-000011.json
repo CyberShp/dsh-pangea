@@ -1,0 +1,9 @@
+{
+  "record_id": "rec-000011",
+  "body": "{\"format_version\": \"behavior-test-case-v1\", \"case_id\": \"TC-007\", \"title\": \"Authentication failure when controller's challenge has invalid DH value length\", \"purpose\": \"branch\", \"test_level\": \"business_blackbox\", \"entry\": \"spdk_nvme_qpair_authenticate(qpair, cb_fn, cb_ctx)\", \"preconditions\": [\"Host has dhchap_key set\", \"Host configures a non-NULL dhgroup (e.g., ffdhe2048)\", \"No authentication currently in progress\", \"Controller sends a challenge with dhvlen=0 or dhvlen too large for NVME_AUTH_DATA_SIZE for the given dhgroup\"], \"steps\": [{\"action\": \"Call spdk_nvme_qpair_authenticate and poll until challenge is received\", \"expected\": \"State progresses to AWAIT_CHALLENGE; nvme_auth_check_challenge validates dhvlen per dhgroup and fails for dhvlen=0 or overflow\"], {\"action\": \"Continue polling until poll returns -EACCES\", \"expected\": \"nvme_auth_set_failure called; FAILURE2 sent; state becomes AWAIT_FAILURE2; poll returns -EACCES\"}], \"external_observations\": [\"nvme_fabric_qpair_authenticate_poll returns -EACCES\", \"auth->status == -EACCES\", \"FAILURE2 sent with reason=SPDK_NVMF_AUTH_INCORRECT_PAYLOAD\"], \"cleanup\": [\"Retry with a properly configured controller\"], \"flow_refs\": [{\"flow_id\": \"F-002\", \"path_id\": \"P-07\"}], \"coverage_refs\": [], \"risk_refs\": [], \"variants\": [], \"execution_status\": \"not_run\", \"source_evidence\": [\"spdk-full:lib/nvme/nvme_auth.c:856-879 (dhvlen validation per dhgroup)\", \"spdk-full:lib/nvme/nvme_auth.c:869-874 (overflow check: sizeof(*challenge) + hl + challenge->dhvlen > NVME_AUTH_DATA_SIZE)\"]}",
+  "kind": "test_case",
+  "evidence": [],
+  "relates_to": [],
+  "supersedes": [],
+  "created_revision": 11
+}

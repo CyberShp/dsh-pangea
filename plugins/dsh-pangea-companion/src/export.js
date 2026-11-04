@@ -70,7 +70,10 @@ export function caseEvidenceRows(run) {
   const items = run?.details?.test_cases ?? []
   // Preserve additional entry/oracle fields verbatim as the contract evolves.
   const extras = [...new Set(items.flatMap(item => Object.keys(item).filter(key => /entry|oracle/.test(key) && !fields.includes(key))))].sort()
-  const keys = [...fields, ...extras]
+  // A recovered reading must travel with its parse diagnostics and untouched
+  // source envelope. Keep both in the appendix, outside the eight-column cases.
+  const parseFields = items.some(item => item.record_parse != null) ? ['record_parse', 'source_record'] : []
+  const keys = [...fields, ...extras, ...parseFields]
   return [['序号', '用例身份', '单元ID', '用例ID', ...keys], ...items.map((item, index) => [index + 1, caseIdentity(item), item.unit_id, item.display_id ?? item.test_case_id, ...keys.map(key => item[key])])]
 }
 

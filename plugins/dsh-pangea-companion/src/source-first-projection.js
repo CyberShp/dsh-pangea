@@ -5,13 +5,10 @@ import { normalizeFlow, normalizeFlows } from './flow-normalize.js'
 import { behaviorCoverageProjection } from './behavior-coverage.js'
 import { pathMembers } from './flow-graph/layout.js'
 import { activeDiagramDiagnostics, diagramDiagnostics, DIAGRAM_CONTRACT } from './diagram-contract.js'
+import { parseRecordBody } from './record-body.js'
 const list = value => Array.isArray(value) ? value : value == null ? [] : [value]
 const plain = value => typeof value === 'string' ? value : value == null ? '' : JSON.stringify(value, null, 2)
 const strings = value => list(value).map(plain)
-function mapping(body) {
-  if (body && typeof body === 'object' && !Array.isArray(body)) return body
-  try { const parsed = JSON.parse(body); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {} } catch { return {} }
-}
 function activeRecords(records) {
   const known = new Set(), retired = new Set()
   for (const record of records) {
@@ -85,11 +82,17 @@ export function caseQualitySummary(cases, scene) {
     has_legacy_groups: hasLegacyGroups, ready_ratio: cases.length && !hasLegacyGroups ? (readyBlackbox + readyGraybox) / cases.length : null }
 }
 
-export function recordTitle(record, body = mapping(record.body)) {
+export function recordTitle(record, body, recordParse) {
+  if (body === undefined) {
+    const parsed = parseRecordBody(record)
+    body = parsed.body
+    recordParse = parsed.record_parse
+  }
   if (record.kind === 'check') return `检查记录 · ${body.check_id ?? record.record_id}`
   if (record.kind === 'flow' && typeof body.title !== 'string' && typeof body['标题'] === 'string') return body['标题']
   if (typeof body.title === 'string' && body.title.trim()) return body.title.trim()
-  const first = typeof record.body === 'string' && !Object.keys(body).length ? record.body.trim().split('\n')[0].trim() : ''
+  const structuredCase = record.kind === 'test_case' && recordParse?.status === 'invalid'
+  const first = !structuredCase && typeof record.body === 'string' && !Object.keys(body).length ? record.body.trim().split('\n')[0].trim() : ''
   if (first && !/^[\s{}\[\],:|`#*-]+$/.test(first)) return first.replace(/^#{1,6}\s+/, '').slice(0, 120)
   return `${({ unresolved: '待确认事项', summary: '分析总结', note: '分析说明', risk: '风险记录', test_case: '测试用例' })[record.kind] ?? '分析记录'} · ${record.record_id}`
 }
@@ -100,9 +103,13 @@ export function sourceFirstProjection(artifacts) {
   const delivery = artifacts.filter(a => (a.stage === 'targeted_closure' && (a.status === 'accepted' || a.delivery_revision != null)) || (a.stage === 'unit_analysis' && !closureUnits.has(a.task?.unit_id)))
   const rows = delivery.flatMap(action => activeRecords(action.records ?? []).flatMap(record => {
     // One flow record may hold several flows ({flows:[]}); split ids stay stable by position.
-    const bodies = record.kind === 'flow' ? normalizeFlows(record.body) : [mapping(record.body)]
+    const parsed = record.kind === 'flow' ? null : parseRecordBody(record)
+    const bodies = record.kind === 'flow' ? normalizeFlows(record.body) : [parsed.body]
     const unit = action.task?.unit_id ?? action.action_id
     return bodies.map((body, index) => {
+      // Parse metadata belongs to this projection, never to authored content.
+      // The original field, if present, still survives in source_record.body.
+      const { record_parse: authoredParseMetadata, ...fields } = body
       const originalId = record.kind === 'check' ? body.check_id ?? record.record_id : body.risk_id ?? body.case_id ?? body.test_case_id ?? body.flow_id ?? body.coverage_id ?? record.record_id
       const recordContracts = action.task?.record_contracts ?? {}
       const persisted = action.diagram_diagnostics ?? activeDiagramDiagnostics(action.runtime_result)
@@ -116,11 +123,12 @@ export function sourceFirstProjection(artifacts) {
       const diagnostics = [...current]
       for (const item of computed) if (!diagnostics.some(other => other.field === item.field && other.code === item.code && other.classification === item.classification)) diagnostics.push(item)
       return {
-        ...body, unit_id: unit, display_id: plain(originalId),
+        ...fields, unit_id: unit, display_id: plain(originalId),
+        ...(parsed?.record_parse ? { record_parse: parsed.record_parse } : {}),
         ...(record.kind === 'flow' ? { record_contracts: recordContracts,
           ...(recordContracts.diagram === DIAGRAM_CONTRACT || current.length ? { diagram_diagnostics: diagnostics } : {}) } : {}),
         projection_id: `${unit}/${record.record_id}${index ? `#${index + 1}` : ''}`,
-        title: recordTitle(record, body.raw_text != null && !body.title ? {} : body),
+        title: recordTitle(record, body.raw_text != null && !body.title ? {} : body, parsed?.record_parse),
         source_record: { ...record, action_id: action.action_id, task_id: action.task_id, revision: action.revision, status: action.status, result_path: action.result_path },
       }
     })

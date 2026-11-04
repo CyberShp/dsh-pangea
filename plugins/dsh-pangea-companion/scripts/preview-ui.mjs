@@ -1,9 +1,9 @@
 // Real browser rendering of shipped components against isolated deterministic fixtures.
 import { createServer } from 'node:http'
-import { readFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -13,6 +13,8 @@ import { uiWorkbenchFixture } from '../tests/fixtures/ui-workbench.mjs'
 
 const plugin = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const option = (name, fallback) => { const index = process.argv.indexOf(name); return index < 0 ? fallback : process.argv[index + 1] }
+// Optional, explicit synthetic fixture extension for CI. Default behavior is unchanged.
+const fixtureModule = option('--fixture-module') ? await import(pathToFileURL(path.resolve(option('--fixture-module'))).href) : null
 const desktop = path.resolve(option('--desktop', path.join(plugin, '../../../pangea-desktop')))
 const agent = path.resolve(option('--agent', path.join(desktop, '../pangea-agent')))
 const tools = path.resolve(option('--tools', path.join(desktop, '../../visual-tools/node_modules')))
@@ -21,26 +23,27 @@ const require = createRequire(path.join(desktop, 'package.json'))
 const { build } = require('esbuild')
 const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'pangea-ui-preview-'))
 await mkdir(path.join(dataRoot, 'repositories/storage/tls'), { recursive: true })
-await Promise.all(Array.from({ length: 42 }, (_, index) => readFile(path.join(agent, 'AGENTS.md')).then(async () => {
-  const { writeFile } = await import('node:fs/promises')
-  await writeFile(path.join(dataRoot, 'repositories/storage/tls', index ? `unit-${index}.c` : 'handshake.c'), '/* UI verification fixture */\nint handshake(void) { return 0; }\n')
-})))
+await Promise.all(Array.from({ length: 42 }, (_, index) =>
+  writeFile(path.join(dataRoot, 'repositories/storage/tls', index ? `unit-${index}.c` : 'handshake.c'), '/* UI verification fixture */\nint handshake(void) { return 0; }\n')))
 const css = await readFile(path.join(plugin, '../dsh-pangea/src/product-ui.css'), 'utf8')
 const uiSource = await readFile(path.join(plugin, '../dsh-pangea/src/ui-components.js'), 'utf8')
 const bundle = await build({ stdin: { contents: `
 import React from 'react'; import {createRoot} from 'react-dom/client';
 ${uiSource.replace(/^export /gm, '')}
-const pages=[];const listeners=new Set();let draft={};let exported;const modules={};let mountVersion=0;
+const pages=[];const listeners=new Set();let draft={};let exported;const modules={};let mountVersion=0;let activeSurface='';let selectedTaskId;let productState={};
 window.__ModuleLoader__={load(spec){const value=spec.factory(name=>name==='react'?React:{});modules[spec.id]=value;if(spec.id==='dsh-pangea-companion'){exported=value;window.pangeaClient=value}}};
-const service={ui:createProductUi(React),registerPage(page){pages.push(page)},getRunDraft(){return draft},subscribeRunDraft(fn){listeners.add(fn);return()=>listeners.delete(fn)},updateRunDraft(patch){draft={...draft,...patch};listeners.forEach(fn=>fn())},subscribe(){return()=>{}},getProductState(){return{}},setProductState(){},selectTask(){},requestRunSelection(_scope,runId){this.updateRunDraft({intent:'select-run',runId,requestId:Date.now()})},requestRunCreation(){this.updateRunDraft({intent:'create',requestId:Date.now()});mount('create')},openPage(_scope,id){mount(id==='workbench'?'home':id==='environments'?'environment':id==='settings'?'settings':id==='assets'?'assets':'tasks',id==='workbench'?'home':'analysis')}};
+const service={ui:createProductUi(React),registerPage(page){pages.push(page)},getRunDraft(){return draft},subscribeRunDraft(fn){listeners.add(fn);return()=>listeners.delete(fn)},updateRunDraft(patch){draft={...draft,...patch};listeners.forEach(fn=>fn())},subscribe(){return()=>{}},getProductState(){return productState},setProductState(patch){productState={...productState,...patch}},getSelectedTaskId(){return selectedTaskId},selectTask(taskId){selectedTaskId=taskId},requestRunSelection(_scope,runId){this.updateRunDraft({intent:'select-run',runId,requestId:Date.now()})},requestRunCreation(){this.updateRunDraft({intent:'create',requestId:Date.now()});if(activeSurface!=='analysis')mount('create')},openPage(_scope,id){const screen=id==='workbench'?'home':id==='environments'?'environment':id==='settings'?'settings':id==='assets'?'assets':'tasks';const surface=surfaceFor(screen);if(activeSurface!==surface)mount(screen,screen==='home'?'home':screen==='environment'?'execution':'analysis')}};
 const ctx={pangea:service,effect(fn){return fn()},sessions:{open(){}},workspaces:{}};
-const root=createRoot(document.getElementById('app'));function mount(initialScreen='tasks',pageMode='analysis'){const key=++mountVersion;if(initialScreen==='assets')return root.render(React.createElement(pages.find(p=>p.id==='assets').component,{key,ctx,scope:{cwd:${JSON.stringify(agent)}},visible:true}));if(initialScreen==='settings')return root.render(React.createElement(modules['dsh-pangea'].SettingsPage,{key,service,scope:{cwd:${JSON.stringify(agent)}}}));root.render(React.createElement(exported.PangeaPanel,{key,ctx,scope:{cwd:${JSON.stringify(agent)}},visible:true,initialScreen,pageMode}))};
-const load=src=>new Promise(resolve=>{const script=document.createElement('script');script.src=src;script.onload=resolve;document.body.appendChild(script)});(async()=>{await load('/shell.js');await load('/assets.js');await load('/client.js');modules['dsh-pangea-asset-catalog'].apply(ctx);exported.apply(ctx);window.previewMount=mount;mount();})();
+const root=createRoot(document.getElementById('app'));const surfaceFor=screen=>['home','assets','settings','environment'].includes(screen)?screen:'analysis';function mount(initialScreen='tasks',pageMode='analysis'){activeSurface=surfaceFor(initialScreen);document.querySelectorAll('[data-preview-page]').forEach(el=>el.setAttribute('aria-current',el.dataset.previewPage===initialScreen?'page':'false'));const key=++mountVersion;if(initialScreen==='assets')return root.render(React.createElement(pages.find(p=>p.id==='assets').component,{key,ctx,scope:{cwd:${JSON.stringify(agent)}},visible:true}));if(initialScreen==='settings')return root.render(React.createElement(modules['dsh-pangea'].SettingsPage,{key,service,scope:{cwd:${JSON.stringify(agent)}}}));root.render(React.createElement(exported.PangeaPanel,{key,ctx,scope:{cwd:${JSON.stringify(agent)}},visible:true,initialScreen,pageMode}))};
+const load=src=>new Promise(resolve=>{const script=document.createElement('script');script.src=src;script.onload=resolve;document.body.appendChild(script)});(async()=>{await load('/shell.js');await load('/assets.js');await load('/client.js');modules['dsh-pangea-asset-catalog'].apply(ctx);exported.apply(ctx);window.previewMount=(screen,pageMode)=>{draft={};selectedTaskId=undefined;mount(screen,pageMode)};const first=new URLSearchParams(location.search).get('page')||'tasks';mount(first,first==='home'?'home':'analysis');})();
 window.addEventListener('pangea:query-model-onboarding',()=>window.dispatchEvent(new CustomEvent('pangea:model-onboarding-state',{detail:{status:'ready',connections:[],modelAvailable:false,customAvailable:true}})));
 window.addEventListener('pangea:open-assistant',()=>{document.body.classList.toggle('preview-assistant');});
 `, resolveDir: desktop, sourcefile: 'ui-preview.jsx', loader: 'jsx' }, bundle: true, write: false, platform: 'browser', nodePaths: [path.join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': '"development"' } })
-let scene = 'running', count = 40
-const fixture = () => uiWorkbenchFixture(dataRoot, scene, count)
+let scene = option('--scene', 'running'), count = 40
+const fixture = () => {
+  const value = uiWorkbenchFixture(dataRoot, scene, count)
+  return fixtureModule?.transformFixture ? fixtureModule.transformFixture(value, { dataRoot, scene, count }) : value
+}
 const assetFixture = {
   asset_id: 'typography-design', title: '连接模块设计说明', asset_type: 'design', status: 'available', source_name: '连接设计.md', revision: 1,
   repository_ids: ['storage'], module_tags: ['TLS'], language_tags: [],
@@ -59,7 +62,9 @@ const runner = async ({ args }) => {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost'), { run, task } = fixture()
-    if (url.pathname === '/fixture') { scene = url.searchParams.get('scene') || 'running'; count = Number(url.searchParams.get('count') || 40); return send(res, { status: 'ok', scene, count }) }
+    if (url.pathname === '/fixture') { scene = url.searchParams.get('scene') || 'running'; count = Number(url.searchParams.get('count') || (scene === 'dense' ? 100 : 40)); fixtureModule?.resetFixture?.(); return send(res, { status: 'ok', scene, count }) }
+    const customResponse = await fixtureModule?.responseFor?.({ url, req, run, task, scene, count, dataRoot })
+    if (customResponse !== undefined) return send(res, customResponse)
     if (url.pathname === '/api/pangea-companion/case-reviews') return await caseReviewRouteHandler(req, res, { resolveRoot: async () => dataRoot, readRun: async () => run })
     if (url.pathname === '/api/pangea-companion/export') return await exportRouteHandler(req, res, { resolveRoot: async () => dataRoot, readRun: async () => run })
     if (url.pathname === '/api/pangea-companion/repositories') {
@@ -88,7 +93,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/ui.css') { res.writeHead(200, { 'content-type': 'text/css' }); return res.end(css) }
     if (url.pathname.startsWith('/fonts/')) { const relative = url.pathname.slice(7); if (relative.includes('..')) return send(res, {}, 400); const file = path.join(tools, '@fontsource/noto-sans-sc', relative); res.writeHead(200, { 'content-type': relative.endsWith('.css') ? 'text/css' : 'font/woff2' }); return res.end(await readFile(file)) }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-    res.end(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">${hasFonts ? '<link rel="stylesheet" href="/fonts/400.css"><link rel="stylesheet" href="/fonts/600.css">' : ''}<link rel="stylesheet" href="/ui.css"><style>body{margin:0;--pangea-font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif!important}*{box-sizing:border-box}button,input,select{font:inherit}#preview-top{height:53px;display:flex;align-items:center;justify-content:space-between;background:white;padding:0 24px;border-bottom:1px solid #e1e5eb;font:14px var(--pangea-font)}#preview-frame{display:grid;grid-template-columns:176px minmax(0,1fr);height:calc(100vh - 53px)}#preview-nav button{display:block;border:0;background:transparent;text-align:left;padding:10px 0;width:100%;cursor:pointer}#preview-nav{padding:32px 16px;background:#f1f2f5;font:14px/2.4 var(--pangea-font)}#app{min-width:0;overflow:auto;padding:0}.preview-assistant #preview-frame{grid-template-columns:176px minmax(0,1fr) 380px}.preview-assistant #preview-frame:after{content:"讨论助手 · 布局验证";background:#fff;padding:24px;border-left:1px solid #e1e5eb}</style></head><body data-pangea-product-shell><div id="preview-top"><strong>PANGEA Desktop</strong><span>界面测试 · 示例数据 <button onclick="document.body.classList.toggle('preview-assistant')">讨论助手</button></span></div><div id="preview-frame"><nav id="preview-nav"><button onclick="previewMount('home','home')">工作台</button><button onclick="previewMount('tasks')">分析任务</button><button onclick="previewMount('assets')">测试资产</button><button onclick="previewMount('create')">新建分析</button></nav><main id="app"></main></div><script src="/entry.js"></script></body></html>`)
+    res.end(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">${hasFonts ? '<link rel="stylesheet" href="/fonts/400.css"><link rel="stylesheet" href="/fonts/600.css">' : ''}<link rel="stylesheet" href="/ui.css"><style>body{margin:0;--pangea-font:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif!important}*{box-sizing:border-box}button,input,select{font:inherit}#preview-top{height:53px;display:flex;align-items:center;justify-content:space-between;background:white;padding:0 24px;border-bottom:1px solid #e1e5eb;font:14px var(--pangea-font)}#preview-frame{display:grid;grid-template-columns:176px minmax(0,1fr);height:calc(100vh - 53px)}#preview-nav button{display:block;border:0;background:transparent;text-align:left;padding:10px 0;width:100%;cursor:pointer}#preview-nav button[aria-current=page]{color:#a81f32;background:#f8e9ec;font-weight:600;border-radius:6px;padding-left:10px}#preview-top select{max-width:120px;margin-right:12px}#preview-nav{padding:20px 16px;background:#f1f2f5;font:14px/2.4 var(--pangea-font)}#app{min-width:0;overflow:auto;padding:0}.preview-assistant #preview-frame{grid-template-columns:176px minmax(0,1fr) 380px}.preview-assistant #preview-frame:after{content:"讨论助手 · 布局验证";background:#fff;padding:24px;border-left:1px solid #e1e5eb}</style></head><body data-pangea-product-shell><div id="preview-top"><strong>PANGEA Desktop</strong><span>界面测试 · 示例数据 ${fixtureModule?.reviewScenes ? '<label>场景 <select aria-label="验收场景" onchange="fetch(&quot;/fixture?scene=&quot;+this.value).then(()=>location.reload())">' + fixtureModule.reviewScenes.map(([id, label]) => '<option value="' + id + '"' + (scene === id ? ' selected' : '') + '>' + label + '</option>').join('') + '</select></label> ' : ''}<button onclick="document.body.classList.toggle('preview-assistant')">讨论助手</button></span></div><div id="preview-frame"><nav id="preview-nav" aria-label="验收页面"><button data-preview-page="home" onclick="previewMount('home','home')">工作台</button><button data-preview-page="tasks" onclick="previewMount('tasks')">分析任务</button><button data-preview-page="create" onclick="previewMount('create')">新建分析</button><button data-preview-page="assets" onclick="previewMount('assets')">测试资产</button><button data-preview-page="environment" onclick="previewMount('environment','execution')">执行环境</button><button data-preview-page="settings" onclick="previewMount('settings')">设置</button></nav><main id="app"></main></div><script src="/entry.js"></script></body></html>`)
   } catch (error) { send(res, { status: 'error', error: error.message }, 500) }
 })
 server.listen(Number(option('--port', 0)), '127.0.0.1', () => console.log(JSON.stringify({ url: `http://127.0.0.1:${server.address().port}`, dataRoot, scene })))

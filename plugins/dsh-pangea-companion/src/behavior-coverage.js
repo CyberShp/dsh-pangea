@@ -81,3 +81,30 @@ export function behaviorCoverageForCase(ledgers, testCase) {
     .map(item => ({ unit_id: ledger.unit_id, item_id: item.item_id, operation: item.operation, status: item.status,
       case_refs: array(item.case_refs).filter(ref => [testCase.case_id, testCase.display_id, testCase.test_case_id].includes(ref?.case_id)) })))
 }
+
+// Columns are analysis units, not inferred completion stages. Units with no
+// ledger remain visible with unknown counts rather than an invented zero.
+export function behaviorCoverageBoard(units, ledgers) {
+  const columns = array(units).map((unit, index) => ({
+    unit_id: unit?.unit_id ?? null, title: unit?.title ?? unit?.unit_id ?? '未标注分析单元',
+    status: unit?.status ?? null, source_unit: unit, key: `unit-${index}`,
+    ledgers: typeof unit?.unit_id === 'string' && unit.unit_id
+      ? array(ledgers).filter(ledger => ledger.unit_id === unit.unit_id) : [],
+  }))
+  for (const ledger of array(ledgers)) {
+    if (columns.some(column => column.ledgers.includes(ledger))) continue
+    let column = textUnit(ledger.unit_id) ? columns.find(item => item.unit_id === ledger.unit_id) : null
+    if (!column) { column = { unit_id: ledger.unit_id ?? null, title: ledger.unit_id ?? '未标注分析单元', status: null,
+      source_unit: null, key: `unlisted-${columns.length}`, ledgers: [] }; columns.push(column) }
+    column.ledgers.push(ledger)
+  }
+  return columns.map(column => {
+    const items = column.ledgers.flatMap(ledger => array(ledger.items).map(item => ({ ...item, ledger_id: ledger.projection_id, view_key: item.display_key ?? `${ledger.projection_id}/item-${array(ledger.items).indexOf(item)}` })))
+    const known = column.ledgers.length > 0 && column.ledgers.every(ledger => Array.isArray(ledger.items)
+      && !array(ledger.projection_warnings).some(warning => warning.includes('items 不是数组')))
+    const counts = known ? Object.fromEntries([...Object.keys(BEHAVIOR_STATUS_LABELS), 'unclassified'].map(status => [status,
+      items.filter(item => status === 'unclassified' ? !Object.hasOwn(BEHAVIOR_STATUS_LABELS, item.status) : item.status === status).length])) : null
+    return { ...column, items, declared_counts: counts, ledger_status: known ? 'declared' : 'unknown' }
+  })
+}
+const textUnit = value => typeof value === 'string' && value.trim() !== ''

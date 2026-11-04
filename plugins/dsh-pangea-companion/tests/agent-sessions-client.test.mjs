@@ -256,6 +256,99 @@ test('history completeness warning and recorded action IDs are visible without o
   assert.deepEqual(labels, ['关联动作：review-comparison-b', '关联动作：review-independent-a'])
 })
 
+async function sessionDialogFocusFixture() {
+  const hooks = [], effects = [], listeners = new Map(), controls = new Map()
+  let index = 0, pending = [], closed = 0, rendered = []
+  const doc = {
+    body: { style: { overflow: 'auto' } },
+    addEventListener(type, listener) { const set = listeners.get(type) || new Set(); set.add(listener); listeners.set(type, set) },
+    removeEventListener(type, listener) { listeners.get(type)?.delete(listener) },
+    dispatch(type, event) { for (const listener of [...(listeners.get(type) || [])]) listener(event) },
+  }
+  const element = () => ({ ownerDocument: doc, isConnected: true, disabled: false, closest() { return null },
+    getClientRects() { return this.isConnected ? [{}] : [] },
+    focus() { if (this.isConnected && !this.disabled) { doc.activeElement = this; doc.dispatch('focusin', { target: this }) } },
+  })
+  const trigger = element(), dialog = element()
+  let focusables = []
+  dialog.querySelectorAll = () => focusables.filter(control => !control.disabled)
+  dialog.querySelector = () => dialog.querySelectorAll()[0]
+  dialog.contains = target => target === dialog || focusables.includes(target)
+  trigger.focus()
+  const unmount = () => { for (const effect of effects) effect?.cleanup?.(); dialog.isConnected = false }
+  const react = {
+    useState(initial) { const key = index++; if (!(key in hooks)) hooks[key] = initial; return [hooks[key], value => { hooks[key] = typeof value === 'function' ? value(hooks[key]) : value }] },
+    useRef(initial) { const key = index++; return hooks[key] ??= { current: initial } },
+    useEffect(callback, dependencies) {
+      const key = index++, previous = effects[key]
+      if (!previous || !dependencies || dependencies.some((value, i) => !Object.is(value, previous.dependencies?.[i]))) pending.push(() => {
+        previous?.cleanup?.(); effects[key] = { dependencies, cleanup: callback() }
+      })
+    },
+  }
+  const { AgentSessionsDialog } = await client(react, { document: doc, setTimeout: () => 1, clearTimeout() {} })
+  const request = async args => args.view === 'agent-sessions' ? { run_id: 'run-a', items: [session('a')] }
+    : page('a', [{ seq: 1, type: 'host_event', execution_id: 'e1' }, { seq: 2, type: 'host_event', execution_id: 'e2' }])
+  const render = () => {
+    index = 0; pending = []
+    rendered = nodes(AgentSessionsDialog({ cwd: '/fixture', dataRoot: '/fixture/data', runId: 'run-a',
+      initialSessionId: 'a', initialExecutionId: 'e1', request, onClose() { closed++; unmount() } }))
+    const active = new Set()
+    focusables = []
+    for (const node of rendered) {
+      if (node.props.ref && node.props.role === 'dialog') node.props.ref.current = dialog
+      if (!['button', 'input', 'select', 'summary'].includes(node.type) && node.props.tabIndex !== 0) continue
+      const key = `${node.type}:${node.props['aria-label'] || node.props.key || text(node)}`
+      let control = controls.get(key)
+      if (!control) { control = element(); controls.set(key, control) }
+      control.isConnected = true; control.disabled = node.props.disabled === true
+      node.element = control; active.add(control); focusables.push(control)
+    }
+    for (const control of controls.values()) if (!active.has(control)) {
+      control.isConnected = false
+      // Removing the focused filter button leaves keyboard events on body.
+      if (doc.activeElement === control) doc.activeElement = doc.body
+    }
+    for (const effect of pending) effect()
+    return rendered
+  }
+  const key = (name, shiftKey = false) => {
+    const event = { key: name, shiftKey, prevented: false, preventDefault() { this.prevented = true }, stopPropagation() {} }
+    doc.dispatch('keydown', event); return event
+  }
+  render(); await flush(); render()
+  return { doc, trigger, dialog, render, key, unmount, closed: () => closed,
+    listenerCount: () => [...listeners.values()].reduce((sum, set) => sum + set.size, 0) }
+}
+
+for (const recovery of ['Escape', 'Tab']) test(`session dialog recovers ${recovery} after the focused execution filter disappears`, async t => {
+  const app = await sessionDialogFocusFixture()
+  t.after(app.unmount)
+  const initial = app.render(), wholeSession = initial.find(node => node.type === 'button' && text(node) === '显示整个会话')
+  assert.ok(wholeSession)
+  assert.equal(initial.find(node => typeof node.type === 'function' && node.type.name === 'AgentSessionTranscript').props.events.length, 1)
+  wholeSession.element.focus(); wholeSession.props.onClick()
+  const expanded = app.render()
+  assert.equal(expanded.some(node => node.type === 'button' && text(node) === '显示整个会话'), false)
+  assert.equal(expanded.find(node => typeof node.type === 'function' && node.type.name === 'AgentSessionTranscript').props.events.length, 2)
+  assert.equal(app.dialog.contains(app.doc.activeElement), true, 'removing the focused control restores focus inside the dialog after commit')
+  // Escape and Tab must also work if a browser or host steals focus later.
+  app.doc.activeElement = app.doc.body
+  if (recovery === 'Tab') {
+    assert.equal(app.key('Tab').prevented, true)
+    const focusables = app.dialog.querySelectorAll(), first = focusables[0], last = focusables.at(-1)
+    assert.equal(app.doc.activeElement, first)
+    app.key('Tab', true); assert.equal(app.doc.activeElement, last)
+    app.render(); assert.equal(app.doc.activeElement, last, 'polling must not reset focus')
+    app.key('Tab'); assert.equal(app.doc.activeElement, first)
+  }
+  assert.equal(app.key('Escape').prevented, true)
+  assert.equal(app.closed(), 1)
+  assert.equal(app.doc.activeElement, app.trigger)
+  assert.equal(app.doc.body.style.overflow, 'auto')
+  assert.equal(app.listenerCount(), 0)
+})
+
 test('assembled blocks use latest valid update time, while streamed content and tool transitions stay in seq order', async () => {
   const { agentSessionTranscript, AgentSessionTranscript } = await client()
   const at = second => `2026-10-16T12:00:${String(second).padStart(2, '0')}Z`

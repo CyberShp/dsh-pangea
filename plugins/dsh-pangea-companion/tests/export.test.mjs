@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { inflateRawSync } from 'node:zlib'
 
-import { buildTestCaseCsv, buildTestCaseXlsx, csvCell } from '../src/export.js'
+import { buildTestCaseCsv, buildTestCaseCsvBundle, buildTestCaseXlsx, caseEvidenceRows, csvCell } from '../src/export.js'
 import { sourceFirstProjection } from '../src/source-first-projection.js'
 
 const headers = ['用例ID', '标题', '类型', '前置条件', '操作步骤', '预期结果', '观察点', '清理动作（环境恢复）']
@@ -27,26 +27,27 @@ function csvRows(csv) {
   return rows
 }
 
-function xlsxSheet(xlsx) {
-  const data = Buffer.from(xlsx)
+function zipEntry(archive, entryName) {
+  const data = Buffer.from(archive)
   assert.equal(data.subarray(0, 2).toString(), 'PK')
   for (let offset = 0; offset + 30 <= data.length && data.readUInt32LE(offset) === 0x04034b50;) {
     const method = data.readUInt16LE(offset + 8), size = data.readUInt32LE(offset + 18)
     const nameLength = data.readUInt16LE(offset + 26), extraLength = data.readUInt16LE(offset + 28)
     const name = data.subarray(offset + 30, offset + 30 + nameLength).toString()
     const start = offset + 30 + nameLength + extraLength
-    if (name === 'xl/worksheets/sheet1.xml') {
+    if (name === entryName) {
       const bytes = data.subarray(start, start + size)
       return (method === 8 ? inflateRawSync(bytes) : bytes).toString()
     }
     offset = start + size
   }
-  assert.fail('XLSX package has no test-case worksheet')
+  assert.fail(`ZIP package has no ${entryName}`)
 }
 
+const xlsxSheet = xlsx => zipEntry(xlsx, 'xl/worksheets/sheet1.xml')
 const unescapeXml = value => value.replace(/&(amp|lt|gt|quot|apos);/g, (_, name) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" })[name])
-function xlsxRows(xlsx) {
-  return [...xlsxSheet(xlsx).matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)].map(([, row]) =>
+function xlsxRows(xlsx, sheet = 'sheet1.xml') {
+  return [...zipEntry(xlsx, `xl/worksheets/${sheet}`).matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)].map(([, row]) =>
     [...row.matchAll(/<c\b[^>]*\/>|<c\b[^>]*>([\s\S]*?)<\/c>/g)].map(([, cell = '']) =>
       unescapeXml([...cell.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map(([, text]) => text).join(''))))
 }
@@ -170,8 +171,7 @@ test('empty exports still contain the eight-column header and whole runs keep ev
 })
 
 
-test('canonical observation exports stay eight columns and preserve coverage rationale in evidence only', async () => {
-  const { caseEvidenceRows } = await import('../src/export.js')
+test('canonical observation exports stay eight columns and preserve coverage rationale in evidence only', () => {
   for (const observations of [[], ['原文 request() at repo:src/file.c:123']]) {
     const body = { format_version: 'behavior-test-case-v1', case_id: 'C', case_type: 'stale', test_level: 'business_blackbox', observability: ['stale'], external_observations: observations, summary: '原文依据\n第二行', coverage_refs: ['G'] }
     const run = { details: sourceFirstProjection([{ stage: 'unit_analysis', task: { unit_id: 'u' }, records: [{ record_id: 'c', kind: 'test_case', body }] }]) }
@@ -183,4 +183,64 @@ test('canonical observation exports stay eight columns and preserve coverage rat
     assert.equal(evidence[1][evidence[0].indexOf('summary')], body.summary)
     assert.deepEqual(evidence[1][evidence[0].indexOf('coverage_refs')], ['G'])
   }
+})
+
+test('recovered and invalid case exports retain parse diagnostics and exact source bodies only in evidence', () => {
+  const recoveredBody = '{\r\n  "case_id": "TC-11", "title": "空队列,出队 <边界> & 状态",\r\n' +
+    '  "steps": [{"action": "读取空队列", "expected": "返回 EAGAIN"],\r\n' +
+    '    {"action": "再次读取", "expected": "队列仍为空"}], "status": "not_run"\r\n}'
+  const invalidBody = '{"case_id":"TC-12","steps":[\n"完整未能解析的原文，保留末段 <&>"'
+  const offset = recoveredBody.indexOf('],')
+  const recovered = { status: 'recovered', code: 'mismatched_closer', diagnostics: [
+    { offset, line: 3, column: offset - recoveredBody.lastIndexOf('\n', offset), found: ']', expected: '}', message: '对象结束符与结构不匹配' },
+  ] }
+  const invalid = { status: 'invalid', code: 'incomplete_json', diagnostics: [
+    { offset: invalidBody.length, line: 2, column: 25, found: '', expected: ']}', message: '原文未完整结束，未恢复内容' },
+  ] }
+  const items = [
+    { projection_id: 'u/rec11', unit_id: 'u', display_id: 'TC-11', title: '空队列,出队 <边界> & 状态', status: 'not_run',
+      step_pairs: [{ action: '读取空队列', expected: '返回 EAGAIN' }, { action: '再次读取', expected: '队列仍为空' }],
+      record_parse: recovered, source_record: { record_id: 'rec11', kind: 'test_case', created_revision: 4, body: recoveredBody } },
+    { projection_id: 'u/rec12', unit_id: 'u', display_id: 'TC-12', title: '待核对的用例记录', record_parse: invalid,
+      source_record: { record_id: 'rec12', kind: 'test_case', created_revision: 5, body: invalidBody } },
+    { projection_id: 'u/rec13', unit_id: 'u', display_id: 'TC-13', title: '正常用例',
+      source_record: { record_id: 'rec13', kind: 'test_case', body: { title: '正常用例', status: 'not_run', external_observations: ['保留原文'] } } },
+  ]
+  const run = { run_id: 'run-parse', publication: { state: 'draft' }, details: { test_cases: items } }
+  const before = JSON.stringify(run)
+  const baseline = { ...run, details: { test_cases: items.map(({ record_parse, source_record, ...item }) => item) } }
+  const mainRows = exportedRows(run)
+  assert.equal(mainRows[1][4], '1. 读取空队列\n2. 再次读取')
+  assert.equal(mainRows[1][5], '1. 返回 EAGAIN\n2. 队列仍为空')
+  assert.equal(buildTestCaseCsv(run), buildTestCaseCsv(baseline), 'diagnostics do not alter the eight-column case projection')
+  assert.equal(xlsxSheet(buildTestCaseXlsx(run)), xlsxSheet(buildTestCaseXlsx(baseline)))
+  const bundle = buildTestCaseCsvBundle(run)
+  assert.equal(zipEntry(bundle, 'cases.csv'), buildTestCaseCsv(run))
+  assert.deepEqual(JSON.parse(zipEntry(bundle, 'manifest.json')).case_order, items.map(item => item.projection_id))
+  const csvEvidence = csvRows(zipEntry(bundle, 'case-evidence.csv'))
+  const xlsxEvidence = xlsxRows(buildTestCaseXlsx(run), 'sheet2.xml')
+  assert.deepEqual(xlsxEvidence, csvEvidence, 'CSV and XLSX appendices preserve the same diagnostics and sources')
+  const evidenceHeaders = csvEvidence[0]
+  assert.deepEqual(evidenceHeaders.slice(-2), ['record_parse', 'source_record'])
+  for (const [index, item] of items.entries()) {
+    const row = csvEvidence[index + 1]
+    assert.equal(row[evidenceHeaders.indexOf('用例身份')], item.projection_id)
+    const parseCell = row[evidenceHeaders.indexOf('record_parse')]
+    assert.deepEqual(parseCell ? JSON.parse(parseCell) : undefined, item.record_parse)
+    const original = JSON.parse(row[evidenceHeaders.indexOf('source_record')])
+    assert.deepEqual(original, item.source_record)
+    assert.deepEqual(original.body, item.source_record.body, 'export does not substitute repaired content for the saved record body')
+  }
+  assert.equal(JSON.parse(csvEvidence[1][evidenceHeaders.indexOf('source_record')]).body.includes('"status": "not_run"'), true)
+  assert.equal(JSON.stringify(run), before, 'export does not mutate parse status, source body or execution status')
+})
+
+test('ordinary case exports retain the existing evidence schema without parse columns', () => {
+  const run = { details: { test_cases: [{ projection_id: 'u/c', title: '正常用例', oracle_detail: { expected: '未改变' }, source_record: { body: { title: '正常用例' } } }] } }
+  const rows = caseEvidenceRows(run)
+  assert.equal(rows[0].includes('record_parse'), false)
+  assert.equal(rows[0].includes('source_record'), false)
+  assert.equal(rows[0].at(-1), 'oracle_detail')
+  assert.deepEqual(rows[1].at(-1), { expected: '未改变' })
+  exportedRows(run)
 })

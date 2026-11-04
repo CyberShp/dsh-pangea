@@ -1,12 +1,18 @@
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { appendFile, lstat, mkdir, open, readFile, readdir, realpath, stat } from 'node:fs/promises'
+import { buildExecutionTimeline, timelineEvent } from './execution-timeline.js'
 import { writeTaskStoreFile } from './task-store.js'
 
 const MAX_EVENT_BYTES = 256 * 1024
 const MAX_PAGE_BYTES = 1024 * 1024
 const queues = new Map()
 const recordingErrors = new Map()
+// Process-local, timing-only cache. A restart rebuilds from the durable log in
+// bounded batches. No transcript content or partial line is retained here.
+const timelineCaches = new Map()
+const TIMELINE_READ_BUDGET = 2 * 1024 * 1024
+const TIMELINE_EVENT_LIMIT = 50000
 export function isAgentSessionPathInside(root, value, pathApi = path) {
   // Windows realpath may change drive/directory casing. Use the platform's
   // path semantics while retaining case-sensitive comparisons on POSIX.
@@ -211,6 +217,109 @@ export class AgentSessionStore {
       return left === right ? a.session_id.localeCompare(b.session_id) : left > right ? -1 : 1
     }), total: items.length,
       recording_error: recordingErrors.get(this.root) || errors.join('；') || null, truncated: files.length > 4000 }
+  }
+
+  async timeline(progress = {}, { now = Date.now(), maxBytes = TIMELINE_READ_BUDGET } = {}) {
+    return serial(`timeline:${this.root}`, async () => {
+      const listing = await this.list(), histories = [], diagnostics = []
+      const root = await this.safePath(this.root)
+      let cache = timelineCaches.get(root)
+      if (!cache) {
+        cache = { sessions: new Map(), next: 0, eventCount: 0 }
+        timelineCaches.set(root, cache)
+      }
+      // LRU is per run, so thousands of sessions in one run cannot evict each
+      // other and force every unchanged poll to scan them from byte zero.
+      timelineCaches.delete(root); timelineCaches.set(root, cache)
+      while (timelineCaches.size > 8) timelineCaches.delete(timelineCaches.keys().next().value)
+      let remaining = Math.min(TIMELINE_READ_BUDGET, Math.max(0, Number(maxBytes) || 0)), bytesReadTotal = 0, validationBytes = 0
+      if (listing.recording_error) diagnostics.push(listing.recording_error)
+      if (listing.truncated) diagnostics.push('会话列表已限量，时间线不是完整历史。')
+      const ordered = [...listing.items.slice(cache.next), ...listing.items.slice(0, cache.next)]
+      let lastRead = null
+      for (const session of ordered) {
+        let state = cache.sessions.get(session.session_id), handle
+        if (!session.event_count) { histories.push({ session_id: session.session_id, events: [], complete: false }); continue }
+        try {
+          handle = await open(await this.safePath(path.join(this.root, `${session.session_id}.jsonl`)), 'r')
+          const info = await handle.stat(), identity = `${info.dev}:${info.ino}`, signature = `${info.size}:${info.mtimeMs}:${info.ctimeMs}`
+          const fingerprint = async (offset, length) => {
+            const buffer = Buffer.alloc(length)
+            const { bytesRead } = await handle.read(buffer, 0, length, offset)
+            remaining -= bytesRead; bytesReadTotal += bytesRead; validationBytes += bytesRead
+            return createHash('sha256').update(buffer.subarray(0, bytesRead)).digest('hex')
+          }
+          let rewritten = false
+          if (state && info.size > state.size && state.prefix && state.anchor) {
+            // A file may be truncated and regrown between polls without an
+            // inode change. Validate both ends of the committed prefix before
+            // trusting its offset. Cache only fingerprints, never transcript.
+            if (remaining < state.prefix.length + state.anchor.length + 256) {
+              histories.push({ session_id: session.session_id, events: state.events, complete: false })
+              continue
+            }
+            rewritten = await fingerprint(0, state.prefix.length) !== state.prefix.hash
+              || await fingerprint(state.anchor.offset, state.anchor.length) !== state.anchor.hash
+          }
+          if (!state || rewritten || state.identity !== identity || info.size < state.size
+            || info.size === state.size && state.signature !== signature) {
+            cache.eventCount -= state?.events.length ?? 0
+            state = { identity, size: info.size, signature, offset: 0, scannedSignature: null, events: [], damaged: false, skipping: false, complete: false }
+            cache.sessions.set(session.session_id, state)
+          }
+          state.size = info.size; state.signature = signature
+          if (state.scannedSignature !== signature && remaining > 256) {
+            let offset = state.offset, pending = Buffer.alloc(0)
+            const end = Math.min(info.size, offset + remaining - 256)
+            while (offset < end) {
+              const chunk = Buffer.alloc(Math.min(64 * 1024, end - offset))
+              const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset)
+              if (!bytesRead) break
+              offset += bytesRead; remaining -= bytesRead; bytesReadTotal += bytesRead; lastRead = session.session_id
+              const buffer = Buffer.concat([pending, chunk.subarray(0, bytesRead)])
+              let begin = 0
+              for (let newline; (newline = buffer.indexOf(10, begin)) >= 0; begin = newline + 1) {
+                state.offset += newline + 1 - begin
+                if (state.skipping || newline - begin > MAX_EVENT_BYTES) { state.damaged = true; state.skipping = false; continue }
+                try {
+                  const event = JSON.parse(buffer.subarray(begin, newline).toString('utf8'))
+                  if (event.run_id !== this.runId || event.session_id !== session.session_id) throw new Error('事件身份不一致')
+                  const projected = timelineEvent(event)
+                  if (projected) {
+                    if (cache.eventCount < TIMELINE_EVENT_LIMIT) { state.events.push(projected); cache.eventCount++ }
+                    else state.damaged = true
+                  }
+                } catch { state.damaged = true }
+              }
+              pending = buffer.subarray(begin)
+              if (pending.length > MAX_EVENT_BYTES) {
+                state.offset += pending.length; pending = Buffer.alloc(0); state.skipping = true; state.damaged = true
+              }
+            }
+            if (state.offset > 0) {
+              const length = Math.min(128, state.offset)
+              state.prefix = { length, hash: await fingerprint(0, length) }
+              state.anchor = { offset: state.offset - length, length, hash: await fingerprint(state.offset - length, length) }
+            }
+            state.scannedSignature = offset === info.size ? signature : null
+            state.complete = offset === info.size && state.offset === info.size && !state.skipping && !state.damaged
+          }
+          // Any appended bytes not yet scanned invalidate the previous complete flag.
+          const complete = state.complete && state.scannedSignature === signature
+          histories.push({ session_id: session.session_id, events: state.events, complete })
+          if (!complete) diagnostics.push('会话事件仍在增量读取或存在缺失、损坏、未完成写入；未知边界未推算。')
+        } catch (error) {
+          histories.push({ session_id: session.session_id, events: [], complete: false })
+          diagnostics.push(`会话时间线不可读取：${error.message}`)
+        } finally { await handle?.close() }
+      }
+      // Fairly continue the next session after exhausting the shared byte budget.
+      if (lastRead !== null && listing.items.length) cache.next = (listing.items.findIndex(item => item.session_id === lastRead) + 1) % listing.items.length
+      const visible = new Set(listing.items.map(item => item.session_id))
+      for (const [id, state] of cache.sessions) if (!visible.has(id)) { cache.eventCount -= state.events.length; cache.sessions.delete(id) }
+      return { ...buildExecutionTimeline({ progress, sessions: listing.items, histories, now, diagnostics }),
+        projection_read: { bytes_read: bytesReadTotal, validation_bytes: validationBytes, byte_budget: TIMELINE_READ_BUDGET } }
+    })
   }
 
   async flush() { await queues.get(this.root) }

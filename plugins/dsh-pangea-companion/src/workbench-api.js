@@ -372,7 +372,7 @@ async function homeFile(filename) {
   catch (error) { if (error.code === 'ENOENT') return false; throw error }
 }
 
-// Read only lifecycle metadata and report existence. The home page never needs
+// Read only lifecycle/naming metadata and report existence. The home page never needs
 // result records, source snapshots, plans, tool output or a Python subprocess.
 async function homeRun(dataRoot, runId) {
   try {
@@ -384,8 +384,27 @@ async function homeRun(dataRoot, runId) {
     if (progress?.workflow_version === 'source-first-v1') {
       const lifecycle = progress.lifecycle_status ?? 'running'
       if (!['running', 'complete', 'stopped', 'failed'].includes(lifecycle)) throw new Error(`Unknown Run lifecycle: ${lifecycle}`)
+      let contract = null, namingWarning = null
+      try {
+        contract = await homeJson(path.join(directory, 'inputs', 'task-contract.json'))
+        if (contract?.run_id && contract.run_id !== runId) throw new Error(`Run contract identity mismatch: ${runId}`)
+      } catch (error) {
+        contract = null
+        namingWarning = `任务命名元数据不可读取：${error instanceof Error ? error.message : String(error)}`
+      }
+      const settings = contract?.analysis_settings && typeof contract.analysis_settings === 'object' && !Array.isArray(contract.analysis_settings)
+        ? Object.fromEntries(['scenario', 'mode', 'objective'].filter(key => typeof contract.analysis_settings[key] === 'string' && contract.analysis_settings[key].trim()).map(key => [key, contract.analysis_settings[key]]))
+        : null
       summary = {
         run_id: runId, workflow_version: progress.workflow_version,
+        repository: typeof contract?.repository === 'string' ? contract.repository : null,
+        source_scope: stringList(contract?.source_scope),
+        analysis_profile: typeof contract?.analysis_profile === 'string' ? contract.analysis_profile : null,
+        // The frozen contract stores the explicit objective in analysis_settings;
+        // expose the same naming field used by the full reader without loading results.
+        analysis_scene: settings?.objective ? { objective: settings.objective } : null,
+        analysis_settings: settings, scenario: settings?.scenario ?? 'module-analysis', mode: settings?.mode ?? null,
+        ...(namingWarning ? { reader_warnings: [namingWarning] } : {}),
         lifecycle_status: lifecycle, stage: progress.stage ?? 'preparing',
         phase: lifecycle === 'complete' ? 'COMPLETE' : lifecycle === 'stopped' ? 'STOPPED' : lifecycle === 'failed' ? 'FAILED' : String(progress.stage ?? 'preparing').toUpperCase(),
         quality_status: progress.quality_status ?? null,

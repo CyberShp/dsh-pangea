@@ -16,6 +16,7 @@
   let modelState = { known: false, required: false, modelAvailable: false }
   let dismissed = false
   let queriedShell = null
+  let onboardingReturnFocus = null
 
   function installProductChromePolicy() {
     if (document.getElementById(CHROME_STYLE_ID)) return
@@ -81,8 +82,20 @@
     }
   }
 
-  function removeOnboarding() {
-    document.querySelector(`[${ONBOARDING_ATTR}]`)?.remove()
+  function removeOnboarding({ restoreFocus = true } = {}) {
+    const overlay = document.querySelector(`[${ONBOARDING_ATTR}]`)
+    if (!overlay) return
+    overlay.remove()
+    if (restoreFocus && onboardingReturnFocus?.isConnected) onboardingReturnFocus.focus?.({ preventScroll: true })
+    onboardingReturnFocus = null
+  }
+
+  function anotherDialogIsOpen() {
+    return Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"], dialog[open]')).some(dialog =>
+      !dialog.closest?.(`[${ONBOARDING_ATTR}]`)
+      && dialog.getAttribute?.('aria-hidden') !== 'true'
+      && !dialog.closest?.('[hidden], [aria-hidden="true"]')
+      && (!dialog.getClientRects || dialog.getClientRects().length > 0))
   }
 
   function createOnboarding() {
@@ -94,7 +107,7 @@
     card.setAttribute('role', 'dialog')
     card.setAttribute('aria-modal', 'true')
     card.setAttribute('aria-label', '首次配置模型与 API')
-    card.style.cssText = 'box-sizing:border-box;width:min(600px,calc(100vw - 48px));padding:30px;border:1px solid #dfe3e8;border-radius:12px;background:#fff;box-shadow:0 24px 70px rgba(0,0,0,.24);color:#17191d;font-family:"Huawei Sans","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI",sans-serif'
+    card.style.cssText = 'box-sizing:border-box;width:min(600px,calc(100vw - 48px));padding:24px;border:1px solid #e1e5eb;border-radius:12px;background:#fff;box-shadow:0 24px 70px rgba(0,0,0,.24);color:#17191d;font-family:"Huawei Sans","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI",sans-serif'
 
     const title = document.createElement('h2')
     title.textContent = '配置模型与 API'
@@ -106,7 +119,7 @@
     const action = document.createElement('button')
     action.type = 'button'
     action.textContent = '打开模型与 API 设置'
-    action.style.cssText = 'width:100%;min-height:44px;border:0;border-radius:7px;padding:0 16px;background:#c7000b;color:#fff;font:inherit;font-weight:650;cursor:pointer'
+    action.style.cssText = 'width:100%;min-height:44px;border:0;border-radius:7px;padding:0 16px;background:#b62836;color:#fff;font:inherit;font-weight:650;cursor:pointer'
     action.addEventListener('click', openInternalModels)
 
     const later = document.createElement('button')
@@ -118,6 +131,12 @@
       removeOnboarding()
     })
 
+    card.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { event.preventDefault(); dismissed = true; removeOnboarding(); return }
+      if (event.key !== 'Tab') return
+      if (event.shiftKey && document.activeElement === action) { event.preventDefault(); later.focus() }
+      else if (!event.shiftKey && document.activeElement === later) { event.preventDefault(); action.focus() }
+    })
     card.append(title, description, action, later)
     overlay.appendChild(card)
     return overlay
@@ -129,7 +148,14 @@
       removeOnboarding()
       return
     }
-    if (!document.querySelector(`[${ONBOARDING_ATTR}]`)) document.body.appendChild(createOnboarding())
+    // First-launch notices and explicit configuration dialogs keep their own turn.
+    if (anotherDialogIsOpen()) { removeOnboarding({ restoreFocus: false }); return }
+    if (!document.querySelector(`[${ONBOARDING_ATTR}]`)) {
+      onboardingReturnFocus = document.activeElement
+      const overlay = createOnboarding()
+      document.body.appendChild(overlay)
+      overlay.querySelector?.('button')?.focus?.({ preventScroll: true })
+    }
   }
 
   function queryForVisibleShell() {

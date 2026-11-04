@@ -648,6 +648,53 @@ test('opens the product workbench once when a session becomes active', async () 
   assert.equal(sidebar.opened.length, 1)
 })
 
+test('product navigation can be explicitly collapsed and expanded without changing the active page', async () => {
+  const states = []
+  let cursor = 0
+  const react = {
+    createElement(type, props, ...children) { return { type, props: { ...props, children: children.flat() } } },
+    cloneElement(node, props) { return { ...node, props: { ...node.props, ...props } } },
+    useState(initial) {
+      const index = cursor++
+      if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial
+      return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value }]
+    },
+    useRef(initial) { return { current: initial } },
+    useCallback(fn) { return fn }, useMemo(fn) { return fn() },
+    useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot() },
+    useEffect() {}, useLayoutEffect() {},
+  }
+  const { exported } = await loadClient(react)
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar)
+  service.registerPage({ id: 'analysis', title: '分析', component: () => null })
+  const scope = { sessionId: 'session-1', cwd: '/tmp/project' }
+  const tab = { id: 'analysis-tab', type: 'dsh-pangea:analysis', meta: {} }
+  sidebar.setState({ splits: { tabs: [tab], active: tab.id }, bottomSplits: { tabs: [] } })
+  const shell = sidebar.getTab(tab.type).component({ scope, tab, visible: true })
+  const nodes = tree => tree && typeof tree === 'object'
+    ? [tree, ...(tree.props?.children ?? []).flatMap(nodes)] : []
+  const render = () => { cursor = 0; return shell.type(shell.props) }
+  let rendered = render()
+  const toggle = () => nodes(rendered).find(node => node.props?.['data-pangea-nav-toggle'])
+  assert.equal(rendered.props['data-pangea-nav-collapsed'], 'false')
+  assert.equal(toggle().props['aria-expanded'], true)
+  toggle().props.onClick()
+  rendered = render()
+  assert.equal(rendered.props['data-pangea-nav-collapsed'], 'true')
+  assert.equal(toggle().props['aria-label'], '展开导航')
+  assert.equal(nodes(rendered).find(node => node.props?.['data-pangea-nav-button'])?.props['aria-current'], 'page')
+  service.registerPage({ id: 'assets', title: '资产', component: () => null })
+  const assetTab = { id: 'asset-tab', type: 'dsh-pangea:assets', meta: {} }
+  const assetShell = sidebar.getTab(assetTab.type).component({ scope, tab: assetTab, visible: true })
+  cursor = 0
+  assert.equal(assetShell.type(assetShell.props).props['data-pangea-nav-collapsed'], 'true', 'new native pages inherit the navigation width')
+  toggle().props.onClick()
+  rendered = render()
+  assert.equal(rendered.props['data-pangea-nav-collapsed'], 'false')
+  assert.equal(toggle().props['aria-label'], '收起导航')
+})
+
 test('shows PANGEA pages first, removes source control, and keeps terminal visible', async () => {
   const { exported } = await loadClient()
   const sidebar = fakeSidebar()

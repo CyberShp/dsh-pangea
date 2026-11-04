@@ -21,6 +21,14 @@ window.__ModuleLoader__.load({
     })
     const productStateByWorkspace = new Map()
     const productBodyAttributeOwners = new Map()
+    let productNavCollapsed = false
+    const productNavListeners = new Set()
+    const getProductNavCollapsed = () => productNavCollapsed
+    const subscribeProductNav = listener => { productNavListeners.add(listener); return () => productNavListeners.delete(listener) }
+    const toggleProductNav = () => {
+      productNavCollapsed = !productNavCollapsed
+      productNavListeners.forEach(listener => listener())
+    }
     const LEGACY_TAB_TYPES = new Set([
       'dsh-pangea-companion:pangea',
       'dsh-pangea-asset-catalog:assets',
@@ -475,10 +483,6 @@ window.__ModuleLoader__.load({
             display: none !important;
           }
           body[data-pangea-product-shell] [data-dsh-panel-host] .nArs4W_panelBody { height: 100%; }
-          [data-pangea-shell] { grid-template-columns: 74px minmax(0, 1fr); }
-          [data-pangea-product-nav] { padding-inline: 9px; }
-          [data-pangea-nav-label], [data-pangea-nav-heading] { display: none; }
-          [data-pangea-nav-button], [data-pangea-tool-button] { grid-template-columns: 1fr; padding: 0; place-items: center; }
           [data-pangea-topbar-title] { margin-left: 18px; padding-left: 18px; font-size: 18px; }
           [data-pangea-project] { display: none; }
           [data-pangea-assistant-narrow-toggle] {
@@ -941,8 +945,8 @@ window.__ModuleLoader__.load({
         node('div', '', node('span', '', '连接'), node('strong', '', connections.length ? connections.map(item => item.name).join('、') : modelCatalog.status === 'ready' ? '尚未配置' : '—')),
         node('div', '', node('span', '', '模型列表'), node('strong', '', modelCatalog.status !== 'ready' ? '待读取目录' : modelCount == null ? '未提供模型数量' : `${modelCount} 个模型`)))
       const card = (title, description, icon, state, metrics, note, action) => node('section', 'panel settings-overview-card',
-        node('div', 'settings-overview-head', node('div', 'settings-brand-icon', settingsIcon(icon)), node('div', '', h('h3', null, title), h('p', null, description)), state),
-        metrics, node('div', 'settings-overview-foot', node('span', 'settings-form-note', note), action))
+        node('div', 'settings-overview-head', node('div', 'settings-brand-icon', settingsIcon(icon)), node('div', 'settings-overview-copy', node('div', 'settings-overview-title', h('h3', null, title), state), h('p', null, description)), action),
+        metrics, node('div', 'settings-overview-foot', node('span', 'settings-form-note', note)))
       const modelCard = card('讨论助手模型', '为讨论助手配置模型接口与 API 凭据。', 'Cpu', badge(modelStatus, modelCatalog.status === 'ready' && modelCatalog.modelAvailable ? 'good' : ''), modelMetrics, '外部 Agent 的模型在新建分析时选择', button('打开模型设置', openModels, true))
       const executorCard = card('分析执行器', '源码分析由外部 Agent 执行；每次创建前检查 Agent 和模型是否就绪。', 'Activity', badge('创建时检查'), null, '执行器的就绪状态以新建分析页的实时检查为准', button('选择分析执行器', () => service.requestRunCreation(scope)))
       const versionCard = card('版本与升级', '导入并校验 PANGEA Desktop 签名升级包。', 'PackageCheck', badge('Windows'),
@@ -957,7 +961,7 @@ window.__ModuleLoader__.load({
           node('div', 'settings-model-status', node('div', 'row', node('div', 'settings-brand-icon', connection.id.slice(0, 1).toUpperCase()), node('div', '', h('h3', null, connection.name), node('p', 'mono', `${connection.id} · ${connection.custom ? '自定义接口' : '原生提供方'}`))), badge(connection.credentialConfigured ? 'API 密钥已配置' : connection.credentialRequired ? 'API 密钥未配置' : '提供方原生认证', connection.usable ? 'good' : '')),
           node('dl', 'key-value', h('dt', null, '接口地址'), node('dd', 'mono small', connection.baseURL ?? '由提供方管理'), h('dt', null, 'API 协议'), node('dd', 'mono small', connection.protocol ?? '由提供方管理'), h('dt', null, '凭据'), h('dd', null, credential)), node('div', 'divider'),
           node('div', 'section-head', h('h2', null, '可用模型'), badge(connection.modelCount ?? '未知')),
-          connection.models ? node('div', 'table-wrap', h('table', null, h('thead', null, h('tr', null, ['模型', '模型 ID', '输入'].map(label => h('th', { key: label }, label)))), h('tbody', null, connection.models.map(model => h('tr', { key: model.id }, h('td', null, model.name), h('td', null, node('span', 'mono small', model.id)), h('td', null, model.input?.includes('image') ? model.input.includes('text') ? '文本与图像' : '图像' : '文本')))))) : h('p', { className: 'settings-form-note' }, '提供方未声明模型目录，可打开模型设置查看原生配置。'),
+          connection.models ? node('div', 'table-wrap settings-model-list', h('table', null, h('thead', null, h('tr', null, ['模型', '模型 ID', '输入'].map(label => h('th', { key: label }, label)))), h('tbody', null, connection.models.map(model => h('tr', { key: model.id }, h('td', null, model.name), h('td', null, node('span', 'mono small', model.id)), h('td', null, model.input?.includes('image') ? model.input.includes('text') ? '文本与图像' : '图像' : '文本')))))) : h('p', { className: 'settings-form-note' }, '提供方未声明模型目录，可打开模型设置查看原生配置。'),
           node('div', 'settings-savebar', node('span', 'settings-form-note', '配置状态不代表网络连通性'), button('编辑模型目录', () => openModels(connection.id), false, 'Pencil')))
       }
       const modelsBody = modelCreating ? node('section', 'panel', node('div', 'empty', node('div', 'empty-icon', settingsIcon('Inbox')), h('h2', null, '准备连接模型'), h('p', null, '设置接口与可用模型后即可开始。'), node('div', 'row'))) : modelsEmpty ? node('section', 'panel', node('div', 'settings-empty', h('div', { className: 'settings-brand-icon', style: { margin: 'auto', width: 54, height: 54 } }, settingsIcon('Cpu')), h('h3', null, '添加第一个模型连接'), h('p', null, '填写接口地址、协议与模型列表。如果提供方使用 API 密钥，也可以在这里一并保存。'), modelCatalog.customAvailable ? button('连接模型接口', () => openModels(undefined, true), true, 'Plus') : button('查看提供方', () => openModels(), true, 'ArrowRight'))) : node('div', 'settings-main-cols', node('div', 'stack', connections.map(renderConnection)), modelsHelp)
@@ -1411,6 +1415,7 @@ window.__ModuleLoader__.load({
       const [assistantOpen, setAssistantOpen] = React.useState(false)
       const [terminalCollapsed, setTerminalCollapsed] = React.useState(false)
       const [fileUtilitySelection, setFileUtilitySelection] = React.useState(null)
+      const navCollapsed = React.useSyncExternalStore(subscribeProductNav, getProductNavCollapsed, getProductNavCollapsed)
       const sidebarState = sidebarSnapshot?.state
       const fileUtilityTabs = sidebarState && tab?.id
         ? [...allTabs(sidebarState.splits), ...allTabs(sidebarState.bottomSplits)].filter(item =>
@@ -1583,7 +1588,7 @@ window.__ModuleLoader__.load({
             ? editorContent()
             : h(descriptor.component, { ...tabProps, store: tabProps.store, tab: toolTab, visible: productVisible })))
       }
-      return h('div', { 'data-pangea-shell': true },
+      return h('div', { 'data-pangea-shell': true, 'data-pangea-nav-collapsed': navCollapsed ? 'true' : 'false' },
         h(ProductHeader, {
           scope, workspaceList, systemState,
           assistantVisible: assistantOpen && page.id === 'analysis' && Boolean(assistantContext?.taskId),
@@ -1597,7 +1602,8 @@ window.__ModuleLoader__.load({
         assistantOpen && page.id === 'analysis' && assistantContext?.taskId
           ? h(AssistantPageHeader, { context: assistantContext, onClose: () => setAssistantOpen(false) }) : null,
         h('aside', { 'data-pangea-product-nav': true, 'aria-label': 'PANGEA 产品导航' },
-          h('div', { 'data-pangea-nav-heading': true, 'aria-hidden': true }, 'WORKSPACE'),
+          h('button', { type: 'button', 'data-pangea-nav-toggle': true, 'aria-label': navCollapsed ? '展开导航' : '收起导航', 'aria-expanded': !navCollapsed, title: navCollapsed ? '展开导航' : '收起导航', onClick: toggleProductNav }, h('span', { 'aria-hidden': true }, navCollapsed ? '›' : '‹'), h('span', { 'data-pangea-nav-label': true }, '收起导航')),
+          h('div', { 'data-pangea-nav-heading': true, 'aria-hidden': true }, '工作空间'),
           h('nav', { 'data-pangea-nav-list': true, 'aria-label': '工作空间' }, snapshot.pages.filter(item => item.id !== 'settings' && showProductPageInNavigation(item, scope)).map(item => {
             const label = pageMeta[item.id]?.label ?? (typeof item.title === 'function' ? item.title() : item.title)
             const active = item.id === page.id && !pageCovered

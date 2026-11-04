@@ -107,14 +107,16 @@ function homeTaskFixture(root, runId, overrides = {}) {
     active_conversation_id: 'conversation', ...overrides }
 }
 
-test('home reads only lifecycle metadata and reports without Python, assets or result projections', async () => {
+test('home reads lifecycle and naming metadata without Python, assets or result projections', async () => {
   const root = await workspace()
   try {
     await mkdir(path.join(root, 'pangea-data', 'repositories', 'repo'), { recursive: true })
     await mkdir(path.join(root, 'pangea-data', 'repositories', '.pangea-import-pending'), { recursive: true })
+    const contract = { run_id: 'run-z', repository: 'semantic-queue', source_scope: ['mq.c', 'mq.h'], analysis_profile: 'behavior-test-v2',
+      analysis_settings: { scenario: 'module-analysis', mode: 'depth', objective: 'interface-contract' }, target: 'A complete requirement that belongs in task information' }
     const directory = await homeRunFixture(root, 'run-z', { workflow_version: 'source-first-v1', run_id: 'run-z', lifecycle_status: 'complete', quality_status: 'PASS' }, {
       'report.md': 'delivered', 'report.html': 'delivered', 'report-complete.json': '{}',
-      'inputs/task-contract.json': '{broken and deliberately irrelevant', 'results/records.json': '{broken',
+      'inputs/task-contract.json': JSON.stringify(contract), 'results/records.json': '{broken', 'inputs/source-index.json': '{broken',
     })
     const tasks = [homeTaskFixture(root, 'run-z', { attempts: [{ last_output: 'large output' }], last_output: 'large output' })]
     const before = JSON.stringify(tasks)
@@ -122,12 +124,46 @@ test('home reads only lifecycle metadata and reports without Python, assets or r
     assert.deepEqual(snapshot.compatibility, { compatible: null, api_version: null, checked: false, source: 'local-metadata' })
     assert.deepEqual(snapshot.capabilities.repositories, ['repo', 'repo-one'])
     assert.equal(snapshot.runs.items[0].report_available, true)
+    assert.equal(snapshot.runs.items[0].repository, contract.repository)
+    assert.deepEqual(snapshot.runs.items[0].source_scope, contract.source_scope)
+    assert.equal(snapshot.runs.items[0].analysis_profile, contract.analysis_profile)
+    assert.equal(snapshot.runs.items[0].scenario, contract.analysis_settings.scenario)
+    assert.deepEqual(snapshot.runs.items[0].analysis_settings, contract.analysis_settings)
+    assert.deepEqual(snapshot.runs.items[0].analysis_scene, { objective: 'interface-contract' })
+    assert.equal(Object.hasOwn(snapshot.runs.items[0], 'target'), false)
     assert.equal(snapshot.tasks.items[0].status, 'completed')
     assert.deepEqual(snapshot.tasks.items[0].conversations, tasks[0].conversations)
     assert.equal(Object.hasOwn(snapshot.tasks.items[0], 'attempts'), false)
     assert.equal(Object.hasOwn(snapshot.tasks.items[0], 'last_output'), false)
     assert.equal(JSON.stringify(tasks), before)
-    assert.equal(await readFile(path.join(directory, 'inputs', 'task-contract.json'), 'utf8'), '{broken and deliberately irrelevant')
+    assert.equal(await readFile(path.join(directory, 'inputs', 'task-contract.json'), 'utf8'), JSON.stringify(contract))
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('home retains lifecycle when naming contracts are absent, malformed or bound to another run', async () => {
+  const root = await workspace()
+  try {
+    for (const [runId, contract] of [['missing', null], ['malformed', '{broken'], ['wrong-contract', '{"run_id":"other","repository":"wrong"}']]) {
+      await homeRunFixture(root, runId, { workflow_version: 'source-first-v1', run_id: runId, lifecycle_status: 'complete', quality_status: 'UNRESOLVED' }, {
+        'report.md': 'delivered', 'report.html': 'delivered', 'report-complete.json': '{}',
+        ...(contract === null ? {} : { 'inputs/task-contract.json': contract }),
+      })
+    }
+    const snapshot = await homeSnapshot({ cwd: root })
+    for (const run of snapshot.runs.items) {
+      assert.equal(run.lifecycle_status, 'complete')
+      assert.equal(run.quality_status, 'UNRESOLVED')
+      assert.equal(run.report_available, true)
+      assert.equal(run.reader_error, undefined)
+      assert.equal(run.repository, null)
+      assert.deepEqual(run.source_scope, [])
+      assert.equal(run.analysis_profile, null)
+      assert.equal(run.analysis_scene, null)
+      assert.equal(Object.hasOwn(run, 'target'), false)
+      if (run.run_id === 'missing') assert.equal(run.reader_warnings, undefined)
+      else assert.match(run.reader_warnings[0], /任务命名元数据不可读取/)
+    }
+    assert.equal(snapshot.tasks.total, 0)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

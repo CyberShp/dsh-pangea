@@ -14,6 +14,33 @@ export function caseIdentity(item) {
   return typeof id === 'string' && id.trim() ? id : null
 }
 
+// Display only: keep malformed authored fields available without inventing a
+// case title or repairing identity from an embedded record.
+export function caseTitlePresentation(item) {
+  const original = item?.title
+  const unavailable = () => ({ title: '用例记录（标题待核对）', issue: '标题格式需核对', original })
+  const fromRecord = value => value && typeof value === 'object' && !Array.isArray(value)
+    && Object.hasOwn(value, 'title') && typeof value.title === 'string' && value.title.trim()
+    ? { title: value.title, issue: '', original }
+    : unavailable()
+  if (typeof original !== 'string') return fromRecord(original)
+  const text = original.trim()
+  if (!text) return unavailable()
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(text)
+  // Bracketed labels such as "[TLS] 握手失败" are ordinary titles.
+  const structured = fenced || /^\{|^\[\s*(?:[\[{"\]\d-]|true\b|false\b|null\b|$)|^```json\b/i.test(text)
+  if (!structured) return { title: original, issue: '', original }
+  try { return fromRecord(JSON.parse(fenced ? fenced[1] : text)) } catch { return unavailable() }
+}
+
+export function caseRecordParseNotice(item) {
+  const state = item?.record_parse
+  if (!['recovered', 'invalid'].includes(state?.status)) return null
+  return state.status === 'recovered'
+    ? { summary: '原文格式异常 · 已恢复读取', detail: '原始用例记录有一处括号格式错误，读取时已恢复标题与完整字段。原始记录保持不变，可在下方查看。' }
+    : { summary: '原始记录无法解析', detail: '原始用例记录存在格式错误，无法可靠读取结构化字段。请查看下方原文和解析说明。' }
+}
+
 export function filterTestCases(items = [], filters = {}, reviews = {}) {
   const query = String(filters.query ?? '').trim().toLocaleLowerCase()
   return items.filter(item => {

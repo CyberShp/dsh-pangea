@@ -200,7 +200,7 @@ function effectHarness() {
     createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
     useState(initial) { const key = index++; if (!(key in hooks)) hooks[key] = initial; return [hooks[key], value => { hooks[key] = value }] },
     useRef(initial) { const key = index++; return hooks[key] ??= { current: initial } },
-    useEffect(effect, deps) { const key = index++, previous = effects[key]; if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) pending.push(() => { previous?.cleanup?.(); effects[key] = { deps, cleanup: effect() } }) },
+    useEffect(effect, deps) { const key = index++, previous = effects[key]; if (!previous || !deps || deps.some((value, i) => !Object.is(value, previous.deps?.[i]))) pending.push(() => { previous?.cleanup?.(); effects[key] = { deps, cleanup: effect() } }) },
   }
   return { React, render(Component, props) { index = 0; pending = []; const tree = Component(props); for (const run of pending) run(); return tree }, unmount() { for (const effect of effects) effect?.cleanup?.() } }
 }

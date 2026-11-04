@@ -56,16 +56,16 @@ test('registers a PANGEA-owned asset management page', async () => {
   assert.equal(pages[0].title(), '资产管理')
 })
 
-test('uses the approved asset prototype typography scale', async () => {
+test('uses the shared compact desktop typography and spacing', async () => {
   const { source } = await loadClient()
   assert.match(source, /fontFamily: 'var\(--pangea-font, /)
-  assert.match(source, /title: \{ fontSize: 26, fontWeight: 600/)
+  assert.match(source, /title: \{ fontSize: 24, fontWeight: 600/)
   assert.match(source, /button: \{[\s\S]*fontSize: 14/)
   assert.match(source, /meta: \{[\s\S]*fontSize: 14/)
-  assert.match(source, /padding: '25px 31px 0'/)
+  assert.match(source, /padding: '20px 24px 0'/)
   assert.match(source, /\.pangea-asset-header-subtitle\{color:#70767d!important;font-size:12px!important;line-height:1\.8!important;margin-top:9px!important\}/)
   assert.match(source, /\.pangea-asset-tabs button\[aria-current=page\][^{]*\{[^}]*color:#25292e/)
-  assert.match(source, /fontSize: 14, cursor: 'pointer', minHeight: 43, padding: '10px 0 14px'/)
+  assert.match(source, /fontSize: 14, cursor: 'pointer', minHeight: 36, padding: '8px 0 10px'/)
   assert.match(source, /fontWeight: 400, lineHeight: 'normal'/)
   assert.match(source, /pangea-asset-empty\.is-first-use \.pangea-asset-empty-title\{font-size:20px/)
   assert.match(source, /pangea-asset-empty-step\{[^}]*text-align:left/)

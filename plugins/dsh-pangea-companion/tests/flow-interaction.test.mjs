@@ -222,19 +222,17 @@ test('cycle route preserves repeated ordered steps and drag suppression does not
   assert.equal(prevented, 1)
 })
 
-test('coverage list links declared variants and comparison distinguishes structural equality from text changes', async () => {
+test('coverage projection retains declared variants and comparison distinguishes structural equality from text changes', async () => {
   const app = await harness()
   const ledgers = behaviorCoverageProjection([{ projection_id: 'n', unit_id: 'u', format_version: 'behavior-coverage-v1', scope: '连接', items: [
     { item_id: 'B', operation: '连接', status: 'designed', case_refs: [{ case_id: 'TC', variant_id: 'V' }], reason: '已设计组合' },
     { item_id: 'M', operation: '取消', status: 'missing', case_refs: [], reason: '缺少核实依据' },
   ] }], [{ unit_id: 'u', test_case_id: 'u/c', case_id: 'TC', variants: [{ variant_id: 'V', input: 'sha384', expected: '连接' }] }])
-  let selected
-  const tree = app.render('BehaviorCoverageView', { ledgers, onCase(link) { selected = link } })
-  assert.match(text(tree), /不代表已执行.*实测代码覆盖率/)
-  assert.match(text(tree), /待补用例.*缺少核实依据/)
-  nodes(tree).find(node => node.type === 'button' && text(node) === 'TC / V').props.onClick()
-  assert.equal(selected.target_case_id, 'u/c')
-  assert.equal(selected.variant_id, 'V')
+  const link = ledgers[0].items[0].case_links[0]
+  assert.equal(link.target_case_id, 'u/c')
+  assert.equal(link.variant_id, 'V')
+  assert.equal(ledgers[0].items[1].reason, '缺少核实依据')
+  assert.equal(ledgers[0].items[1].case_links.length, 0)
   const comparison = app.render('FlowComparisonView', {
     baseline: { run_id: 'old-run', version_id: 'old-version' },
     onUseBaseline() { assert.fail('historical comparison must remain read-only') },

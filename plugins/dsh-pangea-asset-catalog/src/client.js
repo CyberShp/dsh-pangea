@@ -139,14 +139,14 @@ window.__ModuleLoader__.load({
     const styles = {
       root: {
         height: '100%', overflow: 'auto', color: 'var(--dsw-alias-label-primary, #22252b)', background: 'var(--dsw-alias-bg-base, #f7f7f5)',
-        fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', scrollbarWidth: 'none',
+        fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', scrollbarWidth: 'thin',
         fontSize: 14,
       },
-      header: { position: 'sticky', top: 0, zIndex: 3, padding: '25px 31px 0', background: 'var(--dsw-alias-bg-base, #f7f7f5)', borderBottom: '1px solid #e5e7e4' },
-      content: { padding: '24px 30px 32px 31px' },
+      header: { position: 'sticky', top: 0, zIndex: 3, padding: '20px 24px 0', background: 'var(--dsw-alias-bg-base, #f7f7f5)', borderBottom: '1px solid #e5e7e4' },
+      content: { padding: '16px 24px 24px' },
       row: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
       wrap: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
-      title: { fontSize: 26, fontWeight: 600, margin: 0, lineHeight: '34px' }, itemTitle: { fontSize: 16, fontWeight: 680, overflowWrap: 'anywhere', lineHeight: 1.5 },
+      title: { fontSize: 24, fontWeight: 600, margin: 0, lineHeight: '32px' }, itemTitle: { fontSize: 16, fontWeight: 680, overflowWrap: 'anywhere', lineHeight: 1.5 },
       meta: { color: 'var(--dsw-alias-label-secondary, #69717d)', fontSize: 14, lineHeight: 1.5, marginTop: 5, overflowWrap: 'anywhere' },
       card: { border: '1px solid var(--dsw-alias-border-l2, #e0e2df)', borderRadius: 10, padding: 20, marginBottom: 14, background: 'var(--dsw-alias-bg-layer-1, #fff)' },
       notice: { borderColor: 'var(--dsw-alias-state-business-secondary, #e05b65)' },
@@ -1032,33 +1032,32 @@ window.__ModuleLoader__.load({
           .pangea-asset-root{container-type:inline-size;container-name:pangea-assets}
           .pangea-asset-root *{box-sizing:border-box}
           .pangea-asset-layout{display:grid;grid-template-columns:minmax(0,1fr);min-height:100%}
-          .pangea-asset-layout.has-assistant{grid-template-columns:minmax(0,1fr) 310px;column-gap:24px}
-          .pangea-asset-layout.is-importing{margin-right:31px}
-          .pangea-asset-layout.is-importing .pangea-asset-header{width:calc(100% + 334px)}
-          .pangea-asset-layout.is-importing .pangea-asset-content{padding-right:0!important}
-          .pangea-asset-layout.is-importing .pangea-asset-assistant{position:static;align-self:start;max-height:none;margin-top:217px;padding:22px;border:1px solid #e5e7e4;border-radius:10px;background:#fff}
+          .pangea-asset-layout.has-assistant{grid-template-columns:minmax(0,1fr) 304px;column-gap:16px;align-items:start;align-content:start}.pangea-asset-layout.has-assistant>main{display:contents}.pangea-asset-layout.has-assistant .pangea-asset-header{grid-column:1/-1}.pangea-asset-layout.has-assistant .pangea-asset-content{grid-column:1;padding-right:0!important}
+          .pangea-asset-layout.is-importing{margin-right:0}
+          .pangea-asset-layout.is-importing .pangea-asset-header{width:100%}
+          .pangea-asset-layout.is-importing .pangea-asset-assistant{margin:16px 24px 24px 0;padding:18px;border:1px solid #e1e5eb;border-radius:8px;background:#fff;top:116px;max-height:calc(100vh - 148px)}
           .pangea-asset-content{width:100%}
           .pangea-asset-assistant{padding:24px;border-left:1px solid var(--dsw-alias-border-l2,#dce1e7);position:sticky;top:0;align-self:start;max-height:100vh;overflow:auto;background:var(--dsw-alias-bg-layer-1,#fff)}
           .pangea-asset-detail{margin-right:1px}
-          .pangea-asset-detail-top{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:24px}
-          .pangea-asset-detail-top h2{font-size:23px;line-height:1.4;margin:0;color:#24282d}
+          .pangea-asset-detail-top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px;flex-wrap:wrap}
+          .pangea-asset-detail-top h2{font-size:20px;line-height:1.5;margin:0;color:#24282d;overflow-wrap:anywhere}
           .pangea-asset-detail-heading{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;margin-bottom:8px}
-          .pangea-asset-detail-grid{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:24px;align-items:start}
-          .pangea-asset-detail-panel{min-width:0;padding:25px 26px;border:1px solid #e1e5df;border-radius:10px;background:#fff}
+          .pangea-asset-detail-grid{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:16px;align-items:start}
+          .pangea-asset-detail-panel{min-width:0;padding:18px;border:1px solid #e1e5eb;border-radius:8px;background:#fff}
           .pangea-asset-detail-side{display:grid;gap:18px}
-          .pangea-asset-detail-side>.pangea-asset-detail-panel{padding:23px}
-          .pangea-asset-detail-panel h3{font-size:16px;margin:0 0 19px}
+          .pangea-asset-detail-side>.pangea-asset-detail-panel{padding:16px}
+          .pangea-asset-detail-panel h3{font-size:16px;margin:0 0 12px}
           .pangea-asset-detail-badges{display:flex;align-items:center;gap:8px;font-size:12px;color:#69717d}
           .pangea-asset-detail-badges span{padding:5px 8px;border-radius:4px;background:#f1f3f1}
           .pangea-asset-detail-badges .is-good{color:#23724b;background:#e9f4ee}
           .pangea-asset-detail-badges .is-warn{color:#a46510;background:#fcf3e3}
           .pangea-asset-detail-badges .is-error{color:#a33b3b;background:#faebeb}
-          .pangea-asset-detail-subtabs{display:flex;gap:24px;border-bottom:1px solid #e3e6e1;margin-bottom:27px}
+          .pangea-asset-detail-subtabs{display:flex;gap:20px;border-bottom:1px solid #e1e5eb;margin-bottom:16px;overflow:auto}
           .pangea-asset-detail-subtabs button{border:0;background:none;padding:3px 0 13px;color:#67717c;font:inherit;font-size:14px;cursor:pointer}
           .pangea-asset-detail-subtabs button[aria-current=page]{border-bottom:2px solid #c7152a;color:#25292e;font-weight:650}
-          .pangea-asset-detail-kv{display:grid;grid-template-columns:125px minmax(0,1fr);gap:17px 18px;margin:0;font-size:14px;line-height:1.7}
+          .pangea-asset-detail-kv{display:grid;grid-template-columns:100px minmax(0,1fr);gap:10px 14px;margin:0;font-size:14px;line-height:1.65}
           .pangea-asset-detail-kv dt{color:#71808d}.pangea-asset-detail-kv dd{margin:0;overflow-wrap:anywhere}
-          .pangea-asset-detail-item{border:1px solid #e1e5df;border-radius:8px;margin-top:12px;padding:18px 19px;background:#fff}
+          .pangea-asset-detail-item{border:0;border-top:1px solid #e1e5eb;margin-top:0;padding:14px 0;background:#fff}
           .pangea-asset-detail-item summary{cursor:pointer;font-size:14px;font-weight:650}
           .pangea-asset-detail-item .pangea-asset-detail-kv{margin-top:21px;grid-template-columns:112px minmax(0,1fr)}
           .pangea-asset-detail-source-note{margin-top:18px;padding:14px 16px;border-left:2px solid #bed1b0;background:#f7f8f5;color:#637384;font-size:12px;overflow-wrap:anywhere}
@@ -1126,7 +1125,7 @@ window.__ModuleLoader__.load({
           .pangea-asset-breadcrumb{display:flex;align-items:center;gap:9px;color:#70767d;font-size:12px;margin-bottom:17px}
           .pangea-asset-breadcrumb span:last-child{color:#323841}
           .pangea-asset-header-actions{align-self:center;padding-bottom:0}
-          .pangea-asset-tabs{display:flex;gap:30px;overflow-x:auto;margin-top:22px}
+          .pangea-asset-tabs{display:flex;gap:20px;overflow-x:auto;margin-top:12px;scrollbar-width:thin}
           .pangea-asset-tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;padding:10px 0;white-space:nowrap;color:#788087;font-size:14px}
           .pangea-asset-tabs button[aria-current=page]{border-bottom-color:#b62836;color:#25292e;font-weight:650}
           .pangea-asset-header-subtitle{color:#70767d!important;font-size:12px!important;line-height:1.8!important;margin-top:9px!important}
@@ -1138,13 +1137,13 @@ window.__ModuleLoader__.load({
           .pangea-asset-import-intro{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
           .pangea-asset-import-intro p{margin:5px 0 0}
           .pangea-asset-import-badge{flex:0 0 auto;border-radius:4px;padding:3px 8px;background:#f3f4f2;color:#70767d;font-size:12px;line-height:1.5}
-          .pangea-asset-import-modes{display:flex;gap:8px;margin:25px 0 26px;padding-bottom:0;border-bottom:0}
+          .pangea-asset-import-modes{display:flex;gap:8px;margin:16px 0;padding-bottom:0;border-bottom:0}
           .pangea-asset-import-modes button{display:inline-flex;align-items:center;gap:7px;min-height:34px;border:1px solid #dfe3dc;border-radius:6px;background:#fff;padding:6px 12px;color:#555f58;font:inherit;font-size:12px;cursor:pointer}
           .pangea-asset-import-modes button[aria-pressed=true]{border-color:#25292e;color:#fff;background:#25292e}
-          .pangea-asset-import-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+          .pangea-asset-import-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
           .pangea-asset-import-fields label>span{display:flex;align-items:center;gap:6px}
           .pangea-asset-import-fields label>span small{color:#8b9295;font-size:12px;font-weight:400}
-          .pangea-asset-dropzone{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:226px;margin:26px 0 16px;padding:24px;border:1px dashed #cdd3c8;border-radius:10px;background:#fafbf8;text-align:center;transition:background .15s,border-color .15s}
+          .pangea-asset-dropzone{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:148px;margin:16px 0;padding:18px;border:1px dashed #cdd3c8;border-radius:10px;background:#fafbf8;text-align:center;transition:background .15s,border-color .15s}
           .pangea-asset-dropzone.is-dragging{border-color:#82966e;background:#f3f7ee}
           .pangea-asset-dropzone h3{margin:12px 0 5px;font-size:15px;font-weight:600}
           .pangea-asset-dropzone p{margin:0 0 15px;color:#828a89;font-size:12px;line-height:1.7}
@@ -1167,12 +1166,12 @@ window.__ModuleLoader__.load({
           .pangea-asset-import-card.has-file .pangea-asset-import-footer{margin-top:24px}
           .pangea-asset-layout.is-importing .pangea-asset-return,.pangea-asset-import-footer .pangea-asset-cancel{border-color:transparent!important;background:transparent!important}
           .pangea-asset-readiness{margin-top:20px;padding:13px 14px;border:1px solid #eadfc6;border-radius:7px;background:#fbf8ef;color:#806c40}
-          .pangea-asset-readiness.is-blocked{position:relative;min-height:165px;padding-right:120px}
+          .pangea-asset-readiness.is-blocked{position:relative;padding:12px}
           .pangea-asset-readiness.is-ready{border-color:transparent;background:#eaf5ee;color:#20765a}
           .pangea-asset-readiness-title{display:flex;align-items:center;gap:9px}
           .pangea-asset-readiness strong{font-size:14px}
           .pangea-asset-readiness p{margin:5px 0 0 26px;font-size:12px;line-height:1.7}
-          .pangea-asset-open-settings{position:absolute;right:15px;top:14px;border:1px solid #e6d9be;border-radius:5px;background:#fff;padding:5px 10px;color:#926316;font:inherit;font-size:12px;cursor:pointer}
+          .pangea-asset-open-settings{display:inline-flex;margin:10px 0 0 26px;border:1px solid #e6d9be;border-radius:5px;background:#fff;padding:5px 10px;color:#926316;font:inherit;font-size:12px;cursor:pointer}
           .pangea-asset-coverage-info{font-size:12px;color:#70767d;line-height:1.9}
           .pangea-asset-coverage-icon{display:grid;place-items:center;width:50px;height:50px;margin:17px 0 21px;border:1px solid #dce6d3;border-radius:12px;background:#f8faf5;color:#82966e}
           .pangea-asset-coverage-info h3{margin:0 0 13px;color:#25292e;font-size:18px;line-height:1.4}
@@ -1182,26 +1181,24 @@ window.__ModuleLoader__.load({
           .pangea-asset-table th,.pangea-asset-table td{text-align:left;padding:14px 12px;border-bottom:1px solid #e5e9ef;overflow-wrap:anywhere}
           .pangea-asset-table th{background:#f7f8fa;color:#596273;font-weight:600;white-space:nowrap}
           .pangea-asset-table td:nth-child(2){min-width:180px}
-          .pangea-asset-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid #e2e4e2;border-radius:10px;background:#fff;margin-bottom:20px}
-          .pangea-asset-metric{position:relative;padding:20px 23px;min-width:0}
-          .pangea-asset-metric+.pangea-asset-metric::before{content:'';position:absolute;left:0;top:20px;bottom:20px;border-left:1px solid #e2e4e2}
+          .pangea-asset-metrics{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+          .pangea-asset-metric{display:inline-flex;align-items:baseline;gap:10px;min-height:36px;padding:6px 12px;min-width:0;border:1px solid #e1e5eb;border-radius:6px;background:#fff;font:inherit;cursor:pointer}
+          .pangea-asset-metric[aria-pressed=true]{border-color:#b62836;background:#fbf0f2}
           .pangea-asset-metric-label{font-size:12px;color:#69717d}
-          .pangea-asset-metric-value{font-size:27px;font-weight:500;line-height:1.5;letter-spacing:-.7px;margin:0}
+          .pangea-asset-metric-value{font-size:18px;font-weight:600;line-height:1.4;font-variant-numeric:tabular-nums;margin:0}
           .pangea-asset-metric-value+.pangea-asset-metric-label{font-size:12px;line-height:1.8;margin-top:2px}
-          .pangea-asset-filters{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:19px;margin-bottom:14px}
+          .pangea-asset-filters{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
           .pangea-asset-search-summary{display:flex;align-items:center;gap:16px;margin-bottom:14px;min-height:40px}
           .pangea-asset-search-summary-form{flex:1 1 auto;min-width:0}
           .pangea-asset-search-summary-form input{width:100%;height:40px;min-height:40px}
           .pangea-asset-search-summary-chip{flex:0 0 auto;border:0;background:transparent;padding:8px 0;color:#71809a;font:inherit;font-size:12px;line-height:1.4;white-space:nowrap;cursor:pointer}
-          .pangea-asset-filter-search{width:100%;min-width:0}
+          .pangea-asset-filter-search{flex:1 1 260px;min-width:180px}
           .pangea-asset-filter-search form{width:100%;align-items:center!important}
           .pangea-asset-filter-search input{width:100%;height:40px;min-height:40px;transform:translateY(-1px)}
-          .pangea-asset-filter-options{position:relative;width:197px;display:flex;align-items:center;gap:8px;flex:0 0 auto}
-          .pangea-asset-status-chips{width:203px;min-height:72px;display:flex;align-content:flex-start;align-items:center;justify-content:flex-start;column-gap:8px;row-gap:10px;flex-wrap:wrap}
-          .pangea-asset-status-chip,.pangea-asset-more-filters>summary{height:30px;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;border:1px solid #e5e7e4;border-radius:5px;background:#fff;padding:0 11px;color:#25292e;font:inherit;font-size:12px;line-height:1.7;cursor:pointer}
-          .pangea-asset-status-chip[aria-pressed="true"]{background:#25292e;border-color:#25292e;color:#fff}
-          .pangea-asset-more-filters{position:absolute;right:0;top:40px;flex:0 0 auto}
-          .pangea-asset-more-filters>summary{position:relative;width:32px;padding:0;list-style:none;opacity:0;transition:opacity .12s}
+          .pangea-asset-filter-options{position:relative;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+          .pangea-asset-more-filters>summary{height:30px;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;border:1px solid #e5e7e4;border-radius:5px;background:#fff;padding:0 11px;color:#25292e;font:inherit;font-size:12px;line-height:1.7;cursor:pointer}
+          .pangea-asset-more-filters{position:relative;flex:0 0 auto}
+          .pangea-asset-more-filters>summary{position:relative;gap:6px;padding:0 10px;list-style:none}
           .pangea-asset-more-filters:hover>summary,.pangea-asset-more-filters:focus-within>summary,.pangea-asset-more-filters[open]>summary,.pangea-asset-more-filters>summary[aria-label*="已应用筛选"]{opacity:1}
           .pangea-asset-more-filters>summary::-webkit-details-marker{display:none}
           .pangea-asset-filter-popover{position:absolute;z-index:8;top:calc(100% + 8px);right:0;width:min(280px,calc(100vw - 48px));padding:14px;border:1px solid #e1e4e2;border-radius:9px;background:#fff;box-shadow:0 12px 32px #18212a24}
@@ -1237,7 +1234,7 @@ window.__ModuleLoader__.load({
           .pangea-asset-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
           .pangea-asset-selection{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 18px;margin-top:16px;border-radius:8px;background:#25292e;color:#fff}
           .pangea-asset-selection-title{font-size:14px;line-height:1.5}
-          .pangea-asset-selection.is-empty{background:#fff;color:#4b5562;border:1px solid #e2e4e2;box-shadow:none}
+          .pangea-asset-selection.is-empty{background:transparent;color:#626b78;border:0;box-shadow:none;padding:0;margin-top:12px}.pangea-asset-selection.is-empty .pangea-asset-selection-title{display:none}
           .pangea-asset-selection .pangea-asset-meta{color:inherit}
           .pangea-asset-selection:not(.is-empty) .pangea-asset-meta{display:none}
           .pangea-asset-modal-scrim{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:24px;background:#17202c66}
@@ -1250,20 +1247,20 @@ window.__ModuleLoader__.load({
           .pangea-asset-root input[type=checkbox]{width:18px;height:18px;margin:4px 0;flex-shrink:0;accent-color:var(--pangea-red,#b62836)}
           .pangea-asset-root .pangea-asset-list input[type=checkbox]{width:15px;height:15px;margin:0}
           .pangea-asset-root summary{cursor:pointer}
-          @container pangea-assets (max-width:960px){.pangea-asset-layout.has-assistant{grid-template-columns:minmax(0,1fr)}.pangea-asset-layout.is-importing{margin-right:0}.pangea-asset-layout.is-importing .pangea-asset-header{width:100%}.pangea-asset-layout.is-importing .pangea-asset-content{padding-right:30px!important}.pangea-asset-assistant{position:static;border-left:0;border-top:1px solid var(--dsw-alias-border-l2,#dce1e7);max-height:none}.pangea-asset-layout.is-importing .pangea-asset-assistant{margin-top:0}}
-          @container pangea-assets (max-width:760px){.pangea-asset-list-head th:first-child,.pangea-asset-list-row td:first-child{width:44px}.pangea-asset-list-head th:nth-child(3),.pangea-asset-list-row td:nth-child(3){width:88px}.pangea-asset-list-head th:nth-child(n+4),.pangea-asset-list-row td:nth-child(n+4){display:none}}
-          .pangea-asset-empty{min-height:410px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;border:1px solid #e2e4e2;border-radius:10px;background:#fff;padding:32px}
-          .pangea-asset-empty.is-compact{min-height:410px}
-          .pangea-asset-empty.is-first-use{position:relative;justify-content:flex-start;width:calc(100% + 1px);padding-top:67px}
-          .pangea-asset-empty.is-first-use .pangea-asset-empty-steps{position:absolute;top:calc(100% + 24px);left:-1px;right:-1px;width:auto;margin:0}
+          @container pangea-assets (max-width:960px){.pangea-asset-layout.has-assistant{grid-template-columns:minmax(0,1fr)}.pangea-asset-layout.is-importing{margin-right:0}.pangea-asset-layout.is-importing .pangea-asset-header{width:100%}.pangea-asset-layout.has-assistant .pangea-asset-content{padding-right:24px!important}.pangea-asset-assistant{position:static;border-left:0;border-top:1px solid var(--dsw-alias-border-l2,#dce1e7);max-height:none}.pangea-asset-layout.is-importing .pangea-asset-assistant{grid-column:1;margin:0 24px 24px;max-height:none}}
+          @container pangea-assets (max-width:760px){.pangea-asset-list-head th:first-child,.pangea-asset-list-row td:first-child{width:44px}.pangea-asset-list-head th:nth-child(3),.pangea-asset-list-row td:nth-child(3){width:88px}.pangea-asset-list-head th:nth-child(4),.pangea-asset-list-row td:nth-child(4){width:128px}.pangea-asset-list-head th:nth-child(n+5),.pangea-asset-list-row td:nth-child(n+5){display:none}}
+          .pangea-asset-empty{min-height:280px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;border:1px solid #e2e4e2;border-radius:10px;background:#fff;padding:32px}
+          .pangea-asset-empty.is-compact{min-height:240px}
+          .pangea-asset-empty.is-first-use{justify-content:center;width:100%;padding:28px}
+          .pangea-asset-empty.is-first-use .pangea-asset-empty-steps{position:static;width:100%;margin:20px 0 0}
           .pangea-asset-empty-icon{width:52px;height:52px;display:grid;place-items:center;margin-bottom:20px;border:1px solid #e1e4e1;border-radius:14px;color:#747e89}
           .pangea-asset-empty-copy{max-width:440px;margin:9px auto 0;color:#70767d;font-size:14px;line-height:1.7}
           .pangea-asset-empty.is-first-use .pangea-asset-empty-title{font-size:20px!important;font-weight:600!important;line-height:normal!important}
           .pangea-asset-empty.is-first-use .pangea-asset-empty-copy{max-width:450px;margin:12px auto 21px;line-height:1.9}
           .pangea-asset-empty-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;margin-top:24px}
-          .pangea-asset-empty-step{border:1px solid #e2e4e2;border-radius:10px;background:#fff;padding:22px;text-align:left}
+          .pangea-asset-empty-step{border-top:1px solid #e1e5eb;padding:14px 0 0;text-align:left}
           .pangea-asset-empty-step strong{display:block;font-size:15px;font-weight:600}
-          .pangea-asset-empty-step span{display:block;margin-top:17px;color:#6b7582;font-size:12px;line-height:1.8}
+          .pangea-asset-empty-step span{display:block;margin-top:8px;color:#6b7582;font-size:12px;line-height:1.8}
           .pangea-asset-loading-state{display:block}
           .pangea-asset-loading-note{display:flex;align-items:flex-start;gap:10px;padding:15px 17px;margin-bottom:22px;border-radius:7px;background:#edf3f8;color:#496988}
           .pangea-asset-loading-note svg{margin-top:2px;flex:0 0 16px}
@@ -1276,7 +1273,7 @@ window.__ModuleLoader__.load({
           .pangea-asset-skeleton-line{width:80%;height:13px;margin-bottom:15px;border-radius:5px;background:#eeefec}
           .pangea-asset-skeleton-line.is-short{width:45%;height:8px;margin:0}
           .pangea-asset-skeleton-line.is-tag{width:70px;height:20px;flex:0 0 70px;margin:0}
-          @container pangea-assets (max-width:600px){.pangea-asset-root .pangea-asset-header,.pangea-asset-root .pangea-asset-content,.pangea-asset-assistant{padding:16px!important}.pangea-asset-root .pangea-asset-fields,.pangea-asset-form-grid,.pangea-asset-import-fields{grid-template-columns:minmax(0,1fr)!important;gap:12px!important}.pangea-asset-fields dd{margin-bottom:12px!important}.pangea-asset-tabs{gap:18px}.pangea-asset-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.pangea-asset-metric:nth-child(3){border-left:0;border-top:1px solid #e2e4e2}.pangea-asset-metric:nth-child(4){border-top:1px solid #e2e4e2}.pangea-asset-list-head,.pangea-asset-list-row{grid-template-columns:28px minmax(140px,1fr) minmax(72px,.5fr)}.pangea-asset-list-head>:nth-child(n+4),.pangea-asset-list-row>:nth-child(n+4){display:none}.pangea-asset-filters{align-items:stretch;flex-direction:column}.pangea-asset-empty-steps{grid-template-columns:minmax(0,1fr)}.pangea-asset-import-intro{align-items:flex-start}.pangea-asset-import-modes{flex-wrap:wrap}.pangea-asset-import-footer{align-items:stretch}.pangea-asset-import-footer button{flex:1}}
+          @container pangea-assets (max-width:600px){.pangea-asset-root .pangea-asset-header,.pangea-asset-root .pangea-asset-content,.pangea-asset-assistant{padding:16px!important}.pangea-asset-root .pangea-asset-fields,.pangea-asset-form-grid,.pangea-asset-import-fields{grid-template-columns:minmax(0,1fr)!important;gap:12px!important}.pangea-asset-fields dd{margin-bottom:12px!important}.pangea-asset-tabs{gap:18px}.pangea-asset-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.pangea-asset-list-head,.pangea-asset-list-row{grid-template-columns:28px minmax(140px,1fr) minmax(72px,.5fr)}.pangea-asset-list-head th:nth-child(3),.pangea-asset-list-row td:nth-child(3){display:none}.pangea-asset-filters{align-items:stretch;flex-direction:column}.pangea-asset-empty-steps{grid-template-columns:minmax(0,1fr)}.pangea-asset-import-intro{align-items:flex-start}.pangea-asset-import-modes{flex-wrap:wrap}.pangea-asset-import-footer{align-items:stretch}.pangea-asset-import-footer button{flex:1}}
         `),
           h('div', { className: `pangea-asset-layout${showAssistant ? ' has-assistant' : ''}${importOpen ? ' is-importing' : ''}` }, h('main', { style: { minWidth: 0 } },
         h('div', { className: 'pangea-asset-header', style: styles.header },
@@ -1302,14 +1299,14 @@ window.__ModuleLoader__.load({
           h('nav', { className: 'pangea-asset-tabs', 'aria-label': '资产管理导航' },
             [['library', '资产库'], ['review', '待审核'], ['methodologies', '方法论'], ['archived', '已删除 / 已归档']].map(([value, label]) =>
               h('button', { key: value, type: 'button', disabled: busy, 'aria-current': section === value ? 'page' : undefined,
-                style: { fontFamily: 'inherit', fontSize: 14, cursor: 'pointer', minHeight: 43, padding: '10px 0 14px' }, onClick: () => navigate(value) }, label)))),
+                style: { fontFamily: 'inherit', fontSize: 14, cursor: 'pointer', minHeight: 36, padding: '8px 0 10px' }, onClick: () => navigate(value) }, label)))),
         h('div', { className: 'pangea-asset-content', style: styles.content },
           b08Mode ? b08View() : null,
           activeAsset && !importOpen && !designedDetail && !b08Mode ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, marginBottom: 12 }, onClick: () => { selectAsset(null); setImportOpen(false); setEditingAssetId(''); setError(''); setNotice('') } }, '返回列表') : null,
           designedDetail && !importOpen && !b08Mode ? detailView(activeAsset, details[activeAsset.asset_id]) : null,
           showLibrary && !activeAsset && state && assets.length ? h('div', { className: 'pangea-asset-metrics', 'aria-label': '资产统计' },
-            [['全部资料', summary.total ?? pagination.total, '材料与提取内容'], ['可用于分析', summary.available ?? 0, '已完成处理'], ['待人工审核', summary.review ?? 0, '历史缺陷资料'], ['需要处理', summary.failed ?? 0, '可查看失败记录']].map(([label, count, hint]) =>
-              h('div', { key: label, className: 'pangea-asset-metric' }, h('div', { className: 'pangea-asset-metric-label' }, label), h('div', { className: 'pangea-asset-metric-value' }, count), h('div', { className: 'pangea-asset-metric-label' }, hint)))) : null,
+            [['全部资料', summary.total ?? pagination.total, '', '材料与提取内容'], ['可用于分析', summary.available ?? 0, 'available', '已完成处理'], ['待人工审核', summary.review ?? 0, 'awaiting_review', '历史缺陷资料'], ['处理失败', summary.failed ?? 0, 'failed', '查看失败记录']].map(([label, count, filter, hint]) =>
+              h('button', { key: label, type: 'button', className: 'pangea-asset-metric', 'aria-pressed': status === filter, title: hint, onClick: () => { setPage(1); setStatus(filter) } }, h('span', { className: 'pangea-asset-metric-label' }, label), h('strong', { className: 'pangea-asset-metric-value' }, count)))) : null,
           importOpen ? h('section', { className: `pangea-asset-import-card${importFile ? ' has-file' : ''}`, style: styles.card, 'aria-label': '导入新资产', 'aria-busy': busy },
             h('div', { className: 'pangea-asset-import-intro' },
               h('div', null, h('h2', { style: { ...styles.itemTitle, margin: 0 } }, '导入新的分析材料'), h('p', { style: styles.meta }, '可一次选择多个同类文件，提交后自动排队提取，无需逐个等待。')),
@@ -1335,7 +1332,7 @@ window.__ModuleLoader__.load({
             h('input', { ref: importFileInput, className: 'pangea-asset-sr-only', type: 'file', 'aria-label': '选择资产文件', multiple: true, disabled: busy, accept: coverageOnly ? '.xlsx,.json' : '.md,.txt,.pdf,.docx,.xlsx', onChange: event => { setImportFiles(Array.from(event.target.files ?? [])); setImportBatch([]); setImportPath(''); setError('') } }),
             importFiles.length > 1 && !importBatch.length ? h('div', { style: { maxHeight: 220, overflow: 'auto', marginBottom: 14 }, 'aria-label': '待导入文件' },
               importFiles.map((file, index) => h('div', { key: index, style: styles.meta }, `${index + 1}. ${file.name} · ${(file.size / 1024).toFixed(1)} KB${file.size === 0 ? ' · 空文件，将跳过' : file.size > 24 * 1024 * 1024 ? ' · 超过 24 MiB，将跳过' : ''}`))) : null,
-            h('details', { className: 'pangea-asset-local-path', open: Boolean(importPath || importFile) }, h('summary', null, '使用本机文件路径'),
+            h('details', { className: 'pangea-asset-local-path', open: Boolean(importPath) }, h('summary', null, '使用本机文件路径'),
               h('input', { 'aria-label': '资产文件路径', disabled: busy, placeholder: '文件完整路径', style: { ...styles.input, width: '100%', minHeight: importFile ? 40 : 38, marginTop: importFile ? 13 : 10 }, value: importPath, onChange: event => { setImportPath(event.target.value); setError(''); if (event.target.value) setImportFile(null) } })),
             importFileIssue || error ? h('div', { className: 'pangea-asset-callout is-error', role: 'alert' },
               h('strong', null, importFileIssue ? importFile.size === 0 ? '文件内容为空' : '文件超过上传限制' : '导入失败'),
@@ -1391,18 +1388,13 @@ window.__ModuleLoader__.load({
             h('form', { role: 'search', 'aria-label': '资产关键词搜索', className: 'pangea-asset-filter-search', onSubmit: event => { event.preventDefault(); setPage(1); setQuery(queryDraft.trim()) } },
               h('input', { type: 'search', 'aria-label': '搜索资产', placeholder: '搜索标题、编号或文件路径…', style: { ...styles.input, border: '1px solid #e0e3df', borderRadius: 6, background: '#fff', color: '#25292e', padding: '10px 13px' }, value: queryDraft, onChange: event => setQueryDraft(event.target.value) })),
             h('div', { className: 'pangea-asset-filter-options' },
-              section === 'library' ? h('div', { className: 'pangea-asset-status-chips', role: 'group', 'aria-label': '资产状态筛选' },
-                [['', '全部状态'], ['available', '可用'], ['awaiting_review', '待审核'], ['failed', '失败']].map(([value, label]) => h('button', {
-                  key: value || 'all-status', type: 'button', className: 'pangea-asset-status-chip', 'aria-pressed': status === value,
-                  onClick: () => { setPage(1); setStatus(value) },
-                }, label))) : null,
               h('details', { className: 'pangea-asset-more-filters' },
                 h('summary', { 'aria-label': type || status && !['available', 'awaiting_review', 'failed'].includes(status) ? '更多筛选，已应用筛选' : '更多筛选', title: '更多筛选' },
-                  h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', 'aria-hidden': true }, h('path', { d: 'M4 6h16M7 12h10M10 18h4' }))),
+                  h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', 'aria-hidden': true }, h('path', { d: 'M4 6h16M7 12h10M10 18h4' })), '更多筛选'),
                 h('div', { className: 'pangea-asset-filter-popover' },
                   h('label', { style: styles.field }, h('span', { style: styles.label }, '资产类型'),
                     h('select', { 'aria-label': '筛选资产类型', style: styles.input, value: type, onChange: event => { setPage(1); setKind(''); setType(event.target.value) } }, TYPES.filter(([value]) => !value || !state?.asset_types?.length || state.asset_types.includes(value)).map(([value, label]) => h('option', { key: value || 'all', value }, value ? label : '全部类型')))),
-                  section === 'library' ? h('label', { style: styles.field }, h('span', { style: styles.label }, '更多状态'),
+                  section === 'library' ? h('label', { style: styles.field }, h('span', { style: styles.label }, '处理状态'),
                     h('select', { 'aria-label': '资产状态', style: styles.input, value: status, onChange: event => { setPage(1); setStatus(event.target.value) } }, STATUS_FILTERS.map(([value, label]) => h('option', { key: value || 'all-status', value }, label)))) : null,
                   hasFilters ? h('button', { type: 'button', style: styles.button, onClick: clearFilters }, '清除筛选') : null)))) : null,
           showLibrary && !activeAsset && displayAssets.length ? h('section', { 'aria-label': '资产列表', 'aria-busy': loading || waitingForAssets },

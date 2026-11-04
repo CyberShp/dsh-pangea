@@ -6,9 +6,24 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRun, runPangea } from '../src/pangea-api.js'
 import { companionSnapshot } from '../src/reader.js'
+import { AgentSessionStore } from '../src/agent-sessions.js'
 
 const testDataRoot = await mkdtemp(path.join(tmpdir(), 'pangea-acp-unit-'))
 test.after(() => rm(testDataRoot, { recursive: true, force: true }))
+
+// Keep fixture failure bounds independent of any test-controlled budget timer.
+const fixtureSetTimeout = globalThis.setTimeout, fixtureClearTimeout = globalThis.clearTimeout
+function fixtureWatchdog(controller, label, release = () => {}) {
+  let timer
+  const promise = new Promise((_, reject) => {
+    timer = fixtureSetTimeout(() => {
+      const error = new Error(`fixture deadline: ${label}`)
+      try { release() } finally { controller.abort(error); reject(error) }
+    }, 10000)
+  })
+  void promise.catch(() => {}) // Setup failure must not leave a detached rejection.
+  return { promise, clear: () => fixtureClearTimeout(timer) }
+}
 
 test('worker prompt provides a quoted direct PowerShell CLI call and scratch JSON-file contract', () => {
   const prompt = workerPrompt({ action: { action_id: "run:a'1", role: 'planning', stage: 'unit_planning' }, opened: { task: {} },
@@ -207,6 +222,12 @@ for (const failureMode of ['throw', 'diagnostic', 'completed-with-error', 'event
       assert.equal(created, 1)
       assert.ok(calls.some(args => args.includes('paused')))
       assert.ok(!calls.some(args => args.includes('finished')))
+      const timeline = await new AgentSessionStore({ dataRoot: testDataRoot, runId }).timeline()
+      const segments = timeline.lanes.flatMap(lane => lane.segments)
+      assert.equal(segments.length, 1)
+      assert.equal(segments[0].status, 'paused')
+      assert.ok(segments[0].start_at_ms > 0)
+      assert.ok(segments[0].end_at_ms >= segments[0].start_at_ms)
       assert.ok(events.some(event => event.stage === 'source_first_prompt_ready' && event.prompt_bytes > event.prompt_chars))
       assert.ok(events.some(event => event.error_code === 'INPUT_TOO_LONG'))
       assert.ok(!events.some(event => ['source_first_zero_tool_turn', 'source_first_recovering'].includes(event.stage)))
@@ -265,28 +286,30 @@ for (const scenario of ['throw', 'diagnostic', 'event-only', 'unclosed-tools', '
   })
 }
 
-test('ACP output polling emits only new worker text, with no idle session labels', async () => {
+test('ACP output polling emits only new worker text, with no idle session labels', { timeout: 15000 }, async () => {
   let pendingOutput = '', finished = false
   let releaseTurn, enteredTurn
   const turn = new Promise(resolve => { releaseTurn = resolve })
   const started = new Promise(resolve => { enteredTurn = resolve })
   const controller = new AbortController()
-  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: testDataRoot,
-    runId: 'output-polling', signal: controller.signal,
-    runner: async ({ args }) => {
-      if (args[0] === 'task-open') return { task: {} }
-      if (args[1] === 'next') return { run_id: 'output-polling', lifecycle_status: finished ? 'complete' : 'running',
-        actions: finished ? [] : [{ action_id: 'output-polling:planning', role: 'planning', stage: 'unit_planning', action: 'dispatch_agent' }] }
-      if (args[1] === 'settle') finished = true
-      return {}
-    },
-    subagents: { start: async () => ({ id: '236a6dd4-37db-4aff-8a0f-273b45a7e00e', result: Promise.resolve({ stopReason: 'completed' }),
-      continuePrompt: async () => { enteredTurn(); await turn; return { stopReason: 'completed' } },
-      readOutput: () => { const output = pendingOutput; pendingOutput = ''; return output }, dispose: async () => {},
-    }) },
-  })
+  const watchdog = fixtureWatchdog(controller, 'output polling', () => releaseTurn())
+  let run
   try {
-    await started
+    run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd: '/work', dataRoot: testDataRoot,
+      runId: 'output-polling', signal: controller.signal,
+      runner: async ({ args }) => {
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[1] === 'next') return { run_id: 'output-polling', lifecycle_status: finished ? 'complete' : 'running',
+          actions: finished ? [] : [{ action_id: 'output-polling:planning', role: 'planning', stage: 'unit_planning', action: 'dispatch_agent' }] }
+        if (args[1] === 'settle') finished = true
+        return {}
+      },
+      subagents: { start: async () => ({ id: '236a6dd4-37db-4aff-8a0f-273b45a7e00e', result: Promise.resolve({ stopReason: 'completed' }),
+        continuePrompt: async () => { enteredTurn(); await turn; return { stopReason: 'completed' } },
+        readOutput: () => { const output = pendingOutput; pendingOutput = ''; return output }, dispose: async () => {},
+      }) },
+    })
+    await Promise.race([started, run.result.then(() => { throw new Error('Run ended before the output-polling prompt') }), watchdog.promise])
     for (let i = 0; i < 20; i++) assert.equal(run.readOutput(), '')
     pendingOutput = '就绪'
     assert.equal(run.readOutput(), '[236a6dd4-37db-4aff-8a0f-273b45a7e00e]\n就绪\n')
@@ -298,13 +321,19 @@ test('ACP output polling emits only new worker text, with no idle session labels
     assert.match(run.readOutput(), /正在读取源码/)
     assert.equal(run.readOutput(), '')
     releaseTurn()
-    assert.equal((await run.result).stopReason, 'completed')
+    assert.equal((await Promise.race([run.result, watchdog.promise])).stopReason, 'completed')
     assert.equal(run.readOutput(), '')
+    const timeline = await new AgentSessionStore({ dataRoot: testDataRoot, runId: 'output-polling' }).timeline()
+    const segments = timeline.lanes.flatMap(lane => lane.segments)
+    assert.equal(segments.length, 1)
+    assert.equal(segments[0].status, 'finished')
+    assert.ok(segments[0].end_at_ms >= segments[0].start_at_ms)
   } finally {
     releaseTurn()
     controller.abort()
-    await run.result.catch(() => {})
-    await run.dispose()
+    try {
+      await Promise.race([Promise.all([run?.result.catch(() => {}), run?.dispose()]), watchdog.promise])
+    } finally { watchdog.clear() }
   }
 })
 
@@ -506,9 +535,11 @@ for (const toolsOnFormalTurn of [0, 1]) {
   })
 }
 
-for (const interruption of ['cancel']) {
+// Preserve the closure-budget interruption specification while model-review routing is paused.
+for (const interruption of ['cancel', 'budget']) {
+  const interruptionTest = interruption === 'budget' ? test.skip : test
   for (const phase of ['before-directive', 'during-directive']) {
-    test(`zero-tool recovery ${interruption} ${phase} keeps the original session and never settles`, async () => {
+    interruptionTest(`zero-tool recovery ${interruption} ${phase} keeps the original session and never settles`, { timeout: 15000 }, async t => {
       const root = await mkdtemp(path.join(tmpdir(), 'pangea-zero-tool-'))
       const runId = 'zero-tool-interruption', controller = new AbortController()
       const bindingPath = path.join(root, 'runs', runId, 'acp-workers.json')
@@ -517,40 +548,92 @@ for (const interruption of ['cancel']) {
       let reached, release, finishDirective, paused = false, starts = 0, disposals = 0, settlements = 0
       const interruptedPhase = new Promise(resolve => { reached = resolve })
       const releaseEvent = new Promise(resolve => { release = resolve })
-      const prompts = [], events = []
-      const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: root, dataRoot: root, runId,
-        parent: {}, signal: controller.signal, ...(interruption === 'budget' ? { closureBudgetMs: 80 } : {}),
-        onEvent: async event => {
-          events.push(event)
-          if (event.stage === 'source_first_zero_tool_turn' && phase === 'before-directive') { reached(); await releaseEvent }
-        },
-        runner: async ({ args }) => {
-          if (args[0] === 'task-open') return { task: {} }
-          if (args[1] === 'next') return { run_id: runId, lifecycle_status: 'running', actions: paused ? [] : [{
-            action_id: 'original-action', role: 'analysis',
-            stage: 'unit_analysis', action: 'continue_agent', task_id: 'original' }] }
-          if (args[1] === 'execution' && args.includes('paused')) paused = true
-          if (args[1] === 'settle') settlements++
-          return {}
-        },
-        subagents: { start: async (_provider, request) => {
-          starts++
-          assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote-original' })
-          return { id: 'original', remoteSessionId: 'remote-original', readDiagnostics: () => ({ toolCalls: 0 }),
-            continuePrompt: async value => {
-              prompts.push(value[0].text)
-              if (prompts.length === 1) return { stopReason: 'completed' }
-              if (phase === 'during-directive') { reached(); return new Promise(resolve => { finishDirective = resolve }) }
-              return { stopReason: 'completed' }
-            },
-            dispose: async () => { disposals++; finishDirective?.({ stopReason: 'aborted' }) } }
-        } } })
+      const prompts = [], events = [], aborts = []
+      const nativeSetTimeout = globalThis.setTimeout, nativeClearTimeout = globalThis.clearTimeout
+      const budgetMs = 24 * 60 * 60 * 1000, budgetTimers = new Map()
+      // These top-level tests run serially (Node's default), and the global
+      // mocks are restored in finally. Only this fixture's uniquely long
+      // closure timer is controlled. Native
+      // filesystem-retry, ACP and watchdog timers must keep making progress.
+      // The budget is fired explicitly after reaching the target phase, not
+      // enlarged to give platform-dependent startup I/O more time to win.
+      if (interruption === 'budget') {
+        const nativeAbort = AbortController.prototype.abort
+        t.mock.method(AbortController.prototype, 'abort', function (reason) {
+          aborts.push({ controller: this, reason })
+          return nativeAbort.call(this, reason)
+        })
+        t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+          if (delay > budgetMs / 2 && delay <= budgetMs) {
+            const handle = { unref() { return this }, ref() { return this } }
+            budgetTimers.set(handle, () => callback(...args))
+            return handle
+          }
+          return nativeSetTimeout(callback, delay, ...args)
+        })
+        t.mock.method(globalThis, 'clearTimeout', handle => {
+          if (!budgetTimers.delete(handle)) nativeClearTimeout(handle)
+        })
+      }
+      const watchdog = fixtureWatchdog(controller, `${interruption} ${phase}`, () => {
+        release(); finishDirective?.({ stopReason: 'aborted' })
+      })
+      const deadline = watchdog.promise
+      let run
       try {
-        const result = interruption === 'cancel' ? assert.rejects(run.result, /fixture cancellation/) : run.result
-        await interruptedPhase
+        run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: root, dataRoot: root, runId,
+          parent: {}, signal: controller.signal, ...(interruption === 'budget' ? { closureBudgetMs: budgetMs } : {}),
+          onEvent: async event => {
+            events.push(event)
+            if (event.stage === 'source_first_zero_tool_turn' && phase === 'before-directive') { reached(); await releaseEvent }
+          },
+          runner: async ({ args }) => {
+            if (args[0] === 'task-open') return { task: {} }
+            if (args[1] === 'next') return { run_id: runId, lifecycle_status: 'running', actions: paused ? [] : [{
+              action_id: 'original-action', role: interruption === 'budget' ? 'closure' : 'analysis',
+              stage: interruption === 'budget' ? 'targeted_closure' : 'unit_analysis', action: 'continue_agent', task_id: 'original' }] }
+            if (args[1] === 'execution' && args.includes('paused')) paused = true
+            if (args[1] === 'settle') settlements++
+            return {}
+          },
+          subagents: { start: async (_provider, request) => {
+            starts++
+            assert.deepEqual(request.resume, { taskId: 'original', remoteSessionId: 'remote-original' })
+            return { id: 'original', remoteSessionId: 'remote-original', readDiagnostics: () => ({ toolCalls: 0 }),
+              continuePrompt: async value => {
+                prompts.push(value[0].text)
+                if (prompts.length === 1) return { stopReason: 'completed' }
+                if (phase === 'during-directive') { reached(); return new Promise(resolve => { finishDirective = resolve }) }
+                return { stopReason: 'completed' }
+              },
+              dispose: async () => { disposals++; finishDirective?.({ stopReason: 'aborted' }) } }
+          } } })
+        // An early completion is a test failure, not a phase we can wait for
+        // forever. Observe rejection immediately to avoid detached failures.
+        const outcome = run.result.then(value => ({ kind: 'completed', value }), error => ({ kind: 'failed', error }))
+        const arrival = await Promise.race([interruptedPhase.then(() => ({ kind: 'phase' })), outcome, deadline])
+        assert.equal(arrival.kind, 'phase', `Run ended before ${phase}: ${arrival.error?.message ?? arrival.kind}`)
         if (interruption === 'cancel') controller.abort(new Error('fixture cancellation'))
-        else assert.equal((await result).attentionRequired, true)
-        await result
+        else {
+          assert.equal(budgetTimers.size, 1, 'exactly one closure deadline is armed at the requested phase')
+          const expire = [...budgetTimers.values()][0]
+          budgetTimers.clear()
+          expire()
+        }
+        const result = await Promise.race([outcome, deadline])
+        if (interruption === 'cancel') {
+          assert.equal(result.kind, 'failed')
+          assert.match(result.error.message, /fixture cancellation/)
+        } else {
+          assert.equal(result.kind, 'completed', result.error?.message)
+          assert.equal(result.value.attentionRequired, true)
+          // Prove the owned turn was cancelled by its budget before test
+          // cleanup can mask a missing abort with the outer controller.
+          assert.equal(controller.signal.aborted, false)
+          const budgetAborts = aborts.filter(event => event.controller !== controller
+            && event.reason?.message === '本单元定向修正达到执行预算，保留已保存结果')
+          assert.equal(budgetAborts.length, 1, 'the budget aborts exactly one owned turn before fixture cleanup')
+        }
         release()
         await new Promise(resolve => setImmediate(resolve))
         assert.equal(prompts.length, phase === 'before-directive' ? 1 : 2)
@@ -559,7 +642,17 @@ for (const interruption of ['cancel']) {
         assert.ok(disposals >= 1)
         assert.equal(events.filter(event => event.stage === 'source_first_zero_tool_turn').length, 1)
         assert.equal(events.filter(event => event.stage === 'source_first_worker_started').length, phase === 'before-directive' ? 1 : 2)
-      } finally { release(); controller.abort(); await run.result.catch(() => {}); await run.dispose(); await rm(root, { recursive: true, force: true }) }
+      } finally {
+        release(); finishDirective?.({ stopReason: 'aborted' }); controller.abort()
+        try {
+          await Promise.race([Promise.all([run?.result.catch(() => {}), run?.dispose()]), deadline])
+        } finally {
+          watchdog.clear()
+          budgetTimers.clear()
+          t.mock.restoreAll()
+          await rm(root, { recursive: true, force: true })
+        }
+      }
     })
   }
 }
@@ -807,35 +900,43 @@ test('three analysis workers overlap, refill a free slot, and settle out of orde
 })
 
 
-test('a failed unit stops new dispatch while other running units keep their completed results', async () => {
+test('a failed unit stops new dispatch while other running units keep their completed results', { timeout: 15000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'parallel-failure-'))
   const controller = new AbortController()
   let created = 0
   const settled = [], disposed = []
   const releases = []
   const actions = Array.from({ length: 4 }, (_, i) => ({ action_id: `failure:${i}`, role: 'analysis', stage: 'unit_analysis', action: 'dispatch_agent' }))
-  const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId: 'failure', signal: controller.signal,
-    runner: async ({ args }) => {
-      if (args[0] === 'task-open') return { task: {} }
-      if (args[1] === 'next') return { run_id: 'failure', actions }
-      if (args[1] === 'settle') settled.push(args[args.indexOf('--action-id') + 1])
-      return {}
-    }, subagents: { start: async () => {
-      const number = created++, id = `worker-${number}`
-      return { id, remoteSessionId: `remote-${number}`, result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => disposed.push(id),
-        continuePrompt: async () => {
-          await new Promise(resolve => { releases.push(resolve); if (releases.length === 3) for (const release of releases) release() })
-          if (number === 0) throw new Error('unit transport failed')
-          await new Promise(resolve => setTimeout(resolve, 10))
-          return { stopReason: 'completed' }
-        } }
-    } } })
+  const watchdog = fixtureWatchdog(controller, 'failed-unit barrier', () => { for (const release of releases) release() })
+  let run
   try {
-    await assert.rejects(run.result, /unit transport failed/)
+    run = createSourceFirstAcpRun({ providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId: 'failure', signal: controller.signal,
+      runner: async ({ args }) => {
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[1] === 'next') return { run_id: 'failure', actions }
+        if (args[1] === 'settle') settled.push(args[args.indexOf('--action-id') + 1])
+        return {}
+      }, subagents: { start: async () => {
+        const number = created++, id = `worker-${number}`
+        return { id, remoteSessionId: `remote-${number}`, result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => disposed.push(id),
+          continuePrompt: async () => {
+            await new Promise(resolve => { releases.push(resolve); if (releases.length === 3) for (const release of releases) release() })
+            if (number === 0) throw new Error('unit transport failed')
+            await new Promise(resolve => setTimeout(resolve, 10))
+            return { stopReason: 'completed' }
+          } }
+      } } })
+    await assert.rejects(Promise.race([run.result, watchdog.promise]), /unit transport failed/)
     assert.equal(created, 3)
     assert.deepEqual(settled.sort(), ['failure:1', 'failure:2'])
     assert.equal(disposed.length, 3)
-  } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
+  } finally {
+    for (const release of releases) release()
+    controller.abort()
+    try {
+      await Promise.race([Promise.all([run?.result.catch(() => {}), run?.dispose()]), watchdog.promise])
+    } finally { watchdog.clear(); await rm(root, { recursive: true, force: true }) }
+  }
 })
 
 test('paused run disposal closes its owned process tree, retains remote identity and is idempotent', async () => {
@@ -916,7 +1017,7 @@ test.skip('zero-tool recovery in blind and comparison review preserves one origi
   } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
-test.skip('closure budget pauses only its original worker, other units complete, explicit continuation restores it', async () => {
+test.skip('closure budget pauses only its original worker, other units complete, explicit continuation restores it', { timeout: 15000 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'closure-budget-'))
   const runId = 'closure-budget', controller = new AbortController()
   const actions = Array.from({ length: 4 }, (_, i) => ({ action_id: `${runId}:${i}`, role: 'closure', stage: 'targeted_closure', action: 'continue_agent', task_id: `original-${i}` }))
@@ -925,6 +1026,10 @@ test.skip('closure budget pauses only its original worker, other units complete,
   await writeFile(path.join(root, 'runs', runId, 'acp-workers.json'), JSON.stringify({ runId, workers: bindings }))
   const done = new Set(), paused = new Set(), resumed = [], events = []
   let active = 0, peak = 0, allowSlow = false
+  const firstWaveIds = new Set(actions.slice(0, 3).map(action => action.task_id))
+  const firstWaveEntered = new Set()
+  let releaseFirstWave
+  const firstWaveReady = new Promise(resolve => { releaseFirstWave = resolve })
   const options = { providerId: 'pangea-nga', parent: {}, cwd: root, dataRoot: root, runId, signal: controller.signal, closureBudgetMs: 1000, // Allow binding persistence before testing the slow-worker deadline.
 
     runner: async ({ args }) => {
@@ -937,14 +1042,23 @@ test.skip('closure budget pauses only its original worker, other units complete,
     }, subagents: { start: async (_provider, request) => {
       resumed.push(request.resume)
       const id = request.resume.taskId
+      if (id === 'original-3') assert.ok(done.size + paused.size > 0, 'fourth worker waits for a free slot')
       let running = false
       return { id, remoteSessionId: request.resume.remoteSessionId,
         dispose: async () => { if (running) { active--; running = false } },
         continuePrompt: async () => {
           running = true; active++; peak = Math.max(peak, active)
+          // Binding and event persistence precede each prompt and can take
+          // longer than a fast fake turn, especially on Windows. Hold the
+          // initial wave until all three prompts enter instead of assuming
+          // their startup I/O fits inside a five-millisecond overlap window.
+          if (!allowSlow && firstWaveIds.has(id)) {
+            firstWaveEntered.add(id)
+            if (firstWaveEntered.size === firstWaveIds.size) releaseFirstWave()
+            await firstWaveReady
+          }
           if (id === 'original-0' && !allowSlow) return new Promise(() => {})
-          await new Promise(resolve => setTimeout(resolve, 5))
-          active--; running = false
+          if (running) { active--; running = false }
           return { stopReason: 'completed' }
         } }
     } } }
@@ -952,6 +1066,7 @@ test.skip('closure budget pauses only its original worker, other units complete,
   try {
     run = createSourceFirstAcpRun(options)
     assert.equal((await run.result).attentionRequired, true)
+    assert.deepEqual([...firstWaveEntered].sort(), [...firstWaveIds].sort())
     assert.equal(peak, 3)
     assert.equal(done.size, 3)
     assert.deepEqual([...paused], [`${runId}:0`])
@@ -961,7 +1076,13 @@ test.skip('closure budget pauses only its original worker, other units complete,
     assert.equal((await run.result).attentionRequired, false)
     assert.equal(done.size, 4)
     assert.deepEqual(resumed.at(-1), { taskId: 'original-0', remoteSessionId: 'remote-0' })
-  } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
+  } finally {
+    releaseFirstWave() // Also release waiting fake turns when an assertion fails.
+    controller.abort()
+    await run?.result.catch(() => {})
+    await run?.dispose()
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test.skip('closure allows one mechanical repair then pauses instead of looping', async () => {
@@ -984,3 +1105,39 @@ test.skip('closure allows one mechanical repair then pauses instead of looping',
     assert.equal(repairs, 2)
   } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
 })
+for (const ignored of ['duplicate_execution', 'already_started', 'stale_execution', 'already_settled', 'already_finished']) {
+  test(`ignored execution boundary ${ignored} never creates a new timeline boundary`, async () => {
+    const runId = `timeline-ignored-${ignored}`
+    let settled = false
+    const executionCalls = []
+    const controller = new AbortController()
+    const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: '/work', dataRoot: testDataRoot, runId,
+      signal: controller.signal,
+      runner: async ({ args }) => {
+        if (args[0] === 'task-open') return { task: {} }
+        if (args[1] === 'next') return { run_id: runId, lifecycle_status: settled ? 'complete' : 'running',
+          actions: settled ? [] : [{ action_id: `${runId}:a`, role: 'planning', stage: 'unit_planning', action: 'dispatch_agent' }] }
+        if (args[1] === 'execution') { executionCalls.push(args); return { event_ignored: true, reason: ignored } }
+        if (args[1] === 'settle') settled = true
+        return {}
+      },
+      subagents: { start: async () => ({ id: `${runId}-worker`, remoteSessionId: `${runId}-remote`,
+        result: Promise.resolve({ stopReason: 'completed' }), continuePrompt: async () => ({ stopReason: 'completed' }),
+        dispose: async () => {}, readOutput: () => '' }) },
+    })
+    try {
+      await run.result
+      assert.ok(executionCalls.some(args => args[args.indexOf('--event') + 1] === 'finished'))
+      assert.ok(executionCalls.every(args => args.includes('--execution-id')))
+      assert.equal(new Set(executionCalls.map(args => args[args.indexOf('--execution-id') + 1])).size, 1)
+      const store = new AgentSessionStore({ dataRoot: testDataRoot, runId })
+      const timeline = await store.timeline()
+      assert.equal(timeline.lanes.flatMap(lane => lane.segments).length, 0)
+      assert.equal(timeline.lanes.flatMap(lane => lane.events).filter(event => event.kind.startsWith('execution_')).length, 0)
+      for (const session of (await store.list()).items) {
+        const page = await store.read(session.session_id, { limit: 200 })
+        assert.equal(page.events.filter(event => event.stage === 'source_first_execution').length, 0)
+      }
+    } finally { controller.abort(); await run.dispose() }
+  })
+}

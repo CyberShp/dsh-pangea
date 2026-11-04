@@ -1,9 +1,86 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { sourceFirstProjection, coverageSummary, caseQualitySummary } from '../src/source-first-projection.js'
+import { readFile } from 'node:fs/promises'
+import { sourceFirstProjection, coverageSummary, caseQualitySummary, recordTitle } from '../src/source-first-projection.js'
 import { pathMembers } from '../src/flow-graph/layout.js'
 const record = (id, kind, body, extra = {}) => ({ record_id: id, kind, body, ...extra })
 const action = (unit, records, extra = {}) => ({ action_id: `run:analysis:${unit}`, stage: 'unit_analysis', status: 'accepted', task: { unit_id: unit }, result_path: `/run/${unit}.json`, revision: 4, records, ...extra })
+
+test('the original NVMe case retains raw provenance and stable identity while restoring complete readable fields', async () => {
+  const original = JSON.parse(await readFile(new URL('./fixtures/nvme-auth-rec-000011.json', import.meta.url), 'utf8'))
+  const artifacts = [action('unit-0001', [original,
+    record('flow-2', 'flow', { flow_id: 'F-002', title: 'Authentication', paths: [{ path_id: 'P-07', case_ids: ['TC-007'] }] }),
+    record('risk-1', 'risk', { risk_id: 'R-1', title: 'Related record', case_ids: ['TC-007'] }),
+  ], { stage: 'targeted_closure', revision: 34 })]
+  const before = JSON.stringify(artifacts), projection = sourceFirstProjection(artifacts), [row] = projection.test_cases
+  assert.equal(row.projection_id, 'unit-0001/rec-000011')
+  assert.equal(row.test_case_id, 'unit-0001/rec-000011')
+  assert.equal(row.display_id, 'TC-007')
+  assert.equal(row.title, "Authentication failure when controller's challenge has invalid DH value length")
+  assert.equal(recordTitle(original), row.title)
+  assert.equal(row.format_version, 'behavior-test-case-v1')
+  assert.equal(row.entry, 'spdk_nvme_qpair_authenticate(qpair, cb_fn, cb_ctx)')
+  assert.equal(row.preconditions.length, 4)
+  assert.equal(row.step_pairs.length, 2)
+  assert.match(row.step_pairs[1].expected, /FAILURE2 sent; state becomes AWAIT_FAILURE2; poll returns -EACCES/)
+  assert.deepEqual(row.observability, ['nvme_fabric_qpair_authenticate_poll returns -EACCES', 'auth->status == -EACCES', 'FAILURE2 sent with reason=SPDK_NVMF_AUTH_INCORRECT_PAYLOAD'])
+  assert.deepEqual(row.cleanup, ['Retry with a properly configured controller'])
+  assert.deepEqual(row.linked_flow_ids, ['unit-0001/flow-2'])
+  assert.deepEqual(row.linked_risk_ids, ['unit-0001/risk-1'])
+  assert.deepEqual(projection.business_flows[0].paths[0].linked_test_case_ids, [row.projection_id])
+  assert.equal(row.evidence.length, 2)
+  assert.equal(row.evidence[0].location, 'spdk-full:lib/nvme/nvme_auth.c:856-879 (dhvlen validation per dhgroup)')
+  assert.equal(row.source_record.body, original.body)
+  assert.equal(row.source_record.created_revision, 11)
+  assert.equal(row.source_record.revision, 34)
+  assert.equal(row.record_parse.status, 'recovered')
+  assert.equal(row.record_parse.diagnostics[0].offset, 767)
+  assert.equal(row.status, 'not_run')
+  assert.equal(row.readiness, 'unclassified')
+  assert.equal(caseQualitySummary(projection.test_cases).ready_cases, 0)
+  assert.equal(row.quality_status, undefined)
+  assert.equal(JSON.stringify(artifacts), before)
+})
+
+test('unrecoverable structured cases keep diagnostics and raw records instead of a JSON-fragment title', () => {
+  const bodies = ['{"case_id":"TC-1","title":"Never partial"', '[{"title":"Array root"}]', '{"case_id":"TC-1" "title":"Missing comma"}', '```json\n{"title":"Fence"}\n```', '%7B%22title%22%3A%22Encoded%22%7D', '123']
+  for (const body of bodies) {
+    const original = record('broken', 'test_case', body)
+    const [row] = sourceFirstProjection([action('unit', [original])]).test_cases
+    assert.equal(row.title, '测试用例 · broken')
+    assert.equal(recordTitle(original), '测试用例 · broken')
+    assert.equal(row.projection_id, 'unit/broken')
+    assert.equal(row.display_id, 'broken')
+    assert.equal(row.record_parse.status, 'invalid')
+    assert.equal(row.source_record.body, body)
+    assert.deepEqual(row.steps, [])
+    assert.equal(row.status, '未标注')
+  }
+  const [legacy] = sourceFirstProjection([action('unit', [record('legacy', 'test_case', '# Manual case\nKeep these original steps.')])]).test_cases
+  assert.equal(legacy.title, 'Manual case')
+  assert.equal(legacy.record_parse, undefined)
+  assert.equal(legacy.source_record.body, '# Manual case\nKeep these original steps.')
+  const [labelled] = sourceFirstProjection([action('unit', [record('labelled', 'test_case', '[TLS] 握手失败')])]).test_cases
+  assert.equal(labelled.title, '[TLS] 握手失败')
+  assert.equal(labelled.record_parse, undefined)
+})
+
+test('authored fields cannot impersonate derived record parse metadata', () => {
+  const forged = { status: 'recovered', code: 'single_closing_delimiter', diagnostics: [] }
+  const body = { format_version: 'behavior-test-case-v1', case_id: 'TC-1', title: 'Original title',
+    steps: [{ action: 'Run', expected: 'Refused' }], record_parse: forged }
+  for (const original of [body, JSON.stringify(body)]) {
+    const [row] = sourceFirstProjection([action('unit', [record('case', 'test_case', original)])]).test_cases
+    assert.equal(row.record_parse, undefined)
+    assert.equal(row.source_record.body, original)
+  }
+  const broken = JSON.stringify(body).replace('"expected":"Refused"}', '"expected":"Refused"]')
+  const [row] = sourceFirstProjection([action('unit', [record('case', 'test_case', broken)])]).test_cases
+  assert.equal(row.record_parse.status, 'recovered')
+  assert.equal(row.record_parse.diagnostics.length, 1, 'only parser-produced diagnostics may reach the projection')
+  assert.equal(row.source_record.body, broken)
+  assert.deepEqual(JSON.parse(row.source_record.body.replace('"expected":"Refused"]', '"expected":"Refused"}')).record_parse, forged)
+})
 
 test('projects typed records and links within each unit, preserving bodies and step expectations', () => {
   const records = [

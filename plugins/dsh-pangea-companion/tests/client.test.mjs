@@ -14,6 +14,44 @@ import { applyTaskExecutionState } from '../src/index.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const clientPath = path.resolve(here, '..', 'lib', 'client.js')
+const componentRenders = new WeakMap()
+
+// These children own hooks independently of the panel's indexed fixture state.
+// Re-reading the same element renders its updated state after a click. DOM
+// lifecycle effects remain covered by result-drawers.test.mjs.
+function withPreviewComponents(react) {
+  let frame
+  return {
+    ...react,
+    createElement(type, props, ...children) {
+      const element = react.createElement(type, props, ...children)
+      if (['TextPreview', 'ResultDrawer', 'TaskInfoAction'].includes(type?.name)) {
+        const hooks = { slots: [], index: 0 }
+        componentRenders.set(element, () => {
+          const previous = frame
+          frame = hooks
+          hooks.index = 0
+          try {
+            return type(children.length ? { ...props, children: children.length === 1 ? children[0] : children } : props ?? {})
+          } finally { frame = previous }
+        })
+      }
+      return element
+    },
+    useState(initial) {
+      if (!frame) return react.useState(initial)
+      const hooks = frame, index = hooks.index++
+      if (!(index in hooks.slots)) hooks.slots[index] = typeof initial === 'function' ? initial() : initial
+      return [hooks.slots[index], update => { hooks.slots[index] = typeof update === 'function' ? update(hooks.slots[index]) : update }]
+    },
+    useRef(initial) {
+      if (!frame) return react.useRef(initial)
+      const hooks = frame, index = hooks.index++
+      return hooks.slots[index] ??= { current: initial }
+    },
+    useEffect(...args) { if (!frame) return react.useEffect(...args) },
+  }
+}
 
 function fakeReact() {
   return {
@@ -160,6 +198,7 @@ test('saved internal API settings do not restore an analysis route or show inter
 })
 
 async function loadClientExports(react = fakeReact(), fetcher = async () => { throw new Error('fetch must not run during registration') }, onEvent = () => {}, windowProperties = {}) {
+  react = withPreviewComponents(react)
   const source = await readFile(clientPath, 'utf8')
   let exported
   const sandbox = { URLSearchParams, AbortController, console, fetch: fetcher, setInterval, clearInterval, navigator: windowProperties.navigator,
@@ -171,6 +210,8 @@ async function loadClientExports(react = fakeReact(), fetcher = async () => { th
 
 function descendants(node) {
   if (Array.isArray(node)) return node.flatMap(descendants)
+  const render = node && typeof node === 'object' && componentRenders.get(node)
+  if (render) return [...(node.type?.name === 'TaskInfoAction' ? [node] : []), ...descendants(render())]
   if (['RunWorkspace', 'RunExecutionSummary'].includes(node?.type?.name)) return descendants(node.type(node.props))
   if (!node?.children) return []
   return [node, ...node.children.flatMap(descendants)]
@@ -470,8 +511,12 @@ test('actual review stage shows Chinese structured verdict and preserves origina
   assert.match(serialized, /历史 English explanation stays verbatim/)
   assert.match(serialized, /查看原始复核记录/)
   const decision = nodes.find(node => node.type === 'details' && node.props.className === 'run-output-row')
-  assert.equal(decision.props.open, true, 'review decisions remain visible without requiring disclosure')
+  assert.equal(decision.props.open, false, 'review explanations stay collapsed by default')
   assert.equal(decision.children[0].type, 'summary')
+  assert.match(metricsText(decision.children[0]), /复核结论：待确认/)
+  assert.doesNotMatch(metricsText(decision.children[0]), /历史 English explanation stays verbatim|需要确认设备支持/)
+  assert.match(metricsText(decision.children.slice(1)), /历史 English explanation stays verbatim/)
+  assert.match(metricsText(decision.children.slice(1)), /需要确认设备支持/)
 })
 
 test('stage navigation preserves the task tab and restores exact output navigation context', async () => {
@@ -511,7 +556,9 @@ test('stage navigation preserves the task tab and restores exact output navigati
   nodes.find(node => node.type === 'button' && /^stage /.test(node.props.className) && metricsText(node).includes('结果复核')).props.onClick()
   nodes = render()
   assert.ok(nodes.some(node => node.props['aria-label'] === '结果复核 · 阶段进展'))
-  assert.equal(nodes.find(node => node.type === 'details' && node.props.className === 'run-output-row').props.open, true)
+  const reviewRow = nodes.find(node => node.type === 'details' && node.props.className === 'run-output-row')
+  assert.equal(reviewRow.props.open, false)
+  assert.match(metricsText(reviewRow.children[0]), /复核结论：待确认/)
 })
 
 test('partial and unreadable stage output never turns the compact pending summary into a completion claim', async () => {
@@ -823,7 +870,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /snapshotPollInterval\(value\)/)
   assert.match(source, /同步失败，继续显示上次结果/)
   assert.match(source, /finally \{[\s\S]*sequence === workbenchRequestRef\.current\.sequence\) setWorkbenchLoading\(false\)/)
-  assert.match(source, /\['home', 'tasks', 'create', 'repository-import', 'report'\]\.includes\(screen\.type\).*header/)
+  assert.match(source, /\['home', 'tasks', 'create', 'repository-import', 'report', 'run-record'\]\.includes\(screen\.type\).*header/)
   assert.doesNotMatch(source, /\$\{selectedTask\.title\} · \$\{selectedTask\.task_id\}/)
   // Product forms omit implementation IDs; raw review records may now label them.
   assert.doesNotMatch(source, /field\('任务编号'/)
@@ -1393,7 +1440,7 @@ test('client builds focused discussion drafts, appends them to the active DSH co
   assert.equal(exported.evidenceTabLabel({ location: 'spdk-full:lib/iscsi/conn.c:121-240' }, 0), '1 · conn.c:121–240')
   assert.equal(exported.evidenceTabLabel({ location: 'docs/spec.md#L12-L16' }, 1), '2 · spec.md:12–16')
   assert.equal(exported.runLabel({ run_id: 'analysis-20260905-01', target: 'DHCP 模块' }), 'DHCP 模块')
-  assert.equal(exported.runLabel({ run_id: 'analysis-20260905-01' }), 'analysis-20260905-01')
+  assert.equal(exported.runLabel({ run_id: 'analysis-20260905-01' }), '分析任务', 'a run identifier is metadata, not an authored task name')
 })
 
 test('risk and test case pages use result-focused copy and only show recorded metadata', async () => {
@@ -1510,6 +1557,38 @@ test('risk detail keeps its result and case navigation when source preview retur
   nodes.find(node => node.type === 'button' && metricsText(node).startsWith('TC-001')).props.onClick()
   assert.equal(states[16].type, 'case')
   assert.equal(states[16].id, run.details.test_cases[0].test_case_id)
+  cleanup()
+})
+
+test('case source preview sends the canonical location while retaining the annotated reference', async () => {
+  const { sourceFirstProjection } = await import('../src/source-first-projection.js')
+  const reference = 'spdk-full:lib/nvme/nvme_auth.c:1084-1225 (nvme_fabric_qpair_authenticate_poll)'
+  const details = sourceFirstProjection([{ stage: 'unit_analysis', task: { unit_id: 'u' }, records: [
+    { record_id: 'c', kind: 'test_case', body: { title: 'NVMe authentication', source_evidence: [reference] } },
+  ] }])
+  const states = { 0: { current: { run_id: 'run', details }, data_root: '/isolated' }, 4: 'run', 16: { type: 'case', id: 'u/c' } }
+  const effects = [], requests = []
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = typeof initial === 'function' ? initial() : initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  }, useEffect(effect) { if (String(effect).includes('requestSourceSnippet') && String(effect).includes('setSourcePreview')) effects.push(effect) } }, async url => {
+    requests.push(url)
+    return { ok: true, status: 200, json: async () => ({ status: 'ok', lines: [{ number: 1084, text: 'auth_poll();', target: true }] }) }
+  })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const render = () => { index = 0; const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true }); return descendants(panel.type(panel.props)) }
+  let nodes = render()
+  const cleanup = effects[0]()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(new URL(requests[0], 'http://localhost').searchParams.get('location'), 'spdk-full:lib/nvme/nvme_auth.c:1084-1225')
+  nodes.find(node => node.type === 'button' && metricsText(node) === '关联代码 · 1 处 ↗').props.onClick()
+  nodes = render()
+  const source = nodes.find(node => node.props.role === 'dialog' && node.props['aria-label'] === '源码依据')
+  assert.match(metricsText(source), /nvme_fabric_qpair_authenticate_poll/)
+  assert.match(metricsText(source), /auth_poll\(\);/)
   cleanup()
 })
 
@@ -1904,22 +1983,212 @@ test('selected task overview shows loading until its workbench request settles a
   }
 })
 
-test('result and overview headers keep task metadata in the task info drawer', async () => {
+async function taskPresentationView(task, current, screen, extraTasks = []) {
+  const states = { 0: { current, data_root: current.data_root },
+    1: { compatibility: { compatible: true }, tasks: { items: [...(task ? [task] : []), ...extraTasks] }, runs: { items: [current] } },
+    4: current.run_id, 5: task?.task_id, 16: screen }
+  let index = 0
+  const requests = []
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = typeof initial === 'function' ? initial() : initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } }, async (...args) => { requests.push(args); throw new Error('task presentation must not submit requests') })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const page = pages.find(page => page.id === (screen.type === 'home' ? 'workbench' : 'analysis'))
+  const panel = page.component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const render = () => { index = 0; const tree = panel.type(panel.props); return { tree, nodes: descendants(tree) } }
+  return { client, ...render(), render, states, requests }
+}
+
+function assertTaskInfoRequest(info, expectedName, expectedRequest) {
+  assert.ok(info)
+  let nodes = descendants(info)
+  assert.equal(nodes.some(node => node.props.role === 'dialog'), false, 'task information starts closed')
+  nodes.find(node => node.type === 'button' && node.props['aria-label'] === '任务信息').props.onClick()
+  nodes = descendants(info)
+  const drawer = nodes.find(node => node.props.role === 'dialog' && node.props['aria-label'] === '任务信息')
+  assert.ok(drawer)
+  const name = descendants(drawer).find(node => node.props.className === 'pangea-task-info-name')
+  const request = descendants(drawer).find(node => node.props.className === 'pangea-task-request')
+  assert.equal(metricsText(descendants(name).find(node => node.type === 'h3')), '任务名称')
+  assert.equal(metricsText(descendants(name).find(node => node.type === 'p')), expectedName)
+  assert.equal(metricsText(descendants(request).find(node => node.type === 'h3')), '完整需求')
+  assert.equal(metricsText(descendants(request).find(node => node.type === 'p')), expectedRequest, 'line breaks and the end of the request remain intact')
+  assert.equal(metricsText(drawer).split(expectedRequest).length - 1, 1, 'the original request appears once in the drawer')
+  nodes.find(node => node.props['aria-label'] === '关闭任务信息').props.onClick()
+  assert.equal(descendants(info).some(node => node.props.role === 'dialog'), false)
+}
+
+test('result and overview headers keep the task name separate from the complete request drawer', async () => {
   const target = '完整任务指令第一段。\n第二段：检查数据边界和资源释放。'
   const task = { task_id: 'task', run_id: 'run', data_root: '/data', repository: 'repo', source_scope: ['src/request.c'], title: '请求分析', target, status: 'complete' }
   const current = { run_id: 'run', data_root: '/data', repository: 'repo', target, status: 'complete', details: {} }
+  const before = JSON.stringify({ task, current })
   for (const type of ['overview', 'flows']) {
-    const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type } }; let index = 0
-    const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
-    const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }; client.apply(ctx)
-    const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
-    const nodes = descendants(panel.type(panel.props))
+    const { client, tree, nodes } = await taskPresentationView(task, current, { type })
     assert.ok(!nodes.some(node => node.props.className === 'b03-overview-run-meta'))
-    const info = nodes.find(node => node.type === client.TaskInfoAction); assert.ok(info); assert.equal(info.props.task.target, target)
-    const opened = await loadClientExports({ ...fakeReact(), useState() { return [true, () => {}] } })
-    const drawer = descendants(opened.TaskInfoAction(info.props))
-    assert.ok(drawer.some(node => node.props.role === 'dialog' && node.props['aria-label'] === '任务信息'))
-    assert.ok(drawer.some(node => node.type === 'dd' && node.children.includes(target)))
+    assert.equal(nodes.find(node => node.type === 'h1').children[0], '请求分析')
+    assert.equal(metricsText(tree).includes(target), false)
+    const info = nodes.find(node => node.type === client.TaskInfoAction)
+    assert.ok(info)
+    assert.equal(info.props.task.target, target)
+    assertTaskInfoRequest(info, '请求分析', target)
+  }
+  assert.equal(JSON.stringify({ task, current }), before, 'reading task information does not rewrite saved data')
+})
+
+test('a legacy long request has one real short task name across workbench and result pages', async () => {
+  const request = '为完整 lib/nvme/nvme_auth.c 制定业务行为测试方案。\n' +
+    '覆盖认证发起、挑战响应、错误密钥、超时恢复和资源释放；逐条保留可操作步骤、外部观测以及源码依据。\n' +
+    '不把源码函数调用直接当成用户操作，也不把设计完成写成测试通过。末段要求必须保留。'
+  const name = 'nvme_auth 行为分析'
+  const task = { task_id: 'task-nvme', run_id: 'run-01', data_root: '/data', repository: 'spdk',
+    title: request, target: request, source_scope: ['lib/nvme/nvme_auth.c'], scenario: 'module-analysis', status: 'completed' }
+  const current = { run_id: task.run_id, data_root: task.data_root, repository: task.repository, title: request, target: request,
+    analysis_profile: 'behavior-test-v1', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true,
+    source_snapshot: { requested_scope: task.source_scope, file_count: 1 }, report_available: true, publication: { state: 'final' },
+    reader_health: { status: 'ok', trusted: true }, artifacts: { report_md: '/data/report.md' },
+    details: { business_flows: [], risks: [], test_cases: [{ test_case_id: 'TC-1', title: '错误密钥被拒绝', verification_goal: '拒绝不匹配的认证密钥' }] },
+    workflow: { steps: [], units: [], actions: [] } }
+  const before = JSON.stringify({ task, current })
+  const attention = { ...task, task_id: 'attention', status: 'needs_attention' }
+  const running = { ...task, task_id: 'running', status: 'running', execution_status: 'running' }
+  const home = await taskPresentationView(task, current, { type: 'home' }, [attention, running])
+  for (const [className, heading] of [['b06-attention', 'h3'], ['b06-running', 'strong'], ['b06-report', 'strong']]) {
+    const card = home.nodes.find(node => node.props.className === className)
+    assert.ok(card, className)
+    assert.equal(metricsText(descendants(card).find(node => node.type === heading)), name, className)
+  }
+  assert.equal(metricsText(home.tree).includes(request), false, 'workbench cards do not render the request as a title')
+  const tasks = await taskPresentationView(task, current, { type: 'tasks' })
+  const rowTitle = tasks.nodes.find(node => node.props.className === 'b03-task-title')
+  assert.equal(metricsText(rowTitle), name)
+  assert.equal(rowTitle.props['aria-label'], `打开任务 ${name}`)
+  assert.ok(tasks.nodes.some(node => node.props['aria-label'] === `删除任务 ${name}`))
+  assert.equal(metricsText(tasks.tree).includes(request), false, 'the task list does not repeat the raw requirement')
+  for (const [type, context] of [['overview', '分析概览'], ['flows', '业务流程'], ['cases', '测试用例'], ['case', '用例详情'], ['report', '分析报告'], ['workflow', '运行详情']]) {
+    const { client, nodes } = await taskPresentationView(task, current, { type, ...(type === 'case' ? { id: 'TC-1' } : {}) })
+    assert.deepEqual(nodes.filter(node => node.type === 'h1').map(metricsText), [name], `${type} has one task heading`)
+    assert.ok(nodes.some(node => node.props.className === 'pangea-task-context' && metricsText(node) === `${context} · spdk · RUN 01`), `${type} keeps page and run context separate`)
+    assert.equal(metricsText(nodes).includes(request), false, `${type} keeps the complete request out of the default reading surface`)
+    assertTaskInfoRequest(nodes.find(node => node.type === client.TaskInfoAction), name, request)
+    if (type === 'case') {
+      assert.equal(metricsText(nodes.find(node => node.props.className === 'b05-detail-title')), '错误密钥被拒绝')
+      const sidebar = nodes.find(node => node.props['aria-label'] === '当前筛选用例')
+      assert.ok(descendants(sidebar).some(node => node.type === 'span' && metricsText(node) === '错误密钥被拒绝'))
+    }
+  }
+  assert.equal(JSON.stringify({ task, current }), before, 'display-name projection preserves the legacy request and records')
+
+  const activeTask = { ...task, status: 'running', execution_status: 'running' }
+  const activeRun = { ...current, lifecycle_status: 'running', terminal: false, stage: 'analyzing', publication: { state: 'draft' }, report_available: false }
+  const activeBefore = JSON.stringify({ activeTask, activeRun })
+  for (const type of ['tasks', 'overview']) {
+    const view = await taskPresentationView(activeTask, activeRun, { type })
+    for (const [action, title] of [['停止', '停止分析任务？'], ['删除', '删除分析任务？']]) {
+      const button = view.render().nodes.find(node => node.props['aria-label'] === `${action}任务 ${name}`)
+      assert.ok(button, `${type} ${action} uses the current Run profile`)
+      button.props.onClick()
+      const dialogComponent = view.render().nodes.find(node => node.type === view.client.TaskLifecycleDialog)
+      assert.ok(dialogComponent)
+      const dialogNodes = descendants(dialogComponent.type(dialogComponent.props))
+      const dialog = dialogNodes.find(node => node.props.role === 'dialog')
+      assert.ok(dialogNodes.some(node => node.type === 'h2' && metricsText(node) === title))
+      assert.ok(dialogNodes.some(node => node.type === 'p' && metricsText(node) === name))
+      assert.equal(metricsText(dialog).includes(request), false)
+      dialogNodes.find(node => node.type === 'button' && node.children.includes('取消')).props.onClick()
+      assert.equal(view.render().nodes.some(node => node.type === view.client.TaskLifecycleDialog), false)
+    }
+    if (type === 'tasks') {
+      view.states[0] = { ...view.states[0], current: { run_id: 'unrelated-run', analysis_profile: 'unrelated-profile' } }
+      for (const action of ['停止', '删除']) assert.ok(view.render().nodes.some(node => node.props['aria-label'] === `${action}任务 ${name}`), `${action} uses the linked summary when the current snapshot belongs to another Run`)
+    }
+    assert.equal(view.requests.length, 0, 'opening and cancelling a lifecycle dialog sends no request')
+  }
+  const workspace = await taskPresentationView(activeTask, activeRun, { type: 'workflow' })
+  workspace.nodes.find(node => node.type === 'button' && node.children.includes('停止')).props.onClick()
+  const stopDialog = workspace.render().nodes.find(node => node.props.role === 'dialog' && node.props['aria-labelledby'] === 'pangea-stop-title')
+  assert.ok(stopDialog)
+  assert.ok(descendants(stopDialog).some(node => node.type === 'strong' && metricsText(node) === name))
+  assert.equal(metricsText(stopDialog).includes(request), false)
+  descendants(stopDialog).find(node => node.type === 'button' && node.children.includes('继续运行')).props.onClick()
+  assert.equal(workspace.render().nodes.some(node => node.props['aria-labelledby'] === 'pangea-stop-title'), false)
+  assert.equal(workspace.requests.length, 0, 'cancelling the Run stop confirmation never submits a stop request')
+  assert.equal(JSON.stringify({ activeTask, activeRun }), activeBefore)
+})
+
+test('an unlinked historical Run uses its frozen scope for a short name and retains the complete request', async () => {
+  const request = '只分析 mq.c 和 mq.h 的消息队列接口契约。\n' +
+    '覆盖入队、出队、空队列、满队列、非法参数和生命周期；每条用例说明调用入口、输入与可观察结果。\n' +
+    '保留所有未明确的约束，不补造环境能力，最终这一段也必须完整保留。'
+  const current = { run_id: 'run-07', data_root: '/data', repository: 'semantic-queue', title: request, target: request,
+    source_snapshot: { requested_scope: ['mq.c', 'mq.h'] }, analysis_scene: { objective: 'interface-contract' },
+    workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true,
+    publication: { state: 'final' }, reader_health: { collection_status: { business_flows: 'readable', test_cases: 'readable' } },
+    details: { business_flows: [], risks: [], test_cases: [{ test_case_id: 'TC-MQ-1', title: '空队列出队返回约定状态' }] },
+    workflow: { steps: [], units: [], actions: [] } }
+  const before = JSON.stringify(current)
+  for (const type of ['run-record', 'workflow', 'flows', 'cases', 'case']) {
+    const { client, nodes } = await taskPresentationView(null, current, { type, ...(type === 'case' ? { id: 'TC-MQ-1' } : {}) })
+    assert.deepEqual(nodes.filter(node => node.type === 'h1').map(metricsText), ['mq 接口契约分析'], `${type} has one short task heading`)
+    assert.equal(metricsText(nodes).includes(request), false, `${type} does not use the full request as a default summary`)
+    if (type !== 'workflow') {
+      assert.equal(nodes.filter(node => node.type === 'nav' && node.props['aria-label'] === 'PANGEA 分析页面').length, 1, `${type} has one result navigation`)
+      assert.ok(nodes.some(node => node.props.className === 'pangea-task-header'), `${type} uses the shared task header`)
+    }
+    if (type === 'cases') assert.equal(nodes.filter(node => node.type === 'h2' && metricsText(node) === '测试用例').length, 1, 'the case workspace keeps its own section heading without a Task')
+    assertTaskInfoRequest(nodes.find(node => node.type === client.TaskInfoAction), 'mq 接口契约分析', request)
+  }
+  const view = await taskPresentationView(null, current, { type: 'cases' })
+  const navigate = (label, screen) => {
+    const nodes = view.render().nodes
+    const nav = nodes.find(node => node.type === 'nav' && (node.props['aria-label'] === 'PANGEA 分析页面' || node.props.className === 'task-tabs'))
+    assert.ok(nav, `${view.states[16].type} exposes result navigation`)
+    const button = descendants(nav).find(node => node.type === 'button' && metricsText(node).startsWith(label))
+    assert.ok(button, label)
+    assert.notEqual(button.props.disabled, true, `${label} is available without a Task`)
+    button.props.onClick()
+    assert.equal(view.states[16].type, screen)
+    assert.equal(view.states[4], current.run_id)
+    assert.equal(view.states[5], undefined)
+    assert.deepEqual(view.states[1].tasks.items, [])
+    const next = view.render().nodes
+    assert.deepEqual(next.filter(node => node.type === 'h1').map(metricsText), ['mq 接口契约分析'])
+    assert.equal(next.filter(node => node.type === view.client.TaskInfoAction).length, 1)
+    assert.equal(metricsText(next).includes(request), false)
+    assert.ok(!next.some(node => node.props['aria-label']?.startsWith('停止任务 ') || node.props['aria-label']?.startsWith('删除任务 ')), 'history navigation does not invent task controls')
+    return next
+  }
+  const overview = navigate('概览', 'run-record')
+  assert.ok(overview.some(node => node.props['aria-label'] === '运行记录 · 只读'))
+  assert.ok(overview.some(node => node.type === 'button' && metricsText(node) === '概览' && node.props['aria-current'] === 'page'))
+  const cases = navigate('测试用例', 'cases')
+  assert.equal(cases.filter(node => node.type === 'h2' && metricsText(node) === '测试用例').length, 1)
+  navigate('运行过程', 'workflow')
+  navigate('概览', 'run-record')
+  navigate('业务流程', 'flows')
+  navigate('测试用例', 'cases')
+  assert.equal(view.requests.length, 0, 'historical navigation does not submit an execution request')
+  assert.equal(JSON.stringify(current), before)
+})
+
+test('task information chooses complete request text from task target, run target, then legacy title', async () => {
+  const taskTarget = '任务级完整需求。\n保留任务需求的第二段与末尾。'
+  const runTarget = '本次运行的目标。\n保留运行目标的第二段与末尾。'
+  const legacyTitle = '旧任务将整段需求保存在 title 中，包含源码范围、接口边界、错误恢复和可观察结果。\n最后一段仍是需求正文，不是短任务名。'
+  for (const variant of [
+    { task: { title: '请求分析', target: taskTarget }, current: { target: runTarget }, expected: taskTarget },
+    { task: { title: '请求分析', target: '  ' }, current: { target: runTarget }, expected: runTarget },
+    { task: { title: legacyTitle }, current: {}, expected: legacyTitle },
+  ]) {
+    const task = { task_id: 'task', run_id: 'run', data_root: '/data', repository: 'request', source_scope: ['request.c'], status: 'complete', ...variant.task }
+    const current = { run_id: 'run', data_root: '/data', repository: 'request', details: {}, ...variant.current }
+    const before = JSON.stringify({ task, current })
+    const { client, nodes } = await taskPresentationView(task, current, { type: 'overview' })
+    assertTaskInfoRequest(nodes.find(node => node.type === client.TaskInfoAction), variant.task.title === legacyTitle ? 'request' : '请求分析', variant.expected)
+    assert.equal(JSON.stringify({ task, current }), before)
   }
 })
 
@@ -2207,7 +2476,7 @@ test('task filters can reset a no-results state without changing the selected ta
   const render = () => { index = 0; const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true }); return descendants(panel.type(panel.props)) }
   let nodes = render()
   const rowTitles = () => nodes.filter(n => n.type === 'tr' && n.props.className === 'pangea-task-row')
-    .map(row => descendants(row).find(n => n.type === 'button' && n.props.className === 'b03-task-title')?.children[0])
+    .map(row => metricsText(descendants(row).find(n => n.type === 'button' && n.props.className === 'b03-task-title')))
   assert.deepEqual(rowTitles(), ['较新 CPU 分析', 'TLS 握手检查', '请求队列分析', '配置回归分析', '较旧 CPU 分析'], 'default task order follows most recent update')
   const statusFilter = nodes.find(n => n.type === 'button' && n.children.includes('需要处理'))
   assert.ok(statusFilter)
@@ -2292,7 +2561,14 @@ test('task rows open their own Run and keep unlinked Runs in a read-only route',
   ownRun.props.onClick()
   assert.equal(states[4], 'run-23')
   assert.equal(states[5], 'T-1')
-  assert.equal(states[16].type, 'overview')
+  assert.equal(states[16].type, 'workflow', 'the task row Run control opens the promised execution view')
+
+  states[16] = { type: 'tasks' }
+  nodes = render()
+  nodes.find(node => node.type === 'button' && node.props.className === 'b03-task-title').props.onClick()
+  assert.equal(states[4], 'run-23')
+  assert.equal(states[5], 'T-1')
+  assert.equal(states[16].type, 'overview', 'opening the task title retains its overview route')
 
   states[5] = undefined
   states[4] = null
@@ -2349,7 +2625,7 @@ test('unlinked Run opens a read-only record from the selected frozen snapshot', 
   assert.ok(nodes.some(node => node.type === 'section' && node.props['aria-label'] === '运行结果'))
   assert.ok(nodes.some(node => node.type === 'section' && node.props['aria-label'] === '冻结输入'))
   assert.ok(nodes.some(node => node.type === 'dd' && node.children.includes('9 月 20 日 15:47')))
-  assert.ok(nodes.some(node => node.type === 'h3' && node.props.className === 'b03-run-record-summary-title' && node.children.includes('CPU计时边界分析')))
+  assert.equal(nodes.filter(node => typeof node.type === 'string' && /^h[1-6]$/.test(node.type) && metricsText(node) === 'CPU计时边界分析').length, 1, 'the run title appears once in the page hierarchy')
   assert.ok(nodes.some(node => node.type === 'p' && node.children.includes('CPU 使用率分析摘要。')))
   assert.ok(nodes.some(node => node.type === 'p' && node.props.className === 'b03-run-record-summary-meta' && node.children.includes('RUN 18 · 已完成 · 模块分析')))
   assert.ok(!nodes.some(node => node.type === 'button' && ['停止 Run', '继续分析', '查看分析报告', '打开 HTML 报告'].includes(node.children[0])))
@@ -2357,6 +2633,47 @@ test('unlinked Run opens a read-only record from the selected frozen snapshot', 
   assert.ok(backButton)
   backButton.props.onClick()
   assert.equal(states[16].type, 'tasks')
+})
+
+test('unlinked Run result links preserve run identity and require readable results', async () => {
+  let index = 0
+  const current = { run_id: 'historical-run', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true,
+    details: { business_flows: [], test_cases: [], risks: [], evidence: [] }, workflow: { steps: [], actions: [], units: [] },
+    reader_health: { collection_status: { test_cases: 'readable' } } }
+  const states = { 0: { data_root: '/workspace/data', current },
+    1: { compatibility: { compatible: true }, tasks: { items: [] }, runs: { items: [{ run_id: current.run_id }] } },
+    4: current.run_id, 5: undefined, 16: { type: 'run-record' } }
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = initial
+    return [states[key], value => { states[key] = typeof value === 'function' ? value(states[key]) : value }]
+  } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) }, selectTask() { assert.fail('history navigation must not create or select a task') } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const render = () => { index = 0; const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true }); return descendants(panel.type(panel.props)) }
+  for (const [label, target] of [['查看运行过程', 'workflow'], ['查看测试用例', 'cases']]) {
+    states[16] = { type: 'run-record' }
+    const nodes = render(), button = nodes.find(node => node.type === 'button' && node.children.includes(label))
+    assert.ok(button)
+    assert.equal(button.props.disabled, false, 'a readable empty collection still has a valid empty-state view')
+    button.props.onClick()
+    assert.equal(states[16].type, target)
+    assert.equal(states[4], current.run_id)
+    assert.equal(states[5], undefined)
+    assert.ok(!nodes.some(node => node.type === 'button' && ['停止', '继续分析', '重试停止'].some(text => node.children.includes(text))))
+    if (target === 'workflow') assert.ok(!render().some(node => node.type === 'button' && ['停止', '继续分析', '重试停止'].some(text => node.children.includes(text))))
+  }
+  for (const health of [{ collection_status: { test_cases: 'unavailable' } }, { collection_status: { test_cases: 'readable' }, count_checks: { test_cases: { status: 'mismatch' } } }]) {
+    states[16] = { type: 'run-record' }
+    current.reader_health = health
+    const nodes = render()
+    assert.equal(nodes.find(node => node.type === 'button' && node.children.includes('查看测试用例')).props.disabled, true)
+    assert.equal(nodes.find(node => node.type === 'button' && node.children.includes('查看运行过程')).props.disabled, false)
+  }
+  states[0] = { data_root: '/workspace/data', current: null }
+  const unavailable = render().filter(node => node.type === 'button' && ['查看运行过程', '查看测试用例'].some(text => node.children.includes(text)))
+  assert.equal(unavailable.length, 2)
+  assert.ok(unavailable.every(node => node.props.disabled))
 })
 
 test('overview status variants separate analysis quality from test execution and gate continuation', async () => {
@@ -2523,14 +2840,25 @@ async function caseMetricsView(records, gaps, screen, windowProperties = {}) {
   const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', scenario: 'coverage-analysis', lifecycle_status: 'complete', terminal: true, details,
     coverage_summary: coverageSummary(details.test_cases, gaps), case_quality_summary: caseQualitySummary(details.test_cases) }
   const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: screen }
-  const before = JSON.stringify(states)
+  const before = JSON.stringify({ current, task })
   let index = 0
-  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } }, undefined, undefined, windowProperties)
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); if (!(key in states)) states[key] = typeof initial === 'function' ? initial() : initial; return [states[key], update => { states[key] = typeof update === 'function' ? update(states[key]) : update }] } }, undefined, undefined, windowProperties)
   const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
   client.apply(ctx)
   const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
-  const nodes = descendants(panel.type(panel.props))
-  assert.equal(JSON.stringify(states), before)
+  const expand = node => {
+    if (Array.isArray(node)) return node.map(expand)
+    if (node?.type === client.ResultDrawer) return expand(node.type({ ...node.props, children: node.children }))
+    return node?.children ? { ...node, children: node.children.map(expand) } : node
+  }
+  const render = () => { index = 0; return descendants(expand(panel.type(panel.props))) }
+  let nodes = render()
+  const initialNodes = nodes
+  const button = screen.type === 'case' && nodes.find(node => node.type === 'button' && node.children.includes('拟覆盖依据 ↗'))
+  if (button) { button.props.onClick(); nodes = render() }
+  assert.equal(JSON.stringify({ current, task }), before)
+  nodes.initial = initialNodes
+  nodes.render = render
   return nodes
 }
 
@@ -2558,28 +2886,39 @@ test('built coverage view shows reused branch and risk cases with separate case 
   assert.equal(descendants(unknownMetric).find(node => node.type === 'strong').children[0], '未知')
 })
 
-test('built case view shows declared ready ratio and the reason for a ready case', async () => {
+test('case review shows concrete preparation without promoting declarations into readiness metrics', async () => {
   const body = { format_version: 'behavior-test-case-v1', test_level: 'business_blackbox', execution_readiness: 'ready', readiness_reason: '已核实 CLI 与观测日志' }
   const records = [
     { record_id: 'ready', kind: 'test_case', body },
-    { record_id: 'blackbox-unknown', kind: 'test_case', body: { ...body, execution_readiness: 'unknown' } },
+    { record_id: 'needs-setup', kind: 'test_case', body: { ...body, execution_readiness: 'needs_setup', readiness_reason: ['申请只读账号', '准备独立测试目录'] } },
     { record_id: 'graybox-unknown', kind: 'test_case', body: { ...body, test_level: 'developer_assisted', execution_readiness: 'unknown' } },
     { record_id: 'aux', kind: 'test_case', body: { ...body, test_level: 'whitebox_support' } },
   ]
+  const visibleText = node => {
+    if (Array.isArray(node)) return node.map(visibleText).join(' ')
+    if (node?.type === 'style') return ''
+    if (node?.type === 'details' && !node.props.open) return visibleText(node.children.filter(child => child?.type === 'summary'))
+    return node?.children ? visibleText(node.children) : typeof node === 'string' || typeof node === 'number' ? String(node) : ''
+  }
   const overview = await caseMetricsView(records, [], { type: 'cases' })
-  const section = overview.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')
-  assert.match(metricsText(section), /业务黑盒 2 条（具备执行条件 1 条）/)
-  assert.match(metricsText(section), /1\/4（25.0%）/)
+  assert.equal(overview.some(node => node.props['aria-label'] === '黑盒与灰盒可实施性'), false)
+  assert.equal(overview.some(node => node.props.className === 'b05-metric'), false)
+  assert.doesNotMatch(visibleText(overview[0]), /可实施比例|25\.0%|业务行为覆盖看板|查看可实施性/)
+  assert.match(visibleText(overview[0]), /申请只读账号/)
+  assert.match(visibleText(overview[0]), /准备独立测试目录/)
+  assert.equal(overview.some(node => node.props.className === 'pangea-case-preparation' && metricsText(node).trim() === '[]'), false)
+  assert.equal(overview.some(node => String(node.props.className).split(' ').includes('good') && metricsText(node).includes('具备执行条件')), false)
   const detail = await caseMetricsView(records, [], { type: 'case', id: 'u/ready' })
-  const notice = detail.find(node => String(node.props.className).split(' ').includes('b05-case-notice'))
-  assert.match(metricsText(notice), /具备执行条件.*已核实 CLI 与观测日志/)
-  assert.equal(detail.filter(node => node.props.role === 'status' && metricsText(node).includes('已核实 CLI 与观测日志')).length, 1)
+  assert.doesNotMatch(visibleText(detail.initial[0]), /已核实 CLI 与观测日志|可实施性详情/)
+  assert.equal(detail.initial.some(node => node.props.className === 'pangea-case-preparation-note'), false, 'an empty preparation array does not create a preparation block')
+  assert.ok(detail.initial.some(node => node.type === 'details' && !node.props.open && metricsText(node).includes('已核实 CLI 与观测日志')), 'authored readiness reason remains available in a closed source disclosure')
+  const setup = await caseMetricsView(records, [], { type: 'case', id: 'u/needs-setup' })
+  assert.match(visibleText(setup.initial[0]), /申请只读账号/)
+  assert.match(visibleText(setup.initial[0]), /准备独立测试目录/)
   const empty = await caseMetricsView([], [], { type: 'cases' })
-  assert.match(metricsText(empty.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')), /无可统计用例/)
+  assert.doesNotMatch(visibleText(empty[0]), /黑盒与灰盒可实施性|可实施比例/)
   const legacy = await caseMetricsView([...records, { record_id: 'group', kind: 'test_case_group', body: 'Historical group' }], [], { type: 'cases' })
-  const legacySection = legacy.find(node => node.props['aria-label'] === '黑盒与灰盒可实施性')
-  assert.match(metricsText(legacySection), /包含旧用例组，独立用例比例待复核/)
-  assert.doesNotMatch(metricsText(legacySection), /20.0%/)
+  assert.doesNotMatch(visibleText(legacy[0]), /可实施比例|20\.0%/)
 })
 
 test('closure diagnostics remain available and delivery has one primary control', async () => {
@@ -2619,6 +2958,7 @@ async function executionMetricsView(metrics, { detailRunId = 'run', screen = 'wo
 }
 
 const metricsText = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : node && typeof node === 'object' && componentRenders.has(node) ? metricsText(componentRenders.get(node)())
   : (Array.isArray(node) ? node : node?.children ?? []).map(metricsText).join('')
 
 test('workflow page mounts the shared body styles alongside its run workspace', async () => {
@@ -2751,7 +3091,7 @@ async function diagramWorkspace(overrides = []) {
     return refs[refIndex++] ??= { current: initial }
   }, useEffect(effect, dependencies) {
     // Exercise the cross-panel context effect; polling is supplied by the HTTP fixture.
-    if (dependencies.includes(current) && dependencies.includes(states[1].tasks.items[0])) publishContext = effect
+    if (dependencies?.includes(current) && dependencies.includes(states[1].tasks.items[0])) publishContext = effect
   } }, async (_url, options = {}) => {
     if (!options.body) return { ok: true, json: async () => ({ status: 'ok', ...states[1] }) }
     const request = JSON.parse(options.body)
@@ -3257,6 +3597,53 @@ test('workflow timeline converts structured record and launch summaries to text'
   assert.equal(JSON.stringify(current), before)
 })
 
+test('overview previews keep full text, provenance and actions inside the details drawer', async () => {
+  const firstText = '认证边界的已保存观察。'.repeat(30) + '第一条原文结尾'
+  const secondText = '连接复用的已保存观察。'.repeat(30) + '第二条原文结尾'
+  const firstRecord = { record_id: 'note-a', kind: 'note', body: { title: '认证边界', summary: firstText, evidence: ['repo:auth.c:12'] } }
+  const secondRecord = { record_id: 'note-b', kind: 'note', body: { title: '连接复用', summary: secondText } }
+  const current = { run_id: 'run', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true,
+    details: { notes: [firstRecord, secondRecord] }, workflow: { units: [], steps: [], unresolved: [] } }
+  const before = JSON.stringify(current)
+  const task = { task_id: 'task', run_id: 'run', status: 'complete' }
+  const states = { 0: { current }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'overview' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) {
+    const key = index++
+    if (!Object.hasOwn(states, key)) states[key] = typeof initial === 'function' ? initial() : initial
+    return [states[key], update => { states[key] = typeof update === 'function' ? update(states[key]) : update }]
+  } })
+  const pages = [], ctx = { pangea: { registerPage(page) { pages.push(page) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(page => page.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const tree = panel.type(panel.props)
+  const rows = descendants(tree).filter(node => node.props.className === 'pangea-finding-row')
+  assert.equal(rows.length, 2)
+  for (const row of rows) {
+    const nodes = descendants(row), preview = nodes.find(node => node.props.className === 'pangea-preview-copy')
+    assert.ok(Array.from(metricsText(preview)).length <= 180)
+    assert.match(metricsText(preview), /…$/)
+    assert.doesNotMatch(metricsText(row), /原文结尾|repo:auth.c:12|来源记录|查看分析报告/)
+    assert.equal(nodes.some(node => node.props.role === 'dialog'), false)
+  }
+  descendants(rows[0]).find(node => node.props['aria-label'] === '查看认证边界详情').props.onClick()
+  let opened = descendants(rows[0])
+  const drawer = opened.find(node => node.props.role === 'dialog' && node.props['aria-label'] === '认证边界')
+  assert.ok(drawer)
+  assert.equal(metricsText(descendants(drawer).find(node => node.props.className === 'pangea-full-text')), firstText)
+  assert.deepEqual(JSON.parse(metricsText(descendants(drawer).find(node => node.type === 'pre'))), firstRecord)
+  assert.equal(descendants(rows[1]).some(node => node.props.role === 'dialog'), false, 'each preview owns its open state')
+  opened.find(node => node.props['aria-label'] === '关闭认证边界').props.onClick()
+  assert.equal(descendants(rows[0]).some(node => node.props.role === 'dialog'), false)
+  assert.doesNotMatch(metricsText(rows[0]), /第一条原文结尾/)
+  descendants(rows[1]).find(node => node.props['aria-label'] === '查看连接复用详情').props.onClick()
+  opened = descendants(rows[1])
+  assert.equal(metricsText(opened.find(node => node.props.className === 'pangea-full-text')), secondText)
+  opened.find(node => node.type === 'button' && node.children.includes('查看分析报告')).props.onClick()
+  assert.equal(states[16].type, 'report', 'drawer children retain their navigation action')
+  assert.equal(JSON.stringify(current), before, 'opening previews never changes the saved analysis')
+})
+
 test('overview renders a behavior statistics note without plain object children', async () => {
   const summary = { total: 4, designed: 1, missing: 1, unresolved: 2, not_applicable: 0 }
   const current = { run_id: 'run', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true,
@@ -3272,6 +3659,7 @@ test('overview renders a behavior statistics note without plain object children'
   const check = node => {
     if (Array.isArray(node)) return node.forEach(check)
     if (node == null || typeof node !== 'object') return
+    if (componentRenders.has(node)) return check(componentRenders.get(node)())
     assert.ok('type' in node && Array.isArray(node.children), 'plain object reached React children')
     node.children.forEach(check)
   }
@@ -3283,7 +3671,7 @@ test('case detail shows authored basis and all frozen input matches without trea
   const records = [{ record_id: 'c', kind: 'test_case', body: { purpose: 'branch', summary: '普通操作未触发拒绝路径，增加拒绝请求', coverage_refs: ['G', { coverage_id: 'G' }, 'missing', {}] } }]
   const gaps = [{ coverage_id: 'G', path: 'auth.c', count: 8, meaning: 'covered context' }, { coverage_id: 'G', path: 'auth.c', branch_id: 'reject', count: 0, meaning: 'uncovered branch' }]
   const nodes = await caseMetricsView(records, gaps, { type: 'case', id: 'u/c' })
-  const section = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
+  const section = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
   const rendered = JSON.stringify(section)
   for (const value of ['普通操作未触发拒绝路径', '正计数记录可能只是已覆盖上下文', '重复或冲突', 'covered context', 'uncovered branch', '没有此引用', '无效覆盖引用']) assert.ok(rendered.includes(value), value)
   assert.equal(descendants(section).filter(node => node.type === 'h4' && node.children.includes('G')).length, 1)
@@ -3291,7 +3679,7 @@ test('case detail shows authored basis and all frozen input matches without trea
 
 for (const gaps of [null, []]) test(`case detail marks missing frozen reference unverified (${gaps === null ? 'unreadable' : 'empty'})`, async () => {
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', coverage_refs: 'G' } }], gaps, { type: 'case', id: 'u/c' })
-  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
   assert.ok(rendered.includes('未提供逐用例 summary'))
   assert.ok(rendered.includes(gaps === null ? '冻结覆盖输入不可读取' : '冻结覆盖输入中没有此引用'))
 })
@@ -3300,7 +3688,7 @@ test('coverage case without refs remains visible but unverified; legacy branch c
   for (const purpose of ['coverage', 'branch']) {
     const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose, title: '保留原始用例' } }], [], { type: 'case', id: 'u/c' })
     assert.ok(JSON.stringify(nodes).includes('保留原始用例'))
-    const section = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
+    const section = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
     if (purpose === 'coverage') assert.ok(JSON.stringify(section).includes('未提供有效覆盖引用'))
     else assert.equal(section, undefined)
   }
@@ -3308,7 +3696,7 @@ test('coverage case without refs remains visible but unverified; legacy branch c
 
 for (const refs of ['G', { coverage_id: 'G' }]) test(`case detail flags original non-array refs despite a matching frozen input (${typeof refs})`, async () => {
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', summary: '依据', coverage_refs: refs } }], [{ coverage_id: 'G', condition: '冻结拒绝分支' }], { type: 'case', id: 'u/c' })
-  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
   assert.ok(rendered.includes('原始 coverage_refs 不是数组'))
   assert.ok(rendered.includes('不作为有效引用'))
   assert.ok(rendered.includes('冻结拒绝分支'))
@@ -3316,7 +3704,7 @@ for (const refs of ['G', { coverage_id: 'G' }]) test(`case detail flags original
 
 for (const summary of ['', ' \n\t ']) test('case detail does not treat blank summary as an explanation', async () => {
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { purpose: 'coverage', summary, coverage_refs: ['G'] } }], [{ coverage_id: 'G' }], { type: 'case', id: 'u/c' })
-  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入'))
+  const rendered = JSON.stringify(nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
   assert.ok(rendered.includes('未提供逐用例 summary'))
 })
 
@@ -3345,11 +3733,11 @@ test('stop progress requires durable confirmation before displaying completion',
   assert.match(JSON.stringify(client.StopProgress({ task: { ...task, stop_confirmed_at: 1234 } })), /已停止，已保存结果保留/)
 })
 
-test('case basis follows steps, is collapsed and retains literal evidence; empty observations are omitted', async () => {
+test('case basis opens from the steps into a bottom drawer and retains literal evidence; empty observations are omitted', async () => {
   const summary = { gap: 'plain original', trigger: 'run request()', source_evidence: ['repo:src/long/path/request.c:123'] }
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { format_version: 'behavior-test-case-v1', purpose: 'coverage', summary, steps: [{ action: '操作', expected: '结果' }], observability: ['stale alias'], external_observations: [] } }], [], { type: 'case', id: 'u/c' })
-  const basis = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
-  assert.equal(basis.type, 'details')
+  const basis = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
+  assert.equal(basis.type, 'div')
   assert.ok(!basis.props.open)
   assert.ok(nodes.indexOf(basis) > nodes.findIndex(node => node.type === 'h3' && node.children.includes('操作步骤与逐步预期')))
   assert.ok(JSON.stringify(basis).includes('request()'))
@@ -3373,8 +3761,8 @@ test('copy case omits empty observations and keeps authored basis and source evi
 
 for (const content of [{ summary: '普通用例原文' }, { source_evidence: ['request() repo:src/request.c:123'] }, { summary: '普通用例原文', source_evidence: ['request() repo:src/request.c:123'] }]) test('ordinary case basis preserves standalone summary/evidence without coverage warnings', async () => {
   const nodes = await caseMetricsView([{ record_id: 'c', kind: 'test_case', body: { format_version: 'behavior-test-case-v1', purpose: 'branch', ...content } }], [], { type: 'case', id: 'u/c' })
-  const basis = nodes.find(node => node.props['aria-label'] === '补测依据与冻结覆盖输入')
-  assert.equal(basis.type, 'details')
+  const basis = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
+  assert.equal(basis.type, 'div')
   assert.ok(!basis.props.open)
   const text = metricsText(basis)
   if (content.summary) assert.ok(text.includes(content.summary))
@@ -3434,4 +3822,36 @@ test('creation UI keeps review controls dormant without execution promises', asy
   assert.doesNotMatch(source, /已完成源码分析、独立复核/)
   assert.match(source, /分析规划.*划分源码范围和分析单元/)
   assert.match(source, /生成报告.*汇总已保存的分析结果/)
+})
+
+test('evidence-only case basis preserves all explicit references and unique same-location choices', async () => {
+  const nodes = await caseMetricsView([{ record_id: 'evidence-only', kind: 'test_case', evidence: [
+    { evidence_id: 'first', location: 'repo:src/a.c:7', observation: '同一行的不同依据', quote: 'FIRST AUTHORED QUOTE' },
+    { evidence_id: 'second', location: 'repo:src/a.c:7', observation: '同一行的不同依据', quote: 'SECOND AUTHORED QUOTE' },
+    'malformed evidence reference',
+  ], body: { title: '仅包含 envelope evidence', purpose: 'branch' } }], [], { type: 'case', id: 'u/evidence-only' })
+  const basis = nodes.find(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入')
+  assert.ok(basis)
+  assert.match(metricsText(basis), /malformed evidence reference/)
+  const links = descendants(basis).filter(node => node.type === 'button' && metricsText(node).includes('src/a.c'))
+  assert.equal(links.length, 2)
+  links[1].props.onClick()
+  let current = nodes.render()
+  let source = current.find(node => node.props.role === 'dialog' && node.props['aria-label'] === '源码依据')
+  assert.match(metricsText(source), /SECOND AUTHORED QUOTE/)
+  assert.doesNotMatch(metricsText(source), /FIRST AUTHORED QUOTE/)
+  let choices = descendants(source).find(node => node.props['aria-label'] === '选择用例关联代码')
+  const buttons = descendants(choices).filter(node => node.type === 'button')
+  assert.equal(buttons.filter(node => node.props['aria-pressed']).length, 1)
+  assert.equal(buttons[1].props['aria-pressed'], true)
+  buttons[0].props.onClick()
+  current = nodes.render()
+  source = current.find(node => node.props.role === 'dialog' && node.props['aria-label'] === '源码依据')
+  assert.match(metricsText(source), /FIRST AUTHORED QUOTE/)
+  assert.doesNotMatch(metricsText(source), /SECOND AUTHORED QUOTE/)
+  assert.ok(current.some(node => node.props.className === 'pangea-bottom-layer' && node.props['aria-hidden'] === 'true'))
+  descendants(source).find(node => node.type === 'button' && metricsText(node) === '返回拟覆盖依据').props.onClick()
+  current = nodes.render()
+  assert.ok(current.some(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
+  assert.ok(!current.some(node => node.props.role === 'dialog' && node.props['aria-label'] === '源码依据'))
 })

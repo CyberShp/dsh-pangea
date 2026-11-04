@@ -25,6 +25,8 @@ const homeResponse = (tasks = [activeTask]) => ({ status: 'ok', view: 'home', co
 // responses and polling clocks. Callback memoization follows React semantics.
 async function harness({ page = 'workbench', visible = true, onWorkbench, onRepositories, onState, runDraft } = {}) {
   const states = [], refs = [], effects = [], callbacks = [], requests = [], navigation = [], events = [], timers = new Map(), pages = []
+  const draftListeners = new Set()
+  const publishDraft = value => { runDraft = value; for (const listener of draftListeners) listener() }
   let stateIndex, refIndex, effectIndex, callbackIndex, pending, tree, exported, dirty = true, now = 0, timerId = 0
   let scope = { cwd: '/workspace', sessionId: 'session-1' }, shown = visible
   const bodyAttributes = new Map()
@@ -63,9 +65,10 @@ async function harness({ page = 'workbench', visible = true, onWorkbench, onRepo
   const ctx = { pangea: {
     registerPage(value) { pages.push(value) },
     getRunDraft() { return runDraft },
+    subscribeRunDraft(listener) { draftListeners.add(listener); return () => draftListeners.delete(listener) },
     requestRunCreation(value) { navigation.push({ type: 'create', scope: value }); return true },
     selectTask(taskId) { navigation.push({ type: 'select-task', taskId }) },
-    updateRunDraft(value) { navigation.push({ type: 'draft', value }) },
+    updateRunDraft(value) { navigation.push({ type: 'draft', value }); publishDraft(value) },
     openPage(value, pageId) { navigation.push({ type: 'page', pageId, scope: value }); return true },
   }, effect(fn) { return fn() } }
   exported.apply(ctx)
@@ -90,6 +93,8 @@ async function harness({ page = 'workbench', visible = true, onWorkbench, onRepo
   }
   render(); await settle()
   return { requests, navigation, events, settle, text: () => content(tree), nodes: () => nodes(tree),
+    route: () => ({ runId: states[4], taskId: states[5], screen: states[16], history: states[17] }),
+    async receiveDraft(value) { publishDraft(value); await settle() },
     async click(label) {
       const button = nodes(tree).find(node => node.type === 'button' && content(node).trim() === label)
       assert.ok(button, `missing button ${label}`)
@@ -217,6 +222,66 @@ test('unprobed home compatibility permits page navigation without claiming runti
     assert.equal(h.navigation.at(-1).pageId, 'assets')
     assert.equal(h.requests.filter(call => call.path.endsWith('/state')).length, 0)
   } finally { h.cleanup() }
+})
+
+test('home task catalog entries publish a new browse intent before opening the analysis page', async () => {
+  const h = await harness({ runDraft: { requestId: 8, intent: 'select-task', taskId: 'task-1', runId: 'run-1' } })
+  try {
+    await h.click('全部任务 ↗')
+    assert.equal(h.navigation.at(-3).type, 'select-task')
+    assert.equal(h.navigation.at(-3).taskId, undefined)
+    const first = h.navigation.slice(-2)
+    assert.equal(first[0].type, 'draft')
+    assert.equal(first[0].value.intent, 'browse-tasks')
+    assert.equal(first[0].value.requestId, 9)
+    assert.equal(first[1].type, 'page')
+    assert.equal(first[1].pageId, 'analysis')
+    const shortcut = h.nodes().find(node => node.type === 'button' && content(node).includes('分析任务') && content(node).includes('查看所有任务'))
+    assert.ok(shortcut)
+    shortcut.props.onClick(); await h.settle()
+    const second = h.navigation.slice(-2)
+    assert.equal(second[0].value.intent, 'browse-tasks')
+    assert.equal(second[0].value.requestId, 10, 'reopening the catalog must create a fresh intent')
+    assert.equal(second[1].pageId, 'analysis')
+    assert.equal(h.navigation.filter(item => item.type === 'select-task' && item.taskId === undefined).length, 2)
+    assert.equal(h.navigation.some(item => item.type === 'create' || item.type === 'select-task' && item.taskId), false)
+    assert.equal(h.requests.some(call => call.path.endsWith('/state')), false)
+  } finally { h.cleanup() }
+})
+
+test('browse-tasks stays in the catalog despite a saved task selection and clears detail history', async () => {
+  const task = { ...activeTask, status: 'completed', execution_status: 'completed' }
+  const run = { run_id: 'run-1', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true,
+    details: { test_cases: [{ test_case_id: 'TC-1', title: '请求拒绝', steps: [] }] }, workflow: { units: [], steps: [], actions: [] } }
+  const before = JSON.stringify({ task, run })
+  for (const fromDetail of [true, false]) {
+  const h = await harness({ page: 'analysis', runDraft: fromDetail ? { requestId: 1, intent: 'select-task', taskId: task.task_id, runId: task.run_id } : { requestId: 2, intent: 'browse-tasks' },
+    onWorkbench: () => ({ ...homeResponse([task]), selected_task_id: task.task_id }), onState: () => ({ status: 'ok', current: run, runs: [] }) })
+  try {
+    if (fromDetail) {
+      await h.click('评审测试用例')
+      await h.click('请求拒绝')
+      assert.equal(h.route().screen.type, 'case')
+      assert.equal(h.route().history.length, 1)
+    }
+    const selections = h.navigation.filter(item => item.type === 'select-task').length
+    await h.receiveDraft({ requestId: 2, intent: 'browse-tasks' })
+    assert.ok(h.nodes().some(node => node.props['aria-label'] === '分析任务列表'))
+    assert.equal(h.route().screen.type, 'tasks')
+    assert.equal(h.route().history.length, 0)
+    assert.equal(h.route().taskId, undefined)
+    assert.equal(h.route().runId, null)
+    assert.equal(h.navigation.filter(item => item.type === 'select-task').length, selections)
+    await h.click('TLS 握手分析')
+    assert.equal(h.route().screen.type, 'overview')
+    await h.receiveDraft({ requestId: 2, intent: 'browse-tasks' })
+    assert.equal(h.route().screen.type, 'overview', 'a consumed intent must not override later user navigation')
+    await h.receiveDraft({ requestId: 3, intent: 'browse-tasks' })
+    assert.equal(h.route().screen.type, 'tasks')
+    assert.equal(h.navigation.some(item => item.type === 'create'), false)
+    assert.equal(JSON.stringify({ task, run }), before, 'browsing the catalog changes UI selection only')
+  } finally { h.cleanup() }
+  }
 })
 
 const failedPersistence = {

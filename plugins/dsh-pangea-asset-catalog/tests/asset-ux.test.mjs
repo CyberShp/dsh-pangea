@@ -170,12 +170,12 @@ test('asset history puts each date and status together and opens only records th
   assert.equal(ui.text().includes('本次处理记录已保留'), false, 'preservation explanation is not repeated for every record')
 })
 
-test('asset page keeps scrolling without reserving a visible scrollbar gutter', async () => {
+test('asset page exposes scrolling for long asset lists', async () => {
   const ui = await mount()
   const root = ui.nodes().find(node => node.props.className === 'pangea-asset-root')
   assert.ok(root)
   assert.equal(root.props.style.overflow, 'auto')
-  assert.equal(root.props.style.scrollbarWidth, 'none')
+  assert.equal(root.props.style.scrollbarWidth, 'thin')
 })
 
 test('asset table only selects available rows and creates an analysis from the selected ids', async () => {
@@ -645,4 +645,17 @@ test('detail analysis uses only its asset id and requires a frozen input revisio
     await ui.click('原始材料')
     assert.ok(ui.text().includes('<tag> as text'))
   }
+})
+
+
+test('asset summary filters the current catalog', async () => {
+  const ui = await mount()
+  await ui.click('可用于分析1')
+  assert.equal(ui.state(10), 'available')
+  const selected = ui.nodes().find(node => node.props.className === 'pangea-asset-metric' && node.props['aria-pressed'] === true)
+  assert.ok(selected)
+  await ui.click('待人工审核1')
+  assert.equal(ui.state(10), 'awaiting_review')
+  await ui.click('全部资料2')
+  assert.equal(ui.state(10), '')
 })

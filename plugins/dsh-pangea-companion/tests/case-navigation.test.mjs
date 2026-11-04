@@ -93,7 +93,6 @@ async function harness() {
 
   function expand(node) {
     if (Array.isArray(node)) return node.map(expand)
-    if (node?.type === exported.BehaviorCoverageView) return expand(node.type(node.props))
     return node?.children ? { ...node, children: node.children.map(expand) } : node
   }
   function mount() {
@@ -149,7 +148,7 @@ async function harness() {
   return {
     outer, root, documentElement, click, input, render,
     text: () => content(tree), nodes: () => descendants(tree), dom: () => mounted,
-    coverage: () => mounted.find(node => node.tagName === 'DETAILS' && node.props['aria-label'] === '业务行为覆盖清单'),
+    filters: () => mounted.find(node => node.props['data-view-key'] === 'case-filters'),
     variants: () => mounted.find(node => node.props.className === 'b05-variant-preview'),
     table: () => mounted.find(node => node.props['data-scroll-key']),
     search(value) { input('搜索测试用例').props.onChange({ target: { value } }); render() },
@@ -167,22 +166,23 @@ async function harness() {
   }
 }
 
-test('business behavior coverage starts collapsed and keeps its ledger content available', async () => {
+test('case list keeps review controls without turning authored behavior records into a dashboard', async () => {
   const h = await harness()
   try {
-    assert.ok(h.coverage(), 'coverage must use a native disclosure')
-    assert.equal(h.coverage().open, false)
-    assert.ok(h.nodes().some(node => node.type === 'summary' && content(node).includes('业务行为覆盖清单')))
-    assert.match(h.text(), /超时重试/)
+    assert.ok(h.table(), 'case list must retain its scroll surface')
+    assert.ok(h.variants(), 'authored parameter variants must remain available')
+    assert.equal(h.filters().open, false)
+    assert.equal(h.nodes().some(node => node.props['aria-label'] === '业务行为覆盖清单'), false)
+    assert.doesNotMatch(h.text(), /业务行为覆盖看板|黑盒与灰盒可实施性|可实施比例/)
   } finally { h.cleanup() }
 })
 
-for (const entry of ['连接超时后恢复', '查看 ›', 'TC-1']) {
+for (const entry of ['连接超时后恢复', '查看 ›']) {
   test(`case entry ${entry} restores list scroll, disclosures and selection on back`, async () => {
     const h = await harness()
     try {
       h.search('连接超时'); h.select('TC-1')
-      h.coverage().open = true; h.variants().open = true
+      h.filters().open = true; h.variants().open = true
       assert.ok(h.table(), 'case table must expose its scroll surface')
       h.table().scrollLeft = 135
       h.outer.scrollTop = 1275; h.outer.scrollLeft = 23
@@ -197,7 +197,7 @@ for (const entry of ['连接超时后恢复', '查看 ›', 'TC-1']) {
       assert.equal(h.documentElement.scrollTop, 240)
       assert.equal(h.documentElement.scrollLeft, 9)
       assert.equal(h.table().scrollLeft, 135)
-      assert.equal(h.coverage().open, true)
+      assert.equal(h.filters().open, true)
       assert.equal(h.variants().open, true)
       assert.equal(h.input('搜索测试用例').props.value, '连接超时')
       assert.equal(h.input('选择 TC-1').props.checked, true)
@@ -212,14 +212,15 @@ for (const change of ['run', 'workspace']) {
   test(`a different ${change} does not restore the previous list viewport`, async () => {
     const h = await harness()
     try {
-      h.outer.scrollTop = 1780; h.coverage().open = true
+      h.outer.scrollTop = 1780; h.filters().open = true; h.variants().open = true
       h.click('连接超时后恢复')
       if (change === 'run') h.changeRun('run-2')
       else h.changeWorkspace('/another-workspace')
       h.outer.scrollTop = 55
       h.click('返回用例')
       assert.notEqual(h.outer.scrollTop, 1780)
-      assert.equal(h.coverage().open, false)
+      assert.equal(h.filters().open, false)
+      assert.equal(h.variants().open, false)
     } finally { h.cleanup() }
   })
 }
