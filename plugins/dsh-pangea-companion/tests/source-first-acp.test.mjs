@@ -85,7 +85,9 @@ test('Planning carries its public write contract across initial and compacted tu
     assert.match(prompt, /plan-write --expected-revision N --unit-file/)
     assert.match(prompt, /真实 region ID 字符串组成 owned_regions\/context_regions/)
     assert.match(prompt, /不包 units\/plan\/kind\/body，不自造 unit_id/)
-    assert.match(prompt, /最终仍按 target 核对冻结候选范围内的主责归属、重叠、依赖、排除依据及全部 planning rubric 义务/)
+    assert.match(prompt, /按 target 核对必要主责、依赖和未决边界/)
+    assert.match(prompt, /target-first-v1 的未分配候选不是待办/)
+    assert.match(prompt, /未知引用、归属冲突等真实诊断仍由本 worker 修正/)
     assert.match(prompt, /compact 后先 result-read 复用真实 unit_id/)
     assert.ok(prompt.length < 6500)
   }
@@ -599,8 +601,17 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
           continuePrompt: async prompt => {
             const binding = JSON.parse(prompt[0].text.split('\n').find(line => line.startsWith('每次 CLI')).split('：').slice(1).join('：'))
             const call = (command, args = []) => runPangea({ cwd, args: [command, ...binding, ...args] })
-            const { task } = await call('task-open')
-            assert.ok(prompt[0].text.length < 7000)
+            const snapshotLine = prompt[0].text.split('\n').find(line => line.startsWith('当前 task-open 回包：'))
+            const opened = snapshotLine ? JSON.parse(snapshotLine.slice('当前 task-open 回包：'.length)) : await call('task-open')
+            const { task } = opened
+            if (snapshotLine) {
+              assert.equal(task.task_type, 'source_first_plan')
+              assert.equal(task.planning_io_policy, 'planning-io-v1')
+              assert.ok(JSON.stringify(opened).length <= 32000)
+              assert.ok(opened.planning_startup.pages.length > 0)
+              assert.doesNotMatch(prompt[0].text, /PowerShell 直接执行 task-open/)
+            }
+            assert.ok(prompt[0].text.length - (snapshotLine?.length ?? 0) < 7000)
             assert.ok(JSON.stringify(task).length < 14000)
             assert.equal(task.allowed_paths, undefined)
             assert.equal(task.all_scope_paths, undefined)
@@ -619,10 +630,13 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
                 await assert.rejects(call('source-read', ['--repo-id', 'sample', '--path', '../outside.c', '--view', 'text']))
               }
             }
-            const current = await call('result-read')
+            const current = snapshotLine ? opened.write_contract : await call('result-read')
             let saved
             if (task.task_type === 'source_first_plan') {
-              saved = await call('plan-write', ['--expected-revision', String(current.revision), '--unit', JSON.stringify({ title: 'TLS 连接', purpose: '验证连接结果', owned_files: [{ repo_id: 'sample', path: 'src/tls.c' }] })])
+              const file = path.join(request.scratchDirectory, 'planning-units.json')
+              await writeFile(file, JSON.stringify([{ title: 'TLS 连接', purpose: '验证连接结果', owned_files: [{ repo_id: 'sample', path: 'src/tls.c' }] }]))
+              saved = await call('plan-write-batch', ['--expected-revision', String(current.revision), '--units-file', file, '--request-id', `${id}-plan-v1`])
+              assert.equal(saved.units.length, 1)
             } else if (task.task_type === 'source_first_analysis') {
               const file = path.join(request.scratchDirectory, 'analysis-records.json')
               await writeFile(file, JSON.stringify([{ kind: 'note', body: '协议 fixture 范围依据；不是模型质量验收。', evidence: ['sample:src/tls.c:1'] }]))
