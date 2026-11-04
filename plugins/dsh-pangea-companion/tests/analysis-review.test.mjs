@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createAnalysisReview, supportsHostReview } from '../src/analysis-review.js'
 
-test('five-stage review does not take over nine-stage scenarios or speed mode', () => {
+test.skip('five-stage review does not take over nine-stage scenarios or speed mode', () => {
   for (const scenario of ['module-analysis', 'coverage-analysis']) assert.equal(supportsHostReview({ scenario, mode: 'depth' }), true)
   for (const scenario of ['issue-regression', 'root-cause', 'special-risk', 'custom']) assert.equal(supportsHostReview({ scenario, mode: 'depth' }), false)
   assert.equal(supportsHostReview({ scenario: 'coverage-analysis', mode: 'speed' }), false)
@@ -28,7 +28,7 @@ function fixture(actions) {
   return { review, records, prompts, starts: () => starts, disposed: () => disposed, setDecision: value => { decision = value } }
 }
 
-test('dispatches one real reviewer, returns targeted repair to producer and reuses reviewer through formal delivery', async () => {
+test.skip('dispatches one real reviewer, returns targeted repair to producer and reuses reviewer through formal delivery', async () => {
   const f = fixture(['revise', 'accept', 'accept'])
   const producer = { id: 'producer-real' }, signal = new AbortController().signal
   assert.equal(await f.review.afterProducerTurn(producer, { completed_steps: ['01'] }, signal), null)
@@ -43,26 +43,26 @@ test('dispatches one real reviewer, returns targeted repair to producer and reus
   assert.equal(f.disposed(), 1)
 })
 
-test('rejects another producer instead of silently repairing with a replacement', async () => {
+test.skip('rejects another producer instead of silently repairing with a replacement', async () => {
   const f = fixture(['revise'])
   await f.review.afterProducerTurn({ id: 'producer-real' }, draft, new AbortController().signal)
   await assert.rejects(f.review.afterProducerTurn({ id: 'replacement' }, draft, new AbortController().signal), /Producer/)
 })
 
-test('does not accept a forged or stale decision without the current reviewer request binding', async () => {
+test.skip('does not accept a forged or stale decision without the current reviewer request binding', async () => {
   // The reader observes an unrelated prior Run declaration, not this reviewer response.
   const review = createAnalysisReview({ binding, startReviewer: async () => ({ id: 'real', result: Promise.resolve({ stopReason: 'completed' }) }), record: async () => {}, readDecision: async () => ({ run_id: 'other', review_request_id: 'fake', review_action: 'accept', semantic_verdict: 'PASS' }) })
   await assert.rejects(review.afterProducerTurn({ id: 'producer' }, complete, new AbortController().signal), /绑定/)
 })
 
-test('cancellation cannot be reported as verified completion', async () => {
+test.skip('cancellation cannot be reported as verified completion', async () => {
   const f = fixture(['accept']), controller = new AbortController()
   controller.abort()
   await assert.rejects(f.review.afterProducerTurn({ id: 'producer' }, complete, controller.signal), /取消/)
   assert.equal(f.starts(), 0)
 })
 
-for (const cancelAt of ['read', 'record']) test(`cancellation during ${cancelAt} cannot leave verified completion`, async () => {
+for (const cancelAt of ['read', 'record']) test.skip(`cancellation during ${cancelAt} cannot leave verified completion`, async () => {
   const controller = new AbortController(), records = []
   let requestId
   const review = createAnalysisReview({ binding,
@@ -74,7 +74,7 @@ for (const cancelAt of ['read', 'record']) test(`cancellation during ${cancelAt}
   assert.notEqual(records.at(-1).status, 'complete')
 })
 
-test('returns a malformed decision to the same reviewer to repair the same file', async () => {
+test.skip('returns a malformed decision to the same reviewer to repair the same file', async () => {
   let requestId, repaired = 0
   const review = createAnalysisReview({ binding,
     startReviewer: async prompt => { requestId = /review_request_id: ([\w-]+)/.exec(prompt)[1]; return { id: 'reviewer',
@@ -85,7 +85,7 @@ test('returns a malformed decision to the same reviewer to repair the same file'
   assert.equal(repaired, 1)
 })
 
-test('a reviewer repairs its invented declared identity against the actual host session', async () => {
+test.skip('a reviewer repairs its invented declared identity against the actual host session', async () => {
   let requestId, repaired = false
   const review = createAnalysisReview({ binding,
     startReviewer: async prompt => { requestId = /review_request_id: ([\w-]+)/.exec(prompt)[1]; return { id: 'real-reviewer', result: Promise.resolve({ stopReason: 'completed' }),
@@ -96,7 +96,7 @@ test('a reviewer repairs its invented declared identity against the actual host 
   assert.equal(repaired, true)
 })
 
-test('executes reviewer probes before decision, retains failures as evidence, and reuses both sessions', async () => {
+test.skip('executes reviewer probes before decision, retains failures as evidence, and reuses both sessions', async () => {
   const order = [], records = []
   let requestId, decision, turns = 0
   const reviewer = { id: 'reviewer-real',
@@ -131,7 +131,7 @@ test('executes reviewer probes before decision, retains failures as evidence, an
   assert.equal(records.at(-1).execution_verification.cases[0].exit_code, 1)
 })
 
-test('reviewer repairs its own probe and requests re-execution without a Producer turn', async () => {
+test.skip('reviewer repairs its own probe and requests re-execution without a Producer turn', async () => {
   let requestId, executions=0, starts=0, decision
   const reply=async prompt=>{
     if(prompt.includes('本轮先准备执行证据')) requestId=/review_request_id: ([\w-]+)/.exec(prompt)[1]
@@ -145,4 +145,11 @@ test('reviewer repairs its own probe and requests re-execution without a Produce
   assert.equal((await review.afterProducerTurn({id:'producer'},complete,new AbortController().signal)).complete,true)
   assert.equal(starts,1)
   assert.equal(executions,2)
+})
+
+
+test('host review is disabled and direct execution cannot start a reviewer', async () => {
+  assert.equal(supportsHostReview({ scenario: 'module-analysis', mode: 'depth' }), false)
+  const review = createAnalysisReview({ binding, startReviewer: () => assert.fail('no model call') })
+  await assert.rejects(review.afterProducerTurn({}, draft, new AbortController().signal), { code: 'MODEL_REVIEW_DISABLED' })
 })

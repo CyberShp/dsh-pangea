@@ -26,7 +26,7 @@ function plannedUnits(plan) {
 }
 
 function effectiveAction(actions, unitId) {
-  const unitActions = actions.filter(action => action.unit_id === unitId && ['analysis', 'closure'].includes(action.role))
+  const unitActions = actions.filter(action => !action.review_skipped && action.unit_id === unitId && ['analysis', 'closure'].includes(action.role))
   return unitActions.filter(action => action.role === 'closure').at(-1) ?? unitActions.at(-1) ?? null
 }
 
@@ -63,7 +63,7 @@ export function sourceFirstExecutionView({ progress, plan = null, artifacts = []
     const taskId = action.task_id ?? null, unitId = task.unit_id ?? null, status = action.status ?? null
     const declared = Boolean(result?.completion?.complete === true && result.completion.declared_revision === result.revision)
     let operation = 'none'
-    if (lifecycle !== 'complete' && status !== 'accepted' && !partialReporting) {
+    if (!action.review_skipped && lifecycle !== 'complete' && status !== 'accepted' && !partialReporting) {
       if (status === 'settled') operation = 'advance_workflow'
       else if (declared && taskId) operation = 'settle_action'
       else if (['pending', 'dispatched', 'paused'].includes(status) || (status === 'failed' && action.error === '用户停止 Run')) {
@@ -81,7 +81,7 @@ export function sourceFirstExecutionView({ progress, plan = null, artifacts = []
     const row = {
       action_id: actionId, task_id: taskId, unit_id: unitId,
       title: task.title || task.target || null, role: action.role ?? null,
-      stage: action.stage ?? null, status,
+      stage: action.stage ?? null, status, review_skipped: action.review_skipped === true,
       saved_revision: Number.isInteger(result?.revision) ? result.revision : null,
       saved_record_count: records?.length ?? null, last_saved_at_ms: savedAt,
       completion_declared: declared,
@@ -101,7 +101,7 @@ export function sourceFirstExecutionView({ progress, plan = null, artifacts = []
         : seed ? 'seed' : 'draft'
       preserved.push({ action_id: actionId, unit_id: unitId, revision: row.saved_revision, record_count: records.length, acceptance })
     }
-    if (['paused', 'failed'].includes(status) || action.attention_required) {
+    if (!action.review_skipped && (['paused', 'failed'].includes(status) || action.attention_required)) {
       unresolved.push({ action_id: actionId, unit_id: unitId, status, reason: action.error || '执行尚未完成，已保存结果保留' })
     }
   }
@@ -115,14 +115,14 @@ export function sourceFirstExecutionView({ progress, plan = null, artifacts = []
     counts[key] += 1
   }
   const canResume = ['running', 'stopped'].includes(lifecycle)
-  const requiresQuiescence = canResume && stage !== 'reporting' && !partialReporting && actions.some(action => action.task_id
+  const requiresQuiescence = canResume && stage !== 'reporting' && !partialReporting && actions.some(action => !action.review_skipped && action.task_id
     && (['dispatched', 'paused'].includes(action.status) || (action.status === 'failed' && action.error === '用户停止 Run')))
   let resumeFrom = actions.filter(action => action.resume_action !== 'none')
     .map(action => ({ action_id: action.action_id, task_id: action.task_id, operation: action.resume_action }))
   if (stage === 'reporting' && lifecycle !== 'complete') resumeFrom = [{ action_id: null, task_id: null, operation: 'finalize_report' }]
   return {
     format_version: 'pangea-execution-view-v1', stage, lifecycle_status: lifecycle,
-    quality_status: progress.quality_status ?? null, unit_counts: counts,
+    quality_status: progress.quality_status ?? null, review_policy: progress.review_policy ?? null, unit_counts: counts,
     last_effective_progress: lastProgress, actions, preserved, unresolved,
     recovery: { can_resume: canResume, requires_host_quiescence: requiresQuiescence,
       resume_from: resumeFrom, blocked_reason: canResume ? null : 'Run 已结束或冻结输入异常，不能续跑' },

@@ -5,7 +5,7 @@ import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { analysisOptions, SCENE_PROFILE } from '../src/analysis-scenes.js'
-import { summarizeRun, readInputMaterials } from '../src/reader.js'
+import { summarizeRun, readInputMaterials, sourceFirstStepRows } from '../src/reader.js'
 import { buildTestCaseCsv, buildTestCaseXlsx } from '../src/export.js'
 import { writeArchitectureRun } from './architecture-source-first-fixture.mjs'
 
@@ -159,4 +159,62 @@ test('coverage query forwards exact deep scope, recursion and source with legacy
     assert.equal(args[args.indexOf('--source') + 1], query.source || 'summary')
     assert.ok(!args.includes('--module'))
   }
+})
+
+
+test('review-free runs expose only analysis stages and do not invent a review verdict', async t => {
+  const f = await fixture(t, 'branch-analysis')
+  const progressPath = path.join(f.run, 'progress.json')
+  const progress = JSON.parse(await readFile(progressPath, 'utf8'))
+  await json(progressPath, { ...progress, review_policy: 'disabled', quality_status: 'UNRESOLVED' })
+  const run = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
+  assert.equal(run.review_policy, 'disabled')
+  assert.deepEqual(run.semantic_review, { method: 'disabled', verdict: null })
+  assert.equal(run.review, null)
+  assert.equal(run.workflow.judge.required, false)
+  assert.deepEqual(run.workflow.steps.map(step => step.stage), ['preparing', 'planning', 'analyzing', 'reporting', 'complete'])
+  assert.equal(run.workflow.step_progress.total, 5)
+  assert.equal(run.lifecycle_status, 'complete')
+  // Even an old unsupported PASS without actual review records is not a review pass.
+  await json(progressPath, { ...progress, quality_status: 'PASS' })
+  const legacy = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
+  assert.equal(legacy.semantic_review.verdict, null)
+})
+
+test('migrated legacy review and correction phases remain readable but are skipped', () => {
+  const steps = sourceFirstStepRows({ stage: 'complete', lifecycle_status: 'complete', review_policy: 'disabled' }, '/run', [
+    { stage: 'comparison_review', status: 'paused', review_skipped: true, task_path: '/run/review.json', result_path: '/run/review-result.json' },
+    { stage: 'targeted_closure', status: 'paused', review_skipped: true, task_path: '/run/closure.json' },
+  ])
+  for (const stage of ['reviewing', 'closing']) {
+    const row = steps.find(step => step.stage === stage)
+    assert.equal(row.status, 'skipped')
+    assert.match(row.title, /历史.*不再执行/)
+    assert.ok(row.artifacts.length)
+  }
+})
+
+
+test('existing accepted review output is readable before and after disabled-policy migration', async t => {
+  const f = await fixture(t, 'branch-analysis')
+  const progressPath = path.join(f.run, 'progress.json')
+  const progress = JSON.parse(await readFile(progressPath, 'utf8'))
+  const actionId = `${f.task.run_id}:review`
+  const taskPath = path.join(f.run, 'agent-tasks/review.json')
+  const resultPath = path.join(f.run, 'agent-results/review.json')
+  await json(taskPath, { task_type: 'comparison_review', result_path: resultPath })
+  await json(resultPath, { format_version: 'pangea-notes-v1', binding: { run_id: f.task.run_id, action_id: actionId, task_id: 'reviewer' }, revision: 1,
+    records: [{ record_id: 'decision', kind: 'review_decision', body: { verdict: 'PASS', summary: '历史审核结论' } }] })
+  progress.actions[actionId] = { stage: 'comparison_review', role: 'review', task_path: taskPath, task_id: 'reviewer', status: 'accepted' }
+  progress.accepted_revisions[actionId] = 1
+  progress.quality_status = 'PASS'
+  await json(progressPath, progress)
+  const before = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
+  assert.equal(before.semantic_review.verdict, 'PASS')
+  assert.equal(before.review.comparison.records[0].body.summary, '历史审核结论')
+  await json(progressPath, { ...progress, review_policy: 'disabled' })
+  const after = await summarizeRun(f.root, f.task.run_id, { includeDetails: true })
+  assert.equal(after.semantic_review.method, 'disabled')
+  assert.equal(after.semantic_review.verdict, null)
+  assert.deepEqual(after.review.comparison.records, before.review.comparison.records)
 })

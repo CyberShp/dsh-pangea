@@ -1,3 +1,4 @@
+import { supportsHostReview, MODEL_REVIEW_ENABLED } from './analysis-review.js'
 import { inspectSourceFirstAcpRecovery, sourceFirstAcpUpdateBusy, stopSourceFirstAcpRun } from './source-first-acp.js'
 import { companionUpdateBusy, registerUpdateParticipant } from './update-admission.js'
 import { AgentSessionStore } from './agent-sessions.js'
@@ -6,7 +7,6 @@ import { inspectSourceFirstChildren, interruptSourceFirstChildren } from './repo
 import { processPresence, readAcpBindings } from './acp-recovery.js'
 import { randomUUID } from 'node:crypto'
 import { listViews, viewArtifact } from './architecture-views.js'
-import { supportsHostReview } from './analysis-review.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
 import { buildTestCaseCsv, buildTestCaseXlsx, buildTestCaseCsvBundle } from './export.js'
@@ -234,7 +234,7 @@ export function applyTaskExecutionState(snapshot, task, observation) {
     snapshot = { ...snapshot, current }
   }
   const review = task.host_review
-  if (review?.task_id === task.task_id && review.run_id === task.run_id && review.attempt_id === task.attempt_id) {
+  if (current.review_policy !== 'disabled' && review?.task_id === task.task_id && review.run_id === task.run_id && review.attempt_id === task.attempt_id) {
     const verified = review.status === 'complete' && review.reviewer_turn_completed_at
       && review.producer_session_id && review.reviewer_session_id && review.producer_session_id !== review.reviewer_session_id
     const waiting = review.status === 'waiting' || task.status === 'needs_attention'
@@ -666,8 +666,8 @@ function deriveTaskResumeEligibility(runtime, task, sourceRecovery) {
   if (!task?.run_id) return { can_resume: false, resume_blocked_reason: '没有可继续的 Run' }
   if (task.status === 'completed') return { can_resume: false, resume_blocked_reason: '当前 Run 已交付完成' }
   if (!task.provider) return { can_resume: false, resume_blocked_reason: '内部 API 分析支持已移除；历史结果仍保留，请选择外部 Agent 新建分析' }
-  if (task.host_review?.reviewer_session_id && task.host_review.status !== 'complete') {
-    return { can_resume: false, resume_blocked_reason: '独立复核尚未结束；需恢复原 Producer/Reviewer 会话，不能创建替代会话' }
+  if (task.workflow_version !== 'source-first-v1' && task.host_review?.reviewer_session_id && task.host_review.status !== 'complete') {
+    return { can_resume: false, resume_blocked_reason: '旧 Run 停在暂不执行的模型审核阶段；历史结果保留，请新建无审核分析' }
   }
   if (task.workflow_version === 'source-first-v1' && sourceRecovery) {
     // A persisted terminal task must never override a still-running exact Job.
@@ -1894,6 +1894,7 @@ export function sourceFirstTools(ctx, execute = executeSourceFirst) {
         },
       },
       async execute(args, exec) {
+        if (!MODEL_REVIEW_ENABLED) throw Object.assign(new Error('模型审核暂不执行'), { code: 'MODEL_REVIEW_DISABLED' })
         const values = [...sourceCommandArgs(args), '--expected-revision', String(args.expected_revision), '--decision', JSON.stringify(args.decision)]
         optionalCommandArg(values, '--request-id', args.request_id)
         return execute(exec, 'review-decide', values)

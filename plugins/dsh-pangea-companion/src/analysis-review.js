@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
+export const MODEL_REVIEW_ENABLED = false
+
 export function supportsHostReview(request) {
-  return request.workflow_version !== 'source-first-v1' && request.mode === 'depth' && ['module-analysis', 'coverage-analysis'].includes(request.scenario)
+  return MODEL_REVIEW_ENABLED && request.workflow_version !== 'source-first-v1' && request.mode === 'depth' && ['module-analysis', 'coverage-analysis'].includes(request.scenario)
 }
 
 export function createAnalysisReview({ binding, startReviewer, record, readDecision, verifyCases }) {
@@ -30,6 +32,7 @@ export function createAnalysisReview({ binding, startReviewer, record, readDecis
   }
   return {
     async afterProducerTurn(producer, state, signal) {
+      if (!MODEL_REVIEW_ENABLED) throw Object.assign(new Error('模型审核暂不执行；历史审核结果仍可读取'), { code: 'MODEL_REVIEW_DISABLED' })
       checkCancelled(signal)
       if (!state?.completed_steps?.includes('03')) return null
       if (!producer?.id || (producerId && producerId !== String(producer.id))) throw new Error('独立复核 Producer 绑定不成立')

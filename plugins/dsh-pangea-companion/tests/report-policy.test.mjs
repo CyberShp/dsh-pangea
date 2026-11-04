@@ -179,7 +179,7 @@ test('dispatch creates one real child and binds the exact Graph action', async (
 test('settle merges the returned continuation and reuses the original task', async () => {
   const root = await fixture()
   const owner = agent(root, 'root-agent')
-  const current = action(root, 'review')
+  const current = action(root, 'analysis')
   await prepareAction(root, current)
   const h = harness()
   await h.post(execFor(owner, 'pangea_run_create', {}), {
@@ -191,7 +191,7 @@ test('settle merges the returned continuation and reuses the original task', asy
   await h.post(dispatch, first)
   await h.settle(owner, 'child-1')
   const continuation = action(root, 'comparison', 'continue_agent', 'child-1')
-  continuation.stage = 'comparison_review'
+  continuation.stage = 'unit_analysis'
   await prepareAction(root, continuation)
   const settle = execFor(owner, 'pangea_action_settle', {
     data_root: path.join(root, 'pangea-data'), run_id: 'run-01', action_id: current.action_id,
@@ -240,7 +240,7 @@ test('child can use only its bound result/source scope and cannot advance lifecy
   assert.match(h.guard(execFor(child, 'write', { file_path: current.resultPath })), /必须通过已绑定的 result\/plan\/review 工具/)
 })
 
-test('internal closure timeout pauses and interrupts the exact original worker', async () => {
+test.skip('internal closure timeout pauses and interrupts the exact original worker', async () => {
   const root = await fixture()
   const owner = agent(root, 'budget-root')
   const current = { ...action(root, 'closure', 'continue_agent', 'original-worker'), stage: 'targeted_closure' }
@@ -296,7 +296,7 @@ test('replaying dispatch after a lost tool result does not bind, start, or follo
 
 test('retries a followup rejected before admission using the same execution identity', async () => {
   const root = await fixture(), owner = agent(root, 'retry-root')
-  const current = { ...action(root, 'analysis-retry'), stage: 'targeted_closure', pending_repair: { error: 'repair' } }
+  const current = { ...action(root, 'analysis-retry'), stage: 'unit_analysis', pending_repair: { error: 'repair' } }
   await prepareAction(root, current)
   const events = [], h = harness(async (_cwd, binding, event, _reason, _budget, automatic) => events.push({ binding, event, automatic }))
   const selected = { dataRoot: path.join(root, 'pangea-data'), runId: 'run-01' }
@@ -352,7 +352,7 @@ test('a runtime without a drain API cannot turn an interrupt request into stop c
   await interruptSourceFirstChildren(selected)
 })
 
-test('ignored core execution events do not advance native child state or interrupt a live turn', async () => {
+test.skip('ignored core execution events do not advance native child state or interrupt a live turn', async () => {
   const root = await fixture(), owner = agent(root, 'ignored-root')
   const current = { ...action(root, 'closure-ignored', 'continue_agent', 'ignored-worker'), stage: 'targeted_closure' }
   await prepareAction(root, current)
@@ -393,7 +393,7 @@ test('a rejected start for another execution identity never sends a worker follo
   await interruptSourceFirstChildren(selected)
 })
 
-test('a late pause from a prior execution cannot interrupt the resumed worker', async () => {
+test.skip('a late pause from a prior execution cannot interrupt the resumed worker', async () => {
   const root = await fixture(), owner = agent(root, 'late-pause-root')
   const current = { ...action(root, 'closure-race', 'continue_agent', 'original-race-worker'), stage: 'targeted_closure' }
   await prepareAction(root, current)
@@ -455,3 +455,16 @@ for (const ordering of ['end-first', 'notice-first']) test(`native lifecycle con
   assert.equal(events.filter(event => event.event === 'finished').length, 1)
   await interruptSourceFirstChildren(selected)
 })
+
+
+for (const stage of ['independent_review', 'comparison_review', 'targeted_closure']) {
+  for (const actionType of ['dispatch_agent', 'continue_agent']) test(`disabled ${stage} ${actionType} cannot start or resume internal DSH`, async () => {
+    const root = await fixture(), owner = agent(root, 'disabled-root'), h = harness()
+    const current = { ...action(root, 'disabled', actionType, actionType === 'continue_agent' ? 'original-worker' : null), stage }
+    await prepareAction(root, current)
+    await h.post(execFor(owner, 'pangea_run_create', {}), { workflow_version: 'source-first-v1', run_id: 'run-01', data_root: path.join(root, 'pangea-data'), actions: [current] })
+    const dispatch = execFor(owner, 'pangea_action_dispatch', { action_id: current.action_id })
+    await assert.rejects(h.tools.get('pangea_action_dispatch').execute(dispatch.arguments, dispatch), { code: 'MODEL_REVIEW_DISABLED' })
+    assert.equal(h.starts.length, 0); assert.equal(h.followups.length, 0); assert.equal(h.binds.length, 0)
+  })
+}

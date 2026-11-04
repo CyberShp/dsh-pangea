@@ -312,3 +312,12 @@ test('real reader contract retains exact output references and explicit closure 
     assert.equal(partial.outputs.counts.some(row => row.kind === 'test_case'), false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+
+test('disabled historical review work remains readable without appearing as current work', () => {
+  const current = run([action('old-review', 'comparison_review', [record('r', 'review_decision', { verdict: 'PASS' })], { status: 'paused', review_skipped: true })], { review_policy: 'disabled' })
+  const view = buildRunInsights(current, 'reviewing')
+  assert.equal(view.current_work.length, 0)
+  assert.equal(view.outputs.total_records, 1)
+  assert.equal(view.outputs.latest[0].record.body.verdict, 'PASS')
+})

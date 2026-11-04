@@ -696,7 +696,8 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     assert.equal(current.report_available, true)
     assert.equal(current.counts.risks, 0)
     assert.equal(current.reader_health.collection_status.risks, 'readable')
-    assert.equal(current.workflow.steps.find(item => item.stage === 'closing').status, 'skipped')
+    assert.equal(current.workflow.steps.some(item => ['reviewing', 'closing'].includes(item.stage)), false)
+    assert.deepEqual(current.semantic_review, { verdict: null, method: 'disabled' })
     assert.ok(current.workflow.step_progress.total > 0)
     assert.equal(current.counts.test_cases, 0)
     assert.equal(current.source_first_records[0].records[0].body.original, 'Agent prose')
@@ -806,7 +807,7 @@ test('reads source-first progress, frozen inputs, revisions, and raw Agent recor
     await writeJson(path.join(runRoot, 'progress.json'), stopped)
     const stoppedCurrent = (await companionSnapshot({ dataRoot, runId })).current
     assert.equal(stoppedCurrent.workflow.steps.find(item => item.stage === 'analyzing').status, 'stopped')
-    assert.equal(stoppedCurrent.workflow.steps.find(item => item.stage === 'reviewing').status, 'pending')
+    assert.equal(stoppedCurrent.workflow.steps.some(item => item.stage === 'reviewing'), false)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

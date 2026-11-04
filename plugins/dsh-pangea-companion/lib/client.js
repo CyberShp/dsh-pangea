@@ -9,6 +9,8 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
+    // Temporarily suspend review execution; retain its controls for a future explicit re-enable.
+    const MODEL_REVIEW_ENABLED = false
     const __testToolPicker = (() => {
     function createTestToolPicker(React, SourceScopePicker) {
       const h = React.createElement
@@ -621,7 +623,7 @@ window.__ModuleLoader__.load({
           || (a.ref.action_id === b.ref.action_id ? b.index - a.index : a.ref.action_id.localeCompare(b.ref.action_id)))
       const savedTimes = selectedActions.filter(action => action.readable).map(action => action.saved_at_ms).filter(value => value !== null)
       const lifecycle = current.lifecycle_status ?? current.execution_view?.lifecycle_status
-      const currentWork = deliveryStage ? [] : selectedActions.filter(action => Object.hasOwn(actionStates, action.status)).map(action => ({
+      const currentWork = deliveryStage ? [] : selectedActions.filter(action => !action.review_skipped && Object.hasOwn(actionStates, action.status)).map(action => ({
         action_id: action.action_id, unit_id: action.unit_id,
         title: byUnit.get(action.unit_id)?.title ?? string(action.title) ?? (action.unit_id || selectedInfo.title),
         purpose: byUnit.get(action.unit_id)?.purpose ?? null,
@@ -3357,7 +3359,7 @@ window.__ModuleLoader__.load({
       const stopBlockedReason = error ? '当前状态读取失败，请先重试读取后再停止。' : !current?.run_id ? '当前运行身份尚未读取。' : p.stopping && !['blocked', 'interrupted'].includes(currentStopOperation(task)?.status) ? '停止请求已发出，正在等待执行端确认。' : !p.stopping && (current.terminal || p.stopped || p.failed) ? '当前运行已结束，无需再次停止。' : ''
       const snapshotStatus = current?.source_snapshot?.status
       const snapshotLabel = ['manifest_verified', 'frozen', 'verified'].includes(snapshotStatus) ? '已冻结' : ['corrupt', 'invalid'].includes(snapshotStatus) ? '资料损坏，待检查' : snapshotStatus === 'legacy_unavailable' ? '历史 Run 未冻结' : '尚未验证'
-      const attention = Boolean(current?.needs_user || p.needsAttention)
+      const attention = current?.lifecycle_status !== 'complete' && Boolean(current?.needs_user || p.needsAttention)
       const failureReason = sourceFirstRecordBody(current?.terminal_error || task?.launch_error || current?.blocking_reason || current?.workflow?.error || '未记录具体原因，请展开执行详情查看诊断。')
       const finished = !p.stopping && (current?.lifecycle_status === 'complete' || (!current?.lifecycle_status && current?.terminal && current?.phase === 'COMPLETE'))
       const outcome = outcomePresentation(current)
@@ -3367,7 +3369,7 @@ window.__ModuleLoader__.load({
       const active = steps.find(step => step.step === current?.workflow?.current_step) ?? steps.find(step => current?.stage && step.stage === current.stage)
         ?? steps.find(step => ['running', 'paused', 'stopped', 'failed'].includes(step.status)) ?? steps.at(-1)
       const selected = steps.find(step => step.step === selection) ?? active
-      const stageDescription = { preparing: '冻结本次分析输入，记录源码与资产修订。', planning: '按冻结的源码范围划分分析单元。', reviewing: '复核分析结果与源码依据，记录需要修正的问题。', closing: '根据复核发现补充依据、修正结论，保留修订记录。', reporting: '汇总已保存结果与未解决事项，生成本次交付报告。', complete: '全部阶段已结束，交付物与本次运行记录已保存。' }[selected?.stage]
+      const stageDescription = { preparing: '冻结本次分析输入，记录源码与资产修订。', planning: '按冻结的源码范围划分分析单元。', reviewing: '查看历史模型审核记录；暂不执行模型审核。', closing: '查看历史定向修正记录；暂不启动模型修正。', reporting: '汇总已保存结果与未解决事项，生成本次交付报告。', complete: '全部阶段已结束，交付物与本次运行记录已保存。' }[selected?.stage]
       const units = current?.workflow?.units ?? []
       const actions = current?.workflow?.actions ?? []
       const stages = { preparing: [], planning: ['unit_planning', 'source_first_plan'], analyzing: ['unit_analysis'], reviewing: ['independent_review', 'comparison_review'], closing: ['targeted_closure'], reporting: ['report'], complete: [] }
@@ -3429,11 +3431,11 @@ window.__ModuleLoader__.load({
             h('p', null, error ? '当前状态未知，下方是最后成功读取的运行信息。' : p.failed ? '已有结果和失败会话已保留，可查看原因后继续分析。' : current.blocking_reason ? sourceFirstRecordBody(current.blocking_reason) : finished ? completionSummary : p.stopped ? '源码快照、已接受单元和运行记录均已保留。' : '选择阶段，查看已保存的产出和待处理事项；实时对话可在 Agent 会话管理中查看。')),
             node('div', 'metrics', stat('阶段已完成', h(React.Fragment, null, current.workflow?.completed_steps?.length ?? steps.filter(step => step.status === 'completed').length, node('span', 'small muted', ` / ${steps.length}`))), stat('运行时长', duration), stat('用户介入', attention || p.failed ? '需要' : '无需'))),
           p.failed && !error ? h('p', { role: 'alert', className: 'notice danger' }, failureReason) : null,
-          attention && !error ? h('div', { className: 'notice warn', style: { marginBottom: 24 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, '选择接下来的处理方式'), h('p', null, !task ? '此 Run 未关联任务记录，无法继续执行或交付；可查看已有结果。' : sourceFirstRecordBody(current.blocking_reason) || '查看未解决事项，继续处理或交付已有结果。'))), node('div', 'row', button('交付已有结果', () => perform('deliver', deliver), '', !task), button('继续修正', () => perform('resume', resume), '', !task?.can_resume))) : null,
+          attention && !error ? h('div', { className: 'notice warn', style: { marginBottom: 24 } }, node('div', 'notice-main', runIcon('CircleAlert'), node('div', '', h('strong', null, '选择接下来的处理方式'), h('p', null, !task ? '此 Run 未关联任务记录，无法继续执行或交付；可查看已有结果。' : sourceFirstRecordBody(current.blocking_reason) || '查看未解决事项，继续处理或交付已有结果。'))), node('div', 'row', button('交付已有结果', () => perform('deliver', deliver), '', !task), MODEL_REVIEW_ENABLED && button('继续修正', () => perform('resume', resume), '', !task?.can_resume))) : null,
           h('details', { className: 'run-execution-details' }, h('summary', null, '执行详情与 Agent 会话'), h('div', { className: 'execution-tools' }, h('button', { type: 'button', className: 'btn', disabled: !current?.run_id || !cwd, onClick: () => setSessionsOpen(true) }, 'Agent 会话管理')), h(RunExecutionSummary, { current, task, stale: Boolean(error) })),
           node('div', 'run-layout', node('section', 'run-stages', heading('运行阶段', node('span', 'tiny muted', `${steps.length} 个阶段`)),
             steps.map(step => h('button', { key: step.step, type: 'button', className: `stage ${step.status === 'completed' ? 'done' : ''} ${step === selected ? 'current' : ''}`, 'aria-pressed': step === selected, onClick: () => setSelection(step.step) },
-              h('b', null, step.status === 'completed' ? '✓' : step.step), h('div', null, step.title, h('p', null, error && step === active ? '上次记录' : step.status === 'pending' ? '等待前序完成' : step.status === 'running' ? p.failed && step === active ? '本次执行失败' : '当前正在执行' : step.status === 'paused' ? '等待你的决定' : step.status === 'stopped' && p.canResume ? '已停止 · 可继续' : STAGE_STATUS[step.status] ?? step.status)))), node('p', 'aside-note', '选择阶段，查看对应任务与产物。')),
+              h('b', null, step.status === 'completed' ? '✓' : step.step), h('div', null, step.title, h('p', null, error && step === active ? '上次记录' : step.status === 'skipped' ? '暂不执行' : step.status === 'pending' ? '等待前序完成' : step.status === 'running' ? p.failed && step === active ? '本次执行失败' : '当前正在执行' : step.status === 'paused' ? '等待你的决定' : step.status === 'stopped' && p.canResume ? '已停止 · 可继续' : STAGE_STATUS[step.status] ?? step.status)))), node('p', 'aside-note', '选择阶段，查看对应任务与产物。')),
             node('section', 'panel run-focus', node('header', 'run-stage-heading',
               node('span', 'run-stage-icon', runIcon('ScanLine')),
               node('div', 'run-stage-copy', node('div', 'run-stage-title', h('h2', null, selected?.title ?? '阶段尚未读取'), badge(error ? '上次记录' : selected?.status === 'running' ? p.failed && selected === active ? '执行失败' : '分析中' : selected?.status === 'paused' ? '需要处理' : STAGE_STATUS[selected?.status] ?? status, tone)),
@@ -3450,7 +3452,7 @@ window.__ModuleLoader__.load({
                     node('span', 'stage-artifact-copy', node('span', 'stage-artifact-title', artifactLabel(file)), node('span', 'stage-artifact-name', file.split(/[\\/]/).pop())), node('span', 'stage-artifact-open', '打开')))))) : null)
                 : renderRunInsights(insights, { openFlow: id => openFlow(id, view()), navigate, showAll: () => setInsightLimit(Number.MAX_SAFE_INTEGER), openReport: reportPath && ['reporting', 'complete'].includes(selected?.stage) ? () => openFile(reportPath) : null })),
               node('div', 'run-foot', h('span', null, h('span', { className: 'status-dot' }), error ? '正在显示上次记录' : insights.last_saved_at_ms ? `最近保存 · ${time(insights.last_saved_at_ms)}` : '尚未记录结果保存时间'), h('span', null, '产出按保存时间倒序'))),
-            node('aside', 'run-aside', h('section', null, heading('已产出', node('span', 'tiny muted', `${outputs.length} 项可查看`)), outputs.map(output => h('div', { key: output.title, className: 'file-row' }, runIcon('FileText'), h('div', null, h('div', { style: { fontSize: 14 } }, output.title), node('div', 'meta', output.caption)), button('查看', output.action, 'ghost'))), !outputs.length ? node('p', 'small muted', '当前尚无可读取产物。') : null, node('p', 'aside-note', current.publication?.state === 'final' ? '报告包含结论、源码依据与测试建议。' : '分析中的内容为草稿，复核后更新。')),
+            node('aside', 'run-aside', h('section', null, heading('已产出', node('span', 'tiny muted', `${outputs.length} 项可查看`)), outputs.map(output => h('div', { key: output.title, className: 'file-row' }, runIcon('FileText'), h('div', null, h('div', { style: { fontSize: 14 } }, output.title), node('div', 'meta', output.caption)), button('查看', output.action, 'ghost'))), !outputs.length ? node('p', 'small muted', '当前尚无可读取产物。') : null, node('p', 'aside-note', current.publication?.state === 'final' ? '报告包含结论、源码依据与测试建议。' : '分析中的内容为草稿，随结果保存更新。')),
               h('section', { style: { marginTop: 28 } }, heading('本次运行'), fields([['分析方式', ({ 'module-analysis': '模块分析', 'coverage-analysis': '覆盖率分析', 'risk-analysis': '风险分析', 'branch-analysis': '分支分析' })[current.scenario] ?? current.scenario ?? '未记录'], ['运行模式', ({ depth: '标准型', speed: '速度型' })[current.mode] ?? current.mode ?? '未记录'], ['源码快照', current.source_snapshot?.file_count == null ? '未读取' : `${current.source_snapshot.file_count} 个文件 · ${snapshotLabel}`], ['分析范围', current.target ?? '未记录']]), node('div', 'divider'), node('div', 'small muted', runIcon('LockKeyhole'), ['manifest_verified', 'frozen', 'verified'].includes(snapshotStatus) ? ' 基于冻结的源码快照' : ` 源码快照${snapshotLabel}`),
                 node('details', 'run-information', h('summary', null, '运行信息'), fields([['运行编号', current.run_id], ['开始时间', time(startTime)], ['最近同步', time(current.state_read?.observed_at)], ['工作流', current.workflow_version], ['交付完整性', outcome.delivery], ['审查方式', outcome.review], ['语义结论', outcome.semantic]]), diagnostics), p.stopped && !p.canResume ? h('p', { className: 'aside-note', role: 'status' }, p.resumeBlockedReason) : null)))),
           confirmStop ? node('div', 'run-overlay', h('section', { className: 'modal', ref: dialog, role: 'dialog', 'aria-modal': true, 'aria-labelledby': 'pangea-stop-title', onKeyDown: event => {
@@ -3658,25 +3660,27 @@ window.__ModuleLoader__.load({
 
     function outcomePresentation(current) {
       const delivery = current?.delivery_integrity
-      const review = current?.semantic_review
+      const review = current?.review_policy === 'disabled' ? { method: 'disabled', verdict: null } : current?.semantic_review
       return {
         workflow: current?.lifecycle_status === 'complete' ? '流程完成' : '流程未完成',
         delivery: ({ complete: '交付完整', incomplete: '交付不完整', unavailable: '交付不可读取' })[delivery?.status] ?? '交付尚未检查',
-        review: ({ graph_review: current?.mode === 'speed' ? '速度型对照复核（未盲审）' : 'Graph 独立复核', independent_verified: '独立审查（宿主已核验执行）', independent_pending: '独立审查待完成', independent_declared: '独立审查（Agent 声明，宿主未核验）', self_review: '自审', unavailable: '审查记录不可读取' })[review?.method] ?? '审查方式未记录',
-        semantic: review?.verdict === 'PASS' ? 'PASS（审查者结论）' : review?.verdict === 'UNRESOLVED' ? 'UNRESOLVED（审查者结论）' : '未给出语义结论',
+        review: ({ disabled: '未启用模型审核', graph_review: current?.mode === 'speed' ? '速度型对照复核（未盲审）' : 'Graph 独立复核', independent_verified: '独立审查（宿主已核验执行）', independent_pending: '独立审查待完成', independent_declared: '独立审查（Agent 声明，宿主未核验）', self_review: '自审', unavailable: '审查记录不可读取' })[review?.method] ?? '审查方式未记录',
+        semantic: review?.method === 'disabled' ? '未进行模型审核' : review?.verdict === 'PASS' ? 'PASS（审查者结论）' : review?.verdict === 'UNRESOLVED' ? 'UNRESOLVED（审查者结论）' : '未给出语义结论',
       }
     }
 
     function configuredReviewMethod(current) {
+      if (current?.review_policy === 'disabled' || current?.semantic_review?.method === 'disabled') return '未启用模型审核'
       const value = current?.analysis_settings?.review_method
       return typeof value === 'string' && value.trim() ? value.trim() : '未记录'
     }
 
     function semanticReviewStatusLabel(current) {
-      const review = current?.semantic_review
+      const review = current?.review_policy === 'disabled' ? { method: 'disabled', verdict: null } : current?.semantic_review
       if (!review || typeof review !== 'object') return '未记录'
       const verdict = ['PASS', 'UNRESOLVED'].includes(review.verdict) ? review.verdict : null
       switch (review.method) {
+        case 'disabled': return '未启用模型审核'
         case 'graph_review': return verdict ? `Graph 复核结果 · ${verdict}` : 'Graph 复核尚无结论'
         case 'independent_pending': return verdict ? `待独立核验 · 暂存结论 ${verdict}` : '待独立核验'
         case 'independent_verified': return `宿主已核验执行 · ${verdict ? `结论 ${verdict}` : '未给出结论'}`
@@ -4904,7 +4908,7 @@ window.__ModuleLoader__.load({
           ? { kind: 'file', path: form.coverage_path }
           : form.coverage_kind === 'asset' ? { kind: 'asset', asset_id: form.coverage_asset_id }
           : { kind: 'query', query: { product: form.coverage_product, c_version: form.coverage_version, b_version: form.coverage_b_version || '', scope: form.coverage_module, recursive: form.coverage_recursive !== false, source: form.coverage_source || 'summary' } } } : {}),
-        mode: form.mode || 'depth',
+        mode: MODEL_REVIEW_ENABLED ? form.mode || 'depth' : 'depth',
         provider_id: form.provider_id || null,
         model_route: null,
         agent_model: form.provider_id ? form.agent_model || null : null,
@@ -7760,7 +7764,7 @@ window.__ModuleLoader__.load({
         const selectedCoverage = createForm.asset_ids.some(id => (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.asset_type === 'coverage' && (assetLabels[id] ?? assetCatalog?.assets?.find(item => item.asset_id === id))?.status === 'available')
         const coverageReady = createForm.scenario !== 'coverage-analysis' || (sceneOptions ? selectedCoverage : (createForm.coverage_kind === 'file' ? createForm.coverage_path.trim() : createForm.coverage_kind === 'asset' ? Boolean(createForm.coverage_asset_id) : workbench?.capabilities?.coverage_query_skill?.available && createForm.coverage_product.trim() && createForm.coverage_version.trim() && createForm.coverage_module.trim()))
         const submitBlockReason = !compatible ? '等待工作台就绪后即可创建分析。'
-          : !supported('scenarios', createForm.scenario) || !supported('modes', createForm.mode) ? '请选择当前环境支持的分析场景与模式。'
+          : !supported('scenarios', createForm.scenario) ? '请选择当前环境支持的分析场景。'
           : !createForm.repository ? '请先选择源码仓库。'
           : !createForm.target.trim() ? '请填写本次分析目标。'
           : !objectiveReady ? '请选择产品行为或接口契约分析目标。'
@@ -7793,7 +7797,7 @@ window.__ModuleLoader__.load({
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
-        const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && objectiveReady && sourceScope.length && sourceScope.every(__sourceScopePicker.isSubdirectoryPath) && supported('scenarios', createForm.scenario) && supported('modes', createForm.mode))
+        const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && objectiveReady && sourceScope.length && sourceScope.every(__sourceScopePicker.isSubdirectoryPath) && supported('scenarios', createForm.scenario))
         const inputsReady = (!createForm.test_tool_sources?.length || createForm.test_tool_preview?.matched_file_count > 0) && coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
         const go = (next, nextView = 'inputs') => {
           if (creatingRun) return
@@ -7817,9 +7821,9 @@ window.__ModuleLoader__.load({
         let context = panel(h(React.Fragment, null,
           h('div', { className: 'create-side-title' }, '本次分析'), badge(createForm.repository || '待选择仓库', 'neutral'),
           h('h3', { className: 'create-context-title' }, createForm.target || '待填写分析目标'), h('p', { className: 'create-copy' }, scene[2]),
-          h('dl', { className: 'key-value' }, ['分析场景', scene[0], '分析模式', createForm.mode === 'depth' ? '标准型' : '速度型', '源码范围', validScopePreview ? `已选目录 · ${validScopePreview.matched_file_count} 个源码文件` : '尚未预览命中文件', '输入资料', step > 1 ? `${selectedAssets.length} 份已选资产` : '下一步选择', '执行 Agent', step > 2 ? selectedProviderLabel : '待选择'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
+          h('dl', { className: 'key-value' }, ['分析场景', scene[0], ...(MODEL_REVIEW_ENABLED ? ['分析模式', createForm.mode === 'depth' ? '标准型' : '速度型'] : []), '源码范围', validScopePreview ? `已选目录 · ${validScopePreview.matched_file_count} 个源码文件` : '尚未预览命中文件', '输入资料', step > 1 ? `${selectedAssets.length} 份已选资产` : '下一步选择', '执行 Agent', step > 2 ? selectedProviderLabel : '待选择'].map((text, i) => h(i % 2 ? 'dd' : 'dt', { key: i }, text))),
           h('div', { className: 'create-scene-focus' }, h('strong', null, '本次分析重点'), h('p', null, scene[3]), badge(createForm.scenario === 'coverage-analysis' ? '覆盖率输入必需' : '覆盖率输入可选', createForm.scenario === 'coverage-analysis' ? 'warn' : 'neutral')),
-          step === 1 && h(React.Fragment, null, h('div', { className: 'create-subhead' }, '分析模式'), field('', h('select', { 'aria-label': '分析模式', value: createForm.mode, onChange: event => update('mode', event.target.value) }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '标准型 · 独立盲审 + 对照复核'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型 · 直接审核，跳过盲审')))),
+          MODEL_REVIEW_ENABLED && step === 1 && h(React.Fragment, null, h('div', { className: 'create-subhead' }, '分析模式'), field('', h('select', { 'aria-label': '分析模式', value: createForm.mode, onChange: event => update('mode', event.target.value) }, h('option', { value: 'depth', disabled: !supported('modes', 'depth') }, '标准型 · 独立盲审 + 对照复核'), h('option', { value: 'speed', disabled: !supported('modes', 'speed') }, '速度型 · 直接审核，跳过盲审')))),
           step === 3 && !executionReady && h('div', { style: { marginTop: 18 } }, badge('执行设置待完成', 'warn')), h('div', { className: 'divider' }), h('div', { className: 'create-check-item' }, runIcon('ShieldCheck'), h('span', null, '每次运行将保存独立的源码快照与资产版本。'))), 'create-side')
         if (step === 2 && view === 'coverage') context = panel(h(React.Fragment, null,
           h('div', { className: 'create-side-title' }, '覆盖率如何参与分析'), h('h3', { className: 'create-context-title' }, '先获取数据', h('br'), '再匹配源码'),
@@ -7883,14 +7887,14 @@ window.__ModuleLoader__.load({
             try { if (providerId) window.localStorage?.setItem(ACP_PROVIDER_STORAGE_KEY, providerId) } catch { /* storage unavailable */ }
           }
           content = panel(h(React.Fragment, null,
-            h('h2', { className: 'create-heading' }, '选择执行分析的 Agent'), h('p', { className: 'create-copy' }, '分析与复核统一使用外部 Agent。模型读取完成并确认可用后，才能继续创建。'),
+            h('h2', { className: 'create-heading' }, '选择执行分析的 Agent'), h('p', { className: 'create-copy' }, MODEL_REVIEW_ENABLED ? '分析与复核统一使用外部 Agent。模型读取完成并确认可用后，才能继续创建。' : '分析使用外部 Agent，审核暂不执行。模型读取完成并确认可用后，才能继续创建。'),
             h('div', { className: 'form-grid', style: { marginTop: 22 } }, field('外部 Agent', h('select', { 'aria-label': '外部 Agent', value: createForm.provider_id, disabled: creatingRun, onChange: event => selectProvider(event.target.value) }, !createForm.provider_id && h('option', { value: '', disabled: true }, '请选择外部 Agent'), unavailableProvider && h('option', { value: createForm.provider_id, disabled: true }, selectedProviderLabel), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: !item.registered }, item.label)))), createForm.provider_id && selectedProvider && h(AgentModelSelect, { providerId: createForm.provider_id, cwd, state: analysisAgentModels, value: createForm.agent_model, disabled: creatingRun, onChange: value => update('agent_model', value), onRefresh: refreshAnalysisAgentModels })),
             h('div', { style: { marginTop: 22 } }, unavailableProvider ? notice(retiredProvider ? 'Claude Code 支持已移除' : '原执行器不可用', unavailableProviderMessage, 'warn') : executionReady ? notice('执行环境已就绪', execution.message, 'good', badge('可用', 'good')) : notice('执行设置尚未就绪', execution.message, 'warn', !analysisProviderRegistered && h('div', { className: 'row' }, button('打开 Agent 设置', () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'external' } })), '', 'Settings'), button('重新检测', () => { void loadWorkbench() }, '', 'RefreshCw')))),
-            h('div', { className: 'create-subhead' }, '本次执行包含'), h('div', { className: 'grid3' }, [['单元分析', scene[2]], ...(createForm.mode === 'depth' ? [['独立盲审', '独立检查结果与源码'], ['对照复核', '核对分歧，形成交付']] : [['直接审核', '检查结果与源码']])].map(([title, copy]) => h('div', { key: title, className: 'callout' }, h('strong', { className: 'small' }, title), h('p', { className: 'create-copy', style: { margin: '8px 0 0' } }, copy)))), footer(() => go(2), () => go(4), '下一步 · 确认创建', !executionReady)))
+            h('div', { className: 'create-subhead' }, '本次执行包含'), h('div', { className: 'grid3' }, (MODEL_REVIEW_ENABLED ? [['单元分析', scene[2]], ...(createForm.mode === 'depth' ? [['独立盲审', '独立检查结果与源码'], ['对照复核', '核对分歧，形成交付']] : [['直接审核', '检查结果与源码']])] : [['分析规划', '划分源码范围和分析单元'], ['单元分析', scene[2]], ['生成报告', '汇总已保存的分析结果']]).map(([title, copy]) => h('div', { key: title, className: 'callout' }, h('strong', { className: 'small' }, title), h('p', { className: 'create-copy', style: { margin: '8px 0 0' } }, copy)))), footer(() => go(2), () => go(4), '下一步 · 确认创建', !executionReady)))
         } else {
           const row = (label, title, detail, destination) => h('div', { className: 'create-review-row' }, h('div', { className: 'create-review-label' }, label), h('div', null, h(label === '源码范围' ? 'div' : 'strong', { className: label === '源码范围' ? 'mono small' : undefined, style: { whiteSpace: 'pre-line' } }, title), h('p', { style: { whiteSpace: 'pre-line' } }, detail)), h('button', { type: 'button', className: 'link', disabled: creatingRun, onClick: () => go(destination) }, '修改', runIcon('ArrowUpRight')))
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
-            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]} · ${createForm.mode === 'depth' ? '标准型' : '速度型'}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
+            row('分析目标', createForm.target, `${createForm.repository} · ${scene[0]}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), row('源码范围', sourceScope.join('\n'), validScopePreview ? `命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
             row('测试工具代码（仅参考）', (createForm.test_tool_sources || []).map(source => `${source.repo_id}: ${source.paths.join('、')}`).join('\n') || '未选择', createForm.test_tool_preview ? `已确认 ${createForm.test_tool_preview.matched_file_count} 个参考文件；不作为被测对象` : '可选，不影响原有分析', 2),
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint', className: 'notice warn' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
@@ -7910,7 +7914,7 @@ window.__ModuleLoader__.load({
             current.case_readiness ? h('div', { style: styles.itemMeta }, `具备执行条件 ${current.case_readiness.ready} · 待补执行条件 ${current.case_readiness.needs_setup} · 未标注 ${current.case_readiness.unclassified}`) : null,
             current.execution_progress?.length ? h('section', { 'aria-label': '实际执行进度', className: 'pangea-correction-progress', style: styles.card },
               h('h3', null, '实际执行进度'),
-              current.execution_progress.filter(item => item.stage === 'targeted_closure' || ['dispatched', 'paused'].includes(item.status)).map(item => {
+              current.execution_progress.filter(item => !item.review_skipped).filter(item => item.stage === 'targeted_closure' || ['dispatched', 'paused'].includes(item.status)).map(item => {
                 const elapsed = item.elapsed_ms + (item.started_at_ms && !item.finished_at_ms ? Math.max(0, Date.now() - item.started_at_ms) : 0)
                 return h('article', { key: item.action_id, className: 'pangea-correction-item' },
                   h('div', { className: 'pangea-correction-head' }, h('h4', null, item.unit_id || item.action_id),
@@ -7926,8 +7930,8 @@ window.__ModuleLoader__.load({
                   item.reason ? h('p', { className: 'pangea-correction-reason' }, item.reason) : null)
               })) : null,
             showActions && current.stage === 'closing' && selectedTask ? h('div', { style: styles.card },
-              h('div', null, '定向修正可以继续，也可以结束并交付已有结果。结束后不再自动返修，未完成项明确保留。'),
-              h('button', { type: 'button', style: styles.button, onClick: () => { void deliverCurrentRun() } }, '结束修正，交付当前结果')) : null
+              h('div', null, '历史修正记录保留，可交付已有结果；暂不执行模型审核或定向修正。'),
+              h('button', { type: 'button', style: styles.button, onClick: () => { void deliverCurrentRun() } }, '交付当前结果')) : null
         )
       }
 
@@ -8618,7 +8622,8 @@ window.__ModuleLoader__.load({
         const mode = run?.mode ?? task?.mode
         const scenarioLabel = ({ 'module-analysis': '模块分析', 'coverage-analysis': '覆盖率分析', 'risk-analysis': '风险分析', 'branch-analysis': '分支分析' })[scenario] ?? text(scenario, '分析场景未记录')
         const modeLabel = ({ depth: '标准型', standard: '标准型', speed: '速度型', fast: '速度型' })[mode] ?? text(mode, '模式未记录')
-        return task?.status === 'needs_attention' ? `${modeLabel} · 等待修正决策` : `${scenarioLabel} · ${modeLabel}`
+        if (MODEL_REVIEW_ENABLED) return task?.status === 'needs_attention' ? `${modeLabel} · 等待修正决策` : `${scenarioLabel} · ${modeLabel}`
+        return task?.status === 'needs_attention' ? `${scenarioLabel} · 等待处理` : scenarioLabel
       }
 
       function taskStatusTone(status) {
@@ -8802,9 +8807,7 @@ window.__ModuleLoader__.load({
         const testCases = details.test_cases ?? []
         const inputFiles = (current?.input_materials ?? []).map(material => material.title ?? material.asset_id).filter(Boolean)
         const scenario = current?.analysis_settings?.scenario ?? run?.scenario ?? current?.scenario
-        const mode = current?.analysis_settings?.mode ?? run?.mode ?? current?.mode
         const scenarioLabel = ({ 'module-analysis': '模块分析', 'coverage-analysis': '覆盖率分析', 'risk-analysis': '风险分析', 'branch-analysis': '分支分析' })[scenario] ?? text(scenario, '分析场景未记录')
-        const modeLabel = ({ standard: '标准型', depth: '标准型', fast: '速度型', speed: '速度型' })[mode] ?? text(mode, '模式未记录')
         const statusLabel = current?.lifecycle_status === 'complete' ? '已完成'
           : current?.lifecycle_status === 'running' ? '运行中'
             : current?.lifecycle_status === 'stopped' ? '已停止'
@@ -8836,7 +8839,7 @@ window.__ModuleLoader__.load({
                   h('h3', { className: 'b03-run-record-summary-title' }, runTitle),
                   runSummary ? h('p', null, runSummary) : null,
                   h('p', { className: 'b03-run-record-summary-meta' }, [runId ? `RUN ${String(runId).match(/(\d+)$/)?.[1] ?? runId}` : null,
-                    statusLabel, scenarioLabel, modeLabel].filter(Boolean).join(' · ')))),
+                    statusLabel, scenarioLabel].filter(Boolean).join(' · ')))),
               h('section', { className: 'b03-run-record-card', 'aria-label': '冻结输入' },
                 h('h2', null, '冻结输入'),
                 h('dl', { className: 'b03-run-record-inputs' },
@@ -8901,7 +8904,7 @@ window.__ModuleLoader__.load({
             })()
               : presentation.stopped ? `${current.analysis?.completed ?? 0} / ${current.analysis?.total ?? '—'} 个分析单元已接受，源码快照与检查点已保存，可从运行过程继续。`
                 : presentation.failed ? '本次执行未正常结束。已有结果和错误记录仍可查看。'
-                : '已完成源码分析、独立复核与定向修正，结果可查看与交付。'
+                : '已完成源码分析和报告整理，结果可查看与交付。'
         const progressAction = presentation.needsAttention || presentation.failed || presentation.stopping || presentation.stopped || presentation.running
         const progressActionLabel = presentation.needsAttention ? '处理待办' : presentation.failed ? '查看失败原因' : presentation.stopping ? '查看停止进度' : presentation.stopped ? '前往继续分析' : '查看运行过程'
         const semanticVerdict = outcomePresentation(current).semantic
@@ -8950,7 +8953,7 @@ window.__ModuleLoader__.load({
               progressAction ? progressActionLabel : testCases.length ? '评审测试用例' : reportAvailableFor(current) ? '查看分析报告' : '查看运行过程'))),
           presentation.failed ? h('div', { className: 'pangea-ui', style: { padding: 0, background: 'transparent' } }, h('p', { role: 'alert', className: 'notice danger' }, sourceFirstRecordBody(current.terminal_error || selectedTask.launch_error || current.blocking_reason || '未记录具体原因，请查看运行过程中的执行诊断。'))) : null,
           presentation.needsAttention && unresolvedItems.length ? h('section', { className: 'b03-overview-attention', role: 'alert' },
-            h('div', null, h('strong', null, unresolvedItems[0].text), h('p', null, '可继续定向修正，或保留未解决项并交付已有结果。')),
+            h('div', null, h('strong', null, unresolvedItems[0].text), h('p', null, '模型审核已移除，可保留未解决项并交付已有结果。')),
             h('button', { type: 'button', onClick: () => jump('workflow') }, '查看处理方式')) : null,
           ['warning', 'error'].includes(health?.status) ? renderHealthCard(false) : null,
           h('details', { className: 'run-execution-details pangea-result-execution' }, h('summary', null, '执行状态详情'), h(RunExecutionSummary, { current, task: selectedTask, stale: Boolean(error), compact: true })),
@@ -8997,7 +9000,6 @@ window.__ModuleLoader__.load({
                   verdictBadge ? h('span', { className: `b03-overview-verdict ${verdictBadge === '审查 PASS' ? 'b03-overview-verdict-pass' : 'b03-overview-verdict-unresolved'}`, title: semanticVerdict, 'aria-label': `质量结论：${semanticVerdict}` }, verdictBadge) : null),
                 h('dl', { className: 'b03-overview-kv' },
                   h('dt', null, '场景'), h('dd', null, ({ 'module-analysis': '模块分析', 'coverage-analysis': '覆盖率分析', 'risk-analysis': '风险分析', 'branch-analysis': '分支分析' })[current.scenario] ?? current.scenario ?? '未记录'),
-                  h('dt', null, '模式'), h('dd', null, ({ depth: '标准型', speed: '速度型' })[current.mode] ?? current.mode ?? '未记录'),
                   h('dt', null, '复核方式'), h('dd', null, configuredReviewMethod(current)),
                   h('dt', null, '复核状态'), h('dd', null, semanticReviewStatusLabel(current)),
                   h('dt', null, '运行时长'), h('dd', { className: 'b03-task-meta' }, durationLabel(runRecordTime(current.started_at), runRecordTime(current.ended_at)) || (presentation.running ? '进行中' : '未记录'))),
@@ -9089,7 +9091,7 @@ window.__ModuleLoader__.load({
                 h('p', null, testCases.length + ' 条设计用例覆盖主要路径、边界与异常。设计用例不代表已执行，也不代表实测覆盖率已提升。'),
                 executionRuns.length ? h('p', null, executionRuns.length + ' 条测试执行记录已回传。') : null),
               h('section', { id: outline[3][0] }, h('h3', null, '04 / 复核与限制'),
-                h('p', null, `${partial ? `保留 ${unresolvedItems.length} 项未解决修正${unresolvedItems.length ? `（${unresolvedItems.map(item => item.id).join('、')}）` : ''}，并列出对应证据缺口。` : '本次报告保留质量结论与复核信息。'} 质量结论：${outcomePresentation(current).semantic}。`))),
+                h('p', null, `${partial ? `保留 ${unresolvedItems.length} 项未解决修正${unresolvedItems.length ? `（${unresolvedItems.map(item => item.id).join('、')}）` : ''}，并列出对应证据缺口。` : '本次报告保留分析结果与运行记录。'} 质量结论：${outcomePresentation(current).semantic}。`))),
             h('aside', { className: 'b03-report-nav' },
               h('section', { className: 'b03-overview-card' }, h('h3', null, '报告目录'),
                 outline.map(([id, label], index) => h('button', { key: id, type: 'button', className: 'b03-report-outline-link', style: { ...styles.backButton, minHeight: 0, padding: '14px 0', border: 0, borderBottom: index < outline.length - 1 ? '1px solid #e5e7e4' : 0, borderRadius: 0, background: 'transparent', color: '#25292e', fontSize: 14 }, onClick: () => scrollTo(id) }, label))),
@@ -9566,13 +9568,13 @@ window.__ModuleLoader__.load({
       }
 
       function renderReview() {
-        if (current?.workflow_version === 'source-first-v1') return renderSourceFirstRecords((current.source_first_records ?? []).filter(item => ['independent_review', 'comparison_review'].includes(item.stage)))
+        if (current?.workflow_version === 'source-first-v1') return h(React.Fragment, null, h('p', null, '历史模型审核记录，仅供查阅，暂不执行。'), renderSourceFirstRecords((current.source_first_records ?? []).filter(item => ['independent_review', 'comparison_review'].includes(item.stage))))
         const review = current?.review
         if (review == null) return h('div', { style: styles.card }, h('div', { style: styles.empty }, '当前 Run 还没有复核结果。'))
         return h(React.Fragment, null,
-          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '复核结论'),
+          h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '历史复核结论'),
             renderReviewPresentation(h, review, { renderText: renderReadableBody })),
-          details.review_issues != null ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '有效复核问题'),
+          details.review_issues != null ? h('div', { style: styles.card }, h('div', { style: styles.itemTitle }, '历史复核问题'),
             renderReviewPresentation(h, details.review_issues, { renderText: renderReadableBody })) : null)
       }
 

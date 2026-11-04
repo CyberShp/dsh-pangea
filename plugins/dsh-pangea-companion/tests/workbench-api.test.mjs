@@ -11,47 +11,23 @@ const catalogProvider = { async discoverModels() { return { current_model: 'nati
 
 const capabilities = { repositories: ['repo-one'], analysis_skill: { skill_id: 'codetalks-skill', version: '1.4.9' } }
 
-for (const cleanupFails of [false, true]) test(`managed depth job preserves sessions and reports cleanup failure=${cleanupFails}`, async () => {
+test('legacy depth producer no longer launches an independent reviewer', async () => {
   const root = await workspace()
   try {
-    const runRoot = path.join(root, 'run'), decisionFile = path.join(runRoot, '内部索引', '独立审查状态.json')
-    await mkdir(path.dirname(decisionFile), { recursive: true })
-    let hooks, producerTurns = 0, reviewerTurns = 0, starts = 0, disposed = 0
-    const records = [], owner = { id: 'owner' }
-    const answerReview = async prompt => {
-      if (prompt.includes('本轮先准备执行证据')) return { stopReason: 'completed', output: [] }
-      reviewerTurns++
-      const requestId = /review_request_id: ([\w-]+)/.exec(prompt)[1]
-      await writeFile(decisionFile, JSON.stringify({ run_id: 'run', review_request_id: requestId,
-        review_action: reviewerTurns === 1 ? 'revise' : 'accept', semantic_verdict: 'PASS', summary: 'reviewed' }))
-      return { stopReason: 'completed', output: [] }
-    }
-    const runtime = { agents: { get: () => owner },
-      jobs: { start(spec) { hooks = spec.run(); return 'job' }, get: () => ({ startedAt: 10 }) },
+    let hooks, starts = 0, disposed = 0
+    const runtime = { agents: { get: () => ({ id: 'owner' }) }, jobs: { start(spec) { hooks = spec.run(); return 'job' }, get: () => ({ startedAt: 10 }) },
       subagents: { getProvider: () => catalogProvider, async start(provider, request) {
-        starts++
-        if (starts === 1) {
-          assert.match(request.prompt[0].text, /完成阶段 03 后/)
-          return { id: 'producer', result: Promise.resolve({ stopReason: 'completed' }),
-            async continuePrompt(p) { producerTurns++; assert.match(p[0].text, producerTurns === 1 ? /定向修订/ : /正式交付/); return { stopReason: 'completed' } },
-            async dispose() { disposed++ } }
-        }
-        return { id: 'reviewer', result: answerReview(request.prompt[0].text), continuePrompt: p => answerReview(p[0].text), async dispose() { disposed++; if (cleanupFails) throw new Error('review cleanup failed') } }
-      } },
-    }
+        starts++; assert.match(request.prompt[0].text, /模型审核暂不执行/)
+        return { id: 'producer', result: Promise.resolve({ stopReason: 'completed' }), async dispose() { disposed++ } }
+      } } }
     const api = { workspace: { list: async () => ok({ items: [{ workspaceId: 'w', path: root }] }) }, sessions: { create: async () => ok({ sessionId: 'owner' }), rename: async () => ok({}) } }
-    const runner = async ({ args, signal }) => args[0] === 'system' ? capabilities : args[1] === 'verify-cases'
-      ? (assert.ok(signal), { status: 'recorded', receipt_path: 'receipt.json', cases: [{ case_id: 'TC-1', status: 'executed', exit_code: 1 }] }) : args[1] === 'get'
-      ? { run_id: 'run', completed_steps: producerTurns >= 2 ? ['01','02','03','04','05'] : ['01','02','03'], lifecycle_status: producerTurns >= 2 ? 'complete' : 'running', report_available: producerTurns >= 2 }
-      : { run_id: 'run', run_root: runRoot, request_path: path.join(root, 'request.md') }
+    const runner = async ({ args }) => args[0] === 'system' ? capabilities : args[1] === 'get'
+      ? { run_id: 'run', lifecycle_status: 'complete', report_available: true }
+      : { run_id: 'run', run_root: path.join(root, 'run'), request_path: path.join(root, 'request.md') }
     await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo-one', target: 'depth', source_scope: ['src'], mode: 'depth', provider_id: 'pangea-opencode' } }, runner,
-      async () => {}, async () => {}, runtime, process.env, { reviewBinding: { task_id: 'task', attempt_id: 'attempt' }, onReviewState: async value => records.push(value) })
-    if (cleanupFails) await assert.rejects(hooks.done, /任务进程清理未完成/); else assert.equal((await hooks.done).status, 'completed')
-    assert.equal(starts, 2)
-    assert.equal(producerTurns, 2)
-    assert.equal(reviewerTurns, 3)
-    assert.equal(disposed, 2)
-    assert.equal(records.at(-1).status, 'complete')
+      async () => {}, async () => {}, runtime, process.env, { reviewBinding: { task_id: 'task', attempt_id: 'attempt' }, onReviewState: () => assert.fail('no review state') })
+    assert.equal((await hooks.done).status, 'completed')
+    assert.equal(starts, 1); assert.equal(disposed, 1)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 const acpRuntimeConfig = {
@@ -1033,5 +1009,50 @@ test('one damaged historical Run does not hide other workbench Runs or capabilit
     assert.equal(result.run, null)
     assert.equal(result.run_detail.run_id, 'broken')
     assert.equal(result.run_detail.status, 'error')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+// Historical host-review lifecycle specifications, retained while execution is disabled.
+for (const cleanupFails of [false, true]) test.skip(`managed depth job preserves sessions and reports cleanup failure=${cleanupFails}`, async () => {
+  const root = await workspace()
+  try {
+    const runRoot = path.join(root, 'run'), decisionFile = path.join(runRoot, '内部索引', '独立审查状态.json')
+    await mkdir(path.dirname(decisionFile), { recursive: true })
+    let hooks, producerTurns = 0, reviewerTurns = 0, starts = 0, disposed = 0
+    const records = [], owner = { id: 'owner' }
+    const answerReview = async prompt => {
+      if (prompt.includes('本轮先准备执行证据')) return { stopReason: 'completed', output: [] }
+      reviewerTurns++
+      const requestId = /review_request_id: ([\w-]+)/.exec(prompt)[1]
+      await writeFile(decisionFile, JSON.stringify({ run_id: 'run', review_request_id: requestId,
+        review_action: reviewerTurns === 1 ? 'revise' : 'accept', semantic_verdict: 'PASS', summary: 'reviewed' }))
+      return { stopReason: 'completed', output: [] }
+    }
+    const runtime = { agents: { get: () => owner },
+      jobs: { start(spec) { hooks = spec.run(); return 'job' }, get: () => ({ startedAt: 10 }) },
+      subagents: { getProvider: () => catalogProvider, async start(provider, request) {
+        starts++
+        if (starts === 1) {
+          assert.match(request.prompt[0].text, /完成阶段 03 后/)
+          return { id: 'producer', result: Promise.resolve({ stopReason: 'completed' }),
+            async continuePrompt(p) { producerTurns++; assert.match(p[0].text, producerTurns === 1 ? /定向修订/ : /正式交付/); return { stopReason: 'completed' } },
+            async dispose() { disposed++ } }
+        }
+        return { id: 'reviewer', result: answerReview(request.prompt[0].text), continuePrompt: p => answerReview(p[0].text), async dispose() { disposed++; if (cleanupFails) throw new Error('review cleanup failed') } }
+      } },
+    }
+    const api = { workspace: { list: async () => ok({ items: [{ workspaceId: 'w', path: root }] }) }, sessions: { create: async () => ok({ sessionId: 'owner' }), rename: async () => ok({}) } }
+    const runner = async ({ args, signal }) => args[0] === 'system' ? capabilities : args[1] === 'verify-cases'
+      ? (assert.ok(signal), { status: 'recorded', receipt_path: 'receipt.json', cases: [{ case_id: 'TC-1', status: 'executed', exit_code: 1 }] }) : args[1] === 'get'
+      ? { run_id: 'run', completed_steps: producerTurns >= 2 ? ['01','02','03','04','05'] : ['01','02','03'], lifecycle_status: producerTurns >= 2 ? 'complete' : 'running', report_available: producerTurns >= 2 }
+      : { run_id: 'run', run_root: runRoot, request_path: path.join(root, 'request.md') }
+    await launchAnalysisSession(api, { cwd: root, input: { repository: 'repo-one', target: 'depth', source_scope: ['src'], mode: 'depth', provider_id: 'pangea-opencode' } }, runner,
+      async () => {}, async () => {}, runtime, process.env, { reviewBinding: { task_id: 'task', attempt_id: 'attempt' }, onReviewState: async value => records.push(value) })
+    if (cleanupFails) await assert.rejects(hooks.done, /任务进程清理未完成/); else assert.equal((await hooks.done).status, 'completed')
+    assert.equal(starts, 2)
+    assert.equal(producerTurns, 2)
+    assert.equal(reviewerTurns, 3)
+    assert.equal(disposed, 2)
+    assert.equal(records.at(-1).status, 'complete')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

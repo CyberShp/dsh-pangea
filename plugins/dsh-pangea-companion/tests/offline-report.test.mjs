@@ -209,3 +209,10 @@ test('appendix supports columns beyond Z and preserves nested entry/oracle value
   assert.match(sheet, /&quot;response&quot;:\{&quot;expected&quot;:&quot;&lt;ok&gt;&quot;\}/)
   assert.doesNotMatch(sheet, /\[object Object\]/)
 })
+
+
+test('offline summary distinguishes no model review from unresolved analysis', () => {
+  const report = buildOfflineReport({ run_id: 'no-review', lifecycle_status: 'complete', review_policy: 'disabled', quality_status: 'UNRESOLVED', details: {} })
+  assert.match(report.html, /质量状态：未进行模型审核/)
+  assert.doesNotMatch(report.html, /质量状态：UNRESOLVED/)
+})

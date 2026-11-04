@@ -37,7 +37,7 @@ test('new-Run tool hides retired inputs and rejects them when execute bypasses s
   await assert.rejects(create.execute({ ...input, flow_baseline: { run_id: 'saved-run', version_id: 'saved-version' } }, exec), /不再支持流程基线/)
 })
 
-test('registers source-first lifecycle, source, result, review, and finish tools with exact bindings', async () => {
+test('registers source-first lifecycle, source, result, historical review reads, and finish tools with exact bindings', async () => {
   const registered = []
   const calls = []
   const ctx = {
@@ -72,6 +72,8 @@ test('registers source-first lifecycle, source, result, review, and finish tools
     'pangea_work_finish',
     'pangea_review_decide',
   ])
+
+  await assert.rejects(registered.find(tool => tool.name === 'pangea_review_decide').execute({}, {}), { code: 'MODEL_REVIEW_DISABLED' })
 
   const binding = {
     data_root: '/tmp/pangea-data',

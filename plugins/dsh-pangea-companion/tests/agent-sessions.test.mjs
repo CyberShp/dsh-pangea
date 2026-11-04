@@ -326,8 +326,8 @@ test('source-first records the actual worker protocol and keeps late tools on th
   const f = await fixture(t), controller = new AbortController()
   let phase = 0, callback, turns = 0
   const actions = [
-    { action_id: 'blind', action: 'dispatch_agent', stage: 'blind_review', role: 'review' },
-    { action_id: 'comparison', action: 'continue_agent', stage: 'comparison_review', role: 'review', task_id: 'subagent-1' },
+    { action_id: 'analysis-first', action: 'dispatch_agent', stage: 'unit_analysis', role: 'analysis' },
+    { action_id: 'analysis-next', action: 'continue_agent', stage: 'unit_analysis', role: 'analysis', task_id: 'subagent-1' },
   ]
   const run = createSourceFirstAcpRun({ ...f, cwd: f.dataRoot, providerId: meta.provider, agentModel: meta.model,
     parent: { id: 'owner' }, signal: controller.signal, attemptId: 'attempt',
@@ -353,10 +353,10 @@ test('source-first records the actual worker protocol and keeps late tools on th
     const listing = await f.store.list(), page = await f.store.read(listing.items[0].session_id)
     assert.equal(listing.total, 1)
     const prompts = page.events.filter(event => event.type === 'prompt')
-    assert.deepEqual(prompts.map(event => event.action_id), ['blind', 'comparison'])
+    assert.deepEqual(prompts.map(event => event.action_id), ['analysis-first', 'analysis-next'])
     assert.notEqual(prompts[0].execution_id, prompts[1].execution_id)
     const late = page.events.find(event => event.update?.toolCallId === 'late')
-    assert.equal(late.action_id, 'blind')
+    assert.equal(late.action_id, 'analysis-first')
     assert.equal(late.execution_id, prompts[0].execution_id)
     assert.equal(late.host_request_id, prompts[0].host_request_id)
     assert.equal(late.driver_request_id, 'driver-1')

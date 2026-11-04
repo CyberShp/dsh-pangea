@@ -196,3 +196,23 @@ test('reader projects checked files and planned but undispatched units without c
     assert.ok(corrupt.execution_view.diagnostics.some(item => item.action_id === 'closure-one'))
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+
+test('skipped historical reviews preserve records without blocking units or recovery', () => {
+  const progress = { lifecycle_status: 'running', stage: 'reporting', review_policy: 'disabled', actions: {
+    analysis: { role: 'analysis', stage: 'unit_analysis', status: 'accepted', task_id: 'worker' },
+    closure: { role: 'closure', stage: 'targeted_closure', status: 'paused', task_id: 'worker', review_skipped: true },
+    review: { role: 'review', stage: 'comparison_review', status: 'paused', task_id: 'reviewer', review_skipped: true, attention_required: true },
+  } }
+  const plan = { units: [{ unit_id: 'unit' }] }
+  const view = sourceFirstExecutionView({ progress, plan, artifacts: [
+    { action_id: 'analysis', task: { unit_id: 'unit' } }, { action_id: 'closure', task: { unit_id: 'unit' } },
+  ] })
+  assert.equal(view.review_policy, 'disabled')
+  assert.equal(view.actions.length, 3)
+  assert.equal(view.actions[1].resume_action, 'none')
+  assert.deepEqual(view.unresolved, [])
+  assert.equal(view.recovery.requires_host_quiescence, false)
+  assert.equal(view.unit_counts.completed, 1)
+  assert.equal(sourceFirstUnitRows(plan, view)[0].status, 'accepted')
+})

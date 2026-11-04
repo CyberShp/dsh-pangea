@@ -666,7 +666,10 @@ function sourceFirstLifecycle(progress) {
 
 export function sourceFirstStepRows(progress, runDirectory, artifacts, mode) {
   const life = sourceFirstLifecycle(progress)
-  const currentIndex = Math.max(0, SOURCE_FIRST_STAGES.findIndex(([stage]) => stage === life.stage))
+  const historicalStages = new Set(artifacts.map(item => item.stage))
+  const stages = SOURCE_FIRST_STAGES.filter(([stage]) => stage !== 'reviewing' && stage !== 'closing'
+    || stage === life.stage || (stage === 'reviewing' ? ['independent_review', 'comparison_review'].some(value => historicalStages.has(value)) : historicalStages.has('targeted_closure')))
+  const currentIndex = Math.max(0, stages.findIndex(([stage]) => stage === life.stage))
   const actionArtifacts = new Map()
   for (const item of artifacts) {
     const actionStage = item.stage ?? item.task?.review_stage ?? item.task?.task_type
@@ -693,9 +696,10 @@ export function sourceFirstStepRows(progress, runDirectory, artifacts, mode) {
     reporting: [path.join(runDirectory, 'report.md'), path.join(runDirectory, 'report.html'), path.join(runDirectory, 'report-complete.json')],
     complete: [path.join(runDirectory, 'report.md'), path.join(runDirectory, 'report.html'), path.join(runDirectory, 'report-complete.json')],
   }
-  return SOURCE_FIRST_STAGES.map(([stage, title], index) => {
-    const skipped = stage === 'closing' && !artifacts.some(item => item.stage === 'targeted_closure') && (life.lifecycle_status === 'complete' || currentIndex > index)
-    const status = stage === 'closing' && progress.partial_delivery ? 'stopped'
+  return stages.map(([stage, title], index) => {
+    const reviewDisabled = progress.review_policy === 'disabled' && ['reviewing', 'closing'].includes(stage)
+    const skipped = reviewDisabled || stage === 'closing' && !artifacts.some(item => item.stage === 'targeted_closure') && (life.lifecycle_status === 'complete' || currentIndex > index)
+    const status = reviewDisabled ? 'skipped' : stage === 'closing' && progress.partial_delivery ? 'stopped'
       : stage === 'closing' && progress.needs_user && !artifacts.some(item => item.stage === 'targeted_closure' && item.status === 'dispatched') ? 'paused'
       : skipped ? 'skipped' : life.lifecycle_status === 'complete'
       ? 'completed'
@@ -711,7 +715,7 @@ export function sourceFirstStepRows(progress, runDirectory, artifacts, mode) {
     return {
       step: String(index + 1).padStart(2, '0'),
       stage,
-      title: stage === 'reviewing' && mode === 'speed' ? '首轮结果对照复核（速度型）' : title,
+      title: ['reviewing', 'closing'].includes(stage) && progress.review_policy === 'disabled' ? `历史${title}（不再执行）` : stage === 'reviewing' && mode === 'speed' ? '首轮结果对照复核（速度型）' : title,
       status,
       artifacts: stageArtifacts.filter((file, position) => stageArtifacts.indexOf(file) === position),
     }
@@ -970,17 +974,19 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     current_warnings: item.current_warnings,
   }))
   const steps = sourceFirstStepRows(progress, runDirectory, actionView.artifacts, contract?.analysis_settings?.mode)
+  const hasHistoricalReview = records.some(item => ['independent_review', 'comparison_review'].includes(item.stage) && item.records?.length)
   const workflow = {
     steps,
     completed_steps: steps.filter(item => ['completed', 'skipped'].includes(item.status)).map(item => item.step),
     current_step: life.stage,
     core_rules_ack: {},
-    judge: { required: true, status: progress.stage === 'reviewing' || progress.stage === 'complete' ? 'running' : 'pending' },
+    judge: { required: false, status: hasHistoricalReview ? 'historical' : 'disabled' },
     actions: actionView.artifacts.map(item => ({
       action_id: item.action_id,
       action: item.action,
       role: item.role,
       stage: item.stage,
+      review_skipped: item.review_skipped === true,
       binding_status: item.binding_status,
       task_path: item.task_path,
       task_id: item.task_id ?? null,
@@ -996,7 +1002,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     unresolved: [...currentWarningDegradations(progress.degradations, actionView.artifacts), ...(progress.blocking_reason ? [progress.blocking_reason] : [])],
     diagnostic_history: Array.isArray(progress.degradations) ? progress.degradations : [],
     error_history: [...(Array.isArray(progress.errors) ? progress.errors : []), ...actionView.issues],
-    step_progress: { completed: steps.filter(item => ['completed', 'skipped'].includes(item.status)).length, total: SOURCE_FIRST_STAGES.length },
+    step_progress: { completed: steps.filter(item => ['completed', 'skipped'].includes(item.status)).length, total: steps.length },
   }
   const summary = {
     ...flowMetadata,
@@ -1006,6 +1012,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     analysis_scene: analysisScene,
     run_id: runId,
     workflow_version: progress.workflow_version ?? 'source-first-v1',
+    review_policy: progress.review_policy ?? null,
     scenario: contract?.analysis_settings?.scenario ?? 'module-analysis',
     mode: contract?.analysis_settings?.mode ?? null,
     analysis_settings: contract?.analysis_settings ?? null,
@@ -1013,7 +1020,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     publication: { state: reportAvailable ? 'final' : actionView.artifacts.some(a => a.records.length) ? 'draft' : 'pending', revision: null },
     partial_delivery: progress.partial_delivery === true,
     delivery_integrity: { status: progress.partial_delivery ? 'partial' : reportAvailable ? 'complete' : 'incomplete' },
-    semantic_review: { verdict: progress.quality_status ?? null, method: 'graph_review' },
+    semantic_review: hasHistoricalReview && progress.review_policy !== 'disabled' ? { verdict: progress.quality_status ?? null, method: 'graph_review' } : { verdict: null, method: 'disabled' },
     ...life,
     phase_title: steps.find(item => item.stage === life.stage)?.title ?? life.stage,
     target: contract?.target ?? runId,
@@ -1043,7 +1050,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     case_readiness: Object.fromEntries(['ready', 'needs_setup', 'unclassified'].map(key => [key, projection.test_cases.filter(item => item.readiness === key).length])),
     case_quality_summary: caseQualitySummary(projection.test_cases, analysisScene),
     execution_progress: actionView.artifacts.map(item => ({
-      action_id: item.action_id, unit_id: item.task?.unit_id, stage: item.stage, status: item.status,
+      action_id: item.action_id, unit_id: item.task?.unit_id, stage: item.stage, status: item.status, review_skipped: item.review_skipped === true,
       worker_turns: item.worker_turns ?? 0, auto_continuations: item.auto_continuations ?? 0,
       started_at_ms: item.execution_started_at_ms, finished_at_ms: item.execution_finished_at_ms,
       elapsed_ms: item.execution_elapsed_ms ?? 0, budget_ms: item.execution_budget_ms,
@@ -1052,14 +1059,14 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     })),
     errors: Array.isArray(progress.errors) ? progress.errors : [],
     error_history: actionView.issues,
-    review: {
+    review: hasHistoricalReview ? {
       status: progress.stage === 'complete' || (progress.stage === 'reporting' && progress.quality_status) ? 'COMPLETE' : 'PENDING',
       summary: progress.quality_status ?? 'pending',
       issues: [],
       counts: { effective: null },
       independent: records.find(item => item.stage === 'independent_review') ?? null,
       comparison: records.find(item => item.stage === 'comparison_review') ?? null,
-    },
+    } : null,
     data_source: 'source-first-notes',
     input_materials: includeDetails ? await readInputMaterials(runDirectory) : [],
     reader_health: {

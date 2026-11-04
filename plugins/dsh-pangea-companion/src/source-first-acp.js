@@ -1,3 +1,4 @@
+import { MODEL_REVIEW_ENABLED } from './analysis-review.js'
 import path from 'node:path'
 import { writeFile, mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -49,6 +50,19 @@ export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped, onProg
   await progress()
   liveRuns.delete(JSON.stringify([path.resolve(dataRoot), runId]))
   return true
+}
+
+// Historical review artifacts stay readable, but no model may execute their actions.
+export function assertExecutableAction(action) {
+  if (MODEL_REVIEW_ENABLED) return
+  const stage = String(action?.stage ?? '').toLowerCase()
+  const role = String(action?.role ?? '').toLowerCase()
+  if (['independent_review', 'comparison_review', 'blind_review', 'targeted_closure'].includes(stage)
+    || ['review', 'reviewer', 'closure', 'independent_review', 'comparison_review'].includes(role)) {
+    const error = new Error('模型审核及审核触发的定向修订暂不执行；历史结果保留，请使用无审核工作流继续分析')
+    error.code = 'MODEL_REVIEW_DISABLED'
+    throw error
+  }
 }
 
 const cliContract = cwd => path.join(cwd, 'docs', 'source-first-cli-worker.md')
@@ -121,6 +135,7 @@ export function workerContinuationPrompt({ action, opened, cwd, dataRoot, runId,
   return [
     sameAction ? `继续原会话的同一 action_id=${action.action_id}，从未完成部分接续。` : `在原会话执行当前阶段 action_id=${action.action_id}，使用下列当前绑定。`,
     `当前角色：${action.role}；阶段：${action.stage}。只执行当前 action，不派发子 Agent、不推进 Graph。`,
+    '本次审核暂不执行，不调用 Reviewer、独立盲审、对照审核或审核触发的 closure；旧冻结规则只沿用生成内容与格式，不改变冻结文件，也不伪造审核通过。',
     `每次 CLI 调用的绑定参数（JSON 数组，逐项原样传入）：${JSON.stringify(binding)}`,
     `Python 可执行文件：${python || 'python'}；工作目录：${cwd}`,
     scratchDirectory ? `当前 worker 临时目录：${scratchDirectory}。继续复用已有文件；正式结果通过 CLI 写入。` : '',
@@ -152,6 +167,7 @@ export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, pyt
     scratchDirectory ? `当前 worker 临时目录：${scratchDirectory}。任务专用临时数据及必要脚本只放此目录，文件路径按字面值使用，原会话续接时继续复用。正式结果仍通过 CLI 写入。` : '',
     `每次 CLI 调用的绑定参数（JSON 数组，逐项原样传入）：${JSON.stringify(binding)}`,
     `当前角色：${action.role}；阶段：${action.stage}；task_path：${action.task_path}`,
+    '本次审核暂不执行，不调用 Reviewer、独立盲审、对照审核或审核触发的 closure；旧冻结规则只沿用生成内容与格式，不改变冻结文件，也不伪造审核通过。',
     '使用现有 Python CLI 操作冻结输入与当前结果；不寻找插件或 MCP 配置。工具/命令失败时报告准确错误，不搜索安装目录或凭据。',
     '当前身份由 Desktop ACP 宿主绑定；执行器中可见的 pangea_* 插件工具属于另一套会话调度，不使用它们。插件报未绑定时停止重试，改用上述 Python CLI；所有 PANGEA 读写只走此 CLI。CLI 自身的绑定错误原样报告，由宿主恢复，不能自行 dispatch、bind、settle 或推进 Graph。',
     action.validation_error || action.pending_repair ? `原会话修复同一结果，保留有效正文。错误摘要：${repairText}。先 result-read 获取当前 revision 和诊断，不重复读取已掌握的输入。` : '',
@@ -335,6 +351,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
     } finally { clearTimeout(timer); clearTimeout(warning) }
   }
   async function runAction(action) {
+    assertExecutableAction(action)
     if (!action.action_id || !['dispatch_agent', 'continue_agent'].includes(action.action)) throw new Error('Graph action 不可派发')
     if (action.task_id && bindings[action.task_id]?.blocked) {
       return { stopReason: 'completed', attentionRequired: true, diagnostic: '原请求或工具状态尚未确认，不能重复派发；保留原会话和结果' }
@@ -918,7 +935,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         check()
         const next = await adapter('next')
         if (next.run_id !== runId) throw new Error('Graph 返回了其他 Run 的 action')
-        const candidates = (next.actions ?? []).filter(action => !active.has(action.action_id) && !paused.has(action.action_id))
+        const candidates = (next.actions ?? []).filter(action => !action.review_skipped && !active.has(action.action_id) && !paused.has(action.action_id))
         for (const action of candidates) {
           if (failure || active.size >= 3) break
           const independent = ['unit_analysis', 'targeted_closure'].includes(action.stage)

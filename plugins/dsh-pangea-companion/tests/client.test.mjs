@@ -1159,7 +1159,7 @@ test('new analysis offers only branch, risk and coverage even when the engine su
   assert.ok(scenes.every(node => !node.props.disabled))
 })
 
-test('builds analysis requests with explicit scenario and mode', async () => {
+test('builds analysis requests with explicit scenario and fixed compatibility mode', async () => {
   const source = await readFile(clientPath, 'utf8')
   let exported
   const sandbox = { URLSearchParams, console }
@@ -1172,7 +1172,7 @@ test('builds analysis requests with explicit scenario and mode', async () => {
   }))), {
     request_version: '2.0', repository: 'open-iscsi', target: '认证恢复',
     source_scope: ['src/auth', 'src/session'], asset_ids: ['asset-1'],
-    scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route: null, agent_model: 'native/selected',
+    scenario: 'root-cause', mode: 'depth', provider_id: 'pangea-opencode', model_route: null, agent_model: 'native/selected',
   })
   assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).scenario, 'branch-analysis')
   assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).mode, 'depth')
@@ -2053,8 +2053,8 @@ test('source-first create form disables unsupported analysis options', async () 
   const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
   const nodes = descendants(panel.type(panel.props))
   for (const value of ['coverage-analysis', 'risk-analysis', 'branch-analysis']) assert.equal(nodes.find(n => n.props['data-scenario'] === value).props.disabled, true)
-  assert.equal(nodes.find(n => n.type === 'option' && n.props.value === 'speed').props.disabled, true)
-  assert.equal(nodes.find(n => n.type === 'option' && n.props.value === 'depth').props.disabled, false)
+  assert.ok(!nodes.some(n => n.props['aria-label'] === '分析模式'))
+  assert.ok(!nodes.some(n => n.type === 'option' && ['speed', 'depth'].includes(n.props.value)))
 })
 
 
@@ -2351,7 +2351,7 @@ test('unlinked Run opens a read-only record from the selected frozen snapshot', 
   assert.ok(nodes.some(node => node.type === 'dd' && node.children.includes('9 月 20 日 15:47')))
   assert.ok(nodes.some(node => node.type === 'h3' && node.props.className === 'b03-run-record-summary-title' && node.children.includes('CPU计时边界分析')))
   assert.ok(nodes.some(node => node.type === 'p' && node.children.includes('CPU 使用率分析摘要。')))
-  assert.ok(nodes.some(node => node.type === 'p' && node.props.className === 'b03-run-record-summary-meta' && node.children.includes('RUN 18 · 已完成 · 模块分析 · 标准型')))
+  assert.ok(nodes.some(node => node.type === 'p' && node.props.className === 'b03-run-record-summary-meta' && node.children.includes('RUN 18 · 已完成 · 模块分析')))
   assert.ok(!nodes.some(node => node.type === 'button' && ['停止 Run', '继续分析', '查看分析报告', '打开 HTML 报告'].includes(node.children[0])))
   const backButton = nodes.find(node => node.type === 'button' && node.props['aria-label'] === '返回任务列表')
   assert.ok(backButton)
@@ -3408,4 +3408,30 @@ test('changing analysis repository clears source selection and receipt but same 
   render().find(node => node.type?.name === 'SourceScopePicker').props.onChange('')
   assert.equal(states[91], null)
   assert.equal(render().find(node => node.children.includes('下一步 · 输入资料')).props.disabled, true)
+})
+
+
+test('review-disabled completed runs never claim review PASS or need review repair', async () => {
+  const client = await loadClientExports()
+  const current = { run_id: 'r', lifecycle_status: 'complete', stage: 'complete', terminal: true,
+    review_policy: 'disabled', quality_status: 'UNRESOLVED', needs_user: true,
+    semantic_review: { method: 'graph_review', verdict: 'PASS' }, publication: { state: 'final' },
+    workflow: { steps: [{ step: '04', stage: 'reporting', title: '报告组装', status: 'completed' }], actions: [{ action_id: 'old-review', stage: 'comparison_review', status: 'paused', review_skipped: true }] } }
+  const task = { run_id: 'r', provider: 'pangea-opencode', status: 'needs_attention', execution_status: 'paused', can_resume: true }
+  assert.equal(client.outcomePresentation(current).semantic, '未进行模型审核')
+  assert.equal(client.semanticReviewStatusLabel(current), '未启用模型审核')
+  assert.equal(client.deriveRunPresentation(task, current).statusKey, 'complete')
+  const rendered = client.RunWorkspace({ current, task, navigate() {} })
+  assert.doesNotMatch(JSON.stringify(rendered), /继续修正|选择接下来的处理方式|审查 PASS/)
+})
+
+test('creation UI keeps review controls dormant without execution promises', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  assert.match(source, /const MODEL_REVIEW_ENABLED = false/)
+  assert.match(source, /MODEL_REVIEW_ENABLED && step === 1 &&/)
+  assert.match(source, /MODEL_REVIEW_ENABLED && button\('继续修正'/)
+  assert.match(source, /标准型 · 独立盲审/)
+  assert.doesNotMatch(source, /已完成源码分析、独立复核/)
+  assert.match(source, /分析规划.*划分源码范围和分析单元/)
+  assert.match(source, /生成报告.*汇总已保存的分析结果/)
 })

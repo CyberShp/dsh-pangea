@@ -3,7 +3,7 @@ import { analysisOptions, SCENE_PROFILE } from './analysis-scenes.js'
 import path from 'node:path'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { attentionRequiredOutcome } from './acp-outcome.js'
-import { createAnalysisReview, supportsHostReview } from './analysis-review.js'
+import { createAnalysisReview, supportsHostReview, MODEL_REVIEW_ENABLED } from './analysis-review.js'
 import { createSourceFirstAcpRun } from './source-first-acp.js'
 import { normalizeIncrementalRequest } from './incremental-request.js'
 import { normalizeFlowBaseline, readFlowMetadata } from './flow-baseline.js'
@@ -442,7 +442,7 @@ function homeTask(task, run) {
   // Match TaskStore.reconcileRuns precedence without mutating persisted tasks.
   let status = task.status
   let executionStatus = task.execution_status
-  const pendingReview = task.host_review && task.host_review.status !== 'complete'
+  const pendingReview = run?.review_policy !== 'disabled' && task.host_review && task.host_review.status !== 'complete'
     && !(run?.workflow_version === 'source-first-v1' && task.host_review.status === 'pending' && !task.host_review.reviewer_session_id)
   const activeProvider = task.provider && ['starting', 'running', 'stopping'].includes(task.execution_status)
   const strongerTerminal = ['failed', 'stopped', 'interrupted'].includes(task.execution_status)
@@ -649,7 +649,7 @@ function continuationPrompt(run) {
     run?.phase === 'PREPARING' ? '当前 Run 尚未写出初始化状态。先使用首轮提供的 Python 路径执行请求中的 run_guard.py init；若执行失败，报告具体命令、退出码和受限错误摘要并结束。' : null,
     '请读取运行根目录中的 `内部索引/运行状态.json` 以及当前步骤交接文件，以落盘状态为准继续执行。',
     `当前阶段：${run?.phase ?? '未知'}；已完成步骤：${run?.completed_steps?.length ?? '未知'}/${run?.workflow?.steps?.length ?? '按当前冻结 manifest'}。`,
-    '继续当前 Run，不要创建新的 Run。',
+    '继续当前 Run，不要创建新的 Run。模型审核暂不执行，不执行审核或审核触发的修订；若旧冻结步骤要求审核，保留结果并报告兼容阻塞，不伪造通过。',
   ].filter(Boolean).join('\n')
 }
 
@@ -716,7 +716,7 @@ async function settleAcpRun(start, signal, wasCancelled, lifecycle = {}) {
       })
       if (signal.aborted || wasCancelled()) return { status: 'killed' }
       let reviewTurn
-      if (lifecycle.review) {
+      if (MODEL_REVIEW_ENABLED && lifecycle.review) {
         try { reviewTurn = await lifecycle.review.afterProducerTurn(run, state, signal) }
         catch (error) {
           if (signal.aborted || wasCancelled()) return { status: 'killed' }
@@ -959,6 +959,7 @@ export async function launchAnalysisSession(
     requestedResumeRunId ? '这是一次续跑：先读取内部索引/运行状态.json，调用 run_guard.py init --resume 保留已完成步骤，再从当前步骤继续。' : null,
     '旧 PANGEA Graph、Planning、Worker action、Review、Closure、Reporting、bind、validate 和 settle 均不存在。',
     '生命周期只以运行根目录中的 `内部索引/运行状态.json` 为准。',
+    '模型审核暂不执行：不要执行独立审核、comparison、Reviewer 或审核触发的定向修订。只执行规划、分析与报告；不伪造审核结论。若旧冻结脚本要求审核才能交付，保留已生成结果，明确报告兼容阻塞并结束，不为满足旧 gate 调用模型审核。',
     managedReview ? '本任务由宿主派发独立 Reviewer。完成阶段 03 后保存并发布分析与用例，结束本轮回复等待宿主；不要执行阶段 04/05，不自行派发或编写独立审查结论。收到宿主复核或修订消息后，只按该消息继续当前 Run。' : null,
     '',
     '现在读取运行请求并执行。',

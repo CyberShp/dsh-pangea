@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { createTaskStore, writeTaskStoreFile } from '../src/task-store.js'
+import { createTaskStore, taskStatusFromRun, writeTaskStoreFile } from '../src/task-store.js'
 
 test('publishes through a unique temporary file and retries transient Windows rename failures', async () => {
   const calls = []
@@ -552,4 +552,10 @@ test('does not promote a late Job binding from an older attempt to the current t
     assert.equal(bound.job_id, null)
     assert.equal(bound.attempts.find(item => item.attempt_id === first.attempt_id).job_id, 'job-old')
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+
+test('disabled model review is normal completed delivery, not an unresolved failure', () => {
+  assert.equal(taskStatusFromRun({ lifecycle_status: 'complete', quality_status: 'UNRESOLVED', review_policy: 'disabled' }), 'completed')
+  assert.equal(taskStatusFromRun({ lifecycle_status: 'complete', quality_status: 'UNRESOLVED' }), 'needs_attention')
 })

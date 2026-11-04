@@ -287,7 +287,7 @@ function taskStatusFromRun(run) {
     || lifecycle === 'attention_required'
     || status === 'attention_required'
     || quality === 'REWORK'
-    || quality === 'UNRESOLVED'
+    || (quality === 'UNRESOLVED' && run?.review_policy !== 'disabled')
     || phase === 'INCOMPLETE'
     || phase === 'ATTENTION_REQUIRED'
     || (run?.errors?.length ?? 0) > 0
@@ -883,7 +883,7 @@ export class TaskStore {
         if (task.workflow_version !== run.workflow_version) { task.workflow_version = run.workflow_version; changed = true }
         if (task.host_review?.status === 'pending' && !task.host_review?.reviewer_session_id) { task.host_review = null; changed = true }
       }
-      if (task.host_review && task.host_review.status !== 'complete') continue
+      if (run.review_policy !== 'disabled' && task.host_review && task.host_review.status !== 'complete') continue
       if (task.provider && ['starting', 'running', 'stopping'].includes(task.execution_status)) continue
       // A terminal ACP/stop observation is stronger than a stale Run
       // snapshot. The Runtime may publish its own terminal state slightly

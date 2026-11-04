@@ -250,7 +250,7 @@ export function buildRunInsights(current = {}, selected = null, { stale = false,
       || (a.ref.action_id === b.ref.action_id ? b.index - a.index : a.ref.action_id.localeCompare(b.ref.action_id)))
   const savedTimes = selectedActions.filter(action => action.readable).map(action => action.saved_at_ms).filter(value => value !== null)
   const lifecycle = current.lifecycle_status ?? current.execution_view?.lifecycle_status
-  const currentWork = deliveryStage ? [] : selectedActions.filter(action => Object.hasOwn(actionStates, action.status)).map(action => ({
+  const currentWork = deliveryStage ? [] : selectedActions.filter(action => !action.review_skipped && Object.hasOwn(actionStates, action.status)).map(action => ({
     action_id: action.action_id, unit_id: action.unit_id,
     title: byUnit.get(action.unit_id)?.title ?? string(action.title) ?? (action.unit_id || selectedInfo.title),
     purpose: byUnit.get(action.unit_id)?.purpose ?? null,

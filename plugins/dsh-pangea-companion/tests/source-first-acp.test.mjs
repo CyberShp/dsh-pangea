@@ -145,6 +145,17 @@ test('same-action review repair retains delivery contract with bounded diagnosti
   assert.doesNotMatch(prompt, /先调用 task-open|PowerShell 直接执行 task-open|先读取客户端无关 CLI 合同/)
 })
 
+for (const stage of ['independent_review', 'comparison_review', 'targeted_closure']) {
+  for (const action of ['dispatch_agent', 'continue_agent']) test(`${stage} ${action} never starts or resumes a worker`, async () => {
+    const runId = `${stage}-${action}`, controller = new AbortController(), calls = []
+    const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', cwd: '/work', dataRoot: testDataRoot, runId, signal: controller.signal,
+      runner: async ({ args }) => { calls.push(args); return { run_id: runId, actions: [{ action_id: 'blocked', action, stage, task_id: action === 'continue_agent' ? 'original' : null }] } },
+      subagents: { start: async () => assert.fail('removed review must not consume tokens') } })
+    try { await assert.rejects(run.result, { code: 'MODEL_REVIEW_DISABLED' }); assert.ok(calls.every(args => args[1] === 'next')) }
+    finally { controller.abort(); await run.dispose() }
+  })
+}
+
 for (const failureMode of ['throw', 'diagnostic', 'completed-with-error', 'event-only', 'structured-event-only', 'update-event-only']) {
   test(`input-too-long ${failureMode} pauses original action without empty settlement or retries`, async () => {
     let turns = 0, created = 0
@@ -364,10 +375,9 @@ test('cancellation while recording request start does not dispatch a prompt', as
 })
 
 for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) {
-  test(`${providerId} executes planning, analysis, blind/comparison and closure in exact original sessions`, async () => {
+  test(`${providerId} executes planning and analysis without review sessions`, async () => {
     const steps = [
-      ['planning', 'planning'], ['analysis', 'unit_analysis'], ['review', 'independent_review'],
-      ['review', 'comparison_review', 'worker-3'], ['closure', 'targeted_closure', 'worker-2'],
+      ['planning', 'unit_planning'], ['analysis', 'unit_analysis'],
     ]
     let index = 0, created = 0
     const bindings = [], prompts = [], disposed = [], events = [], scratches = []
@@ -398,18 +408,18 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) 
           }, dispose: async () => disposed.push(id) }
       } } })
     assert.equal((await run.result).stopReason, 'completed')
-    assert.equal(created, 3)
-    assert.equal(new Set(scratches).size, 3)
+    assert.equal(created, 2)
+    assert.equal(new Set(scratches).size, 2)
     const finished = events.filter(event => event.stage === 'source_first_worker_finished')
     assert.equal(finished.length, steps.length)
     assert.ok(finished.every(event => event.model === 'selected/model' && event.stop_reason === 'completed'))
-    assert.deepEqual(prompts.map(p => p[0]), ['worker-1', 'worker-2', 'worker-3', 'worker-3', 'worker-2'])
+    assert.deepEqual(prompts.map(p => p[0]), ['worker-1', 'worker-2'])
     assert.deepEqual(events.filter(event => event.stage === 'source_first_prompt_ready').map(event => event.prompt_kind),
-      ['initial', 'initial', 'initial', 'action_transition', 'action_transition'])
+      ['initial', 'initial'])
     assert.deepEqual(events.filter(event => event.stage === 'source_first_acp_request' && event.status === 'start').map(event => event.phase),
-      ['task', 'task', 'task', 'action_transition', 'action_transition'])
+      ['task', 'task'])
     for (const stage of ['source_first_file_permission', 'source_first_tool_event']) {
-      assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.action_id), ['run:0', 'run:1', 'run:2', 'run:3', 'run:4'])
+      assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.action_id), ['run:0', 'run:1'])
       assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.action_stage), steps.map(step => step[1]))
       assert.deepEqual(events.filter(event => event.stage === stage).map(event => event.unit_id), steps.map((_, index) => `unit-${index}`))
       for (const event of events.filter(event => event.stage === stage)) {
@@ -419,7 +429,7 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) 
       }
     }
     assert.deepEqual(prompts.map(([, prompt]) => prompt.split('\n').find(line => line.startsWith('当前 worker 临时目录：')).split('。')[0]),
-      [scratches[0], scratches[1], scratches[2], scratches[2], scratches[1]].map(directory => `当前 worker 临时目录：${directory}`))
+      [scratches[0], scratches[1]].map(directory => `当前 worker 临时目录：${directory}`))
     for (const [step, [, prompt]] of prompts.entries()) {
       assert.doesNotMatch(prompt, /\.opencode|\.agents\/pangea|pangea_action_dispatch/)
       assert.match(prompt, /source-first-cli-worker\.md/)
@@ -428,19 +438,10 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) 
         assert.match(prompt, /task-open/)
         assert.match(prompt, new RegExp(`当前角色：${steps[step][0]}；阶段：${steps[step][1]}`))
       }
-      if (steps[step][1] === 'comparison_review') {
-        assert.match(prompt, /review-decide --expected-revision N --decision JSON对象.*最后 work-finish/)
-        assert.match(prompt, /decision 回显 task\.version_set_id/)
-        assert.match(prompt, /无 finding 或资料不足也须裁决/)
-        assert.match(prompt, /summary\/finding 不能代替 review_decision/)
-        assert.match(prompt, /decision 必须包含当前版本绑定：\{"version_set_id":"comparison-version-fixture"\}/)
-        assert.match(prompt, /ok=false 表示裁决未保存.*不能继续 work-finish/)
-      } else {
-        assert.doesNotMatch(prompt, /review-decide|review_decision/)
-      }
+      assert.doesNotMatch(prompt, /review-decide|review_decision/)
     }
-    assert.ok(bindings.some(([actionId, taskId]) => actionId === 'run:4' && taskId === 'worker-2'))
-    await run.dispose(); assert.equal(disposed.length, 3)
+    assert.ok(bindings.some(([actionId, taskId]) => actionId === 'run:1' && taskId === 'worker-2'))
+    await run.dispose(); assert.equal(disposed.length, 2)
   })
 }
 
@@ -483,7 +484,7 @@ for (const toolsOnFormalTurn of [0, 1]) {
       runner: async ({ args }) => {
         if (args[0] === 'task-open') return { task: {} }
         if (args[1] === 'next') return { run_id: 'ready-only', lifecycle_status: settled ? 'complete' : 'running',
-          actions: settled ? [] : [{ action_id: 'ready:review', role: 'review', stage: 'independent_review', action: 'dispatch_agent', task_path: '/task.json' }] }
+          actions: settled ? [] : [{ action_id: 'ready:analysis', role: 'analysis', stage: 'unit_analysis', action: 'dispatch_agent', task_path: '/task.json' }] }
         if (args[1] === 'settle') settled++
         return {}
       },
@@ -503,7 +504,7 @@ for (const toolsOnFormalTurn of [0, 1]) {
   })
 }
 
-for (const interruption of ['cancel', 'budget']) {
+for (const interruption of ['cancel']) {
   for (const phase of ['before-directive', 'during-directive']) {
     test(`zero-tool recovery ${interruption} ${phase} keeps the original session and never settles`, async () => {
       const root = await mkdtemp(path.join(tmpdir(), 'pangea-zero-tool-'))
@@ -524,8 +525,8 @@ for (const interruption of ['cancel', 'budget']) {
         runner: async ({ args }) => {
           if (args[0] === 'task-open') return { task: {} }
           if (args[1] === 'next') return { run_id: runId, lifecycle_status: 'running', actions: paused ? [] : [{
-            action_id: 'original-action', role: interruption === 'budget' ? 'closure' : 'review',
-            stage: interruption === 'budget' ? 'targeted_closure' : 'independent_review', action: 'continue_agent', task_id: 'original' }] }
+            action_id: 'original-action', role: 'analysis',
+            stage: 'unit_analysis', action: 'continue_agent', task_id: 'original' }] }
           if (args[1] === 'execution' && args.includes('paused')) paused = true
           if (args[1] === 'settle') settlements++
           return {}
@@ -561,42 +562,6 @@ for (const interruption of ['cancel', 'budget']) {
   }
 }
 
-test('zero-tool recovery in blind and comparison review preserves one original reviewer', async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'pangea-zero-tool-reviewer-'))
-  const controller = new AbortController(), runId = 'zero-tool-reviewer'
-  let stage = 0, starts = 0, toolCalls = 0
-  const prompts = [], bound = []
-  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: root, dataRoot: root, runId,
-    parent: {}, signal: controller.signal,
-    runner: async ({ args }) => {
-      if (args[0] === 'task-open') return { task: { version_set_id: 'version' } }
-      if (args[1] === 'next') return { run_id: runId, lifecycle_status: stage === 2 ? 'complete' : 'running', actions: stage === 2 ? [] : [{
-        action_id: `review:${stage}`, role: 'review', stage: stage ? 'comparison_review' : 'independent_review',
-        action: stage ? 'continue_agent' : 'dispatch_agent', ...(stage ? { task_id: 'original' } : {}) }] }
-      if (args[1] === 'bind') bound.push(args.at(-1))
-      if (args[1] === 'settle') stage++
-      return {}
-    },
-    subagents: { start: async () => {
-      starts++
-      return { id: 'original', remoteSessionId: 'remote-original', result: Promise.resolve({ stopReason: 'completed' }),
-        readDiagnostics: () => ({ toolCalls }), dispose: async () => {},
-        continuePrompt: async value => { prompts.push(value[0].text); if (prompts.length % 2 === 0) toolCalls++; return { stopReason: 'completed' } } }
-    } } })
-  try {
-    assert.equal((await run.result).attentionRequired, false)
-    assert.equal(starts, 1)
-    assert.equal(stage, 2)
-    assert.equal(prompts.length, 4)
-    assert.ok(bound.every(id => id === 'original'))
-    assert.match(prompts[0], /independent_review/)
-    assert.match(prompts[2], /comparison_review/)
-    assert.equal(prompts[1], prompts[3])
-    const saved = JSON.parse(await readFile(path.join(root, 'runs', runId, 'acp-workers.json'), 'utf8'))
-    assert.equal(saved.workers.original.remoteSessionId, 'remote-original')
-  } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
-})
-
 test('missing original reviewer never spawns a replacement', async () => {
   const controller = new AbortController()
   const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: '/work', dataRoot: testDataRoot, runId: 'missing-reviewer', signal: controller.signal,
@@ -606,7 +571,7 @@ test('missing original reviewer never spawns a replacement', async () => {
   controller.abort(); await run.dispose()
 })
 
-for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false], ['speed', true], ['speed', false, 2000]]) test(`host ACP controller completes a real Python Graph in ${mode} mode using bound CLI writes${closure ? ' with closure' : ''} (${fileCount} files)`, {
+for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false], ['speed', false, 2000]]) test(`host ACP controller completes a real Python Graph in ${mode} mode using bound CLI writes${closure ? ' with closure' : ''} (${fileCount} files)`, {
   skip: !process.env.PANGEA_INTEGRATION_RUNTIME && 'Requires the staged Python runtime',
 }, async () => {
   const runtime = process.env.PANGEA_INTEGRATION_RUNTIME
@@ -654,40 +619,10 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
                 await assert.rejects(call('source-read', ['--repo-id', 'sample', '--path', '../outside.c', '--view', 'text']))
               }
             }
-            if (task.task_type === 'source_first_closure') {
-              const seed = JSON.parse(await readFile(task.result_path, 'utf8'))
-              assert.equal(seed.binding.task_id, id)
-              assert.equal(seed.binding.action_id, task.action_id)
-              assert.ok(seed.records.length > 0)
-              assert.equal(seed.completion, null)
-              assert.equal(id, stages.find(stage => stage[0] === 'source_first_analysis')[2])
-            }
             const current = await call('result-read')
             let saved
             if (task.task_type === 'source_first_plan') {
               saved = await call('plan-write', ['--expected-revision', String(current.revision), '--unit', JSON.stringify({ title: 'TLS 连接', purpose: '验证连接结果', owned_files: [{ repo_id: 'sample', path: 'src/tls.c' }] })])
-            } else if (task.review_stage === 'comparison_review') {
-              const compared = await call('comparison-read', ['--version-set-id', task.version_set_id])
-              assert.ok(JSON.stringify(compared).includes('analysis'))
-              assert.equal(JSON.stringify(compared).includes('independent_review'), mode === 'depth')
-              const recordsFile = path.join(request.scratchDirectory, 'review-records.json')
-              await writeFile(recordsFile, JSON.stringify([{ kind: 'summary', body: '协议 fixture 的审查依据，不代表模型语义验收。' }]))
-              const recorded = await call('result-write', ['--expected-revision', String(current.revision), '--records-file', recordsFile])
-              let revision = recorded.revision
-              const correctionRecordIds = []
-              if (closure) {
-                const findingFile = path.join(request.scratchDirectory, 'finding.json'), unitIdsFile = path.join(request.scratchDirectory, 'units.json')
-                await writeFile(findingFile, JSON.stringify({ summary: '清理说明', body: '补充连接失败后的清理说明' }))
-                await writeFile(unitIdsFile, JSON.stringify([unitId]))
-                const finding = await call('comparison-finding-write', ['--expected-revision', String(revision), '--unit-ids-file', unitIdsFile, '--finding-file', findingFile])
-                revision = finding.revision
-                const persisted = await call('result-read')
-                correctionRecordIds.push(...persisted.records.filter(r => r.kind === 'finding').map(r => r.record_id))
-                assert.equal(correctionRecordIds.length, 1)
-              }
-              const decisionFile = path.join(request.scratchDirectory, 'decision.json')
-              await writeFile(decisionFile, JSON.stringify({ version_set_id: task.version_set_id, disposition: closure ? 'finding' : 'pass', correction_record_ids: correctionRecordIds, summary: '协议回归 fixture 完成，不代表模型质量验证' }))
-              saved = await call('review-decide', ['--expected-revision', String(revision), '--decision-file', decisionFile])
             } else if (task.task_type === 'source_first_analysis') {
               const file = path.join(request.scratchDirectory, 'analysis-records.json')
               await writeFile(file, JSON.stringify([{ kind: 'note', body: '协议 fixture 范围依据；不是模型质量验收。', evidence: ['sample:src/tls.c:1'] }]))
@@ -698,17 +633,6 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
               const persisted = await call('result-read')
               assert.equal(persisted.records.length, 2)
               assert.equal(persisted.records[1].body.execution_status, 'not_run')
-            } else if (task.task_type === 'source_first_closure') {
-              const before = JSON.parse(await readFile(task.result_path, 'utf8'))
-              const targets = path.join(request.scratchDirectory, 'targets.json'), replacement = path.join(request.scratchDirectory, 'replacement.json')
-              await writeFile(targets, JSON.stringify([current.records[0].record_id]))
-              await writeFile(replacement, JSON.stringify({ kind: 'note', body: '协议 fixture 定向更正，保留其他记录与原历史。' }))
-              saved = await call('result-supersede', ['--expected-revision', String(current.revision), '--target-record-ids-file', targets, '--replacement-file', replacement])
-              const persisted = await call('result-read')
-              const after = JSON.parse(await readFile(task.result_path, 'utf8'))
-              for (const record of before.records) assert.deepEqual(after.records.find(r => r.record_id === record.record_id), record)
-              assert.equal(persisted.records.find(r => r.record_id === current.records[0].record_id).active, false)
-              assert.equal(persisted.records.length, current.records.length + 1)
             } else {
               saved = await call('result-write', ['--expected-revision', String(current.revision), '--records', JSON.stringify([{ kind: 'note', body: '固定回归 fixture：已启用 TLS 时连接成功，未启用时返回失败。', evidence: ['sample:src/tls.c:1'] }])])
             }
@@ -718,13 +642,12 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
       } } })
     const completed = await run.result
     assert.equal(completed.stopReason, 'completed')
-    assert.equal(count, 3)
+    assert.equal(count, 2)
     const acceptedEvents = hostEvents.filter(e => e.stage === 'source_first_action_settled')
     assert.equal(acceptedEvents.length, stages.length)
     assert.ok(acceptedEvents.every(e => e.validation === 'valid' && Number.isInteger(e.accepted_revision)))
-    assert.equal(stages.length, (mode === 'depth' ? 4 : 3) + Number(closure))
-    if (mode === 'depth') assert.equal(stages[2][2], stages[3][2])
-    else assert.equal(stages.some(stage => stage[1] === 'independent_review'), false)
+    assert.equal(stages.length, 2)
+    assert.ok(stages.every(stage => ['source_first_plan', 'source_first_analysis'].includes(stage[0])))
     const state = await runPangea({ cwd, args: ['runs', 'get', '--data-root', created.data_root, '--run-id', created.run_id] })
     assert.equal(state.lifecycle_status, 'complete')
   } finally {
@@ -901,7 +824,85 @@ test('a failed unit stops new dispatch while other running units keep their comp
   } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
-test('closure budget pauses only its original worker, other units complete, explicit continuation restores it', async () => {
+test('paused run disposal closes its owned process tree, retains remote identity and is idempotent', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'pangea-terminal-cleanup-'))
+  const controller = new AbortController()
+  let quiesced = 0, disposed = 0
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', agentModel: 'm', parent: {}, cwd: root, dataRoot: root,
+    runId: 'cleanup', signal: controller.signal,
+    runner: async ({ args }) => args[1] === 'next' ? { run_id: 'cleanup', lifecycle_status: 'running', actions: [
+      { action_id: 'cleanup:planning', action: 'dispatch_agent', role: 'planning', stage: 'unit_planning' }] } : {},
+    subagents: { start: async () => ({ id: 'owned', remoteSessionId: 'remote-owned', result: Promise.resolve({ stopReason: 'completed' }),
+      continuePrompt: async () => { throw new Error('input too long') }, dispose: async () => { disposed++ },
+      quiesceForRecovery: async () => { quiesced++; return { confirmed: true, processTreeStopped: true } } }) } })
+  try {
+    assert.equal((await run.result).attentionRequired, true)
+    await Promise.all([run.dispose(), run.dispose()])
+    assert.equal(quiesced, 1)
+    assert.equal(disposed, 0)
+    const saved = JSON.parse(await readFile(path.join(root, 'runs', 'cleanup', 'acp-workers.json'), 'utf8'))
+    assert.equal(saved.workers.owned.remoteSessionId, 'remote-owned')
+    assert.equal(saved.workers.owned.quiescent, true)
+    assert.equal(saved.workers.owned.requires_process_tree_confirmation, false)
+  } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('workers can discover direct and budget-deferred tool reference indexes on initial and resumed turns', () => {
+  for (const task of [
+    { test_tool_reference_paths: [{ repo_id: 'tools', path: 'scripts/tool.py' }] },
+    { deferred_fields: { test_tool_reference_paths: { input_id: 'task:test_tool_reference_paths', count: 2000 } } },
+  ]) {
+    const args = { action: { action_id: 'r:a', stage: 'unit_analysis', role: 'analysis' }, opened: { task }, cwd: '/fixture', dataRoot: '/fixture/data', runId: 'r', taskId: 'w' }
+    for (const prompt of [workerPrompt(args), workerContinuationPrompt({ ...args, sameAction: true }), workerContinuationPrompt({ ...args, sameAction: false })]) {
+      assert.match(prompt, /task\.test_tool_reference_paths/)
+      assert.match(prompt, /input-read --input-id task:test_tool_reference_paths/)
+      assert.match(prompt, /next_cursor/)
+      assert.match(prompt, /source-read --repo-id ID --path PATH --view text/)
+      assert.match(prompt, /仅参考，不扩张被测义务、不执行工具/)
+      assert.doesNotMatch(prompt, /scripts\/tool\.py/)
+    }
+  }
+  assert.doesNotMatch(workerPrompt({ action: {}, opened: { task: {} }, cwd: '/fixture' }), /本 Run 具有测试工具参考/)
+})
+
+// Retained review execution specifications; disabled while model-review routing is paused.
+test.skip('zero-tool recovery in blind and comparison review preserves one original reviewer', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'pangea-zero-tool-reviewer-'))
+  const controller = new AbortController(), runId = 'zero-tool-reviewer'
+  let stage = 0, starts = 0, toolCalls = 0
+  const prompts = [], bound = []
+  const run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', cwd: root, dataRoot: root, runId,
+    parent: {}, signal: controller.signal,
+    runner: async ({ args }) => {
+      if (args[0] === 'task-open') return { task: { version_set_id: 'version' } }
+      if (args[1] === 'next') return { run_id: runId, lifecycle_status: stage === 2 ? 'complete' : 'running', actions: stage === 2 ? [] : [{
+        action_id: `review:${stage}`, role: 'review', stage: stage ? 'comparison_review' : 'independent_review',
+        action: stage ? 'continue_agent' : 'dispatch_agent', ...(stage ? { task_id: 'original' } : {}) }] }
+      if (args[1] === 'bind') bound.push(args.at(-1))
+      if (args[1] === 'settle') stage++
+      return {}
+    },
+    subagents: { start: async () => {
+      starts++
+      return { id: 'original', remoteSessionId: 'remote-original', result: Promise.resolve({ stopReason: 'completed' }),
+        readDiagnostics: () => ({ toolCalls }), dispose: async () => {},
+        continuePrompt: async value => { prompts.push(value[0].text); if (prompts.length % 2 === 0) toolCalls++; return { stopReason: 'completed' } } }
+    } } })
+  try {
+    assert.equal((await run.result).attentionRequired, false)
+    assert.equal(starts, 1)
+    assert.equal(stage, 2)
+    assert.equal(prompts.length, 4)
+    assert.ok(bound.every(id => id === 'original'))
+    assert.match(prompts[0], /independent_review/)
+    assert.match(prompts[2], /comparison_review/)
+    assert.equal(prompts[1], prompts[3])
+    const saved = JSON.parse(await readFile(path.join(root, 'runs', runId, 'acp-workers.json'), 'utf8'))
+    assert.equal(saved.workers.original.remoteSessionId, 'remote-original')
+  } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
+})
+
+test.skip('closure budget pauses only its original worker, other units complete, explicit continuation restores it', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'closure-budget-'))
   const runId = 'closure-budget', controller = new AbortController()
   const actions = Array.from({ length: 4 }, (_, i) => ({ action_id: `${runId}:${i}`, role: 'closure', stage: 'targeted_closure', action: 'continue_agent', task_id: `original-${i}` }))
@@ -949,7 +950,7 @@ test('closure budget pauses only its original worker, other units complete, expl
   } finally { controller.abort(); await run?.dispose(); await rm(root, { recursive: true, force: true }) }
 })
 
-test('closure allows one mechanical repair then pauses instead of looping', async () => {
+test.skip('closure allows one mechanical repair then pauses instead of looping', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'closure-repairs-'))
   const runId = 'repair-limit', controller = new AbortController()
   let turns = 0, repairs = 0, paused = false
@@ -968,45 +969,4 @@ test('closure allows one mechanical repair then pauses instead of looping', asyn
     assert.equal(turns, 2)
     assert.equal(repairs, 2)
   } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
-})
-
-test('paused run disposal closes its owned process tree, retains remote identity and is idempotent', async () => {
-  const root = await mkdtemp(path.join(tmpdir(), 'pangea-terminal-cleanup-'))
-  const controller = new AbortController()
-  let quiesced = 0, disposed = 0
-  const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', agentModel: 'm', parent: {}, cwd: root, dataRoot: root,
-    runId: 'cleanup', signal: controller.signal,
-    runner: async ({ args }) => args[1] === 'next' ? { run_id: 'cleanup', lifecycle_status: 'running', actions: [
-      { action_id: 'cleanup:planning', action: 'dispatch_agent', role: 'planning', stage: 'unit_planning' }] } : {},
-    subagents: { start: async () => ({ id: 'owned', remoteSessionId: 'remote-owned', result: Promise.resolve({ stopReason: 'completed' }),
-      continuePrompt: async () => { throw new Error('input too long') }, dispose: async () => { disposed++ },
-      quiesceForRecovery: async () => { quiesced++; return { confirmed: true, processTreeStopped: true } } }) } })
-  try {
-    assert.equal((await run.result).attentionRequired, true)
-    await Promise.all([run.dispose(), run.dispose()])
-    assert.equal(quiesced, 1)
-    assert.equal(disposed, 0)
-    const saved = JSON.parse(await readFile(path.join(root, 'runs', 'cleanup', 'acp-workers.json'), 'utf8'))
-    assert.equal(saved.workers.owned.remoteSessionId, 'remote-owned')
-    assert.equal(saved.workers.owned.quiescent, true)
-    assert.equal(saved.workers.owned.requires_process_tree_confirmation, false)
-  } finally { controller.abort(); await run.dispose(); await rm(root, { recursive: true, force: true }) }
-})
-
-test('workers can discover direct and budget-deferred tool reference indexes on initial and resumed turns', () => {
-  for (const task of [
-    { test_tool_reference_paths: [{ repo_id: 'tools', path: 'scripts/tool.py' }] },
-    { deferred_fields: { test_tool_reference_paths: { input_id: 'task:test_tool_reference_paths', count: 2000 } } },
-  ]) {
-    const args = { action: { action_id: 'r:a', stage: 'unit_analysis', role: 'analysis' }, opened: { task }, cwd: '/fixture', dataRoot: '/fixture/data', runId: 'r', taskId: 'w' }
-    for (const prompt of [workerPrompt(args), workerContinuationPrompt({ ...args, sameAction: true }), workerContinuationPrompt({ ...args, sameAction: false })]) {
-      assert.match(prompt, /task\.test_tool_reference_paths/)
-      assert.match(prompt, /input-read --input-id task:test_tool_reference_paths/)
-      assert.match(prompt, /next_cursor/)
-      assert.match(prompt, /source-read --repo-id ID --path PATH --view text/)
-      assert.match(prompt, /仅参考，不扩张被测义务、不执行工具/)
-      assert.doesNotMatch(prompt, /scripts\/tool\.py/)
-    }
-  }
-  assert.doesNotMatch(workerPrompt({ action: {}, opened: { task: {} }, cwd: '/fixture' }), /本 Run 具有测试工具参考/)
 })
