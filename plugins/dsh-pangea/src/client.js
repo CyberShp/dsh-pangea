@@ -654,7 +654,7 @@ window.__ModuleLoader__.load({
     function updateStatusCopy(status) {
       if (!status) return '正在读取 Desktop 版本信息…'
       if (status.phase === 'up-to-date') return '当前通道已是最新版本。'
-      if (status.phase === 'checking') return status.source === 'github' ? '正在检查 GitHub 更新…' : '正在读取并校验升级包…'
+      if (status.phase === 'checking') return status.source === 'intranet' ? '正在检查 内网更新…' : '正在读取并校验升级包…'
       if (status.phase === 'downloading' && status.activity === 'download') return `正在下载升级包 ${Math.round(status.percent ?? 0)}%`
       if (status.phase === 'downloading') return `正在校验升级包 ${Math.round(status.percent ?? 0)}%`
       if (status.phase === 'downloaded') return `${status.availableVersion ?? '升级包'} 已就绪`
@@ -681,7 +681,6 @@ window.__ModuleLoader__.load({
         && typeof bridge?.importUpdatePackage === 'function'
         && typeof bridge?.installUpdate === 'function'
       const onlineAvailable = updateAvailable && typeof bridge?.checkForUpdates === 'function'
-      const networkSettingsAvailable = typeof bridge?.openUpdateNetworkSettings === 'function'
       const [updateStatus, setUpdateStatus] = React.useState(null)
       const [busyAction, setBusyAction] = React.useState(null)
       const [helperHandoff, setHelperHandoff] = React.useState(false)
@@ -690,7 +689,6 @@ window.__ModuleLoader__.load({
       const [section, setSection] = React.useState('general')
       const [modelCatalog, setModelCatalog] = React.useState({ status: 'loading', connections: [] })
       const [modelCreating, setModelCreating] = React.useState(false)
-      const [networkSettingsError, setNetworkSettingsError] = React.useState('')
 
       React.useEffect(() => {
         const receive = event => setModelCreating(event.detail.open && event.detail.create)
@@ -721,15 +719,6 @@ window.__ModuleLoader__.load({
       }, [bridge, updateAvailable])
 
       const openModels = (providerId, create = false) => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'internal', providerId: typeof providerId === 'string' ? providerId : undefined, create } }))
-      const openUpdateNetworkSettings = async () => {
-        if (!networkSettingsAvailable) return
-        setNetworkSettingsError('')
-        try {
-          await bridge.openUpdateNetworkSettings()
-        } catch {
-          setNetworkSettingsError('更新网络设置未能打开，请重试。')
-        }
-      }
       const checkOnline = async () => {
         if (!onlineAvailable || busyAction) return
         setBusyAction('check')
@@ -805,7 +794,7 @@ window.__ModuleLoader__.load({
       }, h('strong', null, title), h('p', null, message))
       const updatePackageFile = status => node('div', 'settings-update-file',
         settingsIcon('FileArchive'),
-        h('div', null, h('strong', null, status?.packageName ?? (status?.source === 'github' ? 'GitHub Release' : '本地 ZIP 升级包')), h('p', null, status?.source === 'github' ? '完整升级 ZIP · GitHub' : status?.packageType === 'patch' ? '增量补丁 · 本地导入' : '完整升级 ZIP · 本地导入')),
+        h('div', null, h('strong', null, status?.packageName ?? (status?.source === 'intranet' ? '内网更新源' : '本地 ZIP 升级包')), h('p', null, status?.source === 'intranet' ? '签名升级包 · 内网' : status?.packageType === 'patch' ? '增量补丁 · 本地导入' : '完整升级 ZIP · 本地导入')),
         badge(status?.packageName ? '已选择' : '正在读取'))
       const updateRoute = (status, patch = status?.packageType === 'patch', tone = 'good') => node('div', 'settings-update-route',
         node('div', '', h('p', null, tone === 'danger' ? '当前安装' : '当前版本'), h('strong', null, status?.currentVersion ?? '正在读取')),
@@ -813,23 +802,23 @@ window.__ModuleLoader__.load({
         node('div', '', h('p', null, tone === 'danger' ? '补丁要求基线' : patch ? '目标版本 · 基线' : '目标版本'), h('strong', null, tone === 'danger' ? status?.baseVersion ?? '—' : status?.availableVersion ?? '—'), patch && tone !== 'danger' && status?.baseVersion ? h('span', { className: 'settings-update-base' }, `补丁基线 ${status.baseVersion}`) : null),
         badge(patch ? tone === 'danger' ? '不匹配' : '增量补丁' : '完整升级包', tone))
       const updatePanel = () => {
-        const online = updateStatus?.source === 'github'
+        const online = updateStatus?.source === 'intranet'
         const transferring = updateStatus?.activity === 'download'
         const phase = updateStatus?.phase ?? (actionError ? 'status-error' : updateAvailable ? 'loading' : 'unsupported')
         const unpackagedEnvironment = phase === 'unsupported' && /已打包的 Windows/.test(updateStatus?.message ?? '')
         const baseMismatch = phase === 'error' && updateStatus?.packageType === 'patch' && Boolean(updateStatus.baseVersion) && updateStatus.baseVersion !== updateStatus.currentVersion
         const activeBlocked = phase === 'downloaded' && !blockedDismissed && /分析.*(?:运行|进行)/.test(updateStatus?.message ?? '')
         const phaseTitle = helperHandoff ? '正在准备重启' : activeBlocked ? '先完成正在运行的分析' : phase === 'downloaded' && busyAction === 'install' ? '正在检查安装条件' : ({
-          loading: '正在读取版本状态', idle: '当前没有待安装的升级包', checking: online ? '正在检查 GitHub 更新' : '正在读取升级包', 'up-to-date': '已是最新版本',
+          loading: '正在读取版本状态', idle: '当前没有待安装的升级包', checking: online ? '正在检查 内网更新' : '正在读取升级包', 'up-to-date': '已是最新版本',
           downloading: transferring ? '正在下载升级包' : '正在校验升级包', downloaded: '升级已就绪', error: online ? '在线更新未完成' : baseMismatch ? '补丁基线与当前版本不一致' : '这个升级包未通过校验',
           'install-error': '升级未完成，当前版本可继续使用', unsupported: '当前环境不支持应用内升级', 'status-error': '暂时无法读取版本状态',
         }[phase] ?? '版本状态暂不可用')
         const descriptions = {
           loading: '正在读取当前 Desktop 与本地升级包状态。',
-          idle: onlineAvailable ? '检查 GitHub 更新，或从本机导入签名升级包。' : '从本机选择完整升级包或增量补丁。',
+          idle: onlineAvailable ? '检查 内网更新，或从本机导入签名升级包。' : '从本机选择完整升级包或增量补丁。',
           'up-to-date': '当前发布通道没有更高版本。',
           checking: online ? '正在查找当前通道的新版本并验证更新清单。' : '正在识别包类型并准备校验。',
-          downloading: transferring ? '正在从 GitHub 下载已锁定版本的完整包，完成后自动校验。' : '检查包的完整性、签名与版本兼容性。',
+          downloading: transferring ? '正在从内网下载已锁定版本的升级包，完成后自动校验。' : '检查包的完整性、签名与版本兼容性。',
           downloaded: '升级包已验证。完成当前工作后，可以安排安装并重启。',
           error: baseMismatch
             ? `请选择以 ${updateStatus.currentVersion} 为基线的补丁，或使用完整升级包。`
@@ -913,15 +902,7 @@ window.__ModuleLoader__.load({
         }
 
         return h(React.Fragment, null,
-          node('div', 'settings-section-head', node('div', '', h('h2', null, '版本与升级'), h('p', null, onlineAvailable ? '从 GitHub 获取更新，或导入签名升级包；校验后选择合适的时间安装。' : '导入签名升级包，校验后选择合适的时间安装。')),
-            bridge ? h('button', {
-              type: 'button', className: 'btn', 'data-pangea-update-network-settings': true,
-              disabled: !networkSettingsAvailable,
-              title: networkSettingsAvailable ? '设置在线更新的代理连接' : '请升级 Desktop 后使用更新网络设置',
-              onClick: openUpdateNetworkSettings,
-            }, settingsIcon('Settings2'), '更新网络设置') : null),
-          bridge && !networkSettingsAvailable ? updateNotice('更新网络设置不可用', '当前 Desktop 尚不支持主动打开更新网络设置，请升级 Desktop 后使用。', 'info') : null,
-          networkSettingsError ? updateNotice('网络设置未打开', networkSettingsError, 'danger') : null,
+          node('div', 'settings-section-head', node('div', '', h('h2', null, '版本与升级'), h('p', null, onlineAvailable ? '从内网获取更新，或导入签名升级包；校验后选择合适的时间安装。' : '导入签名升级包，校验后选择合适的时间安装。'))),
           node('div', 'settings-main-cols',
             h('section', { className: 'panel settings-update-card', 'data-pangea-update-state': phase },
               node('div', 'settings-version-hero', node('div', 'settings-version-mark', 'P.'), node('div', '', h('h3', null, 'PANGEA Desktop'), h('p', null, '当前版本 ', h('strong', null, updateStatus?.currentVersion ?? (hasError ? '读取失败' : '正在读取')), ' · Windows'))),

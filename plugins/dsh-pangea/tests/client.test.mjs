@@ -352,79 +352,13 @@ async function updateSettingsPageHarness(updateStatus, options = {}) {
   return { ...render(), calls, statusReads, state, render, mountEffects }
 }
 
-test('update network settings stays directly available in every update phase without checking or downloading', async () => {
-  for (const phase of [null, 'idle', 'up-to-date', 'available', 'checking', 'downloading', 'downloaded', 'error', 'install-error', 'unsupported']) {
-    const view = await updateSettingsPageHarness(phase ? { phase, currentVersion: '2.0.22', source: 'github' } : null, { online: true, networkSettings: true })
-    const entry = view.nodes.find(node => node.props?.['data-pangea-update-network-settings'])
-    assert.ok(entry, String(phase))
-    assert.equal(entry.props.disabled, false, String(phase))
-    assert.deepEqual(view.calls, [], 'rendering must not check or open settings')
-    await entry.props.onClick()
-    await entry.props.onClick()
-    assert.deepEqual(view.calls, ['network-settings', 'network-settings'], 'repeat clicks use the Desktop singleton dialog, never update operations')
-    assert.deepEqual(view.statusReads, [], 'opening does not wait for a version status response')
+test('intranet update page has no network configuration entry even on older bridges', async () => {
+  for (const phase of ['idle', 'checking', 'error', 'downloaded']) {
+    const view = await updateSettingsPageHarness({ phase, source: 'intranet', message: 'HTTP 404' }, { online: true, networkSettings: true })
+    assert.equal(view.nodes.some(node => node.props?.['data-pangea-update-network-settings']), false)
+    assert.doesNotMatch(view.text, /更新网络设置|GitHub/)
+    assert.deepEqual(view.calls, [])
   }
-})
-
-test('update network settings is reachable through normal settings navigation without automatic network work', async () => {
-  const view = await updateSettingsPageHarness({ phase: 'idle' }, { section: 'general', online: true, networkSettings: true })
-  const cleanup = await view.mountEffects()
-  assert.deepEqual(view.statusReads, ['status'], 'mount only reads local update status')
-  assert.deepEqual(view.calls, [])
-  const navigation = view.nodes.find(node => node.type === 'button' && node.children.includes('版本与升级'))
-  navigation.props.onClick()
-  const updatePage = view.render()
-  const entry = updatePage.nodes.find(node => node.props?.['data-pangea-update-network-settings'])
-  assert.ok(entry)
-  await entry.props.onClick()
-  assert.deepEqual(view.calls, ['network-settings'])
-  cleanup()
-})
-
-test('update network settings does not depend on update bridge health or successful status reads', async () => {
-  for (const options of [{ statusError: true }, { updateBridgeMissing: true }, { busyAction: 'check' }, { busyAction: 'install', helperHandoff: true }]) {
-    const view = await updateSettingsPageHarness(null, { ...options, networkSettings: true, online: true })
-    const cleanup = await view.mountEffects()
-    const entry = view.render().nodes.find(node => node.props?.['data-pangea-update-network-settings'])
-    assert.equal(entry.props.disabled, false)
-    await entry.props.onClick()
-    assert.deepEqual(view.calls, ['network-settings'])
-    cleanup()
-  }
-})
-
-test('legacy Desktop explains missing network capability and the web has no fake entry', async () => {
-  const legacy = await updateSettingsPageHarness({ phase: 'idle' }, { online: true })
-  const disabled = legacy.nodes.find(node => node.props?.['data-pangea-update-network-settings'])
-  assert.equal(disabled.props.disabled, true)
-  assert.match(legacy.text, /当前 Desktop 尚不支持主动打开更新网络设置，请升级 Desktop 后使用。/)
-  await disabled.props.onClick()
-  assert.deepEqual(legacy.calls, [])
-  const web = await updateSettingsPageHarness(null, { bridgeMissing: true })
-  assert.equal(web.nodes.some(node => node.props?.['data-pangea-update-network-settings']), false)
-  assert.doesNotMatch(web.text, /更新网络设置/)
-})
-
-test('network settings open failures are visible and a retry clears only the network error', async () => {
-  let fail = true
-  const status = { phase: 'error', source: 'github', message: 'HTTP 403' }
-  const view = await updateSettingsPageHarness(status, {
-    networkSettings: true,
-    onOpenNetworkSettings: async () => { if (fail) throw new Error('dialog failed') },
-  })
-  const entry = view.nodes.find(node => node.props?.['data-pangea-update-network-settings'])
-  await entry.props.onClick()
-  const failed = view.render()
-  assert.match(failed.text, /更新网络设置未能打开，请重试。/)
-  assert.match(failed.text, /HTTP 403/)
-  assert.ok(failed.nodes.some(node => node.props?.role === 'alert' && node.children.some(child => child?.children?.includes('网络设置未打开'))))
-  fail = false
-  await failed.nodes.find(node => node.props?.['data-pangea-update-network-settings']).props.onClick()
-  const retried = view.render()
-  assert.doesNotMatch(retried.text, /更新网络设置未能打开/)
-  assert.match(retried.text, /HTTP 403/)
-  assert.equal(view.state[0], status, 'opening network settings must not overwrite update status')
-  assert.deepEqual(view.calls, ['network-settings', 'network-settings'])
 })
 
 test('renders the update page from real update bridge states without invented progress or versions', async () => {
@@ -1209,7 +1143,7 @@ test('task assistant fences old todos until the selected task session is availab
   assert.equal(check.props.disabled, false)
   await check.props.onClick()
   assert.deepEqual(idle.calls, ['check'])
-  const onlineStatus = { currentVersion: '2.0.21', source: 'github', manual: true }
+  const onlineStatus = { currentVersion: '2.0.21', source: 'intranet', manual: true }
   const downloading = await updateSettingsPageHarness({ ...onlineStatus, phase: 'downloading', activity: 'download', percent: 47 }, { online: true })
   assert.match(downloading.text, /下载中47%/)
   assert.doesNotMatch(downloading.text, /本地导入/)
