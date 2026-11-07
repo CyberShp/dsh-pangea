@@ -308,6 +308,7 @@ async function updateSettingsPageHarness(updateStatus, options = {}) {
     subscribeUpdateStatus: () => 1,
     unsubscribeUpdateStatus() {},
   }
+  if (options.notes) bridge.showUpdateNotes = async () => { calls.push('notes') }
   if (options.online) bridge.checkForUpdates = async () => { calls.push('check'); return updateStatus }
   if (options.networkSettings) bridge.openUpdateNetworkSettings = async () => {
     calls.push('network-settings')
@@ -1157,4 +1158,14 @@ test('task assistant fences old todos until the selected task session is availab
   assert.match(failed.text, /在线更新失败/)
   assert.match(failed.text, /HTTP 403/)
   assert.ok(failed.nodes.some(node => node.props?.['data-pangea-update-action'] === 'check' && !node.props.disabled))
+})
+
+test('available intranet update keeps a notes entry without automatically downloading', async () => {
+  const view = await updateSettingsPageHarness({ phase: 'available', source: 'intranet', currentVersion: '2.1.19', availableVersion: '2.1.20' }, { online: true, notes: true })
+  assert.match(view.text, /发现 v2.1.20/)
+  const entry = view.nodes.find(node => node.type === 'button' && node.children.includes('查看更新日志'))
+  assert.ok(entry)
+  assert.deepEqual(view.calls, [])
+  await entry.props.onClick()
+  assert.deepEqual(view.calls, ['notes'])
 })

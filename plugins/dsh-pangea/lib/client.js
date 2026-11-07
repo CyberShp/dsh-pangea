@@ -833,11 +833,12 @@ window.__ModuleLoader__.load({
         const baseMismatch = phase === 'error' && updateStatus?.packageType === 'patch' && Boolean(updateStatus.baseVersion) && updateStatus.baseVersion !== updateStatus.currentVersion
         const activeBlocked = phase === 'downloaded' && !blockedDismissed && /分析.*(?:运行|进行)/.test(updateStatus?.message ?? '')
         const phaseTitle = helperHandoff ? '正在准备重启' : activeBlocked ? '先完成正在运行的分析' : phase === 'downloaded' && busyAction === 'install' ? '正在检查安装条件' : ({
-          loading: '正在读取版本状态', idle: '当前没有待安装的升级包', checking: online ? '正在检查 内网更新' : '正在读取升级包', 'up-to-date': '已是最新版本',
+          available: '发现新版本', loading: '正在读取版本状态', idle: '当前没有待安装的升级包', checking: online ? '正在检查 内网更新' : '正在读取升级包', 'up-to-date': '已是最新版本',
           downloading: transferring ? '正在下载升级包' : '正在校验升级包', downloaded: '升级已就绪', error: online ? '在线更新未完成' : baseMismatch ? '补丁基线与当前版本不一致' : '这个升级包未通过校验',
           'install-error': '升级未完成，当前版本可继续使用', unsupported: '当前环境不支持应用内升级', 'status-error': '暂时无法读取版本状态',
         }[phase] ?? '版本状态暂不可用')
         const descriptions = {
+          available: '查看更新说明，再决定是否下载。',
           loading: '正在读取当前 Desktop 与本地升级包状态。',
           idle: onlineAvailable ? '检查 内网更新，或从本机导入签名升级包。' : '从本机选择完整升级包或增量补丁。',
           'up-to-date': '当前发布通道没有更高版本。',
@@ -890,8 +891,10 @@ window.__ModuleLoader__.load({
           content.push(updateNotice(phase === 'unsupported' ? '升级能力不可用' : phase === 'install-error' ? '安装助手报告升级失败' : baseMismatch ? '不能应用这份补丁' : signatureFailure ? '签名校验失败' : online ? '在线更新失败' : '升级包没有通过校验', unpackagedEnvironment ? '当前运行环境没有提供升级包导入与安装能力。' : baseMismatch ? '增量包仅适用于它声明的原始版本。当前安装尚未发生变更。' : phase === 'install-error' ? updateStatus?.message ?? '安装助手未返回失败详情。' : signatureFailure ? '请选择由 PANGEA Desktop 构建生成的签名完整包或补丁包。' : updateStatus?.message ?? updateError ?? descriptions[phase], phase === 'unsupported' ? 'info' : baseMismatch || phase === 'install-error' ? 'warn' : 'danger'))
         } else if (phase === 'status-error') {
           content.push(updateNotice('状态读取失败', '请重新读取最新版本状态。', 'warn'))
+        } else if (phase === 'available') {
+          content.push(updateNotice(`发现 v${updateStatus.availableVersion}`, '查看更新日志，了解新增功能、问题修复和升级注意事项。', 'info'))
         } else if (phase === 'idle' || phase === 'up-to-date') {
-          content.push(node('div', 'callout settings-update-idle', node('div', 'row', settingsIcon('FolderOpen'), h('span', { className: 'small' }, onlineAvailable ? '启动后自动检查并下载；安装仍由你确认。也可导入离线 ZIP。' : '选择原始 ZIP 文件，无需提前解压。'))))
+          content.push(node('div', 'callout settings-update-idle', node('div', 'row', settingsIcon('FolderOpen'), h('span', { className: 'small' }, onlineAvailable ? '启动后自动检查；下载与安装均由你确认。也可导入离线 ZIP。' : '选择原始 ZIP 文件，无需提前解压。'))))
         } else {
           content.push(node('div', 'settings-update-progress indeterminate', h('span')))
         }
@@ -911,6 +914,8 @@ window.__ModuleLoader__.load({
           actions.push(updateAction('正在检查…', 'install', true, 'PackageCheck', true))
         } else if (phase === 'status-error') {
           actions.push(updateAction(busyAction === 'refresh' ? '正在重新读取…' : '重新读取状态', 'refresh', true, 'PackageCheck', busyAction === 'refresh' || !updateAvailable))
+        } else if (phase === 'available' && typeof bridge?.showUpdateNotes === 'function') {
+          actions.push(button('查看更新日志', () => { void bridge.showUpdateNotes().catch(() => setActionError('更新说明未能打开，请重试。')) }, true))
         } else if (phase === 'downloaded') {
           const baseMatches = updateStatus?.packageType !== 'patch' || !updateStatus.baseVersion || updateStatus.baseVersion === updateStatus.currentVersion
           actions.push(updateAction(busyInstall ? '正在准备重启…' : updateStatus?.message ? '重试安装' : '安装并重启', 'install', true, 'PackageCheck', busyInstall || busyImport || !baseMatches))
