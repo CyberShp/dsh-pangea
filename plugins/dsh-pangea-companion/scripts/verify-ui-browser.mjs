@@ -100,7 +100,7 @@ try {
     await page.locator('[data-message-id="tls-hello"]').click();await page.getByRole('complementary',{name:'交互详情'}).waitFor();await checkFullscreenBody(true);await snap('sequence-fullscreen-details')
     await page.keyboard.press('Escape');await page.getByRole('button',{name:'全屏阅读时序图',exact:true}).waitFor();await page.waitForFunction(()=>!document.fullscreenElement)
     for(const value of ['running','failed','stopping','partial']){await scene(value);const badge=await page.locator('.b03-overview-status').innerText();if(['failed','stopping'].includes(value))assert.doesNotMatch(badge,/已完成/);await tab('运行过程').click();await page.locator('.pangea-run-workspace').waitFor();await snap(`run-${value}-1380`)}
-    await page.getByText('执行详情与 Agent 会话',{exact:true}).click();await page.getByRole('button',{name:'Agent 会话管理',exact:true}).click()
+    await page.getByRole('button',{name:'Agent 会话管理',exact:true}).click()
     await page.getByRole('dialog',{name:'Agent 会话管理'}).waitFor();await page.locator('.agent-session-transcript').waitFor()
     assert.match(await page.locator('.agent-session-transcript').innerText(),/模拟读取错误/)
     assert.equal(await page.locator('.agent-tool details[open]').count(),0);await snap('session-markdown-error');await page.keyboard.press('Escape')

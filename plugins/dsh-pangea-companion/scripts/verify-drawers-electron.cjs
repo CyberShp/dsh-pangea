@@ -145,7 +145,7 @@ async function main() {
   // Explicit-zero historical data must retain the same compact workspace.
   await scene('zero'); await caseWorkspace()
   await snapshot('case-workspace-explicit-zero')
-  await tab('运行过程'); await taskInfo(); await click('执行详情与 Agent 会话', 'summary')
+  await tab('运行过程'); await taskInfo()
   await wait(`!!document.querySelector('.pangea-execution-timeline')`)
   assert.equal(await js(`document.querySelectorAll('.pangea-timeline-segment.running').length`), 1)
   assert.equal(await js(`document.querySelectorAll('.pangea-timeline-segment.paused').length`), 1)

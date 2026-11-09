@@ -3855,3 +3855,36 @@ test('evidence-only case basis preserves all explicit references and unique same
   assert.ok(current.some(node => node.props['aria-label'] === '拟覆盖依据与冻结覆盖输入'))
   assert.ok(!current.some(node => node.props.role === 'dialog' && node.props['aria-label'] === '源码依据'))
 })
+
+test('Run exposes original Agent session management and timeline without hiding actionable warnings', async () => {
+  const client = await loadClientExports()
+  for (const scenario of ['running', 'failed', 'partial', 'unreadable']) {
+    let destination
+    const current = { run_id: 'run-disclosure', workflow_version: 'source-first-v1',
+      lifecycle_status: scenario === 'partial' ? 'complete' : scenario === 'failed' ? 'failed' : 'running',
+      terminal: ['failed', 'partial'].includes(scenario), partial_delivery: scenario === 'partial', terminal_error: scenario === 'failed' ? '连接中断，请重试' : null,
+      workflow: { steps: [{ step: 1, title: '源码与业务分析', stage: 'analyzing', status: 'running' }], unresolved: [{ message: '恢复路径尚待验证' }] },
+      details: { business_flows: [{ flow_id: 'flow-1' }], test_cases: [{ test_case_id: 'case-1' }] },
+      reader_health: { status: scenario === 'unreadable' ? 'error' : 'ok', issues: ['用例读取失败'], collection_status: { business_flows: 'readable', test_cases: scenario === 'unreadable' ? 'unavailable' : 'readable' } },
+    }
+    const before = JSON.stringify(current)
+    const nodes = descendants(client.RunWorkspace({ current, navigate(target) { destination = target } }))
+    const disclosure = nodes.find(node => node.props.className === 'run-execution-details run-detail-disclosure')
+    assert.ok(disclosure)
+    assert.notEqual(disclosure.props.open, true)
+    assert.ok(descendants(disclosure).some(node => node.props.className === 'run-stages'))
+    assert.ok(!descendants(disclosure).some(node => node.type === 'button' && metricsText(node) === 'Agent 会话管理'))
+    const outside = nodes.filter(node => !descendants(disclosure).includes(node))
+    assert.ok(outside.some(node => node.type === 'button' && metricsText(node) === 'Agent 会话管理'))
+    assert.ok(outside.some(node => node.type === client.ExecutionTimelineView))
+    const outputs = nodes.find(node => node.props.className === 'run-saved-outputs')
+    assert.ok(outputs)
+    descendants(outputs).find(node => node.type === 'button' && metricsText(node) === '查看').props.onClick()
+    assert.equal(destination, 'flows')
+    const alerts = outside.filter(node => node.props.role === 'alert').map(metricsText).join(' ')
+    if (scenario === 'failed') assert.match(alerts, /连接中断/)
+    if (scenario === 'partial') assert.match(alerts, /恢复路径尚待验证/)
+    if (scenario === 'unreadable') assert.match(alerts, /用例读取失败/)
+    assert.equal(JSON.stringify(current), before)
+  }
+})

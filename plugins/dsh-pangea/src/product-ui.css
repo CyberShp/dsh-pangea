@@ -1234,3 +1234,14 @@ body[data-pangea-product-shell] .pangea-companion{background:var(--pangea-bg)!im
 .pangea-settings-workspace .settings-model-list{max-height:360px;overflow:auto;scrollbar-gutter:stable}
 .pangea-settings-workspace .settings-model-list th{position:sticky;top:0;background:var(--panel);z-index:1}
 @container(max-width:780px){.pangea-settings-workspace .settings-layout{grid-template-columns:minmax(0,1fr);gap:16px}.pangea-settings-workspace .settings-nav{position:static;display:flex;gap:8px;overflow:auto}.pangea-settings-workspace .settings-nav button{width:auto;white-space:nowrap;margin:0}.pangea-settings-workspace .settings-nav-label,.pangea-settings-workspace .settings-nav>.divider,.pangea-settings-workspace .settings-nav>.settings-form-note{display:none}.pangea-settings-workspace .settings-main-cols{grid-template-columns:minmax(0,1fr)}.pangea-settings-workspace .settings-overview-head{flex-wrap:wrap}.pangea-settings-workspace .settings-overview-copy{flex-basis:calc(100% - 46px)}}
+
+/* Run progress, Agent sessions and timeline stay visible; supporting details are opt-in. */
+.pangea-run-workspace .run-saved-outputs{margin:0 0 24px;max-width:900px}
+.pangea-run-workspace .run-saved-outputs .file-row{padding:12px 0;border-bottom:1px solid var(--pangea-line,#e1e5eb)}
+.pangea-run-workspace .run-saved-outputs .file-row>div{flex:1}
+.pangea-run-workspace .run-saved-outputs .aside-note{margin-top:12px}
+.pangea-run-workspace .run-detail-disclosure>summary{font-size:14px;font-weight:600;cursor:pointer}
+.pangea-run-workspace .run-detail-disclosure>.metrics{display:flex;gap:32px;margin:24px 0}
+.pangea-run-workspace .run-detail-disclosure>.run-layout{margin-top:24px}
+.pangea-run-workspace .run-progress-summary{white-space:nowrap;align-self:center}
+@container (max-width:700px){.pangea-run-workspace .run-progress-summary{white-space:normal}.pangea-run-workspace .run-detail-disclosure>.metrics{flex-wrap:wrap;gap:16px}}
