@@ -689,9 +689,13 @@ window.__ModuleLoader__.load({
         ['本次运行目标', current?.target && current.target !== request ? current.target : null],
         ['关注点', (task?.focus || current?.focus || []).join('、')],
         ['仓库', current?.repository || task?.repository],
-        ['源码范围', (task?.source_scope || current?.source_scope || current?.source_snapshot?.requested_scope || []).join('、')], ['运行编号', current?.run_id || task?.run_id],
+        [(current?.source_investigation_policy || task?.source_investigation_policy) === 'repository-local-v1' ? '起始范围' : '源码范围', (task?.source_scope || current?.source_scope || current?.source_snapshot?.requested_scope || []).join('、')], ['运行编号', current?.run_id || task?.run_id],
         ['场景', current?.scenario || task?.scenario], ['工作流', current?.workflow_version || task?.workflow_version],
         ['开始时间', current?.started_at], ['结束时间', current?.ended_at], ['源码文件', current?.source_snapshot?.file_count],
+        ...((current?.source_investigation_policy || task?.source_investigation_policy) === 'repository-local-v1' ? [
+          ['调查边界', '本次已选代码仓；补查不增加全仓分析义务'],
+          ['补充调查文件', (current?.source_snapshot?.supplemental_files || []).map(item => `${item.repo_id}:${item.path}`).join('\n') || '尚无补充调查文件'],
+        ] : []),
         ['资料版本', (current?.input_materials || []).map(item => `${item.title || item.name || item.asset_id || '资料'}${item.revision != null ? ' r' + item.revision : ''}`).join('、')],
       ].filter(([label, value]) => !['原始标题', '本次运行目标', '关注点'].includes(label) || value)
       return h(React.Fragment, null, h('button', { type: 'button', className: 'pangea-info-button', 'aria-label': '任务信息', ref: trigger, onClick: () => setOpen(true) }, 'ⓘ 任务信息'),
@@ -699,7 +703,7 @@ window.__ModuleLoader__.load({
           h('section', { ref: panel, className: 'pangea-info-drawer', role: 'dialog', 'aria-modal': true, 'aria-label': '任务信息', tabIndex: -1 }, h('div', { className: 'pangea-page-actions' }, h('h2', null, '任务信息'), h('button', { type: 'button', onClick: () => setOpen(false), 'aria-label': '关闭任务信息' }, '关闭')),
           h('section', { className: 'pangea-task-info-name' }, h('h3', null, '任务名称'), h('p', null, name)),
           h('section', { className: 'pangea-task-request' }, h('h3', null, '完整需求'), h('p', null, request || '未记录完整需求')),
-          h('dl', null, rows.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', null, value == null || value === '' ? '未记录' : String(value))))))) : null)
+          h('dl', null, rows.map(([label, value]) => h(React.Fragment, { key: label }, h('dt', null, label), h('dd', { style: { whiteSpace: 'pre-wrap' } }, value == null || value === '' ? '未记录' : String(value))))))) : null)
     }
     function TextPreview({ title, value, preview, renderBody, children }) {
       const [open, setOpen] = React.useState(false)
@@ -2330,6 +2334,7 @@ window.__ModuleLoader__.load({
         request_version: '2.0',
         ...(form.source_task_id ? { source_task_id: form.source_task_id } : {}),
         repository: form.repository,
+        source_investigation_policy: Object.hasOwn(form, 'source_investigation_policy') ? form.source_investigation_policy : 'repository-local-v1',
         target: form.target,
         ...(form.scope_preview_id ? { scope_preview_id: form.scope_preview_id, expected_scope_revision: form.expected_scope_revision } : {}),
         ...(form.test_tool_sources?.length ? { test_tool_sources: form.test_tool_sources, test_tool_preview_id: form.test_tool_preview?.preview_id, expected_test_tool_revision: form.test_tool_preview?.scope_revision } : {}),
@@ -5304,7 +5309,8 @@ window.__ModuleLoader__.load({
           sceneOptions?.objectives ? field('测试对象层级', h('select', { 'aria-label': '测试对象层级', value: createForm.objective, onChange: event => update('objective', event.target.value) }, h('option', { value: '' }, '请选择测试对象层级'), h('option', { value: 'product-behavior' }, '产品行为 · 验证实际操作与外部结果（通常选此项）'), h('option', { value: 'interface-contract' }, '接口契约 · 验证公开 API 的调用规则与结果'))) : null,
           h('div', { className: 'create-subhead' }, '分析场景'),
           h('div', { className: 'choice-grid create-scenes', role: 'group', 'aria-label': '分析场景' }, Object.entries(scenes).map(([id, item]) => h('button', { key: id, type: 'button', className: `choice create-option ${createForm.scenario === id ? 'selected' : ''}`, 'aria-pressed': createForm.scenario === id, disabled: !supported('scenarios', id), 'data-scenario': id, onClick: () => update('scenario', id) }, runIcon(item[1]), h('div', null, h('strong', null, item[0]), h('p', null, item[2])), h('span', { className: 'create-scene-check' }, runIcon('CircleCheck'))))),
-          h('div', { className: 'create-scope', style: { marginTop: 22 } }, field('源码冻结目录', h('textarea', { 'aria-label': '源码冻结目录', value: createForm.source_scope_text, readOnly: true, placeholder: '请通过下方目录选择器选择真实下级目录' }))),
+          h('div', { className: 'create-scope', style: { marginTop: 22 } }, field('起始代码范围', h('textarea', { 'aria-label': '起始代码范围', value: createForm.source_scope_text, readOnly: true, placeholder: '请通过下方目录选择器选择真实下级目录' }))),
+          h('p', { className: 'b05-subtle' }, '从所选目录开始分析，可追查当前代码仓内的相关实现。补充调查不扩大本次分析目标。'),
           h(SourceScopePicker, { renderIcon: runIcon, cwd, dataRoot: workbench?.data_root, repository: createForm.repository, value: createForm.source_scope_text, preview: validScopePreview, onChange: value => update('source_scope_text', value), onPreview: value => setScopePreview({ ...value, key: createScopeKey }) }),
           footer(() => navigate({ type: 'tasks' }), () => go(2), '下一步 · 输入资料', !targetReady)), 'create-target-panel')
         else if (step === 2 && view === 'inputs') content = panel(h(React.Fragment, null,

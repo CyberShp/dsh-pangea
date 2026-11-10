@@ -145,6 +145,7 @@ export async function createRun(cwd, input, runner = runPangea) {
   }
   const detected = await runner({ cwd: root, args: ['system', 'capabilities', '--data-root', typeof input.data_root === 'string' ? path.resolve(root, input.data_root) : path.join(root, 'pangea-data')] })
   if (supportsSourceFirst(detected)) return createSourceFirstRun(cwd, input, runner)
+  if (input.source_investigation_policy != null) throw new Error('当前分析引擎不支持仓内追查，请更新配套组件')
   if (input.incremental_request != null) throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')
   if (input.flow_baseline != null) throw new Error('当前分析引擎不支持流程基线，请更新配套组件')
   if (input.test_tool_sources?.length) throw new Error('测试工具代码参考需要 source-first 分析引擎')
@@ -243,6 +244,7 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     : path.join(root, 'pangea-data')
   const request = {
     workflow_version: SOURCE_FIRST_VERSION,
+    ...(Object.hasOwn(input, 'source_investigation_policy') ? { source_investigation_policy: input.source_investigation_policy ?? null } : {}),
     runtime_provenance: runProvenance(root),
     ...(input.analysis_profile ? { analysis_profile: input.analysis_profile } : {}),
     ...(input.asset_revisions ? { asset_revisions: input.asset_revisions } : {}),
@@ -271,6 +273,7 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     args: ['system', 'capabilities', '--data-root', dataRoot],
   })
   assertSourceFirstCapabilities(capabilities)
+  if (request.source_investigation_policy != null && (request.source_investigation_policy !== 'repository-local-v1' || !capabilities.source_first?.contract_fields?.includes('source_investigation_policy'))) throw new Error('当前分析引擎不支持仓内追查，请更新配套组件')
   if (request.incremental_request && !capabilities.source_first?.contract_fields?.includes('incremental_request')) throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')
   if (request.flow_baseline && !capabilities.source_first?.contract_fields?.includes('flow_baseline')) throw new Error('当前分析引擎不支持流程基线，请更新配套组件')
   if (!capabilities.source_first?.contract_fields?.includes('model_settings')) delete request.model_settings

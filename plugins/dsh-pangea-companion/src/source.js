@@ -1,5 +1,6 @@
 import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 
 function hasText(value) {
   return typeof value === 'string' && value.trim() !== ''
@@ -95,4 +96,45 @@ export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoo
     truncated: windowEnd < requestedEnd,
     lines,
   }
+}
+
+// Only files explicitly saved by source tools are listed. Never enumerate the
+// live repository or widen an old Run's original manifest when presenting it.
+export async function readSupplementalSourceManifest(runDirectory) {
+  const filename = path.join(runDirectory, 'inputs', 'source-supplemental.json')
+  let raw
+  try { raw = await readFile(filename, 'utf8') } catch (error) { if (error.code === 'ENOENT') return { files: [] }; throw error }
+  const value = JSON.parse(raw)
+  if (value.format_version !== 'pangea-source-supplemental-v1' || !Array.isArray(value.files)) throw new Error('补充源码清单格式无效')
+  const seen = new Set()
+  const files = value.files.map(item => {
+    if (!item || typeof item.repo_id !== 'string' || !/^[^:/\\]+$/.test(item.repo_id) || ['.', '..'].includes(item.repo_id)
+      || typeof item.path !== 'string' || !item.path || /^(?:[\\/]|[A-Za-z]:)/.test(item.path)
+      || item.path.split(/[\\/]/).some(part => !part || part === '.' || part === '..')) throw new Error('补充源码清单包含越界路径')
+    const key = JSON.stringify([item.repo_id, item.path])
+    if (seen.has(key)) throw new Error('补充源码清单包含重复文件')
+    seen.add(key)
+    return { repo_id: item.repo_id, path: item.path, captured_at: item.captured_at, sha256: item.sha256, bytes: item.bytes, action_id: item.action_id }
+  })
+  return { format_version: value.format_version, files }
+}
+
+export async function readSavedSupplementalSources(runDirectory) {
+  const manifest = await readSupplementalSourceManifest(runDirectory)
+  if (!manifest.files.length) return []
+  const runRoot = await realpath(runDirectory)
+  const root = await realpath(path.join(runDirectory, 'inputs', 'source'))
+  const sourceRelative = path.relative(runRoot, root)
+  if (path.isAbsolute(sourceRelative) || sourceRelative === '..' || sourceRelative.startsWith(`..${path.sep}`)) throw new Error('补充源码路径越出 Run 快照')
+  const result = []
+  for (const item of manifest.files) {
+    const repository = path.join(root, item.repo_id)
+    const file = await realpath(path.join(repository, item.path))
+    const relative = path.relative(repository, file)
+    if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) throw new Error('补充源码路径越出仓库快照')
+    const bytes = await readFile(file)
+    if (item.bytes !== bytes.length || item.sha256 !== createHash('sha256').update(bytes).digest('hex')) throw new Error(`补充源码校验失败：${item.repo_id}:${item.path}`)
+    result.push({ ...item, content: bytes.toString('utf8') })
+  }
+  return result
 }

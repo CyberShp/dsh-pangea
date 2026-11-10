@@ -145,7 +145,7 @@ test('directory picker rejects root-shaped drafts and invalid relative paths bef
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ status: 'ok', path: '.', entries: [] }) })
   try {
     let tree = render(Component, props)
-    assert.equal(nodes(tree).find(n => n.type === 'button' && text(n) === '预览命中文件').props.disabled, true)
+    assert.equal(nodes(tree).find(n => n.type === 'button' && text(n) === '预览起始文件').props.disabled, true)
     nodes(tree).find(n => n.type === 'button' && text(n) === '选择下级目录').props.onClick()
     await new Promise(resolve => setImmediate(resolve))
     tree = render(Component, props)
@@ -178,14 +178,14 @@ test('selected ghosts and legacy files can be removed, cancelled, cleared, and r
     assert.equal(button('清空选择').props.disabled, false)
     button('清空选择').props.onClick()
     assert.deepEqual(changes, ['']); assert.deepEqual(previews, [null])
-    assert.equal(button('预览命中文件').props.disabled, true)
+    assert.equal(button('预览起始文件').props.disabled, true)
     // Direct invocation cannot turn the empty selection into a preview.
-    button('预览命中文件').props.onClick()
+    button('预览起始文件').props.onClick()
     assert.match(text(draw()), /请选择真实存在/)
     await open()
     nodes(draw()).find(n => n.type === 'input' && n.props.type === 'checkbox').props.onChange()
     button('完成选择').props.onClick()
-    assert.equal(props.value, 'new-src'); assert.equal(button('预览命中文件').props.disabled, false)
+    assert.equal(props.value, 'new-src'); assert.equal(button('预览起始文件').props.disabled, false)
     await open()
     button('移除已选范围 new-src').props.onClick()
     button('取消').props.onClick()
@@ -211,7 +211,7 @@ test('late source previews cannot revive after repository changes, clearing, or 
   globalThis.fetch = () => new Promise(resolve => pending.push(resolve))
   let props = { cwd: '/fixture', repository: 'old', value: 'old-src', onChange() {}, onPreview(value) { if (value) previews.push(value) } }
   const render = () => h.render(Component, props)
-  const preview = () => nodes(render()).find(n => n.type === 'button' && text(n) === '预览命中文件').props.onClick()
+  const preview = () => nodes(render()).find(n => n.type === 'button' && text(n) === '预览起始文件').props.onClick()
   const finish = resolve => resolve({ ok: true, json: async () => ({ status: 'ok', matched_file_count: 1, files: [] }) })
   try {
     render(); preview()

@@ -131,7 +131,7 @@ test('new analysis target and confirmation steps show only the selected source s
     const nodes = descendants(panel.type(panel.props))
     assert.doesNotMatch(JSON.stringify(nodes), /参考源码范围|流程基线|tests\/old-reference\.c|old-run|old-version/, `create step ${createStep}`)
     if (createStep === 1) {
-      const sourceScope = nodes.find(node => node.type === 'textarea' && node.props['aria-label'] === '源码冻结目录')
+      const sourceScope = nodes.find(node => node.type === 'textarea' && node.props['aria-label'] === '起始代码范围')
       assert.equal(sourceScope.props.value, 'src')
       assert.equal(sourceScope.props.readOnly, true)
       const picker = nodes.find(node => node.type?.name === 'SourceScopePicker')
@@ -1218,7 +1218,7 @@ test('builds analysis requests with explicit scenario and fixed compatibility mo
     scenario: 'root-cause', mode: 'speed', provider_id: 'pangea-opencode', model_route_key: 'ignored', agent_model: 'native/selected',
   }))), {
     request_version: '2.0', repository: 'open-iscsi', target: '认证恢复',
-    source_scope: ['src/auth', 'src/session'], asset_ids: ['asset-1'],
+    source_scope: ['src/auth', 'src/session'], asset_ids: ['asset-1'], source_investigation_policy: 'repository-local-v1',
     scenario: 'root-cause', mode: 'depth', provider_id: 'pangea-opencode', model_route: null, agent_model: 'native/selected',
   })
   assert.equal(exported.buildAnalysisRequest({ source_scope_text: '.', asset_ids: [] }).scenario, 'branch-analysis')

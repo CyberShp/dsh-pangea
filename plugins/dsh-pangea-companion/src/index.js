@@ -8,7 +8,7 @@ import { processPresence, readAcpBindings } from './acp-recovery.js'
 import { randomUUID } from 'node:crypto'
 import { listViews, viewArtifact } from './architecture-views.js'
 import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
-import { parseEvidenceLocation, readEvidenceSnippet } from './source.js'
+import { parseEvidenceLocation, readEvidenceSnippet, readSavedSupplementalSources } from './source.js'
 import { buildTestCaseCsv, buildTestCaseXlsx, buildTestCaseCsvBundle } from './export.js'
 import { buildOfflineReport, reportSnapshotHash } from './offline-report.js'
 import { CaseReviewStore, selectExportCases } from './case-review-store.js'
@@ -90,7 +90,7 @@ const RUN_CREATE_PARAMETERS = {
   properties: {
     repository: { type: 'string', minLength: 1, description: '当前冻结输入中的仓库 ID。创建前只做确定性目录/文件名范围准备。' },
     target: { type: 'string', minLength: 1, description: '用户确认的分析对象原文。' },
-    source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '真实存在的非根下级目录，使用仓库相对路径。' },
+    source_scope: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 }, description: '分析起始目录，使用真实存在的仓库相对下级路径；可追查当前已选仓库内相关实现。' },
     focus: { type: 'array', items: { type: 'string', minLength: 1 } },
     asset_ids: { type: 'array', items: { type: 'string', minLength: 1 } },
     test_case_examples: { type: 'array', items: { type: 'string', minLength: 1 } },
@@ -557,6 +557,8 @@ export async function exportRouteHandler(req, res, { readRun = summarizeRun, res
           catch (error) { artifactDiagnostics.push(`发布记录不可解析：${error.message}`) }
         }
       }
+      const supplementalSources = run.source_investigation_policy === 'repository-local-v1'
+        ? await readSavedSupplementalSources(path.join(dataRoot, 'runs', runId)) : []
       const finalRun = await readRun(dataRoot, runId, { includeDetails: true })
       let publicationChanged = initialHash !== reportSnapshotHash(finalRun)
       for (const sample of samples) {
@@ -580,7 +582,7 @@ export async function exportRouteHandler(req, res, { readRun = summarizeRun, res
       const versionNote = !revisionMatch ? '原文字报告缺少匹配当前结果的发布版本记录；原文作为独立附件保留，图形与事实使用本次同一快照。'
         : '发布记录的接受版本已核对；旧发布记录未保存文字内容哈希，原文字报告的生成版本仅能核对至结果版本。'
       originalTextDiagnostic = [...artifactDiagnostics, versionNote].join('\n')
-      const report = buildOfflineReport(run, { originalText, originalTextDiagnostic, publicationManifest,
+      const report = buildOfflineReport(run, { originalText, originalTextDiagnostic, publicationManifest, supplementalSources,
         consistency: { snapshot_window: 'verified_before_after', artifact_window: artifactWindow, original_text_version: revisionMatch && artifactWindow === 'verified' ? 'accepted_revisions_match_no_original_digest' : 'unverified', accepted_revisions: accepted } })
       return textResponse(res, 200, 'application/zip', report.bytes, { 'content-disposition': `attachment; filename="pangea-${runId}-offline-report.zip"` })
     }
@@ -1718,7 +1720,7 @@ export function sourceFirstTools(ctx, execute = executeSourceFirst) {
     }),
     ctx.tools.register({
       name: 'pangea_source_index',
-      description: '先读取紧凑文件目录；提供 repo_id+path 后分页读取该文件的稳定 region 坐标。',
+      description: '按当前任务策略查看源码位置。repository-local-v1 可在已选仓库内浏览目录；repo_id+path 指向文件时读取稳定 region 坐标，补查不扩大主责。',
       parameters: { ...binding(), properties: { ...SOURCE_BINDING_PROPERTIES, repo_id: { type: 'string' }, path: { type: 'string' }, cursor: { type: 'string' }, page_size: { type: 'integer', minimum: 1, maximum: 200 } } },
       async execute(args, exec) {
         const values = [...sourceCommandArgs(args)]
@@ -1732,7 +1734,7 @@ export function sourceFirstTools(ctx, execute = executeSourceFirst) {
     }),
     ctx.tools.register({
       name: 'pangea_source_read',
-      description: '读取授权冻结源码。整文件省略行范围；next_read 非空时复制整对象继续读取，保留宿主绑定。request_complete 仅表示本次范围交付完成。长行片段需拼接后阅读。',
+      description: '读取当前任务授权源码。repository-local-v1 允许在已选仓库内追查，首次读取补存到 Run；旧任务沿用冻结范围。整文件省略行范围；next_read 非空时复制整对象继续读取，保留宿主绑定。request_complete 仅表示本次范围交付完成。长行片段需拼接后阅读。',
       parameters: { ...binding(), required: [...binding().required, 'repo_id'], properties: { ...SOURCE_BINDING_PROPERTIES, repo_id: { type: 'string', minLength: 1 }, path: { type: 'string' }, region_id: { type: 'string' }, line_start: { type: 'integer', minimum: 1 }, line_end: { type: 'integer', minimum: 1 }, cursor: { type: 'string' }, max_lines: { type: 'integer', minimum: 1, maximum: 2000 }, view: { type: 'string', enum: ['legacy', 'compact', 'text'] }, page_token: { type: 'string' }, max_chars: { type: 'integer', minimum: 1 } } },
       async execute(args, exec) {
         const values = [...sourceCommandArgs(args), '--repo-id', args.repo_id]
@@ -1743,7 +1745,7 @@ export function sourceFirstTools(ctx, execute = executeSourceFirst) {
     }),
     ctx.tools.register({
       name: 'pangea_source_search',
-      description: '在当前 task 允许的冻结源码范围内做字面搜索，只返回原文命中和定位，不生成语义调用关系。',
+      description: '按当前 task 策略做字面搜索。repository-local-v1 可指定仓内目录，命中先保存再返回；旧任务仅限冻结范围。沿 next_cursor 续扫，注意 searched_scope、filters、failures 和 scan_complete；零命中不代表全仓不存在。',
       parameters: { ...binding(), required: [...binding().required, 'query'], properties: { ...SOURCE_BINDING_PROPERTIES, query: { type: 'string', minLength: 1 }, repo_id: { type: 'string' }, path: { type: 'string' }, cursor: { type: 'string' }, page_size: { type: 'integer', minimum: 1, maximum: 512 } } },
       async execute(args, exec) {
         const values = [...sourceCommandArgs(args), '--query', args.query]
@@ -1941,6 +1943,7 @@ export function apply(ctx) {
       requireCurrentAnalysisInputs(args)
       const result = await createRun(workspaceCwd(exec), {
         ...args,
+        source_investigation_policy: 'repository-local-v1',
         effective_context_budget: args.effective_context_budget ?? 250000,
       })
       if (result?.workflow_version !== 'source-first-v1') {

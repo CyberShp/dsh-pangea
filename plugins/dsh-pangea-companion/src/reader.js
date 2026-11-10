@@ -1,3 +1,4 @@
+import { readSupplementalSourceManifest } from './source.js'
 import { AgentSessionStore } from './agent-sessions.js'
 import { buildExecutionTimeline } from './execution-timeline.js'
 import { riskApplicable } from './analysis-scenes.js'
@@ -892,11 +893,18 @@ async function sourceFirstSnapshot(runDirectory, progress, contract, actionArtif
     const canonicalIndexPath = await realpath(indexPath)
     if (canonicalRecordedIndexPath !== canonicalIndexPath) issues.push('source manifest 没有指向当前 Run 的 source index')
   }
+  let supplementalFiles = []
+  if (contract?.source_investigation_policy === 'repository-local-v1') {
+    try { supplementalFiles = (await readSupplementalSourceManifest(runDirectory)).files }
+    catch (error) { issues.push(`补充源码清单不可读取：${error.message}`) }
+  }
   const fileCount = frozenSourceFileCount(manifest, index)
   return {
     status: issues.length ? 'corrupt' : manifest && index ? 'manifest_verified' : 'legacy_unavailable',
     snapshot_digest: null,
     file_count: fileCount,
+    supplemental_files: supplementalFiles,
+    supplemental_file_count: supplementalFiles.length,
     issues,
     manifest_path: manifestPath,
     index_path: indexPath,
@@ -1027,6 +1035,7 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     phase_title: steps.find(item => item.stage === life.stage)?.title ?? life.stage,
     target: contract?.target ?? runId,
     repository: contract?.repository ?? null,
+    source_investigation_policy: contract?.source_investigation_policy ?? null,
     repositories: contract?.repositories ?? sourceSnapshot.repositories.map(item => item.repo_id).filter(Boolean),
     verdict: progress.quality_status ?? null,
     quality_status: progress.quality_status ?? null,

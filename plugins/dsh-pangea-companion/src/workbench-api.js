@@ -211,6 +211,10 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   if (value?.incremental_request != null && (!semantic || !capabilities.source_first?.contract_fields?.includes('incremental_request'))) {
     throw new Error('当前分析引擎不支持定向补充或变更分析，请更新配套组件')
   }
+  if (value?.source_investigation_policy != null) {
+    if (value.source_investigation_policy !== 'repository-local-v1') throw new Error('不支持的源码调查策略')
+    if (!semantic || !capabilities.source_first?.contract_fields?.includes('source_investigation_policy')) throw new Error('当前分析引擎不支持仓内追查，请更新配套组件')
+  }
   if (semantic) assertSourceFirstCapabilities(capabilities)
   else {
     assertCodetalksSkill(capabilities)
@@ -250,6 +254,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     mode,
     ...(objective != null ? { objective } : {}),
     source_scope: sourceScope,
+    ...(Object.hasOwn(value ?? {}, 'source_investigation_policy') ? { source_investigation_policy: value.source_investigation_policy ?? null } : {}),
     ...(Array.isArray(value?.test_tool_sources) && value.test_tool_sources.length ? { test_tool_sources: structuredClone(value.test_tool_sources), expected_test_tool_revision: value.expected_test_tool_revision } : {}),
     ...(value?.expected_scope_revision ? { expected_scope_revision: value.expected_scope_revision } : {}),
     ...(value?.analysis_profile === SCENE_PROFILE ? { analysis_profile: SCENE_PROFILE, asset_revisions: value.asset_revisions ?? {} } : scenario === 'coverage-analysis' ? { coverage_input: value.coverage_input } : {}),
@@ -294,6 +299,7 @@ export function deriveAnalysisInput(parent, input, options) {
     analysis_profile: parent.analysis_profile,
     asset_revisions: parent.asset_revisions,
     source_scope: parent.source_scope,
+    source_investigation_policy: parent.source_investigation_policy ?? null,
     context_scope: parent.context_scope,
     asset_ids: parent.asset_ids,
     focus: parent.focus,
@@ -399,6 +405,7 @@ async function homeRun(dataRoot, runId) {
         run_id: runId, workflow_version: progress.workflow_version,
         repository: typeof contract?.repository === 'string' ? contract.repository : null,
         source_scope: stringList(contract?.source_scope),
+        source_investigation_policy: contract?.source_investigation_policy ?? null,
         analysis_profile: typeof contract?.analysis_profile === 'string' ? contract.analysis_profile : null,
         // The frozen contract stores the explicit objective in analysis_settings;
         // expose the same naming field used by the full reader without loading results.

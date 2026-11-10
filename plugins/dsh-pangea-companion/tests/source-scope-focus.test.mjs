@@ -44,7 +44,7 @@ function focusHarness() {
     unmount() { for (const effect of effects) effect?.cleanup?.() },
   }
 }
-function previewControl(rendered) { return rendered.find(node => node.type === 'button' && ['预览命中文件', '正在读取范围…'].includes(text(node))) }
+function previewControl(rendered) { return rendered.find(node => node.type === 'button' && ['预览起始文件', '正在读取范围…'].includes(text(node))) }
 const result = (overrides = {}) => ({ status: 'ok', preview_id: 'scope-preview', matched_file_count: 1, files: [{ relative_path: 'src/main.c' }], next_cursor: 50, has_more: false, ...overrides })
 
 for (const outcome of ['success', 'failure']) test(`scope preview preserves button focus on ${outcome} and ignores duplicate activation`, async t => {
