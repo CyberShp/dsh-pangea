@@ -476,6 +476,35 @@ for (const providerId of ['pangea-codeagent', 'pangea-nga', 'pangea-opencode']) 
   })
 }
 
+// Transport paths are repeated in both prompts (binding JSON, runnable command,
+// scratch directory). They are not repeated task instructions; a longer Windows
+// temp path must not change the instruction-compression assertion.
+function normalizedPromptLength(prompt, dataRoot) {
+  return prompt.replaceAll(JSON.stringify(dataRoot).slice(1, -1), '<data-root>')
+    .replaceAll(dataRoot, '<data-root>').length
+}
+
+for (const dataRoot of ['/tmp/pangea-acp-unit-XXXXXX', String.raw`C:\Users\runneradmin\AppData\Local\Temp\pangea-acp-unit-XXXXXX`,
+  String.raw`C:\Users\runneradmin\AppData\Local\Temp\nested-` + 'long-workspace-'.repeat(30)]) {
+  test(`repair instruction compression is independent of data-root length (${dataRoot.length})`, () => {
+    const options = { action: { action_id: 'repair:planning', role: 'planning', stage: 'planning', task_path: '/task.json' },
+      opened: { task: {} }, cwd: '/work', dataRoot, runId: 'repair-test', taskId: 'original',
+      scratchDirectory: (dataRoot.startsWith('C:') ? path.win32 : path.posix).join(dataRoot, 'runs', 'repair-test', 'worker-scratch', '00000000-0000-0000-0000-000000000000') }
+    const initial = workerPrompt(options)
+    const continuation = workerContinuationPrompt({ ...options, sameAction: true,
+      action: { ...options.action, pending_repair: { error: 'bad JSON' } } })
+    assert.ok(normalizedPromptLength(continuation, dataRoot) < normalizedPromptLength(initial, dataRoot) / 2)
+    // Normalizing the assertion must never shorten/corrupt paths actually sent.
+    assert.ok(continuation.includes(JSON.stringify(dataRoot)))
+    assert.ok(continuation.includes(options.scratchDirectory))
+    assert.match(continuation, /bad JSON/)
+    assert.match(continuation, /旧任务仍沿用原冻结范围/)
+    assert.match(continuation, /result-read/)
+    assert.match(continuation, /work-finish/)
+    assert.doesNotMatch(continuation, /身份绑定已完成|先调用 task-open|按 task\.rubric_paths/)
+  })
+}
+
 test('malformed output returns to the same worker and attention does not fabricate completion', async () => {
   let attempts = 0, creations = 0
   const prompts = [], events = []
@@ -498,7 +527,7 @@ test('malformed output returns to the same worker and attention does not fabrica
   assert.match(prompts[1], /result-read/)
   assert.match(prompts[1], /work-finish/)
   assert.doesNotMatch(prompts[1], /身份绑定已完成|先调用 task-open|PowerShell 直接执行 task-open|按 task\.rubric_paths/)
-  assert.ok(prompts[1].length < prompts[0].length / 2)
+  assert.ok(normalizedPromptLength(prompts[1], testDataRoot) < normalizedPromptLength(prompts[0], testDataRoot) / 2)
   assert.deepEqual(events.filter(event => event.stage === 'source_first_prompt_ready').map(event => event.prompt_kind), ['initial', 'continuation'])
   assert.deepEqual(events.filter(event => event.stage === 'source_first_acp_request' && event.status === 'start').map(event => event.phase), ['task', 'continuation'])
   const saved = JSON.parse(await readFile(path.join(testDataRoot, 'runs', 'repair-test', 'acp-workers.json'), 'utf8'))
