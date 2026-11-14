@@ -28,6 +28,9 @@ import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pa
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 import { scopeTree, validateScope, previewScope, confirmScope, previewTestTools, confirmTestTools } from './repositories/scope.js'
+import { FaultInjectionService } from './fault-injection.js'
+import { createInjectionGenerator } from './fault-injection-agent.js'
+import { updateAdmission } from './update-admission.js'
 
 export const name = 'dsh-pangea-companion'
 export const inject = ['tools', 'webServer', 'agents', 'apiProxy', 'subagents', 'jobs']
@@ -36,6 +39,7 @@ const API_PATH = '/api/pangea-companion/state'
 const SOURCE_API_PATH = '/api/pangea-companion/source'
 const EXPORT_API_PATH = '/api/pangea-companion/export'
 const CASE_REVIEW_API_PATH = '/api/pangea-companion/case-reviews'
+const FAULT_INJECTION_API_PATH = '/api/pangea-companion/fault-injection'
 const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
 const EXECUTION_API_PATH = '/api/pangea-companion/executions'
 const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
@@ -494,6 +498,34 @@ async function reconcileTaskLaunches(api, tasks, taskItems, launchLogs, runtime,
 
 function jobOwner(runtime, task) {
   return runtimeService(runtime, 'agents')?.get?.(task.owner_session_id)
+}
+
+export async function faultInjectionRouteHandler(req, res, service, runtime, { readRun = summarizeRun, resolveRoot = discoverPangeaDataRoot } = {}) {
+  if (!['GET', 'POST'].includes(req.method)) return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  try {
+    const url = new URL(req.url ?? FAULT_INJECTION_API_PATH, 'http://localhost')
+    const input = req.method === 'POST' ? await requestJson(req) : Object.fromEntries(url.searchParams)
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.run_id || '')) throw Object.assign(new Error('run_id 无效'), { statusCode: 400 })
+    const dataRoot = await resolveRoot({ cwd: input.cwd, dataRoot: input.data_root })
+    if (req.method === 'GET' && input.task_id) return json(res, 200, { status: 'ok', task: await service.read(dataRoot, input.run_id, input.task_id) })
+    if (req.method === 'POST') {
+      let task
+      if (input.action === 'cancel') task = await service.cancel(dataRoot, input.run_id, input.task_id)
+      else {
+        updateAdmission(runtime)?.assertOpen()
+        if (input.action === 'push') task = await service.push(dataRoot, input.run_id, input.task_id)
+        else if (input.action === 'verify') task = await service.recordVerification(dataRoot, input.run_id, input.task_id, input)
+        else if (input.action !== 'generate') throw Object.assign(new Error('未知打桩操作'), { statusCode: 400 })
+      }
+      if (task) return json(res, 200, { status: 'ok', task })
+    }
+    const run = await readRun(dataRoot, input.run_id, { includeDetails: true })
+    if (run.run_id !== input.run_id) throw Object.assign(new Error('读取的用例不属于当前 Run'), { statusCode: 409 })
+    if (req.method === 'POST') return json(res, 202, { status: 'ok', task: await service.start({ dataRoot, run, input, cwd: input.cwd }) })
+    return json(res, 200, { status: 'ok', tasks: await service.list(dataRoot, input.run_id), defaults: await service.defaults(dataRoot, run),
+      providers: acpProviderOptions().filter(provider => provider.available).map(provider => ({ id: provider.id, label: provider.label })) })
+  } catch (error) { return json(res, error.statusCode ?? (error.code === 'ENOENT' ? 404 : 500), { status: 'error', error: error.message }) }
 }
 
 export async function caseReviewRouteHandler(req, res, { readRun = summarizeRun, resolveRoot = discoverPangeaDataRoot } = {}) {
@@ -1916,6 +1948,8 @@ export function apply(ctx) {
   const launchLocks = new Set()
   const environments = new EnvironmentStore()
   const ssh = new PangeaSshRuntime(environments)
+  const faultInjection = new FaultInjectionService({ generate: createInjectionGenerator(ctx) })
+  registerUpdateParticipant(ctx, 'fault-injection', () => faultInjection.busy(), () => faultInjection.dispose())
   registerUpdateParticipant(ctx, 'companion', () => companionUpdateBusy({
     operations: taskOperationState(tasks), launchLocks, sourceFirstBusy: sourceFirstAcpUpdateBusy,
     ssh,
@@ -2026,6 +2060,7 @@ export function apply(ctx) {
   const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks, ctx, launchLogs) })
   const disposeSourceRoute = ctx.webServer.register({ kind: 'exact', path: SOURCE_API_PATH, handler: sourceRouteHandler })
   const disposeCaseReviewRoute = ctx.webServer.register({ kind: 'exact', path: CASE_REVIEW_API_PATH, handler: (req, res) => caseReviewRouteHandler(req, res) })
+  const disposeFaultInjectionRoute = ctx.webServer.register({ kind: 'exact', path: FAULT_INJECTION_API_PATH, handler: (req, res) => faultInjectionRouteHandler(req, res, faultInjection, ctx) })
   const disposeExportRoute = ctx.webServer.register({ kind: 'exact', path: EXPORT_API_PATH, handler: exportRouteHandler })
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
@@ -2048,6 +2083,8 @@ export function apply(ctx) {
     disposeSourceRoute()
     disposeExportRoute()
     disposeCaseReviewRoute()
+    disposeFaultInjectionRoute()
+    await faultInjection.dispose()
     disposeStateRoute()
     disposeJobDone?.()
     disposeJobController?.()

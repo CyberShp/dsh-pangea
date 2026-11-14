@@ -17,6 +17,7 @@ const SHARED = [
   ['__sourceScopePicker', 'src/source-scope-picker.js'],
   ['__overviewFindings', 'src/overview-findings.js'],
   ['__caseReviewProjection', 'src/case-review-projection.js'],
+  ['__faultInjectionView', 'src/fault-injection-view.js'],
   ['__reviewPresentation', 'src/review-presentation.js'],
   ['__runInsights', 'src/run-insights.js'],
   ['__behaviorCoverage', 'src/behavior-coverage.js'],

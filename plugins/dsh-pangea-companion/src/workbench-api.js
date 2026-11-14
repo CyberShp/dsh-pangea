@@ -601,7 +601,7 @@ export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limi
   }
 }
 
-async function createDshSession(api, root, title) {
+export async function createDshSession(api, root, title) {
   let payload = { cwd: root }
   if (api.workspace?.list) {
     const workspaces = apiValue(await api.workspace.list(rpc({}))).items

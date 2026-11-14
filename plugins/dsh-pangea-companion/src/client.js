@@ -32,6 +32,7 @@ window.__ModuleLoader__.load({
     const { caseIdentity, caseTitlePresentation, caseRecordParseNotice, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
     const TestToolPicker = __testToolPicker.createTestToolPicker(React, __sourceScopePicker.createSourceScopePicker(React))
     const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
+    const FaultInjectionPanel = __faultInjectionView.createFaultInjectionPanel(React)
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
       if (typeof body === 'string') return body
@@ -6759,6 +6760,7 @@ window.__ModuleLoader__.load({
           selectedCaseIds.length ? h('div', { className: 'b05-selected-bar' }, h('div', null, `已选择 ${selectedCaseIds.length} 条用例`, h('small', null, `含 ${selectedCaseIds.filter(id => !selectableIds.includes(id)).length} 条筛选外选择；可复制或导出` )),
             h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: () => setSelectedCaseIds([]) }, '清空选择'),
               h('button', { type: 'button', disabled: selectedCaseIds.length === 0, onClick: () => { void copySelectedCases() } }, '复制选中用例'), h('button', { type: 'button', onClick: () => { setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true); setCaseExportScope('selected') } }, '导出所选')) ) : null,
+          h(FaultInjectionPanel, { key: `injection-list:${current.run_id}`, runId: current.run_id, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases.filter(item => selectedCaseIds.includes(caseIdentity(item))) }),
           renderCaseExportDialog(),
           renderCaseDrawer())
       }
@@ -7002,6 +7004,7 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'basis', scope: caseScreenKey }) }, '拟覆盖依据 ↗'),
                 h('button', { type: 'button', className: 'b05-text-link', disabled: !caseEvidenceOptions.length, onClick: () => setSourceDrawerOpen(true) }, `关联代码 · ${caseEvidenceOptions.length} 处 ↗`)),
               !caseEvidenceOptions.length ? h('p', { className: 'b05-subtle' }, caseEvidence.unresolved.length ? '源码引用未能解析为明确位置，原文保留在拟覆盖依据中。' : '当前用例未记录明确源码引用。') : null,
+              h(FaultInjectionPanel, { key: `injection-case:${current.run_id}:${caseIdentity(item)}`, runId: current.run_id, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: [item] }),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
