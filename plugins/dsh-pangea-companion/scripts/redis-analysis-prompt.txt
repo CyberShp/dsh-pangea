@@ -1,0 +1,8 @@
+对当前真实 Redis 仓库做一次有源码证据的流程分析与故障注入设计。只读源码，不修改文件，不构建、不启动服务、不调用其他 Agent。不要读取仓库外的参考修改或既有验收结果。
+
+目标是 SAVE 命令的 RDB 保存流程。先调查真实入口、调用路径、失败返回、清理和最终快照替换，再设计两条打桩用例：临时 RDB 文件打开失败 A；后续 fsync 失败 B。解释 A/B 是否存在前后阻断，逐项给出源码路径、函数、行号及业务预期。
+
+然后给出真实代码修改，用唯一原文 before/after 表达。仅修改 src/rdb.c，保留产品的错误处理、临时文件清理与正式快照替换逻辑。控制合同：读取环境变量 PANGEA_FI_RDB，未设置或空值时全部关闭；A、B、AB 分别启用指定桩。每个桩每个进程只触发一次，相互独立。A 模拟 EACCES，B 模拟 EIO。每次实际命中通过 Redis 日志输出精确标识 PANGEA_FI hit=A 或 PANGEA_FI hit=B。使用真实 errno，避免泄漏 FILE 指针或修改业务预期。不伪称已编译或已实测。
+
+最终回答仅为一个合法 JSON 对象，不加 Markdown 代码围栏：
+{"summary":"中文概述","flow":{"nodes":[{"id":"...","label":"...","evidence":"src/rdb.c:行号 函数"}],"edges":[{"from":"...","to":"...","condition":"..."}]},"cases":[{"case_key":"redis/A或redis/B","title":"业务标题","steps":["..."],"expected":["..."],"evidence":["..."]}],"points":[{"id":"A或B","case_keys":["redis/A或redis/B"],"repo_id":"redis","path":"src/rdb.c","symbol":"...","action":"...","trigger":"...","times":1,"enable":"...","disable":"...","observe":"...","cleanup":"...","depends_on":[],"exclusive_with":[]}],"profiles":[{"case_key":"redis/A或redis/B","point_ids":["A或B"],"steps":["..."]}],"edits":[{"repo_id":"redis","path":"src/rdb.c","before":"当前文件中唯一匹配的真实原文","after":"替换后的代码"}],"limitations":["未实际验证的事项"]}

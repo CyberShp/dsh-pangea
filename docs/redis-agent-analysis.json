@@ -1,0 +1,240 @@
+{
+  "summary": "真实源码表明 A 位于打开临时文件处，B 位于后续 fsync 前。A 命中会直接返回，故同一次 SAVE 中 B 不会到达；这不是永久互斥。AB 模式第一次 SAVE 消耗 A，第二次消耗 B，第三次恢复正常。注入只修改故障来源并保留原清理、返回及快照替换路径。",
+  "flow": {
+    "nodes": [
+      {
+        "id": "entry",
+        "label": "SAVE 入口检查是否有 RDB 子进程",
+        "evidence": "src/rdb.c:3621 saveCommand"
+      },
+      {
+        "id": "save",
+        "label": "开始保存并选择临时文件",
+        "evidence": "src/rdb.c:1516 rdbSave"
+      },
+      {
+        "id": "open",
+        "label": "打开临时 RDB 文件",
+        "evidence": "src/rdb.c:1452 rdbSaveInternal"
+      },
+      {
+        "id": "serialize",
+        "label": "序列化并刷新文件",
+        "evidence": "src/rdb.c:1474 rdbSaveInternal"
+      },
+      {
+        "id": "sync",
+        "label": "同步磁盘并关闭文件",
+        "evidence": "src/rdb.c:1482 rdbSaveInternal"
+      },
+      {
+        "id": "cleanup",
+        "label": "关闭临时文件并删除临时文件",
+        "evidence": "src/rdb.c:1490 rdbSaveInternal werr"
+      },
+      {
+        "id": "rename",
+        "label": "替换正式快照并同步目录",
+        "evidence": "src/rdb.c:1531 rdbSave"
+      },
+      {
+        "id": "error",
+        "label": "通知保存失败并返回 ERR",
+        "evidence": "src/rdb.c:1524 rdbSave; src/rdb.c:3634 saveCommand"
+      },
+      {
+        "id": "ok",
+        "label": "更新保存状态并返回 OK",
+        "evidence": "src/rdb.c:1557 rdbSave; src/rdb.c:3632 saveCommand"
+      }
+    ],
+    "edges": [
+      {
+        "from": "entry",
+        "to": "save",
+        "condition": "没有运行中的 RDB 子进程"
+      },
+      {
+        "from": "entry",
+        "to": "error",
+        "condition": "存在 RDB 子进程时入口直接拒绝，不命中 A/B"
+      },
+      {
+        "from": "save",
+        "to": "open",
+        "condition": "创建临时文件名"
+      },
+      {
+        "from": "open",
+        "to": "error",
+        "condition": "打开失败或 A 命中；B 不可达"
+      },
+      {
+        "from": "open",
+        "to": "serialize",
+        "condition": "打开成功"
+      },
+      {
+        "from": "serialize",
+        "to": "cleanup",
+        "condition": "序列化或 fflush 失败"
+      },
+      {
+        "from": "serialize",
+        "to": "sync",
+        "condition": "序列化和刷新成功"
+      },
+      {
+        "from": "sync",
+        "to": "cleanup",
+        "condition": "同步失败或 B 命中"
+      },
+      {
+        "from": "cleanup",
+        "to": "error",
+        "condition": "保留 errno 并返回失败"
+      },
+      {
+        "from": "sync",
+        "to": "rename",
+        "condition": "同步和关闭成功"
+      },
+      {
+        "from": "rename",
+        "to": "ok",
+        "condition": "替换及目录同步成功"
+      },
+      {
+        "from": "rename",
+        "to": "error",
+        "condition": "替换或目录同步失败，沿原代码处理"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "case_key": "redis/A",
+      "title": "手动保存时临时快照创建失败后的数据保护与恢复",
+      "steps": [
+        "使用独立数据目录，先以桩关闭的 Redis 保存 acceptance=baseline，停止进程。",
+        "以 PANGEA_FI_RDB=A 启动同一目录，确认原值可读，SET acceptance updated 后执行 SAVE。",
+        "核对命中日志、原 dump.rdb 哈希及内存中的 updated 值。",
+        "同一进程再次 SAVE；随后清空变量重启，GET acceptance。"
+      ],
+      "expected": [
+        "第一次 SAVE 返回 ERR，恰好一条 PANGEA_FI hit=A，B 无命中。",
+        "原快照不变，未产生本次临时文件，内存数据不丢失。",
+        "A 一次性耗尽后下一次 SAVE 成功，关闭桩重启能读到 updated。"
+      ],
+      "evidence": [
+        "src/rdb.c:1452-1464 rdbSaveInternal 打开失败路径",
+        "src/rdb.c:1523-1526 rdbSave 失败前不会执行 rename",
+        "src/rdb.c:3621-3636 saveCommand"
+      ]
+    },
+    {
+      "case_key": "redis/B",
+      "title": "手动保存时磁盘同步失败后的临时文件清理与恢复",
+      "steps": [
+        "以桩关闭的 Redis 在独立目录保存 acceptance=baseline，停止进程。",
+        "以 PANGEA_FI_RDB=B 启动，SET acceptance updated 后 SAVE。",
+        "核对 B 命中、旧快照哈希、临时文件清理和内存数据。",
+        "再次 SAVE；清空变量重启后检查持久化的数据。"
+      ],
+      "expected": [
+        "第一次 SAVE 返回 ERR，恰好一条 PANGEA_FI hit=B，A 无命中。",
+        "原 dump.rdb 不变，失败的临时文件被删除，内存 updated 可读。",
+        "下一次 SAVE 成功，关闭桩重启后 updated 可读。"
+      ],
+      "evidence": [
+        "src/rdb.c:1481-1496 rdbSaveInternal 同步和 werr 清理",
+        "src/rdb.c:1523-1532 rdbSave 失败时不替换正式快照",
+        "src/rdb.c:3631-3635 saveCommand 返回状态"
+      ]
+    }
+  ],
+  "points": [
+    {
+      "id": "A",
+      "case_keys": [
+        "redis/A"
+      ],
+      "repo_id": "redis",
+      "path": "src/rdb.c",
+      "symbol": "rdbSaveInternal",
+      "action": "令 fopen 路径返回 NULL 并设置 EACCES",
+      "trigger": "进程第一次到达 RDB 文件打开位置",
+      "times": 1,
+      "enable": "以环境变量 PANGEA_FI_RDB=A 启动打桩包的 redis-server，使用独立数据目录并禁用自动保存。",
+      "disable": "清空 PANGEA_FI_RDB 并重新启动；每个桩在当前进程只触发一次。",
+      "observe": "服务日志中精确标识 PANGEA_FI hit=A 只出现一次；结合 SAVE 的 ERR 响应判定。",
+      "cleanup": "等待本次 SAVE 返回，确认内存数据和原快照；桩耗尽后成功 SAVE，再关闭桩重启核对数据。",
+      "depends_on": [],
+      "exclusive_with": []
+    },
+    {
+      "id": "B",
+      "case_keys": [
+        "redis/B"
+      ],
+      "repo_id": "redis",
+      "path": "src/rdb.c",
+      "symbol": "rdbSaveInternal",
+      "action": "在文件已经刷新、同步之前设置 EIO 并进入原 werr",
+      "trigger": "进程第一次到达 RDB fsync 位置",
+      "times": 1,
+      "enable": "以环境变量 PANGEA_FI_RDB=B 启动打桩包的 redis-server，使用独立数据目录并禁用自动保存。",
+      "disable": "清空 PANGEA_FI_RDB 并重新启动；每个桩在当前进程只触发一次。",
+      "observe": "服务日志中精确标识 PANGEA_FI hit=B 只出现一次；结合 SAVE 的 ERR 响应判定。",
+      "cleanup": "等待本次 SAVE 返回，确认内存数据和原快照；桩耗尽后成功 SAVE，再关闭桩重启核对数据。",
+      "depends_on": [],
+      "exclusive_with": []
+    }
+  ],
+  "profiles": [
+    {
+      "case_key": "redis/A",
+      "point_ids": [
+        "A"
+      ],
+      "steps": [
+        "使用独立数据目录，先以桩关闭的 Redis 保存 acceptance=baseline，停止进程。",
+        "以 PANGEA_FI_RDB=A 启动同一目录，确认原值可读，SET acceptance updated 后执行 SAVE。",
+        "核对命中日志、原 dump.rdb 哈希及内存中的 updated 值。",
+        "同一进程再次 SAVE；随后清空变量重启，GET acceptance。"
+      ]
+    },
+    {
+      "case_key": "redis/B",
+      "point_ids": [
+        "B"
+      ],
+      "steps": [
+        "以桩关闭的 Redis 在独立目录保存 acceptance=baseline，停止进程。",
+        "以 PANGEA_FI_RDB=B 启动，SET acceptance updated 后 SAVE。",
+        "核对 B 命中、旧快照哈希、临时文件清理和内存数据。",
+        "再次 SAVE；清空变量重启后检查持久化的数据。"
+      ]
+    }
+  ],
+  "edits": [
+    {
+      "repo_id": "redis",
+      "path": "src/rdb.c",
+      "before": "    FILE *fp = fopen(filename,\"w\");",
+      "after": "    /* Acceptance injection: independent one-shot faults in each process. */\n    static pid_t fi_owner_pid = 0;\n    static int fi_a_used = 0, fi_b_used = 0;\n    pid_t fi_current_pid = getpid();\n    if (fi_owner_pid != fi_current_pid) {\n        fi_owner_pid = fi_current_pid;\n        fi_a_used = fi_b_used = 0;\n    }\n    const char *fi_mode = getenv(\"PANGEA_FI_RDB\");\n    int fi_a_enabled = fi_mode &&\n        (!strcmp(fi_mode,\"A\") || !strcmp(fi_mode,\"AB\"));\n    int fi_b_enabled = fi_mode &&\n        (!strcmp(fi_mode,\"B\") || !strcmp(fi_mode,\"AB\"));\n    FILE *fp;\n    if (fi_a_enabled && !fi_a_used) {\n        fi_a_used = 1;\n        serverLog(LL_WARNING,\"PANGEA_FI hit=A\");\n        errno = EACCES;\n        fp = NULL;\n    } else {\n        fp = fopen(filename,\"w\");\n    }"
+    },
+    {
+      "repo_id": "redis",
+      "path": "src/rdb.c",
+      "before": "    if (fsync(fileno(fp))) { err_op = \"fsync\"; goto werr; }",
+      "after": "    if (fi_b_enabled && !fi_b_used) {\n        fi_b_used = 1;\n        serverLog(LL_WARNING,\"PANGEA_FI hit=B\");\n        errno = EIO;\n        err_op = \"fsync\";\n        goto werr;\n    }\n    if (fsync(fileno(fp))) { err_op = \"fsync\"; goto werr; }"
+    }
+  ],
+  "limitations": [
+    "只做源码分析和原文唯一匹配检查，尚未编译、部署或执行用例。",
+    "验收范围是同步 SAVE。rdbSaveInternal 也有其他调用者，需禁用自动保存并隔离实例；控制不是按客户端或文件名选择。",
+    "AB 的第三次成功要求真实文件系统正常、没有更早的独立 IO 错误。",
+    "父进程 fork 后通过 PID 变化重置计数，但未验证 BGSAVE 和复制场景。"
+  ]
+}

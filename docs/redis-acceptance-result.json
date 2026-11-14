@@ -1,0 +1,70 @@
+{
+  "project": "redis/redis",
+  "base_commit": "ba181057223b04aba580a01b1b36662430aea4a0",
+  "analysis_executor": "current-session independent Agent /root/redis_real_analysis",
+  "cases": [
+    {
+      "mode": "off",
+      "first_save": "+OK",
+      "hits": {
+        "A": 0,
+        "B": 0
+      },
+      "restart_recovery": "passed",
+      "status": "passed"
+    },
+    {
+      "mode": "A",
+      "first_save": "-ERR",
+      "hits": {
+        "A": 1,
+        "B": 0
+      },
+      "restart_recovery": "passed",
+      "status": "passed"
+    },
+    {
+      "mode": "B",
+      "first_save": "-ERR",
+      "hits": {
+        "A": 0,
+        "B": 1
+      },
+      "restart_recovery": "passed",
+      "status": "passed"
+    },
+    {
+      "mode": "AB",
+      "first_save": "-ERR",
+      "hits": {
+        "A": 1,
+        "B": 1
+      },
+      "restart_recovery": "passed",
+      "status": "passed"
+    }
+  ],
+  "status": "passed",
+  "generation_result_sha256": "0ee9137a7e9ea3311c2a3f2608749e8b472210adc9e0e573b5b970cbcbce8ad6",
+  "modified_commit": "3e3c78698e1f7f792f6fc9914f802f0908d79c82",
+  "package_sha256": "8f77f5af9df7428552ed1f6290529565efb4f60993d46f2351d8b5ab164ad858",
+  "analysis_artifact": "docs/redis-agent-analysis.json",
+  "pangea_acp_verified": false,
+  "date": "2026-11-14",
+  "evidence": {
+    "A": [
+      "1872:M 14 Nov 2026 17:02:13.925 # PANGEA_FI hit=A",
+      "1872:M 14 Nov 2026 17:02:13.925 # Failed opening the temp RDB file temp-1872.rdb (in server root dir /workspace/scratch/11efe6c052cd/redis-live-agent-acceptance/case-A) for saving: Permission denied"
+    ],
+    "B": [
+      "1880:M 14 Nov 2026 17:02:14.179 # PANGEA_FI hit=B",
+      "1880:M 14 Nov 2026 17:02:14.179 # Write error while saving DB to the disk(fsync): Input/output error"
+    ],
+    "AB": [
+      "1888:M 14 Nov 2026 17:02:14.415 # PANGEA_FI hit=A",
+      "1888:M 14 Nov 2026 17:02:14.415 # Failed opening the temp RDB file temp-1888.rdb (in server root dir /workspace/scratch/11efe6c052cd/redis-live-agent-acceptance/case-AB) for saving: Permission denied",
+      "1888:M 14 Nov 2026 17:02:14.416 # PANGEA_FI hit=B",
+      "1888:M 14 Nov 2026 17:02:14.416 # Write error while saving DB to the disk(fsync): Input/output error"
+    ]
+  }
+}
