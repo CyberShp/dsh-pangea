@@ -514,6 +514,7 @@ export async function faultInjectionRouteHandler(req, res, service, runtime, { r
       if (input.action === 'cancel') task = await service.cancel(dataRoot, input.run_id, input.task_id)
       else {
         updateAdmission(runtime)?.assertOpen()
+        if (input.action === 'configure') return json(res, 200, { status: 'ok', ...await service.configurePipeline(dataRoot, input.run_id, input.task_id, input.pipeline_url) })
         if (input.action === 'push') task = await service.push(dataRoot, input.run_id, input.task_id)
         else if (input.action === 'verify') task = await service.recordVerification(dataRoot, input.run_id, input.task_id, input)
         else if (input.action !== 'generate') throw Object.assign(new Error('未知打桩操作'), { statusCode: 400 })

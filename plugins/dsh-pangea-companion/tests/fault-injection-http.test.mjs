@@ -81,6 +81,16 @@ test('fault injection HTTP acceptance', async t => {
     assert.equal(saved.verification[0].build.commits[0].commit, task.repositories[0].commit)
     assert.equal((await request()).body.tasks.length, 1)
   })
+  await t.test('pipeline URL configuration persists separately from build results', async () => {
+    assert.equal((await post({ action: 'configure', task_id: task.id, pipeline_url: 'javascript:alert(1)' })).status, 400)
+    const r = await post({ action: 'configure', task_id: task.id, pipeline_url: 'https://ci.example.test/pipeline?a=1' })
+    assert.equal(r.status, 200)
+    await service.dispose(); service = new FaultInjectionService({ generate: generator })
+    const saved = (await request({ task_id: task.id })).body.task
+    assert.equal(saved.pipeline_url, 'https://ci.example.test/pipeline?a=1')
+    assert.equal(saved.build.url, 'https://example.test/build/1')
+    assert.equal((await request()).body.defaults.pipeline_url, saved.pipeline_url)
+  })
   await t.test('concurrent HTTP generations use distinct branches and checkouts', async () => {
     const starts = await Promise.all([generate(), generate()]); starts.forEach(r => assert.equal(r.status, 202))
     const [a, b] = await Promise.all(starts.map(r => terminal(r.body.task.id)))

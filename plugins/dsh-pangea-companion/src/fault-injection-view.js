@@ -7,12 +7,13 @@ const readable = value => value == null ? '' : typeof value === 'string' ? value
 export function createFaultInjectionPanel(React) {
   const h = React.createElement
   const busy = task => ['preparing', 'generating', 'pushing'].includes(task?.status)
-  return function FaultInjectionPanel({ runId, dataRoot, cwd, cases = [] }) {
+  return function FaultInjectionPanel({ runId, dataRoot, cwd, onOpenPipeline, cases = [] }) {
     const [open, setOpen] = React.useState(false)
     const [tasks, setTasks] = React.useState([])
     const [taskId, setTaskId] = React.useState('')
     const [settings, setSettings] = React.useState(null)
     const [providers, setProviders] = React.useState([])
+    const [pipelineUrl, setPipelineUrl] = React.useState('')
     const [error, setError] = React.useState('')
     const [working, setWorking] = React.useState(false)
     const [build, setBuild] = React.useState({ url: '', package_id: '', package_sha256: '', notes: '' })
@@ -60,12 +61,13 @@ export function createFaultInjectionPanel(React) {
       return () => { live = false; clearInterval(timer) }
     }, [open, scope, activeTaskIds])
     React.useEffect(() => {
+      setPipelineUrl(task?.pipeline_url || '')
       setBuild({ url: '', package_id: '', package_sha256: '', notes: '', ...task?.build })
       setVerification({ case_key: task?.case_keys?.[0] || '', result: 'not_run', hits: '', notes: '' })
     }, [taskId])
     const act = async (action, extra = {}) => {
       setWorking(true); setError('')
-      try { const value = await request({ action, task_id: taskId, ...extra }); remember(value.task) }
+      try { const value = await request({ action, task_id: taskId, ...extra }); remember(value.task); if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url })) }
       catch (reason) { setError(reason.message) }
       finally { setWorking(false) }
     }
@@ -82,10 +84,12 @@ export function createFaultInjectionPanel(React) {
         h('div', null, h('strong', null, '打桩与个人分支'), h('p', { className: 'b05-subtle' }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可一起生成打桩修改。` : '选择用例生成打桩修改，或查看已有打桩任务。')),
         h('button', { type: 'button', className: 'btn', 'aria-expanded': open, onClick: () => setOpen(value => !value) }, open ? '收起打桩' : '打开打桩工作区')),
       open ? h('div', null,
+        h('p', { className: 'b05-subtle' }, '1 选择用例 → 2 生成并检查修改 → 3 推送个人分支 → 4 打开流水线构建'),
         error ? h('p', { role: 'alert' }, error) : null,
         candidates.length ? h('details', null, h('summary', null, '分析中记录的桩点'), candidates.map(item => h('div', { key: item.projection_id || item.test_case_id },
           h('strong', null, readable(item.title)), renderPoints((item.instrumentation || item.source_record.body.instrumentation)?.points)))) : null,
-        settings ? h('details', { open: !task }, h('summary', null, '生成新的打桩修改'),
+        settings ? h('details', { open: !task }, h('summary', null, task ? '为当前选择创建新任务' : '生成新的打桩修改'),
+          h('p', null, '本次选择：', cases.map(item => readable(item.title)).join('、') || '请先在用例列表选择用例'),
           h('div', { style: { marginTop: 14 } },
             h('div', { style: grid },
               h('label', null, '执行器', h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value }) },
@@ -96,6 +100,7 @@ export function createFaultInjectionPanel(React) {
               h('legend', null, h('label', null, h('input', { type: 'checkbox', checked: repo.enabled !== false, 'aria-label': `本次包含 ${repo.repo_id}`, disabled: working,
                 onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), ' ', readable(repo.repo_id))), h('div', { style: grid },
                 ...[['source_path', 'Git 仓库目录'], ['base_ref', '源码基线（提交或本地分支）'], ['remote', '推送远端']].map(([key, label]) => field(`${repo.repo_id} · ${label}`, repo[key], value => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, [key]: value } : item) })))))),
+            field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value })),
             field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true }),
             h('button', { type: 'button', className: 'btn primary', disabled: working || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false),
               onClick: () => act('generate', { ...settings, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : `生成打桩修改（${selectedKeys.length} 条用例）`)))
@@ -106,6 +111,7 @@ export function createFaultInjectionPanel(React) {
           h('p', { role: 'status' }, h('strong', null, INJECTION_STATUS_LABELS[task.status] || task.status)),
           task.error ? h('p', { role: 'alert', style: { whiteSpace: 'pre-wrap' } }, task.error) : null,
           busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null,
+          h('p', null, '本任务用例：', task.cases.map(item => readable(item.title)).join('、')),
           h('p', null, '个人分支：', h('code', null, task.branch)),
           task.result?.summary ? h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)) : null,
           renderPoints(task.result?.points),
@@ -117,6 +123,14 @@ export function createFaultInjectionPanel(React) {
             h('p', null, '基线：', h('code', null, repo.base_commit)), repo.commit ? h('p', null, '修改提交：', h('code', null, repo.commit)) : null,
             repo.diff ? h('pre', { style: { maxHeight: 400, overflow: 'auto', padding: 12, background: '#f5f7fa' } }, repo.diff) : null)),
           ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('button', { type: 'button', className: 'btn primary', style: { marginTop: 14 }, disabled: working, onClick: () => act('push') }, working ? '正在推送…' : '推送个人分支') : null,
+          task.status === 'pushed' ? h('section', { className: 'b05-card', style: { marginTop: 16 } },
+            h('h3', null, '下一步：构建个人包'),
+            field('本任务流水线 URL', pipelineUrl, setPipelineUrl),
+            h('button', { type: 'button', disabled: working, onClick: () => act('configure', { pipeline_url: pipelineUrl }) }, '保存流水线地址'),
+            h('button', { type: 'button', className: 'btn primary', disabled: working || !task.pipeline_url || pipelineUrl.trim() !== task.pipeline_url,
+              onClick: async () => { try { if (!onOpenPipeline) throw new Error('当前会话的 DSH 浏览器不可用'); await onOpenPipeline(task.pipeline_url) } catch (reason) { setError(reason.message) } } }, '在 DSH 浏览器打开构建流水线'),
+            h('button', { type: 'button', onClick: async () => { try { await navigator.clipboard.writeText(task.branch) } catch { setError('复制失败，请复制上方个人分支名称') } } }, '复制个人分支'),
+            h('p', { className: 'b05-subtle' }, '进入流水线后选择本任务的个人分支并启动构建。流水线入口地址与下方某次构建的结果链接分别保存。')) : null,
           task.repositories.some(repo => repo.commit) ? h('details', { style: { marginTop: 18 }, open: task.status === 'pushed' }, h('summary', null, '构建包与验证记录'),
             h('p', { className: 'b05-subtle' }, '在已有流水线选择上面的个人分支或修改提交出包；烧包测试后，在这里记录结果。'),
             h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),

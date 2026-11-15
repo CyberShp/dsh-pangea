@@ -39,8 +39,9 @@ globalThis.fetch = async (url, options = {}) => {
 }
 const container = document.createElement('div'); document.body.append(container)
 let renderer = createRoot(container)
+const openedPipelines = []
 const Panel = createFaultInjectionPanel(React)
-const render = async () => act(async () => { renderer.render(React.createElement(Panel, { runId: run.run_id, dataRoot, cwd: root, cases })) })
+const render = async () => act(async () => { renderer.render(React.createElement(Panel, { runId: run.run_id, dataRoot, cwd: root, onOpenPipeline: url => openedPipelines.push(url), cases })) })
 const button = label => [...container.querySelectorAll('button')].find(node => node.textContent === label)
 const click = async label => { const node = button(label); assert.ok(node, label); assert.equal(node.disabled, false); await act(async () => { node.click() }) }
 const until = async predicate => {
@@ -58,6 +59,8 @@ const change = async (label, value) => {
 try {
   await render(); await click('打开打桩工作区')
   await until(() => button('生成打桩修改（1 条用例）'))
+  await change('构建流水线 URL', 'https://ci.example.test/pipeline')
+  assert.equal(button('在 DSH 浏览器打开构建流水线'), undefined)
   await click('生成打桩修改（1 条用例）')
   await until(() => button('推送个人分支'))
   assert.match(container.textContent, /逐用例执行说明/)
@@ -65,6 +68,14 @@ try {
   assert.deepEqual(calls[0].case_keys, ['unit/A'])
   await click('推送个人分支')
   await until(() => container.textContent.includes('个人分支已推送'))
+  await click('在 DSH 浏览器打开构建流水线')
+  assert.deepEqual(openedPipelines, ['https://ci.example.test/pipeline'])
+  await change('本任务流水线 URL', 'https://ci.example.test/updated')
+  assert.equal(button('在 DSH 浏览器打开构建流水线').disabled, true)
+  await click('保存流水线地址')
+  await until(() => !button('在 DSH 浏览器打开构建流水线').disabled)
+  await click('在 DSH 浏览器打开构建流水线')
+  assert.equal(openedPipelines.at(-1), 'https://ci.example.test/updated')
   await change('构建链接', 'https://ci.example.test/1')
   await change('个人包名称或版本', 'personal-001.zip')
   await change('实际结果', 'passed')
@@ -81,6 +92,7 @@ try {
   await render(); await click('打开打桩工作区')
   await until(() => container.querySelector('[aria-label="已有打桩任务"]'))
   await change('已有打桩任务', task.id)
+  assert.equal(container.querySelector('[aria-label="本任务流水线 URL"]').value, 'https://ci.example.test/updated')
   assert.match(container.textContent, /撤桩后恢复正常/)
   assert.equal(container.querySelector('[aria-label="个人包名称或版本"]').value, 'personal-001.zip')
   assert.ok(![...container.querySelectorAll('button')].some(node => node.textContent.includes('导出')))

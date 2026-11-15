@@ -141,12 +141,33 @@ export class FaultInjectionService {
     }
     return records.sort((a, b) => b.created_at.localeCompare(a.created_at))
   }
+  async configurePipeline(dataRoot, runId, taskId, value) {
+    const url = String(value || '').trim()
+    if (url) {
+      let parsed
+      try { parsed = new URL(url) } catch { throw serviceError('请输入完整的构建流水线 HTTP/HTTPS 地址') }
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw serviceError('流水线地址需使用 HTTP/HTTPS，且不能包含账号密码')
+    }
+    const save = async () => {
+      let task
+      if (taskId) {
+        task = await this.read(dataRoot, runId, taskId)
+        task.pipeline_url = url
+        await this.save(await this.directory(dataRoot, runId, taskId), task)
+      }
+      await writeTaskStoreFile(path.join(await this.directory(dataRoot, runId), 'pipeline.json'), JSON.stringify({ pipeline_url: url }))
+      return { pipeline_url: url, task }
+    }
+    return taskId ? this.exclusive(dataRoot, runId, taskId, save) : save()
+  }
   async defaults(dataRoot, run) {
     const progressFile = path.join(dataRoot, 'runs', run.run_id, 'progress.json')
     let progress = {}
     try { progress = JSON.parse(await readFile(progressFile, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
     const repos = run.source_snapshot?.repositories?.length ? run.source_snapshot.repositories : (run.repositories ?? []).map(repo_id => ({ repo_id }))
-    return { provider_id: progress.model_settings?.provider ?? '', agent_model: progress.model_id ?? '',
+    let pipeline = {}
+    try { pipeline = JSON.parse(await readFile(path.join(await this.directory(dataRoot, run.run_id), 'pipeline.json'), 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    return { pipeline_url: pipeline.pipeline_url || '', provider_id: progress.model_settings?.provider ?? '', agent_model: progress.model_id ?? '',
       repositories: repos.map(repo => ({ repo_id: repo.repo_id, source_path: path.join(dataRoot, 'repositories', repo.repo_id),
         base_ref: repo.git?.commit ?? repo.git?.head ?? 'HEAD', remote: 'origin', analysis_commit: repo.git?.commit ?? repo.git?.head ?? null })) }
   }
@@ -170,9 +191,10 @@ export class FaultInjectionService {
     })
     const prefix = String(input.branch_prefix || 'pangea-fi').trim()
     if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(prefix) || prefix.includes('..') || prefix.endsWith('/') || prefix.endsWith('.lock')) throw serviceError('个人分支前缀无效')
+    const pipeline = await this.configurePipeline(dataRoot, run.run_id, null, input.pipeline_url ?? defaults.pipeline_url)
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
     const record = { schema_version: 1, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
-      branch: `${prefix}/${taskId}`, case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
+      pipeline_url: pipeline.pipeline_url, branch: `${prefix}/${taskId}`, case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
       provider_id: input.provider_id || defaults.provider_id, agent_model: input.agent_model || defaults.agent_model,
       instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
