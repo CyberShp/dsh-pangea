@@ -11,6 +11,7 @@ export function createFaultInjectionPanel(React) {
   const busy = task => ['preparing', 'generating', 'pushing'].includes(task?.status)
   return function FaultInjectionPanel({ runId, dataRoot, cwd, onOpenPipeline, cases = [] }) {
     const [open, setOpen] = React.useState(false)
+    const [profileKey, setProfileKey] = React.useState('')
     const [tasks, setTasks] = React.useState([])
     const [taskId, setTaskId] = React.useState('')
     const [settings, setSettings] = React.useState(null)
@@ -24,6 +25,10 @@ export function createFaultInjectionPanel(React) {
     const [verification, setVerification] = React.useState({ case_key: '', result: 'not_run', hits: '', notes: '' })
     const selectedKeys = cases.map(item => item.projection_id || item.test_case_id).filter(Boolean)
     const task = tasks.find(item => item.id === taskId)
+    const profiles = Array.isArray(task?.result?.profiles) ? task.result.profiles : []
+    const profile = profiles.find(item => item.case_key === profileKey) || profiles[0]
+    const latestResults = new Map((task?.verification || []).map(item => [item.case_key, item.result]))
+    const passedCount = [...latestResults.values()].filter(result => result === 'passed').length
     const activeTaskIds = tasks.filter(busy).map(item => item.id).join(',')
     const scope = JSON.stringify([runId, dataRoot, cwd])
     const request = async (payload = null) => {
@@ -38,6 +43,7 @@ export function createFaultInjectionPanel(React) {
     const selectTask = value => {
       if (taskId) drafts.current[taskId] = { pipelineUrl, build, verification }
       setTaskId(value)
+      setProfileKey('')
       try { localStorage.setItem(`pangea-fi:${scope}`, value) } catch {}
     }
     const remember = value => {
@@ -86,24 +92,50 @@ export function createFaultInjectionPanel(React) {
     const field = (label, value, change, options = {}) => h('label', { style: { display: 'grid', gap: 5, marginBottom: 10 } }, label,
       h(options.multiline ? 'textarea' : 'input', { 'aria-label': label, value: readable(value), onChange: event => change(event.target.value),
         disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), style: { width: '100%', boxSizing: 'border-box' } }))
-    const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 }
-    const renderPoints = points => Array.isArray(points) ? points.map((point, index) => h('article', { key: point.id || index, style: { padding: '12px 0', borderTop: '1px solid #e2e6ee' } },
-      h('strong', null, `${readable(point.id)} · ${readable(point.repo_id)}:${readable(point.path)}`),
+    const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14 }
+    const renderPoints = points => Array.isArray(points) ? points.map((point, index) => h('details', { key: point.id || index, className: 'pangea-fi-point' },
+      h('summary', null, `${readable(point.id)} · ${readable(point.action) || '桩点说明'}`),
+      h('p', { className: 'b05-subtle' }, `${readable(point.repo_id)}:${readable(point.path)}`),
       h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : null
     const candidates = cases.filter(item => item.instrumentation || item.source_record?.body?.instrumentation)
     return h('section', { className: 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
+      h('style', null, `
+        .pangea-injection-panel { min-width:0; font-size:12px; }
+        .pangea-injection-panel .pangea-fi-workspace { max-height:70vh; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding-right:8px; }
+        .pangea-injection-panel .pangea-fi-workspace > * { min-width:0; }
+        .pangea-injection-panel details { border-top:1px solid #e7ebe5; margin-top:6px; }
+        .pangea-injection-panel .pangea-fi-workspace > section.b05-card { padding:0; border:0; margin:8px 0; }
+        .pangea-injection-panel .pangea-fi-build { padding:10px 12px; }
+        .pangea-injection-panel button + button { margin-left:8px; }
+        .pangea-injection-panel summary { cursor:pointer; padding:7px 0; font-weight:500; }
+        .pangea-injection-panel p { margin:8px 0; overflow-wrap:anywhere; }
+        .pangea-injection-panel h3 { font-size:14px; margin:8px 0; }
+        .pangea-injection-panel .pangea-fi-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+        .pangea-injection-panel input:not([type=checkbox]), .pangea-injection-panel select, .pangea-injection-panel textarea { font:inherit; min-width:0; max-width:100%; padding:7px 9px; border:1px solid #dfe5dc; border-radius:6px; background:#fff; color:inherit; }
+        .pangea-injection-panel label > select { display:block; width:100%; margin-top:5px; }
+        .pangea-injection-panel button { font:inherit; padding:7px 11px; border:1px solid #dfe5dc; border-radius:6px; background:#fff; color:#566051; cursor:pointer; }
+        .pangea-injection-panel button.primary { background:#27372d; border-color:#27372d; color:#fff; }
+        .pangea-injection-panel button:disabled { opacity:.5; cursor:default; }
+        .pangea-injection-panel .pangea-fi-scroll { max-height:340px; overflow:auto; overflow-wrap:anywhere; }
+        .pangea-injection-panel .pangea-fi-steps { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.65; padding-left:24px; }
+        .pangea-injection-panel .pangea-fi-steps li { padding:6px 0; }
+        .pangea-injection-panel .pangea-fi-records { list-style:none; padding:0; }
+        .pangea-injection-panel .pangea-fi-records > li { padding:10px 0; border-top:1px solid #e7ebe5; }
+        .pangea-injection-panel .pangea-fi-records pre { white-space:pre-wrap; font:inherit; }
+        .pangea-injection-panel .pangea-reading-fields dd { overflow-wrap:anywhere; }
+        @media(max-width:640px) { .pangea-injection-panel .b05-head-actions { flex-wrap:wrap; } .pangea-injection-panel .pangea-fi-workspace { max-height:75vh; } }
+      `),
       h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between' } },
         h('div', null, h('strong', null, '打桩与个人分支'), h('p', { className: 'b05-subtle' }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可一起生成打桩修改。` : '选择用例生成打桩修改，或查看已有打桩任务。')),
         h('button', { type: 'button', className: 'btn', 'aria-expanded': open, onClick: () => setOpen(value => !value) }, open ? '收起打桩' : '打开打桩工作区')),
-      open ? h('div', null,
-        h('p', { className: 'b05-subtle' }, '1 选择用例 → 2 生成并检查修改 → 3 推送个人分支 → 4 打开流水线构建'),
+      open ? h('div', { className: 'pangea-fi-workspace', role: 'region', 'aria-label': '打桩任务详情', tabIndex: 0 },
         error ? h('p', { role: 'alert' }, error) : null,
         notice ? h('p', { role: 'status' }, notice) : null,
         h(RepositorySettings, { cwd, dataRoot, repositories: settings?.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, ...value.defaults, baseline_acknowledged: false })) } }),
         candidates.length ? h('details', null, h('summary', null, '分析中记录的桩点'), candidates.map(item => h('div', { key: item.projection_id || item.test_case_id },
           h('strong', null, readable(item.title)), renderPoints((item.instrumentation || item.source_record.body.instrumentation)?.points)))) : null,
         settings ? h('details', { open: !task }, h('summary', null, task ? '为当前选择创建新任务' : '生成新的打桩修改'),
-          h('p', null, '本次选择：', cases.map(item => readable(item.title)).join('、') || '请先在用例列表选择用例'),
+          h('details', null, h('summary', null, `已选择 ${selectedKeys.length} 条用例`), h('p', { className: 'pangea-fi-scroll' }, cases.map(item => readable(item.title)).join('、') || '请先在用例列表选择用例')),
           h('div', { style: { marginTop: 14 } },
             h('div', { style: grid },
               h('label', null, '执行器', h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value }) },
@@ -136,27 +168,18 @@ export function createFaultInjectionPanel(React) {
           h('h3', null, `正在查看：${task.name || task.cases?.[0]?.title || '打桩任务'}`),
           task.status === 'pushing' && task.current_repository ? h('p', null, `正在推送：${task.current_repository}`) : null,
           ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('button', { type: 'button', disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成') : null,
-          h('p', null, '本任务用例：', task.cases.map(item => readable(item.title)).join('、')),
+          h('p', { className: 'b05-subtle' }, `${task.case_keys.length} 条用例 · ${task.result?.points?.length || 0} 个桩点 · 最新记录 ${passedCount}/${task.case_keys.length} 通过`),
           h('p', null, '个人分支：', h('code', null, task.branch)),
-          task.result?.summary ? h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)) : null,
-          renderPoints(task.result?.points),
-          Array.isArray(task.result?.profiles) ? h('div', null, h('strong', null, '逐用例执行说明'), task.result.profiles.map((profile, index) => h('div', { key: profile.case_key || index },
-            h('p', null, readable(task.cases.find(item => item.case_key === profile.case_key)?.title || profile.case_key)),
-            h('ol', null, (Array.isArray(profile.steps) ? profile.steps : [profile.steps]).map((step, at) => h('li', { key: at }, readable(step))))))) : null,
-          task.result?.limitations?.length ? h('p', { style: { whiteSpace: 'pre-wrap' } }, '生成说明：', readable(task.result.limitations)) : null,
-          task.repositories.map(repo => h('details', { key: repo.repo_id, style: { marginTop: 12 } }, h('summary', null, `${repo.repo_id} · ${repo.commit ? repo.pushed ? '已推送' : '已提交' : '未修改'}`),
-            h('p', null, '基线：', h('code', null, repo.base_commit)), repo.commit ? h('p', null, '修改提交：', h('code', null, repo.commit)) : null,
-            repo.diff ? h('pre', { style: { maxHeight: 400, overflow: 'auto', padding: 12, background: '#f5f7fa' } }, repo.diff) : null)),
           ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('button', { type: 'button', className: 'btn primary', style: { marginTop: 14 }, disabled: working, onClick: () => act('push') }, working ? '正在推送…' : '推送个人分支') : null,
-          task.status === 'pushed' ? h('section', { className: 'b05-card', style: { marginTop: 16 } },
-            h('h3', null, '下一步：构建个人包'),
-            field('本任务流水线 URL', pipelineUrl, setPipelineUrl),
-            h('button', { type: 'button', disabled: working, onClick: () => act('configure', { pipeline_url: pipelineUrl }) }, '保存流水线地址'),
+          task.status === 'pushed' ? h('section', { className: 'b05-card pangea-fi-build', style: { marginTop: 10 } },
+            h('h3', null, '构建个人包'),
+            h('details', { open: !task.pipeline_url }, h('summary', null, '流水线设置'), field('本任务流水线 URL', pipelineUrl, setPipelineUrl),
+              h('button', { type: 'button', disabled: working, onClick: () => act('configure', { pipeline_url: pipelineUrl }) }, '保存流水线地址')),
             h('button', { type: 'button', className: 'btn primary', disabled: working || !task.pipeline_url || pipelineUrl.trim() !== task.pipeline_url,
               onClick: async () => { try { if (!onOpenPipeline) throw new Error('当前会话的 DSH 浏览器不可用'); await onOpenPipeline(task.pipeline_url) } catch (reason) { setError(reason.message) } } }, '在 DSH 浏览器打开构建流水线'),
             h('button', { type: 'button', onClick: async () => { try { await navigator.clipboard.writeText(task.branch) } catch { setError('复制失败，请复制上方个人分支名称') } } }, '复制个人分支'),
-            h('p', { className: 'b05-subtle' }, '进入流水线后选择本任务的个人分支并启动构建。流水线入口地址与下方某次构建的结果链接分别保存。')) : null,
-          task.repositories.some(repo => repo.commit) ? h('details', { style: { marginTop: 18 }, open: task.status === 'pushed' }, h('summary', null, '构建包与验证记录'),
+            h('p', { className: 'b05-subtle' }, '使用上方个人分支出包，在验证记录中关联构建结果。')) : null,
+          task.repositories.some(repo => repo.commit) ? h('details', { key: `verification:${task.id}`, style: { marginTop: 12 } }, h('summary', null, '构建包与验证记录'),
             h('p', { className: 'b05-subtle' }, '在已有流水线选择上面的个人分支或修改提交出包；烧包测试后，在这里记录结果。'),
             h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),
             h('div', { style: grid }, h('label', null, '验证用例', h('select', { 'aria-label': '验证用例', value: verification.case_key, onChange: event => {
@@ -168,8 +191,20 @@ export function createFaultInjectionPanel(React) {
               field('桩点实际命中', verification.hits, value => setVerification({ ...verification, hits: value }))),
             field('验证现象与记录', verification.notes, value => setVerification({ ...verification, notes: value }), { multiline: true }),
             h('button', { type: 'button', className: 'btn', disabled: working || busy(task), onClick: () => act('verify', { build, verification }) }, '保存构建与验证记录'),
-            task.verification.length ? h('ul', null, task.verification.map((value, index) => h('li', { key: index }, `${value.at} · ${readable(task.cases.find(item => item.case_key === value.case_key)?.title || value.case_key)} · ${({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result]} · ${value.hits} · ${value.notes}`,
+            task.verification.length ? h('ul', { className: 'pangea-fi-records pangea-fi-scroll', 'aria-label': '验证历史' }, [...task.verification].reverse().map((value, index) => h('li', { key: index }, `${value.at} · ${readable(task.cases.find(item => item.case_key === value.case_key)?.title || value.case_key)} · ${({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result]} · ${value.hits}`,
+              value.notes ? h('details', null, h('summary', null, '查看验证记录'), h('pre', null, value.notes)) : null,
               h('p', { className: 'b05-subtle' }, `验证包：${value.build?.package_id || '未填写'}；提交：${(value.build?.commits || []).map(repo => `${repo.repo_id} ${repo.commit.slice(0, 12)}`).join('、')}`),
-              value.build?.url ? h('a', { href: value.build.url, target: '_blank', rel: 'noreferrer' }, '查看本次构建') : null))) : null) : null) : null) : null)
+              value.build?.url ? h('a', { href: value.build.url, target: '_blank', rel: 'noreferrer' }, '查看本次构建') : null))) : null) : null,
+          task.result?.summary ? h('details', null, h('summary', null, '修改摘要与用例'), h('div', { className: 'pangea-fi-scroll' }, h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)), h('p', null, task.cases.map(item => readable(item.title)).join('、')))) : null,
+          task.result?.points?.length ? h('details', null, h('summary', null, `桩点说明（${task.result.points.length}）`), h('div', { className: 'pangea-fi-scroll' }, renderPoints(task.result.points))) : null,
+          profiles.length ? h('details', { key: `profiles:${task.id}` }, h('summary', null, `逐用例执行说明（${profiles.length}）`),
+            h('label', null, '选择执行说明', h('select', { 'aria-label': '选择执行说明', value: profile?.case_key || '', onChange: event => setProfileKey(event.target.value) },
+              profiles.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(task.cases.find(value => value.case_key === item.case_key)?.title || item.case_key))))),
+            h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(profile?.steps) ? profile.steps : [profile?.steps]).map((step, at) => h('li', { key: at }, readable(step))))) : null,
+          task.result?.limitations?.length ? h('details', null, h('summary', null, `生成限制（${task.result.limitations.length}）`), h('p', { className: 'pangea-fi-scroll', style: { whiteSpace: 'pre-wrap' } }, readable(task.result.limitations))) : null,
+          task.repositories.map(repo => h('details', { key: repo.repo_id, style: { marginTop: 12 } }, h('summary', null, `${repo.repo_id} · ${repo.commit ? repo.pushed ? '已推送' : '已提交' : '未修改'}`),
+            h('p', null, '基线：', h('code', null, repo.base_commit)), repo.commit ? h('p', null, '修改提交：', h('code', null, repo.commit)) : null,
+            repo.diff ? h('pre', { style: { maxHeight: 400, overflow: 'auto', padding: 12, background: '#f5f7fa' } }, repo.diff) : null))
+          ) : null) : null)
   }
 }
