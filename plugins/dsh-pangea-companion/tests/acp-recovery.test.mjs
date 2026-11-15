@@ -303,7 +303,7 @@ test('unclosed lifecycle alone rejects continuation before another prompt is dis
   }
   const options = {
     dataRoot, cwd: dataRoot, runId: 'run', providerId: 'pangea-nga', signal: new AbortController().signal,
-    onEvent: event => events.push(event), progressPolicy, subagents: { start: async () => worker },
+    onEvent: event => events.push(event), progressPolicy: reconciliationPolicy, subagents: { start: async () => worker },
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
       if (args[0] === 'result-read') return { revision: 1, completion_complete: false }

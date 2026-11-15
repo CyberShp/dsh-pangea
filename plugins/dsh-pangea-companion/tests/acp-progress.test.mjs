@@ -38,13 +38,21 @@ test('late successful result wins over recovery', async () => {
   const worker = { cancelTurn: async () => { turn.resolve(outcome); return { confirmed: true, outcome } } }
   assert.equal(await waitForAcpTurn({ worker, turn: turn.promise, signal: signal(), policy }), outcome)
 })
-test('activity including compaction refreshes idle time without reading text', async () => {
-  const turn = deferred(); let activity = 0, cancels = 0
+test('activity including compaction refreshes idle time even when the first poll is delayed', async t => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] })
+  let now = 0, activity = 0, cancels = 0
+  t.mock.method(performance, 'now', () => now)
+  const turn = deferred()
   const worker = { readDiagnostics: () => ({ lastActivityAt: activity }), cancelTurn: () => { cancels++ } }
-  const interval = setInterval(() => activity++, 5)
-  const end = setTimeout(() => turn.resolve({ stopReason: 'completed' }), 80)
-  try { assert.equal((await waitForAcpTurn({ worker, turn: turn.promise, signal: signal(), policy })).stopReason, 'completed'); assert.equal(cancels, 0) }
-  finally { clearInterval(interval); clearTimeout(end) }
+  const result = waitForAcpTurn({ worker, turn: turn.promise, signal: signal(), policy })
+  // An event arrives before a delayed first poll. It must refresh the baseline.
+  for (let i = 0; i < 5; i++) {
+    activity++; now += 40; t.mock.timers.tick(2)
+    await Promise.resolve()
+  }
+  turn.resolve({ stopReason: 'completed' })
+  assert.equal((await result).stopReason, 'completed')
+  assert.equal(cancels, 0)
 })
 test('user stop interrupts cancellation wait', async () => {
   const controller = new AbortController()

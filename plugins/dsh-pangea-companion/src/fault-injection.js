@@ -80,13 +80,22 @@ export function injectionPrompt({ record, inputPath, outputPath }) {
     '只在这些仓库内调查需要的实现、构建配置和既有故障注入/调测入口。输入里的 instrumentation 是候选方案，须结合本次提交源码定位。',
     '核对所选用例引用的 analysis_source 冻结片段与本次源码副本；同一 commit 也可能存在分析时未提交的修改。只比较相关位置，差异对注入方案的影响写入 summary，不重做全仓分析。',
     '不要修改或推送源码仓库，不运行构建或安装命令。唯一交付是下述 JSON 文件；宿主负责精确写入、提交和推送。',
+    '源码副本是只读输入，包括拟新增文件的位置：禁止用 write/edit/apply_patch 或 shell 直接在 repositories 中创建或修改文件，也不要先写源文件再把它读回生成 edits。新增模块的完整源码放进 edits[].after 字符串，before=null；已有文件修改用 before/after 字符串描述。',
+    '可用 Python/Node 在内存中构造 JSON 对象并序列化到指定 outputPath；生成草稿或辅助脚本只能写在该输出文件的父目录。交付前读取输出文件并检查 JSON 能解析、edits 非空，然后结束；聊天里的代码块不能代替磁盘交付。',
+    '本任务不搭建模拟 HTTP/数据库/容器栈，不启动后台服务，不执行 profiles 中的部署或业务操作。自检限定为 JSON 合同、原文替换唯一性及源码语法；真实构建与端到端实测由宿主后续执行，不能把模拟结果写成实测结论。',
     '先完成调用路径与副作用判断，再生成实际可编译的修改。故障注入制造原因，保留原有错误处理和恢复逻辑，不直接篡改预期结果。',
     '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中。优先复用真实已有调测入口；没有时实现符合项目语言与构建方式的最小控制入口，并把必要源文件/构建接入一起纳入 edits。',
     '分别给出各用例的启停步骤：前置失败阻断后续桩时分轮执行；故障处理需要组合桩时写明触发顺序。关闭桩后说明需重建的业务状态。不要凭空列互斥关系，也不要做全仓两两组合审查。',
+    '逐用例说明必须按真实执行顺序串演：关闭全部桩建立并验证正常基线 → 保存基线证据 → 启用目标桩 → 执行业务并检查实际命中及故障后状态 → 关闭桩或耗尽次数后验证恢复。基线准备不得提前消耗一次性桩。',
+    '若开关仅在启动时读取，先用关闭桩的进程生成持久化基线，再正常停服并以目标模式启动，明确哪些状态保留、哪些内存状态需重建；把每次业务调用对触发计数的影响逐步核对。profiles 中命令、预期结果与 edits 的状态机必须一致，不能要求同一次调用既正常建立基线又触发故障。',
+    '逐步核对观测断言：目录中还包括步骤自己创建的日志、证据文件，不得断言只剩业务文件；临时文件清理应检查目标临时文件模式。时间戳须考虑实际精度，同一时间单位内的成功写入不保证时间戳变化，应结合内容哈希、数据读回或计数验证恢复。区分命令退出码与业务返回值，并说明 grep 无匹配等预期非零退出，不能用笼统忽略错误掩盖失败。',
     '分析基线与本次基线不同则重新定位，并在 summary 交代影响。不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
     'JSON 结构：{summary:string, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
     'case_key 必须逐字使用输入的 case_key。points/profiles 是业务说明；edits 才是实际修改。before 为当前文件中唯一出现的原文，after 为替换内容；新增文件 before=null。path 为仓库相对路径。不要包含 .git 文件，不删除文件。',
     '每条选中用例都应有对应 profile；多个用例可复用一个 point。给出能直接执行的启用、关闭及命中检查方法，不把待实现的开关写成已有命令。',
+    'profiles 必须与输入 case_keys 一一对应：总数相同、case_key 集合相同且每个 case_key 只出现一次。同一用例的首次保存、已有会话、恢复等多轮场景合并在同一个 profile.steps 中，不得拆成重复 case_key 的多个 profile。写完后用程序核对上述计数与集合。',
+    '检查 shell 内嵌语言的命令：bash -n 不会检查 python -c 的名称或语义；Python 源码布尔/空值使用 True/False/None，JSON 字符串才使用 true/false/null。对可提取的内嵌 Python 做 AST 检查并排查裸 true/false/null 名称；SQL 聚合查询不得无 GROUP BY 混用 count(*) 与非聚合列，数据库客户端开启遇错停止。关键断言失败须以非零退出体现。自定义 shell 断言函数须核对定义和所有调用的实参数量，并在独立 shell 中用成功、失败、空值输入验证退出码，避免 set -u 下引用未传参数；这类无副作用自检允许执行，不得执行部署或业务命令来做自检。次数配置为零或负数时必须明确为禁用，不得隐式强制触发一次。',
+    'profiles.steps 按顺序给出目标平台可执行的 shell 命令，预期结果和说明放在 shell 注释里；变量在首次使用前定义。不能用箭头、SAVE#1 一类伪命令或“同上”省略组合轮次的命令。提交前逐条自查所有 profile（包括组合轮次）的状态、文件清单（含 pidfile）、时间精度及恢复步骤，不仅检查单桩轮次。',
     `把完整 JSON 写入 ${outputPath}，写完结束。任务 ID：${record.id}。`,
   ].join('\n')
 }
@@ -127,9 +136,15 @@ export class FaultInjectionService {
   }
   async read(dataRoot, runId, taskId) {
     const directory = await this.directory(dataRoot, runId, taskId)
-    const record = JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8'))
+    let record = JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8'))
     if (record.id !== taskId || record.run_id !== runId) throw serviceError('打桩任务身份不匹配')
-    if (activeStates.has(record.status) && !this.active.has(this.key(dataRoot, runId, taskId))) return { ...record, status: 'interrupted', error: '上次操作已中断；可重新生成，已提交的修改仍保留' }
+    if (activeStates.has(record.status) && !this.active.has(this.key(dataRoot, runId, taskId))) {
+      // Completion publishes its terminal record before removing the operation.
+      // Our first asynchronous read may have observed the preceding generation.
+      record = JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8'))
+      if (record.id !== taskId || record.run_id !== runId) throw serviceError('打桩任务身份不匹配')
+      if (activeStates.has(record.status) && !this.active.has(this.key(dataRoot, runId, taskId))) return { ...record, status: 'interrupted', error: '上次操作已中断；可重新生成，已提交的修改仍保留' }
+    }
     return record
   }
   async list(dataRoot, runId) {
@@ -165,6 +180,8 @@ export class FaultInjectionService {
     const progressFile = path.join(dataRoot, 'runs', run.run_id, 'progress.json')
     let progress = {}
     try { progress = JSON.parse(await readFile(progressFile, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    let contract = {}
+    try { contract = JSON.parse(await readFile(path.join(dataRoot, 'runs', run.run_id, 'inputs', 'task-contract.json'), 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
     const repos = run.source_snapshot?.repositories?.length ? run.source_snapshot.repositories : (run.repositories ?? []).map(repo_id => ({ repo_id }))
     let pipeline = {}
     try { pipeline = JSON.parse(await readFile(path.join(await this.directory(dataRoot, run.run_id), 'pipeline.json'), 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -185,7 +202,7 @@ export class FaultInjectionService {
     }
     const projectPipeline = repositories.find(repo => repo.project_pipeline_configured)
     return { pipeline_url: projectPipeline ? projectPipeline.pipeline_url : pipeline.pipeline_url || '',
-      provider_id: progress.model_settings?.provider ?? '', agent_model: progress.model_id ?? '', repositories }
+      provider_id: contract.model_settings?.provider ?? progress.model_settings?.provider ?? '', agent_model: contract.model_id ?? progress.model_id ?? '', repositories }
   }
 
   async previewBaseline(dataRoot, run, input) {
@@ -231,13 +248,14 @@ export class FaultInjectionService {
       provider_id: input.provider_id || defaults.provider_id, agent_model: input.agent_model || defaults.agent_model,
       baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
-    await this.save(directory, record)
     const controller = new AbortController(), key = this.key(dataRoot, run.run_id, taskId)
     const operation = { controller, done: null }
     this.active.set(key, operation)
-    operation.done = this.prepareAndGenerate({ dataRoot, directory, record, cwd, signal: controller.signal })
+    const published = this.save(directory, record)
+    operation.done = published.then(() => this.prepareAndGenerate({ dataRoot, directory, record, cwd, signal: controller.signal }))
       .catch(async error => { record.status = controller.signal.aborted ? 'cancelled' : 'failed'; record.error = cleanError(error); await this.save(directory, record) })
       .finally(() => this.active.delete(key))
+    await published
     return record
   }
   async prepareAndGenerate({ dataRoot, directory, record, cwd, signal }) {

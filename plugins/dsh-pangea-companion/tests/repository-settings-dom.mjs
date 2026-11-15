@@ -1,6 +1,6 @@
 // Real React DOM, repository route and Git; no external model or Desktop runtime.
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -39,7 +39,7 @@ try {
   await click('保存仓库与构建配置'); await until(() => saved === 1)
   assert.match(container.textContent, /已关联打桩仓库/)
   const config = await readRepositorySettings(dataRoot, 'plain')
-  assert.equal(config.pipeline_url, 'https://ci.example.test/project'); assert.equal(config.git_path, git)
+  assert.equal(config.pipeline_url, 'https://ci.example.test/project'); assert.equal(await realpath(config.git_path), await realpath(git))
   assert.equal(config.base_ref, await sourceGit(git, ['rev-parse', 'HEAD']))
   await click('代码仓库与构建'); await click('代码仓库与构建')
   await until(() => container.querySelector('[aria-label="项目构建流水线 URL"]').value === 'https://ci.example.test/project')

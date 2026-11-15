@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises'
@@ -215,4 +216,54 @@ test('retry preserves captured cases and resolved baseline in a new task', async
   assert.deepEqual(ready.case_keys, first.case_keys)
   assert.equal(ready.repositories[0].base_commit, first.repositories[0].base_commit)
   assert.equal((await service.read(f.dataRoot, f.run.run_id, first.id)).status, 'failed')
+})
+
+
+test('defaults use the selected Run frozen model contract, with legacy progress fallback', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'fi-defaults-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const dir = path.join(root, 'runs', 'selected', 'inputs'); await mkdir(dir, { recursive: true })
+  const service = new FaultInjectionService(), run = { run_id: 'selected' }
+  await writeFile(path.join(dir, '..', 'progress.json'), JSON.stringify({ model_settings: { provider: 'legacy' }, model_id: 'legacy-model' }))
+  assert.equal((await service.defaults(root, run)).provider_id, 'legacy')
+  await writeFile(path.join(dir, 'task-contract.json'), JSON.stringify({ model_settings: { provider: 'pangea-opencode' }, model_id: 'contract-model' }))
+  const defaults = await service.defaults(root, run)
+  assert.equal(defaults.provider_id, 'pangea-opencode'); assert.equal(defaults.agent_model, 'contract-model')
+  assert.equal((await service.defaults(root, { run_id: 'other' })).provider_id, '')
+})
+
+test('a terminal publication racing a read is not reported as interrupted', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'fi-read-race-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const service = new FaultInjectionService(), record = { id: 'task', run_id: 'run', status: 'generating' }
+  const dir = await service.directory(root, 'run', 'task'); await service.save(dir, record)
+  let completed = false
+  t.mock.method(service.active, 'has', () => {
+    if (!completed) {
+      completed = true
+      // Finish after readFile delivered the old record but before liveness lookup.
+      writeFileSync(path.join(dir, 'task.json'), JSON.stringify({ ...record, status: 'ready' }))
+    }
+    return false
+  })
+  assert.equal((await service.read(root, 'run', 'task')).status, 'ready')
+  await service.save(dir, record)
+  assert.equal((await service.read(root, 'run', 'task')).status, 'interrupted')
+})
+
+test('initial publication is already owned while another request reads it', async t => {
+  const f = await fixture(t)
+  const service = new FaultInjectionService({ generate: async ({ record }) => generated(record) })
+  let published, release
+  const visible = new Promise(resolve => { published = resolve })
+  const held = new Promise(resolve => { release = resolve })
+  const save = service.save.bind(service)
+  t.mock.method(service, 'save', async (directory, record) => {
+    await save(directory, record)
+    if (record.status === 'preparing' && !record.repositories.length) { published(record.id); await held }
+  })
+  const start = service.start({ ...f, cwd: f.root })
+  const taskId = await visible
+  try { assert.equal((await service.read(f.dataRoot, f.run.run_id, taskId)).status, 'preparing') }
+  finally { release(); await start; await wait(service) }
 })

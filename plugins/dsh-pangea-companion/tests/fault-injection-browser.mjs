@@ -38,6 +38,7 @@ const assets = {
   '/react.js': path.join(path.dirname(require.resolve('react/package.json')), 'umd', 'react.development.js'),
   '/react-dom.js': path.join(path.dirname(require.resolve('react-dom/package.json')), 'umd', 'react-dom.development.js'),
   '/panel.js': new URL('../src/fault-injection-view.js', import.meta.url),
+  '/repository-settings-view.js': new URL('../src/repository-settings-view.js', import.meta.url),
 }
 const server = createServer(async (req, res) => {
   try {
@@ -45,6 +46,7 @@ const server = createServer(async (req, res) => {
     if (req.url.startsWith('/api/')) {
       await faultInjectionRouteHandler(req, res, service, {}, { resolveRoot: async () => dataRoot, readRun: async () => run }); return
     }
+    if (req.url !== '/') { res.writeHead(404); res.end('Not found'); return }
     res.writeHead(200, { 'content-type': 'text/html;charset=utf-8' })
     res.end(`<!doctype html><html lang="zh"><meta charset="utf-8"><title>用例打桩工作区</title><style>body{font:15px system-ui;background:#f5f7fb;color:#19243b;margin:32px}main{max-width:1040px;margin:auto}.b05-card{padding:24px;border:1px solid #e2e7ef;border-radius:16px;background:white}.b05-head-actions{display:flex;gap:12px;align-items:center}.b05-subtle{color:#66758b}button,input,textarea,select{font:inherit;padding:9px;border:1px solid #cfd7e5;border-radius:7px}button{cursor:pointer;background:white}.primary{background:#3157d5;color:white}dt{font-weight:600}dd{margin:4px 0 12px}summary{cursor:pointer;padding:12px 0}label select{display:block;width:100%;margin-top:6px}pre{white-space:pre-wrap}</style><main><h1>队列资源申请失败后的恢复</h1><div id="app"></div></main><script src="/react.js"></script><script src="/react-dom.js"></script><script type="module">import {createFaultInjectionPanel} from '/panel.js'; const Panel=createFaultInjectionPanel(React); ReactDOM.createRoot(document.getElementById('app')).render(React.createElement(Panel,${JSON.stringify({ runId: run.run_id, dataRoot, cases: run.details.test_cases })}));</script></html>`)
   } catch (error) { res.writeHead(500); res.end(error.message) }

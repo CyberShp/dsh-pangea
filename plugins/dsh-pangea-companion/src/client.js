@@ -6725,6 +6725,7 @@ window.__ModuleLoader__.load({
       }
 
       function renderCases() {
+        if (!current?.run_id) return h('div', { className: 'b05-card', role: 'status' }, '正在读取当前 Run 的测试用例…')
         const query = caseQuery.trim().toLowerCase()
         const filtered = filteredCaseRows
         const pages = Math.max(1, Math.ceil(filtered.length / 50)), page = Math.min(casePage, pages)

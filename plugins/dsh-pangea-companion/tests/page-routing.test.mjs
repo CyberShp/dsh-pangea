@@ -120,6 +120,15 @@ async function harness({ onboarding = false, tasks = [], selectedId, onImport, c
 }
 const task = { task_id: 'task-1', run_id: 'run-1', title: 'TLS 握手分析', target: 'TLS', repository: 'repo', status: 'running', execution_status: 'running' }
 
+test('cases wait for the selected Run snapshot before mounting fault injection', async () => {
+  const h = await harness({ tasks: [task], selectedId: task.task_id })
+  h.render('analysis')
+  h.bank('analysis').states[16] = { type: 'cases' }
+  h.bank('analysis').states[0] = { current: null }
+  const tree = h.render('analysis')
+  assert.ok(tree.some(node => node.props?.role === 'status' && node.children.includes('正在读取当前 Run 的测试用例…')))
+})
+
 test('initial repository import stays on workbench; new analysis opens the analysis page without replacing home', async () => {
   const h = await harness({ onboarding: true })
   await h.importRepository('home', true)

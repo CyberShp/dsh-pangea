@@ -33,13 +33,14 @@ export async function waitForAcpTurn({ worker, turn, signal, ready = false, poli
   const limits = { ...ACP_PROGRESS_DEFAULTS, ...policy }
   for (const value of Object.values(limits)) if (!Number.isFinite(value) || value <= 0) throw new Error('Invalid ACP progress timeout')
   const started = performance.now()
-  let lastActivity = started, fingerprint, warned = false, settled = false, interval, abort
+  const activityFingerprint = d => JSON.stringify([d.lastActivityAt, d.messageChunks, d.toolCalls, d.lastToolStatus, d.lastToolFinishedAt])
+  let lastActivity = started, fingerprint = activityFingerprint(worker.readDiagnostics?.() ?? {}), warned = false, settled = false, interval, abort
   const observed = Promise.resolve(turn).then(value => { settled = true; return value }, error => { settled = true; throw error })
   const stalled = new Promise((_, reject) => {
     interval = setInterval(() => {
       const d = worker.readDiagnostics?.() ?? {}
-      const next = JSON.stringify([d.lastActivityAt, d.messageChunks, d.toolCalls, d.lastToolStatus, d.lastToolFinishedAt])
-      if (fingerprint !== undefined && fingerprint !== next) { lastActivity = performance.now(); warned = false }
+      const next = activityFingerprint(d)
+      if (fingerprint !== next) { lastActivity = performance.now(); warned = false }
       fingerprint = next
       const idle = performance.now() - lastActivity
       if (!warned && idle >= (ready ? limits.readyWarnMs : limits.warnMs)) {
