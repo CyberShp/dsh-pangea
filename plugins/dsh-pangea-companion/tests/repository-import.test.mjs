@@ -35,11 +35,11 @@ test('imports the complete repository and marks onboarding complete', async () =
 
   const imported = await importRepository({ dataRoot, sourcePath: source, repositoryId: '存储测试' })
 
-  assert.deepEqual(imported, { repository_id: '存储测试', name: '存储测试' })
+  assert.equal(imported.repository_id, '存储测试'); assert.equal(imported.source.kind, 'git-unavailable')
   assert.equal(await readFile(path.join(dataRoot, 'repositories', '存储测试', '.git', 'config'), 'utf8'), '[core]\n')
   const status = await repositoryStatus(dataRoot)
   assert.equal(status.onboarding_required, false)
-  assert.deepEqual(status.repositories, [{ repository_id: '存储测试', name: '存储测试' }])
+  assert.equal(status.repositories[0].repository_id, '存储测试'); assert.equal(status.repositories[0].source.kind, 'git-unavailable')
 })
 
 test('never overwrites an existing repository with the same name', async () => {

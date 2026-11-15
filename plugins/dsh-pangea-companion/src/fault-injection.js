@@ -1,3 +1,4 @@
+import { inspectSource, readRepositorySettings, compareSnapshot } from './repositories/git-source.js'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
@@ -167,9 +168,41 @@ export class FaultInjectionService {
     const repos = run.source_snapshot?.repositories?.length ? run.source_snapshot.repositories : (run.repositories ?? []).map(repo_id => ({ repo_id }))
     let pipeline = {}
     try { pipeline = JSON.parse(await readFile(path.join(await this.directory(dataRoot, run.run_id), 'pipeline.json'), 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
-    return { pipeline_url: pipeline.pipeline_url || '', provider_id: progress.model_settings?.provider ?? '', agent_model: progress.model_id ?? '',
-      repositories: repos.map(repo => ({ repo_id: repo.repo_id, source_path: path.join(dataRoot, 'repositories', repo.repo_id),
-        base_ref: repo.git?.commit ?? repo.git?.head ?? 'HEAD', remote: 'origin', analysis_commit: repo.git?.commit ?? repo.git?.head ?? null })) }
+    const repositories = []
+    for (const repo of repos) {
+      const settings = await readRepositorySettings(dataRoot, repo.repo_id)
+      const sourcePath = settings.git_path || path.join(dataRoot, 'repositories', repo.repo_id)
+      let source
+      try { source = await inspectSource(sourcePath) } catch (error) { source = { kind: 'unavailable', error: error.message } }
+      const baseline = settings.base_ref || repo.git?.commit || repo.git?.head || 'HEAD'
+      let comparison = { available: false, changed_count: 0, files: [] }
+      if (source.kind === 'git') {
+        try { comparison = await compareSnapshot(sourcePath, baseline, path.join(dataRoot, 'runs', run.run_id, 'inputs', 'source', repo.repo_id)) }
+        catch (error) { comparison = { available: false, error: error.message } }
+      }
+      repositories.push({ repo_id: repo.repo_id, source_path: sourcePath, base_ref: baseline, remote: 'origin',
+        analysis_commit: repo.git?.commit ?? repo.git?.head ?? null, source, comparison, linked: Boolean(settings.git_path), project_pipeline_configured: Object.hasOwn(settings, 'pipeline_url'), pipeline_url: settings.pipeline_url || '' })
+    }
+    const projectPipeline = repositories.find(repo => repo.project_pipeline_configured)
+    return { pipeline_url: projectPipeline ? projectPipeline.pipeline_url : pipeline.pipeline_url || '',
+      provider_id: progress.model_settings?.provider ?? '', agent_model: progress.model_id ?? '', repositories }
+  }
+
+  async previewBaseline(dataRoot, run, input) {
+    const defaults = await this.defaults(dataRoot, run)
+    const known = new Set(defaults.repositories.map(repo => repo.repo_id))
+    const repositories = []
+    for (const repo of input.repositories || defaults.repositories) {
+      if (!known.has(repo.repo_id)) throw serviceError('请选择当前分析的源码仓库')
+      const source = await inspectSource(repo.source_path)
+      if (source.kind !== 'git') throw serviceError(source.error || `${repo.repo_id} 是普通目录，请先关联 Git 仓库`)
+      const ref = String(repo.base_ref || 'HEAD')
+      if (ref.startsWith('-') || /[\x00-\x20]/.test(ref)) throw serviceError('源码基线无效')
+      const base_ref = await this.git(source.path, ['rev-parse', '--verify', `${ref}^{commit}`])
+      const comparison = await compareSnapshot(source.path, base_ref, path.join(dataRoot, 'runs', run.run_id, 'inputs', 'source', repo.repo_id))
+      repositories.push({ ...repo, source, base_ref, comparison })
+    }
+    return repositories
   }
   async start({ dataRoot, run, input, cwd }) {
     const keys = input.case_keys
@@ -196,7 +229,7 @@ export class FaultInjectionService {
     const record = { schema_version: 1, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
       name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: `${prefix}/${taskId}`, case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
       provider_id: input.provider_id || defaults.provider_id, agent_model: input.agent_model || defaults.agent_model,
-      instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null }
+      baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
     await this.save(directory, record)
     const controller = new AbortController(), key = this.key(dataRoot, run.run_id, taskId)
@@ -216,6 +249,11 @@ export class FaultInjectionService {
       const ref = String(source.base_ref || 'HEAD')
       if (ref.startsWith('-') || /[\x00-\x1f]/.test(ref)) throw serviceError('源码基线无效')
       const baseCommit = await this.git(sourcePath, ['rev-parse', '--verify', `${ref}^{commit}`], signal)
+      const comparison = await compareSnapshot(sourcePath, baseCommit, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
+      const dirty = Boolean(await this.git(sourcePath, ['status', '--porcelain'], signal))
+      if ((comparison.changed_count || dirty || source.linked) && !record.baseline_acknowledged) throw serviceError(`${source.repo_id}：分析源码与 Git 基线需要核对，请查看基线差异并选择使用所选提交后重新生成`)
+      source.comparison = comparison
+      source.working_tree_dirty = dirty
       const remote = String(source.remote || 'origin')
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) throw serviceError('远端名称无效')
       let remoteUrl = null
@@ -320,7 +358,7 @@ export class FaultInjectionService {
     return this.start({ dataRoot, cwd,
       run: { run_id: runId, source_snapshot: { repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })) }, details: { test_cases: previous.cases } },
       input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ ...repo, base_ref: previous.repositories.find(item => item.repo_id === repo.repo_id)?.base_commit || repo.base_ref })),
-        provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
+        baseline_acknowledged: previous.baseline_acknowledged, provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
         pipeline_url: previous.pipeline_url, name: previous.name, branch_prefix: previous.branch.slice(0, previous.branch.lastIndexOf('/')) } })
   }
   async recordVerification(dataRoot, runId, taskId, input) {

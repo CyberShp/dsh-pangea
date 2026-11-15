@@ -1,3 +1,4 @@
+import { inspectSource, sourceGit, validateGitUrl, validateRef, validatePipeline, readRepositorySettings, saveRepositorySettings } from './git-source.js'
 import { randomUUID } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -88,6 +89,10 @@ async function repositoryItems(repositoriesRoot) {
 export async function repositoryStatus(dataRoot) {
   const repositoriesRoot = path.join(dataRoot, 'repositories')
   const repositories = await repositoryItems(repositoriesRoot)
+  for (const repo of repositories) {
+    repo.source = await inspectSource(path.join(repositoriesRoot, repo.repository_id))
+    repo.settings = await readRepositorySettings(dataRoot, repo.repository_id)
+  }
   const marker = await readMarker(path.join(dataRoot, '.pangea', MARKER_NAME))
   const existingData = repositories.length > 0 || await hasMeaningfulData(dataRoot)
   return {
@@ -98,18 +103,20 @@ export async function repositoryStatus(dataRoot) {
   }
 }
 
-export async function importRepository({ dataRoot, sourcePath, repositoryId }) {
-  if (typeof sourcePath !== 'string' || !sourcePath.trim()) throw new Error('source folder is required')
+export async function importRepository({ dataRoot, sourcePath, repositoryId, gitUrl, baseRef, pipelineUrl }) {
+  if (!gitUrl && (typeof sourcePath !== 'string' || !sourcePath.trim())) throw new Error('source folder is required')
   const name = normalizeRepositoryId(repositoryId)
+  const pipeline = validatePipeline(pipelineUrl)
+  const remoteUrl = gitUrl ? validateGitUrl(gitUrl) : null
+  const ref = validateRef(baseRef)
   await mkdir(dataRoot, { recursive: true })
   const repositoriesRoot = path.join(dataRoot, 'repositories')
   await mkdir(repositoriesRoot, { recursive: true })
 
-  const source = await realpath(sourcePath.trim())
-  const sourceInfo = await lstat(source)
-  if (!sourceInfo.isDirectory()) throw new Error('source path must be a folder')
+  const source = remoteUrl ? null : await realpath(sourcePath.trim())
+  if (source && !(await lstat(source)).isDirectory()) throw new Error('source path must be a folder')
   const resolvedRepositoriesRoot = await realpath(repositoriesRoot)
-  if (isInside(resolvedRepositoriesRoot, source) || isInside(source, resolvedRepositoriesRoot)) {
+  if (source && (isInside(resolvedRepositoriesRoot, source) || isInside(source, resolvedRepositoriesRoot))) {
     throw new Error('choose a source folder outside the PANGEA data directory')
   }
 
@@ -124,15 +131,38 @@ export async function importRepository({ dataRoot, sourcePath, repositoryId }) {
   const temporaryDestination = path.join(resolvedRepositoriesRoot, `.pangea-import-${randomUUID()}`)
   let destinationCreated = false
   try {
-    await cp(source, temporaryDestination, {
-      recursive: true,
-      force: false,
-      errorOnExist: true,
-      preserveTimestamps: true,
-      verbatimSymlinks: true,
-    })
+    if (remoteUrl) {
+      await sourceGit(resolvedRepositoriesRoot, ['clone', '--', remoteUrl, temporaryDestination])
+      const commit = await sourceGit(temporaryDestination, ['rev-parse', '--verify', `${ref}^{commit}`]).catch(async error => {
+        if (ref === 'HEAD') throw error
+        return sourceGit(temporaryDestination, ['rev-parse', '--verify', `refs/remotes/origin/${ref}^{commit}`])
+      })
+      await sourceGit(temporaryDestination, ['checkout', '--detach', commit])
+    } else {
+      // A linked worktree's .git file points outside the directory. Materialize its history first.
+      let worktree = false
+      try { worktree = (await lstat(path.join(source, '.git'))).isFile() } catch {}
+      if (worktree) {
+        const info = await inspectSource(source)
+        if (info.kind !== 'git') throw new Error(info.error || '无法读取 Git 工作树')
+        await sourceGit(resolvedRepositoriesRoot, ['clone', '--no-hardlinks', '--', source, temporaryDestination])
+        await sourceGit(temporaryDestination, ['checkout', '--detach', info.commit])
+        if (info.remote) await sourceGit(temporaryDestination, ['remote', 'set-url', 'origin', await sourceGit(source, ['remote', 'get-url', '--push', 'origin'])])
+        else await sourceGit(temporaryDestination, ['remote', 'remove', 'origin'])
+        for (const entry of await readdir(temporaryDestination)) if (entry !== '.git') await rm(path.join(temporaryDestination, entry), { recursive: true, force: true })
+      }
+      await cp(source, temporaryDestination, {
+        recursive: true,
+        force: worktree,
+        errorOnExist: !worktree,
+        filter: file => !worktree || file !== path.join(source, '.git'),
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+      })
+    }
     await rename(temporaryDestination, destination)
     destinationCreated = true
+    await saveRepositorySettings(dataRoot, name, { pipeline_url: pipeline })
     await writeMarker(dataRoot, name)
   } catch (error) {
     await rm(temporaryDestination, { recursive: true, force: true })
@@ -140,7 +170,7 @@ export async function importRepository({ dataRoot, sourcePath, repositoryId }) {
     throw error
   }
 
-  return { repository_id: name, name }
+  return { repository_id: name, name, source: await inspectSource(destination) }
 }
 
 export { normalizeRepositoryId }

@@ -32,6 +32,7 @@ window.__ModuleLoader__.load({
     const { caseIdentity, caseTitlePresentation, caseRecordParseNotice, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
     const TestToolPicker = __testToolPicker.createTestToolPicker(React, __sourceScopePicker.createSourceScopePicker(React))
     const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
+    const RepositorySettings = __repositorySettingsView.createRepositorySettings(React)
     const FaultInjectionPanel = __faultInjectionView.createFaultInjectionPanel(React)
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
@@ -1295,11 +1296,11 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestRepositoryImport({ cwd, sourcePath, repositoryName, fetcher = fetch }) {
+    async function requestRepositoryImport({ cwd, sourcePath, repositoryName, gitUrl, baseRef, pipelineUrl, fetcher = fetch }) {
       const response = await fetcher(`${REPOSITORY_API_PATH}?${new URLSearchParams({ cwd })}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ source_path: sourcePath, repository_name: repositoryName }),
+        body: JSON.stringify({ source_path: sourcePath, repository_name: repositoryName, git_url: gitUrl, base_ref: baseRef, pipeline_url: pipelineUrl }),
       })
       const body = await response.json()
       if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
@@ -4486,14 +4487,17 @@ window.__ModuleLoader__.load({
         try {
           const selected = await picker.pick({ purpose: 'repository' })
           if (!selected) return
-          setRepositoryForm({ sourcePath: selected, repositoryName: repositoryNameFromPath(selected) })
+          setRepositoryForm(value => ({ ...value, mode: 'local', sourcePath: selected, repositoryName: repositoryNameFromPath(selected) }))
+          const response = await fetch(`${REPOSITORY_API_PATH}?${new URLSearchParams({ cwd })}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'inspect-source', source_path: selected }) })
+          const inspected = await response.json()
+          setRepositoryForm(value => value.sourcePath === selected ? { ...value, sourceInfo: inspected.source, sourceError: inspected.error } : value)
           setRepositoryError('')
         } catch (reason) {
           setRepositoryError(reason instanceof Error ? reason.message : String(reason))
         }
       }
       async function submitRepositoryImport() {
-        if (!cwd || repositoryImporting || !repositoryForm.sourcePath || !repositoryForm.repositoryName.trim()) return
+        if (!cwd || repositoryImporting || !(repositoryForm.mode === 'git' ? repositoryForm.gitUrl : repositoryForm.sourcePath) || !repositoryForm.repositoryName.trim()) return
         const originScreen = screen
         const returnTo = history.at(-1) ?? { type: initialScreen }
         const sequence = ++repositoryImportRef.current
@@ -4509,6 +4513,7 @@ window.__ModuleLoader__.load({
             cwd,
             sourcePath: repositoryForm.sourcePath,
             repositoryName: repositoryForm.repositoryName,
+            gitUrl: repositoryForm.mode === 'git' ? repositoryForm.gitUrl : undefined, baseRef: repositoryForm.baseRef, pipelineUrl: repositoryForm.pipelineUrl,
           })
           if (!stillCurrent()) return
           const nextState = await requestRepositoryStatus({ cwd })
@@ -5927,7 +5932,16 @@ window.__ModuleLoader__.load({
       }
 
       function renderRepositoryImport(firstUse = false) {
-        const folderReady = Boolean(repositoryForm.sourcePath)
+        const gitMode = repositoryForm.mode === 'git'
+        const folderReady = Boolean(gitMode ? repositoryForm.gitUrl : repositoryForm.sourcePath)
+        const sourceFields = h('div', { style: { margin: '18px 0' } },
+          !gitMode && repositoryForm.sourceInfo ? h('p', { role: 'status' }, __repositorySettingsView.sourceLabel(repositoryForm.sourceInfo)) : null,
+          repositoryForm.sourceError ? h('p', { role: 'alert' }, repositoryForm.sourceError) : null,
+          h('label', { className: 'field' }, '源码来源', h('select', { 'aria-label': '源码来源', disabled: repositoryImporting, value: gitMode ? 'git' : 'local', onChange: event => setRepositoryForm(value => ({ ...value, mode: event.target.value })) }, h('option', { value: 'local' }, '本地文件夹'), h('option', { value: 'git' }, 'Git 仓库地址'))),
+          gitMode ? h(React.Fragment, null,
+            h('label', { className: 'field' }, 'Git 仓库地址', h('input', { 'aria-label': 'Git 仓库地址', disabled: repositoryImporting, value: repositoryForm.gitUrl || '', placeholder: 'https://… 或 git@…', onChange: event => setRepositoryForm(value => ({ ...value, gitUrl: event.target.value, repositoryName: !value.repositoryName || value.repositoryName === repositoryNameFromPath(value.gitUrl).replace(/\.git$/, '') ? repositoryNameFromPath(event.target.value).replace(/\.git$/, '') : value.repositoryName })) })),
+            h('label', { className: 'field' }, '分析分支、标签或提交', h('input', { 'aria-label': '分析分支、标签或提交', disabled: repositoryImporting, value: repositoryForm.baseRef || '', placeholder: '留空使用默认分支', onChange: event => setRepositoryForm(value => ({ ...value, baseRef: event.target.value })) }))) : null,
+          h('label', { className: 'field' }, '项目构建流水线 URL', h('input', { 'aria-label': '项目构建流水线 URL', disabled: repositoryImporting, value: repositoryForm.pipelineUrl || '', placeholder: '可稍后在代码仓库与构建中设置', onChange: event => setRepositoryForm(value => ({ ...value, pipelineUrl: event.target.value })) })))
         const copyReady = folderReady && Boolean(repositoryForm.repositoryName.trim())
         if (!firstUse) {
           const name = repositoryForm.repositoryName.trim()
@@ -5940,14 +5954,15 @@ window.__ModuleLoader__.load({
             pageHeader({ title: '添加源码仓库', ui: ctx.pangea?.ui, onBack: goBack, backLabel: pageMode === 'home' ? '返回工作台' : history.at(-1)?.type === 'create' ? '返回新建分析' : '返回分析任务' }),
             h('div', { className: 'create-import-shell' }, h('div', { className: 'cols' },
               h('section', { className: 'panel' },
-                h('div', { className: 'create-import-hero' }, h('div', { className: 'create-import-symbol', style: repositoryImporting ? { color: '#497ba4', background: '#f2f6fb', borderColor: '#dce7f0' } : undefined }, runIcon(repositoryImporting ? 'Copy' : 'FolderGit2')), h('div', null, h('div', { className: 'create-focus-label', style: repositoryImporting ? { color: '#497ba4' } : undefined }, repositoryImporting ? 'IMPORT IN PROGRESS' : 'SOURCE REPOSITORY'), h('h2', { className: 'create-heading', style: { margin: '7px 0 0' } }, repositoryImporting ? `正在复制 ${name}` : '把源码加入 PANGEA'))),
-                h('p', { className: 'create-copy' }, repositoryImporting ? '正在准备独立的分析副本。请保持窗口打开，完成后仓库会自动出现在列表中。' : '选择源码目录，复制到 PANGEA 工作区后，即可开始分析。'),
-                repositoryImporting && h(React.Fragment, null, h('div', { className: 'create-progress', role: 'progressbar', 'aria-label': '正在复制，进度未确定' }, h('span')), h('div', { className: 'row between small muted' }, h('span', null, '正在复制源码与 .git 历史'), h('span', null, '处理中')), h('div', { className: 'divider' })),
-                h('div', { className: repositoryImporting ? 'create-subhead' : 'create-form-label' }, h('span', null, repositoryImporting ? '来源' : '源码仓库目录'), !repositoryImporting && button('选择文件夹', chooseRepositoryFolder, 'ghost', 'FolderOpen')),
-                path(repositoryForm.sourcePath || '尚未选择文件夹'),
+                h('div', { className: 'create-import-hero' }, h('div', { className: 'create-import-symbol', style: repositoryImporting ? { color: '#497ba4', background: '#f2f6fb', borderColor: '#dce7f0' } : undefined }, runIcon(repositoryImporting ? 'Copy' : 'FolderGit2')), h('div', null, h('div', { className: 'create-focus-label', style: repositoryImporting ? { color: '#497ba4' } : undefined }, repositoryImporting ? 'IMPORT IN PROGRESS' : 'SOURCE REPOSITORY'), h('h2', { className: 'create-heading', style: { margin: '7px 0 0' } }, repositoryImporting ? `正在准备 ${name}` : '把源码加入 PANGEA'))),
+                h('p', { className: 'create-copy' }, repositoryImporting ? '正在准备独立的分析副本。请保持窗口打开，完成后仓库会自动出现在列表中。' : '选择本地目录或 Git 仓库地址，准备独立的分析源码。个人分支在打桩时创建。'),
+                repositoryImporting && h(React.Fragment, null, h('div', { className: 'create-progress', role: 'progressbar', 'aria-label': '正在复制，进度未确定' }, h('span')), h('div', { className: 'row between small muted' }, h('span', null, gitMode ? '正在克隆所选 Git 版本' : '正在复制源码与 Git 历史'), h('span', null, '处理中')), h('div', { className: 'divider' })),
+                sourceFields,
+                !gitMode && h('div', { className: repositoryImporting ? 'create-subhead' : 'create-form-label' }, h('span', null, repositoryImporting ? '来源' : '源码仓库目录'), !repositoryImporting && button('选择文件夹', chooseRepositoryFolder, 'ghost', 'FolderOpen')),
+                path((gitMode ? repositoryForm.gitUrl : repositoryForm.sourcePath) || '尚未选择文件夹'),
                 !repositoryImporting && h('label', { className: 'field', style: { marginTop: 23 } }, h('span', null, '仓库名称'), h('input', { 'aria-label': '仓库名称', value: repositoryForm.repositoryName, onChange: event => setRepositoryForm(value => ({ ...value, repositoryName: event.target.value })) }), h('span', { className: 'hint' }, '自动根据目录命名，可在导入前修改。')),
                 h('div', { className: 'create-subhead' }, repositoryImporting ? '目标仓库' : '目标位置'), path(target),
-                repositoryImporting ? h('div', { className: 'callout', style: { marginTop: 24 } }, h('div', { className: 'row' }, runIcon('Info'), h('span', { className: 'small' }, '复制结束前，仓库尚不可用于新建分析。'))) : h('div', { className: 'notice blue', style: { marginTop: 22 } }, h('div', { className: 'notice-main' }, runIcon('Info'), h('div', null, h('strong', null, '完整保存源码与 Git 历史'), h('p', null, '复制到临时目录，成功后一次性加入仓库列表。原目录保持不变，同名仓库不会被覆盖。')))),
+                repositoryImporting ? h('div', { className: 'callout', style: { marginTop: 24 } }, h('div', { className: 'row' }, runIcon('Info'), h('span', { className: 'small' }, '复制结束前，仓库尚不可用于新建分析。'))) : h('div', { className: 'notice blue', style: { marginTop: 22 } }, h('div', { className: 'notice-main' }, runIcon('Info'), h('div', null, h('strong', null, '保留原目录，独立准备分析源码'), h('p', null, '复制到临时目录，成功后一次性加入仓库列表。原目录保持不变，同名仓库不会被覆盖。')))),
                 repositoryError && h('p', { role: 'alert', style: { color: 'var(--red)', marginTop: 15 } }, repositoryError),
                 h('div', { className: 'wizard-footer' }, repositoryImporting ? h('span', { className: 'create-footer-note' }, runIcon('ShieldCheck'), '原始源码保持不变') : button('取消', goBack, 'ghost'), repositoryImporting ? h('button', { className: 'create-disabled', disabled: true }, '正在添加仓库…') : button('添加仓库', submitRepositoryImport, 'primary', 'FolderPlus', !copyReady))),
               h('aside', null, h('section', { className: 'panel' }, h('div', { className: 'create-side-title' }, repositoryImporting ? '导入状态' : '导入方式'),
@@ -5963,16 +5978,17 @@ window.__ModuleLoader__.load({
               h('p', { className: 'b06-onboard-lead' }, '本地数据空间已经准备就绪。加入源码后，分析任务、测试资产和报告会在同一工作区中集中管理。'),
               h('div', { className: 'b06-repo' }, h('div', { className: 'b06-row' }, runIcon('FolderGit2'), h('strong', null, '本地数据空间')), h('span', { className: 'b06-badge green' }, '已就绪')),
               h('div', { className: 'b06-divider' }),
-              h('label', { className: 'b06-field' }, '源码仓库目录', h('span', { className: 'b06-field-row' }, h('input', { readOnly: true, 'aria-label': '源码仓库目录', value: repositoryForm.sourcePath, placeholder: '选择已有源码目录' }), h('button', { type: 'button', className: 'b06-button', disabled: repositoryImporting, onClick: () => { void chooseRepositoryFolder() } }, runIcon('FolderOpen'), '选择文件夹'))),
+              sourceFields,
+              !gitMode && h('label', { className: 'b06-field' }, '源码仓库目录', h('span', { className: 'b06-field-row' }, h('input', { readOnly: true, 'aria-label': '源码仓库目录', value: repositoryForm.sourcePath, placeholder: '选择已有源码目录' }), h('button', { type: 'button', className: 'b06-button', disabled: repositoryImporting, onClick: () => { void chooseRepositoryFolder() } }, runIcon('FolderOpen'), '选择文件夹'))),
               h('label', { className: 'b06-field' }, '仓库名称', h('input', { 'aria-label': '仓库名称', value: repositoryForm.repositoryName, disabled: repositoryImporting, placeholder: '选择目录后自动填写', onChange: event => setRepositoryForm(value => ({ ...value, repositoryName: event.target.value })) })),
               h('p', { className: 'b06-hint' }, '可修改显示名称，已有同名仓库不会被覆盖。'),
-              repositoryImporting ? h(React.Fragment, null, h('div', { className: 'b06-copy-progress', role: 'progressbar', 'aria-label': '正在复制，进度未确定' }), h('div', { className: 'b06-banner', role: 'status', style: { background: '#edf3f8', color: '#416b95' } }, h('div', null, h('strong', null, '正在加入源码仓库'), '正在完整复制源码与 Git 历史，请保持窗口打开。')))
+              repositoryImporting ? h(React.Fragment, null, h('div', { className: 'b06-copy-progress', role: 'progressbar', 'aria-label': '正在复制，进度未确定' }), h('div', { className: 'b06-banner', role: 'status', style: { background: '#edf3f8', color: '#416b95' } }, h('div', null, h('strong', null, '正在加入源码仓库'), '正在复制或克隆源码，请保持窗口打开。')))
                 : repositoryError ? h('div', { className: 'b06-banner', role: 'alert', style: { marginTop: 20 } }, h('div', null, h('strong', null, '源码仓库复制未完成'), repositoryError))
                   : h('p', { className: 'b06-hint', style: { marginTop: 17 } }, '导入会复制完整源码与 .git 历史，原目录保持不变。'),
               h('div', { className: 'b06-onboard-foot' }, h('span', { className: 'b06-meta' }, repositoryImporting ? '复制完成后进入工作台' : '首次使用 · 工作区初始化'), h('button', { type: 'button', className: 'b06-button primary', disabled: !copyReady || repositoryImporting, 'aria-busy': repositoryImporting, onClick: () => { void submitRepositoryImport() } }, repositoryImporting ? '正在复制…' : repositoryError ? '重试加入' : '完成初始化'))),
             h('aside', { className: 'b06-panel' }, h('h2', null, '准备你的测试工作区'),
               step('01', '数据空间已就绪', '保存任务、冻结输入与交付结果。', 'done'),
-              step('02', '选择源码仓库', '从本地已有目录加入源码。', folderReady ? 'done' : 'current'),
+              step('02', '选择源码仓库', '选择本地文件夹或 Git 仓库。', folderReady ? 'done' : 'current'),
               step('03', '完整复制源码', '成功后进入工作台，开始分析。', repositoryImporting ? 'current' : ''),
               h('div', { className: 'b06-divider' }), h('p', { className: 'b06-hint' }, '分析始终基于创建时冻结的源码与资产版本，结论可以追溯到对应输入。'))))
       }
@@ -6037,6 +6053,8 @@ window.__ModuleLoader__.load({
                 repositoryError ? h('div', { role: 'alert' }, h('p', null, `源码仓库状态读取失败：${repositoryError}`), button('重试检查仓库', () => { void loadRepositories() }, false, repositoryLoading))
                   : repository ? h('div', { className: 'b06-repo' }, h('div', { className: 'b06-row' }, runIcon('FolderGit2'), h('strong', null, repository)), h('span', { className: 'b06-badge green' }, '已就绪'))
                     : repositoryState === undefined ? muted('正在检查源码仓库…') : muted('当前没有可用的源码仓库。'),
+                h('p', { className: 'b06-repo-note' }, __repositorySettingsView.sourceLabel(repositoryState?.repositories?.find(item => item.repository_id === repository)?.source)),
+                h(RepositorySettings, { cwd, dataRoot: workbench?.data_root, onSaved: loadRepositories }),
                 h('p', { className: 'b06-repo-note' }, '分析时冻结选定源码，资产与报告保存在当前工作区。'), h('div', { className: 'b06-divider' }), h('button', { type: 'button', className: 'b06-link', onClick: openRepositoryImport }, '添加源码仓库 ↗'))))))
       }
 

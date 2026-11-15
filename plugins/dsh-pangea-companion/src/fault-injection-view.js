@@ -1,3 +1,4 @@
+import { createRepositorySettings, sourceLabel } from './repository-settings-view.js'
 export const INJECTION_STATUS_LABELS = {
   preparing: '准备源码', generating: '生成打桩修改', ready: '修改已生成', pushing: '正在推送',
   pushed: '个人分支已推送', failed: '生成失败', cancelled: '已停止', interrupted: '操作已中断',
@@ -6,6 +7,7 @@ const readable = value => value == null ? '' : typeof value === 'string' ? value
 
 export function createFaultInjectionPanel(React) {
   const h = React.createElement
+  const RepositorySettings = createRepositorySettings(React)
   const busy = task => ['preparing', 'generating', 'pushing'].includes(task?.status)
   return function FaultInjectionPanel({ runId, dataRoot, cwd, onOpenPipeline, cases = [] }) {
     const [open, setOpen] = React.useState(false)
@@ -97,6 +99,7 @@ export function createFaultInjectionPanel(React) {
         h('p', { className: 'b05-subtle' }, '1 选择用例 → 2 生成并检查修改 → 3 推送个人分支 → 4 打开流水线构建'),
         error ? h('p', { role: 'alert' }, error) : null,
         notice ? h('p', { role: 'status' }, notice) : null,
+        h(RepositorySettings, { cwd, dataRoot, repositories: settings?.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, ...value.defaults, baseline_acknowledged: false })) } }),
         candidates.length ? h('details', null, h('summary', null, '分析中记录的桩点'), candidates.map(item => h('div', { key: item.projection_id || item.test_case_id },
           h('strong', null, readable(item.title)), renderPoints((item.instrumentation || item.source_record.body.instrumentation)?.points)))) : null,
         settings ? h('details', { open: !task }, h('summary', null, task ? '为当前选择创建新任务' : '生成新的打桩修改'),
@@ -109,12 +112,19 @@ export function createFaultInjectionPanel(React) {
               field('任务名称', settings.name, value => setSettings({ ...settings, name: value })),
               field('个人分支前缀', settings.branch_prefix, value => setSettings({ ...settings, branch_prefix: value }))),
             (settings.repositories ?? []).map((repo, index) => h('fieldset', { key: repo.repo_id, style: { margin: '10px 0', padding: 14, border: '1px solid #d8dee9', borderRadius: 8 } },
+              h('p', null, sourceLabel(repo.source)),
+              repo.comparison?.changed_count ? h('p', { role: 'status' }, `分析快照与所选提交有 ${repo.comparison.changed_count} 个文件不同：${repo.comparison.files.join('、')}`) : null,
+              repo.comparison?.error ? h('p', { role: 'alert' }, repo.comparison.error) : null,
+              repo.source?.kind === 'git' && !repo.comparison?.available && !repo.comparison?.error ? h('p', null, '本次分析未提供可比较的源码快照，当前仅展示 Git 状态。') : null,
               h('legend', null, h('label', null, h('input', { type: 'checkbox', checked: repo.enabled !== false, 'aria-label': `本次包含 ${repo.repo_id}`, disabled: working,
                 onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), ' ', readable(repo.repo_id))), h('div', { style: grid },
-                ...[['source_path', 'Git 仓库目录'], ['base_ref', '源码基线（提交或本地分支）'], ['remote', '推送远端']].map(([key, label]) => field(`${repo.repo_id} · ${label}`, repo[key], value => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, [key]: value } : item) })))))),
+                ...[['source_path', 'Git 仓库目录'], ['base_ref', '源码基线（提交或本地分支）'], ['remote', '推送远端']].map(([key, label]) => field(`${repo.repo_id} · ${label}`, repo[key], value => setSettings({ ...settings, baseline_acknowledged: false, repositories: settings.repositories.map((item, at) => at === index ? { ...item, [key]: value } : item) })))))),
+            h('button', { type: 'button', disabled: working, onClick: async () => { setWorking(true); setError(''); try { const value = await request({ action: 'preview-baseline', repositories: settings.repositories }); setSettings(previous => ({ ...previous, repositories: value.repositories, baseline_acknowledged: false })); setNotice('基线已核对，请查看各仓库的快照差异') } catch (reason) { setError(reason.message) } finally { setWorking(false) } } }, '核对打桩基线'),
+            h('label', null, h('input', { type: 'checkbox', 'aria-label': '使用所选 Git 提交作为打桩基线', checked: Boolean(settings.baseline_acknowledged), onChange: event => setSettings({ ...settings, baseline_acknowledged: event.target.checked }) }), ' 使用所选 Git 提交作为打桩基线；未提交修改不带入个人分支'),
             field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value })),
+            settings.repositories.some(repo => repo.enabled !== false && repo.source?.kind !== 'git') ? h('p', { role: 'status' }, '所选源码尚未就绪：请在“代码仓库与构建”关联 Git 仓库，或填写有效目录后点击“核对打桩基线”。普通分析不受影响。') : null,
             field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true }),
-            h('button', { type: 'button', className: 'btn primary', disabled: working || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false),
+            h('button', { type: 'button', className: 'btn primary', disabled: working || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && repo.source?.kind !== 'git'),
               onClick: () => act('generate', { ...settings, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : `生成打桩修改（${selectedKeys.length} 条用例）`)))
           : h('p', null, '正在读取打桩设置…'),
         tasks.length ? h('div', { style: { marginTop: 18 } }, h('label', null, '已有打桩任务 ', h('select', { 'aria-label': '已有打桩任务', value: taskId, onChange: event => selectTask(event.target.value) },

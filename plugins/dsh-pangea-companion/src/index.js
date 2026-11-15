@@ -26,6 +26,7 @@ import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { inspectSource, configureRepository } from './repositories/git-source.js'
 import { importRepository, repositoryStatus } from './repositories/import.js'
 import { scopeTree, validateScope, previewScope, confirmScope, previewTestTools, confirmTestTools } from './repositories/scope.js'
 import { FaultInjectionService } from './fault-injection.js'
@@ -518,12 +519,13 @@ export async function faultInjectionRouteHandler(req, res, service, runtime, { r
         if (input.action === 'push') task = await service.push(dataRoot, input.run_id, input.task_id, { background: true })
         else if (input.action === 'retry') task = await service.retry(dataRoot, input.run_id, input.task_id, input.cwd)
         else if (input.action === 'verify') task = await service.recordVerification(dataRoot, input.run_id, input.task_id, input)
-        else if (input.action !== 'generate') throw Object.assign(new Error('未知打桩操作'), { statusCode: 400 })
+        else if (!['generate', 'preview-baseline'].includes(input.action)) throw Object.assign(new Error('未知打桩操作'), { statusCode: 400 })
       }
       if (task) return json(res, 200, { status: 'ok', task })
     }
     const run = await readRun(dataRoot, input.run_id, { includeDetails: true })
     if (run.run_id !== input.run_id) throw Object.assign(new Error('读取的用例不属于当前 Run'), { statusCode: 409 })
+    if (req.method === 'POST' && input.action === 'preview-baseline') return json(res, 200, { status: 'ok', repositories: await service.previewBaseline(dataRoot, run, input) })
     if (req.method === 'POST') return json(res, 202, { status: 'ok', task: await service.start({ dataRoot, run, input, cwd: input.cwd }) })
     return json(res, 200, { status: 'ok', tasks: await service.list(dataRoot, input.run_id), defaults: await service.defaults(dataRoot, run),
       providers: acpProviderOptions().filter(provider => provider.available).map(provider => ({ id: provider.id, label: provider.label })) })
@@ -1609,13 +1611,15 @@ export async function repositoryRouteHandler(req, res, runner = runPangea) {
     if (req.method === 'GET') return json(res, 200, await repositoryStatus(dataRoot))
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
+    if (body.action === 'inspect-source') return json(res, 200, { status: 'ok', source: await inspectSource(body.source_path) })
+    if (body.action === 'configure-repository') return json(res, 200, { status: 'ok', settings: await configureRepository(dataRoot, body.repository_name, body) })
     if (body.action === 'validate-scope') return json(res, 200, await validateScope({ ...body, dataRoot }))
     if (body.action === 'preview-test-tools') return json(res, 200, await previewTestTools({ ...body, dataRoot, cwd }, runner))
     if (body.action === 'preview-scope') return json(res, 200, await previewScope({ ...body, dataRoot, cwd }, runner))
     const imported = await importRepository({
       dataRoot,
       sourcePath: body.source_path,
-      repositoryId: body.repository_name,
+      repositoryId: body.repository_name, gitUrl: body.git_url, baseRef: body.base_ref, pipelineUrl: body.pipeline_url,
     })
     return json(res, 200, { status: 'ok', repository: imported })
   } catch (error) {
