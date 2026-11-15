@@ -194,7 +194,7 @@ export class FaultInjectionService {
     const pipeline = await this.configurePipeline(dataRoot, run.run_id, null, input.pipeline_url ?? defaults.pipeline_url)
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
     const record = { schema_version: 1, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
-      pipeline_url: pipeline.pipeline_url, branch: `${prefix}/${taskId}`, case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
+      name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: `${prefix}/${taskId}`, case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
       provider_id: input.provider_id || defaults.provider_id, agent_model: input.agent_model || defaults.agent_model,
       instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
@@ -282,29 +282,46 @@ export class FaultInjectionService {
     const work = Promise.resolve().then(callback); this.queues.set(key, work)
     try { return await work } finally { this.queues.delete(key) }
   }
-  async push(dataRoot, runId, taskId) {
+  async push(dataRoot, runId, taskId, { background = false } = {}) {
     return this.exclusive(dataRoot, runId, taskId, async () => {
       const record = await this.read(dataRoot, runId, taskId), directory = await this.directory(dataRoot, runId, taskId)
       if (record.status === 'pushed') return record
       if (!['ready', 'interrupted'].includes(record.status) || !record.generation_complete) throw serviceError('请先完整生成本次代码修改')
       const controller = new AbortController(), key = this.key(dataRoot, runId, taskId)
-      const operation = { controller, done: null }; this.active.set(key, operation)
+      const operation = { controller, done: null }
+      record.status = 'pushing'; record.error = null; await this.save(directory, record)
+      this.active.set(key, operation)
       operation.done = (async () => {
-        record.status = 'pushing'; record.error = null; await this.save(directory, record)
         try {
           for (const repo of record.repositories) {
             if (!repo.commit || repo.pushed) continue
-            if (!repo.has_remote) throw serviceError(`${repo.repo_id} 未配置推送远端，请在原仓库配置远端后重新生成`)
+            if (!repo.has_remote) {
+              const source = record.source_repositories.find(item => item.repo_id === repo.repo_id)
+              const remoteUrl = await this.git(source.source_path, ['remote', 'get-url', '--push', source.remote || 'origin'], controller.signal)
+              await this.git(repo.path, ['remote', 'add', 'origin', remoteUrl], controller.signal)
+              repo.has_remote = true
+            }
+            record.current_repository = repo.repo_id; await this.save(directory, record)
             await this.git(repo.path, ['push', 'origin', `${repo.commit}:refs/heads/${repo.branch}`], controller.signal)
             repo.pushed = true; await this.save(directory, record)
           }
           record.status = 'pushed'
-        } catch (error) { record.status = 'ready'; record.error = cleanError(error) }
+        } catch (error) { record.status = 'ready'; record.error = controller.signal.aborted ? '推送已停止，可继续推送剩余仓库' : cleanError(error) }
         await this.save(directory, record)
         return record
       })().finally(() => this.active.delete(key))
-      return operation.done
+      if (background) operation.done.catch(() => {}) // read() exposes interrupted work if final persistence failed.
+      return background ? structuredClone(record) : operation.done
     })
+  }
+  async retry(dataRoot, runId, taskId, cwd) {
+    const previous = await this.read(dataRoot, runId, taskId)
+    if (activeStates.has(previous.status)) throw serviceError('请先停止当前任务')
+    return this.start({ dataRoot, cwd,
+      run: { run_id: runId, source_snapshot: { repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })) }, details: { test_cases: previous.cases } },
+      input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ ...repo, base_ref: previous.repositories.find(item => item.repo_id === repo.repo_id)?.base_commit || repo.base_ref })),
+        provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
+        pipeline_url: previous.pipeline_url, name: previous.name, branch_prefix: previous.branch.slice(0, previous.branch.lastIndexOf('/')) } })
   }
   async recordVerification(dataRoot, runId, taskId, input) {
     return this.exclusive(dataRoot, runId, taskId, async () => {

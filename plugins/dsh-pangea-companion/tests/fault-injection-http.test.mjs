@@ -68,7 +68,7 @@ test('fault injection HTTP acceptance', async t => {
   })
   await t.test('POST push publishes the recorded SHA and repeat is idempotent', async () => {
     for (let i = 0; i < 2; i++) {
-      const r = await post({ action: 'push', task_id: task.id }); assert.equal(r.status, 200); assert.equal(r.body.task.status, 'pushed')
+      const r = await post({ action: 'push', task_id: task.id }); assert.equal(r.status, 200); assert.ok(['pushing', 'pushed'].includes(r.body.task.status)); assert.equal((await terminal(task.id)).status, 'pushed')
     }
     assert.equal(await injectionGit(remote, ['rev-parse', `refs/heads/${task.branch}`]), task.repositories[0].commit)
   })

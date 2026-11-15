@@ -11,7 +11,7 @@ import { createFaultInjectionPanel } from '../src/fault-injection-view.js'
 
 const { Window } = await import(process.env.HAPPY_DOM_MODULE || 'happy-dom')
 const window = new Window({ url: 'http://localhost/' })
-for (const key of ['window', 'document', 'navigator', 'HTMLElement', 'Event', 'MouseEvent']) Object.defineProperty(globalThis, key, { value: key === 'window' ? window : window[key], configurable: true, writable: true })
+for (const key of ['window', 'document', 'navigator', 'localStorage', 'HTMLElement', 'Event', 'MouseEvent']) Object.defineProperty(globalThis, key, { value: key === 'window' ? window : window[key], configurable: true, writable: true })
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 const React = await import('react'), { createRoot } = await import('react-dom/client'), { act } = React
 const root = await mkdtemp(path.join(os.tmpdir(), 'fi-dom-')), dataRoot = path.join(root, 'data'), source = path.join(dataRoot, 'repositories', 'target'), remote = path.join(root, 'remote.git')
@@ -23,11 +23,19 @@ await injectionGit(source, ['add', 'target.c']); await injectionGit(source, ['co
 const base = await injectionGit(source, ['rev-parse', 'HEAD'])
 await injectionGit(root, ['init', '--bare', remote]); await injectionGit(source, ['remote', 'add', 'origin', remote])
 const cases = [{ projection_id: 'unit/A', title: '资源申请失败后的恢复', instrumentation: { points: [{ id: 'A', action: '模拟资源不足' }] } }]
+cases.push({ projection_id: 'unit/B', title: '第二个故障场景' })
 const run = { run_id: 'dom-run', source_snapshot: { repositories: [{ repo_id: 'target', git: { commit: base } }] }, details: { test_cases: cases } }
 await mkdir(path.join(dataRoot, 'runs', run.run_id), { recursive: true })
 await writeFile(path.join(dataRoot, 'runs', run.run_id, 'progress.json'), JSON.stringify({ model_settings: { provider: 'fixture' }, model_id: 'fixture-model' }))
-const service = new FaultInjectionService({ generate: async ({ record }) => ({ summary: '工程测试夹具', points: [{ id: 'A', repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
-  profiles: [{ case_key: record.case_keys[0], point_ids: ['A'], steps: ['开启 A', '执行业务', '关闭 A 并恢复'] }], edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
+let holdPush = true
+const service = new FaultInjectionService({ git: async (cwd, args, signal) => {
+  if (args[0] === 'push' && holdPush) await new Promise((resolve, reject) => {
+    if (signal.aborted) reject(signal.reason)
+    else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+  })
+  return injectionGit(cwd, args, signal)
+}, generate: async ({ record }) => ({ summary: '工程测试夹具', points: [{ id: 'A', repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
+  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], steps: ['开启 A', '执行业务', '关闭 A 并恢复'] })), edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
 const calls = []
 globalThis.fetch = async (url, options = {}) => {
   const req = Readable.from(options.body ? [Buffer.from(options.body)] : [])
@@ -58,14 +66,19 @@ const change = async (label, value) => {
 }
 try {
   await render(); await click('打开打桩工作区')
-  await until(() => button('生成打桩修改（1 条用例）'))
+  await until(() => button('生成打桩修改（2 条用例）'))
   await change('构建流水线 URL', 'https://ci.example.test/pipeline')
   assert.equal(button('在 DSH 浏览器打开构建流水线'), undefined)
-  await click('生成打桩修改（1 条用例）')
+  await click('生成打桩修改（2 条用例）')
   await until(() => button('推送个人分支'))
   assert.match(container.textContent, /逐用例执行说明/)
   assert.equal(calls[0].cwd, root)
-  assert.deepEqual(calls[0].case_keys, ['unit/A'])
+  assert.deepEqual(calls[0].case_keys, ['unit/A', 'unit/B'])
+  await click('推送个人分支')
+  await until(() => button('停止本次操作') && !button('停止本次操作').disabled)
+  await click('停止本次操作')
+  await until(() => button('推送个人分支'))
+  holdPush = false
   await click('推送个人分支')
   await until(() => container.textContent.includes('个人分支已推送'))
   await click('在 DSH 浏览器打开构建流水线')
@@ -81,6 +94,13 @@ try {
   await change('实际结果', 'passed')
   await change('桩点实际命中', 'A=1')
   await change('验证现象与记录', '撤桩后恢复正常')
+  await change('验证用例', 'unit/B')
+  assert.equal(container.querySelector('[aria-label="实际结果"]').value, 'not_run')
+  assert.equal(container.querySelector('[aria-label="验证现象与记录"]').value, '')
+  await change('验证现象与记录', 'B 的独立草稿')
+  await change('验证用例', 'unit/A')
+  assert.equal(container.querySelector('[aria-label="实际结果"]').value, 'passed')
+  assert.equal(container.querySelector('[aria-label="验证现象与记录"]').value, '撤桩后恢复正常')
   await click('保存构建与验证记录')
   await until(() => container.textContent.includes('通过 · A=1'))
   const task = (await service.list(dataRoot, run.run_id))[0]

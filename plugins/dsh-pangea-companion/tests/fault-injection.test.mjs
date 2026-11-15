@@ -175,3 +175,44 @@ test('an interrupted generation cannot publish only its already committed subset
   assert.equal((await service.read(f.dataRoot, f.run.run_id, task.id)).status, 'interrupted')
   await assert.rejects(service.push(f.dataRoot, f.run.run_id, task.id), /完整生成/)
 })
+
+test('background push returns while blocked, can stop and resume the same commit', async t => {
+  const f = await fixture(t); let block = true, started
+  const began = new Promise(resolve => { started = resolve })
+  const service = new FaultInjectionService({ generate: async ({ record }) => generated(record), git: async (cwd, args, signal) => {
+    if (args[0] === 'push' && block) { started(); await new Promise((resolve, reject) => { if (signal.aborted) reject(signal.reason); else signal.addEventListener('abort', () => reject(signal.reason), { once: true }) }) }
+    return injectionGit(cwd, args, signal)
+  } })
+  const task = await service.start(f); await wait(service)
+  const accepted = await service.push(f.dataRoot, f.run.run_id, task.id, { background: true })
+  assert.equal(accepted.status, 'pushing'); await began
+  const stopped = await service.cancel(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(stopped.status, 'ready'); assert.match(stopped.error, /已停止/)
+  block = false
+  const resumed = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(resumed.status, 'pushed'); assert.equal(resumed.repositories[0].commit, stopped.repositories[0].commit)
+})
+
+test('missing remote can be repaired without regenerating code', async t => {
+  const f = await fixture(t), service = new FaultInjectionService({ generate: async ({ record }) => generated(record) })
+  await injectionGit(f.repositories[0].source_path, ['remote', 'remove', 'origin'])
+  const task = await service.start(f); await wait(service)
+  const before = await service.read(f.dataRoot, f.run.run_id, task.id)
+  assert.equal((await service.push(f.dataRoot, f.run.run_id, task.id)).status, 'ready')
+  await injectionGit(f.repositories[0].source_path, ['remote', 'add', 'origin', f.repositories[0].remote_path])
+  const after = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(after.status, 'pushed'); assert.equal(after.repositories[0].commit, before.repositories[0].commit)
+})
+
+test('retry preserves captured cases and resolved baseline in a new task', async t => {
+  const f = await fixture(t); let fail = true
+  const service = new FaultInjectionService({ generate: async ({ record }) => { if (fail) throw Error('model failed'); return generated(record) } })
+  const first = await service.start(f); await wait(service)
+  fail = false
+  const retry = await service.retry(f.dataRoot, f.run.run_id, first.id, f.root); await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, retry.id)
+  assert.equal(ready.status, 'ready'); assert.notEqual(first.id, retry.id)
+  assert.deepEqual(ready.case_keys, first.case_keys)
+  assert.equal(ready.repositories[0].base_commit, first.repositories[0].base_commit)
+  assert.equal((await service.read(f.dataRoot, f.run.run_id, first.id)).status, 'failed')
+})

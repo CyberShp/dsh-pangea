@@ -14,6 +14,8 @@ export function createFaultInjectionPanel(React) {
     const [settings, setSettings] = React.useState(null)
     const [providers, setProviders] = React.useState([])
     const [pipelineUrl, setPipelineUrl] = React.useState('')
+    const drafts = React.useRef({})
+    const [notice, setNotice] = React.useState('')
     const [error, setError] = React.useState('')
     const [working, setWorking] = React.useState(false)
     const [build, setBuild] = React.useState({ url: '', package_id: '', package_sha256: '', notes: '' })
@@ -31,16 +33,23 @@ export function createFaultInjectionPanel(React) {
       if (!response.ok || value.status === 'error') throw new Error(value.error || '打桩操作失败')
       return value
     }
+    const selectTask = value => {
+      if (taskId) drafts.current[taskId] = { pipelineUrl, build, verification }
+      setTaskId(value)
+      try { localStorage.setItem(`pangea-fi:${scope}`, value) } catch {}
+    }
     const remember = value => {
       setTasks(previous => [value, ...previous.filter(item => item.id !== value.id)])
-      setTaskId(value.id)
+      selectTask(value.id)
     }
     React.useEffect(() => {
       if (!open) return
       let live = true
       request().then(value => {
         if (!live) return
-        setTasks(value.tasks ?? []); setProviders(value.providers ?? [])
+        setTasks(value.tasks ?? []);
+        if (!taskId) { try { const last = localStorage.getItem(`pangea-fi:${scope}`); if (value.tasks?.some(item => item.id === last)) setTaskId(last) } catch {} }
+        setProviders(value.providers ?? [])
         setSettings(previous => previous ?? { ...value.defaults, branch_prefix: 'pangea-fi', instructions: '' })
         setError('')
       }).catch(reason => { if (live) setError(reason.message) })
@@ -61,13 +70,14 @@ export function createFaultInjectionPanel(React) {
       return () => { live = false; clearInterval(timer) }
     }, [open, scope, activeTaskIds])
     React.useEffect(() => {
-      setPipelineUrl(task?.pipeline_url || '')
-      setBuild({ url: '', package_id: '', package_sha256: '', notes: '', ...task?.build })
-      setVerification({ case_key: task?.case_keys?.[0] || '', result: 'not_run', hits: '', notes: '' })
+      const draft = drafts.current[taskId]
+      setPipelineUrl(draft?.pipelineUrl ?? task?.pipeline_url ?? '')
+      setBuild(draft?.build ?? { url: '', package_id: '', package_sha256: '', notes: '', ...task?.build })
+      setVerification(draft?.verification ?? { result: 'not_run', hits: '', notes: '', ...task?.verification?.filter(item => item.case_key === task?.case_keys?.[0]).at(-1), case_key: task?.case_keys?.[0] || '' })
     }, [taskId])
     const act = async (action, extra = {}) => {
-      setWorking(true); setError('')
-      try { const value = await request({ action, task_id: taskId, ...extra }); remember(value.task); if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url })) }
+      setWorking(true); setError(''); setNotice('')
+      try { const value = await request({ action, task_id: taskId, ...extra }); remember(value.task); if (['configure', 'verify'].includes(action)) setNotice('已保存'); if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url })) }
       catch (reason) { setError(reason.message) }
       finally { setWorking(false) }
     }
@@ -86,6 +96,7 @@ export function createFaultInjectionPanel(React) {
       open ? h('div', null,
         h('p', { className: 'b05-subtle' }, '1 选择用例 → 2 生成并检查修改 → 3 推送个人分支 → 4 打开流水线构建'),
         error ? h('p', { role: 'alert' }, error) : null,
+        notice ? h('p', { role: 'status' }, notice) : null,
         candidates.length ? h('details', null, h('summary', null, '分析中记录的桩点'), candidates.map(item => h('div', { key: item.projection_id || item.test_case_id },
           h('strong', null, readable(item.title)), renderPoints((item.instrumentation || item.source_record.body.instrumentation)?.points)))) : null,
         settings ? h('details', { open: !task }, h('summary', null, task ? '为当前选择创建新任务' : '生成新的打桩修改'),
@@ -95,6 +106,7 @@ export function createFaultInjectionPanel(React) {
               h('label', null, '执行器', h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value }) },
                 h('option', { value: '' }, '选择执行器'), providers.map(provider => h('option', { key: provider.id, value: provider.id }, provider.label)))),
               field('打桩模型', settings.agent_model, value => setSettings({ ...settings, agent_model: value })),
+              field('任务名称', settings.name, value => setSettings({ ...settings, name: value })),
               field('个人分支前缀', settings.branch_prefix, value => setSettings({ ...settings, branch_prefix: value }))),
             (settings.repositories ?? []).map((repo, index) => h('fieldset', { key: repo.repo_id, style: { margin: '10px 0', padding: 14, border: '1px solid #d8dee9', borderRadius: 8 } },
               h('legend', null, h('label', null, h('input', { type: 'checkbox', checked: repo.enabled !== false, 'aria-label': `本次包含 ${repo.repo_id}`, disabled: working,
@@ -105,12 +117,15 @@ export function createFaultInjectionPanel(React) {
             h('button', { type: 'button', className: 'btn primary', disabled: working || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false),
               onClick: () => act('generate', { ...settings, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : `生成打桩修改（${selectedKeys.length} 条用例）`)))
           : h('p', null, '正在读取打桩设置…'),
-        tasks.length ? h('div', { style: { marginTop: 18 } }, h('label', null, '已有打桩任务 ', h('select', { 'aria-label': '已有打桩任务', value: taskId, onChange: event => setTaskId(event.target.value) },
-          h('option', { value: '' }, '选择任务查看'), tasks.map(item => h('option', { key: item.id, value: item.id }, `${item.created_at.slice(0, 16).replace('T', ' ')} · ${item.case_keys.length} 条 · ${INJECTION_STATUS_LABELS[item.status] || item.status}`))))) : null,
+        tasks.length ? h('div', { style: { marginTop: 18 } }, h('label', null, '已有打桩任务 ', h('select', { 'aria-label': '已有打桩任务', value: taskId, onChange: event => selectTask(event.target.value) },
+          h('option', { value: '' }, '选择任务查看'), tasks.map(item => h('option', { key: item.id, value: item.id }, `${item.name || item.cases?.[0]?.title || '打桩任务'} · ${new Date(item.created_at).toLocaleString()} · ${item.case_keys.length} 条 · ${INJECTION_STATUS_LABELS[item.status] || item.status}`))))) : null,
         task ? h('div', { style: { marginTop: 16 } },
           h('p', { role: 'status' }, h('strong', null, INJECTION_STATUS_LABELS[task.status] || task.status)),
           task.error ? h('p', { role: 'alert', style: { whiteSpace: 'pre-wrap' } }, task.error) : null,
           busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null,
+          h('h3', null, `正在查看：${task.name || task.cases?.[0]?.title || '打桩任务'}`),
+          task.status === 'pushing' && task.current_repository ? h('p', null, `正在推送：${task.current_repository}`) : null,
+          ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('button', { type: 'button', disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成') : null,
           h('p', null, '本任务用例：', task.cases.map(item => readable(item.title)).join('、')),
           h('p', null, '个人分支：', h('code', null, task.branch)),
           task.result?.summary ? h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)) : null,
@@ -134,7 +149,11 @@ export function createFaultInjectionPanel(React) {
           task.repositories.some(repo => repo.commit) ? h('details', { style: { marginTop: 18 }, open: task.status === 'pushed' }, h('summary', null, '构建包与验证记录'),
             h('p', { className: 'b05-subtle' }, '在已有流水线选择上面的个人分支或修改提交出包；烧包测试后，在这里记录结果。'),
             h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),
-            h('div', { style: grid }, h('label', null, '验证用例', h('select', { 'aria-label': '验证用例', value: verification.case_key, onChange: event => setVerification({ ...verification, case_key: event.target.value }) }, task.cases.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(item.title))))),
+            h('div', { style: grid }, h('label', null, '验证用例', h('select', { 'aria-label': '验证用例', value: verification.case_key, onChange: event => {
+                drafts.current[`${taskId}:${verification.case_key}`] = verification
+                const key = event.target.value
+                setVerification(drafts.current[`${taskId}:${key}`] ?? { result: 'not_run', hits: '', notes: '', ...task.verification.filter(item => item.case_key === key).at(-1), case_key: key })
+              } }, task.cases.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(item.title))))),
               h('label', null, '实际结果', h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => setVerification({ ...verification, result: event.target.value }) }, [['not_run', '未执行'], ['passed', '通过'], ['failed', '失败'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
               field('桩点实际命中', verification.hits, value => setVerification({ ...verification, hits: value }))),
             field('验证现象与记录', verification.notes, value => setVerification({ ...verification, notes: value }), { multiline: true }),
