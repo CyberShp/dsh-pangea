@@ -70,7 +70,8 @@ test('real Git + compiled C: generate, inspect, push exact commit, reopen and re
   try { await exec('cc', ['--version']) } catch (error) { if (error.code !== 'ENOENT') throw error; compiler = false }
   await t.test('compiled fixture checks A/B blocking, dependent faults and recovery', { skip: !compiler && 'C compiler is not installed; Git round trip still runs' }, async () => {
     await exec('cc', [path.join(repo.path, 'main.c'), '-o', binary])
-    const run = async faults => (await exec(binary, [], { env: { ...process.env, PANGEA_FI: faults } })).stdout.trim()
+    // C text-mode stdout uses CRLF on Windows; compare the same ordered output on every OS.
+    const run = async faults => (await exec(binary, [], { env: { ...process.env, PANGEA_FI: faults } })).stdout.replace(/\r\n/g, '\n').trim()
     assert.equal(await run(''), 'ok')
     assert.equal(await run('A'), 'hit:A queue_failed')
     assert.equal(await run('B'), 'hit:B io_failed')
