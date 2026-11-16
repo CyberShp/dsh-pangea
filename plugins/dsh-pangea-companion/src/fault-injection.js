@@ -21,8 +21,9 @@ const cleanError = error => {
 
 export async function injectionGit(cwd, args, signal) {
   try {
-    const result = await execute('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', ...args], {
-      cwd, signal, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+    // Keep the process cwd short on Windows; Git handles the long repository path via -C.
+    const result = await execute('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], {
+      signal, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' },
     })
     return result.stdout.trimEnd()
