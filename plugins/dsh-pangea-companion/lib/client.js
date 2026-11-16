@@ -1649,7 +1649,7 @@ window.__ModuleLoader__.load({
     })()
 
     const __riskIncrementalInsights = (() => {
-    const RISK_WARNING_KINDS = new Set(['evidence_quote_mismatch', 'source_fact_hint', 'risk_contract_hint'])
+    const RISK_WARNING_KINDS = new Set(['evidence_quote_mismatch', 'source_fact_hint', 'risk_contract_hint', 'risk_falsifier_hint'])
     const PLACEHOLDER_REACHABILITY = /^(?:待核对|未提供|未记录|未知|待确认|unknown|tbd|pending|n\/a|-|—)$/i
 
     function classifyRiskGrounding(risk) {

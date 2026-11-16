@@ -58,7 +58,8 @@ test('sourceFirstProjection attaches active record warnings and retires supersed
     ],
     warnings: [
       { ...binding, kind: 'source_fact_hint', record_id: 'r-old', record_revision: 1, field: 'body.source_evidence[0]', message: '旧行号越界' },
-      { ...binding, kind: 'evidence_quote_mismatch', record_id: 'r-warn', record_revision: 2, field: 'body.evidence_quotes[0]', message: '引文与冻结源码不一致' },
+      { ...binding, kind: 'risk_falsifier_hint', record_id: 'r-old', record_revision: 1, field: 'body.upstream_falsification', message: '旧反证缺失已由新修订补齐' },
+      { ...binding, kind: 'risk_falsifier_hint', record_id: 'r-warn', record_revision: 2, field: 'body.upstream_falsification', message: 'High/Critical 风险尚无一次窄域 Caller 反证记录' },
     ],
   }
   const activeWarnings = currentResultWarnings(runtimeResult)
