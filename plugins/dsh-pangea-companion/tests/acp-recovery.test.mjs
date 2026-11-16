@@ -389,8 +389,18 @@ for (const mode of ['late-tool', 'repeat-late-tool', 'unconfirmed-prompt', 'save
       return { confirmed: true, outcome }
     },
   }
-  const options = { dataRoot, cwd: dataRoot, runId: 'late-run', providerId: 'fixture', signal: controller.signal, progressPolicy,
-    onEvent: event => { events.push(event); if (event.stage === 'source_first_late_response') released.resolve() },
+  const options = { dataRoot, cwd: dataRoot, runId: 'late-run', providerId: 'fixture', signal: controller.signal,
+    // Keep the intentional pending-turn timeout, but allow real Windows I/O to
+    // finish dispatching it. A 20 ms timer instead tests pre-dispatch recovery.
+    progressPolicy: { ...reconciliationPolicy, warnMs: 250, idleMs: 500 },
+    onEvent: async event => {
+      events.push(event)
+      if (event.stage === 'source_first_late_response') released.resolve()
+      // Model Windows log/binding latency before the pending tool is dispatched.
+      if (event.stage === 'source_first_acp_request' && event.status === 'start') {
+        await new Promise(resolve => setTimeout(resolve, 80))
+      }
+    },
     subagents: { start: async (_, request) => { diagnostic = request.onDiagnostic; return worker } },
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }

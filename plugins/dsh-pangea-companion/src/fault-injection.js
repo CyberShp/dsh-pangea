@@ -8,6 +8,7 @@ import path from 'node:path'
 import { writeTaskStoreFile } from './task-store.js'
 import { caseIdentity } from './case-review-projection.js'
 import { caseContentHash } from './case-review-store.js'
+import { withGitLongPaths } from './repositories/git-environment.js'
 
 const execute = promisify(execFile)
 const activeStates = new Set(['preparing', 'generating', 'pushing'])
@@ -23,10 +24,10 @@ const cleanError = error => {
 export async function injectionGit(cwd, args, signal) {
   try {
     // Keep the process cwd short on Windows; Git handles the long repository path via -C.
-    const result = await execute('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], {
+    const result = await withGitLongPaths(env => execute('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], {
       signal, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' },
-    })
+      env: { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' },
+    }), { signal, cwd })
     return result.stdout.trimEnd()
   } catch (error) {
     if (error.code === 'ENOENT') throw serviceError('生成和推送打桩代码需要 Git，请安装 Git 或将其加入 PATH；普通分析不受影响')
