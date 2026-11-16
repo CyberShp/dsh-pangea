@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { classifyRiskGrounding, summarizeIncrementalInputs } from '../src/risk-and-incremental-insights.js'
+import { caseCoverageBasisProjection, caseFeasibilityProjection, caseFeasibilitySummary } from '../src/case-evidence.js'
 import { currentResultWarnings } from '../src/result-warning-projection.js'
 import { sourceFirstProjection } from '../src/source-first-projection.js'
 import { summarizeRun } from '../src/reader.js'
@@ -155,4 +156,16 @@ test('summarizeRun projects incremental SHA256 change summary and ignores symlin
   assert.equal(escapedSummary.incremental_summary.rules_changed, null)
   assert.equal(escapedSummary.incremental_summary.changed_files.length, 0)
   assert.equal(summarizeIncrementalInputs({}), null)
+})
+
+test('case evidence and feasibility projections use actionable Chinese guidance instead of defensive legalese', () => {
+  const basis = caseCoverageBasisProjection({ purpose: 'coverage', coverage_refs: ['GAP-1'] }, [{ coverage_id: 'GAP-1' }])
+  const feasibility = caseFeasibilityProjection({ execution_readiness: 'needs_instrumentation' })
+  const summary = caseFeasibilitySummary({ total_cases: 10, ready_cases: 6 })
+  for (const text of [basis.disclaimer, feasibility.disclaimer, summary.disclaimer]) {
+    assert.doesNotMatch(text, /不代表|不能据此/)
+  }
+  assert.match(basis.disclaimer, /目标覆盖缺口/)
+  assert.match(feasibility.disclaimer, /环境或打桩条件/)
+  assert.match(summary.disclaimer, /执行准备度分布/)
 })

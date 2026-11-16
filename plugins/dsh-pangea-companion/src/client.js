@@ -221,7 +221,7 @@ window.__ModuleLoader__.load({
         const operation = ({ continue_agent: '续接原执行', dispatch_agent: '开始待执行任务', settle: '接收已完成提交', settle_action: '接收已完成提交', advance_workflow: '推进至下一阶段', finalize_report: '继续整理报告' })[item.operation] ?? '继续处理'
         return `${action?.title || action?.unit_id || '当前阶段任务'}：${operation}`
       })
-      const recovery = finished ? '本次 Run 已结束，已有交付与未解决事项均保留。'
+      const recovery = finished ? '本次分析已结束，已生成的结果与待处理项均已保存。'
         : stale ? '待重新读取当前状态后，确认是否可以继续。'
           : presentation.canResume
             ? [runtime.recovery?.summary, resumeTargets.length ? resumeTargets.join('；') : '按已保存检查点继续当前阶段。'].filter(Boolean).join('；')
@@ -679,7 +679,7 @@ window.__ModuleLoader__.load({
       const runId = current?.run_id || task?.run_id
       const runNumber = runId ? String(runId).match(/(\d+)$/)?.[1] : null
       return h('div', { className: 'pangea-task-header' }, header,
-        h('p', { className: 'pangea-task-context' }, [contextLabel, task?.repository || current?.repository, runId ? runNumber ? `RUN ${runNumber}` : '历史运行' : null].filter(Boolean).join(' · ')))
+        h('p', { className: 'pangea-task-context' }, [contextLabel, task?.repository || current?.repository, runId ? runNumber ? `RUN ${runNumber}` : '分析记录' : null].filter(Boolean).join(' · ')))
     }
     function TaskInfoAction({ task, current }) {
       const [open, setOpen] = React.useState(false)
@@ -4681,12 +4681,12 @@ window.__ModuleLoader__.load({
         return h('section', { className: 'b03-overview-card', style: { marginBottom: 18 }, 'aria-label': '增量分析来源' },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 } }, runIcon('GitBranch'),
             h('strong', null, origin.mode === 'changed-files' ? '基于源码变更的增量分析' : '基于已有结果的定向补充'),
-            inc ? h('span', { className: 'pangea-review-pill', 'data-status': 'info' }, inc.source_policy === 'current-working-tree' ? '工作区最新源码' : '沿用父 Run 冻结源码') : null,
+            inc ? h('span', { className: 'pangea-review-pill', 'data-status': 'info' }, inc.source_policy === 'current-working-tree' ? '工作区最新源码' : '沿用原任务源码快照') : null,
             inc?.rules_changed != null ? h('span', { className: 'pangea-review-pill', 'data-status': inc.rules_changed ? 'warn' : 'adopted' }, inc.rules_changed ? '内置规则已更新' : '分析规则一致') : null),
           h('p', { style: { margin: '8px 0', fontSize: 14, lineHeight: 1.8, whiteSpace: 'pre-wrap' } }, origin.instruction),
           inc ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px 18px', fontSize: 12, color: '#5e6773', padding: '8px 12px', background: '#f6f7f9', border: '1px solid #e6e9ef', borderRadius: 7, margin: '8px 0 10px' } },
-            h('span', null, h('strong', { style: { color: '#1d232a' } }, '范围聚焦：'), inc.selected_unit_ids.length ? `指定 ${inc.selected_unit_ids.length}${inc.parent_unit_count ? ` / ${inc.parent_unit_count}` : ''} 个单元` : inc.parent_unit_count ? `参考父 Run ${inc.parent_unit_count} 个单元` : '按本次要求规划'),
-            h('span', null, h('strong', { style: { color: '#1d232a' } }, '父记录参考：'), inc.selected_record_count ? `指定 ${inc.selected_record_count} 条记录` : '冻结父 Run 历史基线'),
+            h('span', null, h('strong', { style: { color: '#1d232a' } }, '范围聚焦：'), inc.selected_unit_ids.length ? `指定 ${inc.selected_unit_ids.length}${inc.parent_unit_count ? ` / ${inc.parent_unit_count}` : ''} 个单元` : inc.parent_unit_count ? `参考原任务 ${inc.parent_unit_count} 个单元` : '按本次要求规划'),
+            h('span', null, h('strong', { style: { color: '#1d232a' } }, '历史记录参考：'), inc.selected_record_count ? `指定 ${inc.selected_record_count} 条记录` : '引用原任务基线'),
             inc.changed_files.length ? h('span', null, h('strong', { style: { color: '#1d232a' } }, '文件 SHA256 核对：'), `共 ${inc.counts.declared} 处（实测修改 ${inc.counts.modified} · 哈希未变 ${inc.counts.unchanged}${inc.counts.missing ? ` · 缺失 ${inc.counts.missing}` : ''}）`) : null) : null,
           inc?.changed_files?.length ? h('details', { style: { margin: '6px 0 10px', fontSize: 12 } },
             h('summary', { style: { cursor: 'pointer', fontWeight: 600, color: '#365a7d' } }, `查看文件级字节差异核对（${inc.changed_files.length}）`),
@@ -4701,10 +4701,10 @@ window.__ModuleLoader__.load({
             const parent = taskItems.find(task => task.task_id === selectedTask.source_task_id && task.run_id === origin.parent_run_id
               && normalizedPathIdentity(task.data_root) === normalizedPathIdentity(selectedTask.data_root))
             if (parent) chooseTask(parent)
-            else showActionNotice(`来源任务已不在当前工作区，原 Run 为 ${origin.parent_run_id}。本次冻结参考仍可使用。`, true)
+            else showActionNotice(`来源任务已不在当前工作区（来源编号 ${origin.parent_run_id}），已冻结的参考内容仍可正常使用。`, true)
           } }, '查看来源分析', runIcon('ArrowUpRight')),
           h('span', { style: { marginLeft: 10, fontSize: 12, color: '#70767d' } }, origin.parent_run_id),
-          h('span', { style: { marginLeft: 12, fontSize: 12, color: '#70767d' } }, '父记录仅作历史基线参考，本页展示本次新增或重新核验的结果'))
+          h('span', { style: { marginLeft: 12, fontSize: 12, color: '#70767d' } }, '本页展示本次新增或重新核验的分析结论'))
       }
       async function deliverCurrentRun(propagate = false) {
         if (!current || !selectedTask) return
@@ -6058,10 +6058,10 @@ window.__ModuleLoader__.load({
                     : !attention.length ? muted(h(React.Fragment, null, h('strong', null, '当前没有待处理事项'), h('p', null, emptyTasks ? '从一个明确的源码范围开始，创建第一个分析任务。' : '继续查看分析任务，或阅读已经生成的报告。')))
                       : attention.slice(0, 4).map(task => h('article', { key: task.task_id, className: 'b06-attention' },
                         h('div', { className: 'b06-row' }, h('span', { className: 'b06-badge' }, task.status === 'failed' ? '运行失败' : '等待决定'), h('span', { className: 'b06-meta' }, taskRunLabel(task.run_id))),
-                        h('h3', null, taskDisplayName(task, runs.find(run => run.run_id === task.run_id))), h('p', null, task.status === 'failed' ? '本次分析未正常完成，请查看失败记录和可继续操作。' : text(task.needs_user_reason, '分析需要处理，请查看当前 Run 的处理方式。')),
+                        h('h3', null, taskDisplayName(task, runs.find(run => run.run_id === task.run_id))), h('p', null, task.status === 'failed' ? '本次分析未正常完成，请查看失败记录和可继续操作。' : text(task.needs_user_reason, '分析遇到待确认项，请打开任务查看处理建议。')),
                         h('div', { className: 'b06-attention-foot' }, h('span', { className: 'b06-meta' }, `${task.repository || '当前仓库'} · ${taskUpdatedLabel(task.updated_at)}`), button('查看处理方式', () => openTaskFromWorkbench(task), true))))),
               section('进行中的分析', available && running.length ? h('span', { className: 'b06-badge blue' }, `${running.length} 个运行中`) : null,
-                loadingHome ? skeleton(85) : !available ? muted('运行状态尚未读取，不推断任务是否已完成。') : !running.length ? muted(emptyTasks ? '创建分析后，可在这里接续运行。' : '当前没有进行中的分析。')
+                loadingHome ? skeleton(85) : !available ? muted('正在同步任务运行状态，请稍候刷新查看。') : !running.length ? muted(emptyTasks ? '创建分析后，可在这里接续运行。' : '当前没有进行中的分析。')
                   : running.slice(0, 4).map(task => h('div', { key: task.task_id, className: 'b06-running' }, h('span', { className: 'b06-icon' }, runIcon('ScanLine')),
                     h('div', null, h('strong', null, taskDisplayName(task, runs.find(run => run.run_id === task.run_id))), h('p', null, `${task.scenario === 'module-analysis' ? '源码区域分析' : '分析中'} · ${task.repository || '当前仓库'}`)), button('查看进度', () => openTaskFromWorkbench(task))))),
               h('div', { className: 'b06-shortcuts' }, [['ScanLine', '分析任务', '查看所有任务，接续分析与测试设计。', 'analysis'], ['Library', '测试资产', '管理资料、审核条目和可复用的方法论。', 'assets']].map(([glyph, title, copy, page]) =>
@@ -6209,7 +6209,7 @@ window.__ModuleLoader__.load({
                 h('th', { scope: 'col' }, '分析任务'),
                 h('th', { scope: 'col' }, '仓库 / 范围'),
                 h('th', { scope: 'col' }, '状态'),
-                h('th', { scope: 'col' }, 'Run / 运行过程'),
+                h('th', { scope: 'col' }, '运行过程'),
                 h('th', { scope: 'col' }, '更新时间'),
                 h('th', { scope: 'col' }, '操作'))),
               h('tbody', null, rows)))
@@ -6379,7 +6379,7 @@ window.__ModuleLoader__.load({
             analysisExecutorBlockedReason(selectedTask) ? h('p', { role: 'status', className: 'b03-task-subtitle' }, analysisExecutorBlockedReason(selectedTask)) : null,
             h('div', { className: 'b03-overview-hero' },
               h('div', null, h('h2', null, presentation.executionLabel),
-                h('p', null, selectedTask.status === 'failed' ? selectedTask.launch_error ?? '分析启动失败。' : '任务已保存，正在准备分析会话和 PANGEA Run。')),
+                h('p', null, selectedTask.status === 'failed' ? selectedTask.launch_error ?? '分析启动失败。' : '任务已保存，正在准备源码快照并启动分析。')),
               h('span', { style: styles.badge }, taskStatusLabel(selectedTask.status))),
             launchFailure ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
               h('strong', null, '启动错误 · ' + (launchFailure.stage ?? '未知阶段')),
@@ -6469,7 +6469,7 @@ window.__ModuleLoader__.load({
               progressAction ? progressActionLabel : testCases.length ? '评审测试用例' : reportAvailableFor(current) ? '查看分析报告' : '查看运行过程'))),
           presentation.failed ? h('div', { className: 'pangea-ui', style: { padding: 0, background: 'transparent' } }, h('p', { role: 'alert', className: 'notice danger' }, sourceFirstRecordBody(current.terminal_error || selectedTask.launch_error || current.blocking_reason || '未记录具体原因，请查看运行过程中的执行诊断。'))) : null,
           presentation.needsAttention && unresolvedItems.length ? h('section', { className: 'b03-overview-attention', role: 'alert' },
-            h('div', null, h('strong', null, unresolvedItems[0].text), h('p', null, '模型审核已移除，可保留未解决项并交付已有结果。')),
+            h('div', null, h('strong', null, unresolvedItems[0].text), h('p', null, '可直接保留待确认项并交付当前已生成的分析结果。')),
             h('button', { type: 'button', onClick: () => jump('workflow') }, '查看处理方式')) : null,
           ['warning', 'error'].includes(health?.status) ? renderHealthCard(false) : null,
           h('details', { className: 'run-execution-details pangea-result-execution' }, h('summary', null, '执行状态详情'), h(RunExecutionSummary, { current, task: selectedTask, stale: Boolean(error), compact: true })),
@@ -6482,7 +6482,7 @@ window.__ModuleLoader__.load({
                 summaryText ? h(TextPreview, { title: '结果摘要', value: [summaryText, summaryNote && summaryNote !== summaryText ? summaryNote : ''].filter(Boolean).join('\n\n'), renderBody: renderReadableBody }) : null),
               h('section', { className: 'b03-overview-card' },
                 h('div', { className: 'pangea-section-heading' }, h('h3', null, '分析发现与验证缺口'), h('span', { className: 'pangea-section-count' }, `${findingRows.length} 项展示`)),
-                findingRows.length ? h('ul', { className: 'pangea-finding-list' }, findingRows) : h('div', { className: 'b03-task-subtitle' }, collectionEmpty(testCases.length ? 'test_cases' : 'risks', '当前 Run 没有可展示的发现记录。')),
+                findingRows.length ? h('ul', { className: 'pangea-finding-list' }, findingRows) : h('div', { className: 'b03-task-subtitle' }, collectionEmpty(testCases.length ? 'test_cases' : 'risks', '当前任务暂无可展示的分析发现。')),
                 h('div', { className: 'b03-overview-copy b03-overview-findings-footer' }, findingsFooter,
                   h('button', { type: 'button', className: 'b03-task-run', onClick: () => jump('cases') }, '查看用例与预期验证'))),
               current.partial_delivery ? h('section', { className: 'b03-overview-card', role: 'status' },
@@ -6598,12 +6598,12 @@ window.__ModuleLoader__.load({
                 current?.incremental_summary ? h('p', { style: { fontSize: 13, color: '#5e6773', marginTop: 8 } },
                   `增量基线：源自 ${current.incremental_summary.parent_run_id}（${current.incremental_summary.mode === 'changed-files'
                     ? `指定文件 ${current.incremental_summary.counts.declared} 处，SHA256 实测修改 ${current.incremental_summary.counts.modified} 处、未变 ${current.incremental_summary.counts.unchanged} 处`
-                    : '沿用父 Run 冻结源码定向补充'}${current.incremental_summary.rules_changed == null ? '' : current.incremental_summary.rules_changed ? '；内置规则较父 Run 已更新' : '；内置规则哈希一致'}）。`) : null),
+                    : '沿用原任务源码快照定向补充'}${current.incremental_summary.rules_changed == null ? '' : current.incremental_summary.rules_changed ? '；内置分析规则已更新' : '；内置规则哈希一致'}）。`) : null),
               h('section', { id: outline[1][0] }, h('h3', null, '02 / 主要发现'),
                 reportFindings.length ? h('ol', { className: 'b03-report-findings' }, reportFindings.slice(0, 5).map((item, index) => h('li', { key: item.key }, h(TextPreview, { title: `分析发现 ${index + 1}`, value: item.body, renderBody: renderReadableBody }))))
                   : h('p', null, riskEnabled ? collectionEmpty('risks', '本次分析没有形成风险记录。') : '本次未启用风险分析。')),
               h('section', { id: outline[2][0] }, h('h3', null, '03 / 测试建议'),
-                h('p', null, testCases.length + ' 条设计用例覆盖主要路径、边界与异常。设计用例不代表已执行，也不代表实测覆盖率已提升。'),
+                h('p', null, testCases.length + ' 条设计用例覆盖主要路径、边界与异常；如需进入实测，可勾选后导出用例或发起代码打桩。'),
                 executionRuns.length ? h('p', null, executionRuns.length + ' 条测试执行记录已回传。') : null,
                 reviews?.injection_counts?.instrumented > 0 ? h('p', null, `已关联代码打桩用例 ${reviews.injection_counts.instrumented} 条，其中实测已回填 ${reviews.injection_counts.verified} 条（通过 ${reviews.injection_counts.passed} 条${reviews.injection_counts.failed ? ` · 未通过 ${reviews.injection_counts.failed} 条` : ''}）。`) : null),
               h('section', { id: outline[3][0] }, h('h3', null, '04 / 复核与限制'),
@@ -6650,25 +6650,25 @@ window.__ModuleLoader__.load({
               [check.unit_id, check.lens, check.object, check.conclusion, (Array.isArray(check.sites) ? check.sites : []).join('、')].map((value, i) => h('td', { key: i }, text(value, '未提供'))))))))) : null
         if (!risks.length && !riskQuery && riskSeverity === '全部') return h(React.Fragment, null,
           ledger,
-          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '独立风险记录'), h('p', null, riskReadError ? '当前风险资料读取异常，需要恢复读取后确认结果。' : isComplete ? '当前 Run 已结束，查看本轮实际形成的分析结论。' : '分析进行中，独立风险记录尚未发布。')), h('span', { style: styles.badge }, riskReadError ? '暂不可读取' : '0 条记录')),
+          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '独立风险记录'), h('p', null, riskReadError ? '当前风险资料读取异常，需要恢复读取后确认结果。' : isComplete ? '本次分析已完成，可结合业务流程与单元总结核对实现细节。' : '分析进行中，独立风险记录尚未发布。')), h('span', { style: styles.badge }, riskReadError ? '暂不可读取' : '0 条记录')),
           h('div', { className: 'b05-card', style: { textAlign: 'center', padding: '42px 28px 30px' } },
             h('div', { className: 'b04-progress-icon', style: { margin: '0 auto 20px' } }, runIcon('ScanSearch')),
             h('h2', { style: { fontSize: 21 } }, riskReadError ? '风险记录暂不可读取' : isComplete ? '本轮未形成独立风险记录' : '风险记录仍在形成'),
             h('p', { style: { maxWidth: 590, margin: '12px auto 22px', color: '#7c8585' } }, collectionEmpty('risks', isComplete
-              ? '这并不代表未检查范围安全。检查范围、排除理由与剩余不确定性，需结合分析单元总结和源码依据理解。'
-              : '当前记录尚未发布，不能据此判断没有风险。')),
+              ? '本轮未检出独立风险项；分析覆盖的源码范围与边界说明见分析概览及各单元总结。'
+              : '风险记录仍在整理中，完成后将在此处汇总展示。')),
             h('div', { className: 'b04-canvas-actions b04-empty-actions' },
               h('button', { type: 'button', onClick: () => jump('overview') }, '查看分析总结'),
               h('button', { type: 'button', onClick: () => jump('flows') }, '查看业务流程')),
             h('div', { className: 'b05-metrics', style: { textAlign: 'left', gridTemplateColumns: 'repeat(3,1fr)', margin: '35px 0 0' } },
-              metric('本次源码范围', Number.isInteger(current?.source_snapshot?.file_count) && current.source_snapshot.file_count >= 0 ? `${current.source_snapshot.file_count} 个文件` : '未记录', '当前 Run 冻结输入'),
+              metric('本次源码范围', Number.isInteger(current?.source_snapshot?.file_count) && current.source_snapshot.file_count >= 0 ? `${current.source_snapshot.file_count} 个文件` : '未记录', '本次分析源码范围'),
               metric('已分析单元', current?.analysis?.completed ?? 0, '逐项结论见单元总结'),
               metric('业务流程', businessFlows.length, '可继续查看路径与测试目标'))),
           h('div', { className: 'b05-detail-bottom' },
             h('section', { className: 'b05-card' }, h('h3', null, '接下来可以查看'),
               h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('flows') }, '业务流程与路径'),
               h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('cases') }, '测试用例')),
-            h('section', { className: 'b05-card' }, h('h3', null, '如何阅读这个结果'), h('p', null, '风险记录为空描述的是分析产物，不是整体安全保证。'), h('p', null, '调用方、构建条件和运行环境可能超出当前输入范围。'))))
+            h('section', { className: 'b05-card' }, h('h3', null, '如何阅读这个结果'), h('p', null, '建议结合业务流程路径与关键边界用例完成回归验证。'), h('p', null, '调用方入参、构建宏与目标运行环境可结合源码上下文进一步核对。'))))
         return h(React.Fragment, null,
           ledger,
           h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '需要关注的实现风险'), h('p', null, '从触发条件到代码依据，再到验证路径。')), h('span', { style: styles.badge }, `${risks.length} 条独立风险记录`)),
@@ -6708,7 +6708,7 @@ window.__ModuleLoader__.load({
 
       function renderRiskDetail() {
         const risk = riskById.get(screen.id)
-        if (!risk) return h('div', { className: 'b05-card', role: 'alert' }, '当前 Run 中找不到这条风险，可能是 Run 已刷新或切换。')
+        if (!risk) return h('div', { className: 'b05-card', role: 'alert' }, '未找到该条风险记录，可能当前任务已刷新或切换。')
         const semantics = risk.upstream_semantics
         const preview = sourcePreview.key === previewKey ? sourcePreview : { status: 'loading' }
         const snippet = preview.status === 'ready' ? preview.value : null
@@ -6739,7 +6739,7 @@ window.__ModuleLoader__.load({
               h('h4', null, '可能影响'), renderReadableBody(text(risk.impact || risk.residual_effect, '具体影响未提供。')),
               h('h4', null, '预期行为'), renderReadableBody(text(risk.expectation, '预期行为尚未记录。')),
               hasText(risk.blackbox_proof) ? h('div', null, h('h4', null, '黑盒证明'), renderReadableBody(risk.blackbox_proof)) : null,
-              h('div', { className: 'b05-source-context' }, '当前是待核对的分析风险；实际暴露程度需结合调用方与运行环境确认。')),
+              h('div', { className: 'b05-source-context' }, '验证建议：结合上游调用方入参限制与目标运行环境确认实际触发条件。')),
             h('section', { className: 'b05-card pangea-reading-card' }, h('h3', null, '触发条件'),
               renderReadableBody(text(risk.trigger, '触发条件未提供。')),
               hasText(risk.system_result) ? h('div', null, h('h4', null, '系统结果'), renderReadableBody(risk.system_result)) : null,
@@ -6755,7 +6755,7 @@ window.__ModuleLoader__.load({
               snippet ? h('div', { className: 'b05-source-code', style: { maxHeight: 225 } }, snippet.lines.map(line => h('div', {
                 key: line.number, className: 'b05-source-code-line', 'data-target': line.target ? 'true' : undefined }, h('span', null, line.number), h('code', null, line.text || ' ')))) : null,
               preview.status === 'error' ? h('p', { role: 'alert' }, `源码暂不可读：${preview.error}`) : null,
-              h('p', null, previewEvidence?.observation || '这里只描述当前冻结源码片段，不推断未读取的调用关系。'),
+              h('p', null, previewEvidence?.observation || '点击下方入口可展开完整源码上下文核对调用链。'),
               previewEvidence?.location ? h('button', { type: 'button', className: 'b04-link', onClick: () => setSourceDrawerOpen(true) }, '查看源码上下文 ↗') : null)),
           h('div', { className: 'b05-detail-bottom' },
             h('section', { className: 'b05-card' }, h('h3', null, `关联测试用例 · ${linked.length}`),
@@ -6888,7 +6888,7 @@ window.__ModuleLoader__.load({
               },
                 h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
                   h('strong', { style: { fontSize: 15, color: '#25292e' } }, taskDisplayName(task, linkedRun)),
-                  h('span', { className: `b03-task-status ${taskStatusTone(task.status)}` }, task.run_id ? taskRunLabel(task.run_id) : '尚无 Run')),
+                  h('span', { className: `b03-task-status ${taskStatusTone(task.status)}` }, task.run_id ? taskRunLabel(task.run_id) : '待生成结果')),
                 h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginTop: 6, fontSize: 12, color: '#6b7280' } },
                   h('span', null, scopeText),
                   h('span', { style: { color: task.run_id ? '#b62836' : '#8a919a', fontWeight: task.run_id ? 600 : 400 } }, task.run_id ? '选择用例与查看已有打桩任务 →' : '尚未生成分析结果')))
@@ -7055,19 +7055,19 @@ window.__ModuleLoader__.load({
         const hasCoverage = item.purpose === 'coverage' || refs.length > 0
         const hasSummary = item.summary != null && sourceFirstRecordBody(item.summary).trim()
         const hasEvidence = Array.isArray(item.source_evidence) ? item.source_evidence.length > 0 : item.source_evidence != null && sourceFirstRecordBody(item.source_evidence).trim()
-        if (!hasSummary && !hasCoverage && !hasEvidence && !caseEvidence.items.length && !caseEvidence.unresolved.length) return h('p', { role: 'status' }, '当前用例未提供拟覆盖目标或分析依据；不推断函数或分支覆盖范围。')
+        if (!hasSummary && !hasCoverage && !hasEvidence && !caseEvidence.items.length && !caseEvidence.unresolved.length) return h('p', { role: 'status' }, '当前用例未单独附带覆盖率缺口引用，可直接核对关联源码与操作步骤。')
         const frozen = Array.isArray(details.coverage_gaps) ? details.coverage_gaps : null
         const ids = [...new Set(refs.map(ref => typeof ref === 'string' ? ref : ref?.coverage_id).filter(id => typeof id === 'string' && id.trim()))]
         const invalid = refs.some(ref => { const id = typeof ref === 'string' ? ref : ref?.coverage_id; return typeof id !== 'string' || !id.trim() })
         return h('div', { key: caseIdentity(item), className: 'pangea-case-basis', 'aria-label': '拟覆盖依据与冻结覆盖输入' },
-          h('p', { className: 'b05-subtle' }, '以下是测试设计意图与来源记录，不是本用例的实测覆盖结果。'),
+          h('p', { className: 'b05-subtle' }, '以下展示该用例对应的设计依据与源码关联记录。'),
           renderCaseCodeLinks(),
           hasSummary ? h('details', { className: 'pangea-basis-original', 'data-view-key': 'case-basis-summary' }, h('summary', null, '用例说明（原文）'), renderReadableBody(item.summary))
             : item.purpose === 'coverage' ? h('p', null, '未提供逐用例 summary；具体缺口、普通操作不足及新增触发条件尚未说明。') : null,
           hasEvidence ? h('details', { className: 'pangea-basis-original', 'data-view-key': 'case-basis-evidence' }, h('summary', null, '源码依据（原文）'), renderReadableBody(item.source_evidence)) : null,
           hasCoverage ? h('section', null, h('h4', null, '冻结覆盖输入'),
-          h('p', { className: 'b05-subtle' }, '以下仅按显式引用关联冻结覆盖输入；引用匹配不代表已确认缺口或已完成补测，正计数记录可能只是已覆盖上下文。'),
-          !ids.length ? h('p', null, '未核实：未提供有效覆盖引用，不能据此认定为补测。') : null,
+          h('p', { className: 'b05-subtle' }, '以下按用例声明的引用编号匹配导入的覆盖率记录（正计数记录可能只是已覆盖上下文），供补测核对参考。'),
+          !ids.length ? h('p', null, '未提供有效覆盖引用，请结合源码位置核对补测范围。') : null,
           nonArrayRefs ? h('div', null, h('p', null, '未核实：原始 coverage_refs 不是数组；以下仅保留原文与候选匹配，不作为有效引用。'), renderReadableBody(item.coverage_refs)) : null,
           invalid ? h('p', null, '未核实：存在无效覆盖引用，请核对原始记录。') : null,
           ids.map(id => {
@@ -7083,7 +7083,7 @@ window.__ModuleLoader__.load({
 
       function renderCaseDetail() {
         const item = caseById.get(screen.id)
-        if (!item) return h('div', { className: 'b05-card', role: 'alert' }, '当前 Run 中找不到这条测试用例，可能是 Run 已刷新或切换。')
+        if (!item) return h('div', { className: 'b05-card', role: 'alert' }, '未找到该条测试用例，可能当前任务已刷新或切换。')
         const pairs = Array.isArray(item.step_pairs) && item.step_pairs.length ? item.step_pairs
           : (Array.isArray(item.steps) ? item.steps : []).map((action, index) => ({ action, expected: item.expected_results?.[index] }))
         const preparation = casePreparationText(item)
@@ -7145,7 +7145,7 @@ window.__ModuleLoader__.load({
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
-                h('p', { className: 'b05-subtle' }, '以下为已设计参数组合，不单独计为独立用例，也不代表各组合已实测通过。'),
+                h('p', { className: 'b05-subtle' }, '以下参数组合隶属同一条用例，执行时可按组合逐项输入并核对预期。'),
                 item.variants.map((variant, index) => h('article', { key: index, className: 'pangea-case-variant', 'data-variant-id': variant.variant_id,
                   'aria-current': screen.variant_id != null && screen.variant_id === variant.variant_id ? 'true' : undefined,
                   style: screen.variant_id != null && screen.variant_id === variant.variant_id ? { borderLeft: '3px solid #3157d5', paddingLeft: 10, background: '#eef3ff' } : undefined },

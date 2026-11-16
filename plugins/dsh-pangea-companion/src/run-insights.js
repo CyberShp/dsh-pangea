@@ -264,7 +264,7 @@ export function buildRunInsights(current = {}, selected = null, { stale = false,
     pending.push({ key: `execution:${item.action_id}`, source: 'execution', source_label: '执行状态', kind: 'execution', label: '执行待处理',
       title: byUnit.get(item.unit_id)?.title ?? selectedInfo.title, reason: string(item.reason), action: null,
       declared_status: item.status, ref: { action_id: item.action_id, record_id: null, revision: null, unit_id: item.unit_id ?? null },
-      note: '执行状态记录，不代表分析结论有误。' })
+      note: '属于运行执行状态记录，可结合单元结果继续处理。' })
   }
   if (stale) notices.push({ code: 'stale', message: '正在显示上次读取的记录，当前执行状态尚未刷新。' })
   if (current.partial_delivery) notices.push({ code: 'partial_delivery', message: '本次为部分交付；已保存内容不代表全部分析或修正完成。' })
@@ -276,10 +276,10 @@ export function buildRunInsights(current = {}, selected = null, { stale = false,
   }
   let availability = unreadable.length ? rows.length ? 'partial' : 'unavailable' : 'readable'
   if (!Array.isArray(current.source_first_records)) {
-    availability = 'unavailable'; notices.push({ code: 'missing_records', message: '阶段记录尚未读取，不能据此认定没有产物。' })
+    availability = 'unavailable'; notices.push({ code: 'missing_records', message: '阶段记录正在同步中，请稍候刷新查看。' })
   } else if (!selectedActions.length && selectedInfo.status === 'pending') availability = 'not_started'
   else if (!selectedActions.length && !deliveryStage && !['preparing', 'planning'].includes(stage)) {
-    notices.push({ code: 'no_stage_records', message: '当前没有该阶段的已保存记录，不据此判断覆盖情况。' })
+    notices.push({ code: 'no_stage_records', message: '该阶段暂无独立保存的阶段记录，请直接查看最终汇总结果。' })
   }
   const complete = availability === 'readable' || availability === 'not_started'
   return { ...empty, availability, notices, scope,

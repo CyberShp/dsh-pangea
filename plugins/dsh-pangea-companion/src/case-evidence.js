@@ -147,7 +147,7 @@ export function caseCoverageBasisProjection(item, coverageGaps) {
   })
   return { association: 'planned', raw, references, available, valid_container: validContainer,
     summary: item?.summary ?? bodyOf(item).summary ?? null,
-    disclaimer: '仅表示拟覆盖关联，不代表实际覆盖、已执行或验证通过。' }
+    disclaimer: '展示设计阶段关联的目标覆盖缺口，实测结果以打桩或执行记录为准。' }
 }
 
 export function caseFeasibilityProjection(item) {
@@ -162,7 +162,7 @@ export function caseFeasibilityProjection(item) {
     entry: item?.entry ?? body.entry ?? null,
     source_evidence: item?.source_evidence ?? body.source_evidence ?? null,
     execution_status: item?.execution_status ?? body.execution_status ?? null,
-    disclaimer: '执行条件声明不代表已经执行或验证通过。' }
+    disclaimer: '描述执行前需准备的环境或打桩条件。' }
 }
 
 export function caseFeasibilitySummary(quality) {
@@ -177,5 +177,5 @@ export function caseFeasibilitySummary(quality) {
     blackbox_target_reason: source.blackbox_target_reason ?? null,
     has_legacy_groups: typeof source.has_legacy_groups === 'boolean' ? source.has_legacy_groups : null,
     status: object(quality) ? 'reported' : 'unknown', source_summary: quality ?? null,
-    disclaimer: '这里只展示执行条件声明，不代表实际执行通过率；未提供的指标保持未知。' }
+    disclaimer: '汇总用例执行准备度分布，辅助评估手工验证与打桩工作量。' }
 }
