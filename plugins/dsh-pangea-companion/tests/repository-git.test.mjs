@@ -150,16 +150,26 @@ test('snapshot separates CRLF-only differences without hiding edits, missing fil
 test('Git wrappers enable longpaths per invocation without changing repository configuration', async t => {
   const f = await fixture(t)
   await sourceGit(f.source, ['config', '--local', 'core.longpaths', 'false'])
+  // Reproduce the incident: a normal-length repository root with a deep tracked file.
+  // A >260-character repository root hits a separate Git chdir/Windows spawn limit.
+  const relative = path.join(...Array.from({ length: 5 }, (_, i) => `tracked-${i}-${'x'.repeat(20)}`), 'target.c')
+  await mkdir(path.dirname(path.join(f.source, relative)), { recursive: true })
+  await writeFile(path.join(f.source, relative), 'int deep(void) { return 0; }\n')
+  await sourceGit(f.source, ['add', '.'])
+  await sourceGit(f.source, ['commit', '-m', 'deep tracked file'])
+  const commit = await sourceGit(f.source, ['rev-parse', 'HEAD'])
   for (const git of [sourceGit, injectionGit]) {
     assert.equal(await git(f.source, ['config', '--get', 'core.longpaths']), 'true')
     assert.equal(await git(f.source, ['config', '--local', '--get', 'core.longpaths']), 'false')
-    const target = path.join(f.root, ...Array.from({ length: 6 }, (_, i) => `long-workspace-${i}-${'x'.repeat(32)}`))
+    const target = path.join(f.root, ...Array.from({ length: 3 }, (_, i) => `workspace-${i}-${'x'.repeat(20)}`))
+    assert.ok(target.length < 240, `repository root must stay below MAX_PATH: ${target.length}`)
+    assert.ok(path.join(target, relative).length > 280, 'tracked file must exceed MAX_PATH')
     await mkdir(path.dirname(target), { recursive: true })
     await git(f.root, ['clone', '--no-checkout', '--', f.source, target])
-    await git(target, ['checkout', '--detach', f.commit])
+    await git(target, ['checkout', '--detach', commit])
     assert.equal(await git(target, ['status', '--porcelain']), '')
     assert.equal(await git(target, ['branch', '--show-current']), '')
-    assert.ok((await readFile(path.join(target, 'target.c'))).length > 0)
+    assert.ok((await readFile(path.join(target, relative))).length > 0)
     await rm(target, { recursive: true, force: true })
   }
 })
