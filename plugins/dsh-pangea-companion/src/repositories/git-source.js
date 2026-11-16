@@ -8,7 +8,7 @@ import { writeTaskStoreFile } from '../task-store.js'
 const exec = promisify(execFile)
 export async function sourceGit(cwd, args) {
   try {
-    return (await exec('git', ['-c', 'core.hooksPath=', ...args], { cwd, windowsHide: true, timeout: args[0] === 'clone' ? 1800000 : 30000, maxBuffer: 32 * 1024 * 1024,
+    return (await exec('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', ...args], { cwd, windowsHide: true, timeout: args[0] === 'clone' ? 1800000 : 30000, maxBuffer: 32 * 1024 * 1024,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' } })).stdout.trimEnd()
   } catch (error) {
     if (error.code === 'ENOENT') throw Object.assign(new Error('未安装 Git；本地目录分析仍可使用，克隆和打桩需要 Git'), { code: 'GIT_MISSING' })
@@ -42,9 +42,13 @@ export async function inspectSource(sourcePath) {
     if (await realpath(top) !== root) return { kind: 'folder', path: root }
     const commit = await sourceGit(root, ['rev-parse', '--verify', 'HEAD^{commit}'])
     const branch = await sourceGit(root, ['branch', '--show-current'])
-    const dirty = Boolean(await sourceGit(root, ['status', '--porcelain']))
+    const status = await sourceGit(root, ['status', '--porcelain'])
+    const dirty = Boolean(status)
+    const entries = status.split('\n').filter(Boolean)
+    const tracked_changes = entries.some(line => !line.startsWith('?? '))
+    const untracked_files = entries.some(line => line.startsWith('?? '))
     let remote = ''; try { remote = await sourceGit(root, ['remote', 'get-url', '--push', 'origin']) } catch {}
-    return { kind: 'git', path: root, commit, branch, dirty, remote: remote.replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@') }
+    return { kind: 'git', path: root, commit, branch, dirty, tracked_changes, untracked_files, remote: remote.replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@') }
   } catch (error) { return { kind: 'git-unavailable', path: root, error: error.message } }
 }
 function configPath(dataRoot, repoId) {
@@ -88,7 +92,7 @@ export async function compareSnapshot(gitRoot, ref, snapshotRoot) {
   if (!stat.isDirectory()) throw new Error('分析源码快照目录无效')
   const tree = await sourceGit(gitRoot, ['ls-tree', '-r', '-z', validateRef(ref)])
   const blobs = new Map(tree.split('\0').filter(Boolean).map(line => { const split = line.indexOf('\t'); return [line.slice(split + 1), line.slice(0, split).split(' ')[2]] }))
-  let compared = 0, changed = 0; const files = []
+  let compared = 0, changed = 0, eolOnly = 0; const files = [], eolFiles = []
   const walk = async (directory, prefix = '') => {
     for (const item of await readdir(directory, { withFileTypes: true })) {
       if (item.name === '.git') continue
@@ -98,12 +102,22 @@ export async function compareSnapshot(gitRoot, ref, snapshotRoot) {
         const bytes = await readFile(file), expected = blobs.get(relative)
         const actual = createHash(expected?.length === 64 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex')
         compared++
-        if (expected !== actual) { changed++; if (files.length < 30) files.push(relative) }
+        if (expected !== actual) {
+          // Classify only exact CRLF -> LF equivalence. Never execute clean filters
+          // or rewrite snapshots; binary/invalid UTF-8 and all other changes remain visible.
+          let normalized
+          if (expected && !bytes.includes(0)) {
+            try { normalized = Buffer.from(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes).replace(/\r\n/g, '\n')) } catch {}
+          }
+          const eolHash = normalized && createHash(expected.length === 64 ? 'sha256' : 'sha1').update(`blob ${normalized.length}\0`).update(normalized).digest('hex')
+          if (expected && eolHash === expected) { eolOnly++; if (eolFiles.length < 30) eolFiles.push(relative) }
+          else { changed++; if (files.length < 30) files.push(relative) }
+        }
       }
     }
   }
   await walk(snapshotRoot)
-  return { available: true, compared_count: compared, changed_count: changed, files }
+  return { available: true, compared_count: compared, changed_count: changed, files, eol_only_count: eolOnly, eol_only_files: eolFiles }
 }
 
 export async function configureRepository(dataRoot, repoId, input) {

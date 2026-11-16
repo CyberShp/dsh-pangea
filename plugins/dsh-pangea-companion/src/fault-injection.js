@@ -14,11 +14,14 @@ const hash = value => createHash('sha256').update(value).digest('hex')
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)
 const serviceError = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode })
 const inside = (root, file) => { const r = path.relative(root, file); return r && r !== '..' && !r.startsWith(`..${path.sep}`) && !path.isAbsolute(r) }
-const cleanError = error => String(error?.stderr || error?.message || error).replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@').slice(-6000)
+const cleanError = error => {
+  const message = String(error?.stderr || error?.message || error).replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@')
+  return message.length <= 6000 ? message : `${message.slice(0, 2900)}\n…错误输出过长，中间已省略…\n${message.slice(-2900)}`
+}
 
 export async function injectionGit(cwd, args, signal) {
   try {
-    const result = await execute('git', ['-c', 'core.hooksPath=', ...args], {
+    const result = await execute('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', ...args], {
       cwd, signal, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' },
     })

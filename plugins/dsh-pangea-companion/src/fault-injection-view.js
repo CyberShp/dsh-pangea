@@ -185,6 +185,7 @@ export function createFaultInjectionPanel(React) {
                 h('legend', null, h('label', null, h('input', { type: 'checkbox', checked: repo.enabled !== false, disabled: working, 'aria-label': `本次包含 ${repo.repo_id}`, onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), readable(repo.repo_id))),
                 h('p', null, '当前源码：', sourceLabel(repo.source)),
                 repo.comparison?.changed_count ? h('p', null, `分析快照中有 ${repo.comparison.changed_count} 个文件与目标提交不同。这是源码版本比较，不是本次打桩修改文件数；生成时将基于目标代码重新定位桩点。`) : null,
+                repo.comparison?.eol_only_count ? h('p', null, `${repo.comparison.eol_only_count} 个文件仅 CRLF/LF 换行符不同，单独记录，不计入内容变化。`) : null,
                 repo.comparison?.error ? h('p', { role: 'alert' }, repo.comparison.error) : null,
                 h('p', null, `Git 仓库：${repo.source_path}；远端：${repo.remote}；个人分支：${repo.personal_branch || '未配置'}`)))),
             h('p', { className: 'b05-subtle' }, '先在独立副本中生成差异，查看后再提交并推送到项目个人分支；不会创建任务分支，不带入未提交内容。'),

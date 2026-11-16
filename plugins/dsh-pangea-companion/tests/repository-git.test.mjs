@@ -7,7 +7,7 @@ import { Readable } from 'node:stream'
 import { sourceGit, inspectSource, compareSnapshot, readRepositorySettings } from '../src/repositories/git-source.js'
 import { importRepository, repositoryStatus } from '../src/repositories/import.js'
 import { repositoryRouteHandler } from '../src/index.js'
-import { FaultInjectionService } from '../src/fault-injection.js'
+import { FaultInjectionService, injectionGit } from '../src/fault-injection.js'
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'project-git-'))
@@ -109,4 +109,73 @@ test('plain project → link Git → compare analysis snapshot → relocate on t
   assert.equal((await f.request({ action: 'configure-repository', repository_name: 'target', pipeline_url: 'https://ci.example.test/new' })).code, 200)
   assert.equal((await service.defaults(f.dataRoot, run)).pipeline_url, 'https://ci.example.test/new')
   assert.equal((await service.read(f.dataRoot, 'run', next.id)).pipeline_url, 'https://ci.example.test/pipeline')
+})
+
+
+test('snapshot separates CRLF-only differences without hiding edits, missing files, BOM or binary data', async t => {
+  const f = await fixture(t), snapshot = path.join(f.root, 'snapshot-eol')
+  await mkdir(snapshot)
+  await sourceGit(f.source, ['config', 'core.autocrlf', 'false'])
+  const originals = {
+    'text.c': Buffer.from('first\nsecond\n'),
+    'bom.c': Buffer.from('\ufefffirst\n'),
+    'binary.dat': Buffer.from([0, 10, 65]),
+    'invalid.dat': Buffer.from([255, 10, 65]),
+  }
+  for (const [name, bytes] of Object.entries(originals)) await writeFile(path.join(f.source, name), bytes)
+  await sourceGit(f.source, ['add', '.'])
+  await sourceGit(f.source, ['commit', '-m', 'line ending fixtures'])
+  const ref = await sourceGit(f.source, ['rev-parse', 'HEAD'])
+  const snapshots = {
+    'text.c': Buffer.from('first\r\nsecond\r\n'),
+    'bom.c': Buffer.from('\ufefffirst\r\n'),
+    'binary.dat': Buffer.from([0, 13, 10, 65]),
+    'invalid.dat': Buffer.from([255, 13, 10, 65]),
+    'missing.c': Buffer.from('new\r\n'),
+  }
+  for (const [name, bytes] of Object.entries(snapshots)) await writeFile(path.join(snapshot, name), bytes)
+  const result = await compareSnapshot(f.source, ref, snapshot)
+  assert.equal(result.eol_only_count, 2)
+  assert.equal(result.changed_count, 3)
+  assert.deepEqual(result.eol_only_files.sort(), ['bom.c', 'text.c'])
+  for (const [name, bytes] of Object.entries(snapshots)) assert.deepEqual(await readFile(path.join(snapshot, name)), bytes)
+  await writeFile(path.join(snapshot, 'text.c'), 'first\r\nchanged\r\n')
+  const changed = await compareSnapshot(f.source, ref, snapshot)
+  assert.equal(changed.changed_count, 4)
+  assert.equal(changed.eol_only_count, 1)
+  await writeFile(path.join(snapshot, 'bom.c'), 'first\r\n')
+  assert.equal((await compareSnapshot(f.source, ref, snapshot)).changed_count, 5)
+})
+
+test('Git wrappers enable longpaths per invocation without changing repository configuration', async t => {
+  const f = await fixture(t)
+  await sourceGit(f.source, ['config', '--local', 'core.longpaths', 'false'])
+  for (const git of [sourceGit, injectionGit]) {
+    assert.equal(await git(f.source, ['config', '--get', 'core.longpaths']), 'true')
+    assert.equal(await git(f.source, ['config', '--local', '--get', 'core.longpaths']), 'false')
+    const target = path.join(f.root, ...Array.from({ length: 6 }, (_, i) => `long-workspace-${i}-${'x'.repeat(32)}`))
+    await mkdir(path.dirname(target), { recursive: true })
+    await git(f.root, ['clone', '--no-checkout', '--', f.source, target])
+    await git(target, ['checkout', '--detach', f.commit])
+    assert.equal(await git(target, ['status', '--porcelain']), '')
+    assert.equal(await git(target, ['branch', '--show-current']), '')
+    assert.ok((await readFile(path.join(target, 'target.c'))).length > 0)
+    await rm(target, { recursive: true, force: true })
+  }
+})
+
+
+test('current source distinguishes an untracked Agent directory from tracked source edits', async t => {
+  const f = await fixture(t)
+  await mkdir(path.join(f.source, '.cac'))
+  await writeFile(path.join(f.source, '.cac', 'session.txt'), 'fixture')
+  const untracked = await inspectSource(f.source)
+  assert.equal(untracked.dirty, true)
+  assert.equal(untracked.tracked_changes, false)
+  assert.equal(untracked.untracked_files, true)
+  const { sourceLabel } = await import('../src/repository-settings-view.js')
+  assert.match(sourceLabel(untracked), /有未跟踪文件/)
+  assert.doesNotMatch(sourceLabel(untracked), /有未提交修改/)
+  await writeFile(path.join(f.source, 'target.c'), 'changed source')
+  assert.match(sourceLabel(await inspectSource(f.source)), /有未提交修改.*有未跟踪文件/)
 })

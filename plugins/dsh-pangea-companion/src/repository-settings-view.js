@@ -1,5 +1,5 @@
 export function sourceLabel(source) {
-  if (source?.kind === 'git') return `Git · ${source.branch || '固定提交'} · ${source.commit.slice(0, 12)}${source.dirty ? ' · 有未提交修改' : ''}${source.remote ? '' : ' · 未配置远端'}`
+  if (source?.kind === 'git') return `Git · ${source.branch || '固定提交'} · ${source.commit.slice(0, 12)}${source.tracked_changes || (source.dirty && source.tracked_changes === undefined) ? ' · 有未提交修改' : ''}${source.untracked_files ? ' · 有未跟踪文件' : ''}${source.remote ? '' : ' · 未配置远端'}`
   if (source?.kind === 'folder') return '本地文件夹 · 可直接分析 · 打桩前关联 Git 仓库'
   return source?.error || '尚未读取 Git 状态'
 }
