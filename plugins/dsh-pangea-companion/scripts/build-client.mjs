@@ -18,6 +18,7 @@ const SHARED = [
   ['__overviewFindings', 'src/overview-findings.js'],
   ['__caseReviewProjection', 'src/case-review-projection.js'],
   ['__repositorySettingsView', 'src/repository-settings-view.js'],
+  ['__agentModelSelection', 'src/agent-model-selection.js'],
   ['__faultInjectionView', 'src/fault-injection-view.js'],
   ['__reviewPresentation', 'src/review-presentation.js'],
   ['__runInsights', 'src/run-insights.js'],

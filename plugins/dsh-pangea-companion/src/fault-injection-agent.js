@@ -3,6 +3,11 @@ import { createDshSession, runtimeService } from './workbench-api.js'
 import { requireAgentModel } from './agent-models.js'
 import { workspaceRoot } from './pangea-api.js'
 
+async function executionDiagnostic(worker, outcome) {
+  if (outcome.diagnostic) return outcome.diagnostic
+  try { return (await worker.readDiagnostics?.())?.errorSummary || '' } catch { return '' }
+}
+
 // A separate user-requested code-generation session. It never binds, settles or
 // changes the source-first analysis action that produced the selected cases.
 export function createInjectionGenerator(runtime, { resolveModel = requireAgentModel, createSession = createDshSession } = {}) {
@@ -22,9 +27,15 @@ export function createInjectionGenerator(runtime, { resolveModel = requireAgentM
       await onStarted({ owner_session_id: sessionId, agent_session_id: String(worker.id), remote_session_id: worker.remoteSessionId })
       const outcome = await worker.result
       signal.throwIfAborted()
-      if (outcome.stopReason !== 'completed') throw new Error(outcome.diagnostic || `打桩生成结束：${outcome.stopReason}`)
+      if (outcome.stopReason !== 'completed') throw new Error(await executionDiagnostic(worker, outcome) || `打桩生成结束：${outcome.stopReason}`)
       try { return JSON.parse(await readFile(outputPath, 'utf8')) }
-      catch (error) { throw new Error(`打桩生成结果不可读取：${error.message}`) }
+      catch (error) {
+        if (['ENOENT', 'ENOTDIR'].includes(error.code)) {
+          const diagnostic = await executionDiagnostic(worker, outcome)
+          throw new Error(`打桩执行器已结束，但未交付结果文件。请查看执行器会话后重新生成。任务 ID：${record.id}；执行器会话：${worker.remoteSessionId || worker.id || '未提供'}${diagnostic ? `；${diagnostic}` : ''}`)
+        }
+        throw new Error(`打桩生成结果不可读取：${error.message}`)
+      }
     } finally { await worker?.dispose?.() }
   }
 }

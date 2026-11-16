@@ -490,3 +490,44 @@ test('queued submission can be cancelled without waiting for the branch owner', 
     assert.equal((await service.read(f.dataRoot, f.run.run_id, a.id)).status, 'pushing')
   } finally { clearTimeout(timer); release(); await wait(service) }
 })
+
+test('different local/remote branches support consecutive pushes without switching the user worktree', async t => {
+  const f = await fixture(t), repo = f.repositories[0]
+  await injectionGit(repo.source_path, ['branch', 'personal-local'])
+  await writeFile(path.join(f.dataRoot, '.pangea', 'repository-settings', 'target.json'), JSON.stringify({ git_path: repo.source_path, personal_branch: 'personal-local', remote: 'origin', remote_branch: 'main' }))
+  const service = new FaultInjectionService({ generate: async ({ record }) => {
+    const current = await readFile(path.join(record.repositories[0].path, 'main.c'), 'utf8')
+    const result = generated(record)
+    result.edits = [{ repo_id: 'target', path: 'main.c', before: current, after: current + `/* task ${record.id} */\n` }]
+    return result
+  } })
+  t.after(() => service.dispose())
+  for (let i = 0; i < 2; i++) {
+    const task = await service.start({ ...f, cwd: f.root }); await wait(service)
+    const pushed = await service.push(f.dataRoot, f.run.run_id, task.id)
+    assert.equal(pushed.status, 'pushed', pushed.error)
+    assert.equal(await injectionGit(repo.remote_path, ['rev-parse', 'main']), pushed.repositories[0].commit)
+    assert.equal(await injectionGit(repo.source_path, ['rev-parse', 'personal-local']), pushed.repositories[0].commit)
+    assert.equal(await injectionGit(repo.source_path, ['branch', '--show-current']), 'main')
+    assert.equal(await readFile(path.join(repo.source_path, 'main.c'), 'utf8'), original)
+  }
+})
+test('push accepted before transport failure is reconciled even after remote advances', async t => {
+  const f = await fixture(t), repo = f.repositories[0]
+  let remotePushes = 0
+  const service = new FaultInjectionService({ generate: async ({ record }) => generated(record), git: async (cwd, args, signal) => {
+    const output = await injectionGit(cwd, args, signal)
+    if (args[0] === 'push' && args[1] === 'origin') { remotePushes++; throw new Error('connection lost after acceptance') }
+    return output
+  } })
+  t.after(() => service.dispose())
+  const task = await service.start({ ...f }); await wait(service)
+  const uncertain = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.match(uncertain.error, /推送结果待确认/)
+  await writeFile(path.join(repo.source_path, 'other.txt'), 'other user change')
+  await injectionGit(repo.source_path, ['add', 'other.txt']); await injectionGit(repo.source_path, ['commit', '-m', 'later change'])
+  await injectionGit(repo.source_path, ['push', 'origin', 'main'])
+  const confirmed = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(confirmed.status, 'pushed', confirmed.error)
+  assert.equal(remotePushes, 1)
+})

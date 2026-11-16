@@ -31,13 +31,14 @@ const container = document.createElement('div'); document.body.append(container)
 const renderer = createRoot(container), Panel = createRepositorySettings(React); let saved = 0
 const click = async text => { const button = [...container.querySelectorAll('button')].find(node => node.textContent === text); assert.ok(button, text); assert.equal(button.disabled, false); await act(async () => button.click()) }
 const until = async test => { for (let i = 0; i < 100; i++) { if (test()) return; await act(async () => new Promise(resolve => setTimeout(resolve, 30))) } assert.ok(test(), container.textContent) }
-const change = async (label, value) => { const input = container.querySelector(`[aria-label="${label}"]`); assert.ok(input); await act(async () => { Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value').set.call(input, value); input.dispatchEvent(new window.Event('input', { bubbles: true })) }) }
+const change = async (label, value) => { const input = container.querySelector(`[aria-label="${label}"]`); assert.ok(input); await act(async () => { Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value').set.call(input, value); input.dispatchEvent(new window.Event(input.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })) }) }
 try {
   await act(async () => renderer.render(React.createElement(Panel, { cwd: root, dataRoot, onSaved: () => { saved++ } })))
   await click('代码仓库与构建'); await until(() => container.textContent.includes('本地文件夹'))
   await change('项目构建流水线 URL', 'https://ci.example.test/project')
   await change('关联 Git 仓库目录', git)
   await change('关联分支、标签或提交', 'main')
+  await until(() => !container.querySelector('[aria-label="个人开发分支"]').disabled)
   await change('个人开发分支', 'main')
   await change('推送远端', 'origin')
   await click('保存仓库与构建配置'); await until(() => saved === 1)

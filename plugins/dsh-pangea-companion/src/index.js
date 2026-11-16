@@ -1,3 +1,5 @@
+import { repositoryOperation, cancelRepositoryOperation, repositoryOperationsBusy, stopRepositoryOperations } from './repositories/operations.js'
+import { discoverRemoteBranches, repositoryBranches, createTrackingBranch, pullRepositoryLfs } from './repositories/git-source.js'
 import { supportsHostReview, MODEL_REVIEW_ENABLED } from './analysis-review.js'
 import { inspectSourceFirstAcpRecovery, sourceFirstAcpUpdateBusy, stopSourceFirstAcpRun } from './source-first-acp.js'
 import { companionUpdateBusy, registerUpdateParticipant } from './update-admission.js'
@@ -27,7 +29,7 @@ import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { inspectSource, configureRepository } from './repositories/git-source.js'
-import { importRepository, repositoryStatus } from './repositories/import.js'
+import { importRepository, reimportRepository, repositoryStatus } from './repositories/import.js'
 import { scopeTree, validateScope, previewScope, confirmScope, previewTestTools, confirmTestTools } from './repositories/scope.js'
 import { FaultInjectionService } from './fault-injection.js'
 import { createInjectionGenerator } from './fault-injection-agent.js'
@@ -1351,6 +1353,7 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
       return json(res, 200, { status: 'ok', task })
     }
     if (body.action === 'task-start') {
+      if (repositoryOperationsBusy()) throw new Error('仓库正在导入或修改，请完成后再启动分析')
       const task = requireWorkspaceTask(await tasks.get(body.task_id), cwd, body.task_id)
       if ((task.incremental_request || task.flow_baseline) && actionDataRoot && dataRootFor(task.workspace, actionDataRoot) !== dataRootFor(task.workspace, task.data_root)) {
         throw new Error(task.flow_baseline ? '流程基线必须使用选择该版本时的数据目录' : '定向分析必须使用来源任务的数据目录')
@@ -1611,16 +1614,25 @@ export async function repositoryRouteHandler(req, res, runner = runPangea) {
     if (req.method === 'GET') return json(res, 200, await repositoryStatus(dataRoot))
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
+    if (body.action === 'reimport-repository') {
+      if (sourceFirstAcpUpdateBusy()) throw Object.assign(new Error('请先结束正在执行的分析，再重新导入仓库'), { statusCode: 409 })
+      return json(res, 200, { status: 'ok', repository: await repositoryOperation(dataRoot, body.repository_name, () => reimportRepository({ dataRoot, repositoryId: body.repository_name, baseRef: body.base_ref })) })
+    }
+    if (body.action === 'pull-lfs') return json(res, 200, { status: 'ok', ...await repositoryOperation(dataRoot, body.repository_name, () => pullRepositoryLfs(dataRoot, body.repository_name, body)) })
+    if (body.action === 'cancel-import') return json(res, 200, { status: 'ok', ...await cancelRepositoryOperation(dataRoot, body.repository_name) })
+    if (body.action === 'remote-branches') return json(res, 200, { status: 'ok', ...await discoverRemoteBranches(workspaceRoot(cwd), body.git_url) })
+    if (body.action === 'repository-branches') return json(res, 200, { status: 'ok', ...await repositoryBranches(dataRoot, body.repository_name, body) })
+    if (body.action === 'create-tracking-branch') return json(res, 200, { status: 'ok', ...await repositoryOperation(dataRoot, body.repository_name, () => createTrackingBranch(dataRoot, body.repository_name, body)) })
     if (body.action === 'inspect-source') return json(res, 200, { status: 'ok', source: await inspectSource(body.source_path) })
-    if (body.action === 'configure-repository') return json(res, 200, { status: 'ok', settings: await configureRepository(dataRoot, body.repository_name, body) })
+    if (body.action === 'configure-repository') return json(res, 200, { status: 'ok', settings: await repositoryOperation(dataRoot, body.repository_name, () => configureRepository(dataRoot, body.repository_name, body)) })
     if (body.action === 'validate-scope') return json(res, 200, await validateScope({ ...body, dataRoot }))
     if (body.action === 'preview-test-tools') return json(res, 200, await previewTestTools({ ...body, dataRoot, cwd }, runner))
     if (body.action === 'preview-scope') return json(res, 200, await previewScope({ ...body, dataRoot, cwd }, runner))
-    const imported = await importRepository({
+    const imported = await repositoryOperation(dataRoot, body.repository_name, () => importRepository({
       dataRoot,
       sourcePath: body.source_path,
       repositoryId: body.repository_name, gitUrl: body.git_url, baseRef: body.base_ref, pipelineUrl: body.pipeline_url,
-    })
+    }))
     return json(res, 200, { status: 'ok', repository: imported })
   } catch (error) {
     return json(res, error.statusCode ?? 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
@@ -1954,7 +1966,8 @@ export function apply(ctx) {
   const launchLocks = new Set()
   const environments = new EnvironmentStore()
   const ssh = new PangeaSshRuntime(environments)
-  const faultInjection = new FaultInjectionService({ generate: createInjectionGenerator(ctx) })
+  const faultInjection = new FaultInjectionService({ generate: createInjectionGenerator(ctx), validateModel: options => requireAgentModel(ctx, options) })
+  registerUpdateParticipant(ctx, 'repository-operations', repositoryOperationsBusy, stopRepositoryOperations)
   registerUpdateParticipant(ctx, 'fault-injection', () => faultInjection.busy(), () => faultInjection.dispose())
   registerUpdateParticipant(ctx, 'companion', () => companionUpdateBusy({
     operations: taskOperationState(tasks), launchLocks, sourceFirstBusy: sourceFirstAcpUpdateBusy,
@@ -2077,7 +2090,12 @@ export function apply(ctx) {
   const disposeJobDone = jobs?.onJobDone?.((snapshot, owner) => settleAcpTask(ctx, tasks, launchLogs, snapshot, owner).catch(() => undefined))
   const disposeArchitectureRoute = ctx.webServer.register({ kind: 'exact', path: '/api/pangea-companion/architecture-artifact', handler: (req, res) => architectureArtifactRoute(req, res, tasks) })
   const disposeWorkbenchRoute = ctx.webServer.register({ kind: 'exact', path: WORKBENCH_API_PATH, handler: (req, res) => workbenchRouteHandler(req, res, ctx.apiProxy, tasks, launchLocks, launchLogs, ctx, monitor) })
-  const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: repositoryRouteHandler })
+  const disposeRepositoryRoute = ctx.webServer.register({ kind: 'exact', path: REPOSITORY_API_PATH, handler: (req, res) => {
+    if (req.method === 'POST') {
+      try { updateAdmission(ctx)?.assertOpen() } catch (error) { return json(res, 409, { status: 'error', error: error.message }) }
+    }
+    return repositoryRouteHandler(req, res)
+  } })
   ctx.effect?.(() => async () => {
     disposeRepositoryRoute()
     disposeArchitectureRoute()

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, lstat } from 'node:fs/promises
 import os from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
-import { sourceGit, inspectSource, compareSnapshot, readRepositorySettings } from '../src/repositories/git-source.js'
+import { sourceGit, inspectSource, saveRepositorySettings, repositoryBranches, createTrackingBranch, checkoutImportedBranch, verifyImportedCheckout, compareSnapshot, readRepositorySettings } from '../src/repositories/git-source.js'
 import { importRepository, repositoryStatus } from '../src/repositories/import.js'
 import { repositoryRouteHandler } from '../src/index.js'
 import { FaultInjectionService, injectionGit } from '../src/fault-injection.js'
@@ -188,4 +188,85 @@ test('current source distinguishes an untracked Agent directory from tracked sou
   assert.doesNotMatch(sourceLabel(untracked), /有未提交修改/)
   await writeFile(path.join(f.source, 'target.c'), 'changed source')
   assert.match(sourceLabel(await inspectSource(f.source)), /有未提交修改.*有未跟踪文件/)
+})
+
+test('remote import creates a tracking branch and settings separate local and push branches', async t => {
+  const f = await fixture(t)
+  await sourceGit(f.source, ['branch', 'personal'])
+  await sourceGit(f.source, ['push', 'origin', 'personal'])
+  const config = path.join(f.root, 'gitconfig')
+  await writeFile(config, `[url "${f.remote.replace(/\\/g, '/')}"]\n  insteadOf = https://fixture.test/repo.git\n`)
+  const previous = process.env.GIT_CONFIG_GLOBAL; process.env.GIT_CONFIG_GLOBAL = config
+  try {
+    const discovered = await f.request({ action: 'remote-branches', git_url: 'https://fixture.test/repo.git' })
+    assert.equal(discovered.default_branch, 'main')
+    assert.deepEqual(discovered.branches.map(item => item.name), ['main', 'personal'])
+    const result = await f.request({ git_url: 'https://fixture.test/repo.git', base_ref: 'personal', repository_name: 'cloned' })
+    assert.equal(result.code, 200, result.error)
+    assert.equal(result.repository.source.branch, 'personal')
+    const root = path.join(f.dataRoot, 'repositories', 'cloned')
+    assert.equal(await sourceGit(root, ['rev-parse', '--abbrev-ref', '@{upstream}']), 'origin/personal')
+    await sourceGit(root, ['branch', 'local-personal', 'personal'])
+    const settings = await saveRepositorySettings(f.dataRoot, 'cloned', { personal_branch: 'local-personal', remote: 'origin', remote_branch: 'personal' })
+    assert.equal(settings.remote_branch, 'personal')
+    const catalog = await repositoryBranches(f.dataRoot, 'cloned', { refresh: true })
+    assert.ok(catalog.local.some(item => item.name === 'local-personal'))
+    assert.equal(catalog.live, true)
+    await assert.rejects(saveRepositorySettings(f.dataRoot, 'cloned', { remote: 'personal_hyf' }), /现有远端：origin/)
+    await sourceGit(root, ['branch', '-D', 'local-personal'])
+    await saveRepositorySettings(f.dataRoot, 'cloned', { pipeline_url: 'https://ci.example.test/new' })
+    await assert.rejects(saveRepositorySettings(f.dataRoot, 'cloned', { personal_branch: 'missing', remote_branch: 'personal' }), /创建本地跟踪分支/)
+    await createTrackingBranch(f.dataRoot, 'cloned', { personal_branch: 'local-personal', remote_branch: 'personal' })
+    assert.equal(await sourceGit(root, ['branch', '--show-current']), 'personal')
+    assert.equal(await sourceGit(root, ['rev-parse', 'local-personal']), f.commit)
+  } finally { if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = previous }
+})
+test('empty index is rejected without resetting user content', async t => {
+  const f = await fixture(t)
+  await sourceGit(f.source, ['read-tree', '--empty'])
+  await assert.rejects(verifyImportedCheckout(f.source), /索引或工作区不完整/)
+  assert.equal(await sourceGit(f.source, ['ls-files']), '')
+  assert.match(await readFile(path.join(f.source, 'target.c'), 'utf8'), /operation/)
+})
+test('LFS hydrated content is equivalent only when hash and size match the pointer', async t => {
+  const f = await fixture(t), snapshot = path.join(f.root, 'lfs-snapshot')
+  const { createHash } = await import('node:crypto')
+  const bytes = Buffer.from('large file fixture')
+  const pointer = `version https://git-lfs.github.com/spec/v1\noid sha256:${createHash('sha256').update(bytes).digest('hex')}\nsize ${bytes.length}\n`
+  await writeFile(path.join(f.source, 'large.dat'), pointer)
+  await sourceGit(f.source, ['add', '.']); await sourceGit(f.source, ['commit', '-m', 'pointer'])
+  await mkdir(snapshot); await writeFile(path.join(snapshot, 'large.dat'), bytes)
+  const result = await compareSnapshot(f.source, 'HEAD', snapshot)
+  assert.equal(result.changed_count, 0); assert.equal(result.lfs_equivalent_count, 1)
+  await writeFile(path.join(snapshot, 'large.dat'), 'modified file')
+  assert.equal((await compareSnapshot(f.source, 'HEAD', snapshot)).changed_count, 1)
+})
+
+test('repair import retains settings and old checkout and refuses unsaved changes', async t => {
+  const f = await fixture(t)
+  await importRepository({ dataRoot: f.dataRoot, sourcePath: f.source, repositoryId: 'target' })
+  const root = path.join(f.dataRoot, 'repositories', 'target')
+  await saveRepositorySettings(f.dataRoot, 'target', { personal_branch: 'main', pipeline_url: 'https://ci.example.test/job' })
+  const repaired = await f.request({ action: 'reimport-repository', repository_name: 'target' })
+  assert.equal(repaired.code, 200, repaired.error)
+  assert.equal(await sourceGit(root, ['rev-parse', 'HEAD']), f.commit)
+  assert.equal(await sourceGit(repaired.repository.backup_path, ['rev-parse', 'HEAD']), f.commit)
+  assert.equal((await readRepositorySettings(f.dataRoot, 'target')).pipeline_url, 'https://ci.example.test/job')
+  await writeFile(path.join(root, 'target.c'), 'unsaved')
+  const blocked = await f.request({ action: 'reimport-repository', repository_name: 'target' })
+  assert.equal(blocked.code, 400); assert.match(blocked.error, /未提交/)
+  assert.equal(await readFile(path.join(root, 'target.c'), 'utf8'), 'unsaved')
+})
+test('interrupted repair restores missing published directory from retained backup', async t => {
+  const f = await fixture(t)
+  await importRepository({ dataRoot: f.dataRoot, sourcePath: f.source, repositoryId: 'target' })
+  const { rename } = await import('node:fs/promises')
+  const root = path.join(f.dataRoot, 'repositories', 'target'), backup = path.join(f.dataRoot, '.pangea', 'repository-backups', 'target', 'fixture')
+  const recovery = path.join(f.dataRoot, '.pangea', 'repository-recovery')
+  await mkdir(path.dirname(backup), { recursive: true }); await mkdir(recovery)
+  await rename(root, backup)
+  await writeFile(path.join(recovery, 'target.json'), JSON.stringify({ root, backup }))
+  const status = await repositoryStatus(f.dataRoot)
+  assert.equal(status.repositories[0].source.commit, f.commit)
+  assert.equal(await sourceGit(root, ['rev-parse', 'HEAD']), f.commit)
 })

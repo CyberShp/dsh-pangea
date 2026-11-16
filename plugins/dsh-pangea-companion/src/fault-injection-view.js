@@ -1,3 +1,4 @@
+import { analysisExecutionState, loadAnalysisAgentModels } from './agent-model-selection.js'
 import { createRepositorySettings, sourceLabel } from './repository-settings-view.js'
 export const INJECTION_STATUS_LABELS = {
   preparing: '准备源码', generating: '生成打桩修改', ready: '修改已生成', pushing: '提交与推送中',
@@ -28,6 +29,14 @@ export function createFaultInjectionPanel(React) {
     const [working, setWorking] = React.useState(false)
     const [build, setBuild] = React.useState({ url: '', package_id: '', package_sha256: '', notes: '' })
     const [verification, setVerification] = React.useState({ case_key: '', result: 'not_run', hits: '', notes: '' })
+    const [modelState, setModelState] = React.useState({ status: 'idle' })
+    const [modelRefresh, setModelRefresh] = React.useState(0)
+    React.useEffect(() => {
+      if (!open || !settings?.provider_id) return
+      return loadAnalysisAgentModels({ providerId: settings.provider_id, cwd, onState: setModelState })
+    }, [open, settings?.provider_id, cwd, modelRefresh])
+    const modelSelection = analysisExecutionState(settings || {}, providers.map(item => ({ ...item, registered: true })), modelState, cwd)
+    const modelCatalog = modelState.provider_id === settings?.provider_id && modelState.cwd === cwd && modelState.status === 'ready' ? modelState.catalog : null
     const keyOf = item => item.projection_id || item.test_case_id
     const eligible = item => Boolean(keyOf(item)) && cases.filter(other => keyOf(other) === keyOf(item)).length === 1 && Boolean(item.instrumentation || item.source_record?.body?.instrumentation || item.execution_readiness === 'needs_instrumentation')
     const selectedKeys = standalone ? chosen.filter(key => cases.some(item => keyOf(item) === key && eligible(item))) : cases.map(keyOf).filter(Boolean)
@@ -69,7 +78,7 @@ export function createFaultInjectionPanel(React) {
         setTasks(value.tasks ?? []);
         if (!taskId) { try { const last = localStorage.getItem(`pangea-fi:${scope}`); if (value.tasks?.some(item => item.id === last)) { setTaskId(last); if (standalone) setStep(4) } } catch {} }
         setProviders(value.providers ?? [])
-        setSettings(previous => previous ?? { ...value.defaults, instructions: '' })
+        setSettings(previous => previous ?? { ...value.defaults, agent_model: '', instructions: '' })
         setError('')
       }).catch(reason => { if (live) setError(reason.message) })
       return () => { live = false }
@@ -173,14 +182,19 @@ export function createFaultInjectionPanel(React) {
           h('details', null, h('summary', null, `已选择 ${selectedKeys.length} 条用例`), h('p', { className: 'pangea-fi-scroll' }, selectedCases.map(item => readable(item.title)).join('、') || '请先选择用例')),
           h('div', { style: { marginTop: 14 } },
             h('div', { style: grid },
-              h('label', null, '执行器', h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value }) },
+              h('label', null, '执行器', h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value, agent_model: '' }) },
                 h('option', { value: '' }, '选择执行器'), providers.map(provider => h('option', { key: provider.id, value: provider.id }, provider.label)))),
-              field('打桩模型', settings.agent_model, value => setSettings({ ...settings, agent_model: value })),
+              h('div', null, h('label', null, '打桩模型', h('select', { 'aria-label': '打桩模型', value: settings.agent_model || '', disabled: working || !modelCatalog,
+                onChange: event => setSettings({ ...settings, agent_model: event.target.value }) },
+                h('option', { value: '' }, modelCatalog?.current_model ? `使用 Agent 默认（${modelCatalog.current_model}）` : '请选择可用模型'),
+                (modelCatalog?.models || []).map(model => h('option', { key: model.id, value: model.id }, model.label && model.label !== model.id ? `${model.label} · ${model.id}` : model.id)))),
+                h('p', { role: modelState.status === 'error' ? 'alert' : 'status' }, modelSelection.message),
+                h('button', { type: 'button', disabled: working || !settings.provider_id || modelState.status === 'loading', onClick: () => setModelRefresh(value => value + 1) }, '刷新模型')),
               field('任务名称', settings.name, value => setSettings({ ...settings, name: value }))),
             h('p', null, '目标个人分支：', (settings.repositories || []).filter(repo => repo.enabled !== false).map(repo => `${repo.repo_id} → ${repo.personal_branch || '尚未配置'}`).join('；')),
             settings.repositories.some(repo => repo.enabled !== false && !repo.personal_branch) ? h('p', { role: 'status' }, '请展开代码来源与高级设置，在项目配置中选择已有的个人开发分支。') : null,
             h('details', { className: 'pangea-fi-technical' }, h('summary', null, '代码来源与高级设置'),
-              h(RepositorySettings, { cwd, dataRoot, repositories: settings.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, ...value.defaults })) } }),
+              h(RepositorySettings, { cwd, dataRoot, repositories: settings.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, repositories: value.defaults.repositories, pipeline_url: value.defaults.pipeline_url })) } }),
               (settings.repositories ?? []).map((repo, index) => h('fieldset', { key: repo.repo_id },
                 h('legend', null, h('label', null, h('input', { type: 'checkbox', checked: repo.enabled !== false, disabled: working, 'aria-label': `本次包含 ${repo.repo_id}`, onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), readable(repo.repo_id))),
                 h('p', null, '当前源码：', sourceLabel(repo.source)),
@@ -192,8 +206,8 @@ export function createFaultInjectionPanel(React) {
             field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value })),
             settings.repositories.some(repo => repo.enabled !== false && repo.source?.kind !== 'git') ? h('p', { role: 'status' }, '所选源码尚未就绪：请展开“代码来源与高级设置”关联 Git 仓库。普通分析不受影响。') : null,
             field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true }),
-            h('footer', { className: 'pangea-fi-footer' }, standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : null, h('button', { type: 'button', className: 'btn primary', disabled: working || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
-              onClick: () => act('generate', { ...settings, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
+            h('footer', { className: 'pangea-fi-footer' }, standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : null, h('button', { type: 'button', className: 'btn primary', disabled: working || !modelSelection.ready || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
+              onClick: () => act('generate', { ...settings, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
           : !settings ? h('p', null, '正在读取打桩设置…') : null,
         tasks.length ? h('div', { style: { marginTop: 18 } }, h('label', null, '已有打桩任务 ', h('select', { 'aria-label': '已有打桩任务', value: taskId, onChange: event => selectTask(event.target.value) },
           h('option', { value: '' }, '选择任务查看'), tasks.map(item => h('option', { key: item.id, value: item.id }, `${item.name || item.cases?.[0]?.title || '打桩任务'} · ${new Date(item.created_at).toLocaleString()} · ${item.case_keys.length} 条 · ${INJECTION_STATUS_LABELS[item.status] || item.status}`))))) : null,

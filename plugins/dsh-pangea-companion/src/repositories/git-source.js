@@ -1,3 +1,4 @@
+import { repositoryOperationSignal } from './operations.js'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readFile, readdir, realpath, lstat, mkdir, rm } from 'node:fs/promises'
@@ -9,9 +10,10 @@ const exec = promisify(execFile)
 export async function sourceGit(cwd, args) {
   try {
     // Do not pass a potentially >260-character path to Windows process creation.
-    return (await exec('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], { windowsHide: true, timeout: args[0] === 'clone' ? 1800000 : 30000, maxBuffer: 32 * 1024 * 1024,
+    return (await exec('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], { signal: repositoryOperationSignal(), windowsHide: true, timeout: ['clone', 'lfs'].includes(args[0]) ? 1800000 : 30000, maxBuffer: 32 * 1024 * 1024,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' } })).stdout.trimEnd()
   } catch (error) {
+    repositoryOperationSignal()?.throwIfAborted()
     if (error.code === 'ENOENT') throw Object.assign(new Error('未安装 Git；本地目录分析仍可使用，克隆和打桩需要 Git'), { code: 'GIT_MISSING' })
     throw new Error(String(error.stderr || error.message).replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@'))
   }
@@ -73,16 +75,30 @@ export async function saveRepositorySettings(dataRoot, repoId, input) {
       next.base_ref = await sourceGit(info.path, ['rev-parse', '--verify', `${ref}^{commit}`])
     } else { delete next.git_path; delete next.base_ref }
   }
-  if (input.personal_branch !== undefined || next.personal_branch) {
-    const branch = String(input.personal_branch ?? next.personal_branch).trim()
-    if (!branch || branch.startsWith('-') || branch === 'HEAD' || branch.startsWith('refs/')) throw new Error('请选择已存在的个人开发分支')
+  const branch = String(input.personal_branch ?? previous.personal_branch ?? '').trim()
+  const remote = String(input.remote ?? previous.remote ?? 'origin').trim()
+  const remoteBranch = String(input.remote_branch ?? previous.remote_branch ?? branch).trim()
+  const changed = ['personal_branch', 'remote', 'remote_branch', 'git_path'].some(key => input[key] !== undefined && input[key] !== previous[key])
+  if (branch && changed) {
     const root = next.git_path || path.join(dataRoot, 'repositories', repoId)
     await sourceGit(root, ['check-ref-format', '--branch', branch])
-    await sourceGit(root, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
-    const remote = String(input.remote ?? next.remote ?? 'origin').trim()
+    await sourceGit(root, ['check-ref-format', '--branch', remoteBranch])
+    if (branch === 'HEAD' || branch.startsWith('refs/') || remoteBranch.startsWith('refs/')) throw new Error('请选择分支名称，不要填写完整引用')
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) throw new Error('远端名称无效')
-    await sourceGit(root, ['remote', 'get-url', '--push', remote])
-    next.personal_branch = branch; next.remote = remote
+    const remotes = (await sourceGit(root, ['remote'])).split('\n').filter(Boolean)
+    if (!remotes.includes(remote)) throw new Error(`推送远端 ${remote} 不存在；现有远端：${remotes.join('、') || '无'}。请选择现有远端，或先使用 git remote add 添加远端。`)
+    const urls = (await sourceGit(root, ['remote', 'get-url', '--push', '--all', remote])).split('\n').filter(Boolean)
+    if (urls.length !== 1) throw new Error('请选择只有一个推送地址的远端')
+    try { await sourceGit(root, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`]) }
+    catch {
+      const tracked = `refs/remotes/${remote}/${remoteBranch}`
+      let exists = false
+      try { await sourceGit(root, ['rev-parse', '--verify', `${tracked}^{commit}`]); exists = true } catch {}
+      throw new Error(exists ? `本地分支 ${branch} 不存在；请选择“创建本地跟踪分支”，或执行 git branch --track ${branch} ${tracked}` : `本地分支 ${branch} 不存在，缓存中也没有 ${remote}/${remoteBranch}；请刷新分支后选择。`)
+    }
+  }
+  if (input.personal_branch !== undefined || previous.personal_branch) {
+    next.personal_branch = branch; next.remote = remote; next.remote_branch = remoteBranch
   }
   await writeTaskStoreFile(file, JSON.stringify(next, null, 2))
   return next
@@ -91,9 +107,10 @@ export async function saveRepositorySettings(dataRoot, repoId, input) {
 export async function compareSnapshot(gitRoot, ref, snapshotRoot) {
   let stat; try { stat = await lstat(snapshotRoot) } catch (error) { if (error.code === 'ENOENT') return { available: false, changed_count: 0, files: [] }; throw error }
   if (!stat.isDirectory()) throw new Error('分析源码快照目录无效')
-  const tree = await sourceGit(gitRoot, ['ls-tree', '-r', '-z', validateRef(ref)])
+  const tree = await sourceGit(gitRoot, ['ls-tree', '-r', '-l', '-z', validateRef(ref)])
   const blobs = new Map(tree.split('\0').filter(Boolean).map(line => { const split = line.indexOf('\t'); return [line.slice(split + 1), line.slice(0, split).split(' ')[2]] }))
-  let compared = 0, changed = 0, eolOnly = 0; const files = [], eolFiles = []
+  const blobSizes = new Map(tree.split('\0').filter(Boolean).map(line => { const parts = line.slice(0, line.indexOf('\t')).trim().split(/\s+/); return [parts[2], Number(parts[3])] }))
+  let compared = 0, changed = 0, eolOnly = 0, lfsEquivalent = 0; const files = [], eolFiles = []
   const walk = async (directory, prefix = '') => {
     for (const item of await readdir(directory, { withFileTypes: true })) {
       if (item.name === '.git') continue
@@ -112,13 +129,23 @@ export async function compareSnapshot(gitRoot, ref, snapshotRoot) {
           }
           const eolHash = normalized && createHash(expected.length === 64 ? 'sha256' : 'sha1').update(`blob ${normalized.length}\0`).update(normalized).digest('hex')
           if (expected && eolHash === expected) { eolOnly++; if (eolFiles.length < 30) eolFiles.push(relative) }
-          else { changed++; if (files.length < 30) files.push(relative) }
+          else {
+          if (expected) {
+            const size = blobSizes.get(expected)
+            if (size >= 120 && size <= 1024) {
+              const pointer = await sourceGit(gitRoot, ['cat-file', 'blob', expected])
+              const match = /^version https:\/\/git-lfs.github.com\/spec\/v1\noid sha256:([a-f0-9]{64})\nsize (\d+)\n?$/.exec(pointer)
+              if (match && BigInt(match[2]) === BigInt(bytes.length) && createHash('sha256').update(bytes).digest('hex') === match[1]) { lfsEquivalent++; continue }
+            }
+          }
+            changed++; if (files.length < 30) files.push(relative)
+          }
         }
       }
     }
   }
   await walk(snapshotRoot)
-  return { available: true, compared_count: compared, changed_count: changed, files, eol_only_count: eolOnly, eol_only_files: eolFiles }
+  return { available: true, compared_count: compared, changed_count: changed, files, eol_only_count: eolOnly, eol_only_files: eolFiles, lfs_equivalent_count: lfsEquivalent }
 }
 
 export async function configureRepository(dataRoot, repoId, input) {
@@ -130,8 +157,98 @@ export async function configureRepository(dataRoot, repoId, input) {
   await mkdir(parent, { recursive: true })
   const target = path.join(parent, randomUUID())
   try {
-    await sourceGit(parent, ['clone', '--', url, target])
+    await sourceGit(parent, ['clone', '--no-checkout', '--', url, target])
+    await checkoutImportedBranch(target, input.personal_branch || ref)
     const commit = await sourceGit(target, ['rev-parse', '--verify', `${ref}^{commit}`]).catch(() => sourceGit(target, ['rev-parse', '--verify', `refs/remotes/origin/${ref}^{commit}`]))
     return await saveRepositorySettings(dataRoot, repoId, { ...input, git_path: target, base_ref: commit })
   } catch (error) { await rm(target, { recursive: true, force: true }); throw error }
+}
+
+// Network discovery is explicit. Cached remote-tracking refs are never labelled live.
+export async function discoverRemoteBranches(cwd, url) {
+  const output = await sourceGit(cwd, ['ls-remote', '--symref', '--', validateGitUrl(url), 'HEAD', 'refs/heads/*'])
+  const branches = [], seen = new Set()
+  let default_branch = ''
+  for (const line of output.split('\n')) {
+    const [oid, ref] = line.split('\t')
+    if (ref === 'HEAD' && oid.startsWith('ref: refs/heads/')) default_branch = oid.slice(16)
+    if (ref?.startsWith('refs/heads/') && !seen.has(ref)) { seen.add(ref); branches.push({ name: ref.slice(11), commit: oid }) }
+  }
+  return { branches, default_branch, refreshed_at: new Date().toISOString() }
+}
+export async function repositoryBranches(dataRoot, repoId, { git_path, remote = 'origin', refresh = false } = {}) {
+  configPath(dataRoot, repoId)
+  const settings = await readRepositorySettings(dataRoot, repoId)
+  const root = git_path || settings.git_path || path.join(dataRoot, 'repositories', repoId)
+  const info = await inspectSource(root)
+  if (info.kind !== 'git') throw new Error(info.error || '请选择完整 Git 仓库')
+  const remotes = []
+  for (const name of (await sourceGit(root, ['remote'])).split('\n').filter(Boolean)) {
+    const urls = (await sourceGit(root, ['remote', 'get-url', '--push', '--all', name])).split('\n').filter(Boolean)
+    remotes.push({ name, url: urls[0]?.replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@'), multiple: urls.length !== 1 })
+  }
+  const refs = (await sourceGit(root, ['for-each-ref', '--format=%(refname) %(objectname) %(upstream)', 'refs/heads', 'refs/remotes'])).split('\n').filter(Boolean)
+  const local = refs.filter(line => line.startsWith('refs/heads/')).map(line => { const [ref, commit, upstream] = line.split(' '); return { name: ref.slice(11), commit, upstream } })
+  let remote_branches = refs.filter(line => line.startsWith(`refs/remotes/${remote}/`) && !line.startsWith(`refs/remotes/${remote}/HEAD `)).map(line => { const [ref, commit] = line.split(' '); return { name: ref.slice(`refs/remotes/${remote}/`.length), commit } })
+  if (refresh) {
+    const selected = remotes.find(item => item.name === remote)
+    if (!selected || selected.multiple) throw new Error('请选择具有唯一推送地址的远端')
+    const pushUrl = await sourceGit(root, ['remote', 'get-url', '--push', remote])
+    const output = await sourceGit(root, ['ls-remote', '--heads', '--', pushUrl])
+    remote_branches = output.split('\n').filter(Boolean).map(line => { const [commit, ref] = line.split('\t'); return { name: ref.slice(11), commit } })
+  }
+  return { local, remotes, remote_branches, current_branch: info.branch, live: refresh }
+}
+export async function createTrackingBranch(dataRoot, repoId, input) {
+  configPath(dataRoot, repoId)
+  const settings = await readRepositorySettings(dataRoot, repoId)
+  const root = input.git_path || settings.git_path || path.join(dataRoot, 'repositories', repoId)
+  const branch = String(input.personal_branch || ''), remoteBranch = String(input.remote_branch || branch), remote = String(input.remote || 'origin')
+  await sourceGit(root, ['check-ref-format', '--branch', branch])
+  await sourceGit(root, ['check-ref-format', '--branch', remoteBranch])
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) throw new Error('远端名称无效')
+  const urls = (await sourceGit(root, ['remote', 'get-url', '--push', '--all', remote])).split('\n').filter(Boolean)
+  if (urls.length !== 1) throw new Error('远端必须只有一个推送地址')
+  const fetchUrl = await sourceGit(root, ['remote', 'get-url', remote])
+  if (fetchUrl !== urls[0]) throw new Error('读取与推送地址不同，请先在本地建立正确的个人分支')
+  await sourceGit(root, ['fetch', '--no-tags', remote, `refs/heads/${remoteBranch}:refs/remotes/${remote}/${remoteBranch}`])
+  await sourceGit(root, ['branch', '--track', branch, `refs/remotes/${remote}/${remoteBranch}`])
+  return repositoryBranches(dataRoot, repoId, input)
+}
+export async function checkoutImportedBranch(root, ref = 'HEAD') {
+  let branch = validateRef(ref)
+  if (branch === 'HEAD') {
+    const head = await sourceGit(root, ['symbolic-ref', 'refs/remotes/origin/HEAD'])
+    branch = head.replace(/^refs\/remotes\/origin\//, '')
+  }
+  let remoteExists = false
+  try { await sourceGit(root, ['rev-parse', '--verify', `refs/remotes/origin/${branch}^{commit}`]); remoteExists = true } catch {}
+  if (!remoteExists) {
+    // Preserve explicit tag/commit imports for analysis; never mistake them for a local branch.
+    const commit = await sourceGit(root, ['rev-parse', '--verify', `${branch}^{commit}`])
+    await sourceGit(root, ['checkout', '--detach', commit])
+    await verifyImportedCheckout(root)
+    return ''
+  }
+  await sourceGit(root, ['check-ref-format', '--branch', branch])
+  const local = await sourceGit(root, ['for-each-ref', '--format=%(refname)', `refs/heads/${branch}`])
+  if (!local.split('\n').includes(`refs/heads/${branch}`)) await sourceGit(root, ['branch', '--track', branch, `refs/remotes/origin/${branch}`])
+  await sourceGit(root, ['checkout', branch])
+  await verifyImportedCheckout(root)
+  return branch
+}
+export async function verifyImportedCheckout(root) {
+  const tree = await sourceGit(root, ['rev-parse', 'HEAD^{tree}'])
+  if (await sourceGit(root, ['write-tree']) !== tree || await sourceGit(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])) throw new Error('克隆后的索引或工作区不完整；未发布该仓库，请重新导入')
+}
+
+export async function pullRepositoryLfs(dataRoot, repoId, input) {
+  configPath(dataRoot, repoId)
+  const settings = await readRepositorySettings(dataRoot, repoId)
+  const root = settings.git_path || path.join(dataRoot, 'repositories', repoId)
+  const include = String(input.include || '').trim()
+  if (!include || include.startsWith('/') || /[\\:\x00-\x1f]/.test(include) || include.split('/').some(part => part === '..' || part === '.git')) throw new Error('请填写仓库内的 LFS 文件或目录范围，例如 assets/*')
+  await sourceGit(root, ['lfs', 'version'])
+  await sourceGit(root, ['lfs', 'pull', `--include=${include}`, '--exclude='])
+  return { include }
 }

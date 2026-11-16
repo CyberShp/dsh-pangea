@@ -33,6 +33,7 @@ window.__ModuleLoader__.load({
     const TestToolPicker = __testToolPicker.createTestToolPicker(React, __sourceScopePicker.createSourceScopePicker(React))
     const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
     const RepositorySettings = __repositorySettingsView.createRepositorySettings(React)
+    const { requestAgentModels, analysisExecutionState, loadAnalysisAgentModels } = __agentModelSelection
     const FaultInjectionPanel = __faultInjectionView.createFaultInjectionPanel(React)
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
@@ -1323,16 +1324,6 @@ window.__ModuleLoader__.load({
       return body
     }
 
-    async function requestAgentModels({ providerId, cwd, signal, fetcher = fetch }) {
-      const response = await fetcher(ACP_SETTINGS_API_PATH, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, signal,
-        body: JSON.stringify({ action: 'models', provider_id: providerId, cwd }),
-      })
-      const body = await response.json()
-      if (!response.ok || body.status !== 'ok') throw new Error(body.error ?? `HTTP ${response.status}`)
-      return body
-    }
-
     async function testAcpSettings(fetcher = fetch) {
       const response = await fetcher(ACP_SETTINGS_API_PATH, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'test' }),
@@ -2400,37 +2391,6 @@ window.__ModuleLoader__.load({
       if (provider.version_status === 'unavailable') return '命令可用，未返回版本'
       if (provider.version_status === 'not_checked') return '尚未检查'
       return '未读取'
-    }
-
-    function analysisExecutionState(form, providers, state, cwd) {
-      const providerId = form.provider_id
-      const provider = (providers ?? []).find(item => item.id === providerId)
-      const blocked = message => ({ ready: false, model: '', catalogId: '', message })
-      if (!providerId) return blocked(form.external_selection_required ? '历史分析使用内部 API，请重新选择外部 Agent 和模型。' : '请选择已加载的外部 Agent。')
-      if (provider?.registered !== true) return blocked('所选外部 Agent 尚未加载，请检查 Agent 设置。')
-      if (state?.cwd !== cwd || state?.provider_id !== providerId || ['idle', 'loading'].includes(state?.status) || !state?.status) return blocked('正在读取 Agent 可用模型，请等待完成后再继续。')
-      if (state.status === 'error') return blocked(state.error || '模型列表读取失败，请刷新模型后重试。')
-      const catalog = state.catalog
-      if (state.status !== 'ready' || catalog?.provider_id !== providerId || !catalog?.catalog_id) return blocked('模型列表尚未确认，请刷新模型后重试。')
-      const models = Array.isArray(catalog.models) ? catalog.models : []
-      const model = form.agent_model || catalog.current_model
-      if (!model) return blocked(models.length ? 'Agent 未返回有效默认模型，请明确选择一个模型。' : 'Agent 未返回可用模型，请检查 Agent 配置后刷新模型。')
-      if (!models.some(item => item.id === model)) return blocked(form.agent_model ? '原选择的模型已不在当前列表中，请重新选择。' : 'Agent 默认模型不在当前可用列表中，请明确选择一个模型。')
-      return { ready: true, model, catalogId: catalog.catalog_id, message: `已确认模型：${model}` }
-    }
-
-    function loadAnalysisAgentModels({ providerId, cwd, onState, fetcher = fetch }) {
-      const controller = new AbortController()
-      const scope = { provider_id: providerId, cwd }
-      onState({ ...scope, status: 'loading' })
-      requestAgentModels({ providerId, cwd, signal: controller.signal, fetcher }).then(catalog => {
-        if (controller.signal.aborted) return
-        if (catalog.provider_id !== providerId) throw new Error('返回的模型列表与所选 Agent 不一致，请重试。')
-        onState({ ...scope, status: 'ready', catalog })
-      }).catch(failure => {
-        if (!controller.signal.aborted) onState({ ...scope, status: 'error', error: failure instanceof Error ? failure.message : String(failure) })
-      })
-      return () => controller.abort()
     }
 
     function AgentModelSelect({ providerId, cwd, state, value, onChange, onRefresh, disabled }) {
@@ -4498,6 +4458,24 @@ window.__ModuleLoader__.load({
           setRepositoryError(reason instanceof Error ? reason.message : String(reason))
         }
       }
+      async function refreshRepositoryBranches() {
+        const gitUrl = repositoryForm.gitUrl
+        setRepositoryForm(value => ({ ...value, branchesLoading: true, branchError: '' }))
+        try {
+          const response = await fetch(`${REPOSITORY_API_PATH}?${new URLSearchParams({ cwd })}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'remote-branches', git_url: gitUrl }) })
+          const result = await response.json()
+          if (!response.ok || result.status !== 'ok') throw new Error(result.error || '读取远端分支失败')
+          setRepositoryForm(value => value.gitUrl === gitUrl ? { ...value, branchesLoading: false, branches: result.branches, branchesUrl: gitUrl, baseRef: result.branches.some(item => item.name === value.baseRef) ? value.baseRef : result.default_branch || result.branches[0]?.name || '' } : value)
+        } catch (error) { setRepositoryForm(value => value.gitUrl === gitUrl ? { ...value, branchesLoading: false, branches: null, branchError: error.message } : value) }
+      }
+
+      async function cancelRepositoryImport() {
+        try {
+          const response = await fetch(`${REPOSITORY_API_PATH}?${new URLSearchParams({ cwd })}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cancel-import', repository_name: repositoryForm.repositoryName }) })
+          const result = await response.json()
+          if (!response.ok) throw new Error(result.error || '停止导入失败')
+        } catch (error) { setRepositoryError(error.message) }
+      }
       async function submitRepositoryImport() {
         if (!cwd || repositoryImporting || !(repositoryForm.mode === 'git' ? repositoryForm.gitUrl : repositoryForm.sourcePath) || !repositoryForm.repositoryName.trim()) return
         const originScreen = screen
@@ -5942,9 +5920,12 @@ window.__ModuleLoader__.load({
           h('label', { className: 'field' }, '源码来源', h('select', { 'aria-label': '源码来源', disabled: repositoryImporting, value: gitMode ? 'git' : 'local', onChange: event => setRepositoryForm(value => ({ ...value, mode: event.target.value })) }, h('option', { value: 'local' }, '本地文件夹'), h('option', { value: 'git' }, 'Git 仓库地址'))),
           gitMode ? h(React.Fragment, null,
             h('label', { className: 'field' }, 'Git 仓库地址', h('input', { 'aria-label': 'Git 仓库地址', disabled: repositoryImporting, value: repositoryForm.gitUrl || '', placeholder: 'https://… 或 git@…', onChange: event => setRepositoryForm(value => ({ ...value, gitUrl: event.target.value, repositoryName: !value.repositoryName || value.repositoryName === repositoryNameFromPath(value.gitUrl).replace(/\.git$/, '') ? repositoryNameFromPath(event.target.value).replace(/\.git$/, '') : value.repositoryName })) })),
-            h('label', { className: 'field' }, '分析分支、标签或提交', h('input', { 'aria-label': '分析分支、标签或提交', disabled: repositoryImporting, value: repositoryForm.baseRef || '', placeholder: '留空使用默认分支', onChange: event => setRepositoryForm(value => ({ ...value, baseRef: event.target.value })) }))) : null,
+            h('label', { className: 'field' }, '分析分支', h('select', { 'aria-label': '分析分支', disabled: repositoryImporting || repositoryForm.branchesUrl !== repositoryForm.gitUrl, value: repositoryForm.baseRef || '', onChange: event => setRepositoryForm(value => ({ ...value, baseRef: event.target.value })) }, h('option', { value: '' }, '请先读取远端分支'), (repositoryForm.branchesUrl === repositoryForm.gitUrl ? repositoryForm.branches || [] : []).map(item => h('option', { key: item.name, value: item.name }, item.name)))),
+            h('button', { type: 'button', disabled: repositoryImporting || !repositoryForm.gitUrl || repositoryForm.branchesLoading, onClick: refreshRepositoryBranches }, repositoryForm.branchesLoading ? '正在读取分支…' : '读取远端分支'),
+            repositoryForm.branchError ? h('p', { role: 'alert' }, repositoryForm.branchError) : null,
+            h('p', null, '使用本机 Git 凭据；LFS 默认保留指针，子模块不自动下载。')) : null,
           h('label', { className: 'field' }, '项目构建流水线 URL', h('input', { 'aria-label': '项目构建流水线 URL', disabled: repositoryImporting, value: repositoryForm.pipelineUrl || '', placeholder: '可稍后在代码仓库与构建中设置', onChange: event => setRepositoryForm(value => ({ ...value, pipelineUrl: event.target.value })) })))
-        const copyReady = folderReady && Boolean(repositoryForm.repositoryName.trim())
+        const copyReady = folderReady && Boolean(repositoryForm.repositoryName.trim()) && (!gitMode || (repositoryForm.branchesUrl === repositoryForm.gitUrl && repositoryForm.branches?.some(item => item.name === repositoryForm.baseRef)))
         if (!firstUse) {
           const name = repositoryForm.repositoryName.trim()
           const dataRoot = repositoryState?.data_root ?? workbench?.data_root ?? 'pangea-data'
@@ -5966,7 +5947,7 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'create-subhead' }, repositoryImporting ? '目标仓库' : '目标位置'), path(target),
                 repositoryImporting ? h('div', { className: 'callout', style: { marginTop: 24 } }, h('div', { className: 'row' }, runIcon('Info'), h('span', { className: 'small' }, '复制结束前，仓库尚不可用于新建分析。'))) : h('div', { className: 'notice blue', style: { marginTop: 22 } }, h('div', { className: 'notice-main' }, runIcon('Info'), h('div', null, h('strong', null, '保留原目录，独立准备分析源码'), h('p', null, '复制到临时目录，成功后一次性加入仓库列表。原目录保持不变，同名仓库不会被覆盖。')))),
                 repositoryError && h('p', { role: 'alert', style: { color: 'var(--red)', marginTop: 15 } }, repositoryError),
-                h('div', { className: 'wizard-footer' }, repositoryImporting ? h('span', { className: 'create-footer-note' }, runIcon('ShieldCheck'), '原始源码保持不变') : button('取消', goBack, 'ghost'), repositoryImporting ? h('button', { className: 'create-disabled', disabled: true }, '正在添加仓库…') : button('添加仓库', submitRepositoryImport, 'primary', 'FolderPlus', !copyReady))),
+                h('div', { className: 'wizard-footer' }, repositoryImporting ? h('button', { type: 'button', onClick: cancelRepositoryImport }, '停止导入') : button('取消', goBack, 'ghost'), repositoryImporting ? h('button', { className: 'create-disabled', disabled: true }, '正在添加仓库…') : button('添加仓库', submitRepositoryImport, 'primary', 'FolderPlus', !copyReady))),
               h('aside', null, h('section', { className: 'panel' }, h('div', { className: 'create-side-title' }, repositoryImporting ? '导入状态' : '导入方式'),
                 phase(repositoryImporting ? runIcon('Check') : '1', repositoryImporting ? '数据目录已就绪' : '准备数据目录', repositoryImporting ? 'PANGEA 本地工作区可用' : 'PANGEA 工作区已就绪', ''), phase(repositoryImporting ? runIcon('Check') : '2', repositoryImporting ? '源码目录已选择' : '选择源码仓库', repositoryImporting ? name : '选择本机目录，设置仓库名称', repositoryImporting ? '' : 'active'), phase(repositoryImporting ? runIcon('LoaderCircle') : '3', repositoryImporting ? '正在完整复制' : '完整复制', repositoryImporting ? '暂存完成后一次性加入仓库列表' : '复制成功后，仓库可用于分析', repositoryImporting ? 'active' : 'pending'), repositoryImporting && h(React.Fragment, null, h('div', { className: 'divider' }), h('p', { className: 'create-side-note', style: { marginTop: 0 } }, '完成后，你可以选择这个仓库并创建第一项分析。')))))))
         }
@@ -5987,7 +5968,7 @@ window.__ModuleLoader__.load({
               repositoryImporting ? h(React.Fragment, null, h('div', { className: 'b06-copy-progress', role: 'progressbar', 'aria-label': '正在复制，进度未确定' }), h('div', { className: 'b06-banner', role: 'status', style: { background: '#edf3f8', color: '#416b95' } }, h('div', null, h('strong', null, '正在加入源码仓库'), '正在复制或克隆源码，请保持窗口打开。')))
                 : repositoryError ? h('div', { className: 'b06-banner', role: 'alert', style: { marginTop: 20 } }, h('div', null, h('strong', null, '源码仓库复制未完成'), repositoryError))
                   : h('p', { className: 'b06-hint', style: { marginTop: 17 } }, '导入会复制完整源码与 .git 历史，原目录保持不变。'),
-              h('div', { className: 'b06-onboard-foot' }, h('span', { className: 'b06-meta' }, repositoryImporting ? '复制完成后进入工作台' : '首次使用 · 工作区初始化'), h('button', { type: 'button', className: 'b06-button primary', disabled: !copyReady || repositoryImporting, 'aria-busy': repositoryImporting, onClick: () => { void submitRepositoryImport() } }, repositoryImporting ? '正在复制…' : repositoryError ? '重试加入' : '完成初始化'))),
+              h('div', { className: 'b06-onboard-foot' }, repositoryImporting ? h('button', { type: 'button', onClick: cancelRepositoryImport }, '停止导入') : null, h('span', { className: 'b06-meta' }, repositoryImporting ? '复制完成后进入工作台' : '首次使用 · 工作区初始化'), h('button', { type: 'button', className: 'b06-button primary', disabled: !copyReady || repositoryImporting, 'aria-busy': repositoryImporting, onClick: () => { void submitRepositoryImport() } }, repositoryImporting ? '正在复制…' : repositoryError ? '重试加入' : '完成初始化'))),
             h('aside', { className: 'b06-panel' }, h('h2', null, '准备你的测试工作区'),
               step('01', '数据空间已就绪', '保存任务、冻结输入与交付结果。', 'done'),
               step('02', '选择源码仓库', '选择本地文件夹或 Git 仓库。', folderReady ? 'done' : 'current'),

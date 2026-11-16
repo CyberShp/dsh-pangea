@@ -59,6 +59,7 @@ async function harness({ onboarding = false, tasks = [], selectedId, onImport, c
     requests.push({ path, cwd: new URL(url, 'https://fixture').searchParams.get('cwd'), body })
     let result
     if (path.endsWith('/repositories') && body?.action === 'inspect-source') result = { status: 'ok', source: { kind: 'folder' } }
+    else if (path.endsWith('/repositories') && body?.action === 'remote-branches') result = { status: 'ok', branches: [{ name: 'release-test' }], default_branch: 'release-test' }
     else if (path.endsWith('/repositories') && options.method === 'POST') {
       result = await (onImport?.(body) ?? { status: 'ok', repository: { name: body.repository_name } })
       if (result.status === 'ok') repositories.push(result.repository.name)
@@ -247,10 +248,11 @@ test('Git import form sends URL and analysis reference from both entry screens',
     }
     change('源码来源', 'git')
     change('Git 仓库地址', 'https://example.test/project.git')
-    change('分析分支、标签或提交', 'release-test')
+    await h.click('home', '读取远端分支'); await tick()
+    change('分析分支', 'release-test')
     change('项目构建流水线 URL', 'https://ci.example.test/project')
     await h.click('home', firstUse ? '完成初始化' : '添加仓库'); await tick()
-    const sent = h.requests.find(item => item.body?.git_url)
+    const sent = h.requests.find(item => item.body?.git_url && !item.body.action)
     assert.equal(sent.body.git_url, 'https://example.test/project.git')
     assert.equal(sent.body.base_ref, 'release-test')
     assert.equal(sent.body.pipeline_url, 'https://ci.example.test/project')

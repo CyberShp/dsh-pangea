@@ -1,4 +1,5 @@
-import { inspectSource, sourceGit, validateGitUrl, validateRef, validatePipeline, readRepositorySettings, saveRepositorySettings } from './git-source.js'
+import { repositoryOperationSignal, repositoryOperation } from './operations.js'
+import { inspectSource, checkoutImportedBranch, sourceGit, validateGitUrl, validateRef, validatePipeline, readRepositorySettings, saveRepositorySettings } from './git-source.js'
 import { randomUUID } from 'node:crypto'
 import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -87,6 +88,7 @@ async function repositoryItems(repositoriesRoot) {
 }
 
 export async function repositoryStatus(dataRoot) {
+  await recoverRepositoryImports(dataRoot)
   const repositoriesRoot = path.join(dataRoot, 'repositories')
   const repositories = await repositoryItems(repositoriesRoot)
   for (const repo of repositories) {
@@ -132,12 +134,8 @@ export async function importRepository({ dataRoot, sourcePath, repositoryId, git
   let destinationCreated = false
   try {
     if (remoteUrl) {
-      await sourceGit(resolvedRepositoriesRoot, ['clone', '--', remoteUrl, temporaryDestination])
-      const commit = await sourceGit(temporaryDestination, ['rev-parse', '--verify', `${ref}^{commit}`]).catch(async error => {
-        if (ref === 'HEAD') throw error
-        return sourceGit(temporaryDestination, ['rev-parse', '--verify', `refs/remotes/origin/${ref}^{commit}`])
-      })
-      await sourceGit(temporaryDestination, ['checkout', '--detach', commit])
+      await sourceGit(resolvedRepositoriesRoot, ['clone', '--no-checkout', '--', remoteUrl, temporaryDestination])
+      await checkoutImportedBranch(temporaryDestination, ref)
     } else {
       // A linked worktree's .git file points outside the directory. Materialize its history first.
       let worktree = false
@@ -155,18 +153,19 @@ export async function importRepository({ dataRoot, sourcePath, repositoryId, git
         recursive: true,
         force: worktree,
         errorOnExist: !worktree,
-        filter: file => !worktree || file !== path.join(source, '.git'),
+        filter: file => { repositoryOperationSignal()?.throwIfAborted(); return !worktree || file !== path.join(source, '.git') },
         preserveTimestamps: true,
         verbatimSymlinks: true,
       })
     }
+    repositoryOperationSignal()?.throwIfAborted()
     await rename(temporaryDestination, destination)
     destinationCreated = true
     await saveRepositorySettings(dataRoot, name, { pipeline_url: pipeline })
     await writeMarker(dataRoot, name)
   } catch (error) {
-    await rm(temporaryDestination, { recursive: true, force: true })
-    if (destinationCreated) await rm(destination, { recursive: true, force: true })
+    await rm(temporaryDestination, { recursive: true, force: true }).catch(() => {})
+    if (destinationCreated) await rm(destination, { recursive: true, force: true }).catch(() => {})
     throw error
   }
 
@@ -174,3 +173,87 @@ export async function importRepository({ dataRoot, sourcePath, repositoryId, git
 }
 
 export { normalizeRepositoryId }
+
+// Repair import is a staged replacement. Old Git history and settings are retained.
+// The caller owns the repository operation lock and excludes active analysis.
+export async function reimportRepository({ dataRoot, repositoryId, baseRef }) {
+  const name = normalizeRepositoryId(repositoryId)
+  const root = path.join(dataRoot, 'repositories', name)
+  const info = await inspectSource(root)
+  if (info.kind !== 'git') throw new Error('修复性重导需要完整 Git 仓库及来源地址；普通目录请重新添加')
+  if (info.dirty) throw new Error('仓库存在未提交或未跟踪内容，请先保存到其他位置；本次未替换源码')
+  const url = await sourceGit(root, ['remote', 'get-url', 'origin'])
+  const ref = validateRef(baseRef || info.branch || info.commit)
+  const token = randomUUID(), staging = path.join(dataRoot, 'repositories', `.pangea-import-${token}`)
+  const backup = path.join(dataRoot, '.pangea', 'repository-backups', name, token)
+  const journal = path.join(dataRoot, '.pangea', 'repository-recovery', `${name}.json`)
+  const settings = await readRepositorySettings(dataRoot, name)
+  let moved = false, published = false
+  try {
+    await sourceGit(dataRoot, ['clone', '--no-checkout', '--', url, staging])
+    await checkoutImportedBranch(staging, ref)
+    // Compare against the freshly cloned remote, not stale/missing tracking refs.
+    await sourceGit(staging, ['fetch', '--no-tags', '--', root, 'refs/heads/*:refs/pangea-reimport/*'])
+    if (await sourceGit(staging, ['rev-list', '--glob=refs/pangea-reimport/*', '--not', '--remotes'])) throw new Error('仓库存在本地独有提交，请先推送或备份后重导')
+    for (const oldRef of (await sourceGit(staging, ['for-each-ref', '--format=%(refname)', 'refs/pangea-reimport'])).split('\n').filter(Boolean)) await sourceGit(staging, ['update-ref', '-d', oldRef])
+    await sourceGit(staging, ['remote', 'set-url', '--push', 'origin', await sourceGit(root, ['remote', 'get-url', '--push', 'origin'])])
+    if (!settings.git_path && settings.personal_branch) {
+      const local = settings.personal_branch, remote = settings.remote || 'origin', branch = settings.remote_branch || local
+      await sourceGit(staging, ['check-ref-format', '--branch', local])
+      if (remote !== 'origin') {
+        const fetchUrl = await sourceGit(root, ['remote', 'get-url', remote])
+        const pushUrl = await sourceGit(root, ['remote', 'get-url', '--push', remote])
+        await sourceGit(staging, ['remote', 'add', remote, fetchUrl])
+        await sourceGit(staging, ['remote', 'set-url', '--push', remote, pushUrl])
+        await sourceGit(staging, ['fetch', '--no-tags', remote])
+      }
+      const refs = await sourceGit(staging, ['for-each-ref', '--format=%(refname)', `refs/heads/${local}`])
+      if (!refs.split('\n').includes(`refs/heads/${local}`)) await sourceGit(staging, ['branch', '--track', local, `refs/remotes/${remote}/${branch}`])
+    }
+    // Preserve local author identity, never copy hooks or credential secrets.
+    for (const setting of ['user.name', 'user.email']) {
+      let value
+      try { value = await sourceGit(root, ['config', '--local', '--get', setting]) } catch {}
+      if (value) await sourceGit(staging, ['config', setting, value])
+    }
+    repositoryOperationSignal()?.throwIfAborted()
+    await mkdir(path.dirname(backup), { recursive: true }); await mkdir(path.dirname(journal), { recursive: true })
+    await writeFile(journal, JSON.stringify({ root, backup, staging, repository_id: name }))
+    await rename(root, backup); moved = true
+    await rename(staging, root); published = true
+    await writeMarker(dataRoot, name)
+    await rm(journal, { force: true })
+    return { repository_id: name, source: await inspectSource(root), backup_path: backup, settings }
+  } catch (error) {
+    if (moved) {
+      try { if (published) await rename(root, staging); await rename(backup, root); await rm(journal, { force: true }) }
+      catch { throw new Error(`重导未完成，旧仓库保留在 ${backup}；恢复记录：${journal}；原错误：${error.message}`) }
+    }
+    throw error
+  } finally { await rm(staging, { recursive: true, force: true }).catch(() => {}) }
+}
+
+export async function recoverRepositoryImports(dataRoot) {
+  const directory = path.join(dataRoot, '.pangea', 'repository-recovery')
+  let files
+  try { files = await readdir(directory) } catch (error) { if (error.code === 'ENOENT') return; throw error }
+  for (const file of files.filter(name => name.endsWith('.json'))) {
+    const repoId = normalizeRepositoryId(file.slice(0, -5))
+    try {
+      await repositoryOperation(dataRoot, repoId, async () => {
+        const journal = path.join(directory, file)
+        let record
+        try { record = JSON.parse(await readFile(journal, 'utf8')) } catch (error) { if (error.code === 'ENOENT') return; throw error }
+        const root = path.resolve(dataRoot, 'repositories', repoId)
+        const backups = path.resolve(dataRoot, '.pangea', 'repository-backups', repoId)
+        if (path.resolve(record.root) !== root || !isInside(backups, path.resolve(record.backup)) || path.resolve(record.backup) === backups) throw new Error('仓库恢复记录路径无效')
+        let exists = false
+        try { exists = (await lstat(root)).isDirectory() } catch (error) { if (error.code !== 'ENOENT') throw error }
+        if (!exists) await rename(record.backup, root)
+        // If new root was published, its complete clone was verified before the swap.
+        // Preserve backup and settings in both outcomes; never delete user data here.
+        await rm(journal, { force: true })
+      })
+    } catch (error) { if (error.statusCode !== 409) throw error }
+  }
+}
