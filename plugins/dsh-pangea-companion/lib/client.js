@@ -289,7 +289,14 @@ window.__ModuleLoader__.load({
     .pangea-case-workspace .b05-table-scroll { border:1px solid var(--workflow-line); border-radius:0 0 8px 8px; background:#fff; }
     .pangea-case-workspace .b05-case-table { border:0; border-radius:0; table-layout:fixed; }
     .pangea-case-workspace .b05-case-table :is(th,td):nth-child(1) { width:44px; }
-    .pangea-case-workspace .b05-case-table :is(th,td):nth-child(2) { width:80px; }
+    .pangea-case-workspace .b05-case-table :is(th,td):nth-child(2) { width:92px; }
+    .pangea-injection-task-card { display:block; width:100%; padding:16px 18px; text-align:left; border:1px solid #e6e8ec; border-radius:10px; background:#fff; cursor:pointer; transition:border-color .15s ease,box-shadow .15s ease,background .15s ease; }
+    .pangea-injection-task-card:hover:not(:disabled) { border-color:#d7b1b8; background:#fffdfd; box-shadow:0 4px 12px rgba(23,33,46,.05); }
+    .pangea-injection-task-card:disabled { opacity:.6; cursor:not-allowed; background:#f8f9fa; }
+    .pangea-review-pill { display:inline-flex; align-items:center; gap:4px; padding:1px 7px; border-radius:999px; font-size:11px; font-weight:500; line-height:1.5; white-space:nowrap; background:#eef1f5; color:#5e6773; }
+    .pangea-review-pill[data-status="adopted"] { background:#eaf5ee; color:#20765a; font-weight:600; }
+    .pangea-review-pill[data-status="excluded"] { background:#f3f4f6; color:#6b7280; }
+    .pangea-case-review-list button .pangea-review-item-top { display:flex; align-items:center; justify-content:space-between; gap:8px; font-family:Consolas,monospace; font-size:12px; }
     .pangea-case-workspace .b05-case-table :is(th,td):nth-child(4) { width:100px; }
     .pangea-case-workspace .b05-case-table :is(th,td):nth-child(5) { width:100px; }
     .pangea-case-workspace .b05-case-table :is(th,td):nth-child(6) { width:180px; }
@@ -765,15 +772,18 @@ window.__ModuleLoader__.load({
       if (source?.kind === 'folder') return '本地文件夹 · 可直接分析 · 打桩前关联 Git 仓库'
       return source?.error || '尚未读取 Git 状态'
     }
+
     function createRepositorySettings(React) {
       const h = React.createElement
-      return function RepositorySettings({ cwd, dataRoot, repositories = [], onSaved }) {
-        const [open, setOpen] = React.useState(false), [items, setItems] = React.useState([])
+      return function RepositorySettings({ cwd, dataRoot, repositories = [], defaultOpen = false, onSaved }) {
+        const [open, setOpen] = React.useState(defaultOpen), [items, setItems] = React.useState([])
         const [selected, setSelected] = React.useState(''), [mode, setMode] = React.useState('local')
         const [form, setForm] = React.useState({}), [busy, setBusy] = React.useState(false), [message, setMessage] = React.useState('')
+        const [isError, setIsError] = React.useState(false)
         const [branches, setBranches] = React.useState(null)
         const [branchError, setBranchError] = React.useState('')
         const [refresh, setRefresh] = React.useState(0)
+        React.useEffect(() => { if (defaultOpen) setOpen(true) }, [defaultOpen])
         const query = new URLSearchParams({ ...(cwd ? { cwd } : {}), ...(dataRoot ? { data_root: dataRoot } : {}) })
         const request = async body => {
           const response = await fetch(`/api/pangea-companion/repositories?${query}`, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {})
@@ -782,12 +792,28 @@ window.__ModuleLoader__.load({
         }
         const choose = (id, list = items) => {
           const settings = list.find(item => item.repository_id === id)?.settings || {}
-          setSelected(id); setForm({ pipeline_url: settings.pipeline_url || '', git_path: settings.git_path || '', base_ref: settings.base_ref || 'HEAD', git_url: '', personal_branch: settings.personal_branch || '', remote: settings.remote || 'origin', remote_branch: settings.remote_branch || settings.personal_branch || '' }); setMode('local')
+          setSelected(id)
+          setForm({
+            pipeline_url: settings.pipeline_url || '',
+            git_path: settings.git_path || '',
+            base_ref: settings.base_ref || 'HEAD',
+            git_url: '',
+            personal_branch: settings.personal_branch || '',
+            remote: settings.remote || 'origin',
+            remote_branch: settings.remote_branch || settings.personal_branch || '',
+            lfs_include: '',
+          })
+          setMode('local')
         }
         React.useEffect(() => {
           if (!open) return
           let live = true
-          request().then(result => { if (live) { setItems(result.repositories); choose(repositories[0]?.repo_id || result.repositories[0]?.repository_id || '', result.repositories) } }).catch(error => { if (live) setMessage(error.message) })
+          request().then(result => {
+            if (live) {
+              setItems(result.repositories)
+              choose(repositories[0]?.repo_id || result.repositories[0]?.repository_id || '', result.repositories)
+            }
+          }).catch(error => { if (live) { setIsError(true); setMessage(error.message) } })
           return () => { live = false }
         }, [open, cwd, dataRoot])
         React.useEffect(() => {
@@ -798,69 +824,115 @@ window.__ModuleLoader__.load({
             .then(value => { if (live) setBranches(value) }).catch(error => { if (live) setBranchError(error.message) })
           return () => { live = false }
         }, [open, selected, form.git_path, form.remote, mode, refresh])
-        const select = (label, key, options) => h('label', { style: { display: 'grid', gap: 5, margin: '12px 0' } }, label,
+        const select = (label, key, options) => h('label', { className: 'pangea-repo-field' }, h('span', null, label),
           h('select', { 'aria-label': label, value: form[key] || '', disabled: busy || !branches, onChange: event => setForm({ ...form, [key]: event.target.value,
             ...(key === 'remote' ? { remote_branch: '' } : key === 'personal_branch' ? { remote_branch: event.target.value } : {}) }) },
             h('option', { value: '' }, '请选择'),
             form[key] && !options.some(item => item.name === form[key]) ? h('option', { value: form[key] }, `${form[key]}（待核实）`) : null,
             options.map(item => h('option', { key: item.name, value: item.name }, item.url ? `${item.name} · ${item.url}` : item.name))))
         const createBranch = async () => {
-          setBusy(true); setMessage('')
+          setBusy(true); setMessage(''); setIsError(false)
           try {
             await request({ action: 'create-tracking-branch', repository_name: selected, git_path: form.git_path || undefined, remote: form.remote,
               personal_branch: form.remote_branch, remote_branch: form.remote_branch })
             setForm(previous => ({ ...previous, personal_branch: previous.remote_branch })); setRefresh(value => value + 1)
-            setMessage('已创建本地跟踪分支；请保存配置。')
-          } catch (error) { setMessage(error.message) } finally { setBusy(false) }
+            setMessage('已创建本地跟踪分支；请点击下方“保存仓库与构建配置”完成绑定。')
+          } catch (error) { setIsError(true); setMessage(error.message) } finally { setBusy(false) }
         }
-        const field = (label, key) => h('label', { style: { display: 'grid', gap: 5, margin: '12px 0' } }, label, h('input', { 'aria-label': label, value: form[key] || '', disabled: busy, onChange: event => setForm({ ...form, [key]: event.target.value }) }))
+        const pickDirectory = async key => {
+          try {
+            const picked = await globalThis.window?.dshDesktopDirectoryPicker?.pick?.({ purpose: 'repository' })
+            if (picked) setForm(previous => ({ ...previous, [key]: picked }))
+          } catch (error) { setIsError(true); setMessage(error?.message || '目录选择失败') }
+        }
+        const field = (label, key, withPicker = false) => h('label', { className: 'pangea-repo-field' }, h('span', null, label),
+          withPicker && globalThis.window?.dshDesktopDirectoryPicker?.pick
+            ? h('div', { className: 'pangea-repo-input-row' },
+              h('input', { 'aria-label': label, value: form[key] || '', disabled: busy, onChange: event => setForm({ ...form, [key]: event.target.value }) }),
+              h('button', { type: 'button', className: 'btn', disabled: busy, onClick: () => { void pickDirectory(key) } }, '选择目录'))
+            : h('input', { 'aria-label': label, value: form[key] || '', disabled: busy, onChange: event => setForm({ ...form, [key]: event.target.value }) }))
         const reimport = async () => {
-          setBusy(true); setMessage('')
+          setBusy(true); setMessage(''); setIsError(false)
           try {
             const result = await request({ action: 'reimport-repository', repository_name: selected })
             const refreshed = await request(); setItems(refreshed.repositories); choose(selected, refreshed.repositories)
             setRefresh(value => value + 1); await onSaved?.(); setMessage(`已重新导入，旧目录备份：${result.repository.backup_path}`)
-          } catch (error) { setMessage(error.message) } finally { setBusy(false) }
+          } catch (error) { setIsError(true); setMessage(error.message) } finally { setBusy(false) }
         }
         const pullLfs = async () => {
-          setBusy(true); setMessage('')
+          setBusy(true); setMessage(''); setIsError(false)
           try { await request({ action: 'pull-lfs', repository_name: selected, include: form.lfs_include }); setMessage('所选 LFS 内容已下载') }
-          catch (error) { setMessage(error.message) } finally { setBusy(false) }
+          catch (error) { setIsError(true); setMessage(error.message) } finally { setBusy(false) }
         }
         const save = async () => {
-          setBusy(true); setMessage('')
+          setBusy(true); setMessage(''); setIsError(false)
           try {
             const payload = { action: 'configure-repository', repository_name: selected, pipeline_url: form.pipeline_url, base_ref: form.base_ref, ...(form.personal_branch ? { personal_branch: form.personal_branch, remote: form.remote, remote_branch: form.remote_branch || form.personal_branch } : {}) }
             if (mode === 'remote') payload.git_url = form.git_url
             else if (form.git_path) payload.git_path = form.git_path
             if (mode === 'remote' && !payload.git_url) throw new Error('请输入关联仓库地址')
             await request(payload); const refreshed = await request(); setItems(refreshed.repositories); choose(selected, refreshed.repositories); await onSaved?.(); setMessage('已保存；后续打桩任务使用此配置，原分析源码保持不变。')
-          } catch (error) { setMessage(error.message) } finally { setBusy(false) }
+          } catch (error) { setIsError(true); setMessage(error.message) } finally { setBusy(false) }
         }
-        return h('section', { className: 'b05-card' },
-          h('button', { type: 'button', 'aria-expanded': open, onClick: () => setOpen(!open) }, '代码仓库与构建'),
-          open ? h('div', null,
-            h('label', null, '配置仓库', h('select', { 'aria-label': '配置仓库', value: selected, disabled: busy, onChange: event => choose(event.target.value) }, items.filter(item => !repositories.length || repositories.some(repo => repo.repo_id === item.repository_id)).map(item => h('option', { key: item.repository_id, value: item.repository_id }, item.name)))),
-            h('p', null, sourceLabel(items.find(item => item.repository_id === selected)?.source)),
-            items.find(item => item.repository_id === selected)?.settings?.git_path ? h('p', null, `已关联打桩仓库：${items.find(item => item.repository_id === selected).settings.git_path}`) : null,
-            select('个人开发分支', 'personal_branch', branches?.local || []),
-            select('推送远端', 'remote', branches?.remotes || []),
-            select('远端目标分支', 'remote_branch', branches?.remote_branches || []),
-            h('button', { type: 'button', disabled: busy || !selected, onClick: () => setRefresh(value => value + 1) }, '刷新远端分支'),
-            h('button', { type: 'button', disabled: busy || !form.remote_branch || !branches || branches.local.some(item => item.name === form.remote_branch), onClick: createBranch }, '创建本地跟踪分支'),
-            h('p', { role: 'status' }, branchError || (branches?.live ? '已读取推送端的远端分支' : '远端分支为本地缓存，可刷新查询服务器')),
-            h('p', null, '打桩只提交到这个已有分支；任务不会创建新分支。'),
-            field('项目构建流水线 URL', 'pipeline_url'),
-            h('details', null, h('summary', null, '修复性重新导入'), h('p', null, '从来源仓库重新克隆并验证，成功后替换分析源码；保留旧目录和仓库配置。存在未提交或本地独有提交时停止。'), h('button', { type: 'button', disabled: busy || !selected, onClick: reimport }, '重新导入并保留旧目录')),
-            h('details', null, h('summary', null, '按需下载 LFS 文件'), field('LFS 文件范围', 'lfs_include'),
-              h('button', { type: 'button', disabled: busy || !selected || !form.lfs_include, onClick: pullLfs }, '下载所选 LFS 文件')),
-            h('details', null, h('summary', null, '关联或更换打桩 Git 仓库'),
-              h('p', null, '选择与分析源码对应的 Git 仓库。关联后保留原分析目录；打桩前展示源码差异。'),
-              h('select', { 'aria-label': '关联方式', value: mode, disabled: busy, onChange: event => setMode(event.target.value) }, h('option', { value: 'local' }, '已有本地 Git 仓库'), h('option', { value: 'remote' }, '克隆 Git 仓库地址')),
-              mode === 'local' ? field('关联 Git 仓库目录', 'git_path') : field('关联 Git 仓库地址', 'git_url'),
-              field('关联分支、标签或提交', 'base_ref')),
-            h('button', { type: 'button', disabled: busy || !selected, onClick: save }, busy ? '正在保存仓库配置…' : '保存仓库与构建配置'),
-            message ? h('p', { role: 'status' }, message) : null) : null)
+        const currentRepo = items.find(item => item.repository_id === selected)
+        const needsGitLink = Boolean(currentRepo && currentRepo.source?.kind !== 'git' && !currentRepo.settings?.git_path)
+        return h('section', { className: 'pangea-repo-settings' },
+          h('style', null, `
+            .pangea-repo-settings { border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 8px; background: #fff; padding: 12px 14px; margin: 10px 0; }
+            .pangea-repo-toggle { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 0; background: transparent; padding: 2px 0; color: var(--pangea-ink, #1d232a); font: 600 13px/1.5 inherit; cursor: pointer; text-align: left; }
+            .pangea-repo-toggle::after { content: "▾"; color: var(--pangea-muted, #5e6773); font-size: 12px; transition: transform .15s ease; }
+            .pangea-repo-toggle[aria-expanded="true"]::after { transform: rotate(180deg); }
+            .pangea-repo-body { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--pangea-line, #e2e6ec); display: grid; gap: 12px; }
+            .pangea-repo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 12px; }
+            .pangea-repo-field { display: grid; gap: 5px; font-size: 12px; font-weight: 600; color: var(--pangea-ink, #1d232a); margin: 0; }
+            .pangea-repo-field input, .pangea-repo-field select { width: 100%; min-height: 36px; box-sizing: border-box; padding: 6px 10px; border: 1px solid #d5dbe3; border-radius: 6px; background: #fff; color: var(--pangea-ink, #1d232a); font: 400 13px/1.5 inherit; }
+            .pangea-repo-input-row { display: flex; gap: 8px; align-items: center; }
+            .pangea-repo-input-row input { flex: 1; min-width: 0; }
+            .pangea-repo-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+            .pangea-repo-status { margin: 0; padding: 8px 12px; border-radius: 6px; background: var(--pangea-subtle, #f1f3f6); color: var(--pangea-muted, #5e6773); font-size: 12px; line-height: 1.6; }
+            .pangea-repo-status.is-error { background: #fbefef; color: #b62836; }
+            .pangea-repo-status.is-ok { background: #eaf5ee; color: #20765a; }
+            .pangea-repo-subdetails { border-top: 1px solid var(--pangea-line, #e2e6ec); padding-top: 10px; }
+            .pangea-repo-subdetails > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--pangea-ink, #1d232a); padding: 4px 0; }
+          `),
+          h('button', { type: 'button', className: 'pangea-repo-toggle', 'aria-expanded': open, onClick: () => setOpen(!open) }, '代码仓库与构建'),
+          open ? h('div', { className: 'pangea-repo-body' },
+            h('div', { className: 'pangea-repo-grid' },
+              h('label', { className: 'pangea-repo-field' }, h('span', null, '配置仓库'),
+                h('select', { 'aria-label': '配置仓库', value: selected, disabled: busy, onChange: event => choose(event.target.value) },
+                  items.filter(item => !repositories.length || repositories.some(repo => repo.repo_id === item.repository_id)).map(item => h('option', { key: item.repository_id, value: item.repository_id }, item.name)))),
+              field('项目构建流水线 URL', 'pipeline_url')),
+            h('p', { className: 'pangea-repo-status' }, sourceLabel(currentRepo?.source),
+              currentRepo?.settings?.git_path ? ` · 已关联打桩仓库：${currentRepo.settings.git_path}` : ''),
+            h('div', { className: 'pangea-repo-grid' },
+              select('个人开发分支', 'personal_branch', branches?.local || []),
+              select('推送远端', 'remote', branches?.remotes || []),
+              select('远端目标分支', 'remote_branch', branches?.remote_branches || [])),
+            h('div', { className: 'pangea-repo-actions' },
+              h('button', { type: 'button', className: 'btn', disabled: busy || !selected, onClick: () => setRefresh(value => value + 1) }, '刷新远端分支'),
+              h('button', { type: 'button', className: 'btn', disabled: busy || !form.remote_branch || !branches || branches.local.some(item => item.name === form.remote_branch), onClick: createBranch }, '创建本地跟踪分支'),
+              h('span', { role: 'status', style: { fontSize: 12, color: branchError ? '#b62836' : '#5e6773' } }, branchError || (branches?.live ? '已读取推送端的远端分支' : '远端分支为本地缓存，可刷新查询服务器'))),
+            h('p', { style: { margin: 0, fontSize: 12, color: '#5e6773' } }, '打桩只提交到这个已有分支；任务不会创建新分支。'),
+            h('details', { className: 'pangea-repo-subdetails', open: needsGitLink || undefined },
+              h('summary', null, '关联或更换打桩 Git 仓库'),
+              h('p', { style: { margin: '6px 0 10px', fontSize: 12, color: '#5e6773' } }, '选择与分析源码对应的 Git 仓库。关联后保留原分析目录；打桩前展示源码差异。'),
+              h('div', { className: 'pangea-repo-grid' },
+                h('label', { className: 'pangea-repo-field' }, h('span', null, '关联方式'),
+                  h('select', { 'aria-label': '关联方式', value: mode, disabled: busy, onChange: event => setMode(event.target.value) }, h('option', { value: 'local' }, '已有本地 Git 仓库'), h('option', { value: 'remote' }, '克隆 Git 仓库地址'))),
+                mode === 'local' ? field('关联 Git 仓库目录', 'git_path', true) : field('关联 Git 仓库地址', 'git_url'),
+                field('关联分支、标签或提交', 'base_ref'))),
+            h('details', { className: 'pangea-repo-subdetails' },
+              h('summary', null, '修复性重新导入'),
+              h('p', { style: { margin: '6px 0 10px', fontSize: 12, color: '#5e6773' } }, '从来源仓库重新克隆并验证，成功后替换分析源码；保留旧目录和仓库配置。存在未提交或本地独有提交时停止。'),
+              h('button', { type: 'button', className: 'btn', disabled: busy || !selected, onClick: reimport }, '重新导入并保留旧目录')),
+            h('details', { className: 'pangea-repo-subdetails' },
+              h('summary', null, '按需下载 LFS 文件'),
+              h('div', { style: { marginTop: 8, display: 'grid', gap: 8 } },
+                field('LFS 文件范围', 'lfs_include'),
+                h('div', null, h('button', { type: 'button', className: 'btn', disabled: busy || !selected || !form.lfs_include, onClick: pullLfs }, '下载所选 LFS 文件')))),
+            h('div', { className: 'pangea-repo-actions', style: { paddingTop: 8, borderTop: '1px solid var(--pangea-line, #e2e6ec)', justifyContent: 'space-between' } },
+              message ? h('p', { role: 'status', className: `pangea-repo-status ${isError ? 'is-error' : 'is-ok'}` }, message) : h('span', null),
+              h('button', { type: 'button', className: 'btn primary', disabled: busy || !selected, onClick: save }, busy ? '正在保存仓库配置…' : '保存仓库与构建配置'))) : null)
       }
     }
 
@@ -920,26 +992,29 @@ window.__ModuleLoader__.load({
       preparing: '准备源码', generating: '生成打桩修改', ready: '修改已生成', pushing: '提交与推送中',
       pushed: '个人分支已推送', failed: '生成失败', cancelled: '已停止', interrupted: '操作已中断',
     }
-    const readable = value => value == null ? '' : typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+    const readable = value => value == null ? '' : typeof value === 'string' ? value : Array.isArray(value) ? value.map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('\n') : JSON.stringify(value, null, 2)
 
     function createFaultInjectionPanel(React) {
       const h = React.createElement
       const RepositorySettings = createRepositorySettings(React)
       const busy = task => ['preparing', 'generating', 'pushing'].includes(task?.status)
-      return function FaultInjectionPanel({ runId, dataRoot, cwd, onOpenPipeline, cases = [], standalone = false, onBack }) {
+      return function FaultInjectionPanel({ runId, dataRoot, cwd, onOpenPipeline, cases = [], standalone = false, onBack, initialCaseKeys = [], handoffRevision = 0 }) {
         const [open, setOpen] = React.useState(standalone)
         const [profileKey, setProfileKey] = React.useState('')
         const [tasks, setTasks] = React.useState([])
         const [taskId, setTaskId] = React.useState('')
         const [acknowledged, setAcknowledged] = React.useState({})
         const [step, setStep] = React.useState(2)
-        const [chosen, setChosen] = React.useState([])
+        const [chosen, setChosen] = React.useState(() => Array.isArray(initialCaseKeys) ? [...initialCaseKeys] : [])
+        const [handoffNote, setHandoffNote] = React.useState('')
+        const [repoSetupOpen, setRepoSetupOpen] = React.useState(false)
         const [query, setQuery] = React.useState('')
         const [focused, setFocused] = React.useState('')
         const [settings, setSettings] = React.useState(null)
         const [providers, setProviders] = React.useState([])
         const [pipelineUrl, setPipelineUrl] = React.useState('')
         const drafts = React.useRef({})
+        const repoDetailsRef = React.useRef(null)
         const [notice, setNotice] = React.useState('')
         const [error, setError] = React.useState('')
         const [working, setWorking] = React.useState(false)
@@ -947,14 +1022,26 @@ window.__ModuleLoader__.load({
         const [verification, setVerification] = React.useState({ case_key: '', result: 'not_run', hits: '', notes: '' })
         const [modelState, setModelState] = React.useState({ status: 'idle' })
         const [modelRefresh, setModelRefresh] = React.useState(0)
+        const keyOf = item => item.projection_id || item.test_case_id
+        const eligible = item => Boolean(keyOf(item)) && cases.filter(other => keyOf(other) === keyOf(item)).length === 1 && Boolean(item.instrumentation || item.source_record?.body?.instrumentation || item.execution_readiness === 'needs_instrumentation')
+        const eligibleKeys = cases.filter(eligible).map(keyOf)
+        React.useEffect(() => {
+          if (!handoffRevision || !Array.isArray(initialCaseKeys) || !initialCaseKeys.length) return
+          const valid = initialCaseKeys.filter(key => cases.some(item => keyOf(item) === key && eligible(item)))
+          const requested = initialCaseKeys.length
+          setChosen(valid)
+          if (valid[0]) setFocused(valid[0])
+          setStep(2)
+          setHandoffNote(valid.length
+            ? `已带入 ${valid.length} 条可打桩用例${valid.length < requested ? `（其余 ${requested - valid.length} 条暂无桩点信息）` : ''}，核对桩点后可继续提交。`
+            : '所选用例暂未包含明确桩点信息，请在下方列表中选择支持打桩的用例。')
+        }, [handoffRevision, runId, cases.length])
         React.useEffect(() => {
           if (!open || !settings?.provider_id) return
           return loadAnalysisAgentModels({ providerId: settings.provider_id, cwd, onState: setModelState })
         }, [open, settings?.provider_id, cwd, modelRefresh])
         const modelSelection = analysisExecutionState(settings || {}, providers.map(item => ({ ...item, registered: true })), modelState, cwd)
         const modelCatalog = modelState.provider_id === settings?.provider_id && modelState.cwd === cwd && modelState.status === 'ready' ? modelState.catalog : null
-        const keyOf = item => item.projection_id || item.test_case_id
-        const eligible = item => Boolean(keyOf(item)) && cases.filter(other => keyOf(other) === keyOf(item)).length === 1 && Boolean(item.instrumentation || item.source_record?.body?.instrumentation || item.execution_readiness === 'needs_instrumentation')
         const selectedKeys = standalone ? chosen.filter(key => cases.some(item => keyOf(item) === key && eligible(item))) : cases.map(keyOf).filter(Boolean)
         const selectedCases = cases.filter(item => selectedKeys.includes(keyOf(item)))
         const focusedCase = cases.find(item => keyOf(item) === focused) || selectedCases[0] || cases[0]
@@ -991,8 +1078,13 @@ window.__ModuleLoader__.load({
           let live = true
           request().then(value => {
             if (!live) return
-            setTasks(value.tasks ?? []);
-            if (!taskId) { try { const last = localStorage.getItem(`pangea-fi:${scope}`); if (value.tasks?.some(item => item.id === last)) { setTaskId(last); if (standalone) setStep(4) } } catch {} }
+            setTasks(value.tasks ?? [])
+            if (!taskId && !(initialCaseKeys?.length > 0)) {
+              try {
+                const last = localStorage.getItem(`pangea-fi:${scope}`)
+                if (value.tasks?.some(item => item.id === last)) { setTaskId(last); if (standalone) setStep(4) }
+              } catch {}
+            }
             setProviders(value.providers ?? [])
             setSettings(previous => previous ?? { ...value.defaults, agent_model: '', instructions: '' })
             setError('')
@@ -1021,165 +1113,269 @@ window.__ModuleLoader__.load({
         }, [taskId])
         const act = async (action, extra = {}) => {
           setWorking(true); setError(''); setNotice('')
-          try { const value = await request({ action, task_id: taskId, ...extra }); remember(value.task); if (action === 'generate') setStep(4); if (['configure', 'verify'].includes(action)) setNotice('已保存'); if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url })) }
-          catch (reason) { setError(reason.message) }
+          try {
+            const value = await request({ action, task_id: taskId, ...extra })
+            remember(value.task)
+            if (action === 'generate') setStep(4)
+            if (['configure', 'verify'].includes(action)) setNotice('已保存')
+            if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url }))
+          } catch (reason) { setError(reason.message) }
           finally { setWorking(false) }
         }
-        const field = (label, value, change, options = {}) => h('label', { style: { display: 'grid', gap: 5, marginBottom: 10 } }, label,
+        const field = (label, value, change, options = {}) => h('label', { className: 'pangea-fi-field' }, h('span', null, label),
           h(options.multiline ? 'textarea' : 'input', { 'aria-label': label, value: readable(value), onChange: event => change(event.target.value),
-            disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), style: { width: '100%', boxSizing: 'border-box' } }))
-        const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14 }
-        const renderPoints = points => Array.isArray(points) ? points.map((point, index) => h('details', { key: point.id || index, open: standalone, className: 'pangea-fi-point' },
+            disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), placeholder: options.placeholder }))
+        const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, alignItems: 'start' }
+        const renderPoints = points => Array.isArray(points) && points.length ? points.map((point, index) => h('details', { key: point.id || index, open: standalone, className: 'pangea-fi-point' },
           h('summary', null, `${readable(point.id)} · ${readable(point.action) || '桩点说明'}`),
           h('p', { className: 'b05-subtle' }, `${readable(point.repo_id)}:${readable(point.path)}`),
-          h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : null
-        const candidates = selectedCases.filter(item => item.instrumentation || item.source_record?.body?.instrumentation)
-        return h('section', { className: 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
+          h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : h('p', { className: 'b05-subtle' }, '该用例按需打桩，具体注入点将在源码生成阶段定位。')
+        const renderCaseSummaryFields = item => {
+          const rows = [
+            ['用例编号', item.display_id || item.test_case_id || '未标注'],
+            ['验证目标', item.verification_goal || item.summary],
+            ['用例类型', item.case_type || item.test_level],
+            ['观察点', Array.isArray(item.observability) ? item.observability.join('；') : item.observability],
+            ['清理动作', Array.isArray(item.cleanup) ? item.cleanup.join('；') : item.cleanup],
+          ].filter(([, value]) => value != null && String(value).trim() !== '')
+          return h('dl', { className: 'pangea-reading-fields', style: { marginTop: 8 } },
+            ...rows.flatMap(([label, value]) => [h('dt', { key: `${label}-dt` }, label), h('dd', { key: `${label}-dd` }, readable(value))]))
+        }
+        const missingBranch = Boolean(settings?.repositories?.some(repo => repo.enabled !== false && !repo.personal_branch))
+        const missingGit = Boolean(settings?.repositories?.some(repo => repo.enabled !== false && repo.source?.kind !== 'git'))
+        const needsRepoSetup = missingBranch || missingGit
+        const pipelineDirty = Boolean(task && pipelineUrl.trim() !== (task.pipeline_url || ''))
+        const statusTone = status => status === 'pushed' || status === 'ready' ? 'good' : ['failed', 'cancelled', 'interrupted'].includes(status) ? 'danger' : 'info'
+        return h('section', { className: standalone ? 'pangea-injection-panel is-standalone' : 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
           h('style', null, `
-            .pangea-injection-panel { min-width:0; font-size:14px; }
-            .pangea-injection-panel .pangea-fi-workspace { overflow:visible; overscroll-behavior:contain; scrollbar-gutter:stable; padding-right:8px; }
-            .pangea-injection-panel .pangea-fi-workspace > * { min-width:0; }
-            .pangea-injection-panel details { border-top:1px solid #e7ebe5; margin-top:6px; }
-            .pangea-injection-panel .pangea-fi-workspace > section.b05-card { padding:0; border:0; margin:8px 0; }
-            .pangea-injection-panel .pangea-fi-build { padding:10px 12px; }
-            .pangea-injection-panel button + button { margin-left:8px; }
-            .pangea-injection-panel summary { cursor:pointer; padding:7px 0; font-weight:500; }
-            .pangea-injection-panel p { margin:8px 0; overflow-wrap:anywhere; }
-            .pangea-injection-panel h3 { font-size:14px; margin:8px 0; }
-            .pangea-injection-panel .pangea-fi-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
-            .pangea-injection-panel input:not([type=checkbox]), .pangea-injection-panel select, .pangea-injection-panel textarea { font:inherit; min-width:0; max-width:100%; padding:7px 9px; border:1px solid #dfe5dc; border-radius:6px; background:#fff; color:inherit; }
-            .pangea-injection-panel label > select { display:block; width:100%; margin-top:5px; }
-            .pangea-injection-panel button { font:inherit; padding:7px 11px; border:1px solid #dfe5dc; border-radius:6px; background:#fff; color:#566051; cursor:pointer; }
-            .pangea-injection-panel button.primary { background:#27372d; border-color:#27372d; color:#fff; }
-            .pangea-injection-panel button:disabled { opacity:.5; cursor:default; }
-            .pangea-injection-panel .pangea-fi-scroll { max-height:340px; overflow:auto; overflow-wrap:anywhere; }
-            .pangea-injection-panel .pangea-fi-steps { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.65; padding-left:24px; }
-            .pangea-injection-panel .pangea-fi-steps li { padding:6px 0; }
-            .pangea-injection-panel .pangea-fi-records { list-style:none; padding:0; }
-            .pangea-injection-panel .pangea-fi-records > li { padding:10px 0; border-top:1px solid #e7ebe5; }
-            .pangea-injection-panel .pangea-fi-records pre { white-space:pre-wrap; font:inherit; }
-            .pangea-injection-panel .pangea-reading-fields dd { overflow-wrap:anywhere; }
-            .pangea-fi-progress { display:flex; gap:24px; padding:18px 0; list-style:none; color:#68736b; border-bottom:1px solid #e1e6e0; }
-            .pangea-fi-progress [aria-current=step] { color:#203d2b; font-weight:700; }
-            .pangea-fi-picker { display:grid; grid-template-columns:minmax(230px, 1fr) minmax(0, 2fr); gap:24px; margin:20px 0; }
-            .pangea-fi-case-list { max-height:65vh; overflow:auto; border:1px solid #e1e6e0; border-radius:10px; padding:8px; }
-            .pangea-fi-case-row { display:flex; align-items:center; gap:8px; padding:6px; }
-            .pangea-fi-case-row button { flex:1; text-align:left; border:0; padding:12px; }
-            .pangea-fi-case-row button[aria-pressed=true] { background:#eaf0e8; }
-            .pangea-fi-case-row small { display:block; margin-top:5px; color:#737a74; }
-            .pangea-fi-case-detail { min-width:0; padding:20px; border:1px solid #e1e6e0; border-radius:10px; }
-            .pangea-fi-case-detail pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.7; }
-            .pangea-fi-footer { position:sticky; bottom:0; display:flex; justify-content:flex-end; gap:12px; background:#fff; padding:16px 0; border-top:1px solid #e1e6e0; }
-            .pangea-fi-technical { margin:20px 0; }
-            .pangea-fi-create { max-width:960px; margin:24px auto; }
-            @media(max-width:760px) { .pangea-fi-picker { grid-template-columns:1fr; } }
-            @media(max-width:640px) { .pangea-injection-panel .b05-head-actions { flex-wrap:wrap; } .pangea-injection-panel .pangea-fi-workspace { max-height:75vh; } }
+            .pangea-injection-panel { min-width: 0; font-size: 14px; color: var(--pangea-ink, #1d232a); }
+            .pangea-injection-panel.is-standalone { background: transparent; border: 0; padding: 0; box-shadow: none; }
+            .pangea-injection-panel .pangea-fi-workspace { overflow: visible; overscroll-behavior: contain; scrollbar-gutter: stable; }
+            .pangea-injection-panel .pangea-fi-workspace:focus-visible { outline: 2px solid var(--pangea-red, #b62836); outline-offset: 4px; border-radius: 8px; }
+            .pangea-injection-panel .pangea-fi-workspace > * { min-width: 0; }
+            .pangea-injection-panel details { border-top: 1px solid var(--pangea-line, #e2e6ec); margin-top: 8px; padding-top: 4px; }
+            .pangea-injection-panel .pangea-fi-build { padding: 16px 18px; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; background: #fff; }
+            .pangea-injection-panel button + button { margin-left: 8px; }
+            .pangea-injection-panel summary { cursor: pointer; padding: 8px 0; font-weight: 600; color: var(--pangea-ink, #1d232a); }
+            .pangea-injection-panel p { margin: 8px 0; overflow-wrap: anywhere; line-height: 1.65; }
+            .pangea-injection-panel h3 { font-size: 16px; font-weight: 650; margin: 10px 0; color: var(--pangea-ink, #1d232a); }
+            .pangea-injection-panel h4 { font-size: 13px; font-weight: 600; margin: 14px 0 6px; color: var(--pangea-muted, #5e6773); }
+            .pangea-injection-panel .pangea-fi-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 14px; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 8px; background: #fff; }
+            .pangea-injection-panel .pangea-fi-toolbar input[type=search] { flex: 1; min-width: 200px; max-width: 360px; }
+            .pangea-injection-panel .pangea-fi-toolbar button + button { margin-left: 0; }
+            .pangea-injection-panel input:not([type=checkbox]), .pangea-injection-panel select, .pangea-injection-panel textarea { font: inherit; font-size: 13px; min-height: 36px; min-width: 0; max-width: 100%; padding: 7px 11px; border: 1px solid #d5dbe3; border-radius: 6px; background: #fff; color: var(--pangea-ink, #1d232a); box-sizing: border-box; }
+            .pangea-injection-panel textarea { min-height: 76px; resize: vertical; }
+            .pangea-injection-panel input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--pangea-red, #b62836); flex-shrink: 0; cursor: pointer; }
+            .pangea-injection-panel .pangea-fi-field { display: grid; gap: 6px; align-content: start; margin-bottom: 12px; font-size: 13px; font-weight: 600; }
+            .pangea-injection-panel label > select { display: block; width: 100%; margin-top: 6px; }
+            .pangea-injection-panel .pangea-fi-field > select { margin-top: 0; }
+            .pangea-injection-panel button { font: inherit; font-size: 13px; min-height: 36px; padding: 6px 13px; border: 1px solid #d5dbe3; border-radius: 6px; background: #fff; color: var(--pangea-ink, #1d232a); cursor: pointer; transition: background .15s ease, border-color .15s ease; }
+            .pangea-injection-panel button:hover:not(:disabled) { background: var(--pangea-subtle, #f1f3f6); }
+            .pangea-injection-panel button.primary { background: var(--pangea-red, #b62836) !important; border-color: var(--pangea-red, #b62836) !important; color: #fff !important; font-weight: 600; }
+            .pangea-injection-panel button.primary:hover:not(:disabled) { background: var(--pangea-red-hover, #981f2b) !important; border-color: var(--pangea-red-hover, #981f2b) !important; }
+            .pangea-injection-panel button:disabled { opacity: .5; cursor: default; }
+            .pangea-injection-panel .pangea-fi-banner { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px 15px; margin: 12px 0; border-radius: 8px; font-size: 13px; line-height: 1.6; border: 1px solid transparent; }
+            .pangea-injection-panel .pangea-fi-banner.danger { background: #fbefef; border-color: #f2c9cd; color: #9c2330; }
+            .pangea-injection-panel .pangea-fi-banner.warn { background: #fbf4e6; border-color: #eedab3; color: #8c5a12; }
+            .pangea-injection-panel .pangea-fi-banner.good { background: #eaf5ee; border-color: #c3e4cf; color: #20765a; }
+            .pangea-injection-panel .pangea-fi-banner.info { background: #edf3f8; border-color: #cfe0ee; color: #365a7d; }
+            .pangea-injection-panel .pangea-fi-scroll { max-height: 340px; overflow: auto; overflow-wrap: anywhere; }
+            .pangea-injection-panel .pangea-fi-steps { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; padding-left: 22px; }
+            .pangea-injection-panel .pangea-fi-steps li { padding: 5px 0; }
+            .pangea-injection-panel .pangea-fi-records { list-style: none; padding: 0; margin: 12px 0 0; }
+            .pangea-injection-panel .pangea-fi-records > li { padding: 12px 0; border-top: 1px solid var(--pangea-line, #e2e6ec); }
+            .pangea-injection-panel .pangea-fi-records pre { white-space: pre-wrap; font: inherit; background: var(--pangea-subtle, #f1f3f6); padding: 8px 10px; border-radius: 6px; }
+            .pangea-injection-panel .pangea-reading-fields dd { overflow-wrap: anywhere; }
+            .pangea-fi-progress { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 0; margin: 0 0 18px; list-style: none; }
+            .pangea-fi-progress li { display: flex; align-items: center; gap: 9px; padding: 8px 0 12px; border-bottom: 2px solid var(--pangea-line, #e2e6ec); color: var(--pangea-muted, #5e6773); font-size: 13px; }
+            .pangea-fi-progress li b { width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--pangea-line, #d5dbe3); background: #fff; display: inline-flex; align-items: center; justify-content: center; font: 600 11px Consolas, monospace; flex-shrink: 0; }
+            .pangea-fi-progress li[data-done="true"] b { background: #eaf5ee; border-color: transparent; color: #20765a; }
+            .pangea-fi-progress li[aria-current="step"] { color: var(--pangea-ink, #1d232a); border-bottom-color: var(--pangea-red, #b62836); font-weight: 600; }
+            .pangea-fi-progress li[aria-current="step"] b { background: var(--pangea-red, #b62836); border-color: var(--pangea-red, #b62836); color: #fff; }
+            .pangea-fi-switcher { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 14px; margin: 0 0 16px; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 8px; background: #fff; }
+            .pangea-fi-switcher label { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 240px; font-size: 13px; font-weight: 600; }
+            .pangea-fi-switcher label > select { margin-top: 0; flex: 1; max-width: 520px; font-weight: 400; }
+            .pangea-fi-picker { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(0, 1.85fr); gap: 20px; margin: 16px 0; align-items: start; }
+            .pangea-fi-case-list { max-height: 62vh; overflow: auto; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; padding: 8px; background: #fff; }
+            .pangea-fi-case-row { display: flex; align-items: flex-start; gap: 8px; padding: 4px; border-bottom: 1px solid #f1f3f6; }
+            .pangea-fi-case-row:last-child { border-bottom: 0; }
+            .pangea-fi-case-row input[type=checkbox] { margin-top: 12px; }
+            .pangea-fi-case-row button { flex: 1; text-align: left; border: 0; border-radius: 7px; padding: 10px 12px; min-height: 0; background: transparent; }
+            .pangea-fi-case-row button[aria-pressed=true] { background: var(--pangea-red-soft, #fbf0f2); box-shadow: inset 3px 0 var(--pangea-red, #b62836); }
+            .pangea-fi-case-id { display: inline-block; margin-right: 7px; font: 600 11px/1.4 Consolas, monospace; color: var(--pangea-muted, #5e6773); background: var(--pangea-subtle, #f1f3f6); padding: 1px 6px; border-radius: 4px; }
+            .pangea-fi-case-row small { display: block; margin-top: 5px; color: var(--pangea-muted, #5e6773); font-size: 12px; }
+            .pangea-fi-case-detail { min-width: 0; padding: 20px 22px; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; background: #fff; }
+            .pangea-fi-case-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.7 inherit; margin: 0; padding: 10px 12px; border-radius: 6px; background: var(--pangea-subtle, #f1f3f6); }
+            .pangea-fi-footer { position: sticky; bottom: 0; z-index: 3; display: flex; justify-content: space-between; align-items: center; gap: 12px; background: rgba(255,255,255,.96); backdrop-filter: blur(4px); padding: 14px 18px; margin-top: 18px; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; }
+            .pangea-fi-create, .pangea-fi-task-card { padding: 20px 22px; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; background: #fff; }
+            .pangea-fi-technical { margin: 16px 0; padding: 12px 14px; border: 1px solid var(--pangea-line, #e2e6ec) !important; border-radius: 8px; background: var(--pangea-subtle, #f8f9fb); }
+            .pangea-fi-repo-box { border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 8px; padding: 10px 14px; margin: 10px 0; background: #fff; }
+            .pangea-fi-status-pill { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+            .pangea-fi-status-pill.good { background: #eaf5ee; color: #20765a; }
+            .pangea-fi-status-pill.danger { background: #fbefef; color: #9c2330; }
+            .pangea-fi-status-pill.info { background: #edf3f8; color: #365a7d; }
+            @media(max-width: 820px) { .pangea-fi-picker { grid-template-columns: 1fr; } .pangea-fi-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
           `),
-          h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between' } },
-            h('div', null, h('strong', null, standalone ? '代码打桩' : '打桩与个人分支'), h('p', { className: 'b05-subtle' }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可一起生成打桩修改。` : '选择用例生成打桩修改，或查看已有打桩任务。')),
-            standalone ? h('button', { type: 'button', onClick: onBack }, '更换分析任务') : h('button', { type: 'button', className: 'btn', 'aria-expanded': open, onClick: () => setOpen(value => !value) }, open ? '收起打桩' : '打开打桩工作区')),
+          !standalone ? h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between', marginBottom: open ? 14 : 0 } },
+            h('div', null, h('strong', null, '打桩与个人分支'), h('p', { className: 'b05-subtle', style: { margin: '4px 0 0' } }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可一起生成打桩修改。` : '选择用例生成打桩修改，或查看已有打桩任务。')),
+            h('button', { type: 'button', className: 'btn', 'aria-expanded': open, onClick: () => setOpen(value => !value) }, open ? '收起打桩' : '打开打桩工作区'))
+            : h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between', marginBottom: 14 } },
+              h('p', { className: 'b05-subtle', style: { margin: 0 } }, selectedKeys.length ? `当前已选 ${selectedKeys.length} 条可打桩用例（共 ${eligibleKeys.length} 条具备打桩条件）` : `当前运行共 ${cases.length} 条用例，其中 ${eligibleKeys.length} 条支持生成故障注入桩点。`),
+              h('div', null,
+                step === 4 ? h('button', { type: 'button', onClick: () => { setTaskId(''); setStep(2) } }, '新建打桩任务') : null,
+                h('button', { type: 'button', onClick: onBack }, '更换分析任务'))),
           open ? h('div', { className: 'pangea-fi-workspace', role: 'region', 'aria-label': '打桩任务详情', tabIndex: 0 },
-            error ? h('p', { role: 'alert' }, error) : null,
-            notice ? h('p', { role: 'status' }, notice) : null,
-            standalone && step < 4 ? h('ol', { className: 'pangea-fi-progress', 'aria-label': '新建打桩步骤' }, ['选择分析任务', '选择用例', '设置与提交'].map((label, index) => h('li', { key: label, 'aria-current': step === index + 1 ? 'step' : undefined }, `${index + 1}  ${label}`))) : null,
+            tasks.length ? h('div', { className: 'pangea-fi-switcher' },
+              h('label', null, '已有打桩任务', h('select', { 'aria-label': '已有打桩任务', value: taskId, onChange: event => selectTask(event.target.value) },
+                h('option', { value: '' }, '选择任务查看'),
+                tasks.map(item => h('option', { key: item.id, value: item.id }, `${item.name || item.cases?.[0]?.title || '打桩任务'} · ${new Date(item.created_at).toLocaleString()} · ${item.case_keys.length} 条 · ${INJECTION_STATUS_LABELS[item.status] || item.status}`)))),
+              standalone && taskId && step === 4 ? h('span', { className: `pangea-fi-status-pill ${statusTone(task?.status)}` }, INJECTION_STATUS_LABELS[task?.status] || task?.status) : null) : null,
+            standalone ? h('ol', { className: 'pangea-fi-progress', 'aria-label': '新建打桩步骤' },
+              ['选择分析任务', '选择用例', '设置与提交', '结果与推送'].map((label, index) => h('li', {
+                key: label,
+                'data-done': step > index + 1 ? 'true' : undefined,
+                'aria-current': step === index + 1 ? 'step' : undefined,
+              }, h('b', null, step > index + 1 ? '✓' : `0${index + 1}`), label))) : null,
+            error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger' }, h('span', null, error)) : null,
+            notice ? h('div', { role: 'status', className: 'pangea-fi-banner good' }, h('span', null, notice)) : null,
+            handoffNote && standalone && step === 2 ? h('div', { role: 'status', className: 'pangea-fi-banner info' },
+              h('span', null, handoffNote),
+              selectedKeys.length && settings ? h('button', { type: 'button', className: 'primary', onClick: () => setStep(3) }, '直接进入设置与提交') : null) : null,
             standalone && step === 2 ? h('section', null,
-              h('div', { className: 'pangea-fi-toolbar' }, h('input', { type: 'search', 'aria-label': '搜索打桩用例', placeholder: '搜索用例名称', value: query, onChange: event => setQuery(event.target.value) }), h('span', { role: 'status' }, `已选择 ${selectedKeys.length} 条`)),
+              h('div', { className: 'pangea-fi-toolbar' },
+                h('input', { type: 'search', 'aria-label': '搜索打桩用例', placeholder: '搜索用例编号或名称…', value: query, onChange: event => setQuery(event.target.value) }),
+                h('button', { type: 'button', disabled: !eligibleKeys.length || selectedKeys.length === eligibleKeys.length, onClick: () => setChosen(eligibleKeys) }, `全选可打桩（${eligibleKeys.length}）`),
+                selectedKeys.length ? h('button', { type: 'button', onClick: () => setChosen([]) }, '清空选择') : null,
+                h('span', { role: 'status', style: { marginLeft: 'auto', fontSize: 13, color: '#5e6773', fontWeight: 600 } }, `已选择 ${selectedKeys.length} 条`)),
               h('div', { className: 'pangea-fi-picker' },
-                h('div', { className: 'pangea-fi-case-list' }, cases.filter(item => readable(item.title).toLowerCase().includes(query.toLowerCase())).map((item, index) => h('div', { key: `${keyOf(item)}:${index}`, className: 'pangea-fi-case-row' },
-                  h('input', { type: 'checkbox', 'aria-label': `选择打桩用例 ${readable(item.title)}`, checked: selectedKeys.includes(keyOf(item)), disabled: !eligible(item), onChange: event => setChosen(previous => event.target.checked ? [...new Set([...previous, keyOf(item)])] : previous.filter(key => key !== keyOf(item))) }),
-                  h('button', { type: 'button', 'aria-pressed': focusedCase === item, onClick: () => setFocused(keyOf(item)) }, readable(item.title), !eligible(item) ? h('small', null, '未提供打桩信息或用例身份不唯一') : null)))),
+                h('div', { className: 'pangea-fi-case-list' }, cases.filter(item => `${item.display_id || ''} ${readable(item.title)}`.toLowerCase().includes(query.toLowerCase())).map((item, index) => {
+                  const pointsCount = (item.instrumentation || item.source_record?.body?.instrumentation)?.points?.length ?? 0
+                  const canSelect = eligible(item)
+                  return h('div', { key: `${keyOf(item)}:${index}`, className: 'pangea-fi-case-row' },
+                    h('input', { type: 'checkbox', 'aria-label': `选择打桩用例 ${readable(item.title)}`, checked: selectedKeys.includes(keyOf(item)), disabled: !canSelect, onChange: event => setChosen(previous => event.target.checked ? [...new Set([...previous, keyOf(item)])] : previous.filter(key => key !== keyOf(item))) }),
+                    h('button', { type: 'button', 'aria-pressed': focusedCase === item, onClick: () => setFocused(keyOf(item)) },
+                      item.display_id || item.test_case_id ? h('span', { className: 'pangea-fi-case-id' }, item.display_id || item.test_case_id) : null,
+                      readable(item.title),
+                      !canSelect ? h('small', null, '未提供打桩信息或用例身份不唯一') : h('small', null, pointsCount ? `${pointsCount} 个预设桩点` : '按需定位源码桩点')))
+                })),
                 h('article', { className: 'pangea-fi-case-detail', 'aria-label': '打桩用例详情' }, focusedCase ? h(React.Fragment, null,
-                  h('h3', null, readable(focusedCase.title)),
+                  h('h3', { style: { marginTop: 0 } },
+                    focusedCase.display_id ? h('span', { className: 'pangea-fi-case-id' }, focusedCase.display_id) : null,
+                    readable(focusedCase.title)),
                   ...[['preconditions', '前置条件'], ['steps', '操作步骤'], ['expected_results', '预期结果']].map(([key, label]) => h('section', { key }, h('h4', null, label), h('pre', null, readable(focusedCase[key]) || '未提供'))),
                   h('h4', null, '打桩信息'), renderPoints((focusedCase.instrumentation || focusedCase.source_record?.body?.instrumentation)?.points),
-                  h('details', null, h('summary', null, '完整用例信息'), h('pre', null, readable(focusedCase)))) : h('p', null, '当前分析任务暂无用例'))),
-              h('footer', { className: 'pangea-fi-footer' }, h('button', { type: 'button', onClick: onBack }, '上一步'), h('button', { type: 'button', className: 'primary', disabled: !selectedKeys.length || !settings, onClick: () => setStep(3) }, '下一步：设置与提交'))) : null,
-            (!standalone || step === 3) && settings ? h('section', { className: 'pangea-fi-create' }, h('h3', null, '设置与提交'),
-              h('details', null, h('summary', null, `已选择 ${selectedKeys.length} 条用例`), h('p', { className: 'pangea-fi-scroll' }, selectedCases.map(item => readable(item.title)).join('、') || '请先选择用例')),
+                  h('details', null, h('summary', null, '完整用例信息'), renderCaseSummaryFields(focusedCase))) : h('p', null, '当前分析任务暂无用例'))),
+              h('footer', { className: 'pangea-fi-footer' },
+                h('button', { type: 'button', onClick: onBack }, '上一步'),
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
+                  !selectedKeys.length ? h('span', { style: { fontSize: 12, color: '#5e6773' } }, '请先勾选至少 1 条用例') : null,
+                  h('button', { type: 'button', className: 'primary', disabled: !selectedKeys.length || !settings, onClick: () => setStep(3) }, '下一步：设置与提交')))) : null,
+            (!standalone || step === 3) && settings ? h('section', { className: 'pangea-fi-create' },
+              h('h3', { style: { marginTop: 0 } }, '设置与提交'),
+              h('details', null, h('summary', null, `已选择 ${selectedKeys.length} 条用例`), h('p', { className: 'pangea-fi-scroll' }, selectedCases.map(item => `${item.display_id ? `${item.display_id} ` : ''}${readable(item.title)}`).join('、') || '请先选择用例')),
+              needsRepoSetup ? h('div', { role: 'status', className: 'pangea-fi-banner warn' },
+                h('span', null, missingGit
+                  ? '所选源码尚未关联 Git 仓库：请在下方“代码仓库与构建”中关联本地或远端 Git 仓库并选择个人开发分支。普通分析不受影响。'
+                  : '请先在下方“代码仓库与构建”中选择已有的个人开发分支后再生成打桩修改。'),
+                h('button', { type: 'button', onClick: () => { setRepoSetupOpen(true); repoDetailsRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }) } }, '定位仓库配置')) : null,
               h('div', { style: { marginTop: 14 } },
                 h('div', { style: grid },
-                  h('label', null, '执行器', h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value, agent_model: '' }) },
+                  h('label', { className: 'pangea-fi-field' }, h('span', null, '执行器'), h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value, agent_model: '' }) },
                     h('option', { value: '' }, '选择执行器'), providers.map(provider => h('option', { key: provider.id, value: provider.id }, provider.label)))),
-                  h('div', null, h('label', null, '打桩模型', h('select', { 'aria-label': '打桩模型', value: settings.agent_model || '', disabled: working || !modelCatalog,
-                    onChange: event => setSettings({ ...settings, agent_model: event.target.value }) },
-                    h('option', { value: '' }, modelCatalog?.current_model ? `使用 Agent 默认（${modelCatalog.current_model}）` : '请选择可用模型'),
-                    (modelCatalog?.models || []).map(model => h('option', { key: model.id, value: model.id }, model.label && model.label !== model.id ? `${model.label} · ${model.id}` : model.id)))),
-                    h('p', { role: modelState.status === 'error' ? 'alert' : 'status' }, modelSelection.message),
-                    h('button', { type: 'button', disabled: working || !settings.provider_id || modelState.status === 'loading', onClick: () => setModelRefresh(value => value + 1) }, '刷新模型')),
-                  field('任务名称', settings.name, value => setSettings({ ...settings, name: value }))),
-                h('p', null, '目标个人分支：', (settings.repositories || []).filter(repo => repo.enabled !== false).map(repo => `${repo.repo_id} → ${repo.personal_branch || '尚未配置'}`).join('；')),
-                settings.repositories.some(repo => repo.enabled !== false && !repo.personal_branch) ? h('p', { role: 'status' }, '请展开代码来源与高级设置，在项目配置中选择已有的个人开发分支。') : null,
-                h('details', { className: 'pangea-fi-technical' }, h('summary', null, '代码来源与高级设置'),
-                  h(RepositorySettings, { cwd, dataRoot, repositories: settings.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, repositories: value.defaults.repositories, pipeline_url: value.defaults.pipeline_url })) } }),
-                  (settings.repositories ?? []).map((repo, index) => h('fieldset', { key: repo.repo_id },
-                    h('legend', null, h('label', null, h('input', { type: 'checkbox', checked: repo.enabled !== false, disabled: working, 'aria-label': `本次包含 ${repo.repo_id}`, onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), readable(repo.repo_id))),
-                    h('p', null, '当前源码：', sourceLabel(repo.source)),
-                    repo.comparison?.changed_count ? h('p', null, `分析快照中有 ${repo.comparison.changed_count} 个文件与目标提交不同。这是源码版本比较，不是本次打桩修改文件数；生成时将基于目标代码重新定位桩点。`) : null,
-                    repo.comparison?.eol_only_count ? h('p', null, `${repo.comparison.eol_only_count} 个文件仅 CRLF/LF 换行符不同，单独记录，不计入内容变化。`) : null,
-                    repo.comparison?.error ? h('p', { role: 'alert' }, repo.comparison.error) : null,
-                    h('p', null, `Git 仓库：${repo.source_path}；远端：${repo.remote}；个人分支：${repo.personal_branch || '未配置'}`)))),
-                h('p', { className: 'b05-subtle' }, '先在独立副本中生成差异，查看后再提交并推送到项目个人分支；不会创建任务分支，不带入未提交内容。'),
-                field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value })),
-                settings.repositories.some(repo => repo.enabled !== false && repo.source?.kind !== 'git') ? h('p', { role: 'status' }, '所选源码尚未就绪：请展开“代码来源与高级设置”关联 Git 仓库。普通分析不受影响。') : null,
-                field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true }),
-                h('footer', { className: 'pangea-fi-footer' }, standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : null, h('button', { type: 'button', className: 'btn primary', disabled: working || !modelSelection.ready || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
-                  onClick: () => act('generate', { ...settings, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
+                  h('div', { className: 'pangea-fi-field' },
+                    h('label', { style: { display: 'grid', gap: 6 } }, h('span', null, '打桩模型'), h('select', { 'aria-label': '打桩模型', value: settings.agent_model || '', disabled: working || !modelCatalog,
+                      onChange: event => setSettings({ ...settings, agent_model: event.target.value }) },
+                      h('option', { value: '' }, modelCatalog?.current_model ? `使用 Agent 默认（${modelCatalog.current_model}）` : '请选择可用模型'),
+                      (modelCatalog?.models || []).map(model => h('option', { key: model.id, value: model.id }, model.label && model.label !== model.id ? `${model.label} · ${model.id}` : model.id)))),
+                    h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' } },
+                      h('span', { role: modelState.status === 'error' ? 'alert' : 'status', style: { fontSize: 12, fontWeight: 400, color: modelState.status === 'error' ? '#b62836' : '#5e6773' } }, modelSelection.message),
+                      h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, disabled: working || !settings.provider_id || modelState.status === 'loading', onClick: () => setModelRefresh(value => value + 1) }, '刷新模型'))),
+                  field('任务名称', settings.name, value => setSettings({ ...settings, name: value }), { placeholder: '可选，便于区分多次打桩任务' })),
+                h('p', { style: { fontSize: 13 } }, h('strong', null, '目标个人分支：'), (settings.repositories || []).filter(repo => repo.enabled !== false).map(repo => `${repo.repo_id} → ${repo.personal_branch || '尚未配置'}`).join('；')),
+                h('details', { ref: repoDetailsRef, className: 'pangea-fi-technical', open: needsRepoSetup || repoSetupOpen || undefined },
+                  h('summary', null, '代码来源与高级设置'),
+                  h(RepositorySettings, { cwd, dataRoot, defaultOpen: needsRepoSetup || repoSetupOpen, repositories: settings.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, repositories: value.defaults.repositories, pipeline_url: value.defaults.pipeline_url })) } }),
+                  (settings.repositories ?? []).map((repo, index) => h('fieldset', { key: repo.repo_id, className: 'pangea-fi-repo-box' },
+                    h('legend', null, h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 600 } }, h('input', { type: 'checkbox', checked: repo.enabled !== false, disabled: working, 'aria-label': `本次包含 ${repo.repo_id}`, onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), readable(repo.repo_id))),
+                    h('p', { style: { fontSize: 12, color: '#5e6773' } }, '当前源码：', sourceLabel(repo.source)),
+                    repo.comparison?.changed_count ? h('p', { style: { fontSize: 12 } }, `分析快照中有 ${repo.comparison.changed_count} 个文件与目标提交不同。这是源码版本比较，不是本次打桩修改文件数；生成时将基于目标代码重新定位桩点。`) : null,
+                    repo.comparison?.eol_only_count ? h('p', { style: { fontSize: 12, color: '#5e6773' } }, `${repo.comparison.eol_only_count} 个文件仅 CRLF/LF 换行符不同，单独记录，不计入内容变化。`) : null,
+                    repo.comparison?.error ? h('p', { role: 'alert', style: { color: '#b62836', fontSize: 12 } }, repo.comparison.error) : null,
+                    h('p', { style: { fontSize: 12, color: '#5e6773' } }, `Git 仓库：${repo.source_path}；远端：${repo.remote}；个人分支：${repo.personal_branch || '未配置'}`)))),
+                h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '先在独立副本中生成差异，查看后再提交并推送到项目个人分支；不会创建任务分支，不带入未提交内容。'),
+                field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value }), { placeholder: '例如 https://ci.example.internal/pipeline/...' }),
+                field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true, placeholder: '可选：补充触发边界、日志开关或构建宏约束…' }),
+                h('footer', { className: 'pangea-fi-footer' },
+                  standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : h('span', null),
+                  h('button', { type: 'button', className: 'btn primary', disabled: working || !modelSelection.ready || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
+                    onClick: () => act('generate', { ...settings, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
               : !settings ? h('p', null, '正在读取打桩设置…') : null,
-            tasks.length ? h('div', { style: { marginTop: 18 } }, h('label', null, '已有打桩任务 ', h('select', { 'aria-label': '已有打桩任务', value: taskId, onChange: event => selectTask(event.target.value) },
-              h('option', { value: '' }, '选择任务查看'), tasks.map(item => h('option', { key: item.id, value: item.id }, `${item.name || item.cases?.[0]?.title || '打桩任务'} · ${new Date(item.created_at).toLocaleString()} · ${item.case_keys.length} 条 · ${INJECTION_STATUS_LABELS[item.status] || item.status}`))))) : null,
-            task && (!standalone || step === 4) ? h('div', { style: { marginTop: 16 } },
-              h('p', { role: 'status' }, h('strong', null, task.status === 'failed' && task.failure_phase === 'preparing' ? '准备源码失败' : INJECTION_STATUS_LABELS[task.status] || task.status)),
-              task.error ? h('div', { role: 'alert' }, h('p', null, task.failure_phase === 'preparing' ? '准备源码失败，尚未开始生成打桩修改。' : '本次操作未完成。'), h('details', null, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, task.error))) : null,
-              busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null,
-              standalone ? h('button', { type: 'button', onClick: () => setStep(2) }, '新建打桩任务') : null,
-              h('h3', null, `正在查看：${task.name || task.cases?.[0]?.title || '打桩任务'}`),
-              task.status === 'pushing' && task.current_repository ? h('p', null, `正在推送：${task.current_repository}`) : null,
-              ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('button', { type: 'button', disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成') : null,
-              h('p', { className: 'b05-subtle' }, `${task.case_keys.length} 条用例 · ${task.result?.points?.length || 0} 个桩点 · 最新记录 ${passedCount}/${task.case_keys.length} 通过`),
-              h('p', null, '个人分支：', h('code', null, task.branch)),
-              task.schema_version !== 2 ? h('p', { role: 'status' }, '此历史任务使用旧任务分支。请先配置项目个人分支，再按最新分支重新生成；旧分支不会被推送。') : null,
-              task.repositories.filter(repo => repo.outgoing_count > 0 && !repo.commit).map(repo => h('label', { key: repo.repo_id, style: { display: 'block', margin: '12px 0' } },
+            task && (!standalone || step === 4) ? h('div', { className: 'pangea-fi-task-card', style: { marginTop: 16 } },
+              h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
+                h('div', null,
+                  h('h3', { style: { margin: 0 } }, `正在查看：${task.name || task.cases?.[0]?.title || '打桩任务'}`),
+                  h('p', { className: 'b05-subtle', style: { margin: '6px 0 0', fontSize: 13 } }, `${task.case_keys.length} 条用例 · ${task.result?.points?.length || 0} 个桩点 · 最新记录 ${passedCount}/${task.case_keys.length} 通过 · 个人分支 `, h('code', null, task.branch))),
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                  h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(task.status)}` }, task.status === 'failed' && task.failure_phase === 'preparing' ? '准备源码失败' : INJECTION_STATUS_LABELS[task.status] || task.status),
+                  busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null)),
+              task.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
+                h('p', { style: { margin: 0, fontWeight: 600 } }, task.failure_phase === 'preparing' ? '准备源码失败，尚未开始生成打桩修改。' : '本次操作未完成。'),
+                h('details', null, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, task.error))) : null,
+              task.status === 'pushing' && task.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送：${task.current_repository}`) : null,
+              ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('div', { style: { marginTop: 10 } }, h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成')) : null,
+              task.schema_version !== 2 ? h('div', { role: 'status', className: 'pangea-fi-banner warn' }, '此历史任务使用旧任务分支。请先配置项目个人分支，再按最新分支重新生成；旧分支不会被推送。') : null,
+              task.repositories.filter(repo => repo.outgoing_count > 0 && !repo.commit).map(repo => h('label', { key: repo.repo_id, className: 'pangea-fi-banner warn', style: { display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: 10, cursor: 'pointer' } },
                 h('input', { type: 'checkbox', 'aria-label': `确认推送已有提交 ${repo.repo_id}`, checked: acknowledged[repo.repo_id] === repo.base_commit,
                   onChange: event => setAcknowledged(previous => ({ ...previous, [repo.repo_id]: event.target.checked ? repo.base_commit : '' })) }),
-                ` ${repo.repo_id} 的 ${repo.branch} 上有 ${repo.outgoing_count} 个已有未推送提交；本次会一并推送。`)),
-              ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h(React.Fragment, null,
-                h('button', { type: 'button', className: 'btn primary', style: { marginTop: 14 }, disabled: working || task.schema_version !== 2 || task.repositories.some(repo => repo.outgoing_count > 0 && !repo.commit && acknowledged[repo.repo_id] !== repo.base_commit),
+                `${repo.repo_id} 的 ${repo.branch} 上有 ${repo.outgoing_count} 个已有未推送提交；勾选确认后本次会一并推送。`)),
+              ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('div', { style: { marginTop: 14, display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                h('button', { type: 'button', className: 'btn primary', disabled: working || task.schema_version !== 2 || task.repositories.some(repo => repo.outgoing_count > 0 && !repo.commit && acknowledged[repo.repo_id] !== repo.base_commit),
                   onClick: () => act('push', { acknowledged_heads: acknowledged }) }, working ? '正在提交…' : task.repositories.some(repo => repo.commit && !repo.pushed) ? `重试提交与推送到 ${task.branch}` : `提交并推送到 ${task.branch}`),
-                h('button', { type: 'button', disabled: working, onClick: () => act('retry') }, '按最新分支重新生成')) : null,
-              task.status === 'pushed' ? h('section', { className: 'b05-card pangea-fi-build', style: { marginTop: 10 } },
-                h('h3', null, '构建个人包'),
-                h('details', { open: !task.pipeline_url }, h('summary', null, '流水线设置'), field('本任务流水线 URL', pipelineUrl, setPipelineUrl),
-                  h('button', { type: 'button', disabled: working, onClick: () => act('configure', { pipeline_url: pipelineUrl }) }, '保存流水线地址')),
-                h('button', { type: 'button', className: 'btn primary', disabled: working || !task.pipeline_url || pipelineUrl.trim() !== task.pipeline_url,
-                  onClick: async () => { try { if (!onOpenPipeline) throw new Error('当前会话的 DSH 浏览器不可用'); await onOpenPipeline(task.pipeline_url) } catch (reason) { setError(reason.message) } } }, '在 DSH 浏览器打开构建流水线'),
-                h('button', { type: 'button', onClick: async () => { try { await navigator.clipboard.writeText(task.branch) } catch { setError('复制失败，请复制上方个人分支名称') } } }, '复制个人分支'),
-                h('p', { className: 'b05-subtle' }, '使用上方个人分支出包，在验证记录中关联构建结果。')) : null,
-              task.repositories.some(repo => repo.commit) ? h('details', { key: `verification:${task.id}`, style: { marginTop: 12 } }, h('summary', null, '构建包与验证记录'),
-                h('p', { className: 'b05-subtle' }, '在已有流水线选择上面的个人分支或修改提交出包；烧包测试后，在这里记录结果。'),
+                h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '按最新分支重新生成')) : null,
+              task.status === 'pushed' ? h('section', { className: 'pangea-fi-build', style: { marginTop: 14 } },
+                h('h3', { style: { marginTop: 0 } }, '构建个人包'),
+                h('details', { open: !task.pipeline_url || pipelineDirty || undefined },
+                  h('summary', null, '流水线设置'),
+                  field('本任务流水线 URL', pipelineUrl, setPipelineUrl),
+                  h('button', { type: 'button', className: pipelineDirty ? 'primary' : '', disabled: working, onClick: () => act('configure', { pipeline_url: pipelineUrl }) }, '保存流水线地址')),
+                pipelineDirty ? h('p', { role: 'status', style: { fontSize: 12, color: '#8c5a12', margin: '10px 0 6px' } }, '流水线地址已更改，请先点击“保存流水线地址”后再打开流水线。') : null,
+                h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                  h('button', { type: 'button', className: 'btn primary', disabled: working || !task.pipeline_url || pipelineDirty,
+                    onClick: async () => { try { if (!onOpenPipeline) throw new Error('当前会话的 DSH 浏览器不可用'); await onOpenPipeline(task.pipeline_url) } catch (reason) { setError(reason.message) } } }, '在 DSH 浏览器打开构建流水线'),
+                  h('button', { type: 'button', style: { marginLeft: 0 }, onClick: async () => { try { await navigator.clipboard.writeText(task.branch); setNotice(`已复制个人分支：${task.branch}`) } catch { setError('复制失败，请复制上方个人分支名称') } } }, '复制个人分支')),
+                h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '使用上方个人分支出包，在验证记录中关联构建结果。')) : null,
+              task.repositories.some(repo => repo.commit) ? h('details', { key: `verification:${task.id}`, style: { marginTop: 12 } },
+                h('summary', null, '构建包与验证记录'),
+                h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '在已有流水线选择上面的个人分支或修改提交出包；烧包测试后，在这里记录结果。'),
                 h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),
-                h('div', { style: grid }, h('label', null, '验证用例', h('select', { 'aria-label': '验证用例', value: verification.case_key, onChange: event => {
+                h('div', { style: grid },
+                  h('label', { className: 'pangea-fi-field' }, h('span', null, '验证用例'), h('select', { 'aria-label': '验证用例', value: verification.case_key, onChange: event => {
                     drafts.current[`${taskId}:${verification.case_key}`] = verification
                     const key = event.target.value
                     setVerification(drafts.current[`${taskId}:${key}`] ?? { result: 'not_run', hits: '', notes: '', ...task.verification.filter(item => item.case_key === key).at(-1), case_key: key })
                   } }, task.cases.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(item.title))))),
-                  h('label', null, '实际结果', h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => setVerification({ ...verification, result: event.target.value }) }, [['not_run', '未执行'], ['passed', '通过'], ['failed', '失败'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
+                  h('label', { className: 'pangea-fi-field' }, h('span', null, '实际结果'), h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => setVerification({ ...verification, result: event.target.value }) }, [['not_run', '未执行'], ['passed', '通过'], ['failed', '失败'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
                   field('桩点实际命中', verification.hits, value => setVerification({ ...verification, hits: value }))),
                 field('验证现象与记录', verification.notes, value => setVerification({ ...verification, notes: value }), { multiline: true }),
-                h('button', { type: 'button', className: 'btn', disabled: working || busy(task), onClick: () => act('verify', { build, verification }) }, '保存构建与验证记录'),
+                h('button', { type: 'button', className: 'btn primary', disabled: working || busy(task), onClick: () => act('verify', { build, verification }) }, '保存构建与验证记录'),
                 task.verification.length ? h('ul', { className: 'pangea-fi-records pangea-fi-scroll', 'aria-label': '验证历史' }, [...task.verification].reverse().map((value, index) => h('li', { key: index }, `${value.at} · ${readable(task.cases.find(item => item.case_key === value.case_key)?.title || value.case_key)} · ${({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result]} · ${value.hits}`,
                   value.notes ? h('details', null, h('summary', null, '查看验证记录'), h('pre', null, value.notes)) : null,
-                  h('p', { className: 'b05-subtle' }, `验证包：${value.build?.package_id || '未填写'}；提交：${(value.build?.commits || []).map(repo => `${repo.repo_id} ${repo.commit.slice(0, 12)}`).join('、')}`),
+                  h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, `验证包：${value.build?.package_id || '未填写'}；提交：${(value.build?.commits || []).map(repo => `${repo.repo_id} ${repo.commit.slice(0, 12)}`).join('、')}`),
                   value.build?.url ? h('a', { href: value.build.url, target: '_blank', rel: 'noreferrer' }, '查看本次构建') : null))) : null) : null,
-              task.result?.summary ? h('details', null, h('summary', null, '修改摘要与用例'), h('div', { className: 'pangea-fi-scroll' }, h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)), h('p', null, task.cases.map(item => readable(item.title)).join('、')))) : null,
+              task.result?.summary ? h('details', null, h('summary', null, '修改摘要与用例'), h('div', { className: 'pangea-fi-scroll' }, h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)), h('p', { style: { fontSize: 12, color: '#5e6773' } }, task.cases.map(item => readable(item.title)).join('、')))) : null,
               task.result?.points?.length ? h('details', null, h('summary', null, `桩点说明（${task.result.points.length}）`), h('div', { className: 'pangea-fi-scroll' }, renderPoints(task.result.points))) : null,
               profiles.length ? h('details', { key: `profiles:${task.id}` }, h('summary', null, `逐用例执行说明（${profiles.length}）`),
-                h('label', null, '选择执行说明', h('select', { 'aria-label': '选择执行说明', value: profile?.case_key || '', onChange: event => setProfileKey(event.target.value) },
+                h('label', { className: 'pangea-fi-field' }, h('span', null, '选择执行说明'), h('select', { 'aria-label': '选择执行说明', value: profile?.case_key || '', onChange: event => setProfileKey(event.target.value) },
                   profiles.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(task.cases.find(value => value.case_key === item.case_key)?.title || item.case_key))))),
-                h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(profile?.steps) ? profile.steps : [profile?.steps]).map((step, at) => h('li', { key: at }, readable(step))))) : null,
-              task.result?.limitations?.length ? h('details', null, h('summary', null, `生成限制（${task.result.limitations.length}）`), h('p', { className: 'pangea-fi-scroll', style: { whiteSpace: 'pre-wrap' } }, readable(task.result.limitations))) : null,
-              task.repositories.map(repo => h('details', { key: repo.repo_id, open: Boolean(repo.diff && !repo.pushed), style: { marginTop: 12 } }, h('summary', null, `${repo.repo_id} · ${repo.branch} · ${repo.commit ? repo.pushed ? '已推送' : '已提交' : repo.diff ? '待提交差异' : '未修改'}`),
-                h('p', null, '基线：', h('code', null, repo.base_commit)), repo.commit ? h('p', null, '修改提交：', h('code', null, repo.commit)) : null,
-                repo.diff ? h('pre', { style: { maxHeight: 400, overflow: 'auto', padding: 12, background: '#f5f7fa' } }, repo.diff) : null))
+                h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(profile?.steps) ? profile.steps : [profile?.steps]).map((itemStep, at) => h('li', { key: at }, readable(itemStep))))) : null,
+              task.result?.limitations?.length ? h('details', null, h('summary', null, `生成限制（${task.result.limitations.length}）`),
+                Array.isArray(task.result.limitations)
+                  ? h('ul', { className: 'pangea-fi-steps pangea-fi-scroll' }, task.result.limitations.map((item, at) => h('li', { key: at }, readable(item))))
+                  : h('p', { className: 'pangea-fi-scroll', style: { whiteSpace: 'pre-wrap' } }, readable(task.result.limitations))) : null,
+              task.repositories.map(repo => h('details', { key: repo.repo_id, open: Boolean(repo.diff && !repo.pushed), style: { marginTop: 12 } },
+                h('summary', null, `${repo.repo_id} · ${repo.branch} · ${repo.commit ? repo.pushed ? '已推送' : '已提交' : repo.diff ? '待提交差异' : '未修改'}`),
+                h('p', { style: { fontSize: 12, color: '#5e6773' } }, '基线：', h('code', null, repo.base_commit), repo.commit ? h(React.Fragment, null, ' · 修改提交：', h('code', null, repo.commit)) : null),
+                repo.diff ? h('pre', { style: { maxHeight: 400, overflow: 'auto', padding: 12, borderRadius: 8, border: '1px solid #e2e6ec', background: '#f8f9fb', font: '12px/1.6 Consolas, monospace' } }, repo.diff) : null))
               ) : null) : null)
       }
     }
@@ -7667,6 +7863,7 @@ window.__ModuleLoader__.load({
           startedAt: selectedCurrent?.started_at ?? selectedTask.launch_started_at,
           sourceFileCount: selectedCurrent?.source_snapshot?.file_count ?? null,
           sourceFrozen: Boolean(selectedCurrent?.source_snapshot?.manifest_path),
+          riskApplicable: riskEnabled,
           tabCounts: { flows: businessFlows.length, risks: risks.length, cases: testCases.length },
           discussionContext: {
             runId: selectedCurrent?.run_id ?? selectedTask.run_id,
@@ -7771,6 +7968,23 @@ window.__ModuleLoader__.load({
       const [caseDrawer, setCaseDrawer] = React.useState(null)
       const [caseEvidenceSelection, setCaseEvidenceSelection] = React.useState({ scope: '', key: '' })
       const [injectionRun, setInjectionRun] = React.useState('')
+      const [injectionDraft, setInjectionDraft] = React.useState(() => ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
+      const handledInjectionDraftRequest = React.useRef(0)
+      React.useEffect(() => {
+        if (pageMode !== 'injection') return undefined
+        const sync = () => setInjectionDraft(ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
+        sync()
+        return ctx?.pangea?.subscribeInjectionDraft?.(sync)
+      }, [ctx?.pangea, pageMode])
+      React.useEffect(() => {
+        if (pageMode !== 'injection' || !injectionDraft?.requestId || injectionDraft.requestId === handledInjectionDraftRequest.current) return
+        handledInjectionDraftRequest.current = injectionDraft.requestId
+        if (injectionDraft.runId) {
+          setSelectedTaskId(injectionDraft.taskId)
+          setSelectedRun(injectionDraft.runId)
+          setInjectionRun(injectionDraft.runId)
+        }
+      }, [pageMode, injectionDraft?.requestId, injectionDraft?.runId, injectionDraft?.taskId])
       const createScopeKey = JSON.stringify([cwd, workbench?.data_root, createForm.repository, createForm.source_scope_text])
       const validScopePreview = scopePreview?.key === createScopeKey && scopePreview.preview_state === 'complete' ? scopePreview : null
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
@@ -8009,7 +8223,7 @@ window.__ModuleLoader__.load({
             onClick: event => openTaskAction(task, 'stop', event), 'aria-label': '停止任务 ' + taskDisplayName(task, taskRunFor(task)),
             title: stopping ? '执行端尚未确认结束，可再次确认停止' : undefined }, runIcon('Square'),
             busy ? '正在停止…' : state?.error && state.action === 'stop' ? '重试停止' : stopping ? '正在停止…' : '停止') : null,
-          h('button', { type: 'button', className: 'b03-task-open', disabled: busy, style: { color: '#a14035' },
+          h('button', { type: 'button', className: 'b03-task-open pangea-task-delete-btn', disabled: busy, style: { color: '#a14035' },
             onClick: event => openTaskAction(task, 'task-delete', event), 'aria-label': '删除任务 ' + taskDisplayName(task, taskRunFor(task)) },
             busy && state.action === 'task-delete' ? '正在删除…' : state?.error && state.action === 'task-delete' ? '重试删除' : '删除'))
       }
@@ -8888,11 +9102,13 @@ window.__ModuleLoader__.load({
                       : screen.type === 'environment' ? (environmentForm.id ? '编辑测试环境' : '新增测试环境')
                         : screen.type === 'repository-import' ? '添加源码仓库' : 'PANGEA 总览'
 
-      const isTaskOverview = pageMode === 'analysis' && ['overview', 'run-record', 'flows', 'risks', 'risk', 'cases', 'case', 'coverage-cases'].includes(screen.type)
+      const isTaskOverview = pageMode === 'analysis' && ['overview', 'run-record', 'flows', 'risks', 'risk', 'cases', 'case', 'coverage-cases', 'evidence', 'evidence-detail'].includes(screen.type)
       const navigationItems = pageMode !== 'analysis' || (!selectedTask && !current) || ['tasks', 'create'].includes(screen.type) ? [] : isTaskOverview ? [
         [selectedTask ? 'overview' : 'run-record', '概览'], ['flows', `业务流程 ${displayCount('business_flows', businessFlows.length).replace('（草稿）', '')}`],
         ...(riskEnabled ? [['risks', `风险 ${displayCount('risks', risks.length).replace('（草稿）', '')}`]] : []),
-        ['cases', `${current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'} ${displayCount('test_cases', testCases.length).replace('（草稿）', '')}`], ['workflow', '运行过程'],
+        ['cases', `${current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'} ${displayCount('test_cases', testCases.length).replace('（草稿）', '')}`],
+        ...(['evidence', 'evidence-detail'].includes(screen.type) ? [['evidence', '源码依据']] : []),
+        ['workflow', '运行过程'],
       ] : [
         [selectedTask ? 'overview' : 'run-record', '概览'], ['flows', '业务流程'], ...(riskEnabled ? [['risks', '风险']] : []), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['evidence', '源码依据'], ['workflow', '运行过程'],
       ]
@@ -10039,7 +10255,7 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'pangea-empty-state', role: workbenchError ? 'alert' : 'status' }, workbenchError ? '任务列表暂不可用，请重试同步。' : '正在读取分析任务…')
           : taskItems.length && filtered.length
             ? h('div', { className: 'b03-task-table-wrap' }, h('table', { className: 'b03-task-table', 'aria-label': '分析任务' },
-              h('colgroup', null, [33, 12.4, 10, 17.6, 10, 17].map((width, index) => h('col', { key: index, style: { width: `${width}%` } }))),
+              h('colgroup', null, [31, 12.4, 9.6, 17, 10, 20].map((width, index) => h('col', { key: index, style: { width: `${width}%` } }))),
               h('thead', null, h('tr', null,
                 h('th', { scope: 'col' }, '分析任务'),
                 h('th', { scope: 'col' }, '仓库 / 范围'),
@@ -10090,13 +10306,17 @@ window.__ModuleLoader__.load({
           renderCompatibility(),
           taskPageHeader,
           workbench && !workbenchError && !firstUse && !filteredEmpty ? h('div', { className: 'b03-task-metrics', 'aria-label': '任务概况' },
-            [['全部任务', taskItems.length], ['运行中', runningCount], ['需要处理', attentionCount], ['已完成', completedCount]].map(([label, value]) => h('div', { key: label, className: 'b03-task-stat' }, h('span', null, label), h('strong', null, String(value)))),
+            [['全部任务', taskItems.length, '全部'], ['运行中', runningCount, 'running'], ['需要处理', attentionCount, 'needs_attention'], ['已完成', completedCount, 'completed']].map(([label, value, filterValue]) => h('button', {
+              key: label, type: 'button', className: 'b03-task-stat b03-task-stat-btn', 'aria-pressed': taskStatus === filterValue,
+              onClick: () => setTaskStatus(taskStatus === filterValue && filterValue !== '全部' ? '全部' : filterValue),
+            }, h('span', null, label), h('strong', null, String(value)))),
           ) : null,
           h('section', { className: `b03-task-panel${firstUse ? ' first-use' : filteredEmpty ? ' filtered-empty' : ''}`, 'aria-label': '分析任务列表', 'aria-busy': workbenchLoading },
             standardControls,
             taskContent,
             taskItems.length && !filteredEmpty ? h('div', { className: 'b03-task-footer', role: 'status' },
-              h('span', null, `共 ${filtered.length} 个任务`), h('span', null, '1 / 1 页')) : null,
+              h('span', null, `共 ${filtered.length} 个任务`),
+              taskTotal > taskItems.length ? h('span', null, `已加载 ${taskItems.length} / ${taskTotal}`) : hasFilters ? h('span', null, `筛选自 ${taskItems.length} 个任务`) : null) : null,
             unlinkedSection))
       }
       function runRecordTime(value) {
@@ -10400,9 +10620,9 @@ window.__ModuleLoader__.load({
           renderCompatibility(),
           pageHeader({ title: taskDisplayName(selectedTask, current), task: selectedTask, current, contextLabel: '分析报告', ui: ctx.pangea?.ui, onBack: () => jump(selectedTask ? 'overview' : 'tasks'), actions: h('button', { type: 'button', className: 'b03-report-page-action', disabled: !reportArtifact, onClick: () => reportArtifact && openSidebarFile(reportArtifact, reportArtifactTitle) }, '打开已有报告') }),
           h('nav', { className: 'b03-report-tabs', 'aria-label': 'PANGEA 分析页面' }, reportNavigation.map(([target, label, key]) => h('button', {
-            key: target, type: 'button', 'aria-current': target === 'overview' ? 'page' : undefined,
+            key: target, type: 'button',
             onClick: () => jump(target),
-          }, label, key ? h('small', null, displayCount(key, ({ business_flows: businessFlows, risks, test_cases: testCases })[key]?.length ?? 0)) : null))),
+          }, key ? `${label} ${displayCount(key, ({ business_flows: businessFlows, risks, test_cases: testCases })[key]?.length ?? 0).replace('（草稿）', '')}` : label))),
           renderFlowVersions(),
           h('div', { className: 'b03-report-layout' },
             h('article', { className: 'b03-report-document' },
@@ -10580,6 +10800,19 @@ window.__ModuleLoader__.load({
         return content(item.missing_execution_conditions) || (item.readiness !== 'ready' ? content(item.readiness_reason) : '')
       }
 
+      function openFaultInjection(caseKeys = []) {
+        const cleanKeys = [...new Set((Array.isArray(caseKeys) ? caseKeys : []).filter(hasText))]
+        const runId = current?.run_id ?? selectedTask?.run_id ?? null
+        const taskId = selectedTask?.task_id ?? null
+        if (ctx?.pangea?.requestFaultInjection) {
+          if (!ctx.pangea.requestFaultInjection(scope, { runId, taskId, caseKeys: cleanKeys })) {
+            showActionNotice('代码打桩当前不可用，请检查对应插件是否已加载。', true)
+          }
+          return
+        }
+        openProductPage('injection', '代码打桩')
+      }
+
       function renderCases() {
         if (!current?.run_id) return h('div', { className: 'b05-card', role: 'status' }, '正在读取当前 Run 的测试用例…')
         const query = caseQuery.trim().toLowerCase()
@@ -10596,6 +10829,7 @@ window.__ModuleLoader__.load({
         return h('section', { className: 'pangea-case-workspace', 'aria-label': '测试用例工作区' },
           h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '测试用例'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '用例'} · ${unitCount} 个分析单元${designCounts.variants ? ` · ${designCounts.variants} 项参数组合` : ''}`)),
             h('div', { className: 'b05-head-actions' }, coverageAvailable ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => navigate({ type: 'coverage-cases' }) }, '覆盖补测视图') : null,
+              h('button', { type: 'button', className: 'b03-task-action', onClick: () => openFaultInjection(selectedCaseIds) }, selectedCaseIds.length ? `代码打桩（已选 ${selectedCaseIds.length}）` : '打开代码打桩'),
               h('button', { type: 'button', className: 'b03-task-action primary', disabled: !current?.run_id, onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true) } }, reviews?.counts?.adopted ? `导出已采纳 ${reviews.counts.adopted} 条` : '导出用例'))),
           reviewError ? h('p', { role: 'alert', className: 'pangea-review-error' }, `评审记录：${reviewError}`) : null,
           h('div', { className: 'pangea-case-tools' },
@@ -10615,9 +10849,9 @@ window.__ModuleLoader__.load({
             h('thead', null, h('tr', null,
               h('th', null, h('input', { type: 'checkbox', 'aria-label': '选择当前列表', checked: allSelected, disabled: selectableIds.length === 0, onChange: () => setSelectedCaseIds(previous => allSelected ? previous.filter(id => !selectableIds.includes(id)) : [...new Set([...previous, ...selectableIds])]) })),
               ...['编号', '用例名称', '类型', '关联风险', '准备事项', ''].map(label => h('th', { key: label }, label)))),
-            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const selectable = Boolean(caseIdentity(item)) && testCases.filter(other => caseIdentity(other) === caseIdentity(item)).length === 1; const linked = formatRisk(item); return h('tr', { key: `${key}:${index}` },
-              h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(caseIdentity(item)), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(caseIdentity(item)) })),
-              h('td', { className: 'b05-mono' }, item.display_id || item.test_case_id || '待编号'),
+            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const idKey = caseIdentity(item); const selectable = Boolean(idKey) && testCases.filter(other => caseIdentity(other) === idKey).length === 1; const linked = formatRisk(item); const reviewStatus = idKey && reviewByKey[idKey]?.review_status || 'unreviewed'; return h('tr', { key: `${key}:${index}` },
+              h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(idKey), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(idKey) })),
+              h('td', { className: 'b05-mono' }, h('div', null, item.display_id || item.test_case_id || '待编号'), reviews && selectable && reviewStatus !== 'unreviewed' ? h('em', { className: 'pangea-review-pill', 'data-status': reviewStatus, style: { fontStyle: 'normal', marginTop: 4 } }, REVIEW_LABELS[reviewStatus]) : null),
               h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => openCaseDetail(key) }, caseTitlePresentation(item).title),
                 caseRecordParseNotice(item) || caseTitlePresentation(item).issue || hasText(item.verification_goal) && item.verification_goal !== caseTitlePresentation(item).title ? h('small', null, caseRecordParseNotice(item)?.summary || caseTitlePresentation(item).issue || item.verification_goal) : null,
                 item.variants?.length ? h('details', { className: 'b05-variant-preview', 'data-view-key': `case-variants:${key}` }, h('summary', null, `${item.variants.length} 项参数组合`),
@@ -10632,31 +10866,49 @@ window.__ModuleLoader__.load({
             })))),
           filtered.length === 0 ? h('div', { className: 'b05-card', role: collectionWarning(health, 'test_cases') ? 'alert' : 'status' }, collectionEmpty('test_cases', '没有符合条件的测试用例。')) : null,
           h('div', { className: 'pangea-case-paging' }, h('button', { type: 'button', className: 'btn', disabled: page <= 1, onClick: () => setCasePage(page - 1) }, '上一页'), h('span', null, `第 ${page} / ${pages} 页 · 共 ${filtered.length} 条`), h('button', { type: 'button', className: 'btn', disabled: page >= pages, onClick: () => setCasePage(page + 1) }, '下一页')),
-          selectedCaseIds.length ? h('div', { className: 'b05-selected-bar' }, h('div', null, `已选择 ${selectedCaseIds.length} 条用例`, h('small', null, `含 ${selectedCaseIds.filter(id => !selectableIds.includes(id)).length} 条筛选外选择；可复制或导出` )),
+          selectedCaseIds.length ? h('div', { className: 'b05-selected-bar' }, h('div', null, `已选择 ${selectedCaseIds.length} 条用例`, h('small', null, `含 ${selectedCaseIds.filter(id => !selectableIds.includes(id)).length} 条筛选外选择；可复制、导出或打桩` )),
             h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: () => setSelectedCaseIds([]) }, '清空选择'),
+              h('button', { type: 'button', onClick: () => openFaultInjection(selectedCaseIds) }, '打桩所选'),
               h('button', { type: 'button', disabled: selectedCaseIds.length === 0, onClick: () => { void copySelectedCases() } }, '复制选中用例'), h('button', { type: 'button', onClick: () => { setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true); setCaseExportScope('selected') } }, '导出所选')) ) : null,
-          h('button', { type: 'button', className: 'btn', onClick: () => openProductPage('injection', '代码打桩') }, '打开代码打桩'),
           renderCaseExportDialog(),
           renderCaseDrawer())
       }
 
       function renderInjectionWorkspace() {
         const available = workbench?.tasks?.items || []
+        const allRuns = workbench?.runs?.items ?? snapshot?.runs ?? []
         const back = () => { setInjectionRun(''); setSelectedRun(undefined); setSelectedTaskId(undefined) }
-        return h('section', { className: 'b05-card', style: { maxWidth: 1280, margin: '0 auto', padding: 28 }, 'aria-label': '代码打桩工作区' },
-          h('h1', null, '代码打桩'),
-          h('p', { className: 'b05-subtle' }, '从分析结果选择用例，在独立源码副本中生成修改，查看结果后推送个人分支。'),
-          !injectionRun ? h('section', null,
-            h('h2', null, '第一步 · 选择分析任务'),
-            h('input', { type: 'search', 'aria-label': '搜索打桩分析任务', placeholder: '搜索分析任务', value: taskQuery, onChange: event => setTaskQuery(event.target.value), style: { padding: 12, width: '100%', boxSizing: 'border-box', marginBottom: 20 } }),
-            workbenchError ? h('p', { role: 'alert' }, workbenchError) : null,
-            !workbench ? h('p', { role: 'status' }, '正在读取分析任务…') : !available.length ? h('p', null, '暂无分析任务，请先创建分析。') : null,
-            available.filter(task => taskDisplayName(task).toLowerCase().includes(taskQuery.toLowerCase())).map(task => h('button', { key: task.task_id, type: 'button', disabled: !task.run_id,
-              style: { display: 'block', width: '100%', padding: 18, marginBottom: 10, textAlign: 'left', border: '1px solid #dfe5dc', borderRadius: 10, background: '#fff', cursor: task.run_id ? 'pointer' : 'default' },
-              onClick: () => { setSelectedTaskId(task.task_id); setSelectedRun(task.run_id); setInjectionRun(task.run_id) } },
-              h('strong', null, taskDisplayName(task)), h('p', null, task.run_id ? '选择用例与查看已有打桩任务 →' : '尚未生成分析结果'))))
-          : current?.run_id !== injectionRun ? h('div', null, h('p', { role: error ? 'alert' : 'status' }, error || '正在读取所选分析任务的用例…'), error ? h('button', { type: 'button', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', onClick: back }, '返回选择任务'))
+        const matchedTasks = available.filter(task => [taskDisplayName(task), task.repository, task.target, task.run_id].filter(Boolean).join(' ').toLowerCase().includes(taskQuery.trim().toLowerCase()))
+        return h('section', { className: 'pangea-injection-page', 'aria-label': '代码打桩工作区' },
+          pageHeader({ title: '代码打桩', subtitle: '从分析结果选择用例，在独立源码副本中生成修改，核对结果后推送到个人测试分支。', ui: ctx.pangea?.ui, actions: renderRefreshButton() }),
+          !injectionRun ? h('section', { className: 'b03-task-panel', style: { padding: 20 } },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 14 } },
+              h('div', null,
+                h('h2', { style: { margin: 0, fontSize: 16, fontWeight: 600, color: '#25292e' } }, '第一步 · 选择分析任务'),
+                h('p', { style: { margin: '4px 0 0', fontSize: 13, color: '#6b7280' } }, '选择一个已完成或已生成用例的分析任务作为打桩起点。')),
+              h('span', { style: { fontSize: 12, color: '#6b7280' } }, `共 ${matchedTasks.length} 个任务`)),
+            h('input', { type: 'search', className: 'b03-task-search', 'aria-label': '搜索打桩分析任务', placeholder: '搜索分析任务、仓库或范围…', value: taskQuery, onChange: event => setTaskQuery(event.target.value), style: { maxWidth: '100%', width: '100%', boxSizing: 'border-box', marginBottom: 16 } }),
+            workbenchError ? h('p', { role: 'alert', style: { color: '#9c2330' } }, workbenchError) : null,
+            !workbench ? h('p', { role: 'status', style: { color: '#6b7280' } }, '正在读取分析任务…') : !available.length ? h('div', { className: 'pangea-empty-state' }, h('p', null, '暂无分析任务，请先创建分析。'), h('button', { type: 'button', className: 'b03-task-action b03-task-action-primary', onClick: () => openAnalysisTasks() }, '前往分析任务')) : null,
+            h('div', { style: { display: 'grid', gap: 10 } }, matchedTasks.map(task => {
+              const linkedRun = task.run_id ? allRuns.find(run => run.run_id === task.run_id) : null
+              const scopeText = [task.repository || linkedRun?.repository || '当前仓库', taskScopeLabel(task, linkedRun)].filter(Boolean).join(' · ')
+              return h('button', {
+                key: task.task_id, type: 'button', disabled: !task.run_id,
+                className: 'pangea-injection-task-card',
+                onClick: () => { setSelectedTaskId(task.task_id); setSelectedRun(task.run_id); setInjectionRun(task.run_id) },
+              },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
+                  h('strong', { style: { fontSize: 15, color: '#25292e' } }, taskDisplayName(task, linkedRun)),
+                  h('span', { className: `b03-task-status ${taskStatusTone(task.status)}` }, task.run_id ? taskRunLabel(task.run_id) : '尚无 Run')),
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginTop: 6, fontSize: 12, color: '#6b7280' } },
+                  h('span', null, scopeText),
+                  h('span', { style: { color: task.run_id ? '#b62836' : '#8a919a', fontWeight: task.run_id ? 600 : 400 } }, task.run_id ? '选择用例与查看已有打桩任务 →' : '尚未生成分析结果')))
+            })))
+          : current?.run_id !== injectionRun ? h('div', { className: 'b05-card', style: { padding: 24 } }, h('p', { role: error ? 'alert' : 'status', style: { margin: '0 0 12px' } }, error || '正在读取所选分析任务的用例…'), h('div', { style: { display: 'flex', gap: 10 } }, error ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', className: 'b03-task-action', onClick: back }, '返回选择任务')))
           : h(FaultInjectionPanel, { key: `${cwd}:${current.data_root ?? snapshot?.data_root}:${injectionRun}`, standalone: true, onBack: back, runId: injectionRun, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases,
+            initialCaseKeys: injectionDraft?.runId === injectionRun ? injectionDraft.caseKeys : [],
+            handoffRevision: injectionDraft?.runId === injectionRun ? injectionDraft.requestId : 0,
             onOpenPipeline: url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用') } }))
       }
 
@@ -10872,7 +11124,9 @@ window.__ModuleLoader__.load({
               h('span', { className: 'pangea-result-tag' }, CASE_TYPE_LABELS[item.case_type] || text(item.case_type, '类型未标注')),
               h('span', { className: 'pangea-result-tag' }, hasText(item.priority) ? `优先级 ${item.priority}` : '优先级未标注')),
             h('p', { className: 'pangea-case-goal' }, h('span', null, '验证目标'), text(item.verification_goal, '当前记录未单独声明，请核对用例原文。'))),
-            h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: copyCase }, '复制用例'),
+            h('div', { className: 'b05-head-actions' },
+              h('button', { type: 'button', onClick: () => openFaultInjection(caseIdentity(item) ? [caseIdentity(item)] : []) }, '打开代码打桩'),
+              h('button', { type: 'button', onClick: copyCase }, '复制用例'),
               h('button', { type: 'button', onClick: () => addToConversation('case', item, 'executable') }, '与 AI 讨论'))),
           parseNotice ? h('div', { className: 'notice warn', role: 'status', 'aria-label': '原始用例记录格式说明' },
             h('strong', null, parseNotice.summary), h('p', null, parseNotice.detail),
@@ -10899,7 +11153,6 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'basis', scope: caseScreenKey }) }, '拟覆盖依据 ↗'),
                 h('button', { type: 'button', className: 'b05-text-link', disabled: !caseEvidenceOptions.length, onClick: () => setSourceDrawerOpen(true) }, `关联代码 · ${caseEvidenceOptions.length} 处 ↗`)),
               !caseEvidenceOptions.length ? h('p', { className: 'b05-subtle' }, caseEvidence.unresolved.length ? '源码引用未能解析为明确位置，原文保留在拟覆盖依据中。' : '当前用例未记录明确源码引用。') : null,
-              h('button', { type: 'button', className: 'btn', onClick: () => openProductPage('injection', '代码打桩') }, '打开代码打桩'),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
@@ -10917,7 +11170,23 @@ window.__ModuleLoader__.load({
           item.source_record ? h('details', { className: 'b05-raw-record' }, h('summary', null, '查看本轮原始用例记录'), renderRecordBody(item, true)) : null,
           renderCaseDrawer(item),
           renderB05SourceDrawer('case', item))
-        return h('div', { className: 'pangea-case-review-shell' }, h('aside', { className: 'pangea-case-review-list', 'aria-label': '当前筛选用例' }, h('h3', null, `当前筛选 · ${order.length} 条`), order.slice(Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50), Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50) + 50).map(key => h('button', { key, type: 'button', 'aria-current': key === screen.id ? 'true' : undefined, onClick: () => selectReviewCase(key) }, caseById.get(key)?.display_id || key, h('span', null, caseTitlePresentation(caseById.get(key)).title)))), h('div', { className: 'pangea-case-review-detail' }, detailContent))
+        const reviewedInOrder = reviews ? order.filter(key => { const row = reviewByKey[caseIdentity(caseById.get(key))]; return row && row.review_status && row.review_status !== 'unreviewed' }).length : 0
+        return h('div', { className: 'pangea-case-review-shell', onKeyDown: event => {
+          if (event.defaultPrevented || ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target?.tagName)) return
+          if ((event.altKey && event.key === 'ArrowLeft') || (!event.metaKey && !event.ctrlKey && !event.altKey && event.key === '[')) {
+            if (position > 0) { event.preventDefault(); selectReviewCase(order[position - 1]) }
+          } else if ((event.altKey && event.key === 'ArrowRight') || (!event.metaKey && !event.ctrlKey && !event.altKey && event.key === ']')) {
+            if (position >= 0 && position < order.length - 1) { event.preventDefault(); selectReviewCase(order[position + 1]) }
+          }
+        } }, h('aside', { className: 'pangea-case-review-list', 'aria-label': '当前筛选用例' },
+          h('h3', null, `当前筛选 · ${order.length} 条`, reviews ? h('small', { style: { display: 'block', marginTop: 3, fontSize: 12, fontWeight: 400, color: '#6b7280' } }, `已评 ${reviewedInOrder} / ${order.length}`) : null),
+          order.slice(Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50), Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50) + 50).map(key => {
+            const entry = caseById.get(key)
+            const entryStatus = entry && reviewByKey[caseIdentity(entry)]?.review_status || 'unreviewed'
+            return h('button', { key, type: 'button', 'aria-current': key === screen.id ? 'true' : undefined, onClick: () => selectReviewCase(key) },
+              h('div', { className: 'pangea-review-item-top' }, h('strong', { style: { fontWeight: 600 } }, entry?.display_id || key), reviews && entryStatus !== 'unreviewed' ? h('em', { className: 'pangea-review-pill', 'data-status': entryStatus, style: { fontStyle: 'normal' } }, REVIEW_LABELS[entryStatus]) : null),
+              h('span', null, caseTitlePresentation(entry).title))
+          })), h('div', { className: 'pangea-case-review-detail' }, detailContent))
       }
 
       async function copySingleCase(item) {
@@ -11002,8 +11271,8 @@ window.__ModuleLoader__.load({
         : null
       const flowScreen = screen.type === 'flows' && pageMode === 'analysis' && (selectedTask || current)
       const resultScreen = ['risks', 'risk', 'cases', 'case', 'coverage-cases'].includes(screen.type) && pageMode === 'analysis' && (selectedTask || current)
-      const rootClassName = `pangea-companion${screen.type === 'home' ? ' b06-home-screen' : ''}${screen.type === 'tasks' ? ' b03-task-screen' : ''}${screen.type === 'overview' || flowScreen || resultScreen ? ' b03-overview-screen' : ''}${flowScreen ? ' b04-flow-screen' : ''}${resultScreen ? ' b05-result-screen' : ''}`
-      const rootStyle = screen.type === 'home' || screen.type === 'tasks' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
+      const rootClassName = `pangea-companion${screen.type === 'home' ? ' b06-home-screen' : ''}${screen.type === 'tasks' || screen.type === 'injection' ? ' b03-task-screen' : ''}${screen.type === 'overview' || flowScreen || resultScreen ? ' b03-overview-screen' : ''}${flowScreen ? ' b04-flow-screen' : ''}${resultScreen ? ' b05-result-screen' : ''}`
+      const rootStyle = screen.type === 'home' || screen.type === 'tasks' || screen.type === 'injection' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
       const flowTargetLabel = taskDisplayName(selectedTask, current)
       const resultScopeLabel = [selectedTask?.repository || current?.repository || '当前仓库',
         selectedTask?.source_scope?.join('、')].filter(Boolean).join(' / ')
@@ -11013,14 +11282,14 @@ window.__ModuleLoader__.load({
       const resultHeader = resultScreen ? h(React.Fragment, null,
         pageHeader({ title: taskDisplayName(selectedTask, current), task: selectedTask, current, contextLabel: ['cases', 'coverage-cases'].includes(screen.type) ? '测试用例' : screen.type === 'case' ? '用例详情' : screenTitle, ui: ctx.pangea?.ui, onBack: ['risk', 'case', 'coverage-cases'].includes(screen.type) ? goBack : () => jump('tasks'), backLabel: screen.type === 'case' ? '返回用例' : screen.type === 'risk' ? '返回风险' : '返回任务列表', actions: derivationButton(screen.type === 'case' ? caseById.get(screen.id) : screen.type === 'risk' ? riskById.get(screen.id) : undefined) }), navigation) : null
       if (screen.type === 'workflow') return h('div', { ref: panelRootRef, className: 'pangea-companion', style: styles.root }, h('style', null, panelCss), monitorPersistenceNotice, renderSourceFirstWorkflow())
-      return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : 'PANGEA 执行环境' },
+      return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : pageMode === 'injection' ? 'PANGEA 代码打桩' : 'PANGEA 执行环境' },
         h('style', null, panelCss),
         taskActionDialog ? h(TaskLifecycleDialog, { state: { ...taskActionDialog, task: taskItems.find(task => task.task_id === taskActionDialog.task.task_id && task.attempt_id === taskActionDialog.task.attempt_id) ?? taskActionDialog.task }, onRefresh: () => { void loadWorkbench({ background: true }) },
           onClose: () => { if (!taskActionDialog.busy) setTaskActionDialog(null) }, onConfirm: () => { void confirmTaskAction() } }) : null,
         derivation ? h(RunDerivationDialog, { state: derivation, onChange: draft => setDerivation(value => value && ({ ...value, draft })),
           onClose: closeDerivation, onSubmit: input => { void submitDerivation(input) }, onRetry: () => { void openDerivation(null, derivation) } }) : null,
         ['injection', 'home', 'tasks', 'create', 'repository-import', 'report', 'run-record'].includes(screen.type) || (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? null : header,
-        h('div', { className: 'pangea-content', style: screen.type === 'home' ? { padding: '24px 31px 30px', maxWidth: 'none', margin: 0 }
+        h('div', { className: 'pangea-content', style: screen.type === 'home' || screen.type === 'injection' ? { padding: '24px 31px 30px', maxWidth: 'none', margin: 0 }
             : screen.type === 'tasks' ? { padding: '25px 31px 27px', maxWidth: 'none', margin: 0 }
               : (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? { padding: '24px 31px 27px', maxWidth: 'none', margin: 0 }
               : screen.type === 'report' ? { padding: '25px 31px 27px', maxWidth: 'none', margin: 0 }

@@ -6,7 +6,8 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { FaultInjectionService, injectionGit } from '../src/fault-injection.js'
-import { faultInjectionRouteHandler } from '../src/index.js'
+import { requireAgentModel } from '../src/agent-models.js'
+import { acpSettingsRouteHandler, faultInjectionRouteHandler } from '../src/index.js'
 import { createFaultInjectionPanel } from '../src/fault-injection-view.js'
 
 const { Window } = await import(process.env.HAPPY_DOM_MODULE || 'happy-dom')
@@ -29,9 +30,13 @@ const cases = [{ projection_id: 'unit/A', title: '资源申请失败后的恢复
 cases.push({ projection_id: 'unit/B', title: '第二个故障场景' })
 const run = { run_id: 'dom-run', source_snapshot: { repositories: [{ repo_id: 'target', git: { commit: base } }] }, details: { test_cases: cases } }
 await mkdir(path.join(dataRoot, 'runs', run.run_id), { recursive: true })
-await writeFile(path.join(dataRoot, 'runs', run.run_id, 'progress.json'), JSON.stringify({ model_settings: { provider: 'fixture' }, model_id: 'fixture-model' }))
+await writeFile(path.join(dataRoot, 'runs', run.run_id, 'progress.json'), JSON.stringify({ model_settings: { provider: 'pangea-nga' }, model_id: 'fixture-model' }))
+await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
+await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), '# fixture')
+const provider = { discoverModels: async () => ({ current_model: 'fixture-model', models: [{ id: 'fixture-model' }] }) }
+const runtime = { subagents: { getProvider: () => provider } }
 let holdPush = true
-const service = new FaultInjectionService({ git: async (cwd, args, signal) => {
+const service = new FaultInjectionService({ validateModel: options => requireAgentModel(runtime, options), git: async (cwd, args, signal) => {
   if (args[0] === 'push' && holdPush) await new Promise((resolve, reject) => {
     if (signal.aborted) reject(signal.reason)
     else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
@@ -41,11 +46,16 @@ const service = new FaultInjectionService({ git: async (cwd, args, signal) => {
   profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], steps: ['开启 A', '执行业务', '关闭 A 并恢复'] })), edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
 const calls = []
 globalThis.fetch = async (url, options = {}) => {
+  const parsed = new URL(url, 'http://localhost')
   const req = Readable.from(options.body ? [Buffer.from(options.body)] : [])
   req.url = url; req.method = options.method || 'GET'; req.headers = { 'sec-fetch-site': 'same-origin' }
   let status, response
+  if (parsed.pathname.endsWith('/acp-settings')) {
+    await acpSettingsRouteHandler(req, { on() {}, once() {}, off() {}, removeListener() {}, writeHead(code) { status = code }, end(body) { response = body } }, {}, runtime)
+    return new Response(response, { status, headers: { 'content-type': 'application/json' } })
+  }
   if (options.body) calls.push(JSON.parse(options.body))
-  await faultInjectionRouteHandler(req, { writeHead(code) { status = code }, end(body) { response = body } }, service, {}, { resolveRoot: async () => dataRoot, readRun: async () => run })
+  await faultInjectionRouteHandler(req, { writeHead(code) { status = code }, end(body) { response = body } }, service, runtime, { resolveRoot: async () => dataRoot, readRun: async () => run })
   return new Response(response, { status, headers: { 'content-type': 'application/json' } })
 }
 const container = document.createElement('div'); document.body.append(container)
@@ -69,7 +79,7 @@ const change = async (label, value) => {
 }
 try {
   await render(); await click('打开打桩工作区')
-  await until(() => button('生成打桩修改（2 条用例）'))
+  await until(() => button('生成打桩修改（2 条用例）') && !button('生成打桩修改（2 条用例）').disabled)
   await change('构建流水线 URL', 'https://ci.example.test/pipeline')
   assert.equal(button('在 DSH 浏览器打开构建流水线'), undefined)
   await click('生成打桩修改（2 条用例）')

@@ -3794,6 +3794,7 @@ window.__ModuleLoader__.load({
           startedAt: selectedCurrent?.started_at ?? selectedTask.launch_started_at,
           sourceFileCount: selectedCurrent?.source_snapshot?.file_count ?? null,
           sourceFrozen: Boolean(selectedCurrent?.source_snapshot?.manifest_path),
+          riskApplicable: riskEnabled,
           tabCounts: { flows: businessFlows.length, risks: risks.length, cases: testCases.length },
           discussionContext: {
             runId: selectedCurrent?.run_id ?? selectedTask.run_id,
@@ -3898,6 +3899,23 @@ window.__ModuleLoader__.load({
       const [caseDrawer, setCaseDrawer] = React.useState(null)
       const [caseEvidenceSelection, setCaseEvidenceSelection] = React.useState({ scope: '', key: '' })
       const [injectionRun, setInjectionRun] = React.useState('')
+      const [injectionDraft, setInjectionDraft] = React.useState(() => ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
+      const handledInjectionDraftRequest = React.useRef(0)
+      React.useEffect(() => {
+        if (pageMode !== 'injection') return undefined
+        const sync = () => setInjectionDraft(ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
+        sync()
+        return ctx?.pangea?.subscribeInjectionDraft?.(sync)
+      }, [ctx?.pangea, pageMode])
+      React.useEffect(() => {
+        if (pageMode !== 'injection' || !injectionDraft?.requestId || injectionDraft.requestId === handledInjectionDraftRequest.current) return
+        handledInjectionDraftRequest.current = injectionDraft.requestId
+        if (injectionDraft.runId) {
+          setSelectedTaskId(injectionDraft.taskId)
+          setSelectedRun(injectionDraft.runId)
+          setInjectionRun(injectionDraft.runId)
+        }
+      }, [pageMode, injectionDraft?.requestId, injectionDraft?.runId, injectionDraft?.taskId])
       const createScopeKey = JSON.stringify([cwd, workbench?.data_root, createForm.repository, createForm.source_scope_text])
       const validScopePreview = scopePreview?.key === createScopeKey && scopePreview.preview_state === 'complete' ? scopePreview : null
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
@@ -4136,7 +4154,7 @@ window.__ModuleLoader__.load({
             onClick: event => openTaskAction(task, 'stop', event), 'aria-label': '停止任务 ' + taskDisplayName(task, taskRunFor(task)),
             title: stopping ? '执行端尚未确认结束，可再次确认停止' : undefined }, runIcon('Square'),
             busy ? '正在停止…' : state?.error && state.action === 'stop' ? '重试停止' : stopping ? '正在停止…' : '停止') : null,
-          h('button', { type: 'button', className: 'b03-task-open', disabled: busy, style: { color: '#a14035' },
+          h('button', { type: 'button', className: 'b03-task-open pangea-task-delete-btn', disabled: busy, style: { color: '#a14035' },
             onClick: event => openTaskAction(task, 'task-delete', event), 'aria-label': '删除任务 ' + taskDisplayName(task, taskRunFor(task)) },
             busy && state.action === 'task-delete' ? '正在删除…' : state?.error && state.action === 'task-delete' ? '重试删除' : '删除'))
       }
@@ -5015,11 +5033,13 @@ window.__ModuleLoader__.load({
                       : screen.type === 'environment' ? (environmentForm.id ? '编辑测试环境' : '新增测试环境')
                         : screen.type === 'repository-import' ? '添加源码仓库' : 'PANGEA 总览'
 
-      const isTaskOverview = pageMode === 'analysis' && ['overview', 'run-record', 'flows', 'risks', 'risk', 'cases', 'case', 'coverage-cases'].includes(screen.type)
+      const isTaskOverview = pageMode === 'analysis' && ['overview', 'run-record', 'flows', 'risks', 'risk', 'cases', 'case', 'coverage-cases', 'evidence', 'evidence-detail'].includes(screen.type)
       const navigationItems = pageMode !== 'analysis' || (!selectedTask && !current) || ['tasks', 'create'].includes(screen.type) ? [] : isTaskOverview ? [
         [selectedTask ? 'overview' : 'run-record', '概览'], ['flows', `业务流程 ${displayCount('business_flows', businessFlows.length).replace('（草稿）', '')}`],
         ...(riskEnabled ? [['risks', `风险 ${displayCount('risks', risks.length).replace('（草稿）', '')}`]] : []),
-        ['cases', `${current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'} ${displayCount('test_cases', testCases.length).replace('（草稿）', '')}`], ['workflow', '运行过程'],
+        ['cases', `${current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'} ${displayCount('test_cases', testCases.length).replace('（草稿）', '')}`],
+        ...(['evidence', 'evidence-detail'].includes(screen.type) ? [['evidence', '源码依据']] : []),
+        ['workflow', '运行过程'],
       ] : [
         [selectedTask ? 'overview' : 'run-record', '概览'], ['flows', '业务流程'], ...(riskEnabled ? [['risks', '风险']] : []), ['cases', current?.scenario === 'coverage-analysis' ? '补测用例' : '测试用例'], ['evidence', '源码依据'], ['workflow', '运行过程'],
       ]
@@ -6166,7 +6186,7 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'pangea-empty-state', role: workbenchError ? 'alert' : 'status' }, workbenchError ? '任务列表暂不可用，请重试同步。' : '正在读取分析任务…')
           : taskItems.length && filtered.length
             ? h('div', { className: 'b03-task-table-wrap' }, h('table', { className: 'b03-task-table', 'aria-label': '分析任务' },
-              h('colgroup', null, [33, 12.4, 10, 17.6, 10, 17].map((width, index) => h('col', { key: index, style: { width: `${width}%` } }))),
+              h('colgroup', null, [31, 12.4, 9.6, 17, 10, 20].map((width, index) => h('col', { key: index, style: { width: `${width}%` } }))),
               h('thead', null, h('tr', null,
                 h('th', { scope: 'col' }, '分析任务'),
                 h('th', { scope: 'col' }, '仓库 / 范围'),
@@ -6217,13 +6237,17 @@ window.__ModuleLoader__.load({
           renderCompatibility(),
           taskPageHeader,
           workbench && !workbenchError && !firstUse && !filteredEmpty ? h('div', { className: 'b03-task-metrics', 'aria-label': '任务概况' },
-            [['全部任务', taskItems.length], ['运行中', runningCount], ['需要处理', attentionCount], ['已完成', completedCount]].map(([label, value]) => h('div', { key: label, className: 'b03-task-stat' }, h('span', null, label), h('strong', null, String(value)))),
+            [['全部任务', taskItems.length, '全部'], ['运行中', runningCount, 'running'], ['需要处理', attentionCount, 'needs_attention'], ['已完成', completedCount, 'completed']].map(([label, value, filterValue]) => h('button', {
+              key: label, type: 'button', className: 'b03-task-stat b03-task-stat-btn', 'aria-pressed': taskStatus === filterValue,
+              onClick: () => setTaskStatus(taskStatus === filterValue && filterValue !== '全部' ? '全部' : filterValue),
+            }, h('span', null, label), h('strong', null, String(value)))),
           ) : null,
           h('section', { className: `b03-task-panel${firstUse ? ' first-use' : filteredEmpty ? ' filtered-empty' : ''}`, 'aria-label': '分析任务列表', 'aria-busy': workbenchLoading },
             standardControls,
             taskContent,
             taskItems.length && !filteredEmpty ? h('div', { className: 'b03-task-footer', role: 'status' },
-              h('span', null, `共 ${filtered.length} 个任务`), h('span', null, '1 / 1 页')) : null,
+              h('span', null, `共 ${filtered.length} 个任务`),
+              taskTotal > taskItems.length ? h('span', null, `已加载 ${taskItems.length} / ${taskTotal}`) : hasFilters ? h('span', null, `筛选自 ${taskItems.length} 个任务`) : null) : null,
             unlinkedSection))
       }
       function runRecordTime(value) {
@@ -6527,9 +6551,9 @@ window.__ModuleLoader__.load({
           renderCompatibility(),
           pageHeader({ title: taskDisplayName(selectedTask, current), task: selectedTask, current, contextLabel: '分析报告', ui: ctx.pangea?.ui, onBack: () => jump(selectedTask ? 'overview' : 'tasks'), actions: h('button', { type: 'button', className: 'b03-report-page-action', disabled: !reportArtifact, onClick: () => reportArtifact && openSidebarFile(reportArtifact, reportArtifactTitle) }, '打开已有报告') }),
           h('nav', { className: 'b03-report-tabs', 'aria-label': 'PANGEA 分析页面' }, reportNavigation.map(([target, label, key]) => h('button', {
-            key: target, type: 'button', 'aria-current': target === 'overview' ? 'page' : undefined,
+            key: target, type: 'button',
             onClick: () => jump(target),
-          }, label, key ? h('small', null, displayCount(key, ({ business_flows: businessFlows, risks, test_cases: testCases })[key]?.length ?? 0)) : null))),
+          }, key ? `${label} ${displayCount(key, ({ business_flows: businessFlows, risks, test_cases: testCases })[key]?.length ?? 0).replace('（草稿）', '')}` : label))),
           renderFlowVersions(),
           h('div', { className: 'b03-report-layout' },
             h('article', { className: 'b03-report-document' },
@@ -6707,6 +6731,19 @@ window.__ModuleLoader__.load({
         return content(item.missing_execution_conditions) || (item.readiness !== 'ready' ? content(item.readiness_reason) : '')
       }
 
+      function openFaultInjection(caseKeys = []) {
+        const cleanKeys = [...new Set((Array.isArray(caseKeys) ? caseKeys : []).filter(hasText))]
+        const runId = current?.run_id ?? selectedTask?.run_id ?? null
+        const taskId = selectedTask?.task_id ?? null
+        if (ctx?.pangea?.requestFaultInjection) {
+          if (!ctx.pangea.requestFaultInjection(scope, { runId, taskId, caseKeys: cleanKeys })) {
+            showActionNotice('代码打桩当前不可用，请检查对应插件是否已加载。', true)
+          }
+          return
+        }
+        openProductPage('injection', '代码打桩')
+      }
+
       function renderCases() {
         if (!current?.run_id) return h('div', { className: 'b05-card', role: 'status' }, '正在读取当前 Run 的测试用例…')
         const query = caseQuery.trim().toLowerCase()
@@ -6723,6 +6760,7 @@ window.__ModuleLoader__.load({
         return h('section', { className: 'pangea-case-workspace', 'aria-label': '测试用例工作区' },
           h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '测试用例'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '用例'} · ${unitCount} 个分析单元${designCounts.variants ? ` · ${designCounts.variants} 项参数组合` : ''}`)),
             h('div', { className: 'b05-head-actions' }, coverageAvailable ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => navigate({ type: 'coverage-cases' }) }, '覆盖补测视图') : null,
+              h('button', { type: 'button', className: 'b03-task-action', onClick: () => openFaultInjection(selectedCaseIds) }, selectedCaseIds.length ? `代码打桩（已选 ${selectedCaseIds.length}）` : '打开代码打桩'),
               h('button', { type: 'button', className: 'b03-task-action primary', disabled: !current?.run_id, onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true) } }, reviews?.counts?.adopted ? `导出已采纳 ${reviews.counts.adopted} 条` : '导出用例'))),
           reviewError ? h('p', { role: 'alert', className: 'pangea-review-error' }, `评审记录：${reviewError}`) : null,
           h('div', { className: 'pangea-case-tools' },
@@ -6742,9 +6780,9 @@ window.__ModuleLoader__.load({
             h('thead', null, h('tr', null,
               h('th', null, h('input', { type: 'checkbox', 'aria-label': '选择当前列表', checked: allSelected, disabled: selectableIds.length === 0, onChange: () => setSelectedCaseIds(previous => allSelected ? previous.filter(id => !selectableIds.includes(id)) : [...new Set([...previous, ...selectableIds])]) })),
               ...['编号', '用例名称', '类型', '关联风险', '准备事项', ''].map(label => h('th', { key: label }, label)))),
-            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const selectable = Boolean(caseIdentity(item)) && testCases.filter(other => caseIdentity(other) === caseIdentity(item)).length === 1; const linked = formatRisk(item); return h('tr', { key: `${key}:${index}` },
-              h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(caseIdentity(item)), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(caseIdentity(item)) })),
-              h('td', { className: 'b05-mono' }, item.display_id || item.test_case_id || '待编号'),
+            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const idKey = caseIdentity(item); const selectable = Boolean(idKey) && testCases.filter(other => caseIdentity(other) === idKey).length === 1; const linked = formatRisk(item); const reviewStatus = idKey && reviewByKey[idKey]?.review_status || 'unreviewed'; return h('tr', { key: `${key}:${index}` },
+              h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(idKey), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(idKey) })),
+              h('td', { className: 'b05-mono' }, h('div', null, item.display_id || item.test_case_id || '待编号'), reviews && selectable && reviewStatus !== 'unreviewed' ? h('em', { className: 'pangea-review-pill', 'data-status': reviewStatus, style: { fontStyle: 'normal', marginTop: 4 } }, REVIEW_LABELS[reviewStatus]) : null),
               h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => openCaseDetail(key) }, caseTitlePresentation(item).title),
                 caseRecordParseNotice(item) || caseTitlePresentation(item).issue || hasText(item.verification_goal) && item.verification_goal !== caseTitlePresentation(item).title ? h('small', null, caseRecordParseNotice(item)?.summary || caseTitlePresentation(item).issue || item.verification_goal) : null,
                 item.variants?.length ? h('details', { className: 'b05-variant-preview', 'data-view-key': `case-variants:${key}` }, h('summary', null, `${item.variants.length} 项参数组合`),
@@ -6759,31 +6797,49 @@ window.__ModuleLoader__.load({
             })))),
           filtered.length === 0 ? h('div', { className: 'b05-card', role: collectionWarning(health, 'test_cases') ? 'alert' : 'status' }, collectionEmpty('test_cases', '没有符合条件的测试用例。')) : null,
           h('div', { className: 'pangea-case-paging' }, h('button', { type: 'button', className: 'btn', disabled: page <= 1, onClick: () => setCasePage(page - 1) }, '上一页'), h('span', null, `第 ${page} / ${pages} 页 · 共 ${filtered.length} 条`), h('button', { type: 'button', className: 'btn', disabled: page >= pages, onClick: () => setCasePage(page + 1) }, '下一页')),
-          selectedCaseIds.length ? h('div', { className: 'b05-selected-bar' }, h('div', null, `已选择 ${selectedCaseIds.length} 条用例`, h('small', null, `含 ${selectedCaseIds.filter(id => !selectableIds.includes(id)).length} 条筛选外选择；可复制或导出` )),
+          selectedCaseIds.length ? h('div', { className: 'b05-selected-bar' }, h('div', null, `已选择 ${selectedCaseIds.length} 条用例`, h('small', null, `含 ${selectedCaseIds.filter(id => !selectableIds.includes(id)).length} 条筛选外选择；可复制、导出或打桩` )),
             h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: () => setSelectedCaseIds([]) }, '清空选择'),
+              h('button', { type: 'button', onClick: () => openFaultInjection(selectedCaseIds) }, '打桩所选'),
               h('button', { type: 'button', disabled: selectedCaseIds.length === 0, onClick: () => { void copySelectedCases() } }, '复制选中用例'), h('button', { type: 'button', onClick: () => { setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true); setCaseExportScope('selected') } }, '导出所选')) ) : null,
-          h('button', { type: 'button', className: 'btn', onClick: () => openProductPage('injection', '代码打桩') }, '打开代码打桩'),
           renderCaseExportDialog(),
           renderCaseDrawer())
       }
 
       function renderInjectionWorkspace() {
         const available = workbench?.tasks?.items || []
+        const allRuns = workbench?.runs?.items ?? snapshot?.runs ?? []
         const back = () => { setInjectionRun(''); setSelectedRun(undefined); setSelectedTaskId(undefined) }
-        return h('section', { className: 'b05-card', style: { maxWidth: 1280, margin: '0 auto', padding: 28 }, 'aria-label': '代码打桩工作区' },
-          h('h1', null, '代码打桩'),
-          h('p', { className: 'b05-subtle' }, '从分析结果选择用例，在独立源码副本中生成修改，查看结果后推送个人分支。'),
-          !injectionRun ? h('section', null,
-            h('h2', null, '第一步 · 选择分析任务'),
-            h('input', { type: 'search', 'aria-label': '搜索打桩分析任务', placeholder: '搜索分析任务', value: taskQuery, onChange: event => setTaskQuery(event.target.value), style: { padding: 12, width: '100%', boxSizing: 'border-box', marginBottom: 20 } }),
-            workbenchError ? h('p', { role: 'alert' }, workbenchError) : null,
-            !workbench ? h('p', { role: 'status' }, '正在读取分析任务…') : !available.length ? h('p', null, '暂无分析任务，请先创建分析。') : null,
-            available.filter(task => taskDisplayName(task).toLowerCase().includes(taskQuery.toLowerCase())).map(task => h('button', { key: task.task_id, type: 'button', disabled: !task.run_id,
-              style: { display: 'block', width: '100%', padding: 18, marginBottom: 10, textAlign: 'left', border: '1px solid #dfe5dc', borderRadius: 10, background: '#fff', cursor: task.run_id ? 'pointer' : 'default' },
-              onClick: () => { setSelectedTaskId(task.task_id); setSelectedRun(task.run_id); setInjectionRun(task.run_id) } },
-              h('strong', null, taskDisplayName(task)), h('p', null, task.run_id ? '选择用例与查看已有打桩任务 →' : '尚未生成分析结果'))))
-          : current?.run_id !== injectionRun ? h('div', null, h('p', { role: error ? 'alert' : 'status' }, error || '正在读取所选分析任务的用例…'), error ? h('button', { type: 'button', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', onClick: back }, '返回选择任务'))
+        const matchedTasks = available.filter(task => [taskDisplayName(task), task.repository, task.target, task.run_id].filter(Boolean).join(' ').toLowerCase().includes(taskQuery.trim().toLowerCase()))
+        return h('section', { className: 'pangea-injection-page', 'aria-label': '代码打桩工作区' },
+          pageHeader({ title: '代码打桩', subtitle: '从分析结果选择用例，在独立源码副本中生成修改，核对结果后推送到个人测试分支。', ui: ctx.pangea?.ui, actions: renderRefreshButton() }),
+          !injectionRun ? h('section', { className: 'b03-task-panel', style: { padding: 20 } },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 14 } },
+              h('div', null,
+                h('h2', { style: { margin: 0, fontSize: 16, fontWeight: 600, color: '#25292e' } }, '第一步 · 选择分析任务'),
+                h('p', { style: { margin: '4px 0 0', fontSize: 13, color: '#6b7280' } }, '选择一个已完成或已生成用例的分析任务作为打桩起点。')),
+              h('span', { style: { fontSize: 12, color: '#6b7280' } }, `共 ${matchedTasks.length} 个任务`)),
+            h('input', { type: 'search', className: 'b03-task-search', 'aria-label': '搜索打桩分析任务', placeholder: '搜索分析任务、仓库或范围…', value: taskQuery, onChange: event => setTaskQuery(event.target.value), style: { maxWidth: '100%', width: '100%', boxSizing: 'border-box', marginBottom: 16 } }),
+            workbenchError ? h('p', { role: 'alert', style: { color: '#9c2330' } }, workbenchError) : null,
+            !workbench ? h('p', { role: 'status', style: { color: '#6b7280' } }, '正在读取分析任务…') : !available.length ? h('div', { className: 'pangea-empty-state' }, h('p', null, '暂无分析任务，请先创建分析。'), h('button', { type: 'button', className: 'b03-task-action b03-task-action-primary', onClick: () => openAnalysisTasks() }, '前往分析任务')) : null,
+            h('div', { style: { display: 'grid', gap: 10 } }, matchedTasks.map(task => {
+              const linkedRun = task.run_id ? allRuns.find(run => run.run_id === task.run_id) : null
+              const scopeText = [task.repository || linkedRun?.repository || '当前仓库', taskScopeLabel(task, linkedRun)].filter(Boolean).join(' · ')
+              return h('button', {
+                key: task.task_id, type: 'button', disabled: !task.run_id,
+                className: 'pangea-injection-task-card',
+                onClick: () => { setSelectedTaskId(task.task_id); setSelectedRun(task.run_id); setInjectionRun(task.run_id) },
+              },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
+                  h('strong', { style: { fontSize: 15, color: '#25292e' } }, taskDisplayName(task, linkedRun)),
+                  h('span', { className: `b03-task-status ${taskStatusTone(task.status)}` }, task.run_id ? taskRunLabel(task.run_id) : '尚无 Run')),
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginTop: 6, fontSize: 12, color: '#6b7280' } },
+                  h('span', null, scopeText),
+                  h('span', { style: { color: task.run_id ? '#b62836' : '#8a919a', fontWeight: task.run_id ? 600 : 400 } }, task.run_id ? '选择用例与查看已有打桩任务 →' : '尚未生成分析结果')))
+            })))
+          : current?.run_id !== injectionRun ? h('div', { className: 'b05-card', style: { padding: 24 } }, h('p', { role: error ? 'alert' : 'status', style: { margin: '0 0 12px' } }, error || '正在读取所选分析任务的用例…'), h('div', { style: { display: 'flex', gap: 10 } }, error ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', className: 'b03-task-action', onClick: back }, '返回选择任务')))
           : h(FaultInjectionPanel, { key: `${cwd}:${current.data_root ?? snapshot?.data_root}:${injectionRun}`, standalone: true, onBack: back, runId: injectionRun, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases,
+            initialCaseKeys: injectionDraft?.runId === injectionRun ? injectionDraft.caseKeys : [],
+            handoffRevision: injectionDraft?.runId === injectionRun ? injectionDraft.requestId : 0,
             onOpenPipeline: url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用') } }))
       }
 
@@ -6999,7 +7055,9 @@ window.__ModuleLoader__.load({
               h('span', { className: 'pangea-result-tag' }, CASE_TYPE_LABELS[item.case_type] || text(item.case_type, '类型未标注')),
               h('span', { className: 'pangea-result-tag' }, hasText(item.priority) ? `优先级 ${item.priority}` : '优先级未标注')),
             h('p', { className: 'pangea-case-goal' }, h('span', null, '验证目标'), text(item.verification_goal, '当前记录未单独声明，请核对用例原文。'))),
-            h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: copyCase }, '复制用例'),
+            h('div', { className: 'b05-head-actions' },
+              h('button', { type: 'button', onClick: () => openFaultInjection(caseIdentity(item) ? [caseIdentity(item)] : []) }, '打开代码打桩'),
+              h('button', { type: 'button', onClick: copyCase }, '复制用例'),
               h('button', { type: 'button', onClick: () => addToConversation('case', item, 'executable') }, '与 AI 讨论'))),
           parseNotice ? h('div', { className: 'notice warn', role: 'status', 'aria-label': '原始用例记录格式说明' },
             h('strong', null, parseNotice.summary), h('p', null, parseNotice.detail),
@@ -7026,7 +7084,6 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'basis', scope: caseScreenKey }) }, '拟覆盖依据 ↗'),
                 h('button', { type: 'button', className: 'b05-text-link', disabled: !caseEvidenceOptions.length, onClick: () => setSourceDrawerOpen(true) }, `关联代码 · ${caseEvidenceOptions.length} 处 ↗`)),
               !caseEvidenceOptions.length ? h('p', { className: 'b05-subtle' }, caseEvidence.unresolved.length ? '源码引用未能解析为明确位置，原文保留在拟覆盖依据中。' : '当前用例未记录明确源码引用。') : null,
-              h('button', { type: 'button', className: 'btn', onClick: () => openProductPage('injection', '代码打桩') }, '打开代码打桩'),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
@@ -7044,7 +7101,23 @@ window.__ModuleLoader__.load({
           item.source_record ? h('details', { className: 'b05-raw-record' }, h('summary', null, '查看本轮原始用例记录'), renderRecordBody(item, true)) : null,
           renderCaseDrawer(item),
           renderB05SourceDrawer('case', item))
-        return h('div', { className: 'pangea-case-review-shell' }, h('aside', { className: 'pangea-case-review-list', 'aria-label': '当前筛选用例' }, h('h3', null, `当前筛选 · ${order.length} 条`), order.slice(Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50), Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50) + 50).map(key => h('button', { key, type: 'button', 'aria-current': key === screen.id ? 'true' : undefined, onClick: () => selectReviewCase(key) }, caseById.get(key)?.display_id || key, h('span', null, caseTitlePresentation(caseById.get(key)).title)))), h('div', { className: 'pangea-case-review-detail' }, detailContent))
+        const reviewedInOrder = reviews ? order.filter(key => { const row = reviewByKey[caseIdentity(caseById.get(key))]; return row && row.review_status && row.review_status !== 'unreviewed' }).length : 0
+        return h('div', { className: 'pangea-case-review-shell', onKeyDown: event => {
+          if (event.defaultPrevented || ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target?.tagName)) return
+          if ((event.altKey && event.key === 'ArrowLeft') || (!event.metaKey && !event.ctrlKey && !event.altKey && event.key === '[')) {
+            if (position > 0) { event.preventDefault(); selectReviewCase(order[position - 1]) }
+          } else if ((event.altKey && event.key === 'ArrowRight') || (!event.metaKey && !event.ctrlKey && !event.altKey && event.key === ']')) {
+            if (position >= 0 && position < order.length - 1) { event.preventDefault(); selectReviewCase(order[position + 1]) }
+          }
+        } }, h('aside', { className: 'pangea-case-review-list', 'aria-label': '当前筛选用例' },
+          h('h3', null, `当前筛选 · ${order.length} 条`, reviews ? h('small', { style: { display: 'block', marginTop: 3, fontSize: 12, fontWeight: 400, color: '#6b7280' } }, `已评 ${reviewedInOrder} / ${order.length}`) : null),
+          order.slice(Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50), Math.max(0, Math.floor(Math.max(position, 0) / 50) * 50) + 50).map(key => {
+            const entry = caseById.get(key)
+            const entryStatus = entry && reviewByKey[caseIdentity(entry)]?.review_status || 'unreviewed'
+            return h('button', { key, type: 'button', 'aria-current': key === screen.id ? 'true' : undefined, onClick: () => selectReviewCase(key) },
+              h('div', { className: 'pangea-review-item-top' }, h('strong', { style: { fontWeight: 600 } }, entry?.display_id || key), reviews && entryStatus !== 'unreviewed' ? h('em', { className: 'pangea-review-pill', 'data-status': entryStatus, style: { fontStyle: 'normal' } }, REVIEW_LABELS[entryStatus]) : null),
+              h('span', null, caseTitlePresentation(entry).title))
+          })), h('div', { className: 'pangea-case-review-detail' }, detailContent))
       }
 
       async function copySingleCase(item) {
@@ -7129,8 +7202,8 @@ window.__ModuleLoader__.load({
         : null
       const flowScreen = screen.type === 'flows' && pageMode === 'analysis' && (selectedTask || current)
       const resultScreen = ['risks', 'risk', 'cases', 'case', 'coverage-cases'].includes(screen.type) && pageMode === 'analysis' && (selectedTask || current)
-      const rootClassName = `pangea-companion${screen.type === 'home' ? ' b06-home-screen' : ''}${screen.type === 'tasks' ? ' b03-task-screen' : ''}${screen.type === 'overview' || flowScreen || resultScreen ? ' b03-overview-screen' : ''}${flowScreen ? ' b04-flow-screen' : ''}${resultScreen ? ' b05-result-screen' : ''}`
-      const rootStyle = screen.type === 'home' || screen.type === 'tasks' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
+      const rootClassName = `pangea-companion${screen.type === 'home' ? ' b06-home-screen' : ''}${screen.type === 'tasks' || screen.type === 'injection' ? ' b03-task-screen' : ''}${screen.type === 'overview' || flowScreen || resultScreen ? ' b03-overview-screen' : ''}${flowScreen ? ' b04-flow-screen' : ''}${resultScreen ? ' b05-result-screen' : ''}`
+      const rootStyle = screen.type === 'home' || screen.type === 'tasks' || screen.type === 'injection' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
       const flowTargetLabel = taskDisplayName(selectedTask, current)
       const resultScopeLabel = [selectedTask?.repository || current?.repository || '当前仓库',
         selectedTask?.source_scope?.join('、')].filter(Boolean).join(' / ')
@@ -7140,14 +7213,14 @@ window.__ModuleLoader__.load({
       const resultHeader = resultScreen ? h(React.Fragment, null,
         pageHeader({ title: taskDisplayName(selectedTask, current), task: selectedTask, current, contextLabel: ['cases', 'coverage-cases'].includes(screen.type) ? '测试用例' : screen.type === 'case' ? '用例详情' : screenTitle, ui: ctx.pangea?.ui, onBack: ['risk', 'case', 'coverage-cases'].includes(screen.type) ? goBack : () => jump('tasks'), backLabel: screen.type === 'case' ? '返回用例' : screen.type === 'risk' ? '返回风险' : '返回任务列表', actions: derivationButton(screen.type === 'case' ? caseById.get(screen.id) : screen.type === 'risk' ? riskById.get(screen.id) : undefined) }), navigation) : null
       if (screen.type === 'workflow') return h('div', { ref: panelRootRef, className: 'pangea-companion', style: styles.root }, h('style', null, panelCss), monitorPersistenceNotice, renderSourceFirstWorkflow())
-      return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : 'PANGEA 执行环境' },
+      return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : pageMode === 'injection' ? 'PANGEA 代码打桩' : 'PANGEA 执行环境' },
         h('style', null, panelCss),
         taskActionDialog ? h(TaskLifecycleDialog, { state: { ...taskActionDialog, task: taskItems.find(task => task.task_id === taskActionDialog.task.task_id && task.attempt_id === taskActionDialog.task.attempt_id) ?? taskActionDialog.task }, onRefresh: () => { void loadWorkbench({ background: true }) },
           onClose: () => { if (!taskActionDialog.busy) setTaskActionDialog(null) }, onConfirm: () => { void confirmTaskAction() } }) : null,
         derivation ? h(RunDerivationDialog, { state: derivation, onChange: draft => setDerivation(value => value && ({ ...value, draft })),
           onClose: closeDerivation, onSubmit: input => { void submitDerivation(input) }, onRetry: () => { void openDerivation(null, derivation) } }) : null,
         ['injection', 'home', 'tasks', 'create', 'repository-import', 'report', 'run-record'].includes(screen.type) || (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? null : header,
-        h('div', { className: 'pangea-content', style: screen.type === 'home' ? { padding: '24px 31px 30px', maxWidth: 'none', margin: 0 }
+        h('div', { className: 'pangea-content', style: screen.type === 'home' || screen.type === 'injection' ? { padding: '24px 31px 30px', maxWidth: 'none', margin: 0 }
             : screen.type === 'tasks' ? { padding: '25px 31px 27px', maxWidth: 'none', margin: 0 }
               : (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? { padding: '24px 31px 27px', maxWidth: 'none', margin: 0 }
               : screen.type === 'report' ? { padding: '25px 31px 27px', maxWidth: 'none', margin: 0 }

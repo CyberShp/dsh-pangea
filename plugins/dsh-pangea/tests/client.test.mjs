@@ -1169,3 +1169,30 @@ test('available intranet update keeps a notes entry without automatically downlo
   await entry.props.onClick()
   assert.deepEqual(view.calls, ['notes'])
 })
+
+
+test('shares deduplicated fault-injection handoff context and opens the injection page', async () => {
+  const { exported } = await loadClient()
+  const sidebar = fakeSidebar()
+  const service = exported.createPangeaService(sidebar, {}, {})
+  service.registerPage({ id: 'injection', title: '代码打桩', order: 15, component: () => null })
+  let notifications = 0
+  const unsubscribe = service.subscribeInjectionDraft(() => { notifications++ })
+  assert.equal(service.requestFaultInjection({ sessionId: 'session-1' }, { runId: 'run-7', taskId: 'task-7', caseKeys: [' TC-01 ', 'TC-02', 'TC-01', ''] }), true)
+  assert.equal(notifications, 1)
+  assert.deepEqual([...service.getInjectionDraft().caseKeys], ['TC-01', 'TC-02'])
+  assert.equal(service.getInjectionDraft().runId, 'run-7')
+  assert.equal(service.getInjectionDraft().taskId, 'task-7')
+  assert.equal(sidebar.opened.at(-1)?.seed.type, 'dsh-pangea:injection')
+  unsubscribe()
+})
+
+test('assistant page header retains back action and respects riskApplicable', async () => {
+  const react = { createElement(type, props, ...children) { return { type, props: props ?? {}, children: children.flat(Infinity).filter(Boolean) } } }
+  const { exported } = await loadClient(react)
+  const walk = node => typeof node === 'object' && node !== null ? [node, ...node.children.flatMap(walk)] : []
+  const noRisk = exported.AssistantPageHeader({ context: { taskTitle: '覆盖率补测', activeConversationKind: 'analysis', riskApplicable: false }, onClose() {} })
+  const labels = walk(noRisk).filter(node => node.type === 'button').map(node => node.children.join(''))
+  assert.ok(labels.includes('← 返回任务'))
+  assert.equal(labels.some(label => label.includes('风险')), false)
+})

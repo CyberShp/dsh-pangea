@@ -583,7 +583,7 @@ window.__ModuleLoader__.load({
     }
 
     // Lucide 1.8.0, ISC; paths from the approved design's icon set.
-    const productNavIcons = {"workbench":[["rect",{"width":"7","height":"9","x":"3","y":"3","rx":"1"}],["rect",{"width":"7","height":"5","x":"14","y":"3","rx":"1"}],["rect",{"width":"7","height":"9","x":"14","y":"12","rx":"1"}],["rect",{"width":"7","height":"5","x":"3","y":"16","rx":"1"}]],"analysis":[["path",{"d":"M3 7V5a2 2 0 0 1 2-2h2"}],["path",{"d":"M17 3h2a2 2 0 0 1 2 2v2"}],["path",{"d":"M21 17v2a2 2 0 0 1-2 2h-2"}],["path",{"d":"M7 21H5a2 2 0 0 1-2-2v-2"}],["path",{"d":"M7 12h10"}]],"assets":[["path",{"d":"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"}],["path",{"d":"M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"}],["path",{"d":"M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"}]],"file":[["path",{"d":"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"}]],"terminal":[["path",{"d":"m7 11 2-2-2-2"}],["path",{"d":"M11 13h4"}],["rect",{"width":"18","height":"18","x":"3","y":"3","rx":"2","ry":"2"}]],"browser":[["circle",{"cx":"12","cy":"12","r":"10"}],["path",{"d":"M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"}],["path",{"d":"M2 12h20"}]],"settings":[["path",{"d":"M14 17H5"}],["path",{"d":"M19 7h-9"}],["circle",{"cx":"17","cy":"17","r":"3"}],["circle",{"cx":"7","cy":"7","r":"3"}]],"workspace":[["path",{"d":"m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"}]]}
+    const productNavIcons = {"workbench":[["rect",{"width":"7","height":"9","x":"3","y":"3","rx":"1"}],["rect",{"width":"7","height":"5","x":"14","y":"3","rx":"1"}],["rect",{"width":"7","height":"9","x":"14","y":"12","rx":"1"}],["rect",{"width":"7","height":"5","x":"3","y":"16","rx":"1"}]],"analysis":[["path",{"d":"M3 7V5a2 2 0 0 1 2-2h2"}],["path",{"d":"M17 3h2a2 2 0 0 1 2 2v2"}],["path",{"d":"M21 17v2a2 2 0 0 1-2 2h-2"}],["path",{"d":"M7 21H5a2 2 0 0 1-2-2v-2"}],["path",{"d":"M7 12h10"}]],"injection":[["path",{"d":"M6 3v12"}],["circle",{"cx":"18","cy":"6","r":"3"}],["circle",{"cx":"6","cy":"18","r":"3"}],["path",{"d":"M18 9a9 9 0 0 1-9 9"}],["path",{"d":"M15 6h6"}],["path",{"d":"M18 3v6"}]],"assets":[["path",{"d":"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"}],["path",{"d":"M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"}],["path",{"d":"M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"}]],"file":[["path",{"d":"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"}]],"terminal":[["path",{"d":"m7 11 2-2-2-2"}],["path",{"d":"M11 13h4"}],["rect",{"width":"18","height":"18","x":"3","y":"3","rx":"2","ry":"2"}]],"browser":[["circle",{"cx":"12","cy":"12","r":"10"}],["path",{"d":"M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"}],["path",{"d":"M2 12h20"}]],"settings":[["path",{"d":"M14 17H5"}],["path",{"d":"M19 7h-9"}],["circle",{"cx":"17","cy":"17","r":"3"}],["circle",{"cx":"7","cy":"7","r":"3"}]],"workspace":[["path",{"d":"m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"}]]}
     function productIcon(kind, size = 24) {
       if (productNavIcons[kind]) return lineIcon(productNavIcons[kind].map(([tag, props], key) => h(tag, { ...props, key })), size, 1.65)
       const paths = kind === 'workbench'
@@ -980,20 +980,19 @@ window.__ModuleLoader__.load({
     function AssistantPageHeader({ context, onClose }) {
       const record = context?.activeConversationKind === 'analysis' || context?.activeConversationKind === 'architecture'
       const tabs = [
-        ['overview', '概览'], ['flows', '业务流程'], ['risks', '风险'], ['cases', '测试用例'], ['workflow', '运行过程'],
+        ['overview', '概览'],
+        ['flows', '业务流程'],
+        ...(context?.riskApplicable === false ? [] : [['risks', '风险']]),
+        ['cases', '测试用例'],
+        ['workflow', '运行过程'],
       ]
       const tabCounts = context?.tabCounts ?? {}
-      const runLabel = context?.runId ? `RUN ${String(context.runId).replace(/^run[-_ ]/i, '')}` : null
-      const startedAt = context?.startedAt ? new Date(context.startedAt) : null
-      const startedLabel = startedAt && !Number.isNaN(startedAt.getTime())
-        ? `${startedAt.toDateString() === new Date().toDateString() ? '今天' : `${startedAt.getMonth() + 1}月${startedAt.getDate()}日`}${startedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })} 开始`
-        : null
       return h('header', { 'data-pangea-assistant-page-head': true },
         h('div', { 'data-pangea-assistant-page-title-row': true },
           h('div', null,
             h('h1', null, context?.taskTitle || context?.title || '当前分析'),
             null),
-          h('button', { type: 'button', onClick: onClose }, '← 返回任务')),
+          h('button', { type: 'button', 'data-pangea-assistant-back': true, onClick: onClose }, '← 返回任务')),
         h('nav', { 'data-pangea-assistant-task-tabs': true, 'aria-label': '任务页面' }, tabs.map(([type, label]) =>
           h('button', { key: type, type: 'button', 'aria-current': type === (record ? 'workflow' : 'overview') ? 'page' : undefined,
             onClick: () => { onClose(); context?.onOpenTab?.(type) },
@@ -1051,12 +1050,16 @@ window.__ModuleLoader__.load({
           h('div', null,
             h('h2', null, '讨论当前分析'),
             h('p', null, `${taskTitle} · ${activeConversation?.display_title || activeConversation?.title || '新讨论'}`)),
-          h('div', { 'data-pangea-assistant-session-badge': true },
-            h('span', { 'aria-hidden': 'true' }, '讨论会话'),
-            h('select', { 'data-pangea-assistant-select': true, 'aria-label': '切换任务会话',
-              disabled: busy || !conversations.length, value: context?.activeConversationId ?? '',
-              onChange: event => runAction('select', event.target.value),
-            }, conversations.map(item => h('option', { key: item.conversation_id, value: item.conversation_id }, `${kindLabel(item)} · ${item.display_title || item.title}`))))),
+          h('div', { 'data-pangea-assistant-discussion-controls': true },
+            h('div', { 'data-pangea-assistant-session-badge': true },
+              h('span', { 'aria-hidden': 'true' }, '讨论会话'),
+              h('select', { 'data-pangea-assistant-select': true, 'aria-label': '切换任务会话',
+                disabled: busy || !conversations.length, value: context?.activeConversationId ?? '',
+                onChange: event => runAction('select', event.target.value),
+              }, conversations.map(item => h('option', { key: item.conversation_id, value: item.conversation_id }, `${kindLabel(item)} · ${item.display_title || item.title}`)))),
+            h('div', { 'data-pangea-assistant-discussion-actions': true },
+              h('button', { type: 'button', 'data-pangea-assistant-new': true, disabled: busy || !context?.taskId,
+                onClick: () => runAction('create') }, pendingType === 'create' ? '创建中…' : '新建讨论')))),
         h('div', { 'data-pangea-assistant-discussion-callout': true },
           lineIcon([h('path', { key: 'link', d: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71' }), h('path', { key: 'chain', d: 'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71' })], 16),
           `上下文：当前任务 / ${discussionContext.runId || context?.runId ? `RUN ${String(discussionContext.runId || context.runId).replace(/^run[-_ ]/i, '')}` : '暂无 Run'}${focus ? ` / ${focus.kind === 'risk' ? '风险' : '用例'} ${focus.id}` : ''}`),
@@ -1073,9 +1076,6 @@ window.__ModuleLoader__.load({
           focus ? h('button', { type: 'button', onClick: () => context.onNavigateTo?.(focus.kind, focus.id) }, focus.kind === 'risk' ? '风险详情 ↗' : '用例详情 ↗') : null,
           ...relatedLinks.map(item => h('button', { key: `${item.kind}:${item.id}`, type: 'button', onClick: () => context.onNavigateTo?.(item.kind, item.id) }, item.label)),
           ...sources.map((item, index) => h('button', { key: `${item.location}:${index}`, type: 'button', onClick: () => context.onOpenSource?.(item.location), title: item.location }, item.label)))),
-        h('div', { 'data-pangea-assistant-discussion-actions': true },
-          h('button', { type: 'button', 'data-pangea-assistant-new': true, disabled: busy || !context?.taskId,
-            onClick: () => runAction('create') }, pendingType === 'create' ? '创建中…' : '新建讨论')),
         h('p', { 'data-pangea-assistant-discussion-status': true, role: 'status' }, feedback),
         error ? h('p', { role: 'alert', 'data-pangea-assistant-discussion-error': true }, error) : null)
       return h('aside', { 'data-pangea-assistant-head': true, 'data-conversation-kind': kind || 'analysis', 'aria-label': 'AI 助手当前任务' },
@@ -1508,6 +1508,7 @@ window.__ModuleLoader__.load({
       const pageMeta = {
         workbench: { label: '工作台', icon: 'workbench' },
         analysis: { label: 'PANGEA 分析', icon: 'analysis' },
+        injection: { label: '代码打桩', icon: 'injection' },
         execution: { label: '环境配置', icon: 'execution' },
         assets: { label: '测试资产', icon: 'assets' },
         'agent-runtime': { label: 'Agent Runtime', icon: 'agent-runtime' },
@@ -1690,6 +1691,7 @@ window.__ModuleLoader__.load({
       const nativeDisposers = new Map()
       const listeners = new Set()
       const runDraftListeners = new Set()
+      const injectionDraftListeners = new Set()
       const taskSelectionListeners = new Set()
       const registeredNativeIds = new Set()
       let sequence = 0
@@ -1697,6 +1699,7 @@ window.__ModuleLoader__.load({
       let defaultPageId
       let snapshot = Object.freeze({ revision, pages: Object.freeze([]) })
       let runDraft = Object.freeze({ revision: 0, requestId: 0, intent: 'create', runId: null, assetIds: Object.freeze([]) })
+      let injectionDraft = Object.freeze({ revision: 0, requestId: 0, runId: null, taskId: null, caseKeys: Object.freeze([]) })
       let selectedTaskId
       const initializedDefaultSessions = new Set()
       const productSessions = new Set()
@@ -1923,6 +1926,21 @@ window.__ModuleLoader__.load({
         return openPage(scope, 'analysis')
       }
 
+      function getInjectionDraft() { return injectionDraft }
+      function updateInjectionDraft(patch = {}) {
+        const caseKeys = Array.isArray(patch.caseKeys)
+          ? [...new Set(patch.caseKeys.map(v => typeof v === 'string' ? v.trim() : '').filter(Boolean))]
+          : [...injectionDraft.caseKeys]
+        injectionDraft = Object.freeze({ ...injectionDraft, ...patch, revision: injectionDraft.revision + 1, caseKeys: Object.freeze(caseKeys) })
+        for (const listener of [...injectionDraftListeners]) listener()
+        return injectionDraft
+      }
+      function subscribeInjectionDraft(listener) { injectionDraftListeners.add(listener); return () => injectionDraftListeners.delete(listener) }
+      function requestFaultInjection(scope, patch = {}) {
+        updateInjectionDraft({ ...patch, requestId: injectionDraft.requestId + 1 })
+        return openPage(scope, 'injection')
+      }
+
       const disposePolicy = installSidebarPolicy(betterSidebar, registeredNativeIds)
       const disposeDefaultState = betterSidebar.subscribeState?.(ensureProductPage) ?? (() => {})
 
@@ -1940,6 +1958,10 @@ window.__ModuleLoader__.load({
         subscribeRunDraft,
         requestRunCreation,
         requestRunSelection,
+        getInjectionDraft,
+        updateInjectionDraft,
+        subscribeInjectionDraft,
+        requestFaultInjection,
         registerProductSession,
         selectTask,
         getSelectedTaskId,
@@ -1976,6 +1998,7 @@ window.__ModuleLoader__.load({
     exports.setAnalysisProcessLayout = setAnalysisProcessLayout
     exports.shouldShowAssistantProcess = shouldShowAssistantProcess
     exports.assistantSessionId = assistantSessionId
+    exports.AssistantPageHeader = AssistantPageHeader
     exports.AssistantHeader = AssistantHeader
     exports.AssistantProcess = AssistantProcess
     exports.apply = apply
