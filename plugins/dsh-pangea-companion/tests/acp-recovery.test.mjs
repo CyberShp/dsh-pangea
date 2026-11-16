@@ -531,11 +531,11 @@ for (const mode of ['recover', 'saved', 'twice', 'unconfirmed', 'ready', 'discon
   }
 })
 
-test('a completed unit can repair before its slow sibling finishes, with at most three workers', async () => {
+test('a completed unit can repair before its slow sibling finishes, with at most three workers', { timeout: 10000 }, async t => {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'acp-scheduler-'))
   const controller = new AbortController(), slow = deferred(), states = [0, 0, 0, 0]
   let running = 0, peak = 0, repairedBeforeSlow = false
-  const run = createSourceFirstAcpRun({ dataRoot, runId: 'run', cwd: dataRoot, providerId: 'pangea-nga', signal: controller.signal,
+  const run = createSourceFirstAcpRun({ dataRoot, runId: 'run', cwd: dataRoot, providerId: 'pangea-nga', signal: AbortSignal.any([controller.signal, t.signal]),
     runner: async ({ args }) => {
       if (args[0] === 'task-open') return { task: {} }
       if (args[1] === 'settle') { states[Number(args[args.indexOf('--action-id') + 1].split(':')[1])]++; return {} }
@@ -550,9 +550,10 @@ test('a completed unit can repair before its slow sibling finishes, with at most
         running--; return completed
       } }
     } } })
-  const deadline = setTimeout(() => controller.abort(new Error('scheduler blocked')), 1000)
+  // The deferred sibling enforces repair ordering. The test timeout only bounds
+  // a deadlock; real persisted-state I/O is not a one-second product deadline.
   try { await run.result; assert.equal(repairedBeforeSlow, true); assert.ok(peak <= 3) }
-  finally { clearTimeout(deadline); controller.abort(); slow.resolve(); await run.dispose(); await rm(dataRoot, { recursive: true, force: true }) }
+  finally { controller.abort(); slow.resolve(); await run.dispose(); await rm(dataRoot, { recursive: true, force: true }) }
 })
 
 test('attention stores full diagnostic beyond launch log limit and keeps user message short', async t => {
