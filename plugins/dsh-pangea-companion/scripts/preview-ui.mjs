@@ -40,14 +40,40 @@ window.addEventListener('pangea:query-model-onboarding',()=>window.dispatchEvent
 window.addEventListener('pangea:open-assistant',()=>{document.body.classList.toggle('preview-assistant');});
 `, resolveDir: desktop, sourcefile: 'ui-preview.jsx', loader: 'jsx' }, bundle: true, write: false, platform: 'browser', nodePaths: [path.join(desktop, 'node_modules')], define: { 'process.env.NODE_ENV': '"development"' } })
 let scene = option('--scene', 'running'), count = 40
+const seedFi = option('--seed-fi') === '1'
 const fixture = () => {
   const value = uiWorkbenchFixture(dataRoot, scene, count)
   const transformed = fixtureModule?.transformFixture ? fixtureModule.transformFixture(value, { dataRoot, scene, count }) : value
-  for (const [idx, item] of (transformed.run?.details?.test_cases ?? []).slice(0, 3).entries()) {
+  for (const [idx, item] of (transformed.run?.details?.test_cases ?? []).slice(0, 2).entries()) {
     item.execution_readiness ??= 'needs_instrumentation'
     item.instrumentation ??= { points: [{ id: `FI-TLS-0${idx + 1}`, action: '模拟链路超时或故障返回码并观察资源释放' }] }
   }
   return transformed
+}
+if (seedFi) {
+  const { run } = fixture()
+  const c0 = run.details.test_cases[0], c1 = run.details.test_cases[1]
+  const k0 = c0.projection_id || c0.test_case_id, k1 = c1.projection_id || c1.test_case_id
+  const demoDir = path.join(dataRoot, '.pangea', 'fault-injection', run.run_id, 'fi-demo-01')
+  await mkdir(demoDir, { recursive: true })
+  await writeFile(path.join(demoDir, 'task.json'), JSON.stringify({
+    id: 'fi-demo-01', schema_version: 2, run_id: run.run_id, name: 'TLS 握手超时与断链恢复打桩', status: 'pushed', generation_complete: true,
+    branch: 'dev/tls-fi', pipeline_url: 'https://ci.example.internal/storage/tls/482',
+    created_at: '2026-11-17T00:10:00Z', updated_at: '2026-11-17T00:18:00Z',
+    case_keys: [k0, k1],
+    cases: [{ case_key: k0, title: c0.title }, { case_key: k1, title: c1.title }],
+    repositories: [{ repo_id: 'storage', branch: 'dev/tls-fi', base_commit: '8a4e91c0b23d', commit: 'c91f402e77ab', pushed: true, outgoing_count: 0 }],
+    build: { url: 'https://ci.example.internal/storage/tls/482', package_id: 'storage-tls-fi-482', package_sha256: '' },
+    verification: [{ case_key: k0, result: 'passed', hits: 'FI-TLS-01=2', notes: '日志自动识别：\n[PANGEA_VERIFY] case=' + k0 + ' result=passed hits=FI-TLS-01=2', at: '2026-11-17T00:18:00Z', build: { package_id: 'storage-tls-fi-482', commits: [{ repo_id: 'storage', commit: 'c91f402e77ab' }] } }],
+    result: {
+      summary: '在 tls/handshake.c 超时恢复分支注入可控延迟与故障返回码桩点，支持环境变量开关与命中计数日志。',
+      points: [{ id: 'FI-TLS-01', repo_id: 'storage', path: 'tls/handshake.c', action: '模拟链路超时返回 ETIMEDOUT', enable: 'export PANGEA_FI_TLS_01=1', disable: 'unset PANGEA_FI_TLS_01', observe: '[FI_HIT:FI-TLS-01]' }],
+      profiles: [
+        { case_key: k0, point_ids: ['FI-TLS-01'], steps: ['export PANGEA_FI_TLS_01=1', './run_tls_suite --case 001', 'unset PANGEA_FI_TLS_01'] },
+        { case_key: k1, point_ids: ['FI-TLS-01'], steps: ['export PANGEA_FI_TLS_01=1', './run_tls_suite --case 002', 'unset PANGEA_FI_TLS_01'] },
+      ],
+    },
+  }))
 }
 const assetFixture = {
   asset_id: 'typography-design', title: '连接模块设计说明', asset_type: 'design', status: 'available', source_name: '连接设计.md', revision: 1,
@@ -88,7 +114,10 @@ const server = createServer(async (req, res) => {
       if (url.searchParams.get('view') === 'agent-session') return send(res, { status: 'ok', run_id: run.run_id, session: { session_id: 'a'.repeat(64), unit_id: 'unit-tls', status: 'running', history_status: 'recorded' }, events: [{ seq: 1, type: 'session_update', at: '2026-10-21T04:10:00Z', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '## 当前进展\n已保存 **TLS 握手** 的主要路径。\n- 核对失败清理\n- 检查重新建链\n```c\nint result = 0;\n```' } } }, { seq: 2, type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'read-source', title: '读取冻结源码', status: 'failed', rawInput: { path: 'tls/handshake.c' }, rawOutput: { error: '界面测试：模拟读取错误' } } }], has_more: false, next_cursor: 2 })
       return send(res, { status: 'ok', data_root: dataRoot, compatibility: { compatible: true }, capabilities: { repositories: ['storage'], workflow_versions: ['source-first-v1'], source_first: { version: 'source-first-v1', contract_fields: ['analysis_profile', 'analysis_settings', 'asset_revisions', 'expected_scope_revision'], analysis_options_by_profile: { 'behavior-test-v2': { scenarios: ['module-analysis', 'risk-analysis', 'branch-analysis', 'coverage-analysis'], modes: ['depth', 'speed'] } } } }, tasks: { items: [task], total: 1 }, runs: { items: [run], total: 1 }, run, selected_task_id: task.task_id, acp_providers: [{ id: 'pangea-codeagent', label: 'CodeAgent', registered: true }] })
     }
-    if (url.pathname === '/api/pangea-companion/fault-injection') return send(res, { status: 'ok', tasks: [], providers: [{ id: 'pangea-codeagent', label: 'CodeAgent' }], defaults: { provider_id: 'pangea-codeagent', agent_model: 'fixture-model', pipeline_url: 'https://ci.example.internal/storage/tls', repositories: [{ repo_id: 'storage', git_path: '/workspace/storage', remote: 'origin', personal_branch: 'dev/tls-fi', remote_branch: 'dev/tls-fi', source: { kind: 'git', branch: 'main', commit: '8a4e91c0b23d4f1190bc3a12', remote: 'origin' } }] } })
+    if (url.pathname === '/api/pangea-companion/fault-injection') {
+      const demoTasks = seedFi ? [JSON.parse(await readFile(path.join(dataRoot, '.pangea', 'fault-injection', run.run_id, 'fi-demo-01', 'task.json'), 'utf8'))] : []
+      return send(res, { status: 'ok', tasks: demoTasks, providers: [{ id: 'pangea-codeagent', label: 'CodeAgent' }], defaults: { provider_id: 'pangea-codeagent', agent_model: 'fixture-model', pipeline_url: 'https://ci.example.internal/storage/tls', repositories: [{ repo_id: 'storage', git_path: '/workspace/storage', remote: 'origin', personal_branch: 'dev/tls-fi', remote_branch: 'dev/tls-fi', source: { kind: 'git', branch: 'main', commit: '8a4e91c0b23d4f1190bc3a12', remote: 'origin' } }] } })
+    }
     if (url.pathname === '/api/pangea-companion/acp-settings' && req.method === 'POST') return send(res, { status: 'ok', provider_id: 'pangea-codeagent', catalog_id: 'ui-fixture-catalog', current_model: 'fixture-model', models: [{ id: 'fixture-model', label: '界面测试模型' }] })
     if (url.pathname === '/api/pangea-asset-catalog/state') return send(res, url.searchParams.get('asset_id') ? assetDetailFixture : { status: 'ok', initialized: true, assets: [assetFixture], methodologies: [], summary: { total: 1, available: 1, review: 0, failed: 0 }, pagination: { total: 1, page: 1, page_size: 20, total_pages: 1 }, features: {} })
     if (url.pathname.startsWith('/api/')) return send(res, { status: 'ok', assets: [], environments: [], items: [], models: [], settings: {}, capabilities: {} })

@@ -1260,6 +1260,9 @@ body[data-pangea-product-shell]{--pangea-bg:#f6f7f9;--pangea-panel:#ffffff;--pan
 .pangea-review-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:500;line-height:1.5;white-space:nowrap;background:#eef1f5;color:#5e6773}
 .pangea-review-pill[data-status="adopted"]{background:#eaf5ee;color:#20765a;font-weight:600}
 .pangea-review-pill[data-status="excluded"]{background:#f3f4f6;color:#6b7280}
+.pangea-review-pill[data-status="danger"]{background:#fbefef;color:#9c2330;font-weight:600}
+.pangea-review-pill[data-status="warn"]{background:#fbf4e6;color:#8c5a12;font-weight:600}
+.pangea-review-pill[data-status="info"]{background:#edf3f8;color:#365a7d}
 .pangea-case-review-list button .pangea-review-item-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-family:Consolas,monospace;font-size:12px}
 .pangea-companion .b03-task-stat[role="button"],.pangea-companion .b03-task-stat-btn{cursor:pointer;text-align:left;border-radius:7px;padding:6px 12px;transition:background .15s ease,box-shadow .15s ease}
 .pangea-companion .b03-task-stat-btn:hover{background:#f5f7fa}

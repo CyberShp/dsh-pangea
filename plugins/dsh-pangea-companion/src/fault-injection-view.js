@@ -1,4 +1,5 @@
 import { analysisExecutionState, loadAnalysisAgentModels } from './agent-model-selection.js'
+import { buildVerificationShellScript, caseKeyOf, classifyInjectionCandidate, duplicateCaseKeySet, parseVerificationLog } from './fault-injection-candidates.js'
 import { createRepositorySettings, sourceLabel } from './repository-settings-view.js'
 export const INJECTION_STATUS_LABELS = {
   preparing: '准备源码', generating: '生成打桩修改', ready: '修改已生成', pushing: '提交与推送中',
@@ -34,19 +35,25 @@ export function createFaultInjectionPanel(React) {
     const [verification, setVerification] = React.useState({ case_key: '', result: 'not_run', hits: '', notes: '' })
     const [modelState, setModelState] = React.useState({ status: 'idle' })
     const [modelRefresh, setModelRefresh] = React.useState(0)
-    const keyOf = item => item.projection_id || item.test_case_id
-    const eligible = item => Boolean(keyOf(item)) && cases.filter(other => keyOf(other) === keyOf(item)).length === 1 && Boolean(item.instrumentation || item.source_record?.body?.instrumentation || item.execution_readiness === 'needs_instrumentation')
-    const eligibleKeys = cases.filter(eligible).map(keyOf)
+    const [tierFilter, setTierFilter] = React.useState('all')
+    const [logText, setLogText] = React.useState('')
+    const keyOf = caseKeyOf
+    const duplicateKeys = duplicateCaseKeySet(cases)
+    const candidateOf = item => classifyInjectionCandidate(item, duplicateKeys)
+    const selectableKeys = cases.filter(item => candidateOf(item).selectable).map(keyOf)
+    const recommendedKeys = cases.filter(item => ['explicit', 'recommended'].includes(candidateOf(item).tier)).map(keyOf)
+    const explicitKeys = cases.filter(item => candidateOf(item).tier === 'explicit').map(keyOf)
     React.useEffect(() => {
       if (!handoffRevision || !Array.isArray(initialCaseKeys) || !initialCaseKeys.length) return
-      const valid = initialCaseKeys.filter(key => cases.some(item => keyOf(item) === key && eligible(item)))
+      const valid = initialCaseKeys.filter(key => cases.some(item => keyOf(item) === key && candidateOf(item).selectable))
       const requested = initialCaseKeys.length
       setChosen(valid)
+      setTierFilter('all')
       if (valid[0]) setFocused(valid[0])
       setStep(2)
       setHandoffNote(valid.length
-        ? `已带入 ${valid.length} 条可打桩用例${valid.length < requested ? `（其余 ${requested - valid.length} 条暂无桩点信息）` : ''}，核对桩点后可继续提交。`
-        : '所选用例暂未包含明确桩点信息，请在下方列表中选择支持打桩的用例。')
+        ? `已带入 ${valid.length} 条用例${valid.length < requested ? `（其余 ${requested - valid.length} 条缺少唯一身份）` : ''}；未预设桩点的用例将在生成阶段结合源码自动定位。`
+        : '所选用例缺少唯一编号，请在下方列表中选择可用用例。')
     }, [handoffRevision, runId, cases.length])
     React.useEffect(() => {
       if (!open || !settings?.provider_id) return
@@ -54,7 +61,7 @@ export function createFaultInjectionPanel(React) {
     }, [open, settings?.provider_id, cwd, modelRefresh])
     const modelSelection = analysisExecutionState(settings || {}, providers.map(item => ({ ...item, registered: true })), modelState, cwd)
     const modelCatalog = modelState.provider_id === settings?.provider_id && modelState.cwd === cwd && modelState.status === 'ready' ? modelState.catalog : null
-    const selectedKeys = standalone ? chosen.filter(key => cases.some(item => keyOf(item) === key && eligible(item))) : cases.map(keyOf).filter(Boolean)
+    const selectedKeys = standalone ? chosen.filter(key => selectableKeys.includes(key)) : cases.map(keyOf).filter(Boolean)
     const selectedCases = cases.filter(item => selectedKeys.includes(keyOf(item)))
     const focusedCase = cases.find(item => keyOf(item) === focused) || selectedCases[0] || cases[0]
     const task = tasks.find(item => item.id === taskId)
@@ -140,7 +147,7 @@ export function createFaultInjectionPanel(React) {
     const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, alignItems: 'start' }
     const renderPoints = points => Array.isArray(points) && points.length ? points.map((point, index) => h('details', { key: point.id || index, open: standalone, className: 'pangea-fi-point' },
       h('summary', null, `${readable(point.id)} · ${readable(point.action) || '桩点说明'}`),
-      h('p', { className: 'b05-subtle' }, `${readable(point.repo_id)}:${readable(point.path)}`),
+      point.repo_id || point.path ? h('p', { className: 'b05-subtle' }, [readable(point.repo_id), readable(point.path)].filter(Boolean).join(':')) : null,
       h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : h('p', { className: 'b05-subtle' }, '该用例按需打桩，具体注入点将在源码生成阶段定位。')
     const renderCaseSummaryFields = item => {
       const rows = [
@@ -226,13 +233,21 @@ export function createFaultInjectionPanel(React) {
         .pangea-fi-status-pill.good { background: #eaf5ee; color: #20765a; }
         .pangea-fi-status-pill.danger { background: #fbefef; color: #9c2330; }
         .pangea-fi-status-pill.info { background: #edf3f8; color: #365a7d; }
+        .pangea-fi-tier { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; vertical-align: middle; }
+        .pangea-fi-tier.explicit { background: #fbf0f2; color: #b62836; }
+        .pangea-fi-tier.recommended { background: #fbf4e6; color: #8c5a12; }
+        .pangea-fi-tier.on_demand { background: #eef1f5; color: #5e6773; font-weight: 500; }
+        .pangea-fi-tier.ineligible { background: #f3f4f6; color: #9ca3af; font-weight: 500; }
+        .pangea-fi-filter-pills { display: inline-flex; gap: 4px; background: #f1f3f6; padding: 3px; border-radius: 7px; }
+        .pangea-fi-filter-pills button { min-height: 28px; padding: 3px 10px; border: 0; border-radius: 5px; background: transparent; font-size: 12px; }
+        .pangea-fi-filter-pills button[aria-pressed="true"] { background: #fff; color: var(--pangea-red, #b62836); font-weight: 600; box-shadow: 0 1px 2px rgba(16,24,40,.08); }
         @media(max-width: 820px) { .pangea-fi-picker { grid-template-columns: 1fr; } .pangea-fi-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
       `),
       !standalone ? h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between', marginBottom: open ? 14 : 0 } },
         h('div', null, h('strong', null, '打桩与个人分支'), h('p', { className: 'b05-subtle', style: { margin: '4px 0 0' } }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可一起生成打桩修改。` : '选择用例生成打桩修改，或查看已有打桩任务。')),
         h('button', { type: 'button', className: 'btn', 'aria-expanded': open, onClick: () => setOpen(value => !value) }, open ? '收起打桩' : '打开打桩工作区'))
         : h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between', marginBottom: 14 } },
-          h('p', { className: 'b05-subtle', style: { margin: 0 } }, selectedKeys.length ? `当前已选 ${selectedKeys.length} 条可打桩用例（共 ${eligibleKeys.length} 条具备打桩条件）` : `当前运行共 ${cases.length} 条用例，其中 ${eligibleKeys.length} 条支持生成故障注入桩点。`),
+          h('p', { className: 'b05-subtle', style: { margin: 0 } }, selectedKeys.length ? `当前已选 ${selectedKeys.length} 条打桩用例（推荐 ${recommendedKeys.length} 条 · 可选 ${selectableKeys.length} 条）` : `当前运行共 ${cases.length} 条用例：推荐打桩 ${recommendedKeys.length} 条（预设桩点 ${explicitKeys.length} 条），其余 ${ Math.max(0, selectableKeys.length - recommendedKeys.length) } 条支持按需定位桩点。`),
           h('div', null,
             step === 4 ? h('button', { type: 'button', onClick: () => { setTaskId(''); setStep(2) } }, '新建打桩任务') : null,
             h('button', { type: 'button', onClick: onBack }, '更换分析任务'))),
@@ -256,25 +271,37 @@ export function createFaultInjectionPanel(React) {
         standalone && step === 2 ? h('section', null,
           h('div', { className: 'pangea-fi-toolbar' },
             h('input', { type: 'search', 'aria-label': '搜索打桩用例', placeholder: '搜索用例编号或名称…', value: query, onChange: event => setQuery(event.target.value) }),
-            h('button', { type: 'button', disabled: !eligibleKeys.length || selectedKeys.length === eligibleKeys.length, onClick: () => setChosen(eligibleKeys) }, `全选可打桩（${eligibleKeys.length}）`),
+            h('div', { className: 'pangea-fi-filter-pills', role: 'group', 'aria-label': '按打桩建议筛选' },
+              [['all', `全部 ${cases.length}`], ['recommended', `推荐打桩 ${recommendedKeys.length}`], ['explicit', `预设桩点 ${explicitKeys.length}`]].map(([id, label]) => h('button', {
+                key: id, type: 'button', 'aria-pressed': tierFilter === id, onClick: () => setTierFilter(id),
+              }, label))),
+            recommendedKeys.length ? h('button', { type: 'button', disabled: recommendedKeys.every(k => selectedKeys.includes(k)), onClick: () => setChosen(prev => [...new Set([...prev, ...recommendedKeys])]) }, `全选推荐（${recommendedKeys.length}）`) : null,
+            selectableKeys.length && selectableKeys.length !== recommendedKeys.length ? h('button', { type: 'button', disabled: selectedKeys.length === selectableKeys.length, onClick: () => setChosen(selectableKeys) }, `全选可选（${selectableKeys.length}）`) : null,
             selectedKeys.length ? h('button', { type: 'button', onClick: () => setChosen([]) }, '清空选择') : null,
             h('span', { role: 'status', style: { marginLeft: 'auto', fontSize: 13, color: '#5e6773', fontWeight: 600 } }, `已选择 ${selectedKeys.length} 条`)),
           h('div', { className: 'pangea-fi-picker' },
-            h('div', { className: 'pangea-fi-case-list' }, cases.filter(item => `${item.display_id || ''} ${readable(item.title)}`.toLowerCase().includes(query.toLowerCase())).map((item, index) => {
-              const pointsCount = (item.instrumentation || item.source_record?.body?.instrumentation)?.points?.length ?? 0
-              const canSelect = eligible(item)
+            h('div', { className: 'pangea-fi-case-list' }, cases.filter(item => {
+              const cand = candidateOf(item)
+              if (tierFilter === 'recommended' && !['explicit', 'recommended'].includes(cand.tier)) return false
+              if (tierFilter === 'explicit' && cand.tier !== 'explicit') return false
+              return `${item.display_id || ''} ${readable(item.title)}`.toLowerCase().includes(query.toLowerCase())
+            }).map((item, index) => {
+              const cand = candidateOf(item)
               return h('div', { key: `${keyOf(item)}:${index}`, className: 'pangea-fi-case-row' },
-                h('input', { type: 'checkbox', 'aria-label': `选择打桩用例 ${readable(item.title)}`, checked: selectedKeys.includes(keyOf(item)), disabled: !canSelect, onChange: event => setChosen(previous => event.target.checked ? [...new Set([...previous, keyOf(item)])] : previous.filter(key => key !== keyOf(item))) }),
+                h('input', { type: 'checkbox', 'aria-label': `选择打桩用例 ${readable(item.title)}`, checked: selectedKeys.includes(keyOf(item)), disabled: !cand.selectable, onChange: event => setChosen(previous => event.target.checked ? [...new Set([...previous, keyOf(item)])] : previous.filter(key => key !== keyOf(item))) }),
                 h('button', { type: 'button', 'aria-pressed': focusedCase === item, onClick: () => setFocused(keyOf(item)) },
                   item.display_id || item.test_case_id ? h('span', { className: 'pangea-fi-case-id' }, item.display_id || item.test_case_id) : null,
                   readable(item.title),
-                  !canSelect ? h('small', null, '未提供打桩信息或用例身份不唯一') : h('small', null, pointsCount ? `${pointsCount} 个预设桩点` : '按需定位源码桩点')))
+                  h('span', { className: `pangea-fi-tier ${cand.tier}` }, cand.label),
+                  h('small', null, cand.reason)))
             })),
             h('article', { className: 'pangea-fi-case-detail', 'aria-label': '打桩用例详情' }, focusedCase ? h(React.Fragment, null,
               h('h3', { style: { marginTop: 0 } },
                 focusedCase.display_id ? h('span', { className: 'pangea-fi-case-id' }, focusedCase.display_id) : null,
                 readable(focusedCase.title)),
-              ...[['preconditions', '前置条件'], ['steps', '操作步骤'], ['expected_results', '预期结果']].map(([key, label]) => h('section', { key }, h('h4', null, label), h('pre', null, readable(focusedCase[key]) || '未提供'))),
+              ...[['preconditions', '前置条件', focusedCase.preconditions],
+                ['steps', '操作步骤', Array.isArray(focusedCase.steps) && focusedCase.steps.length ? focusedCase.steps : Array.isArray(focusedCase.step_pairs) ? focusedCase.step_pairs.map((s, i) => s?.action ? `${i + 1}. ${s.action}` : '').filter(Boolean) : focusedCase.steps],
+                ['expected_results', '预期结果', Array.isArray(focusedCase.expected_results) && focusedCase.expected_results.length ? focusedCase.expected_results : Array.isArray(focusedCase.step_pairs) ? focusedCase.step_pairs.map((s, i) => s?.expected ? `${i + 1}. ${s.expected}` : '').filter(Boolean) : focusedCase.expected_results]].map(([key, label, val]) => h('section', { key }, h('h4', null, label), h('pre', null, readable(val) || '未提供'))),
               h('h4', null, '打桩信息'), renderPoints((focusedCase.instrumentation || focusedCase.source_record?.body?.instrumentation)?.points),
               h('details', null, h('summary', null, '完整用例信息'), renderCaseSummaryFields(focusedCase))) : h('p', null, '当前分析任务暂无用例'))),
           h('footer', { className: 'pangea-fi-footer' },
@@ -360,6 +387,28 @@ export function createFaultInjectionPanel(React) {
             h('summary', null, '构建包与验证记录'),
             h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '在已有流水线选择上面的个人分支或修改提交出包；烧包测试后，在这里记录结果。'),
             h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),
+            h('details', { style: { margin: '4px 0 12px' } },
+              h('summary', null, '从执行日志自动填充'),
+              h('div', { style: { display: 'grid', gap: 8, paddingTop: 6 } },
+                h('input', { type: 'file', 'aria-label': '选择执行日志文件', accept: '.log,.txt,text/plain', disabled: working, onChange: async event => {
+                  const file = event.target.files?.[0]
+                  if (!file) return
+                  try { setLogText(await file.text()) } catch (reason) { setError(reason?.message || '读取日志文件失败') }
+                } }),
+                h('textarea', { 'aria-label': '执行日志内容', rows: 3, disabled: working, value: logText, placeholder: '粘贴串口或脚本输出日志（自动识别 [PANGEA_VERIFY] 或桩点命中特征）…', onChange: event => setLogText(event.target.value) }),
+                h('div', null, h('button', { type: 'button', disabled: working || !logText.trim(), onClick: () => {
+                  const parsed = parseVerificationLog(logText, task)
+                  if (!parsed.entries.length) {
+                    setError('日志中未识别到匹配的桩点命中或 [PANGEA_VERIFY] 记录，请核对日志或手动填写')
+                    return
+                  }
+                  setError('')
+                  if (verification.case_key) drafts.current[`${taskId}:${verification.case_key}`] = verification
+                  for (const entry of parsed.entries) drafts.current[`${taskId}:${entry.case_key}`] = entry
+                  const target = parsed.entries.find(item => item.case_key === verification.case_key) || parsed.entries[0]
+                  setVerification(target)
+                  setNotice(`已从日志自动填充 ${parsed.matchedCount} 条用例结果，请核对后点击“保存构建与验证记录”`)
+                } }, '解析日志填充')))),
             h('div', { style: grid },
               h('label', { className: 'pangea-fi-field' }, h('span', null, '验证用例'), h('select', { 'aria-label': '验证用例', value: verification.case_key, onChange: event => {
                 drafts.current[`${taskId}:${verification.case_key}`] = verification
@@ -377,6 +426,24 @@ export function createFaultInjectionPanel(React) {
           task.result?.summary ? h('details', null, h('summary', null, '修改摘要与用例'), h('div', { className: 'pangea-fi-scroll' }, h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)), h('p', { style: { fontSize: 12, color: '#5e6773' } }, task.cases.map(item => readable(item.title)).join('、')))) : null,
           task.result?.points?.length ? h('details', null, h('summary', null, `桩点说明（${task.result.points.length}）`), h('div', { className: 'pangea-fi-scroll' }, renderPoints(task.result.points))) : null,
           profiles.length ? h('details', { key: `profiles:${task.id}` }, h('summary', null, `逐用例执行说明（${profiles.length}）`),
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 12px' } },
+              h('button', { type: 'button', onClick: () => {
+                try {
+                  const content = buildVerificationShellScript(task)
+                  const blob = new Blob([content], { type: 'text/x-shellscript;charset=utf-8' })
+                  const href = URL.createObjectURL(blob)
+                  const link = document.createElement('a')
+                  link.href = href
+                  link.download = `pangea-verify-${String(task.id || 'task').slice(0, 8)}.sh`
+                  link.click()
+                  setTimeout(() => URL.revokeObjectURL(href), 0)
+                  setNotice('已生成可执行验证脚本')
+                } catch (reason) { setError(reason?.message || '生成验证脚本失败') }
+              } }, '下载验证脚本'),
+              h('button', { type: 'button', style: { marginLeft: 0 }, onClick: async () => {
+                try { await navigator.clipboard.writeText(buildVerificationShellScript(task)); setNotice('已复制验证脚本') }
+                catch { setError('复制失败，请使用“下载验证脚本”') }
+              } }, '复制验证脚本')),
             h('label', { className: 'pangea-fi-field' }, h('span', null, '选择执行说明'), h('select', { 'aria-label': '选择执行说明', value: profile?.case_key || '', onChange: event => setProfileKey(event.target.value) },
               profiles.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(task.cases.find(value => value.case_key === item.case_key)?.title || item.case_key))))),
             h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(profile?.steps) ? profile.steps : [profile?.steps]).map((itemStep, at) => h('li', { key: at }, readable(itemStep))))) : null,

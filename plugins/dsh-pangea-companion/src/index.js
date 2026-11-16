@@ -32,6 +32,7 @@ import { inspectSource, configureRepository } from './repositories/git-source.js
 import { importRepository, reimportRepository, repositoryStatus } from './repositories/import.js'
 import { scopeTree, validateScope, previewScope, confirmScope, previewTestTools, confirmTestTools } from './repositories/scope.js'
 import { FaultInjectionService } from './fault-injection.js'
+import { summarizeRunVerifications } from './fault-injection-summary.js'
 import { createInjectionGenerator } from './fault-injection-agent.js'
 import { updateAdmission } from './update-admission.js'
 
@@ -546,7 +547,9 @@ export async function caseReviewRouteHandler(req, res, { readRun = summarizeRun,
     if (run.run_id !== input.run_id) return json(res, 409, { status: 'error', code: 'run_mismatch', error: '读取的用例不属于请求 Run' })
     if (run.reader_health?.collection_status?.test_cases === 'unavailable') return json(res, 422, { status: 'error', code: 'cases_unreadable', error: '用例暂不可读取' })
     const store = new CaseReviewStore({ dataRoot, runId: input.run_id }), items = run.details?.test_cases ?? []
-    return json(res, 200, req.method === 'POST' ? await store.update(items, input) : await store.project(items))
+    const projected = req.method === 'POST' ? await store.update(items, input) : await store.project(items)
+    const injection = await summarizeRunVerifications(dataRoot, input.run_id)
+    return json(res, 200, { ...projected, ...injection })
   } catch (reason) { return json(res, reason.statusCode ?? (reason.code === 'ENOENT' ? 404 : 500), { status: 'error', code: reason.code ?? 'review_failed', error: reason.message }) }
 }
 

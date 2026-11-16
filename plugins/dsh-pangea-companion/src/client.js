@@ -6582,7 +6582,8 @@ window.__ModuleLoader__.load({
                   : h('p', null, riskEnabled ? collectionEmpty('risks', '本次分析没有形成风险记录。') : '本次未启用风险分析。')),
               h('section', { id: outline[2][0] }, h('h3', null, '03 / 测试建议'),
                 h('p', null, testCases.length + ' 条设计用例覆盖主要路径、边界与异常。设计用例不代表已执行，也不代表实测覆盖率已提升。'),
-                executionRuns.length ? h('p', null, executionRuns.length + ' 条测试执行记录已回传。') : null),
+                executionRuns.length ? h('p', null, executionRuns.length + ' 条测试执行记录已回传。') : null,
+                reviews?.injection_counts?.instrumented > 0 ? h('p', null, `已关联代码打桩用例 ${reviews.injection_counts.instrumented} 条，其中实测已回填 ${reviews.injection_counts.verified} 条（通过 ${reviews.injection_counts.passed} 条${reviews.injection_counts.failed ? ` · 未通过 ${reviews.injection_counts.failed} 条` : ''}）。`) : null),
               h('section', { id: outline[3][0] }, h('h3', null, '04 / 复核与限制'),
                 h('p', null, `${partial ? `保留 ${unresolvedItems.length} 项未解决修正${unresolvedItems.length ? `（${unresolvedItems.map(item => item.id).join('、')}）` : ''}，并列出对应证据缺口。` : '本次报告保留分析结果与运行记录。'} 质量结论：${outcomePresentation(current).semantic}。`))),
             h('aside', { className: 'b03-report-nav' },
@@ -6744,6 +6745,16 @@ window.__ModuleLoader__.load({
         openProductPage('injection', '代码打桩')
       }
 
+      function injectionBadgeOf(info) {
+        if (!info) return null
+        if (info.result === 'passed') return { label: '打桩已通过', tone: 'adopted', detail: info.hits ? `打桩验证：通过（${info.hits}）` : '打桩验证：通过' }
+        if (info.result === 'failed') return { label: '打桩未通过', tone: 'danger', detail: info.hits ? `打桩验证：未通过（${info.hits}）` : '打桩验证：未通过' }
+        if (info.result === 'not_triggered') return { label: '桩点未触发', tone: 'warn', detail: '打桩验证：目标故障未触发' }
+        if (info.task_status === 'pushed') return { label: '已推分支待测', tone: 'info', detail: `打桩分支已推送${info.branch ? `（${info.branch}）` : ''}，待回填验证` }
+        if (info.task_status === 'ready') return { label: '已生成打桩', tone: 'unreviewed', detail: '打桩修改已生成，待推送验证' }
+        return null
+      }
+
       function renderCases() {
         if (!current?.run_id) return h('div', { className: 'b05-card', role: 'status' }, '正在读取当前 Run 的测试用例…')
         const query = caseQuery.trim().toLowerCase()
@@ -6758,7 +6769,7 @@ window.__ModuleLoader__.load({
         const coverageAvailable = current?.scenario === 'coverage-analysis' || current?.coverage_match || current?.coverage_summary?.valid_gaps != null
         const formatRisk = item => (item.linked_risk_ids ?? []).map(id => riskById.get(id)?.display_id || id)
         return h('section', { className: 'pangea-case-workspace', 'aria-label': '测试用例工作区' },
-          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '测试用例'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '用例'} · ${unitCount} 个分析单元${designCounts.variants ? ` · ${designCounts.variants} 项参数组合` : ''}`)),
+          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '测试用例'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '用例'} · ${unitCount} 个分析单元${designCounts.variants ? ` · ${designCounts.variants} 项参数组合` : ''}${reviews?.injection_counts?.verified > 0 ? ` · 打桩实测 ${reviews.injection_counts.passed}/${reviews.injection_counts.verified} 通过` : ''}`)),
             h('div', { className: 'b05-head-actions' }, coverageAvailable ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => navigate({ type: 'coverage-cases' }) }, '覆盖补测视图') : null,
               h('button', { type: 'button', className: 'b03-task-action', onClick: () => openFaultInjection(selectedCaseIds) }, selectedCaseIds.length ? `代码打桩（已选 ${selectedCaseIds.length}）` : '打开代码打桩'),
               h('button', { type: 'button', className: 'b03-task-action primary', disabled: !current?.run_id, onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true) } }, reviews?.counts?.adopted ? `导出已采纳 ${reviews.counts.adopted} 条` : '导出用例'))),
@@ -6780,9 +6791,11 @@ window.__ModuleLoader__.load({
             h('thead', null, h('tr', null,
               h('th', null, h('input', { type: 'checkbox', 'aria-label': '选择当前列表', checked: allSelected, disabled: selectableIds.length === 0, onChange: () => setSelectedCaseIds(previous => allSelected ? previous.filter(id => !selectableIds.includes(id)) : [...new Set([...previous, ...selectableIds])]) })),
               ...['编号', '用例名称', '类型', '关联风险', '准备事项', ''].map(label => h('th', { key: label }, label)))),
-            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const idKey = caseIdentity(item); const selectable = Boolean(idKey) && testCases.filter(other => caseIdentity(other) === idKey).length === 1; const linked = formatRisk(item); const reviewStatus = idKey && reviewByKey[idKey]?.review_status || 'unreviewed'; return h('tr', { key: `${key}:${index}` },
+            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const idKey = caseIdentity(item); const selectable = Boolean(idKey) && testCases.filter(other => caseIdentity(other) === idKey).length === 1; const linked = formatRisk(item); const reviewStatus = idKey && reviewByKey[idKey]?.review_status || 'unreviewed'; const injectionBadge = injectionBadgeOf(idKey && reviews?.injection_by_case?.[idKey]); return h('tr', { key: `${key}:${index}` },
               h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(idKey), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(idKey) })),
-              h('td', { className: 'b05-mono' }, h('div', null, item.display_id || item.test_case_id || '待编号'), reviews && selectable && reviewStatus !== 'unreviewed' ? h('em', { className: 'pangea-review-pill', 'data-status': reviewStatus, style: { fontStyle: 'normal', marginTop: 4 } }, REVIEW_LABELS[reviewStatus]) : null),
+              h('td', { className: 'b05-mono' }, h('div', null, item.display_id || item.test_case_id || '待编号'),
+                reviews && selectable && reviewStatus !== 'unreviewed' ? h('em', { className: 'pangea-review-pill', 'data-status': reviewStatus, style: { fontStyle: 'normal', marginTop: 4 } }, REVIEW_LABELS[reviewStatus]) : null,
+                injectionBadge ? h('em', { className: 'pangea-review-pill', 'data-status': injectionBadge.tone, style: { fontStyle: 'normal', marginTop: 4 } }, injectionBadge.label) : null),
               h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => openCaseDetail(key) }, caseTitlePresentation(item).title),
                 caseRecordParseNotice(item) || caseTitlePresentation(item).issue || hasText(item.verification_goal) && item.verification_goal !== caseTitlePresentation(item).title ? h('small', null, caseRecordParseNotice(item)?.summary || caseTitlePresentation(item).issue || item.verification_goal) : null,
                 item.variants?.length ? h('details', { className: 'b05-variant-preview', 'data-view-key': `case-variants:${key}` }, h('summary', null, `${item.variants.length} 项参数组合`),
@@ -7053,7 +7066,8 @@ window.__ModuleLoader__.load({
             h('h2', { className: 'b05-detail-title' }, titlePresentation.title),
             h('div', { className: 'pangea-detail-meta' }, h('code', null, item.display_id || item.test_case_id || '待编号'),
               h('span', { className: 'pangea-result-tag' }, CASE_TYPE_LABELS[item.case_type] || text(item.case_type, '类型未标注')),
-              h('span', { className: 'pangea-result-tag' }, hasText(item.priority) ? `优先级 ${item.priority}` : '优先级未标注')),
+              h('span', { className: 'pangea-result-tag' }, hasText(item.priority) ? `优先级 ${item.priority}` : '优先级未标注'),
+              (() => { const badge = injectionBadgeOf(caseIdentity(item) && reviews?.injection_by_case?.[caseIdentity(item)]); return badge ? h('span', { className: 'pangea-review-pill', 'data-status': badge.tone }, badge.detail) : null })()),
             h('p', { className: 'pangea-case-goal' }, h('span', null, '验证目标'), text(item.verification_goal, '当前记录未单独声明，请核对用例原文。'))),
             h('div', { className: 'b05-head-actions' },
               h('button', { type: 'button', onClick: () => openFaultInjection(caseIdentity(item) ? [caseIdentity(item)] : []) }, '打开代码打桩'),
