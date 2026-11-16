@@ -151,6 +151,10 @@ export class FaultInjectionService {
       if (record.id !== taskId || record.run_id !== runId) throw serviceError('打桩任务身份不匹配')
       if (activeStates.has(record.status) && !this.active.has(this.key(dataRoot, runId, taskId))) return { ...record, status: 'interrupted', error: '上次操作已中断；可重新生成，已提交的修改仍保留' }
     }
+    const operation = this.active.get(this.key(dataRoot, runId, taskId))
+    // A terminal file can be visible before branch-lock cleanup finishes. Keep
+    // HTTP callers in the active state until mutations can actually be accepted.
+    if (operation && !activeStates.has(record.status)) return { ...record, status: operation.status }
     return record
   }
   async list(dataRoot, runId) {
@@ -262,7 +266,7 @@ export class FaultInjectionService {
       baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
     const controller = new AbortController(), key = this.key(dataRoot, run.run_id, taskId)
-    const operation = { controller, done: null }
+    const operation = { controller, done: null, status: 'generating' }
     this.active.set(key, operation)
     const published = this.save(directory, record)
     operation.done = published.then(() => this.prepareAndGenerate({ dataRoot, directory, record, cwd, signal: controller.signal }))
@@ -414,7 +418,7 @@ export class FaultInjectionService {
       if (record.status === 'pushed') return record
       if (!['ready', 'interrupted'].includes(record.status) || !record.generation_complete) throw serviceError('请先完整生成本次代码修改')
       const controller = new AbortController(), key = this.key(dataRoot, runId, taskId)
-      const operation = { controller, done: null }
+      const operation = { controller, done: null, status: 'pushing' }
       record.status = 'pushing'; record.error = null
       this.active.set(key, operation)
       const published = this.save(directory, record)

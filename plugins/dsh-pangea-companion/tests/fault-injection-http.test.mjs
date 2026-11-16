@@ -52,7 +52,9 @@ test('fault injection HTTP acceptance', async t => {
   const post = input => request(input, 'POST')
   const generate = (instructions = '') => post({ action: 'generate', case_keys: ['unit/A'], instructions })
   const terminal = async id => {
-    for (let i = 0; i < 100; i++) {
+    // Real Windows Git/process I/O is not a 2.5-second performance contract.
+    const deadline = Date.now() + 30000
+    while (Date.now() < deadline) {
       const r = await request({ task_id: id }); assert.equal(r.status, 200)
       if (!['preparing', 'generating', 'pushing'].includes(r.body.task.status)) return r.body.task
       await new Promise(resolve => setTimeout(resolve, 25))
@@ -64,17 +66,56 @@ test('fault injection HTTP acceptance', async t => {
     const r = await request(); assert.equal(r.status, 200); assert.deepEqual(r.body.tasks, [])
     assert.equal(r.body.defaults.repositories[0].personal_branch, 'main')
   })
-  await t.test('POST generate → GET ready includes exact diff without a commit', async () => {
-    const r = await generate(); assert.equal(r.status, 202)
-    task = await terminal(r.body.task.id); assert.equal(task.status, 'ready', task.error)
-    assert.match(task.repositories[0].diff, /return -1/)
-    assert.equal(await readFile(path.join(source, 'target.c'), 'utf8'), original)
-  })
-  await t.test('POST push publishes the recorded SHA and repeat is idempotent', async () => {
-    for (let i = 0; i < 2; i++) {
-      const r = await post({ action: 'push', task_id: task.id }); assert.equal(r.status, 200); assert.ok(['pushing', 'pushed'].includes(r.body.task.status)); task = await terminal(task.id); assert.equal(task.status, 'pushed', task.error)
+  await t.test('POST generate exposes ready only after cleanup, with exact diff and no commit', async () => {
+    const finished = Promise.withResolvers(), release = Promise.withResolvers()
+    const originalPrepare = service.prepareAndGenerate
+    service.prepareAndGenerate = async (...args) => {
+      await originalPrepare.apply(service, args)
+      finished.resolve()
+      await release.promise
     }
-    assert.equal(await injectionGit(remote, ['rev-parse', `refs/heads/${task.branch}`]), task.repositories[0].commit)
+    try {
+      const r = await generate(); assert.equal(r.status, 202)
+      const operation = service.active.get(service.key(dataRoot, run.run_id, r.body.task.id))
+      await Promise.race([finished.promise, operation.done.then(() => assert.fail('generation ended before the cleanup barrier'))])
+      assert.equal((await request({ task_id: r.body.task.id })).body.task.status, 'generating')
+      assert.equal((await post({ action: 'push', task_id: r.body.task.id })).status, 409)
+      release.resolve()
+      task = await terminal(r.body.task.id); assert.equal(task.status, 'ready', task.error)
+      assert.match(task.repositories[0].diff, /return -1/)
+      assert.equal(await readFile(path.join(source, 'target.c'), 'utf8'), original)
+    } finally {
+      release.resolve()
+      service.prepareAndGenerate = originalPrepare
+    }
+  })
+  await t.test('POST push exposes completion only after cleanup, then repeat is idempotent', async () => {
+    const finished = Promise.withResolvers(), release = Promise.withResolvers()
+    const originalBranchExclusive = service.branchExclusive
+    service.branchExclusive = async (...args) => {
+      const result = await originalBranchExclusive.apply(service, args)
+      finished.resolve()
+      await release.promise
+      return result
+    }
+    try {
+      const r = await post({ action: 'push', task_id: task.id })
+      assert.equal(r.status, 200)
+      const operation = service.active.get(service.key(dataRoot, run.run_id, task.id))
+      await Promise.race([finished.promise, operation.done.then(() => assert.fail('push ended before the cleanup barrier'))])
+      const draining = await request({ task_id: task.id })
+      assert.equal(draining.status, 200)
+      assert.equal(draining.body.task.status, 'pushing')
+      assert.equal((await post({ action: 'push', task_id: task.id })).status, 409)
+      release.resolve()
+      task = await terminal(task.id); assert.equal(task.status, 'pushed', task.error)
+      const repeated = await post({ action: 'push', task_id: task.id })
+      assert.equal(repeated.status, 200); assert.equal(repeated.body.task.status, 'pushed')
+      assert.equal(await injectionGit(remote, ['rev-parse', `refs/heads/${task.branch}`]), task.repositories[0].commit)
+    } finally {
+      release.resolve()
+      service.branchExclusive = originalBranchExclusive
+    }
   })
   await t.test('POST verify persists package/commit snapshot across service restart', async () => {
     const r = await post({ action: 'verify', task_id: task.id, build: { package_id: 'fixture-package', url: 'https://example.test/build/1' }, verification: { case_key: 'unit/A', result: 'not_triggered', hits: 'fixture:A=0' } })

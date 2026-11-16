@@ -894,7 +894,15 @@ test('three analysis workers overlap, refill a free slot, and settle out of orde
   let writes = 0, active = 0, peak = 0, created = 0
   const done = new Set(), started = [], releases = new Map()
   const actions = Array.from({ length: 5 }, (_, i) => ({ action_id: `parallel:${i}`, role: 'analysis', stage: 'unit_analysis', action: 'dispatch_agent' }))
-  const until = async predicate => { for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 2)) } assert.fail('worker did not progress') }
+  // Assert ordering and overlap after observable progress, not a 200 ms disk-I/O budget.
+  const until = async predicate => {
+    const deadline = Date.now() + 10000
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.fail('worker did not progress')
+  }
   const run = createSourceFirstAcpRun({ providerId: 'pangea-nga', parent: {}, cwd: '/work', dataRoot: testDataRoot, runId: 'parallel', signal: controller.signal,
     runner: async ({ args }) => {
       writes++; assert.equal(writes, 1)
