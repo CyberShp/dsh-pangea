@@ -5,7 +5,8 @@ const list = value => Array.isArray(value) ? value : []
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 const RECORD_WARNING_KINDS = new Set(['flow_path_hint', 'risk_contract_hint', 'planning_contract_hint',
   'check_contract_hint', 'review_check_contract_hint', 'review_check_reference_hint',
-  'evidence_quote_mismatch', 'diagram_format_diagnostic'])
+  'evidence_quote_mismatch', 'diagram_format_diagnostic', 'coverage_reference_hint',
+  'readiness_hint', 'source_fact_hint'])
 
 export function retiredResultWarnings(result) {
   const known = new Map(), retired = new Set()

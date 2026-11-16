@@ -122,9 +122,18 @@ export function sourceFirstProjection(artifacts) {
           action_id: action.action_id, task_id: action.task_id, result_path: action.result_path })) : []
       const diagnostics = [...current]
       for (const item of computed) if (!diagnostics.some(other => other.field === item.field && other.code === item.code && other.classification === item.classification)) diagnostics.push(item)
+      const recordWarnings = Array.isArray(action.current_warnings)
+        ? action.current_warnings.filter(warning => {
+          const matchesId = warning?.record_id
+            ? warning.record_id === record.record_id
+            : Number.isInteger(warning?.record_index) && action.records?.[warning.record_index]?.record_id === record.record_id
+          return matchesId && (!Object.hasOwn(warning, 'record_revision') || warning.record_revision === record.created_revision)
+        })
+        : []
       return {
         ...fields, unit_id: unit, display_id: plain(originalId),
         ...(parsed?.record_parse ? { record_parse: parsed.record_parse } : {}),
+        ...(recordWarnings.length ? { record_warnings: recordWarnings } : {}),
         ...(record.kind === 'flow' ? { record_contracts: recordContracts,
           ...(recordContracts.diagram === DIAGRAM_CONTRACT || current.length ? { diagram_diagnostics: diagnostics } : {}) } : {}),
         projection_id: `${unit}/${record.record_id}${index ? `#${index + 1}` : ''}`,

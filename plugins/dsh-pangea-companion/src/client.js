@@ -35,6 +35,7 @@ window.__ModuleLoader__.load({
     const RepositorySettings = __repositorySettingsView.createRepositorySettings(React)
     const { requestAgentModels, analysisExecutionState, loadAnalysisAgentModels } = __agentModelSelection
     const FaultInjectionPanel = __faultInjectionView.createFaultInjectionPanel(React)
+    const { classifyRiskGrounding, summarizeIncrementalInputs } = __riskIncrementalInsights
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
       if (typeof body === 'string') return body
@@ -3900,6 +3901,7 @@ window.__ModuleLoader__.load({
       const [caseEvidenceSelection, setCaseEvidenceSelection] = React.useState({ scope: '', key: '' })
       const [injectionRun, setInjectionRun] = React.useState('')
       const [injectionDraft, setInjectionDraft] = React.useState(() => ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
+      const [riskGroundingFilter, setRiskGroundingFilter] = React.useState('all')
       const handledInjectionDraftRequest = React.useRef(0)
       React.useEffect(() => {
         if (pageMode !== 'injection') return undefined
@@ -4674,11 +4676,27 @@ window.__ModuleLoader__.load({
       function renderDerivationOrigin() {
         const origin = current?.incremental_request ?? selectedTask?.incremental_request
         if (!origin?.parent_run_id) return null
+        const inc = current?.incremental_summary ?? summarizeIncrementalInputs({ request: origin })
+        const fileStatusLabel = { modified: ['已修改', 'adopted'], unchanged: ['哈希未变', 'unreviewed'], deleted: ['已删除', 'danger'], 'baseline-missing': ['基线缺失', 'warn'], 'missing-both': ['双端缺失', 'danger'] }
         return h('section', { className: 'b03-overview-card', style: { marginBottom: 18 }, 'aria-label': '增量分析来源' },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 } }, runIcon('GitBranch'),
-            h('strong', null, origin.mode === 'changed-files' ? '基于源码变更的增量分析' : '基于已有结果的定向补充')),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 } }, runIcon('GitBranch'),
+            h('strong', null, origin.mode === 'changed-files' ? '基于源码变更的增量分析' : '基于已有结果的定向补充'),
+            inc ? h('span', { className: 'pangea-review-pill', 'data-status': 'info' }, inc.source_policy === 'current-working-tree' ? '工作区最新源码' : '沿用父 Run 冻结源码') : null,
+            inc?.rules_changed != null ? h('span', { className: 'pangea-review-pill', 'data-status': inc.rules_changed ? 'warn' : 'adopted' }, inc.rules_changed ? '内置规则已更新' : '分析规则一致') : null),
           h('p', { style: { margin: '8px 0', fontSize: 14, lineHeight: 1.8, whiteSpace: 'pre-wrap' } }, origin.instruction),
-          origin.changed_paths?.length ? h('p', { style: { fontSize: 12, color: '#70767d', overflowWrap: 'anywhere' } }, `变更文件：${origin.changed_paths.join('、')}`) : null,
+          inc ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px 18px', fontSize: 12, color: '#5e6773', padding: '8px 12px', background: '#f6f7f9', border: '1px solid #e6e9ef', borderRadius: 7, margin: '8px 0 10px' } },
+            h('span', null, h('strong', { style: { color: '#1d232a' } }, '范围聚焦：'), inc.selected_unit_ids.length ? `指定 ${inc.selected_unit_ids.length}${inc.parent_unit_count ? ` / ${inc.parent_unit_count}` : ''} 个单元` : inc.parent_unit_count ? `参考父 Run ${inc.parent_unit_count} 个单元` : '按本次要求规划'),
+            h('span', null, h('strong', { style: { color: '#1d232a' } }, '父记录参考：'), inc.selected_record_count ? `指定 ${inc.selected_record_count} 条记录` : '冻结父 Run 历史基线'),
+            inc.changed_files.length ? h('span', null, h('strong', { style: { color: '#1d232a' } }, '文件 SHA256 核对：'), `共 ${inc.counts.declared} 处（实测修改 ${inc.counts.modified} · 哈希未变 ${inc.counts.unchanged}${inc.counts.missing ? ` · 缺失 ${inc.counts.missing}` : ''}）`) : null) : null,
+          inc?.changed_files?.length ? h('details', { style: { margin: '6px 0 10px', fontSize: 12 } },
+            h('summary', { style: { cursor: 'pointer', fontWeight: 600, color: '#365a7d' } }, `查看文件级字节差异核对（${inc.changed_files.length}）`),
+            h('ul', { style: { listStyle: 'none', padding: 0, margin: '8px 0 0', display: 'grid', gap: 6 } }, inc.changed_files.map((file, idx) => {
+              const [statusText, tone] = fileStatusLabel[file.status] || [file.status, 'unreviewed']
+              return h('li', { key: `${file.repo_id}:${file.path}:${idx}`, style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '5px 8px', background: '#fafbfc', borderRadius: 5, border: '1px solid #eef1f5' } },
+                h('code', { style: { fontSize: 12 } }, file.repo_id ? `${file.repo_id}:${file.path}` : file.path),
+                h('span', { className: 'pangea-review-pill', 'data-status': tone }, statusText),
+                file.before_short || file.after_short ? h('span', { style: { color: '#70767d', fontFamily: 'Consolas, monospace' } }, `${file.before_short || '—'} → ${file.after_short || '—'}`) : null)
+            }))) : origin.changed_paths?.length ? h('p', { style: { fontSize: 12, color: '#70767d', overflowWrap: 'anywhere' } }, `变更文件：${origin.changed_paths.join('、')}`) : null,
           h('button', { type: 'button', className: 'b03-task-run', onClick: () => {
             const parent = taskItems.find(task => task.task_id === selectedTask.source_task_id && task.run_id === origin.parent_run_id
               && normalizedPathIdentity(task.data_root) === normalizedPathIdentity(selectedTask.data_root))
@@ -4686,7 +4704,7 @@ window.__ModuleLoader__.load({
             else showActionNotice(`来源任务已不在当前工作区，原 Run 为 ${origin.parent_run_id}。本次冻结参考仍可使用。`, true)
           } }, '查看来源分析', runIcon('ArrowUpRight')),
           h('span', { style: { marginLeft: 10, fontSize: 12, color: '#70767d' } }, origin.parent_run_id),
-          h('span', { style: { marginLeft: 12, fontSize: 12, color: '#70767d' } }, '本页展示本次新增或修订的结果'))
+          h('span', { style: { marginLeft: 12, fontSize: 12, color: '#70767d' } }, '父记录仅作历史基线参考，本页展示本次新增或重新核验的结果'))
       }
       async function deliverCurrentRun(propagate = false) {
         if (!current || !selectedTask) return
@@ -6576,7 +6594,11 @@ window.__ModuleLoader__.load({
                 h('div', null, h('span', null, '测试用例'), h('strong', null, displayCount('test_cases', testCases.length)))),
               h('div', { className: 'b03-report-divider' }),
               h('section', { id: outline[0][0] }, h('h3', null, '01 / 分析范围'),
-                h(TextPreview, { title: '分析范围', value: summaryText + sourceScopeText, renderBody: renderReadableBody })),
+                h(TextPreview, { title: '分析范围', value: summaryText + sourceScopeText, renderBody: renderReadableBody }),
+                current?.incremental_summary ? h('p', { style: { fontSize: 13, color: '#5e6773', marginTop: 8 } },
+                  `增量基线：源自 ${current.incremental_summary.parent_run_id}（${current.incremental_summary.mode === 'changed-files'
+                    ? `指定文件 ${current.incremental_summary.counts.declared} 处，SHA256 实测修改 ${current.incremental_summary.counts.modified} 处、未变 ${current.incremental_summary.counts.unchanged} 处`
+                    : '沿用父 Run 冻结源码定向补充'}${current.incremental_summary.rules_changed == null ? '' : current.incremental_summary.rules_changed ? '；内置规则较父 Run 已更新' : '；内置规则哈希一致'}）。`) : null),
               h('section', { id: outline[1][0] }, h('h3', null, '02 / 主要发现'),
                 reportFindings.length ? h('ol', { className: 'b03-report-findings' }, reportFindings.slice(0, 5).map((item, index) => h('li', { key: item.key }, h(TextPreview, { title: `分析发现 ${index + 1}`, value: item.body, renderBody: renderReadableBody }))))
                   : h('p', null, riskEnabled ? collectionEmpty('risks', '本次分析没有形成风险记录。') : '本次未启用风险分析。')),
@@ -6600,7 +6622,15 @@ window.__ModuleLoader__.load({
                   h('p', null, '源码依据、任务记录和冻结输入均可从原任务中查看。'))))))
       }
       function renderRisks() {
-        const filtered = filterRisks(risks, riskSeverity, riskQuery)
+        const groundingByRisk = new Map(risks.map(risk => [risk, classifyRiskGrounding(risk)]))
+        const anchoredCount = risks.filter(risk => groundingByRisk.get(risk).tier === 'anchored').length
+        const needsCheckCount = risks.length - anchoredCount
+        const baseFiltered = filterRisks(risks, riskSeverity, riskQuery)
+        const filtered = baseFiltered.filter(risk => {
+          if (riskGroundingFilter === 'anchored') return groundingByRisk.get(risk).tier === 'anchored'
+          if (riskGroundingFilter === 'needs_check') return groundingByRisk.get(risk).tier !== 'anchored'
+          return true
+        })
         const counts = riskSeverityCounts(risks)
         const linkedCases = new Set(risks.flatMap(risk => risk.linked_test_case_ids ?? []))
         const groups = new Map()
@@ -6644,26 +6674,34 @@ window.__ModuleLoader__.load({
           h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '需要关注的实现风险'), h('p', null, '从触发条件到代码依据，再到验证路径。')), h('span', { style: styles.badge }, `${risks.length} 条独立风险记录`)),
           h('div', { className: 'b05-metrics' }, metric('高风险', counts.High, '优先验证触发条件'), metric('中风险', counts.Medium, '核对业务影响'),
             metric('关联测试用例', linkedCases.size, `对应 ${risks.length} 条风险`), metric('有直接源码依据', `${risks.filter(risk => risk.evidence?.length).length} / ${risks.length}`, '位置可追溯')),
-          h('div', { className: 'b05-toolbar' },
+          h('div', { className: 'b05-toolbar', style: { flexWrap: 'wrap' } },
             h('input', { 'aria-label': '搜索风险', placeholder: '搜索风险、触发条件、源码位置…', value: riskQuery, onChange: event => setRiskQuery(event.target.value) }),
             h('div', { className: 'b05-filters', role: 'group', 'aria-label': '按风险等级筛选' },
               ['全部', ...RISK_SEVERITY_LEVELS, ...(counts.Ungraded ? ['Ungraded'] : [])].map(level => h('button', { key: level, type: 'button', 'aria-pressed': riskSeverity === level, onClick: () => setRiskSeverity(level) },
-                level === '全部' ? `全部 ${risks.length}` : level === 'Ungraded' ? `未分级 ${counts.Ungraded}` : `${SEVERITY[level]} ${counts[level]}`)))),
+                level === '全部' ? `全部 ${risks.length}` : level === 'Ungraded' ? `未分级 ${counts.Ungraded}` : `${SEVERITY[level]} ${counts[level]}`))),
+            h('div', { className: 'b05-filters', role: 'group', 'aria-label': '按依据完备度筛选' },
+              [['all', '全部状态'], ['anchored', `依据齐备 ${anchoredCount}`], ['needs_check', `待核对 ${needsCheckCount}`]].map(([id, label]) => h('button', {
+                key: id, type: 'button', 'aria-pressed': riskGroundingFilter === id, onClick: () => setRiskGroundingFilter(id),
+              }, label)))),
           filtered.length ? [...groups.entries()].map(([unitId, items]) => {
             const unit = unitById.get(unitId)
             const flows = flowsByUnit.get(unitId) ?? []
             return h('section', { key: unitId },
               h('div', { className: 'b05-group-label' }, h('span', null, unit ? `${unit.unit_id} · ${text(unit.title, '未命名单元')}` : '未归入分析单元'),
                 h('span', null, flows.length ? `业务流程 · ${flows.map(flow => flow.title || flow.flow_id).join('、')}` : '暂无直接关联流程')),
-              items.map(risk => h('button', { key: riskKeyByItem.get(risk), type: 'button', className: 'b05-risk-row', onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }) },
-                h('div', null, h('h3', null, h('small', { style: { display: 'inline', marginRight: 8 } }, risk.display_id || risk.risk_id || '未编号'), text(risk.title, '未命名风险')),
-                  h('p', null, text(risk.trigger, '触发条件尚未记录。')),
-                  h('div', { className: 'b05-risk-meta' }, h('span', null, SEVERITY[riskSeverityLevel(risk)] ? `${SEVERITY[riskSeverityLevel(risk)]}风险` : '未分级'),
-                    h('span', null, risk.translation_status ? TRANSLATION[risk.translation_status] ?? risk.translation_status : '验证状态未提供'),
-                    h('small', null, risk.evidence?.[0]?.location ? displayEvidenceLocation(risk.evidence[0].location) : '源码位置未提供'))),
-                h('div', null, h('strong', null, `${risk.linked_test_case_ids?.length ?? 0} 条关联用例`), h('small', null, (risk.linked_test_case_ids ?? []).map(id => caseById.get(id)?.display_id || id).join(' / ') || '暂无')),
-                h('div', null, h('strong', null, `${risk.evidence?.length ?? 0} 条源码依据`), h('small', null, risk.evidence?.[0]?.observation || '查看来源位置')),
-                h('span', { 'aria-hidden': true }, '↗'))))
+              items.map(risk => {
+                const grounding = groundingByRisk.get(risk)
+                return h('button', { key: riskKeyByItem.get(risk), type: 'button', className: 'b05-risk-row', onClick: () => navigate({ type: 'risk', id: riskKeyByItem.get(risk) }) },
+                  h('div', null, h('h3', null, h('small', { style: { display: 'inline', marginRight: 8 } }, risk.display_id || risk.risk_id || '未编号'), text(risk.title, '未命名风险')),
+                    h('p', null, text(risk.trigger, '触发条件尚未记录。')),
+                    h('div', { className: 'b05-risk-meta' }, h('span', null, SEVERITY[riskSeverityLevel(risk)] ? `${SEVERITY[riskSeverityLevel(risk)]}风险` : '未分级'),
+                      h('span', { className: 'pangea-review-pill', 'data-status': grounding.tone, title: grounding.reason }, grounding.label),
+                      h('span', null, risk.translation_status ? TRANSLATION[risk.translation_status] ?? risk.translation_status : '验证状态未提供'),
+                      h('small', null, risk.evidence?.[0]?.location ? displayEvidenceLocation(risk.evidence[0].location) : '源码位置未提供'))),
+                  h('div', null, h('strong', null, `${risk.linked_test_case_ids?.length ?? 0} 条关联用例`), h('small', null, (risk.linked_test_case_ids ?? []).map(id => caseById.get(id)?.display_id || id).join(' / ') || '暂无')),
+                  h('div', null, h('strong', null, `${risk.evidence?.length ?? 0} 条源码依据`), h('small', null, risk.evidence?.[0]?.observation || '查看来源位置')),
+                  h('span', { 'aria-hidden': true }, '↗'))
+              }))
           }) : h('div', { className: 'b05-card', role: collectionWarning(health, 'risks') ? 'alert' : 'status' }, collectionEmpty('risks', '没有符合条件的风险。')),
           h('p', { className: 'result-footer-note' }, `${Number.isInteger(current?.source_snapshot?.file_count) && current.source_snapshot.file_count >= 0 ? `分析记录基于本次 ${current.source_snapshot.file_count} 个冻结源码文件。` : '本次冻结的源码文件数未记录。'}风险处置与结论以完整分析原文为准。`))
       }
@@ -6676,15 +6714,21 @@ window.__ModuleLoader__.load({
         const snippet = preview.status === 'ready' ? preview.value : null
         const label = risk.display_id || risk.risk_id || '未编号风险'
         const linked = (risk.linked_test_case_ids ?? []).map(id => [id, caseById.get(id)])
+        const grounding = classifyRiskGrounding(risk)
+        const recordWarnings = Array.isArray(risk.record_warnings) ? risk.record_warnings : []
         return h(React.Fragment, null,
           h('div', { className: 'b05-section-head pangea-detail-head' },
             h('div', null,
               h('h2', { className: 'b05-detail-title' }, text(risk.title, '未命名风险')),
               h('div', { className: 'pangea-detail-meta' }, h('code', null, label),
                 h('span', { className: 'pangea-result-tag', 'data-tone': ['High', 'Critical'].includes(riskSeverityLevel(risk)) ? 'danger' : 'warn' }, SEVERITY[riskSeverityLevel(risk)] ? `${SEVERITY[riskSeverityLevel(risk)]}风险` : '未分级'),
+                h('span', { className: 'pangea-review-pill', 'data-status': grounding.tone, title: grounding.reason }, grounding.label),
                 h('span', { className: 'pangea-result-tag' }, risk.translation_status ? TRANSLATION[risk.translation_status] ?? risk.translation_status : '尚无验证结论'),
                 h('span', null, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '未提供'}`))),
             h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void addToConversation('risk', risk, 'review', snippet || undefined) } }, '与 AI 讨论')),
+          recordWarnings.length ? h('div', { className: 'notice warn', role: 'status', 'aria-label': '记录与源码核对提示', style: { marginBottom: 14, padding: '12px 15px', borderRadius: 8, background: '#fbf4e6', border: '1px solid #eedab3', color: '#7a4d0e', fontSize: 13, lineHeight: 1.6 } },
+            h('strong', null, `记录与源码核对提示（${recordWarnings.length}）`),
+            recordWarnings.map((warning, idx) => h('p', { key: idx, style: { margin: '4px 0 0' } }, warning.field ? `${warning.field}：${warning.message}` : warning.message))) : null,
           h('dl', { className: 'pangea-record-facts' },
             h('div', null, h('dt', null, '分析单元'), h('dd', null, risk.unit_id || '未归入单元')),
             h('div', null, h('dt', null, '记录入口'), h('dd', null, risk.entry || risk.source_record?.record_id || '分析记录')),

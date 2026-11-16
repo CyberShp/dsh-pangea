@@ -168,6 +168,9 @@ export const workflowLayoutCss = `
 .pangea-review-pill[data-status="danger"] { background:#fbefef; color:#9c2330; font-weight:600; }
 .pangea-review-pill[data-status="warn"] { background:#fbf4e6; color:#8c5a12; font-weight:600; }
 .pangea-review-pill[data-status="info"] { background:#edf3f8; color:#365a7d; }
+.pangea-companion .b05-risk-meta>.pangea-review-pill[data-status="adopted"] { background:#eaf5ee; color:#20765a; font-weight:600; }
+.pangea-companion .b05-risk-meta>.pangea-review-pill[data-status="danger"] { background:#fbefef; color:#9c2330; font-weight:600; }
+.pangea-companion .b05-risk-meta>.pangea-review-pill[data-status="warn"] { background:#fbf4e6; color:#8c5a12; font-weight:600; }
 .pangea-case-review-list button .pangea-review-item-top { display:flex; align-items:center; justify-content:space-between; gap:8px; font-family:Consolas,monospace; font-size:12px; }
 .pangea-case-workspace .b05-case-table :is(th,td):nth-child(4) { width:100px; }
 .pangea-case-workspace .b05-case-table :is(th,td):nth-child(5) { width:100px; }

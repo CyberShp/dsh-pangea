@@ -11,6 +11,7 @@ import { parseFlowText, unwrapFlows, normalizeFlows } from './flow-normalize.js'
 import { readableNotesEnvelope, sourceFirstExecutionView, sourceFirstUnitRows } from './runtime-view.js'
 import { activeDiagramDiagnostics } from './diagram-contract.js'
 import { currentResultWarnings, currentWarningDegradations } from './result-warning-projection.js'
+import { summarizeIncrementalInputs } from './risk-and-incremental-insights.js'
 
 const STEP_TITLES = [
   '范围和任务契约',
@@ -961,6 +962,33 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
   let coverageGaps = null
   try { coverageGaps = await readJson(path.join(runDirectory, 'inputs', 'coverage-gaps.json')) } catch { /* Old Runs may not have frozen coverage input. */ }
   const coverageOverview = coverageSummary(projection.test_cases, coverageGaps)
+  let incrementalRequest = contract?.incremental_request ?? null
+  let incrementalSummary = null
+  {
+    const incDir = path.join(runDirectory, 'inputs', 'incremental')
+    const readIncJson = async name => {
+      const target = path.join(incDir, name)
+      if (!inside(runDirectory, target) || await pathKind(target) !== 'file') return null
+      const resolved = await realpath(target).catch(() => null)
+      if (!resolved || !inside(runDirectory, resolved)) return null
+      try { return await readJson(resolved) } catch { return null }
+    }
+    if (await pathKind(incDir) === 'directory' || incrementalRequest) {
+      const [reqJson, baselineJson, parentPlanJson, changesJson] = await Promise.all([
+        readIncJson('request.json'),
+        readIncJson('baseline.json'),
+        readIncJson('parent-plan.json'),
+        readIncJson('changes.json'),
+      ])
+      incrementalRequest = reqJson ?? incrementalRequest
+      incrementalSummary = summarizeIncrementalInputs({
+        request: incrementalRequest,
+        baseline: baselineJson,
+        parentPlan: parentPlanJson,
+        changes: changesJson,
+      })
+    }
+  }
 
   const life = sourceFirstLifecycle(progress)
   const sourceSnapshot = await sourceFirstSnapshot(runDirectory, progress, contract, actionView.artifacts)
@@ -1018,6 +1046,8 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
     ...flowMetadata,
     coverage_summary: coverageOverview,
     coverage_match: coverageMatch,
+    incremental_request: incrementalRequest,
+    incremental_summary: incrementalSummary,
     analysis_profile: contract?.analysis_profile ?? null,
     analysis_scene: analysisScene,
     run_id: runId,
