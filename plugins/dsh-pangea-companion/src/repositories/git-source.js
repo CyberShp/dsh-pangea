@@ -4,13 +4,14 @@ import { readFile, readdir, realpath, lstat, mkdir, rm } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { writeTaskStoreFile } from '../task-store.js'
+import { withGitLongPaths } from './git-environment.js'
 
 const exec = promisify(execFile)
 export async function sourceGit(cwd, args) {
   try {
     // Do not pass a potentially >260-character path to Windows process creation.
-    return (await exec('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], { windowsHide: true, timeout: args[0] === 'clone' ? 1800000 : 30000, maxBuffer: 32 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' } })).stdout.trimEnd()
+    return (await withGitLongPaths(env => exec('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], { windowsHide: true, timeout: args[0] === 'clone' ? 1800000 : 30000, maxBuffer: 32 * 1024 * 1024,
+      env: { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' } }), { cwd })).stdout.trimEnd()
   } catch (error) {
     if (error.code === 'ENOENT') throw Object.assign(new Error('未安装 Git；本地目录分析仍可使用，克隆和打桩需要 Git'), { code: 'GIT_MISSING' })
     throw new Error(String(error.stderr || error.message).replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@'))
