@@ -68,6 +68,17 @@ export async function saveRepositorySettings(dataRoot, repoId, input) {
       next.base_ref = await sourceGit(info.path, ['rev-parse', '--verify', `${ref}^{commit}`])
     } else { delete next.git_path; delete next.base_ref }
   }
+  if (input.personal_branch !== undefined || next.personal_branch) {
+    const branch = String(input.personal_branch ?? next.personal_branch).trim()
+    if (!branch || branch.startsWith('-') || branch === 'HEAD' || branch.startsWith('refs/')) throw new Error('请选择已存在的个人开发分支')
+    const root = next.git_path || path.join(dataRoot, 'repositories', repoId)
+    await sourceGit(root, ['check-ref-format', '--branch', branch])
+    await sourceGit(root, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
+    const remote = String(input.remote ?? next.remote ?? 'origin').trim()
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) throw new Error('远端名称无效')
+    await sourceGit(root, ['remote', 'get-url', '--push', remote])
+    next.personal_branch = branch; next.remote = remote
+  }
   await writeTaskStoreFile(file, JSON.stringify(next, null, 2))
   return next
 }

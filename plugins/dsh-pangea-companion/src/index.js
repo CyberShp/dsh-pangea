@@ -516,7 +516,7 @@ export async function faultInjectionRouteHandler(req, res, service, runtime, { r
       else {
         updateAdmission(runtime)?.assertOpen()
         if (input.action === 'configure') return json(res, 200, { status: 'ok', ...await service.configurePipeline(dataRoot, input.run_id, input.task_id, input.pipeline_url) })
-        if (input.action === 'push') task = await service.push(dataRoot, input.run_id, input.task_id, { background: true })
+        if (input.action === 'push') task = await service.push(dataRoot, input.run_id, input.task_id, { background: true, acknowledged_heads: input.acknowledged_heads })
         else if (input.action === 'retry') task = await service.retry(dataRoot, input.run_id, input.task_id, input.cwd)
         else if (input.action === 'verify') task = await service.recordVerification(dataRoot, input.run_id, input.task_id, input)
         else if (!['generate', 'preview-baseline'].includes(input.action)) throw Object.assign(new Error('未知打桩操作'), { statusCode: 400 })

@@ -41,6 +41,9 @@ async function fixture(t, { multi = false } = {}) {
     const commit = await injectionGit(source, ['rev-parse', 'HEAD'])
     await injectionGit(root, ['init', '--bare', remote])
     await injectionGit(source, ['remote', 'add', 'origin', remote])
+    await injectionGit(source, ['push', 'origin', 'main'])
+    await mkdir(path.join(dataRoot, '.pangea', 'repository-settings'), { recursive: true })
+    await writeFile(path.join(dataRoot, '.pangea', 'repository-settings', `${repo_id}.json`), JSON.stringify({ git_path: source, personal_branch: 'main', remote: 'origin' }))
     repositories.push({ repo_id, source_path: source, source_root: source, remote_path: remote, git: { commit }, base_ref: commit })
   }
   const cases = ['A', 'B', 'C'].map(letter => ({ projection_id: `unit/CASE-${letter}`, test_case_id: `unit/CASE-${letter}`, title: `场景 ${letter}`, execution_readiness: 'needs_instrumentation' }))
@@ -79,13 +82,12 @@ test('real Git + compiled C: generate, inspect, push exact commit, reopen and re
     assert.equal(await run('AC'), 'hit:A queue_failed\nhit:C cleanup_failed') // C needs A.
     assert.equal(await run(''), 'ok')
   })
-  const wantedCommit = repo.commit
-  // A later local commit must not change the identity of the reviewed task.
-  await writeFile(path.join(repo.path, 'unrelated.txt'), 'not part of task')
-  await injectionGit(repo.path, ['add', 'unrelated.txt'])
-  await injectionGit(repo.path, ['commit', '-m', 'unrelated local work'])
+  assert.equal(repo.commit, null)
+  assert.equal(await injectionGit(repo.path, ['branch', '--show-current']), '')
   const pushed = await service.push(f.dataRoot, f.run.run_id, task.id)
   assert.equal(pushed.status, 'pushed', pushed.error)
+  const wantedCommit = pushed.repositories[0].commit
+  assert.equal(await injectionGit(f.repositories[0].source_path, ['rev-parse', 'HEAD']), wantedCommit)
   assert.equal(await injectionGit(f.repositories[0].remote_path, ['rev-parse', `refs/heads/${repo.branch}`]), wantedCommit)
   const reopened = new FaultInjectionService()
   assert.equal((await reopened.list(f.dataRoot, f.run.run_id))[0].status, 'pushed')
@@ -95,13 +97,13 @@ test('real Git + compiled C: generate, inspect, push exact commit, reopen and re
   assert.equal(f.run.details.test_cases[0].execution_readiness, 'needs_instrumentation')
 })
 
-test('two tasks share a baseline but never writable checkouts or personal branches', async t => {
+test('two tasks share one personal branch but never writable checkouts', async t => {
   const f = await fixture(t), service = new FaultInjectionService({ generate: async ({ record }) => generated(record) })
   const tasks = await Promise.all([service.start(f), service.start(f)])
   await wait(service)
   const [a, b] = await Promise.all(tasks.map(task => service.read(f.dataRoot, f.run.run_id, task.id)))
   assert.equal(a.status, 'ready', a.error); assert.equal(b.status, 'ready', b.error)
-  assert.notEqual(a.branch, b.branch); assert.notEqual(a.repositories[0].path, b.repositories[0].path)
+  assert.equal(a.branch, b.branch); assert.notEqual(a.repositories[0].path, b.repositories[0].path)
   assert.equal(a.repositories[0].base_commit, b.repositories[0].base_commit)
   assert.equal(await injectionGit(f.repositories[0].source_path, ['status', '--porcelain']), '')
 })
@@ -109,7 +111,7 @@ test('two tasks share a baseline but never writable checkouts or personal branch
 test('multi-repository partial push is recorded and retry pushes only the unfinished repository', async t => {
   const f = await fixture(t, { multi: true }); let fail = true; const calls = []
   const service = new FaultInjectionService({ generate: async ({ record }) => generated(record), git: async (cwd, args, signal) => {
-    if (args[0] === 'push') { calls.push(path.basename(cwd)); if (path.basename(cwd) === 'helper' && fail) throw new Error('simulated remote unavailable') }
+    if (args[0] === 'push' && args[1] === 'origin') { calls.push(path.basename(cwd)); if (path.basename(cwd) === 'helper' && fail) throw new Error('simulated remote unavailable') }
     return injectionGit(cwd, args, signal)
   } })
   const task = await service.start(f); await wait(service)
@@ -195,15 +197,17 @@ test('background push returns while blocked, can stop and resume the same commit
   assert.equal(resumed.status, 'pushed'); assert.equal(resumed.repositories[0].commit, stopped.repositories[0].commit)
 })
 
-test('missing remote can be repaired without regenerating code', async t => {
+test('missing remote fails preparation and can be repaired before regeneration', async t => {
   const f = await fixture(t), service = new FaultInjectionService({ generate: async ({ record }) => generated(record) })
   await injectionGit(f.repositories[0].source_path, ['remote', 'remove', 'origin'])
   const task = await service.start(f); await wait(service)
   const before = await service.read(f.dataRoot, f.run.run_id, task.id)
-  assert.equal((await service.push(f.dataRoot, f.run.run_id, task.id)).status, 'ready')
+  assert.equal(before.status, 'failed'); assert.equal(before.failure_phase, 'preparing')
+  await assert.rejects(service.push(f.dataRoot, f.run.run_id, task.id), /完整生成/)
   await injectionGit(f.repositories[0].source_path, ['remote', 'add', 'origin', f.repositories[0].remote_path])
-  const after = await service.push(f.dataRoot, f.run.run_id, task.id)
-  assert.equal(after.status, 'pushed'); assert.equal(after.repositories[0].commit, before.repositories[0].commit)
+  const retry = await service.retry(f.dataRoot, f.run.run_id, task.id); await wait(service)
+  const after = await service.push(f.dataRoot, f.run.run_id, retry.id)
+  assert.equal(after.status, 'pushed', after.error)
 })
 
 test('retry preserves captured cases and resolved baseline in a new task', async t => {
@@ -267,4 +271,222 @@ test('initial publication is already owned while another request reads it', asyn
   const taskId = await visible
   try { assert.equal((await service.read(f.dataRoot, f.run.run_id, taskId)).status, 'preparing') }
   finally { release(); await start; await wait(service) }
+})
+
+
+test('source preparation failure records its phase and never starts the generator', async t => {
+  const f = await fixture(t)
+  let generatedCount = 0
+  const service = new FaultInjectionService({ generate: async () => { generatedCount++ }, git: async (cwd, args, signal) => {
+    if (args[0] === 'checkout') throw new Error('error: unable to create file nested/header.h: Filename too long')
+    return injectionGit(cwd, args, signal)
+  } })
+  const task = await service.start(f); await wait(service)
+  const failed = await service.read(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.failure_phase, 'preparing')
+  assert.match(failed.error, /Filename too long/)
+  assert.equal(generatedCount, 0)
+  assert.equal(await injectionGit(f.repositories[0].source_path, ['status', '--porcelain']), '')
+})
+
+test('dirty and linked original does not require acknowledgement or copy uncommitted content', async t => {
+  const f = await fixture(t)
+  await writeFile(path.join(f.repositories[0].source_path, 'local-only.txt'), 'original workspace draft')
+  f.input.repositories[0].linked = true
+  let captured
+  const service = new FaultInjectionService({ generate: async ({ record, prompt }) => {
+    captured = record
+    assert.match(prompt, /分析基线与本次基线不同则重新定位/)
+    return generated(record)
+  } })
+  const task = await service.start(f); await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(captured.source_repositories[0].working_tree_dirty, true)
+  await assert.rejects(readFile(path.join(ready.repositories[0].path, 'local-only.txt')), { code: 'ENOENT' })
+  assert.equal(await readFile(path.join(f.repositories[0].source_path, 'local-only.txt'), 'utf8'), 'original workspace draft')
+})
+
+async function configureA(f) {
+  const source = f.repositories[0].source_path
+  await injectionGit(source, ['checkout', '-b', 'A'])
+  await injectionGit(source, ['push', 'origin', 'A'])
+  await writeFile(path.join(f.dataRoot, '.pangea', 'repository-settings', 'target.json'), JSON.stringify({ git_path: source, personal_branch: 'A', remote: 'origin' }))
+  return source
+}
+async function appending(record) {
+  const value = generated(record)
+  value.edits = await Promise.all(record.repositories.map(async repo => {
+    const before = await readFile(path.join(repo.path, 'main.c'), 'utf8')
+    return { repo_id: repo.repo_id, path: 'main.c', before, after: `${before}\n/* task ${record.id}: independent fault */\n` }
+  }))
+  return value
+}
+async function localCommit(source, name = 'user.txt') {
+  await writeFile(path.join(source, name), `developer ${Math.random()}\n`)
+  await injectionGit(source, ['add', '--', name]); await injectionGit(source, ['commit', '-m', 'developer change'])
+  return injectionGit(source, ['rev-parse', 'HEAD'])
+}
+
+test('consecutive tasks only advance configured A, ignore injected branch overrides, and preserve earlier stubs', async t => {
+  const f = await fixture(t), source = await configureA(f)
+  f.input.branch_prefix = 'A_unwanted'; f.input.repositories[0].personal_branch = 'main'
+  f.input.repositories[0].base_ref = 'missing'; f.input.repositories[0].source_path = '/must-not-be-used'
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record) })
+  const initialRefs = await injectionGit(source, ['for-each-ref', '--format=%(refname)', 'refs/heads/'])
+  const initialRemote = await injectionGit(f.repositories[0].remote_path, ['for-each-ref', '--format=%(refname)', 'refs/heads/'])
+  let prior = await injectionGit(source, ['rev-parse', 'A'])
+  const ids = []
+  for (let i = 0; i < 2; i++) {
+    const task = await service.start(f); await wait(service)
+    const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
+    assert.equal(ready.status, 'ready', ready.error); assert.equal(ready.branch, 'A')
+    assert.equal(ready.repositories[0].base_commit, prior); assert.equal(ready.repositories[0].commit, null)
+    assert.equal(await injectionGit(source, ['rev-parse', 'A']), prior)
+    assert.equal(await injectionGit(ready.repositories[0].path, ['branch', '--show-current']), '')
+    const pushed = await service.push(f.dataRoot, f.run.run_id, task.id)
+    assert.equal(pushed.status, 'pushed', pushed.error)
+    prior = pushed.repositories[0].commit; ids.push(task.id)
+    assert.equal(await injectionGit(source, ['rev-parse', 'A']), prior)
+    assert.equal(await injectionGit(f.repositories[0].remote_path, ['rev-parse', 'A']), prior)
+  }
+  const content = await readFile(path.join(source, 'main.c'), 'utf8')
+  ids.forEach(id => assert.ok(content.includes(id)))
+  assert.equal(await injectionGit(source, ['for-each-ref', '--format=%(refname)', 'refs/heads/']), initialRefs)
+  assert.equal(await injectionGit(f.repositories[0].remote_path, ['for-each-ref', '--format=%(refname)', 'refs/heads/']), initialRemote)
+})
+
+test('existing outgoing commits require exact-head acknowledgement before creating a new commit', async t => {
+  const f = await fixture(t), source = await configureA(f)
+  const head = await localCommit(source)
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record) })
+  const task = await service.start(f); await wait(service)
+  const blocked = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(blocked.status, 'ready'); assert.match(blocked.error, /1 个已有未推送提交/)
+  assert.equal(blocked.repositories[0].commit, null)
+  const wrong = await service.push(f.dataRoot, f.run.run_id, task.id, { acknowledged_heads: { target: 'not-the-head' } })
+  assert.equal(wrong.repositories[0].commit, null)
+  const pushed = await service.push(f.dataRoot, f.run.run_id, task.id, { acknowledged_heads: { target: head } })
+  assert.equal(pushed.status, 'pushed', pushed.error)
+  assert.equal(await injectionGit(source, ['merge-base', head, pushed.repositories[0].commit]), head)
+})
+
+test('branch changes after generation reject stale changes; regeneration uses the new branch head', async t => {
+  const f = await fixture(t), source = await configureA(f)
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record) })
+  const task = await service.start(f); await wait(service)
+  const head = await localCommit(source)
+  const blocked = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.match(blocked.error, /个人分支已有新提交/); assert.equal(blocked.repositories[0].commit, null)
+  const retry = await service.retry(f.dataRoot, f.run.run_id, task.id); await wait(service)
+  assert.equal((await service.read(f.dataRoot, f.run.run_id, retry.id)).repositories[0].base_commit, head)
+})
+
+test('remote fast-forward is used for generation; later remote changes cannot be overwritten', async t => {
+  const f = await fixture(t), source = await configureA(f), other = path.join(f.root, 'other')
+  await injectionGit(f.root, ['clone', '--branch', 'A', f.repositories[0].remote_path, other])
+  await injectionGit(other, ['config', 'user.name', 'Other']); await injectionGit(other, ['config', 'user.email', 'other@test'])
+  const remoteHead = await localCommit(other)
+  await injectionGit(other, ['push', 'origin', 'A'])
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record) })
+  const task = await service.start(f); await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(ready.repositories[0].base_commit, remoteHead)
+  assert.equal(ready.repositories[0].outgoing_count, 0)
+  const pushed = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(pushed.status, 'pushed', pushed.error)
+  const next = await service.start(f); await wait(service)
+  await injectionGit(other, ['pull', '--ff-only', 'origin', 'A'])
+  const later = await localCommit(other, 'later.txt'); await injectionGit(other, ['push', 'origin', 'A'])
+  const blocked = await service.push(f.dataRoot, f.run.run_id, next.id)
+  assert.match(blocked.error, /远端分支已更新/)
+  assert.equal(await injectionGit(f.repositories[0].remote_path, ['rev-parse', 'A']), later)
+  assert.equal(await injectionGit(source, ['rev-parse', 'A']), pushed.repositories[0].commit)
+})
+
+test('same-file uncommitted changes block submission without overwriting them', async t => {
+  const f = await fixture(t), source = await configureA(f)
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record) })
+  const task = await service.start(f); await wait(service)
+  await writeFile(path.join(source, 'main.c'), 'developer unsaved work\n')
+  const blocked = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.match(blocked.error, /存在未提交内容/); assert.equal(blocked.repositories[0].commit, null)
+  assert.equal(await readFile(path.join(source, 'main.c'), 'utf8'), 'developer unsaved work\n')
+})
+
+test('parallel submissions to A serialize and reject the second stale task', async t => {
+  const f = await fixture(t); await configureA(f)
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record) })
+  const [a, b] = await Promise.all([service.start(f), service.start(f)]); await wait(service)
+  const results = await Promise.all([service.push(f.dataRoot, f.run.run_id, a.id), service.push(f.dataRoot, f.run.run_id, b.id)])
+  assert.deepEqual(results.map(r => r.status).sort(), ['pushed', 'ready'])
+  assert.match(results.find(r => r.status === 'ready').error, /个人分支已有新提交/)
+})
+
+test('missing fixed configuration and missing existing branch cannot create task branches', async t => {
+  const f = await fixture(t)
+  const file = path.join(f.dataRoot, '.pangea', 'repository-settings', 'target.json')
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record) })
+  await writeFile(file, JSON.stringify({ git_path: f.repositories[0].source_path }))
+  await assert.rejects(service.start(f), /项目配置选择个人开发分支/)
+  await writeFile(file, JSON.stringify({ git_path: f.repositories[0].source_path, personal_branch: 'does-not-exist' }))
+  const task = await service.start(f); await wait(service)
+  assert.equal((await service.read(f.dataRoot, f.run.run_id, task.id)).status, 'failed')
+  assert.equal(await injectionGit(f.repositories[0].source_path, ['branch', '--list', 'does-not-exist']), '')
+})
+
+test('workspace branch switch during submission cannot write to another branch', async t => {
+  const f = await fixture(t), source = await configureA(f)
+  const before = await injectionGit(source, ['rev-parse', 'A'])
+  await injectionGit(source, ['branch', 'B', before])
+  let switched = false
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record), git: async (cwd, args, signal) => {
+    if (args[0] === 'push' && args[1].startsWith('--receive-pack=') && !switched) {
+      switched = true; await injectionGit(source, ['checkout', 'B'])
+    }
+    return injectionGit(cwd, args, signal)
+  } })
+  const task = await service.start(f); await wait(service)
+  const result = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(result.status, 'pushed', result.error)
+  assert.equal(await injectionGit(source, ['branch', '--show-current']), 'B')
+  assert.equal(await injectionGit(source, ['rev-parse', 'B']), before)
+  assert.equal(await readFile(path.join(source, 'main.c'), 'utf8'), original)
+  assert.equal(await injectionGit(source, ['rev-parse', 'A']), result.repositories[0].commit)
+})
+
+test('retry recovers an exact task commit when command completion was interrupted', async t => {
+  const f = await fixture(t); await configureA(f)
+  let interrupt = true, commits = 0
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record), git: async (cwd, args, signal) => {
+    const result = await injectionGit(cwd, args, signal)
+    if (args.includes('commit')) { commits++; if (interrupt) { interrupt = false; throw new Error('completion interrupted after commit') } }
+    return result
+  } })
+  const task = await service.start(f); await wait(service)
+  const stopped = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(stopped.status, 'ready'); assert.equal(stopped.repositories[0].commit, null)
+  const recovered = await service.push(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(recovered.status, 'pushed', recovered.error)
+  assert.equal(commits, 1)
+})
+
+test('queued submission can be cancelled without waiting for the branch owner', async t => {
+  const f = await fixture(t); await configureA(f)
+  let release, began
+  const held = new Promise(resolve => { release = resolve }), started = new Promise(resolve => { began = resolve })
+  const service = new FaultInjectionService({ generate: async ({ record }) => appending(record), git: async (cwd, args, signal) => {
+    if (args[0] === 'push' && args[1] === 'origin') { began(); await held }
+    return injectionGit(cwd, args, signal)
+  } })
+  const a = await service.start(f), b = await service.start(f); await wait(service)
+  await service.push(f.dataRoot, f.run.run_id, a.id, { background: true }); await started
+  await service.push(f.dataRoot, f.run.run_id, b.id, { background: true })
+  let timer
+  try {
+    const cancelled = await Promise.race([service.cancel(f.dataRoot, f.run.run_id, b.id), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('queued cancel blocked behind owner')), 1500) })])
+    assert.equal(cancelled.status, 'ready')
+    assert.equal((await service.read(f.dataRoot, f.run.run_id, a.id)).status, 'pushing')
+  } finally { clearTimeout(timer); release(); await wait(service) }
 })

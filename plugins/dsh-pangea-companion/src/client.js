@@ -3233,7 +3233,7 @@ window.__ModuleLoader__.load({
       const [screen, setScreen] = React.useState({ type: initialScreen })
       const panelRootRef = React.useRef(null)
       const pendingViewportRef = React.useRef(null)
-      const needsRunSnapshot = pageMode === 'analysis'
+      const needsRunSnapshot = pageMode === 'analysis' || pageMode === 'injection'
       const panelScopeRef = React.useRef({ cwd, pageMode, screen })
       panelScopeRef.current = { cwd, pageMode, screen }
       const repositoryRequestRef = React.useRef(0)
@@ -3523,6 +3523,7 @@ window.__ModuleLoader__.load({
         setScreen({ type: initialScreen })
         setHistory([])
         setSelectedCaseIds([])
+        setInjectionRun('')
         ++repositoryRequestRef.current
         ++repositoryImportRef.current
         setRepositoryState(undefined)
@@ -3936,6 +3937,7 @@ window.__ModuleLoader__.load({
       const [scopePreview, setScopePreview] = React.useState(null)
       const [caseDrawer, setCaseDrawer] = React.useState(null)
       const [caseEvidenceSelection, setCaseEvidenceSelection] = React.useState({ scope: '', key: '' })
+      const [injectionRun, setInjectionRun] = React.useState('')
       const createScopeKey = JSON.stringify([cwd, workbench?.data_root, createForm.repository, createForm.source_scope_text])
       const validScopePreview = scopePreview?.key === createScopeKey && scopePreview.preview_state === 'complete' ? scopePreview : null
       const methodologyDetailAvailable = workbench?.run?.run_id === current?.run_id && Array.isArray(workbench?.run?.methodologies)
@@ -5016,7 +5018,7 @@ window.__ModuleLoader__.load({
       const completed = current?.analysis?.completed ?? 0
       const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0
       const activeNav = navType(screen)
-      const screenTitle = screen.type === 'home' ? '测试工作台'
+      const screenTitle = screen.type === 'injection' ? '代码打桩' : screen.type === 'home' ? '测试工作台'
         : screen.type === 'tasks' ? '分析任务'
         : screen.type === 'overview' ? 'PANGEA 总览'
         : screen.type === 'run-record' ? '运行记录'
@@ -6779,9 +6781,29 @@ window.__ModuleLoader__.load({
           selectedCaseIds.length ? h('div', { className: 'b05-selected-bar' }, h('div', null, `已选择 ${selectedCaseIds.length} 条用例`, h('small', null, `含 ${selectedCaseIds.filter(id => !selectableIds.includes(id)).length} 条筛选外选择；可复制或导出` )),
             h('div', { className: 'b05-head-actions' }, h('button', { type: 'button', onClick: () => setSelectedCaseIds([]) }, '清空选择'),
               h('button', { type: 'button', disabled: selectedCaseIds.length === 0, onClick: () => { void copySelectedCases() } }, '复制选中用例'), h('button', { type: 'button', onClick: () => { setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true); setCaseExportScope('selected') } }, '导出所选')) ) : null,
-          h(FaultInjectionPanel, { key: `injection-list:${current.run_id}`, runId: current.run_id, dataRoot: current.data_root ?? snapshot?.data_root, cwd, onOpenPipeline: url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用'); }, cases: testCases.filter(item => selectedCaseIds.includes(caseIdentity(item))) }),
+          h('button', { type: 'button', className: 'btn', onClick: () => openProductPage('injection', '代码打桩') }, '打开代码打桩'),
           renderCaseExportDialog(),
           renderCaseDrawer())
+      }
+
+      function renderInjectionWorkspace() {
+        const available = workbench?.tasks?.items || []
+        const back = () => { setInjectionRun(''); setSelectedRun(undefined); setSelectedTaskId(undefined) }
+        return h('section', { className: 'b05-card', style: { maxWidth: 1280, margin: '0 auto', padding: 28 }, 'aria-label': '代码打桩工作区' },
+          h('h1', null, '代码打桩'),
+          h('p', { className: 'b05-subtle' }, '从分析结果选择用例，在独立源码副本中生成修改，查看结果后推送个人分支。'),
+          !injectionRun ? h('section', null,
+            h('h2', null, '第一步 · 选择分析任务'),
+            h('input', { type: 'search', 'aria-label': '搜索打桩分析任务', placeholder: '搜索分析任务', value: taskQuery, onChange: event => setTaskQuery(event.target.value), style: { padding: 12, width: '100%', boxSizing: 'border-box', marginBottom: 20 } }),
+            workbenchError ? h('p', { role: 'alert' }, workbenchError) : null,
+            !workbench ? h('p', { role: 'status' }, '正在读取分析任务…') : !available.length ? h('p', null, '暂无分析任务，请先创建分析。') : null,
+            available.filter(task => taskDisplayName(task).toLowerCase().includes(taskQuery.toLowerCase())).map(task => h('button', { key: task.task_id, type: 'button', disabled: !task.run_id,
+              style: { display: 'block', width: '100%', padding: 18, marginBottom: 10, textAlign: 'left', border: '1px solid #dfe5dc', borderRadius: 10, background: '#fff', cursor: task.run_id ? 'pointer' : 'default' },
+              onClick: () => { setSelectedTaskId(task.task_id); setSelectedRun(task.run_id); setInjectionRun(task.run_id) } },
+              h('strong', null, taskDisplayName(task)), h('p', null, task.run_id ? '选择用例与查看已有打桩任务 →' : '尚未生成分析结果'))))
+          : current?.run_id !== injectionRun ? h('div', null, h('p', { role: error ? 'alert' : 'status' }, error || '正在读取所选分析任务的用例…'), error ? h('button', { type: 'button', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', onClick: back }, '返回选择任务'))
+          : h(FaultInjectionPanel, { key: `${cwd}:${current.data_root ?? snapshot?.data_root}:${injectionRun}`, standalone: true, onBack: back, runId: injectionRun, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases,
+            onOpenPipeline: url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用') } }))
       }
 
       function renderCaseExportDialog() {
@@ -7023,7 +7045,7 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'basis', scope: caseScreenKey }) }, '拟覆盖依据 ↗'),
                 h('button', { type: 'button', className: 'b05-text-link', disabled: !caseEvidenceOptions.length, onClick: () => setSourceDrawerOpen(true) }, `关联代码 · ${caseEvidenceOptions.length} 处 ↗`)),
               !caseEvidenceOptions.length ? h('p', { className: 'b05-subtle' }, caseEvidence.unresolved.length ? '源码引用未能解析为明确位置，原文保留在拟覆盖依据中。' : '当前用例未记录明确源码引用。') : null,
-              h(FaultInjectionPanel, { key: `injection-case:${current.run_id}:${caseIdentity(item)}`, runId: current.run_id, dataRoot: current.data_root ?? snapshot?.data_root, cwd, onOpenPipeline: url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用'); }, cases: [item] }),
+              h('button', { type: 'button', className: 'btn', onClick: () => openProductPage('injection', '代码打桩') }, '打开代码打桩'),
               item.entry ? h('section', { className: 'b05-card' }, h('h3', null, '测试入口'), h('p', null, sourceFirstRecordBody(item.entry))) : null,
               item.linked_notes?.length ? h('section', { className: 'b05-card' }, h('h3', null, '关联操作说明'), item.linked_notes.map(note => h('details', { key: note.projection_id }, h('summary', null, note.title), h('div', { style: { whiteSpace: 'pre-wrap' } }, sourceFirstRecordBody(note.source_record?.body))))) : null,
               item.variants?.length ? h('section', { className: 'b05-card' }, h('h3', null, `参数变体 · ${item.variants.length} 项`),
@@ -7086,6 +7108,7 @@ window.__ModuleLoader__.load({
       let body
       if (screen.type === 'home') body = renderHome()
       else if (screen.type === 'tasks') body = renderTasks()
+      else if (screen.type === 'injection') body = renderInjectionWorkspace()
       else if (screen.type === 'repository-import') body = renderRepositoryImport(false)
       else if (['overview', 'run-record'].includes(screen.type)) body = renderOverview()
       else if (screen.type === 'report') body = renderReport()
@@ -7104,7 +7127,7 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'evidence-detail') body = renderEvidenceDetail()
       else body = renderOverview()
 
-      const requiresSnapshot = !['home', 'tasks', 'create', 'environment', 'repository-import'].includes(screen.type)
+      const requiresSnapshot = !['injection', 'home', 'tasks', 'create', 'environment', 'repository-import'].includes(screen.type)
       const healthAlert = screen.type !== 'overview' && showRunHealth(screen, selectedTask, current, pageMode) && health?.status === 'warning' ? renderHealthCard(true) : null
       const errorNotice = requiresSnapshot && error ? h('div', { style: { ...styles.card, ...styles.healthError }, role: 'alert' },
         h('div', { style: styles.itemTitle }, snapshot ? '同步失败，继续显示上次结果' : '无法读取 PANGEA 数据'),
@@ -7142,7 +7165,7 @@ window.__ModuleLoader__.load({
           onClose: () => { if (!taskActionDialog.busy) setTaskActionDialog(null) }, onConfirm: () => { void confirmTaskAction() } }) : null,
         derivation ? h(RunDerivationDialog, { state: derivation, onChange: draft => setDerivation(value => value && ({ ...value, draft })),
           onClose: closeDerivation, onSubmit: input => { void submitDerivation(input) }, onRetry: () => { void openDerivation(null, derivation) } }) : null,
-        ['home', 'tasks', 'create', 'repository-import', 'report', 'run-record'].includes(screen.type) || (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? null : header,
+        ['injection', 'home', 'tasks', 'create', 'repository-import', 'report', 'run-record'].includes(screen.type) || (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? null : header,
         h('div', { className: 'pangea-content', style: screen.type === 'home' ? { padding: '24px 31px 30px', maxWidth: 'none', margin: 0 }
             : screen.type === 'tasks' ? { padding: '25px 31px 27px', maxWidth: 'none', margin: 0 }
               : (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? { padding: '24px 31px 27px', maxWidth: 'none', margin: 0 }
@@ -7163,6 +7186,11 @@ window.__ModuleLoader__.load({
         available: (_ctx, scope) => Boolean(scope?.cwd),
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'tasks', pageMode: 'analysis' }),
       }), 'dsh-pangea-companion: analysis page')
+      ctx.effect(() => pangea.registerPage({
+        id: 'injection', title: () => '代码打桩', icon, order: 15,
+        available: (_ctx, scope) => Boolean(scope?.cwd),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'injection', pageMode: 'injection' }),
+      }), 'dsh-pangea-companion: injection page')
       ctx.effect(() => pangea.registerPage({
         id: 'execution', title: () => '环境配置', icon, order: 20,
         available: () => false,

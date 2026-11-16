@@ -1,6 +1,6 @@
 import { createRepositorySettings, sourceLabel } from './repository-settings-view.js'
 export const INJECTION_STATUS_LABELS = {
-  preparing: '准备源码', generating: '生成打桩修改', ready: '修改已生成', pushing: '正在推送',
+  preparing: '准备源码', generating: '生成打桩修改', ready: '修改已生成', pushing: '提交与推送中',
   pushed: '个人分支已推送', failed: '生成失败', cancelled: '已停止', interrupted: '操作已中断',
 }
 const readable = value => value == null ? '' : typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -9,11 +9,16 @@ export function createFaultInjectionPanel(React) {
   const h = React.createElement
   const RepositorySettings = createRepositorySettings(React)
   const busy = task => ['preparing', 'generating', 'pushing'].includes(task?.status)
-  return function FaultInjectionPanel({ runId, dataRoot, cwd, onOpenPipeline, cases = [] }) {
-    const [open, setOpen] = React.useState(false)
+  return function FaultInjectionPanel({ runId, dataRoot, cwd, onOpenPipeline, cases = [], standalone = false, onBack }) {
+    const [open, setOpen] = React.useState(standalone)
     const [profileKey, setProfileKey] = React.useState('')
     const [tasks, setTasks] = React.useState([])
     const [taskId, setTaskId] = React.useState('')
+    const [acknowledged, setAcknowledged] = React.useState({})
+    const [step, setStep] = React.useState(2)
+    const [chosen, setChosen] = React.useState([])
+    const [query, setQuery] = React.useState('')
+    const [focused, setFocused] = React.useState('')
     const [settings, setSettings] = React.useState(null)
     const [providers, setProviders] = React.useState([])
     const [pipelineUrl, setPipelineUrl] = React.useState('')
@@ -23,7 +28,11 @@ export function createFaultInjectionPanel(React) {
     const [working, setWorking] = React.useState(false)
     const [build, setBuild] = React.useState({ url: '', package_id: '', package_sha256: '', notes: '' })
     const [verification, setVerification] = React.useState({ case_key: '', result: 'not_run', hits: '', notes: '' })
-    const selectedKeys = cases.map(item => item.projection_id || item.test_case_id).filter(Boolean)
+    const keyOf = item => item.projection_id || item.test_case_id
+    const eligible = item => Boolean(keyOf(item)) && cases.filter(other => keyOf(other) === keyOf(item)).length === 1 && Boolean(item.instrumentation || item.source_record?.body?.instrumentation || item.execution_readiness === 'needs_instrumentation')
+    const selectedKeys = standalone ? chosen.filter(key => cases.some(item => keyOf(item) === key && eligible(item))) : cases.map(keyOf).filter(Boolean)
+    const selectedCases = cases.filter(item => selectedKeys.includes(keyOf(item)))
+    const focusedCase = cases.find(item => keyOf(item) === focused) || selectedCases[0] || cases[0]
     const task = tasks.find(item => item.id === taskId)
     const profiles = Array.isArray(task?.result?.profiles) ? task.result.profiles : []
     const profile = profiles.find(item => item.case_key === profileKey) || profiles[0]
@@ -43,6 +52,8 @@ export function createFaultInjectionPanel(React) {
     const selectTask = value => {
       if (taskId) drafts.current[taskId] = { pipelineUrl, build, verification }
       setTaskId(value)
+      setAcknowledged({})
+      if (standalone && value) setStep(4)
       setProfileKey('')
       try { localStorage.setItem(`pangea-fi:${scope}`, value) } catch {}
     }
@@ -56,9 +67,9 @@ export function createFaultInjectionPanel(React) {
       request().then(value => {
         if (!live) return
         setTasks(value.tasks ?? []);
-        if (!taskId) { try { const last = localStorage.getItem(`pangea-fi:${scope}`); if (value.tasks?.some(item => item.id === last)) setTaskId(last) } catch {} }
+        if (!taskId) { try { const last = localStorage.getItem(`pangea-fi:${scope}`); if (value.tasks?.some(item => item.id === last)) { setTaskId(last); if (standalone) setStep(4) } } catch {} }
         setProviders(value.providers ?? [])
-        setSettings(previous => previous ?? { ...value.defaults, branch_prefix: 'pangea-fi', instructions: '' })
+        setSettings(previous => previous ?? { ...value.defaults, instructions: '' })
         setError('')
       }).catch(reason => { if (live) setError(reason.message) })
       return () => { live = false }
@@ -85,7 +96,7 @@ export function createFaultInjectionPanel(React) {
     }, [taskId])
     const act = async (action, extra = {}) => {
       setWorking(true); setError(''); setNotice('')
-      try { const value = await request({ action, task_id: taskId, ...extra }); remember(value.task); if (['configure', 'verify'].includes(action)) setNotice('已保存'); if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url })) }
+      try { const value = await request({ action, task_id: taskId, ...extra }); remember(value.task); if (action === 'generate') setStep(4); if (['configure', 'verify'].includes(action)) setNotice('已保存'); if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url })) }
       catch (reason) { setError(reason.message) }
       finally { setWorking(false) }
     }
@@ -93,15 +104,15 @@ export function createFaultInjectionPanel(React) {
       h(options.multiline ? 'textarea' : 'input', { 'aria-label': label, value: readable(value), onChange: event => change(event.target.value),
         disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), style: { width: '100%', boxSizing: 'border-box' } }))
     const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14 }
-    const renderPoints = points => Array.isArray(points) ? points.map((point, index) => h('details', { key: point.id || index, className: 'pangea-fi-point' },
+    const renderPoints = points => Array.isArray(points) ? points.map((point, index) => h('details', { key: point.id || index, open: standalone, className: 'pangea-fi-point' },
       h('summary', null, `${readable(point.id)} · ${readable(point.action) || '桩点说明'}`),
       h('p', { className: 'b05-subtle' }, `${readable(point.repo_id)}:${readable(point.path)}`),
       h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : null
-    const candidates = cases.filter(item => item.instrumentation || item.source_record?.body?.instrumentation)
+    const candidates = selectedCases.filter(item => item.instrumentation || item.source_record?.body?.instrumentation)
     return h('section', { className: 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
       h('style', null, `
-        .pangea-injection-panel { min-width:0; font-size:12px; }
-        .pangea-injection-panel .pangea-fi-workspace { max-height:70vh; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding-right:8px; }
+        .pangea-injection-panel { min-width:0; font-size:14px; }
+        .pangea-injection-panel .pangea-fi-workspace { overflow:visible; overscroll-behavior:contain; scrollbar-gutter:stable; padding-right:8px; }
         .pangea-injection-panel .pangea-fi-workspace > * { min-width:0; }
         .pangea-injection-panel details { border-top:1px solid #e7ebe5; margin-top:6px; }
         .pangea-injection-panel .pangea-fi-workspace > section.b05-card { padding:0; border:0; margin:8px 0; }
@@ -123,54 +134,87 @@ export function createFaultInjectionPanel(React) {
         .pangea-injection-panel .pangea-fi-records > li { padding:10px 0; border-top:1px solid #e7ebe5; }
         .pangea-injection-panel .pangea-fi-records pre { white-space:pre-wrap; font:inherit; }
         .pangea-injection-panel .pangea-reading-fields dd { overflow-wrap:anywhere; }
+        .pangea-fi-progress { display:flex; gap:24px; padding:18px 0; list-style:none; color:#68736b; border-bottom:1px solid #e1e6e0; }
+        .pangea-fi-progress [aria-current=step] { color:#203d2b; font-weight:700; }
+        .pangea-fi-picker { display:grid; grid-template-columns:minmax(230px, 1fr) minmax(0, 2fr); gap:24px; margin:20px 0; }
+        .pangea-fi-case-list { max-height:65vh; overflow:auto; border:1px solid #e1e6e0; border-radius:10px; padding:8px; }
+        .pangea-fi-case-row { display:flex; align-items:center; gap:8px; padding:6px; }
+        .pangea-fi-case-row button { flex:1; text-align:left; border:0; padding:12px; }
+        .pangea-fi-case-row button[aria-pressed=true] { background:#eaf0e8; }
+        .pangea-fi-case-row small { display:block; margin-top:5px; color:#737a74; }
+        .pangea-fi-case-detail { min-width:0; padding:20px; border:1px solid #e1e6e0; border-radius:10px; }
+        .pangea-fi-case-detail pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; line-height:1.7; }
+        .pangea-fi-footer { position:sticky; bottom:0; display:flex; justify-content:flex-end; gap:12px; background:#fff; padding:16px 0; border-top:1px solid #e1e6e0; }
+        .pangea-fi-technical { margin:20px 0; }
+        .pangea-fi-create { max-width:960px; margin:24px auto; }
+        @media(max-width:760px) { .pangea-fi-picker { grid-template-columns:1fr; } }
         @media(max-width:640px) { .pangea-injection-panel .b05-head-actions { flex-wrap:wrap; } .pangea-injection-panel .pangea-fi-workspace { max-height:75vh; } }
       `),
       h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between' } },
-        h('div', null, h('strong', null, '打桩与个人分支'), h('p', { className: 'b05-subtle' }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可一起生成打桩修改。` : '选择用例生成打桩修改，或查看已有打桩任务。')),
-        h('button', { type: 'button', className: 'btn', 'aria-expanded': open, onClick: () => setOpen(value => !value) }, open ? '收起打桩' : '打开打桩工作区')),
+        h('div', null, h('strong', null, standalone ? '代码打桩' : '打桩与个人分支'), h('p', { className: 'b05-subtle' }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可一起生成打桩修改。` : '选择用例生成打桩修改，或查看已有打桩任务。')),
+        standalone ? h('button', { type: 'button', onClick: onBack }, '更换分析任务') : h('button', { type: 'button', className: 'btn', 'aria-expanded': open, onClick: () => setOpen(value => !value) }, open ? '收起打桩' : '打开打桩工作区')),
       open ? h('div', { className: 'pangea-fi-workspace', role: 'region', 'aria-label': '打桩任务详情', tabIndex: 0 },
         error ? h('p', { role: 'alert' }, error) : null,
         notice ? h('p', { role: 'status' }, notice) : null,
-        h(RepositorySettings, { cwd, dataRoot, repositories: settings?.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, ...value.defaults, baseline_acknowledged: false })) } }),
-        candidates.length ? h('details', null, h('summary', null, '分析中记录的桩点'), candidates.map(item => h('div', { key: item.projection_id || item.test_case_id },
-          h('strong', null, readable(item.title)), renderPoints((item.instrumentation || item.source_record.body.instrumentation)?.points)))) : null,
-        settings ? h('details', { open: !task }, h('summary', null, task ? '为当前选择创建新任务' : '生成新的打桩修改'),
-          h('details', null, h('summary', null, `已选择 ${selectedKeys.length} 条用例`), h('p', { className: 'pangea-fi-scroll' }, cases.map(item => readable(item.title)).join('、') || '请先在用例列表选择用例')),
+        standalone && step < 4 ? h('ol', { className: 'pangea-fi-progress', 'aria-label': '新建打桩步骤' }, ['选择分析任务', '选择用例', '设置与提交'].map((label, index) => h('li', { key: label, 'aria-current': step === index + 1 ? 'step' : undefined }, `${index + 1}  ${label}`))) : null,
+        standalone && step === 2 ? h('section', null,
+          h('div', { className: 'pangea-fi-toolbar' }, h('input', { type: 'search', 'aria-label': '搜索打桩用例', placeholder: '搜索用例名称', value: query, onChange: event => setQuery(event.target.value) }), h('span', { role: 'status' }, `已选择 ${selectedKeys.length} 条`)),
+          h('div', { className: 'pangea-fi-picker' },
+            h('div', { className: 'pangea-fi-case-list' }, cases.filter(item => readable(item.title).toLowerCase().includes(query.toLowerCase())).map((item, index) => h('div', { key: `${keyOf(item)}:${index}`, className: 'pangea-fi-case-row' },
+              h('input', { type: 'checkbox', 'aria-label': `选择打桩用例 ${readable(item.title)}`, checked: selectedKeys.includes(keyOf(item)), disabled: !eligible(item), onChange: event => setChosen(previous => event.target.checked ? [...new Set([...previous, keyOf(item)])] : previous.filter(key => key !== keyOf(item))) }),
+              h('button', { type: 'button', 'aria-pressed': focusedCase === item, onClick: () => setFocused(keyOf(item)) }, readable(item.title), !eligible(item) ? h('small', null, '未提供打桩信息或用例身份不唯一') : null)))),
+            h('article', { className: 'pangea-fi-case-detail', 'aria-label': '打桩用例详情' }, focusedCase ? h(React.Fragment, null,
+              h('h3', null, readable(focusedCase.title)),
+              ...[['preconditions', '前置条件'], ['steps', '操作步骤'], ['expected_results', '预期结果']].map(([key, label]) => h('section', { key }, h('h4', null, label), h('pre', null, readable(focusedCase[key]) || '未提供'))),
+              h('h4', null, '打桩信息'), renderPoints((focusedCase.instrumentation || focusedCase.source_record?.body?.instrumentation)?.points),
+              h('details', null, h('summary', null, '完整用例信息'), h('pre', null, readable(focusedCase)))) : h('p', null, '当前分析任务暂无用例'))),
+          h('footer', { className: 'pangea-fi-footer' }, h('button', { type: 'button', onClick: onBack }, '上一步'), h('button', { type: 'button', className: 'primary', disabled: !selectedKeys.length || !settings, onClick: () => setStep(3) }, '下一步：设置与提交'))) : null,
+        (!standalone || step === 3) && settings ? h('section', { className: 'pangea-fi-create' }, h('h3', null, '设置与提交'),
+          h('details', null, h('summary', null, `已选择 ${selectedKeys.length} 条用例`), h('p', { className: 'pangea-fi-scroll' }, selectedCases.map(item => readable(item.title)).join('、') || '请先选择用例')),
           h('div', { style: { marginTop: 14 } },
             h('div', { style: grid },
               h('label', null, '执行器', h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value }) },
                 h('option', { value: '' }, '选择执行器'), providers.map(provider => h('option', { key: provider.id, value: provider.id }, provider.label)))),
               field('打桩模型', settings.agent_model, value => setSettings({ ...settings, agent_model: value })),
-              field('任务名称', settings.name, value => setSettings({ ...settings, name: value })),
-              field('个人分支前缀', settings.branch_prefix, value => setSettings({ ...settings, branch_prefix: value }))),
-            (settings.repositories ?? []).map((repo, index) => h('fieldset', { key: repo.repo_id, style: { margin: '10px 0', padding: 14, border: '1px solid #d8dee9', borderRadius: 8 } },
-              h('p', null, sourceLabel(repo.source)),
-              repo.comparison?.changed_count ? h('p', { role: 'status' }, `分析快照与所选提交有 ${repo.comparison.changed_count} 个文件不同：${repo.comparison.files.join('、')}`) : null,
-              repo.comparison?.error ? h('p', { role: 'alert' }, repo.comparison.error) : null,
-              repo.source?.kind === 'git' && !repo.comparison?.available && !repo.comparison?.error ? h('p', null, '本次分析未提供可比较的源码快照，当前仅展示 Git 状态。') : null,
-              h('legend', null, h('label', null, h('input', { type: 'checkbox', checked: repo.enabled !== false, 'aria-label': `本次包含 ${repo.repo_id}`, disabled: working,
-                onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), ' ', readable(repo.repo_id))), h('div', { style: grid },
-                ...[['source_path', 'Git 仓库目录'], ['base_ref', '源码基线（提交或本地分支）'], ['remote', '推送远端']].map(([key, label]) => field(`${repo.repo_id} · ${label}`, repo[key], value => setSettings({ ...settings, baseline_acknowledged: false, repositories: settings.repositories.map((item, at) => at === index ? { ...item, [key]: value } : item) })))))),
-            h('button', { type: 'button', disabled: working, onClick: async () => { setWorking(true); setError(''); try { const value = await request({ action: 'preview-baseline', repositories: settings.repositories }); setSettings(previous => ({ ...previous, repositories: value.repositories, baseline_acknowledged: false })); setNotice('基线已核对，请查看各仓库的快照差异') } catch (reason) { setError(reason.message) } finally { setWorking(false) } } }, '核对打桩基线'),
-            h('label', null, h('input', { type: 'checkbox', 'aria-label': '使用所选 Git 提交作为打桩基线', checked: Boolean(settings.baseline_acknowledged), onChange: event => setSettings({ ...settings, baseline_acknowledged: event.target.checked }) }), ' 使用所选 Git 提交作为打桩基线；未提交修改不带入个人分支'),
+              field('任务名称', settings.name, value => setSettings({ ...settings, name: value }))),
+            h('p', null, '目标个人分支：', (settings.repositories || []).filter(repo => repo.enabled !== false).map(repo => `${repo.repo_id} → ${repo.personal_branch || '尚未配置'}`).join('；')),
+            settings.repositories.some(repo => repo.enabled !== false && !repo.personal_branch) ? h('p', { role: 'status' }, '请展开代码来源与高级设置，在项目配置中选择已有的个人开发分支。') : null,
+            h('details', { className: 'pangea-fi-technical' }, h('summary', null, '代码来源与高级设置'),
+              h(RepositorySettings, { cwd, dataRoot, repositories: settings.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, ...value.defaults })) } }),
+              (settings.repositories ?? []).map((repo, index) => h('fieldset', { key: repo.repo_id },
+                h('legend', null, h('label', null, h('input', { type: 'checkbox', checked: repo.enabled !== false, disabled: working, 'aria-label': `本次包含 ${repo.repo_id}`, onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), readable(repo.repo_id))),
+                h('p', null, '当前源码：', sourceLabel(repo.source)),
+                repo.comparison?.changed_count ? h('p', null, `分析快照中有 ${repo.comparison.changed_count} 个文件与目标提交不同。这是源码版本比较，不是本次打桩修改文件数；生成时将基于目标代码重新定位桩点。`) : null,
+                repo.comparison?.error ? h('p', { role: 'alert' }, repo.comparison.error) : null,
+                h('p', null, `Git 仓库：${repo.source_path}；远端：${repo.remote}；个人分支：${repo.personal_branch || '未配置'}`)))),
+            h('p', { className: 'b05-subtle' }, '先在独立副本中生成差异，查看后再提交并推送到项目个人分支；不会创建任务分支，不带入未提交内容。'),
             field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value })),
-            settings.repositories.some(repo => repo.enabled !== false && repo.source?.kind !== 'git') ? h('p', { role: 'status' }, '所选源码尚未就绪：请在“代码仓库与构建”关联 Git 仓库，或填写有效目录后点击“核对打桩基线”。普通分析不受影响。') : null,
+            settings.repositories.some(repo => repo.enabled !== false && repo.source?.kind !== 'git') ? h('p', { role: 'status' }, '所选源码尚未就绪：请展开“代码来源与高级设置”关联 Git 仓库。普通分析不受影响。') : null,
             field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true }),
-            h('button', { type: 'button', className: 'btn primary', disabled: working || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && repo.source?.kind !== 'git'),
-              onClick: () => act('generate', { ...settings, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : `生成打桩修改（${selectedKeys.length} 条用例）`)))
-          : h('p', null, '正在读取打桩设置…'),
+            h('footer', { className: 'pangea-fi-footer' }, standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : null, h('button', { type: 'button', className: 'btn primary', disabled: working || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
+              onClick: () => act('generate', { ...settings, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
+          : !settings ? h('p', null, '正在读取打桩设置…') : null,
         tasks.length ? h('div', { style: { marginTop: 18 } }, h('label', null, '已有打桩任务 ', h('select', { 'aria-label': '已有打桩任务', value: taskId, onChange: event => selectTask(event.target.value) },
           h('option', { value: '' }, '选择任务查看'), tasks.map(item => h('option', { key: item.id, value: item.id }, `${item.name || item.cases?.[0]?.title || '打桩任务'} · ${new Date(item.created_at).toLocaleString()} · ${item.case_keys.length} 条 · ${INJECTION_STATUS_LABELS[item.status] || item.status}`))))) : null,
-        task ? h('div', { style: { marginTop: 16 } },
-          h('p', { role: 'status' }, h('strong', null, INJECTION_STATUS_LABELS[task.status] || task.status)),
-          task.error ? h('p', { role: 'alert', style: { whiteSpace: 'pre-wrap' } }, task.error) : null,
+        task && (!standalone || step === 4) ? h('div', { style: { marginTop: 16 } },
+          h('p', { role: 'status' }, h('strong', null, task.status === 'failed' && task.failure_phase === 'preparing' ? '准备源码失败' : INJECTION_STATUS_LABELS[task.status] || task.status)),
+          task.error ? h('div', { role: 'alert' }, h('p', null, task.failure_phase === 'preparing' ? '准备源码失败，尚未开始生成打桩修改。' : '本次操作未完成。'), h('details', null, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, task.error))) : null,
           busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null,
+          standalone ? h('button', { type: 'button', onClick: () => setStep(2) }, '新建打桩任务') : null,
           h('h3', null, `正在查看：${task.name || task.cases?.[0]?.title || '打桩任务'}`),
           task.status === 'pushing' && task.current_repository ? h('p', null, `正在推送：${task.current_repository}`) : null,
           ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('button', { type: 'button', disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成') : null,
           h('p', { className: 'b05-subtle' }, `${task.case_keys.length} 条用例 · ${task.result?.points?.length || 0} 个桩点 · 最新记录 ${passedCount}/${task.case_keys.length} 通过`),
           h('p', null, '个人分支：', h('code', null, task.branch)),
-          ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('button', { type: 'button', className: 'btn primary', style: { marginTop: 14 }, disabled: working, onClick: () => act('push') }, working ? '正在推送…' : '推送个人分支') : null,
+          task.schema_version !== 2 ? h('p', { role: 'status' }, '此历史任务使用旧任务分支。请先配置项目个人分支，再按最新分支重新生成；旧分支不会被推送。') : null,
+          task.repositories.filter(repo => repo.outgoing_count > 0 && !repo.commit).map(repo => h('label', { key: repo.repo_id, style: { display: 'block', margin: '12px 0' } },
+            h('input', { type: 'checkbox', 'aria-label': `确认推送已有提交 ${repo.repo_id}`, checked: acknowledged[repo.repo_id] === repo.base_commit,
+              onChange: event => setAcknowledged(previous => ({ ...previous, [repo.repo_id]: event.target.checked ? repo.base_commit : '' })) }),
+            ` ${repo.repo_id} 的 ${repo.branch} 上有 ${repo.outgoing_count} 个已有未推送提交；本次会一并推送。`)),
+          ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h(React.Fragment, null,
+            h('button', { type: 'button', className: 'btn primary', style: { marginTop: 14 }, disabled: working || task.schema_version !== 2 || task.repositories.some(repo => repo.outgoing_count > 0 && !repo.commit && acknowledged[repo.repo_id] !== repo.base_commit),
+              onClick: () => act('push', { acknowledged_heads: acknowledged }) }, working ? '正在提交…' : task.repositories.some(repo => repo.commit && !repo.pushed) ? `重试提交与推送到 ${task.branch}` : `提交并推送到 ${task.branch}`),
+            h('button', { type: 'button', disabled: working, onClick: () => act('retry') }, '按最新分支重新生成')) : null,
           task.status === 'pushed' ? h('section', { className: 'b05-card pangea-fi-build', style: { marginTop: 10 } },
             h('h3', null, '构建个人包'),
             h('details', { open: !task.pipeline_url }, h('summary', null, '流水线设置'), field('本任务流水线 URL', pipelineUrl, setPipelineUrl),
@@ -202,7 +246,7 @@ export function createFaultInjectionPanel(React) {
               profiles.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(task.cases.find(value => value.case_key === item.case_key)?.title || item.case_key))))),
             h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(profile?.steps) ? profile.steps : [profile?.steps]).map((step, at) => h('li', { key: at }, readable(step))))) : null,
           task.result?.limitations?.length ? h('details', null, h('summary', null, `生成限制（${task.result.limitations.length}）`), h('p', { className: 'pangea-fi-scroll', style: { whiteSpace: 'pre-wrap' } }, readable(task.result.limitations))) : null,
-          task.repositories.map(repo => h('details', { key: repo.repo_id, style: { marginTop: 12 } }, h('summary', null, `${repo.repo_id} · ${repo.commit ? repo.pushed ? '已推送' : '已提交' : '未修改'}`),
+          task.repositories.map(repo => h('details', { key: repo.repo_id, open: Boolean(repo.diff && !repo.pushed), style: { marginTop: 12 } }, h('summary', null, `${repo.repo_id} · ${repo.branch} · ${repo.commit ? repo.pushed ? '已推送' : '已提交' : repo.diff ? '待提交差异' : '未修改'}`),
             h('p', null, '基线：', h('code', null, repo.base_commit)), repo.commit ? h('p', null, '修改提交：', h('code', null, repo.commit)) : null,
             repo.diff ? h('pre', { style: { maxHeight: 400, overflow: 'auto', padding: 12, background: '#f5f7fa' } }, repo.diff) : null))
           ) : null) : null)

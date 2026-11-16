@@ -17,7 +17,7 @@ export function createRepositorySettings(React) {
     }
     const choose = (id, list = items) => {
       const settings = list.find(item => item.repository_id === id)?.settings || {}
-      setSelected(id); setForm({ pipeline_url: settings.pipeline_url || '', git_path: settings.git_path || '', base_ref: settings.base_ref || 'HEAD', git_url: '' }); setMode('local')
+      setSelected(id); setForm({ pipeline_url: settings.pipeline_url || '', git_path: settings.git_path || '', base_ref: settings.base_ref || 'HEAD', git_url: '', personal_branch: settings.personal_branch || '', remote: settings.remote || 'origin' }); setMode('local')
     }
     React.useEffect(() => {
       if (!open) return
@@ -29,7 +29,7 @@ export function createRepositorySettings(React) {
     const save = async () => {
       setBusy(true); setMessage('')
       try {
-        const payload = { action: 'configure-repository', repository_name: selected, pipeline_url: form.pipeline_url, base_ref: form.base_ref }
+        const payload = { action: 'configure-repository', repository_name: selected, pipeline_url: form.pipeline_url, base_ref: form.base_ref, ...(form.personal_branch ? { personal_branch: form.personal_branch, remote: form.remote } : {}) }
         if (mode === 'remote') payload.git_url = form.git_url
         else if (form.git_path) payload.git_path = form.git_path
         if (mode === 'remote' && !payload.git_url) throw new Error('请输入关联仓库地址')
@@ -42,6 +42,9 @@ export function createRepositorySettings(React) {
         h('label', null, '配置仓库', h('select', { 'aria-label': '配置仓库', value: selected, disabled: busy, onChange: event => choose(event.target.value) }, items.filter(item => !repositories.length || repositories.some(repo => repo.repo_id === item.repository_id)).map(item => h('option', { key: item.repository_id, value: item.repository_id }, item.name)))),
         h('p', null, sourceLabel(items.find(item => item.repository_id === selected)?.source)),
         items.find(item => item.repository_id === selected)?.settings?.git_path ? h('p', null, `已关联打桩仓库：${items.find(item => item.repository_id === selected).settings.git_path}`) : null,
+        field('个人开发分支', 'personal_branch'),
+        field('推送远端', 'remote'),
+        h('p', null, '打桩只提交到这个已有分支；任务不会创建新分支。'),
         field('项目构建流水线 URL', 'pipeline_url'),
         h('details', null, h('summary', null, '关联或更换打桩 Git 仓库'),
           h('p', null, '选择与分析源码对应的 Git 仓库。关联后保留原分析目录；打桩前展示源码差异。'),

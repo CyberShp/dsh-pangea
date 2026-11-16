@@ -22,6 +22,9 @@ test('fault injection HTTP acceptance', async t => {
   const base = await injectionGit(source, ['rev-parse', 'HEAD'])
   await injectionGit(root, ['init', '--bare', remote])
   await injectionGit(source, ['remote', 'add', 'origin', remote])
+  await injectionGit(source, ['push', 'origin', 'main'])
+  await mkdir(path.join(dataRoot, '.pangea', 'repository-settings'), { recursive: true })
+  await writeFile(path.join(dataRoot, '.pangea', 'repository-settings', 'target.json'), JSON.stringify({ personal_branch: 'main', remote: 'origin' }))
   const run = { run_id: 'http-run', source_snapshot: { repositories: [{ repo_id: 'target', git: { commit: base } }] }, details: { test_cases: [{ projection_id: 'unit/A', title: '资源申请失败' }] } }
   await mkdir(path.join(dataRoot, 'runs', run.run_id), { recursive: true })
   await writeFile(path.join(dataRoot, 'runs', run.run_id, 'progress.json'), JSON.stringify({ model_settings: { provider: 'fixture' }, model_id: 'fixture-model' }))
@@ -31,7 +34,8 @@ test('fault injection HTTP acceptance', async t => {
       else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
     })
     if (record.instructions === 'fail') throw new Error('fixture generation failed')
-    return { points: [{ id: 'A', repo_id: 'target', path: 'target.c' }], profiles: [{ case_key: 'unit/A', point_ids: ['A'], steps: ['测试夹具'] }], edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }
+    const current = await readFile(path.join(record.repositories[0].path, 'target.c'), 'utf8')
+    return { points: [{ id: 'A', repo_id: 'target', path: 'target.c' }], profiles: [{ case_key: 'unit/A', point_ids: ['A'], steps: ['测试夹具'] }], edits: [{ repo_id: 'target', path: 'target.c', before: current, after: current.replace('return 0;', 'return -1;') + `/* ${record.id} */\n` }] }
   }
   let service = new FaultInjectionService({ generate: generator })
   const server = createServer((req, res) => void faultInjectionRouteHandler(req, res, service, {}, { resolveRoot: async () => dataRoot, readRun: async () => run }))
@@ -58,9 +62,9 @@ test('fault injection HTTP acceptance', async t => {
   let task
   await t.test('GET defaults and empty history', async () => {
     const r = await request(); assert.equal(r.status, 200); assert.deepEqual(r.body.tasks, [])
-    assert.equal(r.body.defaults.repositories[0].base_ref, base)
+    assert.equal(r.body.defaults.repositories[0].personal_branch, 'main')
   })
-  await t.test('POST generate → GET ready includes exact diff and commit', async () => {
+  await t.test('POST generate → GET ready includes exact diff without a commit', async () => {
     const r = await generate(); assert.equal(r.status, 202)
     task = await terminal(r.body.task.id); assert.equal(task.status, 'ready', task.error)
     assert.match(task.repositories[0].diff, /return -1/)
@@ -68,7 +72,7 @@ test('fault injection HTTP acceptance', async t => {
   })
   await t.test('POST push publishes the recorded SHA and repeat is idempotent', async () => {
     for (let i = 0; i < 2; i++) {
-      const r = await post({ action: 'push', task_id: task.id }); assert.equal(r.status, 200); assert.ok(['pushing', 'pushed'].includes(r.body.task.status)); assert.equal((await terminal(task.id)).status, 'pushed')
+      const r = await post({ action: 'push', task_id: task.id }); assert.equal(r.status, 200); assert.ok(['pushing', 'pushed'].includes(r.body.task.status)); task = await terminal(task.id); assert.equal(task.status, 'pushed', task.error)
     }
     assert.equal(await injectionGit(remote, ['rev-parse', `refs/heads/${task.branch}`]), task.repositories[0].commit)
   })
@@ -91,11 +95,11 @@ test('fault injection HTTP acceptance', async t => {
     assert.equal(saved.build.url, 'https://example.test/build/1')
     assert.equal((await request()).body.defaults.pipeline_url, saved.pipeline_url)
   })
-  await t.test('concurrent HTTP generations use distinct branches and checkouts', async () => {
+  await t.test('concurrent HTTP generations use one branch and distinct checkouts', async () => {
     const starts = await Promise.all([generate(), generate()]); starts.forEach(r => assert.equal(r.status, 202))
     const [a, b] = await Promise.all(starts.map(r => terminal(r.body.task.id)))
     assert.equal(a.status, 'ready'); assert.equal(b.status, 'ready')
-    assert.notEqual(a.branch, b.branch); assert.notEqual(a.repositories[0].path, b.repositories[0].path)
+    assert.equal(a.branch, b.branch); assert.notEqual(a.repositories[0].path, b.repositories[0].path)
     assert.equal(a.repositories[0].base_commit, b.repositories[0].base_commit)
   })
   await t.test('POST cancel stops a held generation and premature push is rejected', async () => {

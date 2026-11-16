@@ -2,7 +2,7 @@ import { inspectSource, readRepositorySettings, compareSnapshot } from './reposi
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, realpath, lstat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, lstat, writeFile, open, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { writeTaskStoreFile } from './task-store.js'
 import { caseIdentity } from './case-review-projection.js'
@@ -89,7 +89,7 @@ export function injectionPrompt({ record, inputPath, outputPath }) {
     '逐用例说明必须按真实执行顺序串演：关闭全部桩建立并验证正常基线 → 保存基线证据 → 启用目标桩 → 执行业务并检查实际命中及故障后状态 → 关闭桩或耗尽次数后验证恢复。基线准备不得提前消耗一次性桩。',
     '若开关仅在启动时读取，先用关闭桩的进程生成持久化基线，再正常停服并以目标模式启动，明确哪些状态保留、哪些内存状态需重建；把每次业务调用对触发计数的影响逐步核对。profiles 中命令、预期结果与 edits 的状态机必须一致，不能要求同一次调用既正常建立基线又触发故障。',
     '逐步核对观测断言：目录中还包括步骤自己创建的日志、证据文件，不得断言只剩业务文件；临时文件清理应检查目标临时文件模式。时间戳须考虑实际精度，同一时间单位内的成功写入不保证时间戳变化，应结合内容哈希、数据读回或计数验证恢复。区分命令退出码与业务返回值，并说明 grep 无匹配等预期非零退出，不能用笼统忽略错误掩盖失败。',
-    '分析基线与本次基线不同则重新定位，并在 summary 交代影响。不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
+    '同一分支上可能已有其他打桩修改，必须复用兼容的桩点并保留已有开关；互斥方案应分别触发。分析基线与本次基线不同则重新定位，并在 summary 交代影响。不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
     'JSON 结构：{summary:string, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
     'case_key 必须逐字使用输入的 case_key。points/profiles 是业务说明；edits 才是实际修改。before 为当前文件中唯一出现的原文，after 为替换内容；新增文件 before=null。path 为仓库相对路径。不要包含 .git 文件，不删除文件。',
     '每条选中用例都应有对应 profile；多个用例可复用一个 point。给出能直接执行的启用、关闭及命中检查方法，不把待实现的开关写成已有命令。',
@@ -120,7 +120,7 @@ export function checkInjectionResult(value, record) {
 }
 
 export class FaultInjectionService {
-  constructor({ generate, git = injectionGit } = {}) { this.generate = generate; this.git = git; this.active = new Map(); this.queues = new Map() }
+  constructor({ generate, git = injectionGit } = {}) { this.generate = generate; this.git = git; this.active = new Map(); this.queues = new Map(); this.branchQueues = new Map() }
   key(dataRoot, runId, taskId) { return JSON.stringify([path.resolve(dataRoot), runId, taskId]) }
   async directory(dataRoot, runId, taskId) {
     if (!id(runId) || (taskId != null && !id(taskId))) throw serviceError('打桩任务或 Run 标识无效')
@@ -191,13 +191,13 @@ export class FaultInjectionService {
       const sourcePath = settings.git_path || path.join(dataRoot, 'repositories', repo.repo_id)
       let source
       try { source = await inspectSource(sourcePath) } catch (error) { source = { kind: 'unavailable', error: error.message } }
-      const baseline = settings.base_ref || repo.git?.commit || repo.git?.head || 'HEAD'
+      const baseline = settings.personal_branch ? `refs/heads/${settings.personal_branch}` : 'HEAD'
       let comparison = { available: false, changed_count: 0, files: [] }
       if (source.kind === 'git') {
         try { comparison = await compareSnapshot(sourcePath, baseline, path.join(dataRoot, 'runs', run.run_id, 'inputs', 'source', repo.repo_id)) }
         catch (error) { comparison = { available: false, error: error.message } }
       }
-      repositories.push({ repo_id: repo.repo_id, source_path: sourcePath, base_ref: baseline, remote: 'origin',
+      repositories.push({ repo_id: repo.repo_id, source_path: sourcePath, base_ref: baseline, personal_branch: settings.personal_branch || '', remote: settings.remote || 'origin',
         analysis_commit: repo.git?.commit ?? repo.git?.head ?? null, source, comparison, linked: Boolean(settings.git_path), project_pipeline_configured: Object.hasOwn(settings, 'pipeline_url'), pipeline_url: settings.pipeline_url || '' })
     }
     const projectPipeline = repositories.find(repo => repo.project_pipeline_configured)
@@ -237,14 +237,14 @@ export class FaultInjectionService {
       || repositories.some(repo => !known.has(repo.repo_id))) throw serviceError('请选择当前 Run 的源码仓库')
     const selectedRepositories = repositories.map(repo => {
       if (typeof repo.repo_id !== 'string' || !repo.repo_id || /[\\/:\x00-\x1f]/.test(repo.repo_id) || ['.', '..'].includes(repo.repo_id)) throw serviceError('仓库标识无效')
-      return { ...known.get(repo.repo_id), ...repo }
+      const configured = known.get(repo.repo_id)
+      if (!configured.personal_branch) throw serviceError(`${repo.repo_id}：请先在项目配置选择个人开发分支`)
+      return { ...configured }
     })
-    const prefix = String(input.branch_prefix || 'pangea-fi').trim()
-    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(prefix) || prefix.includes('..') || prefix.endsWith('/') || prefix.endsWith('.lock')) throw serviceError('个人分支前缀无效')
     const pipeline = await this.configurePipeline(dataRoot, run.run_id, null, input.pipeline_url ?? defaults.pipeline_url)
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
-    const record = { schema_version: 1, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
-      name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: `${prefix}/${taskId}`, case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
+    const record = { schema_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
+      name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch))].join('、'), case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
       provider_id: input.provider_id || defaults.provider_id, agent_model: input.agent_model || defaults.agent_model,
       baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
@@ -253,7 +253,7 @@ export class FaultInjectionService {
     this.active.set(key, operation)
     const published = this.save(directory, record)
     operation.done = published.then(() => this.prepareAndGenerate({ dataRoot, directory, record, cwd, signal: controller.signal }))
-      .catch(async error => { record.status = controller.signal.aborted ? 'cancelled' : 'failed'; record.error = cleanError(error); await this.save(directory, record) })
+      .catch(async error => { record.failure_phase = record.status; record.status = controller.signal.aborted ? 'cancelled' : 'failed'; record.error = cleanError(error); await this.save(directory, record) })
       .finally(() => this.active.delete(key))
     await published
     return record
@@ -264,18 +264,18 @@ export class FaultInjectionService {
       const sourcePath = await realpath(source.source_path)
       const top = await this.git(sourcePath, ['rev-parse', '--show-toplevel'], signal)
       if (await realpath(top) !== sourcePath) throw serviceError(`请指定 Git 仓库根目录：${source.repo_id}`)
-      const ref = String(source.base_ref || 'HEAD')
-      if (ref.startsWith('-') || /[\x00-\x1f]/.test(ref)) throw serviceError('源码基线无效')
-      const baseCommit = await this.git(sourcePath, ['rev-parse', '--verify', `${ref}^{commit}`], signal)
+      const branch = source.personal_branch
+      await this.git(sourcePath, ['check-ref-format', '--branch', branch], signal)
+      const baseCommit = await this.git(sourcePath, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], signal)
       const comparison = await compareSnapshot(sourcePath, baseCommit, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
       const dirty = Boolean(await this.git(sourcePath, ['status', '--porcelain'], signal))
-      if ((comparison.changed_count || dirty || source.linked) && !record.baseline_acknowledged) throw serviceError(`${source.repo_id}：分析源码与 Git 基线需要核对，请查看基线差异并选择使用所选提交后重新生成`)
+      // Differences are supplied to the generator for relocation against the target
+      // checkout. A dirty original or a linked repository is not itself a conflict.
       source.comparison = comparison
       source.working_tree_dirty = dirty
       const remote = String(source.remote || 'origin')
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) throw serviceError('远端名称无效')
-      let remoteUrl = null
-      try { remoteUrl = await this.git(sourcePath, ['remote', 'get-url', '--push', remote], signal) } catch (error) { if (signal.aborted) throw error }
+      const remoteUrl = await this.git(sourcePath, ['remote', 'get-url', '--push', remote], signal)
       const checkout = path.join(directory, 'repositories', source.repo_id)
       await mkdir(path.dirname(checkout), { recursive: true })
       await this.git(directory, ['clone', '--no-hardlinks', '--no-checkout', '--', sourcePath, checkout], signal)
@@ -284,11 +284,20 @@ export class FaultInjectionService {
         try { const value = await this.git(sourcePath, ['config', '--get', setting], signal); if (value) await this.git(checkout, ['config', setting, value], signal) }
         catch (error) { if (signal.aborted) throw error }
       }
-      if (remoteUrl) await this.git(checkout, ['remote', 'set-url', 'origin', remoteUrl], signal)
-      else await this.git(checkout, ['remote', 'remove', 'origin'], signal)
-      await this.git(checkout, ['checkout', '-b', record.branch, baseCommit], signal)
-      record.repositories.push({ repo_id: source.repo_id, path: checkout, base_commit: baseCommit, analysis_commit: source.analysis_commit,
-        has_remote: Boolean(remoteUrl), branch: record.branch, commit: null, pushed: false })
+      await this.git(checkout, ['remote', 'set-url', 'origin', remoteUrl], signal)
+      // Fetch exactly the configured existing branch. Missing remote branches are not created.
+      await this.git(checkout, ['fetch', '--no-tags', 'origin', `refs/heads/${branch}`], signal)
+      const remoteHead = await this.git(checkout, ['rev-parse', 'FETCH_HEAD'], signal)
+      const ancestor = await this.git(checkout, ['merge-base', baseCommit, remoteHead], signal)
+      if (ancestor !== baseCommit && ancestor !== remoteHead) throw serviceError(`${source.repo_id}：个人分支与远端已分叉，请先处理冲突`)
+      const target = ancestor === baseCommit ? remoteHead : baseCommit
+      const ahead = Number(await this.git(checkout, ['rev-list', '--count', `${remoteHead}..${target}`], signal))
+      await this.git(checkout, ['checkout', '--detach', target], signal)
+      source.comparison = await compareSnapshot(checkout, target, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
+      record.repositories.push({ repo_id: source.repo_id, path: checkout, source_path: sourcePath,
+        base_commit: target, source_head: baseCommit, remote_head: remoteHead, remote_url: remoteUrl,
+        outgoing_count: ahead, analysis_commit: source.analysis_commit,
+        has_remote: true, branch, commit: null, pushed: false })
       await this.save(directory, record)
     }
     signal.throwIfAborted()
@@ -318,17 +327,10 @@ export class FaultInjectionService {
       repo.diff = await this.git(repo.path, ['diff', '--cached', '--no-ext-diff', '--no-textconv'], signal)
       if (!repo.diff) continue
       repo.diff_sha256 = hash(repo.diff)
-      const author = []
-      for (const [setting, fallback] of [['user.name', 'PANGEA'], ['user.email', 'pangea@localhost']]) {
-        try { await this.git(repo.path, ['config', '--get', setting], signal) }
-        catch (error) { if (signal.aborted) throw error; author.push('-c', `${setting}=${fallback}`) }
-      }
-      await this.git(repo.path, [...author, 'commit', '--no-gpg-sign', '-m', `test: fault injection ${record.id}`], signal)
-      repo.commit = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
       repo.files = files
       await this.save(directory, record)
     }
-    if (!record.repositories.some(repo => repo.commit)) throw serviceError('本次没有形成代码差异')
+    if (!record.repositories.some(repo => repo.diff)) throw serviceError('本次没有形成代码差异')
     record.generation_complete = true
     record.status = 'ready'; record.error = null; await this.save(directory, record)
   }
@@ -338,35 +340,140 @@ export class FaultInjectionService {
     const work = Promise.resolve().then(callback); this.queues.set(key, work)
     try { return await work } finally { this.queues.delete(key) }
   }
-  async push(dataRoot, runId, taskId, { background = false } = {}) {
+  async branchExclusive(record, callback, signal) {
+    const keys = []
+    for (const repo of record.repositories) {
+      const common = await this.git(repo.source_path, ['rev-parse', '--git-common-dir'])
+      keys.push(path.join(await realpath(path.resolve(repo.source_path, common)), `pangea-injection-${hash(repo.branch).slice(0, 24)}.lock`))
+    }
+    const releases = []
+    try {
+      for (const key of [...new Set(keys)].sort()) {
+        const previous = this.branchQueues.get(key) || Promise.resolve()
+        let release; const gate = new Promise(resolve => { release = resolve })
+        const tail = previous.then(() => gate)
+        this.branchQueues.set(key, tail)
+        releases.push(async () => { release(); if (this.branchQueues.get(key) === tail) this.branchQueues.delete(key) })
+        signal?.throwIfAborted()
+        let onAbort
+        try {
+          await Promise.race([previous, new Promise((_, reject) => {
+            onAbort = () => reject(signal.reason || new Error('打桩任务已停止'))
+            signal?.addEventListener('abort', onAbort, { once: true })
+          })])
+        } finally { if (onAbort) signal?.removeEventListener('abort', onAbort) }
+        signal?.throwIfAborted()
+        let handle
+        try { handle = await open(key, 'wx') }
+        catch (error) {
+          if (error.code !== 'EEXIST') throw error
+          let owner
+          try { owner = JSON.parse(await readFile(key, 'utf8')) } catch {}
+          let dead = false
+          if (Number.isInteger(owner?.pid) && owner.pid > 0) {
+            try { process.kill(owner.pid, 0) } catch (reason) { dead = reason.code === 'ESRCH' }
+          }
+          if (!dead) throw serviceError('同一分支正在被另一打桩操作使用，请稍后重试', 409)
+          await unlink(key)
+          handle = await open(key, 'wx')
+        }
+        releases.push(async () => { await handle.close(); await unlink(key) })
+        await handle.writeFile(JSON.stringify({ pid: process.pid, task: record.id }))
+      }
+      return await callback()
+    } finally { for (const release of releases.reverse()) await release() }
+  }
+  async push(dataRoot, runId, taskId, { background = false, acknowledged_heads = {} } = {}) {
     return this.exclusive(dataRoot, runId, taskId, async () => {
       const record = await this.read(dataRoot, runId, taskId), directory = await this.directory(dataRoot, runId, taskId)
+      if (record.schema_version !== 2) throw serviceError('旧任务使用任务分支，请按项目个人分支配置重新生成；本次不会推送旧分支')
       if (record.status === 'pushed') return record
       if (!['ready', 'interrupted'].includes(record.status) || !record.generation_complete) throw serviceError('请先完整生成本次代码修改')
       const controller = new AbortController(), key = this.key(dataRoot, runId, taskId)
       const operation = { controller, done: null }
-      record.status = 'pushing'; record.error = null; await this.save(directory, record)
+      record.status = 'pushing'; record.error = null
       this.active.set(key, operation)
-      operation.done = (async () => {
+      const published = this.save(directory, record)
+      operation.done = published.then(() => this.branchExclusive(record, async () => {
+        const signal = controller.signal
         try {
+          // Check all repositories before making the first local commit.
           for (const repo of record.repositories) {
-            if (!repo.commit || repo.pushed) continue
-            if (!repo.has_remote) {
-              const source = record.source_repositories.find(item => item.repo_id === repo.repo_id)
-              const remoteUrl = await this.git(source.source_path, ['remote', 'get-url', '--push', source.remote || 'origin'], controller.signal)
-              await this.git(repo.path, ['remote', 'add', 'origin', remoteUrl], controller.signal)
-              repo.has_remote = true
+            signal.throwIfAborted()
+            if (!repo.diff || repo.pushed) continue
+            // A cancellation may arrive after Git has written the commit but before
+            // its SHA was saved. Recover only this task's exact reviewed change.
+            if (repo.commit_started && !repo.commit) {
+              const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+              if (head !== repo.base_commit) {
+                const parent = await this.git(repo.path, ['rev-parse', `${head}^`], signal)
+                const subject = await this.git(repo.path, ['log', '-1', '--format=%s', head], signal)
+                const committedDiff = await this.git(repo.path, ['diff', '--no-ext-diff', '--no-textconv', repo.base_commit, head], signal)
+                if (parent !== repo.base_commit || subject !== `test: fault injection ${record.id}` || hash(committedDiff) !== repo.diff_sha256) throw serviceError(`${repo.repo_id}：中断后提交不匹配，请重新生成`)
+                repo.commit = head; await this.save(directory, record)
+              }
             }
+            const configured = await readRepositorySettings(dataRoot, repo.repo_id)
+            const configuredPath = await realpath(configured.git_path || path.join(dataRoot, 'repositories', repo.repo_id))
+            if (configuredPath !== repo.source_path) throw serviceError(`${repo.repo_id}：项目源码目录已变更，请重新生成`)
+            if (configured.personal_branch !== repo.branch) throw serviceError(`${repo.repo_id}：项目个人分支已变更，请重新生成`)
+            const remoteUrl = await this.git(repo.source_path, ['remote', 'get-url', '--push', configured.remote || 'origin'], signal)
+            if (remoteUrl !== repo.remote_url) throw serviceError(`${repo.repo_id}：推送远端已变更，请重新生成`)
+            const currentBranch = await this.git(repo.source_path, ['branch', '--show-current'], signal)
+            if (currentBranch !== repo.branch) throw serviceError(`${repo.repo_id}：请将开发工作区切换到个人分支 ${repo.branch} 后重试`)
+            const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
+            if (local !== repo.source_head && local !== repo.commit) throw serviceError(`${repo.repo_id}：个人分支已有新提交，请重新生成打桩修改`)
+            await this.git(repo.path, ['fetch', '--no-tags', 'origin', `refs/heads/${repo.branch}`], signal)
+            const remote = await this.git(repo.path, ['rev-parse', 'FETCH_HEAD'], signal)
+            if (remote !== repo.remote_head && remote !== repo.commit) throw serviceError(`${repo.repo_id}：远端分支已更新，请重新生成打桩修改`)
+            if (repo.outgoing_count > 0 && acknowledged_heads[repo.repo_id] !== repo.base_commit && !repo.commit) throw serviceError(`${repo.repo_id}：推送将包含个人分支上 ${repo.outgoing_count} 个已有未推送提交，请确认后继续`)
+            if (!repo.commit) {
+              const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+              const diff = await this.git(repo.path, ['diff', '--cached', '--no-ext-diff', '--no-textconv'], signal)
+              if (head !== repo.base_commit || hash(diff) !== repo.diff_sha256 || await this.git(repo.path, ['diff', '--name-only'], signal)) throw serviceError(`${repo.repo_id}：待提交修改已变化，请重新生成`)
+            }
+            const dirty = new Set([
+              ...((await this.git(repo.source_path, ['diff', '--name-only', '-z'], signal)).split('\0')),
+              ...((await this.git(repo.source_path, ['diff', '--cached', '--name-only', '-z'], signal)).split('\0')),
+              ...((await this.git(repo.source_path, ['ls-files', '--others', '--exclude-standard', '-z'], signal)).split('\0')),
+            ].filter(Boolean))
+            if (repo.files.some(file => dirty.has(file))) throw serviceError(`${repo.repo_id}：本次修改文件存在未提交内容，请先处理后重试`)
+          }
+          for (const repo of record.repositories) {
+            signal.throwIfAborted()
+            if (!repo.diff || repo.pushed) continue
             record.current_repository = repo.repo_id; await this.save(directory, record)
-            await this.git(repo.path, ['push', 'origin', `${repo.commit}:refs/heads/${repo.branch}`], controller.signal)
+            if (!repo.commit) {
+              repo.commit_started = true; await this.save(directory, record)
+              const author = []
+              for (const [name, fallback] of [['user.name', 'PANGEA'], ['user.email', 'pangea@localhost']]) {
+                try { await this.git(repo.path, ['config', '--get', name], signal) }
+                catch (error) { signal.throwIfAborted(); author.push('-c', `${name}=${fallback}`) }
+              }
+              await this.git(repo.path, [...author, 'commit', '--no-gpg-sign', '-m', `test: fault injection ${record.id}`], signal)
+              repo.commit = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+              await this.save(directory, record)
+            }
+            const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
+            if (local !== repo.commit) {
+              if (local !== repo.source_head || await this.git(repo.source_path, ['branch', '--show-current'], signal) !== repo.branch) throw serviceError(`${repo.repo_id}：个人分支已变化，请重新生成`)
+              // Address A explicitly, never merge into whichever branch happens to be
+              // checked out after preflight. updateInstead also protects dirty files.
+              await this.git(repo.path, ['push', '--receive-pack=git -c core.hooksPath= -c receive.denyCurrentBranch=updateInstead receive-pack',
+                repo.source_path, `${repo.commit}:refs/heads/${repo.branch}`], signal)
+            }
+            repo.local_applied = true; await this.save(directory, record)
+            // Plain fast-forward push: never create a task ref or force overwrite.
+            await this.git(repo.path, ['push', 'origin', `${repo.commit}:refs/heads/${repo.branch}`], signal)
             repo.pushed = true; await this.save(directory, record)
           }
           record.status = 'pushed'
-        } catch (error) { record.status = 'ready'; record.error = controller.signal.aborted ? '推送已停止，可继续推送剩余仓库' : cleanError(error) }
+        } catch (error) { record.status = 'ready'; record.error = controller.signal.aborted ? '提交或推送已停止，已提交内容保留，可重试' : cleanError(error) }
         await this.save(directory, record)
         return record
-      })().finally(() => this.active.delete(key))
-      if (background) operation.done.catch(() => {}) // read() exposes interrupted work if final persistence failed.
+      }, controller.signal)).catch(async error => { record.status = 'ready'; record.error = cleanError(error); await this.save(directory, record); return record }).finally(() => this.active.delete(key))
+      if (background) operation.done.catch(() => {})
+      await published
       return background ? structuredClone(record) : operation.done
     })
   }
@@ -375,9 +482,9 @@ export class FaultInjectionService {
     if (activeStates.has(previous.status)) throw serviceError('请先停止当前任务')
     return this.start({ dataRoot, cwd,
       run: { run_id: runId, source_snapshot: { repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })) }, details: { test_cases: previous.cases } },
-      input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ ...repo, base_ref: previous.repositories.find(item => item.repo_id === repo.repo_id)?.base_commit || repo.base_ref })),
+      input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })),
         baseline_acknowledged: previous.baseline_acknowledged, provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
-        pipeline_url: previous.pipeline_url, name: previous.name, branch_prefix: previous.branch.slice(0, previous.branch.lastIndexOf('/')) } })
+        pipeline_url: previous.pipeline_url, name: previous.name } })
   }
   async recordVerification(dataRoot, runId, taskId, input) {
     return this.exclusive(dataRoot, runId, taskId, async () => {

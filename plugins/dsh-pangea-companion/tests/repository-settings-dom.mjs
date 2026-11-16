@@ -18,6 +18,8 @@ await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true }); await wr
 await mkdir(plain); await mkdir(git); await writeFile(path.join(plain, 'x.c'), 'source')
 await sourceGit(git, ['init', '-b', 'main']); await sourceGit(git, ['config', 'user.name', 'Test']); await sourceGit(git, ['config', 'user.email', 'test@example.test'])
 await writeFile(path.join(git, 'x.c'), 'source'); await sourceGit(git, ['add', '.']); await sourceGit(git, ['commit', '-m', 'base'])
+await sourceGit(root, ['clone', '--bare', git, path.join(root, 'remote.git')])
+await sourceGit(git, ['remote', 'add', 'origin', path.join(root, 'remote.git')])
 await importRepository({ dataRoot, sourcePath: plain, repositoryId: 'plain' })
 globalThis.fetch = async (url, options = {}) => {
   const req = Readable.from(options.body ? [options.body] : []); req.url = url; req.method = options.method || 'GET'; req.headers = { 'sec-fetch-site': 'same-origin' }
@@ -36,12 +38,16 @@ try {
   await change('项目构建流水线 URL', 'https://ci.example.test/project')
   await change('关联 Git 仓库目录', git)
   await change('关联分支、标签或提交', 'main')
+  await change('个人开发分支', 'main')
+  await change('推送远端', 'origin')
   await click('保存仓库与构建配置'); await until(() => saved === 1)
   assert.match(container.textContent, /已关联打桩仓库/)
   const config = await readRepositorySettings(dataRoot, 'plain')
   assert.equal(config.pipeline_url, 'https://ci.example.test/project'); assert.equal(await realpath(config.git_path), await realpath(git))
+  assert.equal(config.personal_branch, 'main'); assert.equal(config.remote, 'origin')
   assert.equal(config.base_ref, await sourceGit(git, ['rev-parse', 'HEAD']))
   await click('代码仓库与构建'); await click('代码仓库与构建')
   await until(() => container.querySelector('[aria-label="项目构建流水线 URL"]').value === 'https://ci.example.test/project')
+  assert.equal(container.querySelector('[aria-label="个人开发分支"]').value, 'main')
   console.log('PASS: repository settings React DOM → real route → Git association → saved pipeline → reopen')
 } finally { await act(async () => renderer.unmount()); await window.happyDOM.abort(); await rm(root, { recursive: true, force: true }) }
