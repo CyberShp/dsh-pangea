@@ -9,6 +9,7 @@ import { withGitLongPaths } from './git-environment.js'
 
 const exec = promisify(execFile)
 export async function sourceGit(cwd, args) {
+  const startedAt = Date.now()
   try {
     // Do not pass a potentially >260-character path to Windows process creation.
     const signal = repositoryOperationSignal()
@@ -16,8 +17,17 @@ export async function sourceGit(cwd, args) {
       env: { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' } }), { cwd, signal })).stdout.trimEnd()
   } catch (error) {
     repositoryOperationSignal()?.throwIfAborted()
-    if (error.code === 'ENOENT') throw Object.assign(new Error('未安装 Git；本地目录分析仍可使用，克隆和打桩需要 Git'), { code: 'GIT_MISSING' })
-    throw new Error(String(error.stderr || error.message).replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@'))
+    const failure = error.code === 'ENOENT'
+      ? Object.assign(new Error('未安装 Git；本地目录分析仍可使用，克隆和打桩需要 Git'), { code: 'GIT_MISSING' })
+      : new Error(String(error.stderr || error.message).replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@'))
+    failure.gitDiagnostic = {
+      subcommand: /^[a-z][a-z-]*$/.test(args[0] || '') ? args[0] : 'git',
+      exit_code: Number.isInteger(error.code) ? error.code : null,
+      signal: error.signal || null,
+      elapsed_ms: Math.max(0, Date.now() - startedAt),
+      lfs_skip_smudge: '1',
+    }
+    throw failure
   }
 }
 export function validateGitUrl(value) {
@@ -240,8 +250,53 @@ export async function checkoutImportedBranch(root, ref = 'HEAD') {
   return branch
 }
 export async function verifyImportedCheckout(root) {
-  const tree = await sourceGit(root, ['rev-parse', 'HEAD^{tree}'])
-  if (await sourceGit(root, ['write-tree']) !== tree || await sourceGit(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])) throw new Error('克隆后的索引或工作区不完整；未发布该仓库，请重新导入')
+  const diagnostic = { head_tree: null, index_tree: null, status_entries: [], status_entry_count: 0, status_entries_truncated: false }
+  let primaryError, statusOutput
+  try {
+    diagnostic.head_tree = await sourceGit(root, ['rev-parse', 'HEAD^{tree}'])
+    diagnostic.index_tree = await sourceGit(root, ['write-tree'])
+  } catch (error) { primaryError = error }
+  const indexMismatch = diagnostic.head_tree !== null && diagnostic.index_tree !== null && diagnostic.head_tree !== diagnostic.index_tree
+  try {
+    statusOutput = await sourceGit(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+    const fields = statusOutput.split('\0')
+    for (let i = 0; i < fields.length; i++) {
+      if (!fields[i]) continue
+      const entry = { status: fields[i].slice(0, 2), path: fields[i].slice(3) }
+      // Porcelain -z emits destination first, then the original path as a
+      // separate NUL field for rename/copy records. Do not split on newlines.
+      if (/[RC]/.test(entry.status)) entry.original_path = fields[++i] ?? ''
+      diagnostic.status_entry_count++
+      if (diagnostic.status_entries.length < 100) diagnostic.status_entries.push(entry)
+    }
+    diagnostic.status_entries_truncated = diagnostic.status_entry_count > diagnostic.status_entries.length
+  } catch (error) {
+    // If a tree mismatch is already established, failure to collect additional
+    // status evidence must not replace that failure with a secondary error.
+    diagnostic.status_error = error.message
+    if (!primaryError && !indexMismatch) primaryError = error
+  }
+  if (primaryError) {
+    primaryError.checkoutDiagnostic = diagnostic
+    throw primaryError
+  }
+  if (!indexMismatch && !statusOutput) return
+  const reasons = []
+  if (indexMismatch) reasons.push('索引与 HEAD 不一致')
+  if (diagnostic.status_entry_count) {
+    const describe = entry => {
+      const kind = entry.status === '??' ? '未跟踪' : entry.status.includes('U') ? '冲突'
+        : entry.status.includes('D') ? '缺失/删除' : entry.status.includes('R') ? '重命名'
+          : entry.status.includes('C') ? '复制' : entry.status.includes('A') ? '新增'
+            : entry.status.includes('T') ? '类型变化' : '修改'
+      return `${kind} [${entry.status}] ${JSON.stringify(entry.path)}${entry.original_path !== undefined ? `（原路径 ${JSON.stringify(entry.original_path)}）` : ''}`
+    }
+    reasons.push(`工作区/索引有 ${diagnostic.status_entry_count} 项差异：${diagnostic.status_entries.slice(0, 6).map(describe).join('；')}${diagnostic.status_entry_count > 6 ? '；其余见诊断记录' : ''}`)
+  }
+  if (diagnostic.status_error) reasons.push('工作区差异读取失败，详见诊断记录')
+  throw Object.assign(new Error(`克隆后的索引或工作区不完整：${reasons.join('；')}。仓库尚未发布。`), {
+    code: 'GIT_CHECKOUT_INCOMPLETE', checkoutDiagnostic: diagnostic,
+  })
 }
 
 export async function pullRepositoryLfs(dataRoot, repoId, input) {

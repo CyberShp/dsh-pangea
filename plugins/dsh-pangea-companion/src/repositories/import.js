@@ -1,6 +1,7 @@
 import { repositoryOperationSignal, repositoryOperation } from './operations.js'
 import { inspectSource, checkoutImportedBranch, sourceGit, validateGitUrl, validateRef, validatePipeline, readRepositorySettings, saveRepositorySettings } from './git-source.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { writeTaskStoreFile } from '../task-store.js'
 import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
@@ -24,6 +25,12 @@ async function directoryHasEntries(directory) {
 
 async function hasMeaningfulData(dataRoot) {
   for (const name of MEANINGFUL_DIRECTORIES) {
+    if (name === 'repositories' || name === '.pangea') {
+      let entries
+      try { entries = await readdir(path.join(dataRoot, name)) } catch (error) { if (error.code === 'ENOENT') continue; throw error }
+      if (entries.some(entry => name === 'repositories' ? !entry.startsWith('.pangea-import-') : !['repository-imports', 'repository-locks'].includes(entry))) return true
+      continue
+    }
     if (await directoryHasEntries(path.join(dataRoot, name))) return true
   }
   return false
@@ -87,6 +94,31 @@ async function repositoryItems(repositoriesRoot) {
     .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
 }
 
+// The key binds a retained clone to this exact import request. Do not persist
+// credential-bearing URLs, and never reuse a directory selected by a journal.
+function remoteImportPaths(dataRoot, repositoriesRoot, name, url, ref) {
+  const key = createHash('sha256').update(JSON.stringify([name, url, ref])).digest('hex')
+  return {
+    key,
+    staging: path.join(repositoriesRoot, `.pangea-import-${key}`),
+    journal: path.join(dataRoot, '.pangea', 'repository-imports', `${key}.json`),
+  }
+}
+
+async function reusableClone(attempt) {
+  let stat
+  try { stat = await lstat(attempt.staging) } catch (error) { if (error.code === 'ENOENT') return false; throw error }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`导入暂存路径不是普通目录：${attempt.staging}`)
+  let previous
+  try { previous = JSON.parse(await readFile(attempt.journal, 'utf8')) } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error }
+  if (previous?.import_key !== attempt.key || previous.clone_complete !== true) {
+    throw new Error(`上次导入暂存目录尚未确认克隆完成，已保留：${attempt.staging}；诊断记录：${attempt.journal}`)
+  }
+  const git = await lstat(path.join(attempt.staging, '.git'))
+  if (!git.isDirectory() || git.isSymbolicLink()) throw new Error(`导入暂存目录缺少独立 Git 数据：${attempt.staging}`)
+  return true
+}
+
 export async function repositoryStatus(dataRoot) {
   await recoverRepositoryImports(dataRoot)
   const repositoriesRoot = path.join(dataRoot, 'repositories')
@@ -130,11 +162,31 @@ export async function importRepository({ dataRoot, sourcePath, repositoryId, git
     if (error?.code !== 'ENOENT') throw error
   }
 
-  const temporaryDestination = path.join(resolvedRepositoriesRoot, `.pangea-import-${randomUUID()}`)
+  const attempt = remoteUrl ? remoteImportPaths(dataRoot, resolvedRepositoriesRoot, name, remoteUrl, ref) : null
+  const temporaryDestination = attempt?.staging || path.join(resolvedRepositoriesRoot, `.pangea-import-${randomUUID()}`)
+  let cloneComplete = false, phase = remoteUrl ? 'clone' : 'copy'
+  const startedAt = new Date().toISOString()
+  const recordAttempt = async extra => {
+    if (!attempt) return
+    await writeTaskStoreFile(attempt.journal, JSON.stringify({
+      schema_version: 1, import_key: attempt.key, repository_id: name,
+      started_at: startedAt, updated_at: new Date().toISOString(), phase,
+      clone_complete: cloneComplete, lfs_skip_smudge: '1', ...extra,
+    }, null, 2), { errorLabel: '导入诊断保存失败' })
+  }
+  // Resolve ownership before entering cleanup: an unrecognised retained path
+  // must never be deleted, even if its journal is missing or damaged.
+  if (attempt) cloneComplete = await reusableClone(attempt)
   let destinationCreated = false
   try {
     if (remoteUrl) {
-      await sourceGit(resolvedRepositoriesRoot, ['clone', '--no-checkout', '--', remoteUrl, temporaryDestination])
+      if (!cloneComplete) {
+        await recordAttempt({ status: 'running' })
+        await sourceGit(resolvedRepositoriesRoot, ['clone', '--no-checkout', '--', remoteUrl, temporaryDestination])
+        cloneComplete = true
+      }
+      phase = 'checkout-and-verify'
+      await recordAttempt({ status: 'running' })
       await checkoutImportedBranch(temporaryDestination, ref)
     } else {
       // A linked worktree's .git file points outside the directory. Materialize its history first.
@@ -159,15 +211,37 @@ export async function importRepository({ dataRoot, sourcePath, repositoryId, git
       })
     }
     repositoryOperationSignal()?.throwIfAborted()
+    phase = 'publish'
     await rename(temporaryDestination, destination)
     destinationCreated = true
     await saveRepositorySettings(dataRoot, name, { pipeline_url: pipeline })
     await writeMarker(dataRoot, name)
   } catch (error) {
-    await rm(temporaryDestination, { recursive: true, force: true }).catch(() => {})
-    if (destinationCreated) await rm(destination, { recursive: true, force: true }).catch(() => {})
+    // Keep a completed download even when checkout/validation/publication fails.
+    // Retry uses normal checkout, never reset/restore/clean over retained edits.
+    if (attempt && cloneComplete) {
+      let retainedPath = temporaryDestination
+      if (destinationCreated) {
+        try { await rename(destination, temporaryDestination) }
+        catch { retainedPath = destination }
+      }
+      error.message += `；已保留下载的仓库：${retainedPath}。${retainedPath === temporaryDestination ? '使用相同地址、分支和仓库名称重试将复用下载内容。' : '目录回移失败，请先检查该目录；再次导入不会覆盖它。'}`
+    } else {
+      await rm(temporaryDestination, { recursive: true, force: true }).catch(() => {})
+      if (destinationCreated) await rm(destination, { recursive: true, force: true }).catch(() => {})
+    }
+    if (attempt) {
+      try {
+        await recordAttempt({ status: 'failed', error: error.message, checkout: error.checkoutDiagnostic, git: error.gitDiagnostic })
+        error.message += ` 诊断记录：${attempt.journal}`
+      } catch (diagnosticError) { error.message += `；诊断记录未能保存：${diagnosticError.message}` }
+    }
     throw error
   }
+
+  // Diagnostics are ancillary after publication; a log write cannot turn a
+  // successfully imported repository into a failed import.
+  if (attempt) await recordAttempt({ status: 'completed', clone_complete: false }).catch(() => {})
 
   return { repository_id: name, name, source: await inspectSource(destination) }
 }
