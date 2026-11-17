@@ -56,3 +56,33 @@ test('expanded context reads only the frozen Run copy and retains the cited line
     assert.ok(snippet.lines.every(line => !line.text.includes('workspace-edited')))
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+test('long frozen paths support evidence preview and supplemental integrity without exposing namespace prefixes', async () => {
+  const { createHash } = await import('node:crypto')
+  const { readSavedSupplementalSources } = await import('../src/source.js')
+  const run = await mkdtemp(path.join(os.tmpdir(), 'pangea-long-source-'))
+  try {
+    const root = path.join(run, 'inputs', 'source')
+    const relative = ['src', 'network_' + 'a'.repeat(65), 'transport_' + 'b'.repeat(65), '目录 with space_' + 'c'.repeat(65), 'main.cpp'].join('/')
+    const file = path.join(root, 'repo', relative)
+    assert.ok(file.length > 260)
+    const content = '// frozen\nint marker(void) { return 7; }\n'
+    await mkdir(path.toNamespacedPath(path.dirname(file)), { recursive: true })
+    await writeFile(path.toNamespacedPath(file), content)
+    const options = { snapshotRoot: root, snapshotLayout: 'source-first', repositoryId: 'repo', location: `repo:${relative}:2` }
+    const snippet = await readEvidenceSnippet(options)
+    assert.equal(snippet.file_path, file)
+    assert.equal(snippet.lines.find(line => line.number === 2).text, 'int marker(void) { return 7; }')
+    const item = { repo_id: 'repo', path: relative, bytes: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex') }
+    await writeFile(path.join(run, 'inputs', 'source-supplemental.json'), JSON.stringify({ format_version: 'pangea-source-supplemental-v1', files: [item] }))
+    assert.equal((await readSavedSupplementalSources(run))[0].content, content)
+    await writeFile(path.toNamespacedPath(file), 'corrupt')
+    await assert.rejects(readSavedSupplementalSources(run), /校验失败/)
+    // Resolve long paths before enforcing the same symlink/junction boundary.
+    const outside = path.join(run, 'outside')
+    await mkdir(outside)
+    await writeFile(path.join(outside, 'escape.c'), 'outside')
+    await symlink(outside, path.toNamespacedPath(path.join(path.dirname(file), 'escape')), 'junction')
+    await assert.rejects(readEvidenceSnippet({ ...options, location: `repo:${relative.replace('main.cpp', 'escape/escape.c')}:1` }), /escapes/)
+  } finally { await rm(path.toNamespacedPath(run), { recursive: true, force: true }) }
+})

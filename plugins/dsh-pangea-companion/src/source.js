@@ -63,12 +63,12 @@ export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoo
   const resolved = resolveEvidenceFile({ cwd, dataRoot, location, snapshotRoot, repositoryId, snapshotLayout })
   let readPath = resolved.filePath
   if (hasText(snapshotRoot)) {
-    const [root, file] = await Promise.all([realpath(snapshotRoot), realpath(resolved.filePath)])
+    const [root, file] = await Promise.all([realpath(path.toNamespacedPath(snapshotRoot)), realpath(path.toNamespacedPath(resolved.filePath))])
     const relative = path.relative(root, file)
     if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) throw new Error('evidence path escapes the frozen source snapshot')
     readPath = file
   }
-  const raw = await readFile(readPath, 'utf8')
+  const raw = await readFile(path.toNamespacedPath(readPath), 'utf8')
   if (raw.includes('\u0000')) throw new Error('evidence file is not readable text')
 
   const allLines = raw.split(/\r?\n/)
@@ -103,7 +103,7 @@ export async function readEvidenceSnippet({ cwd, dataRoot, location, snapshotRoo
 export async function readSupplementalSourceManifest(runDirectory) {
   const filename = path.join(runDirectory, 'inputs', 'source-supplemental.json')
   let raw
-  try { raw = await readFile(filename, 'utf8') } catch (error) { if (error.code === 'ENOENT') return { files: [] }; throw error }
+  try { raw = await readFile(path.toNamespacedPath(filename), 'utf8') } catch (error) { if (error.code === 'ENOENT') return { files: [] }; throw error }
   const value = JSON.parse(raw)
   if (value.format_version !== 'pangea-source-supplemental-v1' || !Array.isArray(value.files)) throw new Error('补充源码清单格式无效')
   const seen = new Set()
@@ -122,17 +122,17 @@ export async function readSupplementalSourceManifest(runDirectory) {
 export async function readSavedSupplementalSources(runDirectory) {
   const manifest = await readSupplementalSourceManifest(runDirectory)
   if (!manifest.files.length) return []
-  const runRoot = await realpath(runDirectory)
-  const root = await realpath(path.join(runDirectory, 'inputs', 'source'))
+  const runRoot = await realpath(path.toNamespacedPath(runDirectory))
+  const root = await realpath(path.toNamespacedPath(path.join(runDirectory, 'inputs', 'source')))
   const sourceRelative = path.relative(runRoot, root)
   if (path.isAbsolute(sourceRelative) || sourceRelative === '..' || sourceRelative.startsWith(`..${path.sep}`)) throw new Error('补充源码路径越出 Run 快照')
   const result = []
   for (const item of manifest.files) {
     const repository = path.join(root, item.repo_id)
-    const file = await realpath(path.join(repository, item.path))
+    const file = await realpath(path.toNamespacedPath(path.join(repository, item.path)))
     const relative = path.relative(repository, file)
     if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`)) throw new Error('补充源码路径越出仓库快照')
-    const bytes = await readFile(file)
+    const bytes = await readFile(path.toNamespacedPath(file))
     if (item.bytes !== bytes.length || item.sha256 !== createHash('sha256').update(bytes).digest('hex')) throw new Error(`补充源码校验失败：${item.repo_id}:${item.path}`)
     result.push({ ...item, content: bytes.toString('utf8') })
   }
