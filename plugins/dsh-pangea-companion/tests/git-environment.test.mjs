@@ -69,3 +69,25 @@ test('non-Windows Git keeps its existing configuration and allocates no files', 
   }, { env, platform: 'linux', tempRoot: '/missing/not-used' })
   assert.equal(env.GIT_CONFIG_GLOBAL, 'original')
 })
+
+
+test('explicit fixture configuration survives disposable Windows overlays', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'git-env-fixture-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const config = path.join(root, 'fixture config')
+  const remote = path.join(root, 'remote.git').replaceAll('\\', '/')
+  await writeFile(config, '')
+  const options = { env: { ...process.env, GIT_CONFIG_GLOBAL: config, GIT_CONFIG_NOSYSTEM: '1' }, platform: 'win32', tempRoot: root }
+  const git = async (args, env) => (await exec('git', args, { env, cwd: root, windowsHide: true })).stdout.trimEnd()
+  // Each write and read gets a different overlay, even on a Linux test host.
+  for (const [key, value] of [[`url.${remote}.insteadOf`, 'https://import-fixture.test/repo.git'],
+    ['filter.import-fixture.smudge', 'fixture-command smudge'], ['filter.import-fixture.required', 'true']]) {
+    await withGitLongPaths(env => git(['config', '--file', config, key, value], env), options)
+  }
+  await withGitLongPaths(async env => {
+    assert.equal(await git(['ls-remote', '--get-url', 'https://import-fixture.test/repo.git'], env), remote)
+    assert.equal(await git(['config', '--get', 'filter.import-fixture.smudge'], env), 'fixture-command smudge')
+    assert.equal(await git(['config', '--get', 'filter.import-fixture.required'], env), 'true')
+  }, options)
+  assert.deepEqual(await readdir(root), ['fixture config'])
+})

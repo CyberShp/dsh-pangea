@@ -40,12 +40,17 @@ const mode = fs.readFileSync(${JSON.stringify(modeFile)}, 'utf8');
 if (process.argv[2] === 'smudge' && mode === 'fail') { process.stderr.write('fixture checkout failure'); process.exit(17); }
 process.stdout.write(process.argv[2] === 'smudge' && mode === 'dirty' ? Buffer.from('int transformed;\\n') : bytes);
 `)
+  // Write the fixture-owned file explicitly: on Windows sourceGit redirects
+  // GIT_CONFIG_GLOBAL to a disposable longpaths overlay for each invocation.
   const command = `"${process.execPath.replaceAll('\\', '/')}" "${script.replaceAll('\\', '/')}"`
-  await sourceGit(root, ['config', '--global', `url.${remote.replaceAll('\\', '/')}.insteadOf`, 'https://import-fixture.test/repo.git'])
-  await sourceGit(root, ['config', '--global', 'filter.import-fixture.smudge', `${command} smudge`])
-  await sourceGit(root, ['config', '--global', 'filter.import-fixture.clean', `${command} clean`])
-  await sourceGit(root, ['config', '--global', 'filter.import-fixture.required', 'true'])
+  await sourceGit(root, ['config', '--file', config, `url.${remote.replaceAll('\\', '/')}.insteadOf`, 'https://import-fixture.test/repo.git'])
+  await sourceGit(root, ['config', '--file', config, 'filter.import-fixture.smudge', `${command} smudge`])
+  await sourceGit(root, ['config', '--file', config, 'filter.import-fixture.clean', `${command} clean`])
+  await sourceGit(root, ['config', '--file', config, 'filter.import-fixture.required', 'true'])
   const input = { dataRoot, repositoryId: 'project', gitUrl: 'https://import-fixture.test/repo.git', baseRef: 'main' }
+  // Verify the rewrite without contacting the synthetic HTTPS hostname.
+  assert.equal(await sourceGit(root, ['ls-remote', '--get-url', input.gitUrl]), remote.replaceAll('\\', '/'))
+  assert.equal(await sourceGit(root, ['config', '--get', 'filter.import-fixture.smudge']), `${command} smudge`)
   const setMode = value => writeFile(modeFile, value)
   const pending = async () => {
     const paths = (await readdir(path.join(dataRoot, 'repositories'))).filter(name => name.startsWith('.pangea-import-'))
@@ -58,7 +63,7 @@ process.stdout.write(process.argv[2] === 'smudge' && mode === 'dirty' ? Buffer.f
     })))
   }
   await setMode('pass')
-  return { root, source, remote, dataRoot, input, commit, setMode, pending, journals }
+  return { root, source, remote, dataRoot, config, input, commit, setMode, pending, journals }
 }
 
 test('checkout failure retains downloaded history and repaired checkout retries offline without cloning again', async t => {
@@ -158,7 +163,7 @@ test('a different URL does not reuse the retained checkout', async t => {
   await assert.rejects(importRepository(f.input), { code: 'GIT_CHECKOUT_INCOMPLETE' })
   const [retained] = await f.pending()
   await writeFile(path.join(retained, 'keep.txt'), 'do not reuse or remove\n')
-  await sourceGit(f.root, ['config', '--global', '--add', `url.${f.remote.replaceAll('\\', '/')}.insteadOf`, 'https://import-fixture.test/alternative.git'])
+  await sourceGit(f.root, ['config', '--file', f.config, '--add', `url.${f.remote.replaceAll('\\', '/')}.insteadOf`, 'https://import-fixture.test/alternative.git'])
   await f.setMode('pass')
   const imported = await importRepository({ ...f.input, gitUrl: 'https://import-fixture.test/alternative.git' })
   assert.equal(imported.source.dirty, false)
