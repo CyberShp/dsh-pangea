@@ -72,6 +72,7 @@ test('buildVerificationShellScript and parseVerificationLog support structured m
 
   const script = buildVerificationShellScript(task)
   assert.match(script, /^#!\/usr\/bin\/env bash/)
+  assert.match(script, /BASH_VERSINFO\[0\]:-0[\s\S]*export -n LC_ALL LC_CTYPE[\s\S]*LC_CTYPE=C[\s\S]*set -euo pipefail/)
   assert.match(script, /\[PANGEA_CASE_BEGIN\] case=unit\/A points=FI_TIMEOUT/)
   assert.match(script, /\[PANGEA_VERIFY\] case=unit\/A result=passed hits=FI_TIMEOUT=1/)
 
