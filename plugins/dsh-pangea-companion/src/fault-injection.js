@@ -8,7 +8,8 @@ import path from 'node:path'
 import { writeTaskStoreFile } from './task-store.js'
 import { caseIdentity } from './case-review-projection.js'
 import { caseContentHash } from './case-review-store.js'
-import { withGitLongPaths } from './repositories/git-environment.js'
+import { withGitLongPaths, disabledHooksPath, shellQuote } from './repositories/git-environment.js'
+import { protectedBranchReason } from './repositories/branch-policy.js'
 
 const execute = promisify(execFile)
 const activeStates = new Set(['preparing', 'generating', 'pushing'])
@@ -22,9 +23,11 @@ const cleanError = error => {
 }
 
 export async function injectionGit(cwd, args, signal) {
+  // Resolve outside the Git error mapping: a temp-file failure is not "Git missing".
+  const hooksPath = await disabledHooksPath()
   try {
     // Keep the process cwd short on Windows; Git handles the long repository path via -C.
-    const result = await withGitLongPaths(env => execute('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], {
+    const result = await withGitLongPaths(env => execute('git', ['-c', `core.hooksPath=${hooksPath}`, '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], {
       signal, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
       env: { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' },
     }), { signal, cwd })
@@ -35,6 +38,43 @@ export async function injectionGit(cwd, args, signal) {
     throw serviceError(cleanError(error), 422)
   }
 }
+
+// Host-side record of a generation checkout. Only differences from this baseline
+// are attributed to the generator; anything already present right after checkout
+// (local Git/LFS configuration, line-ending normalization) is not.
+export async function workspaceSnapshot(git, checkout, signal) {
+  const output = await git(checkout, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], signal)
+  const fields = output.split('\0'), entries = []
+  for (let index = 0; index < fields.length; index++) {
+    const field = fields[index]
+    if (!field) continue
+    const status = field.slice(0, 2), file = field.slice(3)
+    // Porcelain -z emits the original path of a rename/copy as a separate field.
+    if (/[RC]/.test(status)) index++
+    let sha256
+    try {
+      const target = path.join(checkout, file), stat = await lstat(target)
+      sha256 = stat.isFile() ? hash(await readFile(target)) : stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'directory' : 'other'
+    } catch (error) { if (error.code !== 'ENOENT') throw error; sha256 = 'missing' }
+    entries.push({ status, path: file, sha256 })
+  }
+  return entries
+}
+
+// Absent from the baseline: untracked paths are new files, tracked paths were
+// modified or deleted relative to the checked-out commit.
+const entryChange = status => status.includes('?') || status.includes('A') ? 'added' : status.includes('D') ? 'deleted' : 'changed'
+export function workspaceChanges(baseline = [], current = []) {
+  const before = new Map(baseline.map(entry => [entry.path, entry])), after = new Map(current.map(entry => [entry.path, entry]))
+  const changes = []
+  for (const [file, entry] of after) {
+    const previous = before.get(file)
+    if (!previous || previous.status !== entry.status || previous.sha256 !== entry.sha256) changes.push({ path: file, status: entry.status, change: previous ? 'changed' : entryChange(entry.status) })
+  }
+  for (const [file, entry] of before) if (!after.has(file)) changes.push({ path: file, status: entry.status, change: 'reverted' })
+  return changes
+}
+const describeChanges = changes => changes.slice(0, 8).map(item => `${item.change === 'added' ? '新增' : item.change === 'reverted' ? '还原' : item.change === 'deleted' ? '删除' : '修改'} ${JSON.stringify(item.path)}`).join('；') + (changes.length > 8 ? `；另有 ${changes.length - 8} 项` : '')
 
 // The agent supplies the behavior and exact replacement. The host only checks
 // file boundaries and matching bytes; it never decides whether a fault is useful.
@@ -79,10 +119,52 @@ export async function applyInjectionEdits(repositoryRoot, edits) {
   return [...staged.keys()]
 }
 
-export function injectionPrompt({ record, inputPath, outputPath }) {
+// Replace every repeated large value with a pointer to its first occurrence.
+// Lossless: the first copy is kept verbatim and each repeat names where it is.
+const REPEAT_MIN_LENGTH = 160
+export function dedupeRepeatedValues(root) {
+  const seen = new Map()
+  const visit = (node, at) => {
+    const key = typeof node === 'string' ? `s:${node}` : node && typeof node === 'object' ? `j:${JSON.stringify(node)}` : null
+    if (key && key.length - 2 >= REPEAT_MIN_LENGTH) {
+      if (seen.has(key)) return { $same_as: seen.get(key) }
+      seen.set(key, at)
+    }
+    if (Array.isArray(node)) return node.map((item, index) => visit(item, `${at}[${index}]`))
+    if (node && typeof node === 'object') return Object.fromEntries(Object.entries(node).map(([name, value]) => [name, visit(value, `${at}.${name}`)]))
+    return node
+  }
+  return visit(root, '$')
+}
+
+// What the generator reads. The full task record repeats each selected case in
+// its projection, source_record and evidence copies and carries host bookkeeping
+// (status, model, pipeline, verification) the generator never needs.
+export function compactGenerationInput(record, analysisSource) {
+  const sources = new Map((record.source_repositories ?? []).map(repo => [repo.repo_id, repo]))
+  const comparison = value => value && value.available !== false ? {
+    changed_count: value.changed_count ?? 0, files: value.files ?? [], eol_only_count: value.eol_only_count ?? 0, lfs_equivalent_count: value.lfs_equivalent_count ?? 0,
+  } : null
+  return dedupeRepeatedValues({
+    task_id: record.id, run_id: record.run_id, case_keys: record.case_keys,
+    instructions: record.instructions || '',
+    analysis_source: analysisSource,
+    repositories: record.repositories.map(repo => ({
+      repo_id: repo.repo_id, path: repo.path, base_commit: repo.base_commit, analysis_commit: repo.analysis_commit ?? null,
+      personal_branch: repo.branch, outgoing_count: repo.outgoing_count ?? 0,
+      analysis_snapshot_comparison: comparison(sources.get(repo.repo_id)?.comparison),
+    })),
+    cases: (record.cases ?? []).map(({ content_hash, ...item }) => item),
+  })
+}
+
+export function injectionPrompt({ record, inputPath, outputPath, referencePath = null, referenceError = '' }) {
   return [
     '你正在执行独立的 PANGEA 用例打桩代码生成任务。不要创建分析 Run，也不要调用 Graph bind/settle/work-finish。',
-    `先读取任务输入 JSON：${inputPath}。其中 cases 是已选用例，repositories 是本次独立源码副本及固定提交。`,
+    `先读取任务输入 JSON：${inputPath}。其中 cases 是已选用例，repositories 是本次独立源码副本及固定提交。输入中 {"$same_as": "<路径>"} 表示该处内容与所指路径（$ 为输入根）的值完全相同，已去重以缩短输入。`,
+    '宿主已确认的事实，无需再用工具探测：源码副本是宿主刚检出的干净固定提交（不必运行 git status/log 确认）；宿主写入 edits 时按每个文件现有的 CRLF/LF 风格换行，before/after 用 \\n 即可，不必检查换行符；Git、构建与推送均由宿主完成。',
+    ...(referencePath ? [`参考结果：${referencePath} 是本任务上一次生成的完整结果 JSON。优先复用其中仍然成立的桩点设计、profiles 与 edits，只针对当前源码重新定位 before 原文并修正失效或被指出的问题；不要从零重新调查。与当前源码冲突时以源码为准。${referenceError ? `上一次未完成的原因：${referenceError}` : ''}`] : []),
+    '调查保持定向：先读输入中的用例与 instrumentation，再按函数名/符号用 grep 定位后读取相关片段；不要通读无关目录或整份大文件。',
     '只在这些仓库内调查需要的实现、构建配置和既有故障注入/调测入口。输入里的 instrumentation 是候选方案，须结合本次提交源码定位。',
     '核对所选用例引用的 analysis_source 冻结片段与本次源码副本；同一 commit 也可能存在分析时未提交的修改。只比较相关位置，差异对注入方案的影响写入 summary，不重做全仓分析。',
     '不要修改或推送源码仓库，不运行构建或安装命令。唯一交付是下述 JSON 文件；宿主负责精确写入、提交和推送。',
@@ -142,12 +224,20 @@ export class FaultInjectionService {
   }
   async read(dataRoot, runId, taskId) {
     const directory = await this.directory(dataRoot, runId, taskId)
-    let record = JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8'))
+    // Tasks written before result_saved existed still have their authored result on disk.
+    const withSavedResult = async value => {
+      if (value.result_saved === undefined) {
+        try { if ((await lstat(path.join(directory, 'generation', 'authored-result.json'))).isFile()) value.result_saved = true }
+        catch (error) { if (error.code !== 'ENOENT') throw error }
+      }
+      return value
+    }
+    let record = await withSavedResult(JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8')))
     if (record.id !== taskId || record.run_id !== runId) throw serviceError('打桩任务身份不匹配')
     if (activeStates.has(record.status) && !this.active.has(this.key(dataRoot, runId, taskId))) {
       // Completion publishes its terminal record before removing the operation.
       // Our first asynchronous read may have observed the preceding generation.
-      record = JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8'))
+      record = await withSavedResult(JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8')))
       if (record.id !== taskId || record.run_id !== runId) throw serviceError('打桩任务身份不匹配')
       if (activeStates.has(record.status) && !this.active.has(this.key(dataRoot, runId, taskId))) return { ...record, status: 'interrupted', error: '上次操作已中断；可重新生成，已提交的修改仍保留' }
     }
@@ -249,11 +339,25 @@ export class FaultInjectionService {
       if (typeof repo.repo_id !== 'string' || !repo.repo_id || /[\\/:\x00-\x1f]/.test(repo.repo_id) || ['.', '..'].includes(repo.repo_id)) throw serviceError('仓库标识无效')
       const configured = known.get(repo.repo_id)
       if (!configured.personal_branch) throw serviceError(`${repo.repo_id}：请先在项目配置选择个人开发分支`)
+      const forbidden = protectedBranchReason(configured.personal_branch) || protectedBranchReason(configured.remote_branch)
+      if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}。请在项目配置改选个人开发分支`)
       return { ...configured }
     })
+    // A saved result of an earlier task in this Run: either applied as-is (reuse,
+    // no model call) or handed to the generator as a starting point (reference).
+    const savedResult = async (taskId, label) => {
+      if (taskId == null || taskId === '') return null
+      if (!id(taskId)) throw serviceError(`${label}任务标识无效`)
+      const file = path.join(await this.directory(dataRoot, run.run_id, taskId), 'generation', 'authored-result.json')
+      try { return { task_id: taskId, file, sha256: hash(await readFile(file)) } }
+      catch (error) { if (error.code === 'ENOENT') throw serviceError(`${label}任务没有已保存的生成结果，请重新生成`); throw error }
+    }
+    const reused = await savedResult(input.reuse_task_id, '复用')
+    const reference = reused ? null : await savedResult(input.reference_task_id, '参考')
     const providerId = input.provider_id || defaults.provider_id
     let model = input.agent_model ?? defaults.agent_model
-    if (this.validateModel) {
+    // Reuse never starts the generator, so an unavailable model must not block it.
+    if (this.validateModel && !reused) {
       try { model = await this.validateModel({ providerId, model, cwd, catalogId: input.agent_catalog_id, requireReceipt }) }
       catch (error) { throw serviceError(error.message) }
     }
@@ -263,7 +367,8 @@ export class FaultInjectionService {
     const record = { schema_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
       name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch))].join('、'), case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
       provider_id: providerId, agent_model: model, agent_catalog_id: input.agent_catalog_id || null,
-      baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null }
+      baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null,
+      reused_from: reused, reference_from: reference ? { ...reference, error: String(input.reference_error || '').slice(0, 1500) } : null, notices: [] }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
     const controller = new AbortController(), key = this.key(dataRoot, run.run_id, taskId)
     const operation = { controller, done: null, status: 'generating' }
@@ -315,10 +420,14 @@ export class FaultInjectionService {
       const ahead = Number(await this.git(checkout, ['rev-list', '--count', `${remoteHead}..${target}`], signal))
       await this.git(checkout, ['checkout', '--detach', target], signal)
       source.comparison = await compareSnapshot(checkout, target, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
+      // Anything present now was produced by the host checkout, not by the generator.
+      const baseline = await workspaceSnapshot(this.git, checkout, signal)
       record.repositories.push({ repo_id: source.repo_id, path: checkout, source_path: sourcePath,
         base_commit: target, source_head: baseCommit, remote_head: remoteHead, remote_url: remoteUrl,
         outgoing_count: ahead, analysis_commit: source.analysis_commit,
-        has_remote: true, branch, remote_branch: remoteBranch, commit: null, pushed: false })
+        has_remote: true, branch, remote_branch: remoteBranch, commit: null, pushed: false,
+        workspace_baseline: baseline,
+        baseline_unstaged: baseline.filter(entry => entry.status !== '??' && entry.status[1] !== ' ').map(entry => entry.path) })
       await this.save(directory, record)
       }, { wait: true, signal })
     }
@@ -326,29 +435,71 @@ export class FaultInjectionService {
     const scratchDirectory = path.join(directory, 'generation')
     await mkdir(scratchDirectory, { recursive: true })
     const inputPath = path.join(scratchDirectory, 'input.json'), outputPath = path.join(scratchDirectory, 'result.json')
-    await writeFile(inputPath, JSON.stringify({ ...record, analysis_source: path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source') }, null, 2))
+    const analysisSource = path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source')
+    const fullInput = JSON.stringify({ ...record, analysis_source: analysisSource }, null, 2)
+    const compactInput = JSON.stringify(compactGenerationInput(record, analysisSource), null, 1)
+    await writeFile(inputPath, compactInput)
+    record.input_stats = { full_bytes: Buffer.byteLength(fullInput), compact_bytes: Buffer.byteLength(compactInput) }
     record.status = 'generating'; await this.save(directory, record)
-    if (typeof this.generate !== 'function') throw serviceError('打桩执行器未接入')
-    const result = await this.generate({ record, cwd, scratchDirectory, inputPath, outputPath, signal,
-      prompt: injectionPrompt({ record, inputPath, outputPath }) + `\n用户补充说明：${record.instructions || '无'}`,
-      onStarted: async session => { record.agent_session = session; await this.save(directory, record) } })
-    signal.throwIfAborted()
-    const generated = result ?? JSON.parse(await readFile(outputPath, 'utf8'))
+    let generated
+    if (record.reused_from) {
+      // Apply an earlier task's saved result to this fresh checkout; no model call.
+      const bytes = await readFile(record.reused_from.file)
+      if (hash(bytes) !== record.reused_from.sha256) throw serviceError('复用的生成结果在创建任务后被修改，请重新选择')
+      generated = JSON.parse(bytes.toString('utf8'))
+      await writeFile(outputPath, bytes)
+    } else {
+      if (typeof this.generate !== 'function') throw serviceError('打桩执行器未接入')
+      let referencePath = null
+      if (record.reference_from) {
+        referencePath = path.join(scratchDirectory, 'reference-result.json')
+        await writeFile(referencePath, await readFile(record.reference_from.file))
+      }
+      const result = await this.generate({ record, cwd, scratchDirectory, inputPath, outputPath, signal,
+        prompt: injectionPrompt({ record, inputPath, outputPath, referencePath, referenceError: record.reference_from?.error }) + `\n用户补充说明：${record.instructions || '无'}`,
+        onStarted: async session => { record.agent_session = session; await this.save(directory, record) } })
+      signal.throwIfAborted()
+      generated = result ?? JSON.parse(await readFile(outputPath, 'utf8'))
+    }
     // Keep the authored result available even if its transport shape is broken.
     await writeFile(path.join(scratchDirectory, 'authored-result.json'), JSON.stringify(generated, null, 2))
+    record.result_saved = true
+    await this.save(directory, record)
     checkInjectionResult(generated, record)
     record.result = { ...generated }; delete record.result.edits
     await this.save(directory, record)
     for (const repo of record.repositories) {
       signal.throwIfAborted()
-      if (await this.git(repo.path, ['status', '--porcelain'], signal)) throw serviceError(`Agent 直接修改了源码副本：${repo.repo_id}；本轮不混入未登记修改`)
+      // The delivery is the result file. Changes the generator made to its source
+      // copy are never mixed in: they are recorded, discarded, and the result is
+      // applied to the clean checkout. A result that relied on them no longer
+      // matches the original text and is rejected by the exact-match apply below.
+      const changes = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal))
+      const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+      if (changes.length || head !== repo.base_commit) {
+        repo.workspace_changes = changes.slice(0, 50)
+        await this.git(repo.path, ['checkout', '-q', '--force', '--detach', repo.base_commit], signal)
+        await this.git(repo.path, ['reset', '-q', '--hard', repo.base_commit], signal)
+        await this.git(repo.path, ['clean', '-q', '-f', '-f', '-d'], signal)
+        const remaining = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal)).filter(item => item.change !== 'reverted')
+        if (remaining.length || await this.git(repo.path, ['rev-parse', 'HEAD'], signal) !== repo.base_commit) {
+          throw serviceError(`${repo.repo_id}：生成期间源码副本被改动且无法恢复（${describeChanges(remaining)}）。生成结果已保存，可“直接复用上次生成结果”在新的干净副本上应用`)
+        }
+        record.notices.push(`${repo.repo_id}：执行器在生成期间改动了源码副本（${changes.length ? describeChanges(changes) : 'HEAD 被移动'}）。这些改动已丢弃，未混入提交；下面的差异只来自结果文件中登记的修改。`)
+        await this.save(directory, record)
+      }
       const edits = generated.edits.filter(edit => edit.repo_id === repo.repo_id)
       if (!edits.length) continue
       for (const edit of edits) {
         const attributes = await this.git(repo.path, ['check-attr', '-z', 'filter', '--', edit.path], signal)
         if (attributes.split('\0')[2] === 'lfs') throw serviceError(`本轮打桩不支持修改 LFS 文件：${edit.path}`)
       }
-      const files = await applyInjectionEdits(repo.path, edits)
+      let files
+      try { files = await applyInjectionEdits(repo.path, edits) }
+      catch (error) {
+        if (record.reused_from && /未唯一匹配|新文件已存在/.test(error.message)) error.message = `复用的结果与当前源码不一致：${error.message}。请用“参考上次结果重新生成”，执行器只需重新定位变化的位置`
+        throw error
+      }
       await this.git(repo.path, ['add', '--', ...files], signal)
       repo.diff = await this.git(repo.path, ['diff', '--cached', '--no-ext-diff', '--no-textconv'], signal)
       if (!repo.diff) continue
@@ -444,6 +595,8 @@ export class FaultInjectionService {
             const configuredPath = await realpath(configured.git_path || path.join(dataRoot, 'repositories', repo.repo_id))
             if (configuredPath !== repo.source_path) throw serviceError(`${repo.repo_id}：项目源码目录已变更，请重新生成`)
             if (configured.personal_branch !== repo.branch || (configured.remote_branch || configured.personal_branch) !== (repo.remote_branch || repo.branch)) throw serviceError(`${repo.repo_id}：项目个人分支已变更，请重新生成`)
+            const forbidden = protectedBranchReason(repo.branch) || protectedBranchReason(repo.remote_branch)
+            if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}；本次不会提交或推送`)
             const remoteUrl = await this.git(repo.source_path, ['remote', 'get-url', '--push', configured.remote || 'origin'], signal)
             if (remoteUrl !== repo.remote_url) throw serviceError(`${repo.repo_id}：推送远端已变更，请重新生成`)
             await this.git(repo.path, ['fetch', '--no-tags', 'origin', `refs/heads/${repo.remote_branch || repo.branch}`], signal)
@@ -463,7 +616,9 @@ export class FaultInjectionService {
             if (!repo.commit) {
               const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
               const diff = await this.git(repo.path, ['diff', '--cached', '--no-ext-diff', '--no-textconv'], signal)
-              if (head !== repo.base_commit || hash(diff) !== repo.diff_sha256 || await this.git(repo.path, ['diff', '--name-only'], signal)) throw serviceError(`${repo.repo_id}：待提交修改已变化，请重新生成`)
+              const baselineUnstaged = new Set(repo.baseline_unstaged ?? [])
+              const unstaged = (await this.git(repo.path, ['diff', '--name-only', '-z'], signal)).split('\0').filter(file => file && !baselineUnstaged.has(file))
+              if (head !== repo.base_commit || hash(diff) !== repo.diff_sha256 || unstaged.length) throw serviceError(`${repo.repo_id}：待提交修改已变化，请重新生成`)
             }
             const dirty = new Set([
               ...((await this.git(repo.source_path, ['diff', '--name-only', '-z'], signal)).split('\0')),
@@ -492,7 +647,7 @@ export class FaultInjectionService {
               if (local !== repo.source_head) throw serviceError(`${repo.repo_id}：个人分支已变化，请重新生成`)
               // Address A explicitly, never merge into whichever branch happens to be
               // checked out after preflight. updateInstead also protects dirty files.
-              await this.git(repo.path, ['push', '--receive-pack=git -c core.hooksPath= -c receive.denyCurrentBranch=updateInstead receive-pack',
+              await this.git(repo.path, ['push', `--receive-pack=git -c core.hooksPath=${shellQuote(await disabledHooksPath())} -c receive.denyCurrentBranch=updateInstead receive-pack`,
                 repo.source_path, `${repo.commit}:refs/heads/${repo.branch}`], signal)
             }
             repo.local_applied = true; await this.save(directory, record)
@@ -511,14 +666,19 @@ export class FaultInjectionService {
       return background ? structuredClone(record) : operation.done
     })
   }
-  async retry(dataRoot, runId, taskId, cwd) {
+  // mode: 'regenerate' (fresh generation), 'reference' (generation starting from
+  // this task's saved result) or 'reuse' (apply the saved result; no model call).
+  async retry(dataRoot, runId, taskId, cwd, { mode = 'regenerate' } = {}) {
     const previous = await this.read(dataRoot, runId, taskId)
     if (activeStates.has(previous.status)) throw serviceError('请先停止当前任务')
+    if (!['regenerate', 'reference', 'reuse'].includes(mode)) throw serviceError('未知重试方式')
+    if (mode !== 'regenerate' && !previous.result_saved) throw serviceError('该任务没有已保存的生成结果，请重新生成')
     return this.start({ dataRoot, cwd,
       run: { run_id: runId, source_snapshot: { repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })) }, details: { test_cases: previous.cases } },
       input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })),
         baseline_acknowledged: previous.baseline_acknowledged, provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
-        pipeline_url: previous.pipeline_url, name: previous.name } }, { requireReceipt: false })
+        pipeline_url: previous.pipeline_url, name: previous.name,
+        ...(mode === 'reuse' ? { reuse_task_id: taskId } : mode === 'reference' ? { reference_task_id: taskId, reference_error: previous.error || '' } : {}) } }, { requireReceipt: false })
   }
   async recordVerification(dataRoot, runId, taskId, input) {
     return this.exclusive(dataRoot, runId, taskId, async () => {

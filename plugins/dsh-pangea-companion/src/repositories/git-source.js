@@ -5,15 +5,17 @@ import { readFile, readdir, realpath, lstat, mkdir, rm } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { writeTaskStoreFile } from '../task-store.js'
-import { withGitLongPaths } from './git-environment.js'
+import { withGitLongPaths, disabledHooksPath } from './git-environment.js'
+import { protectedBranchReason } from './branch-policy.js'
 
 const exec = promisify(execFile)
 export async function sourceGit(cwd, args) {
   const startedAt = Date.now()
+  const hooksPath = await disabledHooksPath()
   try {
     // Do not pass a potentially >260-character path to Windows process creation.
     const signal = repositoryOperationSignal()
-    return (await withGitLongPaths(env => exec('git', ['-c', 'core.hooksPath=', '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], { signal, windowsHide: true, timeout: ['clone', 'lfs'].includes(args[0]) ? 1800000 : 30000, maxBuffer: 32 * 1024 * 1024,
+    return (await withGitLongPaths(env => exec('git', ['-c', `core.hooksPath=${hooksPath}`, '-c', 'core.longpaths=true', '-C', path.resolve(cwd), ...args], { signal, windowsHide: true, timeout: ['clone', 'lfs'].includes(args[0]) ? 1800000 : 30000, maxBuffer: 32 * 1024 * 1024,
       env: { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', GIT_LFS_SKIP_SMUDGE: '1' } }), { cwd, signal })).stdout.trimEnd()
   } catch (error) {
     repositoryOperationSignal()?.throwIfAborted()
@@ -96,6 +98,8 @@ export async function saveRepositorySettings(dataRoot, repoId, input) {
     await sourceGit(root, ['check-ref-format', '--branch', branch])
     await sourceGit(root, ['check-ref-format', '--branch', remoteBranch])
     if (branch === 'HEAD' || branch.startsWith('refs/') || remoteBranch.startsWith('refs/')) throw new Error('请选择分支名称，不要填写完整引用')
+    const forbidden = protectedBranchReason(branch) || protectedBranchReason(remoteBranch)
+    if (forbidden) throw new Error(`${forbidden}；请选择或新建自己的个人开发分支`)
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) throw new Error('远端名称无效')
     const remotes = (await sourceGit(root, ['remote'])).split('\n').filter(Boolean)
     if (!remotes.includes(remote)) throw new Error(`推送远端 ${remote} 不存在；现有远端：${remotes.join('、') || '无'}。请选择现有远端，或先使用 git remote add 添加远端。`)
