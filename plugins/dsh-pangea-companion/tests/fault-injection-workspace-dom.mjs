@@ -162,6 +162,8 @@ try {
   assert.equal(container.querySelector('[aria-label="验证用例"]').value, 'unit/C')
   assert.equal(container.querySelector('[aria-label="实际结果"]').value, 'passed')
   assert.equal(container.querySelector('[aria-label="桩点实际命中"]').value, 'A=2')
+  assert.ok(button('再次出桩（复用本次结果，不调用模型）'))
+  assert.equal(container.textContent.includes('已保存'), false)
   await click('保存构建与验证记录')
   await until(() => container.textContent.includes('已保存'))
   const task = (await service.list(dataRoot, run.run_id))[0]

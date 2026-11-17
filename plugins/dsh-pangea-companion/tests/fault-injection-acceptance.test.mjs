@@ -212,7 +212,7 @@ test('master* and develop* are never used as injection branches', async t => {
 test('generation input is de-duplicated losslessly and much smaller than the task record', async t => {
   const f = await fixture(t); let inputPath
   const service = new FaultInjectionService({ generate: async ({ record, inputPath: file, prompt }) => {
-    inputPath = file; assert.match(prompt, /\$same_as/); assert.match(prompt, /不必检查换行符/); return generated(record)
+    inputPath = file; assert.match(prompt, /\$same_as/); assert.match(prompt, /不必检查换行符/); assert.match(prompt, /set -euo pipefail/); assert.match(prompt, /http_code/); return generated(record)
   } })
   const task = await service.start(f); await wait(service)
   const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
