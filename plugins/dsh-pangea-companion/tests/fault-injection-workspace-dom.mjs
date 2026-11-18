@@ -40,7 +40,7 @@ await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
 await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), '# fixture')
 const provider = { discoverModels: async () => ({ current_model: 'fixture-model', models: [{ id: 'fixture-model' }] }) }
 const runtime = { subagents: { getProvider: () => provider } }
-let holdPush = true, failCheckout = false
+let holdPush = true, failCheckout = false, emitBrokenBefore = false, modelCalls = 0
 const service = new FaultInjectionService({ validateModel: options => requireAgentModel(runtime, options), git: async (cwd, args, signal) => {
   if (args[0] === 'checkout' && failCheckout) throw new Error('error: unable to create file nested/header.h: Filename too long')
   if (args[0] === 'push' && holdPush) await new Promise((resolve, reject) => {
@@ -48,8 +48,14 @@ const service = new FaultInjectionService({ validateModel: options => requireAge
     else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
   })
   return injectionGit(cwd, args, signal)
-}, generate: async ({ record }) => ({ summary: '工程测试夹具', points: [{ id: 'A', repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
-  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], steps: ['开启 A', '执行业务', '关闭 A 并恢复'] })), edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
+}, generate: async ({ record, outputPath }) => {
+  modelCalls += 1
+  const payload = { summary: '工程测试夹具', points: [{ id: 'A', repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
+    profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], steps: ['开启 A', '', '执行业务', '关闭 A 并恢复'] })),
+    edits: [{ repo_id: 'target', path: 'target.c', before: emitBrokenBefore ? 'nonexistent_symbol();' : 'return 0;', after: 'return -1;' }] }
+  if (outputPath) await writeFile(outputPath, JSON.stringify(payload, null, 2))
+  return payload
+} })
 const run2 = { ...run, run_id: 'dom-run-2', details: { test_cases: [{ projection_id: 'unit/A', title: '乙任务用例', execution_readiness: 'needs_instrumentation' }] } }
 await mkdir(path.join(dataRoot, 'runs', run2.run_id), { recursive: true })
 await writeFile(path.join(dataRoot, 'runs', run2.run_id, 'progress.json'), JSON.stringify({ model_settings: { provider: 'pangea-nga' }, model_id: 'fixture-model' }))
@@ -190,6 +196,22 @@ try {
   assert.match(container.textContent, /Filename too long/)
   assert.equal(button('提交并推送到 main'), undefined)
   failCheckout = false
+  emitBrokenBefore = true
+  await click('沿用本任务配置重新生成')
+  await until(() => button('原地重新验收（不调用模型）'))
+  const callsBeforeRevalidate = modelCalls
+  const run2Task = (await service.list(dataRoot, run2.run_id)).find(item => item.result_saved)
+  const hotfixPath = path.join(dataRoot, '.pangea', 'fault-injection', run2.run_id, run2Task.id, 'generation', 'result.json')
+  const brokenPayload = JSON.parse(await readFile(hotfixPath, 'utf8'))
+  brokenPayload.edits[0].before = 'return -1;'
+  brokenPayload.edits[0].after = 'return -2;'
+  await new Promise(resolve => setTimeout(resolve, 15))
+  await writeFile(hotfixPath, JSON.stringify(brokenPayload, null, 2))
+  emitBrokenBefore = false
+  await click('原地重新验收（不调用模型）')
+  await until(() => button('提交并推送到 main'))
+  assert.equal(modelCalls, callsBeforeRevalidate)
+  assert.ok(calls.some(item => item.action === 'revalidate' && item.task_id === run2Task.id))
   await click('更换分析任务')
   await choose('任务甲')
   await until(() => button('在 DSH 浏览器打开构建流水线'))

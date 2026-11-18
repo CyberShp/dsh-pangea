@@ -216,7 +216,7 @@ const TEST_FILE_NAME = /(?:^|_|-)(?:test|tests|ut|llt)\.(?:c|cc|cpp|cxx)$|test.*
 const MACRO_LINE = /^\s*#\s*(?:if|ifdef|ifndef|elif|define)\b.*\b\w*(?:SIMU|FAULT|INJECT|MOCK|STUB|ASAN|SANITIZE|TIMEOUT)\w*/i
 const FAULT_DEF_TOKEN = /(?:(?:^|[\s"'(])-D|(?<![-\w]))([A-Za-z_][A-Za-z0-9_]*(?:SIMU|FAULT|INJECT|MOCK|STUB)[A-Za-z0-9_]*)\b/g
 
-function parseRepoLocation(raw, repoId) {
+function parseRepoLocationSpec(raw, repoId) {
   if (typeof raw !== 'string') return null
   let text = raw.trim()
   if (!text) return null
@@ -226,14 +226,32 @@ function parseRepoLocation(raw, repoId) {
     if (prefix !== repoId && !/\.[A-Za-z0-9]+$/.test(prefix)) return null
     if (prefix === repoId) text = text.slice(firstColon + 1)
   }
+  const rangeMatch = text.match(/:(\d+)(?:-(\d+))?(?::.*)?$/)
+  const start = rangeMatch ? Number(rangeMatch[1]) : null
+  const end = rangeMatch ? Number(rangeMatch[2] || rangeMatch[1]) : null
   text = text.replace(/:\d+(?:-\d+)?(?::.*)?$/, '').replaceAll('\\', '/').replace(/^\.\/+/, '')
   if (!text || text.startsWith('/') || text.split('/').some(part => !part || part === '.' || part === '..')) return null
-  return text
+  return { path: text, start: start && start > 0 ? start : null, end: end && end >= (start || 1) ? end : start }
 }
 
-export function collectTargetSourcePaths(repoId, cases = [], analysisContext = null) {
-  const paths = new Set()
-  const add = value => { const parsed = parseRepoLocation(value, repoId); if (parsed) paths.add(parsed) }
+function parseRepoLocation(raw, repoId) {
+  return parseRepoLocationSpec(raw, repoId)?.path ?? null
+}
+
+export function collectTargetEvidenceSpecs(repoId, cases = [], analysisContext = null) {
+  const paths = new Set(), rangesByPath = new Map()
+  const addRange = (relPath, start, end) => {
+    if (!relPath) return
+    paths.add(relPath)
+    if (!Number.isInteger(start) || start <= 0) return
+    const finish = Number.isInteger(end) && end >= start ? end : start
+    if (!rangesByPath.has(relPath)) rangesByPath.set(relPath, [])
+    rangesByPath.get(relPath).push([start, finish])
+  }
+  const add = value => {
+    const spec = parseRepoLocationSpec(value, repoId)
+    if (spec) addRange(spec.path, spec.start, spec.end)
+  }
   for (const item of cases) {
     const body = item?.source_record?.body ?? {}
     for (const ref of [...(Array.isArray(item?.source_evidence) ? item.source_evidence : []), ...(Array.isArray(body?.source_evidence) ? body.source_evidence : [])]) add(ref)
@@ -241,9 +259,41 @@ export function collectTargetSourcePaths(repoId, cases = [], analysisContext = n
     const points = item?.instrumentation?.points ?? body?.instrumentation?.points ?? []
     for (const pt of Array.isArray(points) ? points : []) if (!pt?.repo_id || pt.repo_id === repoId) add(pt?.path)
   }
-  for (const risk of analysisContext?.risks ?? []) for (const ev of risk.evidence ?? []) add(ev?.location)
-  for (const gap of analysisContext?.coverage_gaps ?? []) if (!gap.repo_id || gap.repo_id === repoId) add(gap.path)
-  return [...paths]
+  for (const risk of analysisContext?.risks ?? []) {
+    for (const ref of Array.isArray(risk?.source_evidence) ? risk.source_evidence : []) add(ref)
+    for (const ev of risk.evidence ?? []) add(ev?.location)
+  }
+  for (const gap of analysisContext?.coverage_gaps ?? []) {
+    for (const ref of Array.isArray(gap?.source_evidence) ? gap.source_evidence : []) add(ref)
+    if (!gap.repo_id || gap.repo_id === repoId) {
+      const rel = parseRepoLocation(gap.path, repoId)
+      const lineText = gap.line != null ? String(gap.line).trim() : ''
+      const m = lineText.match(/^(\d+)(?:-(\d+))?$/)
+      addRange(rel, m ? Number(m[1]) : null, m ? Number(m[2] || m[1]) : null)
+    }
+  }
+  return { paths: [...paths], rangesByPath }
+}
+
+export function collectTargetSourcePaths(repoId, cases = [], analysisContext = null) {
+  return collectTargetEvidenceSpecs(repoId, cases, analysisContext).paths
+}
+
+function mergeLineWindows(rawRanges, totalLines, padBefore = 8, padAfter = 18) {
+  if (!Array.isArray(rawRanges) || !rawRanges.length) {
+    return totalLines <= 120 ? [[1, Math.min(totalLines, 80)]] : []
+  }
+  const expanded = rawRanges
+    .map(([s, e]) => [Math.max(1, s - padBefore), Math.min(totalLines, Math.max(s, e) + padAfter)])
+    .filter(([s, e]) => s <= e)
+    .sort((a, b) => a[0] - b[0])
+  const merged = []
+  for (const [s, e] of expanded) {
+    const prev = merged.at(-1)
+    if (prev && s <= prev[1] + 4) prev[1] = Math.max(prev[1], e)
+    else merged.push([s, e])
+  }
+  return merged.slice(0, 3)
 }
 
 async function readBoundedText(root, relPath, maxBytes = 262144) {
@@ -256,9 +306,10 @@ async function readBoundedText(root, relPath, maxBytes = 262144) {
   } catch { return null }
 }
 
-export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPaths = []) {
+export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPaths = [], rangesByPath = new Map()) {
   const root = await realpath(repositoryRoot)
-  const moduleFiles = [], conditionalMacros = [], cmakeRules = [], testDirectories = []
+  const moduleFiles = [], conditionalMacros = [], cmakeRules = [], testDirectories = [], targetSnippets = []
+  let sampleTestSnippet = null
   const seenMacroLocs = new Set(), candidateDirs = new Set(['.']), moduleDirs = new Set()
   for (const rel of targetPaths.slice(0, 8)) {
     let dir = path.posix.dirname(rel)
@@ -301,6 +352,21 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
     if (!moduleSourceTexts.some(item => item.rel === rel)) {
       const text = await readBoundedText(root, rel)
       if (text) moduleSourceTexts.unshift({ rel, text })
+    }
+  }
+  let snippetLinesBudget = 140
+  for (const rel of targetPaths.slice(0, 4)) {
+    if (snippetLinesBudget <= 0) break
+    const found = moduleSourceTexts.find(item => item.rel === rel)
+    if (!found?.text) continue
+    const lines = found.text.split(/\r?\n/)
+    const windows = mergeLineWindows(rangesByPath instanceof Map ? rangesByPath.get(rel) : null, lines.length)
+    for (const [start, rawEnd] of windows) {
+      if (snippetLinesBudget <= 0) break
+      const end = Math.min(rawEnd, start + snippetLinesBudget - 1, start + 69)
+      const numbered = lines.slice(start - 1, end).map((line, idx) => `${start + idx}: ${line.slice(0, 220)}`).join('\n')
+      targetSnippets.push({ path: rel, start_line: start, end_line: end, total_lines: lines.length, content: numbered })
+      snippetLinesBudget -= (end - start + 1)
     }
   }
   for (const { rel, text } of moduleSourceTexts) {
@@ -357,13 +423,23 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
     }
     const testFiles = fileNames.filter(name => TEST_FILE_NAME.test(name) || (TEST_DIR_NAME.test(path.posix.basename(relDir)) && /\.(?:c|cc|cpp|cxx)$/i.test(name)))
     if (testFiles.length && testDirectories.length < 10) {
-      const sampleText = await readBoundedText(root, relDir === '.' ? testFiles[0] : `${relDir}/${testFiles[0]}`, 65536)
+      const sampleRel = relDir === '.' ? testFiles[0] : `${relDir}/${testFiles[0]}`
+      const sampleText = await readBoundedText(root, sampleRel, 65536)
       const isGtest = Boolean(sampleText && /\bgtest\b|TEST(?:_F|_P)?\s*\(/.test(sampleText))
       testDirectories.push({
         directory: relDir,
         framework: isGtest ? 'gtest' : 'native',
         sample_files: testFiles.slice(0, 8),
       })
+      if (!sampleTestSnippet && sampleText) {
+        const sampleLines = sampleText.split(/\r?\n/)
+        const take = Math.min(sampleLines.length, 40)
+        sampleTestSnippet = {
+          path: sampleRel,
+          total_lines: sampleLines.length,
+          content: sampleLines.slice(0, take).map((line, idx) => `${idx + 1}: ${line.slice(0, 220)}`).join('\n'),
+        }
+      }
     }
     for (const sub of entries) {
       if (!sub.isDirectory() || sub.name.startsWith('.')) continue
@@ -384,12 +460,14 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
     const usageCount = moduleSourceTexts.filter(item => token.test(item.text)).length
     return { name, defined_in: definedIn, module_usage_count: usageCount }
   })
-  if (!moduleFiles.length && !conditionalMacros.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length) return null
+  if (!moduleFiles.length && !conditionalMacros.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length && !targetSnippets.length) return null
   return {
     ...(targetPaths.length ? { target_files: targetPaths.slice(0, 8) } : {}),
+    ...(targetSnippets.length ? { target_snippets: targetSnippets } : {}),
     ...(moduleFiles.length ? { module_files: moduleFiles } : {}),
     ...(conditionalMacros.length ? { conditional_macros: conditionalMacros } : {}),
     ...(testDirectories.length ? { test_directories: testDirectories } : {}),
+    ...(sampleTestSnippet ? { sample_test_snippet: sampleTestSnippet } : {}),
     ...(cmakeRules.length ? { cmake_rules: cmakeRules } : {}),
     ...(faultMacros.length ? { fault_macros: faultMacros } : {}),
   }
@@ -418,7 +496,7 @@ export function compactGenerationInput(record, analysisSource) {
   })
 }
 
-const INLINE_INPUT_MAX_CHARS = 32000
+const INLINE_INPUT_MAX_CHARS = 40000
 
 export function injectionPrompt({ record, inputPath, outputPath, compactInput = '', referencePath = null, referenceError = '' }) {
   const posixInput = posixPath(inputPath), posixOutput = posixPath(outputPath), posixRef = referencePath ? posixPath(referencePath) : null
@@ -430,7 +508,7 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
       : `先读取任务输入 JSON：${posixInput}。其中 cases 是已选用例，analysis_context 是关联风险/覆盖率缺口/流程证据，repositories 含本次独立源码副本、固定提交及宿主预扫描的 harness 事实。输入中 {"$same_as": "<路径>"} 表示该处内容与所指路径（$ 为输入根）的值完全相同，已去重以缩短输入。`,
     '宿主已确认的事实，无需再用工具探测：源码副本是宿主刚检出的干净固定提交（不必运行 git status/log 确认）；宿主写入 edits 时按每个文件现有的 CRLF/LF 风格换行，before/after 用 \\n 即可，不必检查换行符；Git、构建与推送均由宿主完成。',
     ...(posixRef ? [`参考结果：${posixRef} 是本任务上一次生成的完整结果 JSON。优先复用其中仍然成立的桩点设计、profiles 与 edits，只针对当前源码重新定位 before 原文并修正失效或被指出的问题；不要从零重新调查。与当前源码冲突时以源码为准。${referenceError ? `上一次未完成的原因：${referenceError}` : ''}`] : []),
-    '探索步数预算严格受限（<= 10 次只读工具调用）：优先消费输入中的 source_evidence、analysis_context、instrumentation 与 repositories[].harness，直接 read 目标源码区间及最多 1 个同目录参考测试文件，旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
+    '探索步数预算严格受限（<= 10 次只读工具调用）：repositories[].harness.target_snippets 已预附带目标源码区间的带行号原文，sample_test_snippet 已预附带同目录测试头部样板；若预切片上下文已足够唯一定位 edits[].before 与测试签名，无需重复 read 同一文件，仅按需补读缺失头文件或调用点后旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
     '若 repositories[].harness 给出了 C/C++ 单元测试环境（test_directories 含 gtest/native 或 cmake_rules/fault_macros）：① 若 fault_macros 显示某测试编译宏（如 -D*_SIMU_FAULT）的 module_usage_count=0，说明当前模块无现成注入消费点，直接在目标函数对应的 #ifdef <测试宏> 保护下植入默认关闭的最小控制桩，不要全仓搜寻既有框架；② 按 Option A 在 test_directories 配套新增（before=null）或补充 gtest 用例文件，在同一测试目标内依次覆盖“桩默认关闭正常路径 → 启用桩命中目标超时/错误分支 → 复位后恢复正常”，同进程测试优先通过受控开关函数/原子计数或环境变量触发，阻塞等待必须有界且时长直接复用源码超时宏或兼容 harness.conditional_macros 中的 ASAN/非 ASAN 阈值（严禁写死小于 ASAN 超时阈值的短常数）；③ 若对应 cmake_rules 为 file_glob，无需修改构建文件，若 configure_depends=false 则在 steps 中先执行 cmake 重新生成以纳入新测试文件，运行 gtest 时指定 --gtest_filter 并校验实际执行用例数 >= 1（防止匹配 0 条用例时仍返回 0）。',
     '只在这些仓库内调查需要的实现与既有调测入口。核对所选用例引用的 analysis_source 冻结片段与本次源码副本，分析基线与本次基线不同则重新定位；只比较相关位置，差异对注入方案的影响写入 summary，不重做全仓分析。',
     '不要修改或推送源码仓库，不运行构建或安装命令。唯一交付是下述 JSON 文件；宿主负责精确写入、提交和推送。',
@@ -443,14 +521,32 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
     '逐步核对观测断言：不得断言目录只剩业务文件；时间戳考虑实际精度并结合内容/计数验证恢复；区分命令退出码与业务返回值。',
     'JSON 结构：{summary:string, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
     'case_key 必须逐字使用输入的 case_key。points/profiles 是业务说明；edits 才是实际修改。before 为当前文件中唯一出现的原文，after 为替换内容；新增文件 before=null。path 为仓库相对路径。不要包含 .git 文件，不删除文件。',
-    'profiles 必须与输入 case_keys 一一对应：总数相同、case_key 集合相同且每个 case_key 只出现一次；同一用例的多轮场景合并在同一个 profile.steps 中，给出能直接执行的启用、关闭及命中检查方法，预期结果放在 shell 注释里，变量先定义后使用，不用伪命令或“同上”。',
+    'profiles 必须与输入 case_keys 一一对应：总数相同、case_key 集合相同且每个 case_key 只出现一次；同一用例的多轮场景合并在同一个 profile.steps 中，steps 数组每个元素都必须是非空的可执行命令或 # 注释行（禁止放入空字符串 "" 或纯空白元素，分节请用 # 注释），给出能直接执行的启用、关闭及命中检查方法，变量先定义后使用，不用伪命令或“同上”。',
     '宿主会将同一 profile.steps 按顺序原样拼入头部带 set -euo pipefail 的单个 bash 脚本执行，并需兼容 macOS 默认 bash 3.2（UTF-8/C.UTF-8）：禁止 declare -A、mapfile/readarray、|&、${var,,} 等 Bash 4+ 语法；变量紧邻中文或非 ASCII 标点时必须写作 ${VAR}；严禁把缺少末尾换行的数据交给 read（如 curl 应用 code=$(curl -sS -o "$body_file" -w \'%{http_code}\' ...) 分离响应体与状态码，或用 read -r var || [[ -n "$var" ]]）；pipefail 下“无匹配”断言用 ! grep -q；内嵌 Python 用 True/False/None，SQL 聚合遵守 GROUP BY，关键断言失败须非零退出。',
     `把完整 JSON 写入 ${posixOutput}，写完结束。任务 ID：${record.id}。`,
     ...(inlined ? [`<task_input_json>\n${compactInput}\n</task_input_json>`] : []),
   ].join('\n')
 }
 
+export function normalizeInjectionResult(value) {
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value.profiles)) {
+    for (const profile of value.profiles) {
+      if (profile && Array.isArray(profile.steps)) {
+        // Strip empty/whitespace separator lines while keeping non-string items
+        // intact so checkInjectionResult still rejects malformed element types.
+        profile.steps = profile.steps.filter(step => typeof step !== 'string' || step.trim().length > 0)
+      }
+    }
+  }
+  if (Array.isArray(value.limitations)) {
+    value.limitations = value.limitations.filter(item => typeof item !== 'string' || item.trim().length > 0)
+  }
+  return value
+}
+
 export function checkInjectionResult(value, record) {
+  normalizeInjectionResult(value)
   if (!value || !Array.isArray(value.edits) || !value.edits.length) throw serviceError('Agent 未提供实际代码修改；本轮未形成修改，可重新生成')
   if (!Array.isArray(value.points) || !value.points.length || !Array.isArray(value.profiles)) throw serviceError('生成结果缺少桩点或逐用例执行说明')
   const repoIds = new Set(record.repositories.map(repo => repo.repo_id)), pointIds = new Set()
@@ -505,13 +601,27 @@ export class FaultInjectionService {
     record.updated_at = new Date().toISOString()
     await writeTaskStoreFile(path.join(directory, 'task.json'), JSON.stringify(record, null, 2) + '\n')
   }
+  async resolveSavedResultFile(directory) {
+    const genDir = path.join(directory, 'generation')
+    const resultFile = path.join(genDir, 'result.json')
+    const authoredFile = path.join(genDir, 'authored-result.json')
+    const statSafe = async file => {
+      try { const st = await lstat(file); return st.isFile() && st.size > 0 ? st : null }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error }
+    }
+    const [rStat, aStat] = await Promise.all([statSafe(resultFile), statSafe(authoredFile)])
+    if (rStat && aStat) return aStat.mtimeMs > rStat.mtimeMs ? authoredFile : resultFile
+    if (rStat) return resultFile
+    if (aStat) return authoredFile
+    return null
+  }
   async read(dataRoot, runId, taskId) {
     const directory = await this.directory(dataRoot, runId, taskId)
-    // Tasks written before result_saved existed still have their authored result on disk.
+    // Tasks written before result_saved existed (or aborted right after result.json
+    // landed on disk) still expose their saved result for revalidate / reuse.
     const withSavedResult = async value => {
-      if (value.result_saved === undefined) {
-        try { if ((await lstat(path.join(directory, 'generation', 'authored-result.json'))).isFile()) value.result_saved = true }
-        catch (error) { if (error.code !== 'ENOENT') throw error }
+      if (!value.result_saved) {
+        if (await this.resolveSavedResultFile(directory)) value.result_saved = true
       }
       return value
     }
@@ -631,9 +741,9 @@ export class FaultInjectionService {
     const savedResult = async (taskId, label) => {
       if (taskId == null || taskId === '') return null
       if (!id(taskId)) throw serviceError(`${label}任务标识无效`)
-      const file = path.join(await this.directory(dataRoot, run.run_id, taskId), 'generation', 'authored-result.json')
-      try { return { task_id: taskId, file, sha256: hash(await readFile(file)) } }
-      catch (error) { if (error.code === 'ENOENT') throw serviceError(`${label}任务没有已保存的生成结果，请重新生成`); throw error }
+      const file = await this.resolveSavedResultFile(await this.directory(dataRoot, run.run_id, taskId))
+      if (!file) throw serviceError(`${label}任务没有已保存的生成结果，请重新生成`)
+      return { task_id: taskId, file, sha256: hash(await readFile(file)) }
     }
     const reused = await savedResult(input.reuse_task_id, '复用')
     const reference = reused ? null : await savedResult(input.reference_task_id, '参考')
@@ -706,8 +816,8 @@ export class FaultInjectionService {
       source.comparison = await compareSnapshot(checkout, target, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
       // Anything present now was produced by the host checkout, not by the generator.
       const baseline = await workspaceSnapshot(this.git, checkout, signal)
-      const targetPaths = collectTargetSourcePaths(source.repo_id, record.cases, record.analysis_context)
-      const harness = await inspectRepositoryHarness(checkout, source.repo_id, targetPaths)
+      const { paths: targetPaths, rangesByPath } = collectTargetEvidenceSpecs(source.repo_id, record.cases, record.analysis_context)
+      const harness = await inspectRepositoryHarness(checkout, source.repo_id, targetPaths, rangesByPath)
       record.repositories.push({ repo_id: source.repo_id, path: checkout, source_path: sourcePath,
         base_commit: target, source_head: baseCommit, remote_head: remoteHead, remote_url: remoteUrl,
         outgoing_count: ahead, analysis_commit: source.analysis_commit,
@@ -749,6 +859,11 @@ export class FaultInjectionService {
       signal.throwIfAborted()
       generated = result ?? JSON.parse(await readFile(outputPath, 'utf8'))
     }
+    await this.applyAndStageResult({ directory, scratchDirectory, record, generated, signal, isRevalidate: false })
+  }
+  async applyAndStageResult({ directory, scratchDirectory, record, generated, signal, isRevalidate = false }) {
+    normalizeInjectionResult(generated)
+    await mkdir(scratchDirectory, { recursive: true })
     // Keep the authored result available even if its transport shape is broken.
     await writeFile(path.join(scratchDirectory, 'authored-result.json'), JSON.stringify(generated, null, 2))
     record.result_saved = true
@@ -757,24 +872,33 @@ export class FaultInjectionService {
     record.result = { ...generated }; delete record.result.edits
     await this.save(directory, record)
     for (const repo of record.repositories) {
-      signal.throwIfAborted()
-      // The delivery is the result file. Changes the generator made to its source
-      // copy are never mixed in: they are recorded, discarded, and the result is
-      // applied to the clean checkout. A result that relied on them no longer
-      // matches the original text and is rejected by the exact-match apply below.
-      const changes = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal))
-      const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
-      if (changes.length || head !== repo.base_commit) {
-        repo.workspace_changes = changes.slice(0, 50)
+      signal?.throwIfAborted?.()
+      if (isRevalidate) {
+        try { if (!(await lstat(repo.path)).isDirectory()) throw new Error('missing') }
+        catch { throw serviceError(`${repo.repo_id}：本任务的独立源码副本已不存在，请使用“直接复用已留存的生成结果”在新副本上应用`) }
         await this.git(repo.path, ['checkout', '-q', '--force', '--detach', repo.base_commit], signal)
         await this.git(repo.path, ['reset', '-q', '--hard', repo.base_commit], signal)
         await this.git(repo.path, ['clean', '-q', '-f', '-f', '-d'], signal)
-        const remaining = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal)).filter(item => item.change !== 'reverted')
-        if (remaining.length || await this.git(repo.path, ['rev-parse', 'HEAD'], signal) !== repo.base_commit) {
-          throw serviceError(`${repo.repo_id}：生成期间源码副本被改动且无法恢复（${describeChanges(remaining)}）。生成结果已保存，可“直接复用上次生成结果”在新的干净副本上应用`)
+        repo.diff = null; repo.diff_sha256 = null; repo.files = []
+      } else {
+        // The delivery is the result file. Changes the generator made to its source
+        // copy are never mixed in: they are recorded, discarded, and the result is
+        // applied to the clean checkout. A result that relied on them no longer
+        // matches the original text and is rejected by the exact-match apply below.
+        const changes = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal))
+        const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+        if (changes.length || head !== repo.base_commit) {
+          repo.workspace_changes = changes.slice(0, 50)
+          await this.git(repo.path, ['checkout', '-q', '--force', '--detach', repo.base_commit], signal)
+          await this.git(repo.path, ['reset', '-q', '--hard', repo.base_commit], signal)
+          await this.git(repo.path, ['clean', '-q', '-f', '-f', '-d'], signal)
+          const remaining = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal)).filter(item => item.change !== 'reverted')
+          if (remaining.length || await this.git(repo.path, ['rev-parse', 'HEAD'], signal) !== repo.base_commit) {
+            throw serviceError(`${repo.repo_id}：生成期间源码副本被改动且无法恢复（${describeChanges(remaining)}）。生成结果已保存，可“直接复用上次生成结果”在新的干净副本上应用`)
+          }
+          record.notices.push(`${repo.repo_id}：执行器在生成期间改动了源码副本（${changes.length ? describeChanges(changes) : 'HEAD 被移动'}）。这些改动已丢弃，未混入提交；下面的差异只来自结果文件中登记的修改。`)
+          await this.save(directory, record)
         }
-        record.notices.push(`${repo.repo_id}：执行器在生成期间改动了源码副本（${changes.length ? describeChanges(changes) : 'HEAD 被移动'}）。这些改动已丢弃，未混入提交；下面的差异只来自结果文件中登记的修改。`)
-        await this.save(directory, record)
       }
       const edits = generated.edits.filter(edit => edit.repo_id === repo.repo_id)
       if (!edits.length) continue
@@ -797,7 +921,31 @@ export class FaultInjectionService {
     }
     if (!record.repositories.some(repo => repo.diff)) throw serviceError('本次没有形成代码差异')
     record.generation_complete = true
+    delete record.failure_phase
     record.status = 'ready'; record.error = null; await this.save(directory, record)
+  }
+  async revalidate(dataRoot, runId, taskId) {
+    return this.exclusive(dataRoot, runId, taskId, async () => {
+      const record = await this.read(dataRoot, runId, taskId), directory = await this.directory(dataRoot, runId, taskId)
+      if (activeStates.has(record.status)) throw serviceError('请先停止当前任务')
+      if (record.status === 'pushed' || record.repositories?.some(repo => repo.commit)) throw serviceError('该任务已生成提交或推送，无需重新验收')
+      if (!Array.isArray(record.repositories) || !record.repositories.length) throw serviceError('该任务尚未完成源码准备，请重新生成')
+      const savedFile = await this.resolveSavedResultFile(directory)
+      if (!savedFile) throw serviceError('该任务没有已保存的生成结果文件（result.json），请重新生成')
+      let generated
+      try { generated = JSON.parse(await readFile(savedFile, 'utf8')) }
+      catch (error) { throw serviceError(`已保存的生成结果不是合法 JSON：${error.message}`) }
+      try {
+        await this.applyAndStageResult({ directory, scratchDirectory: path.join(directory, 'generation'), record, generated, signal: new AbortController().signal, isRevalidate: true })
+      } catch (error) {
+        record.status = 'failed'
+        record.generation_complete = false
+        record.error = cleanError(error)
+        await this.save(directory, record)
+        throw error
+      }
+      return record
+    })
   }
   async exclusive(dataRoot, runId, taskId, callback) {
     const key = this.key(dataRoot, runId, taskId)

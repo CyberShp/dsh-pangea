@@ -82,3 +82,236 @@ for (const scenario of [
     if (scenario.abort || scenario.diagnostic) assert.equal(diagnosticReads, 0)
   })
 }
+
+test('Round 4 guard A: authoring tools and active result writes are exempt from exploration budget interruption', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-authoring-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(path.join(directory, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(directory, '.agents', 'pangea', 'dsh.md'), 'fixture')
+  const scratch = path.join(directory, 'generation')
+  await mkdir(scratch, { recursive: true })
+  const outputPath = path.join(scratch, 'result.json')
+  let cancelCalls = 0
+  const generate = createInjectionGenerator({
+    agents: { get: () => ({ id: 'parent' }) },
+    subagents: {
+      start: async (_provider, req) => {
+        const turn = (async () => {
+          req.onSessionEvent({ type: 'turn_start' })
+          // 2 exploration calls (budget softToolCalls = 3)
+          req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'e1', kind: 'read', status: 'completed' } })
+          req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'e2', kind: 'grep', status: 'completed' } })
+          // Tool #3 and #4 are authoring tools (edit + bash writing result.json) and must NOT count as exploration or be interrupted
+          req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'a1', kind: 'edit', status: 'in_progress' } })
+          await new Promise(resolve => setTimeout(resolve, 45))
+          req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call_update', toolCallId: 'a1', kind: 'edit', status: 'completed' } })
+          req.onSessionEvent({
+            type: 'session_update',
+            update: { sessionUpdate: 'tool_call', toolCallId: 'a2', kind: 'bash', title: `python3 -c "open('${outputPath}','w')"`, status: 'in_progress' },
+          })
+          await new Promise(resolve => setTimeout(resolve, 45))
+          await writeFile(outputPath, JSON.stringify({ summary: 'delivered in turn 1', edits: [{ repo_id: 'r', path: 'a.c', before: '0', after: '1' }] }))
+          req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call_update', toolCallId: 'a2', status: 'completed' } })
+          return { stopReason: 'completed' }
+        })()
+        return {
+          id: 'worker-auth',
+          remoteSessionId: 'remote-auth',
+          result: turn,
+          cancelTurn: async () => { cancelCalls += 1; return { confirmed: true } },
+          dispose: async () => {},
+        }
+      },
+    },
+  }, {
+    resolveModel: async () => 'fast-model',
+    createSession: async () => 'parent',
+    budget: { softToolCalls: 3, pollMs: 15 },
+  })
+  let telemetry = null
+  const result = await generate({
+    record: { id: 'task-auth', provider_id: 'configured', case_keys: ['unit/A'] },
+    cwd: directory,
+    scratchDirectory: scratch,
+    outputPath,
+    prompt: 'generate',
+    signal: new AbortController().signal,
+    onStarted: async () => {},
+    onTelemetry: value => { telemetry = value },
+  })
+  assert.equal(result.summary, 'delivered in turn 1')
+  assert.equal(cancelCalls, 0)
+  assert.equal(telemetry.budget_wrapup_triggered, false)
+  assert.equal(telemetry.explore_tool_calls, 2)
+  assert.equal(telemetry.authoring_tool_calls, 2)
+  assert.equal(telemetry.turns, 1)
+})
+
+test('Round 4 guard B: sliding progress lease keeps slow streaming wrap-up alive well past base wrapUpDurationMs', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-lease-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(path.join(directory, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(directory, '.agents', 'pangea', 'dsh.md'), 'fixture')
+  const scratch = path.join(directory, 'generation')
+  await mkdir(scratch, { recursive: true })
+  const outputPath = path.join(scratch, 'result.json')
+  let cancelCalls = 0
+  const generate = createInjectionGenerator({
+    agents: { get: () => ({ id: 'parent' }) },
+    subagents: {
+      start: async (_provider, req) => {
+        let resolveFirst
+        const firstTurn = new Promise(resolve => { resolveFirst = resolve })
+        req.onSessionEvent({ type: 'turn_start' })
+        req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'c1', kind: 'read', status: 'completed' } })
+        req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'c2', kind: 'read', status: 'completed' } })
+        return {
+          id: 'worker-lease',
+          remoteSessionId: 'remote-lease',
+          result: firstTurn,
+          readDiagnostics: () => ({ activeTools: 0, toolCalls: 2, toolFailures: 0 }),
+          cancelTurn: async () => {
+            cancelCalls += 1
+            resolveFirst({ stopReason: 'cancelled' })
+            return { confirmed: true }
+          },
+          continuePrompt: async () => {
+            req.onSessionEvent({ type: 'turn_start' })
+            // Stream chunks for ~220ms (> 3x base wrapUpDurationMs=60ms) before writing 20KB result.json
+            for (let i = 0; i < 8; i++) {
+              await new Promise(resolve => setTimeout(resolve, 28))
+              req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'agent_message_chunk', text: 'x'.repeat(2500) } })
+            }
+            const bigSummary = 'S'.repeat(19000)
+            await writeFile(outputPath, JSON.stringify({ summary: bigSummary, edits: [{ repo_id: 'r', path: 'a.c', before: '0', after: '1' }] }))
+            return { stopReason: 'completed' }
+          },
+          dispose: async () => {},
+        }
+      },
+    },
+  }, {
+    resolveModel: async () => 'slow-fallback-model',
+    createSession: async () => 'parent',
+    budget: { softToolCalls: 2, wrapUpDurationMs: 60, progressLeaseMs: 90, hardDurationMs: 3000, pollMs: 15 },
+  })
+  const result = await generate({
+    record: { id: 'task-lease', provider_id: 'configured', case_keys: ['unit/A'] },
+    cwd: directory,
+    scratchDirectory: scratch,
+    outputPath,
+    prompt: 'generate',
+    signal: new AbortController().signal,
+    onStarted: async () => {},
+  })
+  assert.equal(result.summary.length, 19000)
+  // cancelTurn was called exactly once (to transition from exploration to wrap-up), never during active wrap-up!
+  assert.equal(cancelCalls, 1)
+})
+
+test('stalled wrap-up with zero events and zero scratch activity terminates cleanly', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-stall-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(path.join(directory, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(directory, '.agents', 'pangea', 'dsh.md'), 'fixture')
+  const scratch = path.join(directory, 'generation')
+  await mkdir(scratch, { recursive: true })
+  const outputPath = path.join(scratch, 'result.json')
+  let cancelCalls = 0
+  const generate = createInjectionGenerator({
+    agents: { get: () => ({ id: 'parent' }) },
+    subagents: {
+      start: async (_provider, req) => {
+        let resolveFirst, rejectWrapUp
+        const firstTurn = new Promise(resolve => { resolveFirst = resolve })
+        req.onSessionEvent({ type: 'turn_start' })
+        req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'c1', kind: 'read', status: 'completed' } })
+        req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'c2', kind: 'read', status: 'completed' } })
+        return {
+          id: 'worker-stall',
+          remoteSessionId: 'remote-stall',
+          result: firstTurn,
+          readDiagnostics: () => ({ activeTools: 0, toolCalls: 2, toolFailures: 0 }),
+          cancelTurn: async () => {
+            cancelCalls += 1
+            if (cancelCalls === 1) resolveFirst({ stopReason: 'cancelled' })
+            else if (rejectWrapUp) rejectWrapUp(new Error('MessageAbortedError'))
+            return { confirmed: true }
+          },
+          continuePrompt: () => new Promise((_resolve, reject) => { rejectWrapUp = reject }),
+          dispose: async () => {},
+        }
+      },
+    },
+  }, {
+    resolveModel: async () => 'model',
+    createSession: async () => 'parent',
+    budget: { softToolCalls: 2, wrapUpDurationMs: 55, progressLeaseMs: 55, hardDurationMs: 1000, pollMs: 15 },
+  })
+  await assert.rejects(generate({
+    record: { id: 'task-stall', provider_id: 'configured', case_keys: ['unit/A'] },
+    cwd: directory,
+    scratchDirectory: scratch,
+    outputPath,
+    prompt: 'generate',
+    signal: new AbortController().signal,
+    onStarted: async () => {},
+  }), /探索预算收口超时/)
+  assert.ok(cancelCalls >= 2)
+})
+
+test('multi-case batch dynamically expands default softToolCalls and non-user-abort salvages valid disk result.json', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-salvage-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(path.join(directory, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(directory, '.agents', 'pangea', 'dsh.md'), 'fixture')
+  const scratch = path.join(directory, 'generation')
+  await mkdir(scratch, { recursive: true })
+  const outputPath = path.join(scratch, 'result.json')
+  let cancelCalls = 0
+  const generate = createInjectionGenerator({
+    agents: { get: () => ({ id: 'parent' }) },
+    subagents: {
+      start: async (_provider, req) => {
+        const turn = (async () => {
+          req.onSessionEvent({ type: 'turn_start' })
+          // 24 read calls: exceeds single-case 18, within 4-case scaled budget (18 + 3*4 = 30)
+          for (let i = 1; i <= 24; i++) {
+            req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: `r-${i}`, kind: 'read', status: 'completed' } })
+          }
+          await new Promise(resolve => setTimeout(resolve, 35))
+          await writeFile(outputPath, JSON.stringify({ summary: 'salvaged', edits: [{ repo_id: 'r', path: 'a.c', before: '0', after: '1' }] }))
+          // Simulate non-completed stopReason right after result.json hit disk
+          return { stopReason: 'cancelled', diagnostic: 'late stream close after write' }
+        })()
+        return {
+          id: 'worker-salvage',
+          remoteSessionId: 'remote-salvage',
+          result: turn,
+          cancelTurn: async () => { cancelCalls += 1; return { confirmed: true } },
+          dispose: async () => {},
+        }
+      },
+    },
+  }, {
+    resolveModel: async () => 'model',
+    createSession: async () => 'parent',
+    budget: { pollMs: 15 },
+  })
+  let telemetry = null
+  const result = await generate({
+    record: { id: 'task-salvage', provider_id: 'configured', case_keys: ['c1', 'c2', 'c3', 'c4'] },
+    cwd: directory,
+    scratchDirectory: scratch,
+    outputPath,
+    prompt: 'generate',
+    signal: new AbortController().signal,
+    onStarted: async () => {},
+    onTelemetry: value => { telemetry = value },
+  })
+  assert.equal(cancelCalls, 0)
+  assert.equal(result.summary, 'salvaged')
+  assert.equal(telemetry.salvaged_disk_result, true)
+  assert.equal(telemetry.soft_tool_budget, 30)
+})
+

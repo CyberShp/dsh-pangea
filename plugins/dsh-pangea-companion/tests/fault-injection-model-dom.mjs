@@ -7,6 +7,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 const React = await import('react'), { createRoot } = await import('react-dom/client'), { act } = React
 const calls = []
 let catalogMode = 'ready'
+let defaultAgentModel = 'old-analysis-model'
 globalThis.fetch = async (url, options = {}) => {
   const body = options.body ? JSON.parse(options.body) : null
   calls.push(body)
@@ -15,7 +16,7 @@ globalThis.fetch = async (url, options = {}) => {
     return Response.json({ status: 'ok', provider_id: body.provider_id, catalog_id: `receipt-${body.provider_id}`, current_model: `${body.provider_id}/default`, models: catalogMode === 'empty' ? [] : [{ id: `${body.provider_id}/default` }, { id: `${body.provider_id}/other` }] })
   }
   if (body?.action === 'generate') return Response.json({ status: 'ok', task: { id: 'task', status: 'ready', repositories: [], case_keys: ['case'], cases: [], verification: [] } })
-  return Response.json({ status: 'ok', tasks: [], providers: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], defaults: { provider_id: 'a', agent_model: 'old-analysis-model', repositories: [{ repo_id: 'repo', personal_branch: 'main', source: { kind: 'git', commit: 'a'.repeat(40) } }] } })
+  return Response.json({ status: 'ok', tasks: [], providers: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }], defaults: { provider_id: 'a', agent_model: defaultAgentModel, repositories: [{ repo_id: 'repo', personal_branch: 'main', source: { kind: 'git', commit: 'a'.repeat(40) } }] } })
 }
 const container = document.createElement('div'); document.body.append(container)
 const root = createRoot(container), Panel = createFaultInjectionPanel(React)
@@ -26,6 +27,7 @@ try {
   await act(async () => root.render(React.createElement(Panel, { runId: 'run', cwd: '/workspace', cases: [{ projection_id: 'case', title: 'case' }] })))
   await click('打开打桩工作区')
   assert.equal(container.querySelector('[aria-label="打桩模型"]').tagName, 'SELECT')
+  assert.equal(container.querySelector('[aria-label="打桩模型"]').value, '')
   assert.equal(findButton('生成打桩修改').disabled, false)
   await change('打桩模型', 'a/other')
   await change('打桩执行器', 'b')
@@ -38,5 +40,16 @@ try {
   catalogMode = 'ready'; await click('刷新模型'); await click('生成打桩修改')
   const sent = calls.find(body => body?.action === 'generate')
   assert.equal(sent.agent_catalog_id, 'receipt-b'); assert.equal(sent.agent_model, 'b/default')
-  console.log('PASS: model dropdown, provider reset, blocked error/empty catalog and receipt payload in React DOM')
+
+  // Verify Round 4 model-inheritance fix: when Run defaults.agent_model ('a/other') exists in provider catalog, keep fast model instead of falling back to 'a/default'
+  calls.length = 0
+  defaultAgentModel = 'a/other'
+  await act(async () => root.render(React.createElement(Panel, { key: 'run-fast', runId: 'run-fast', cwd: '/workspace', cases: [{ projection_id: 'case', title: 'case' }] })))
+  await click('打开打桩工作区')
+  assert.equal(container.querySelector('[aria-label="打桩模型"]').value, 'a/other')
+  await click('生成打桩修改')
+  const fastSent = calls.find(body => body?.action === 'generate')
+  assert.equal(fastSent.agent_catalog_id, 'receipt-a')
+  assert.equal(fastSent.agent_model, 'a/other')
+  console.log('PASS: model dropdown, Run fast-model inheritance, stale-model fallback, provider reset, blocked error/empty catalog and receipt payload in React DOM')
 } finally { await act(async () => root.unmount()); window.happyDOM.abort() }

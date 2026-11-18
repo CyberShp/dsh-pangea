@@ -107,7 +107,10 @@ export function buildVerificationShellScript(task) {
       if (pt?.disable) lines.push(`# 关闭 ${pid}: ${shellQuoteComment(pt.disable)}`)
     }
     const steps = Array.isArray(profile.steps) ? profile.steps : [profile.steps].filter(Boolean)
-    for (const step of steps) lines.push(String(step))
+    for (const step of steps) {
+      const text = String(step)
+      if (text.trim()) lines.push(text)
+    }
     lines.push(`echo "[PANGEA_CASE_END] case=${profile.case_key} status=0"`)
     lines.push('')
   }

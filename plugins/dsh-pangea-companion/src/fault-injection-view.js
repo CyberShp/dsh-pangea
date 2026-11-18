@@ -59,8 +59,11 @@ export function createFaultInjectionPanel(React) {
       if (!open || !settings?.provider_id) return
       return loadAnalysisAgentModels({ providerId: settings.provider_id, cwd, onState: setModelState })
     }, [open, settings?.provider_id, cwd, modelRefresh])
-    const modelSelection = analysisExecutionState(settings || {}, providers.map(item => ({ ...item, registered: true })), modelState, cwd)
     const modelCatalog = modelState.provider_id === settings?.provider_id && modelState.cwd === cwd && modelState.status === 'ready' ? modelState.catalog : null
+    const effectiveSettings = settings && settings.agent_model_inherited && modelCatalog && Array.isArray(modelCatalog.models) && !modelCatalog.models.some(item => item.id === settings.agent_model)
+      ? { ...settings, agent_model: '', agent_model_inherited: false }
+      : settings
+    const modelSelection = analysisExecutionState(effectiveSettings || {}, providers.map(item => ({ ...item, registered: true })), modelState, cwd)
     const selectedKeys = standalone ? chosen.filter(key => selectableKeys.includes(key)) : cases.map(keyOf).filter(Boolean)
     const selectedCases = cases.filter(item => selectedKeys.includes(keyOf(item)))
     const focusedCase = cases.find(item => keyOf(item) === focused) || selectedCases[0] || cases[0]
@@ -105,7 +108,8 @@ export function createFaultInjectionPanel(React) {
           } catch {}
         }
         setProviders(value.providers ?? [])
-        setSettings(previous => previous ?? { ...value.defaults, agent_model: '', instructions: '' })
+        const inheritedModel = value.defaults?.agent_model || ''
+        setSettings(previous => previous ?? { ...value.defaults, agent_model: inheritedModel, agent_model_inherited: Boolean(inheritedModel), instructions: '' })
         setError('')
       }).catch(reason => { if (live) setError(reason.message) })
       return () => { live = false }
@@ -319,11 +323,11 @@ export function createFaultInjectionPanel(React) {
             h('button', { type: 'button', onClick: () => { setRepoSetupOpen(true); repoDetailsRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }) } }, '定位仓库配置')) : null,
           h('div', { style: { marginTop: 14 } },
             h('div', { style: grid },
-              h('label', { className: 'pangea-fi-field' }, h('span', null, '执行器'), h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value, agent_model: '' }) },
+              h('label', { className: 'pangea-fi-field' }, h('span', null, '执行器'), h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value, agent_model: '', agent_model_inherited: false }) },
                 h('option', { value: '' }, '选择执行器'), providers.map(provider => h('option', { key: provider.id, value: provider.id }, provider.label)))),
               h('div', { className: 'pangea-fi-field' },
-                h('label', { style: { display: 'grid', gap: 6 } }, h('span', null, '打桩模型'), h('select', { 'aria-label': '打桩模型', value: settings.agent_model || '', disabled: working || !modelCatalog,
-                  onChange: event => setSettings({ ...settings, agent_model: event.target.value }) },
+                h('label', { style: { display: 'grid', gap: 6 } }, h('span', null, '打桩模型'), h('select', { 'aria-label': '打桩模型', value: effectiveSettings?.agent_model || '', disabled: working || !modelCatalog,
+                  onChange: event => setSettings({ ...settings, agent_model: event.target.value, agent_model_inherited: false }) },
                   h('option', { value: '' }, modelCatalog?.current_model ? `使用 Agent 默认（${modelCatalog.current_model}）` : '请选择可用模型'),
                   (modelCatalog?.models || []).map(model => h('option', { key: model.id, value: model.id }, model.label && model.label !== model.id ? `${model.label} · ${model.id}` : model.id)))),
                 h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' } },
@@ -347,7 +351,7 @@ export function createFaultInjectionPanel(React) {
             h('footer', { className: 'pangea-fi-footer' },
               standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : h('span', null),
               h('button', { type: 'button', className: 'btn primary', disabled: working || !modelSelection.ready || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
-                onClick: () => act('generate', { ...settings, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
+                onClick: () => act('generate', { ...effectiveSettings, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
           : !settings ? h('p', null, '正在读取打桩设置…') : null,
         task && (!standalone || step === 4) ? h('div', { className: 'pangea-fi-task-card', style: { marginTop: 16 } },
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
@@ -365,7 +369,8 @@ export function createFaultInjectionPanel(React) {
           task.telemetry ? h('p', { className: 'b05-subtle', style: { fontSize: 12, margin: '6px 0 0' } }, `执行账本：模型轮次 ${task.telemetry.turns ?? 0} · 工具调用 ${task.telemetry.tool_calls ?? 0} 次 · 上下文压缩 ${task.telemetry.compactions ?? 0} 次${task.telemetry.budget_wrapup_triggered ? ' · 已触发探索预算收口' : ''}`) : null,
           task.status === 'pushing' && task.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送：${task.current_repository}`) : null,
           ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
-            task.result_saved ? h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => act('reuse-result') }, '直接复用已留存的生成结果（不调用模型）') : null,
+            task.result_saved ? h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => act('revalidate') }, '原地重新验收（不调用模型）') : null,
+            task.result_saved ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('reuse-result') }, '直接复用已留存的生成结果（不调用模型）') : null,
             task.result_saved ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry-with-reference') }, '参考上次结果重新生成') : null,
             h('button', { type: 'button', className: task.result_saved ? '' : 'primary', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成')) : null,
           task.schema_version !== 2 ? h('div', { role: 'status', className: 'pangea-fi-banner warn' }, '此历史任务使用旧任务分支。请先配置项目个人分支，再按最新分支重新生成；旧分支不会被推送。') : null,

@@ -5,8 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { Readable } from 'node:stream'
 import { FaultInjectionService, injectionGit, workspaceChanges, dedupeRepeatedValues, compactGenerationInput, checkInjectionResult } from '../src/fault-injection.js'
 import { createInjectionGenerator } from '../src/fault-injection-agent.js'
+import { buildVerificationShellScript } from '../src/fault-injection-candidates.js'
+import { faultInjectionRouteHandler } from '../src/index.js'
 import { protectedBranchReason } from '../src/repositories/branch-policy.js'
 import { disabledHooksPath } from '../src/repositories/git-environment.js'
 
@@ -375,6 +378,14 @@ test('C/C++ driver repo: host pre-scans harness facts, deduplicates 80+ char sou
   assert.equal(harness.cmake_rules[0].source_collection, 'file_glob')
   assert.equal(harness.cmake_rules[0].configure_depends, false)
   assert.equal(harness.test_directories.find(item => item.directory === 'test')?.framework, 'gtest')
+  assert.ok(Array.isArray(harness.target_snippets) && harness.target_snippets.length >= 1)
+  assert.equal(harness.target_snippets[0].path, drvPath)
+  assert.match(harness.target_snippets[0].content, /1: #ifdef __XXX_ASAN__/)
+  assert.match(harness.target_snippets[0].content, /drv_wait_ready/)
+  assert.ok(harness.sample_test_snippet)
+  assert.match(harness.sample_test_snippet.content, /1: #include <gtest\/gtest\.h>/)
+  assert.match(capturedPrompt, /target_snippets/)
+  assert.match(capturedPrompt, /禁止放入空字符串/)
   assert.deepEqual(ready.repositories[0].files.sort(), [drvPath, 'test/test_drv_timeout.cpp'])
 })
 
@@ -470,4 +481,190 @@ test('createInjectionGenerator interrupts runaway exploration on softToolCalls, 
   assert.equal(ready.telemetry.max_context_tokens, 180000)
   assert.deepEqual(ready.telemetry.tool_kinds, { read: 1, bash: 2 })
 })
+
+test('Round 3 blank separator steps are normalized cleanly and generated bash script passes bash -n', async t => {
+  const f = await fixture(t)
+  const rawSteps = []
+  for (let section = 1; section <= 6; section++) {
+    rawSteps.push(`# section ${section}`)
+    for (let idx = 1; idx <= 4; idx++) rawSteps.push(`echo "sec=${section} step=${idx}"`)
+    rawSteps.push(section % 2 === 0 ? '   ' : '')
+  }
+  rawSteps.push('# final verification', 'echo "[FI_HIT:INIT_HANG]"', 'echo "done"')
+  assert.equal(rawSteps.length, 39)
+
+  const service = new FaultInjectionService({
+    generate: async ({ outputPath }) => {
+      const payload = {
+        ...generated({ case_keys: f.input.case_keys }),
+        profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['INIT_HANG'], steps: rawSteps }],
+        limitations: ['ASAN 下超时约 30s', '', '  ', '正常构建约 4s'],
+      }
+      await writeFile(outputPath, JSON.stringify(payload, null, 2))
+      return payload
+    },
+  })
+  const task = await service.start(f); await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(ready.result.profiles[0].steps.length, 33)
+  assert.ok(ready.result.profiles[0].steps.every(step => step.trim().length > 0))
+  assert.deepEqual(ready.result.limitations, ['ASAN 下超时约 30s', '正常构建约 4s'])
+
+  const script = buildVerificationShellScript(ready)
+  const scriptPath = path.join(f.root, 'verify-round3.sh')
+  await writeFile(scriptPath, script, 'utf8')
+  await exec('bash', ['-n', scriptPath])
+
+  assert.throws(() => checkInjectionResult({
+    points: [{ id: 'INIT_HANG', repo_id: 'target', path: 'init.c' }],
+    profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['INIT_HANG'], steps: ['', '   '] }],
+    edits: [{ repo_id: 'target', path: 'init.c', before: original, after: instrumented }],
+  }, { case_keys: ['unit/CASE-HANG'], repositories: [{ repo_id: 'target' }] }), /缺少可读取的桩点引用或执行说明/)
+})
+
+test('HTTP revalidate recovers hotfixed generation/result.json and aborted tasks in-place with zero model calls', async t => {
+  const f = await fixture(t)
+  let modelCalls = 0
+  const service = new FaultInjectionService({
+    generate: async ({ outputPath }) => {
+      modelCalls += 1
+      const broken = {
+        ...generated({ case_keys: f.input.case_keys }),
+        edits: [{ repo_id: 'target', path: 'init.c', before: 'int missing_symbol(void) { return 99; }\n', after: instrumented }],
+      }
+      await writeFile(outputPath, JSON.stringify(broken, null, 2))
+      return broken
+    },
+  })
+  const created = await service.start(f); await wait(service)
+  const failed = await service.read(f.dataRoot, f.run.run_id, created.id)
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.result_saved, true)
+  assert.equal(modelCalls, 1)
+
+  // Hotfix generation/result.json on disk (exact user workflow when manually repairing result.json)
+  const generationResultPath = path.join(f.dataRoot, '.pangea', 'fault-injection', f.run.run_id, created.id, 'generation', 'result.json')
+  const fixed = generated({ case_keys: f.input.case_keys })
+  await new Promise(resolve => setTimeout(resolve, 15))
+  await writeFile(generationResultPath, JSON.stringify(fixed, null, 2))
+
+  // Invoke POST /api/pangea-companion/fault-injection with action: 'revalidate'
+  const body = JSON.stringify({ action: 'revalidate', run_id: f.run.run_id, task_id: created.id })
+  const req = Readable.from([Buffer.from(body)])
+  req.url = '/api/pangea-companion/fault-injection'
+  req.method = 'POST'
+  req.headers = { 'sec-fetch-site': 'same-origin' }
+  let statusCode = 0, rawBody = ''
+  await faultInjectionRouteHandler(
+    req,
+    { writeHead(code) { statusCode = code }, end(chunk) { rawBody = chunk } },
+    service,
+    {},
+    { resolveRoot: async () => f.dataRoot, readRun: async () => f.run },
+  )
+  assert.equal(statusCode, 200, rawBody)
+  const response = JSON.parse(rawBody)
+  assert.equal(response.status, 'ok')
+  assert.equal(response.task.id, created.id)
+  assert.equal(modelCalls, 1)
+
+  await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, created.id)
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.match(ready.repositories[0].diff, /pangea_fault_hit\("INIT_HANG"\)/)
+
+  await service.push(f.dataRoot, f.run.run_id, created.id)
+  await wait(service)
+  const pushed = await service.read(f.dataRoot, f.run.run_id, created.id)
+  assert.equal(pushed.status, 'pushed', pushed.error)
+
+  // Also verify Round 4 rescue: task aborted before authored-result.json existed, with only generation/result.json on disk
+  const f2 = await fixture(t)
+  const abortedService = new FaultInjectionService({
+    generate: async ({ outputPath }) => {
+      await writeFile(outputPath, JSON.stringify(generated({ case_keys: f2.input.case_keys }), null, 2))
+      throw new Error('simulated transport disconnect right after writing result.json')
+    },
+  })
+  const abortedTask = await abortedService.start(f2); await wait(abortedService)
+  const abortedRead = await abortedService.read(f2.dataRoot, f2.run.run_id, abortedTask.id)
+  assert.equal(abortedRead.status, 'failed')
+  assert.equal(abortedRead.result_saved, true)
+
+  await abortedService.revalidate(f2.dataRoot, f2.run.run_id, abortedTask.id)
+  await wait(abortedService)
+  const rescued = await abortedService.read(f2.dataRoot, f2.run.run_id, abortedTask.id)
+  assert.equal(rescued.status, 'ready', rescued.error)
+})
+
+test('real compiled C acceptance: multi-case batch shares one fault stub, compiles with cc, triggers fault hit and clean recovery', async t => {
+  const f = await fixture(t)
+  const cSource = [
+    '#include <stdio.h>',
+    '#include <stdlib.h>',
+    '#include <string.h>',
+    'int drv_init_step(int mode) {',
+    '  if (mode < 0) return -2;',
+    '  return 0;',
+    '}',
+    'int main(int argc, char **argv) {',
+    '  int mode = argc > 1 ? atoi(argv[1]) : 0;',
+    '  int rc = drv_init_step(mode);',
+    '  printf("rc=%d\\n", rc);',
+    '  return rc == 0 ? 0 : 1;',
+    '}',
+    '',
+  ].join('\n')
+  await writeFile(path.join(f.source, 'init.c'), cSource)
+  await injectionGit(f.source, ['add', 'init.c'])
+  await injectionGit(f.source, ['commit', '-m', 'c driver main'])
+  await injectionGit(f.source, ['push', 'origin', 'main'])
+  const head = await injectionGit(f.source, ['rev-parse', 'HEAD'])
+  f.repositories[0].git.commit = head
+  f.repositories[0].base_ref = head
+  f.run.details = {
+    test_cases: [
+      { projection_id: 'unit/CASE-TIMEOUT', test_case_id: 'unit/CASE-TIMEOUT', title: '超时返回 -1', execution_readiness: 'needs_instrumentation', source_evidence: ['target:init.c:4-7'] },
+      { projection_id: 'unit/CASE-RECOVER', test_case_id: 'unit/CASE-RECOVER', title: '关闭故障后恢复正常返回 0', execution_readiness: 'needs_instrumentation', source_evidence: ['target:init.c:4-7'] },
+    ],
+  }
+  f.input = { ...f.input, case_keys: ['unit/CASE-TIMEOUT', 'unit/CASE-RECOVER'] }
+
+  const service = new FaultInjectionService({
+    generate: async () => ({
+      summary: '在 drv_init_step 植入环境变量控制的单点故障桩，同时覆盖超时与恢复两条用例',
+      points: [{ id: 'DRV_TIMEOUT_STUB', repo_id: 'target', path: 'init.c', action: '强制返回 -1', enable: 'DRV_FAULT=1', disable: 'unset DRV_FAULT', observe: '[FI_HIT:DRV_TIMEOUT_STUB]' }],
+      profiles: [
+        { case_key: 'unit/CASE-TIMEOUT', point_ids: ['DRV_TIMEOUT_STUB'], steps: ['cc init.c -o drv_bin', '', 'DRV_FAULT=1 ./drv_bin 0 || true'] },
+        { case_key: 'unit/CASE-RECOVER', point_ids: ['DRV_TIMEOUT_STUB'], steps: ['cc init.c -o drv_bin', 'unset DRV_FAULT && ./drv_bin 0'] },
+      ],
+      edits: [{
+        repo_id: 'target',
+        path: 'init.c',
+        before: '  if (mode < 0) return -2;',
+        after: '  const char *fault = getenv("DRV_FAULT");\n  if (fault && strcmp(fault, "1") == 0) {\n    printf("[FI_HIT:DRV_TIMEOUT_STUB]\\n");\n    return -1;\n  }\n  if (mode < 0) return -2;',
+      }],
+    }),
+  })
+  const created = await service.start(f); await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, created.id)
+  assert.equal(ready.status, 'ready', ready.error)
+  await service.push(f.dataRoot, f.run.run_id, created.id); await wait(service)
+  const pushed = await service.read(f.dataRoot, f.run.run_id, created.id)
+  assert.equal(pushed.status, 'pushed', pushed.error)
+
+  const binPath = path.join(f.root, 'drv_bin')
+  await exec('cc', [path.join(f.source, 'init.c'), '-o', binPath])
+  const faultRun = await exec(binPath, ['0'], { env: { ...process.env, DRV_FAULT: '1' } }).catch(err => err)
+  assert.equal(faultRun.code, 1)
+  assert.match(faultRun.stdout, /\[FI_HIT:DRV_TIMEOUT_STUB\]/)
+  assert.match(faultRun.stdout, /rc=-1/)
+
+  const cleanEnv = { ...process.env }
+  delete cleanEnv.DRV_FAULT
+  const recoverRun = await exec(binPath, ['0'], { env: cleanEnv })
+  assert.match(recoverRun.stdout, /rc=0/)
+})
+
 
