@@ -50,8 +50,8 @@ const service = new FaultInjectionService({ validateModel: options => requireAge
   return injectionGit(cwd, args, signal)
 }, generate: async ({ record, outputPath }) => {
   modelCalls += 1
-  const payload = { summary: '工程测试夹具', points: [{ id: 'A', repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
-    profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], steps: ['开启 A', '', '执行业务', '关闭 A 并恢复'] })),
+  const payload = { summary: '工程测试夹具', points: [{ id: 'A', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
+    profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['A'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['开启 A', '', '执行业务', '关闭 A 并恢复'] })),
     edits: [{ repo_id: 'target', path: 'target.c', before: emitBrokenBefore ? 'nonexistent_symbol();' : 'return 0;', after: 'return -1;' }] }
   if (outputPath) await writeFile(outputPath, JSON.stringify(payload, null, 2))
   return payload
@@ -147,6 +147,8 @@ try {
   await until(() => button('提交并推送到 main'))
   const generate = calls.find(item => item.action === 'generate')
   assert.deepEqual(generate.case_keys, ['unit/A', 'unit/B', 'unit/C'])
+  assert.ok(container.querySelector('[aria-label="安全执行流程"]'))
+  for (const label of ['当前输入来源', '排除的历史与非目标输入', '准备与原状态快照', '历史与非目标输入验证', '退出清理', '独立恢复检查']) assert.ok(container.textContent.includes(label), label)
   assert.equal(generate.run_id, run.run_id)
   assert.equal(container.querySelector('[aria-label="搜索打桩用例"]'), null)
   assert.equal(button('提交并推送到 main').disabled, true)
@@ -162,9 +164,10 @@ try {
   Object.defineProperty(navigator, 'clipboard', { value: { writeText: async text => { copiedScript = text } }, configurable: true })
   await click('复制验证脚本')
   assert.match(copiedScript, /^#!\/usr\/bin\/env bash/)
-  assert.match(copiedScript, /\[PANGEA_CASE_END\] case=unit\/C status=0/)
+  assert.match(copiedScript, /\[PANGEA_CASE_END\] case=%s status=%s.*'unit\/C' "\$final_status"/)
+  assert.match(copiedScript, /trap '__pangea_finish/)
   assert.doesNotMatch(copiedScript, /\[PANGEA_VERIFY\].*result=passed/)
-  await change('执行日志内容', '[PANGEA_VERIFY] case=unit/C result=passed hits=A=2')
+  await change('执行日志内容', '[PANGEA_CASE_BEGIN] case=unit/C points=A\n[PANGEA_VERIFY] case=unit/C result=passed hits=A=2\n[PANGEA_CLEANUP] case=unit/C cleanup=0 verify=0\n[PANGEA_CASE_END] case=unit/C status=0')
   await click('解析日志填充')
   assert.equal(container.querySelector('[aria-label="验证用例"]').value, 'unit/C')
   assert.equal(container.querySelector('[aria-label="实际结果"]').value, 'passed')

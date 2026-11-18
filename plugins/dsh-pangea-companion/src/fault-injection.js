@@ -573,7 +573,15 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
     '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中，次数配置为零或负数时明确禁用。优先复用真实已有调测入口；没有时实现符合项目语言与构建方式的最小控制入口，并把必要源文件/构建接入一起纳入 edits。',
     '逐用例说明按真实执行顺序组织：关闭全部桩验证正常基线 → 启用目标桩执行并检查实际命中及故障后状态 → 关闭桩或耗尽次数后验证恢复（若开关仅启动时读取则写明重启顺序与需重建状态；分轮/组合桩写明触发顺序，基线准备不得提前消耗一次性桩）。同一分支上已有兼容桩点须复用；不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
     '逐步核对观测断言：不得断言目录只剩业务文件；时间戳考虑实际精度并结合内容/计数验证恢复；区分命令退出码与业务返回值。',
-    'JSON 结构：{summary:string, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
+    '安全合同 v2（包括参考旧结果和复用结果）：每个 points 元素增加 trigger_scope:{current_input:string,excluded_inputs:[string]}，明确真实调用链上当前请求/当前操作的来源与匹配表达式。禁止用完整 SQL 参数、序列化历史、日志或持久化上下文的全文匹配代替当前输入；历史里含标记而当前输入不含时不得命中、不得消耗次数。不能可靠隔离当前输入时停止该方案，不能扩大命中范围。',
+    '每个 profile 增加 safety:{setup:[string],negative_steps:[string],negative_point_ids:[id],cleanup:[string],cleanup_verify:[string]}。这些数组均须非空、可执行，negative_point_ids 覆盖本 profile 全部桩点。setup 先保存原控制状态（包括文件原本不存在及原始字节）和本轮独占资源标识；negative_steps 在全新未消耗的次数预算下验证非目标历史/上下文不触发、计数不变，然后 steps 验证目标确实命中、重试和撤桩恢复。不要通过先耗尽次数制造负向通过。',
+    '宿主按 setup → negative_steps → steps 顺序执行，并在同一 profile 的独立 shell 中安装 EXIT/INT/TERM 清理。cleanup 必须独立幂等、容忍 setup 只执行一部分和未定义变量，恢复原控制状态、只清理本轮创建且确属本轮的测试数据/服务；cleanup_verify 独立验证精确恢复与资源清理。不要覆盖宿主 trap、使用 exec 替换宿主或在后台留下未等待的业务命令；Python/其他子进程也须以 try/finally 处理自身资源。清理所需状态不可只存于已退出的子进程内存。保留证据日志；SIGKILL/断电等不可捕获退出明确列入 limitations。',
+    '资源清理必须覆盖本轮登录创建的认证会话/令牌，而不只是 HTTP 连接与业务数据；在 finally/cleanup 撤销或删除仅本轮拥有的认证会话，并独立查询确认不再有效。创建远端业务对象前先持久化本轮唯一 ID/所有权凭据，成功响应到达后先登记资源再做结果断言，以便请求已成功但断言失败/超时也能回收；禁止按用户或时间范围批量删除不属于本轮的数据。含认证信息的状态文件须限制访问且不得写进证据日志。',
+    '清理不能把快照损坏/丢失等同于原状态不存在；原本存在而备份缺失时必须保留现状并报错，不得擅自删除控制文件或宣称恢复成功。清理某资源失败后仍应尝试其它资源，最终汇总失败并非零退出；验证不能吞错。',
+    '恢复备份必须验证完整性：用明确存在标记、严格类型与严格解码（Python base64.b64decode(..., validate=True)），必要时核对原字节哈希。备份缺失或解码损坏不能跳过检查后打印成功，也不能把非法编码宽松解码成空字节并覆盖现状；无法证明原状态时清理与独立核验均须非零。每项资源恢复使用独立异常边界，读取/解码/写入控制备份失败仍须继续撤销本轮认证资源与清理业务数据，最后汇总失败。',
+    '空文件（零字节/空 base64 字符串）是合法的原始快照，必须与字段不存在、备份损坏分开判定，不能用字符串 truthiness 判断备份是否存在。覆盖正常存在、原本不存在、原本为空三种恢复基线。登录等资源分配调用前持久化本轮唯一所有权标识；获得凭据后立即落盘，先于任何后续身份探测或断言。后续探测失败或调用结果未知时，也要能按本轮唯一标识回收并核验；不能把“尚未登记 token”当作“未创建会话”而报告成功。',
+    '核对运行时库的真实数据形状：数据库驱动默认 tuple 行不能直接 dict(row)，需显式字典行工厂或按列名转换；不能仅凭语法检查推断运行成功。控制开关与次数必须严格校验类型，字符串 false 等非布尔值不能因 truthy 被当作启用；异常或不完整控制数据默认禁用。',
+    'JSON 结构：{summary:string, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,trigger_scope:{current_input:string,excluded_inputs:[string]},times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],safety:{setup:[string],negative_steps:[string],negative_point_ids:[id],cleanup:[string],cleanup_verify:[string]},steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
     'case_key 必须逐字使用输入的 case_key。points/profiles 是业务说明；edits 才是实际修改。before 为当前文件中唯一出现的原文，after 为替换内容；新增文件 before=null。path 为仓库相对路径。不要包含 .git 文件，不删除文件。',
     'profiles 必须与输入 case_keys 一一对应：总数相同、case_key 集合相同且每个 case_key 只出现一次；同一用例的多轮场景合并在同一个 profile.steps 中，steps 数组每个元素都必须是非空的可执行命令或 # 注释行（禁止放入空字符串 "" 或纯空白元素，分节请用 # 注释），给出能直接执行的启用、关闭及命中检查方法，变量先定义后使用，不用伪命令或“同上”。',
     '宿主会将同一 profile.steps 按顺序原样拼入头部带 set -euo pipefail 的单个 bash 脚本执行，并需兼容 macOS 默认 bash 3.2（UTF-8/C.UTF-8）：禁止 declare -A、mapfile/readarray、|&、${var,,} 等 Bash 4+ 语法；变量紧邻中文或非 ASCII 标点时必须写作 ${VAR}；严禁把缺少末尾换行的数据交给 read（如 curl 应用 code=$(curl -sS -o "$body_file" -w \'%{http_code}\' ...) 分离响应体与状态码，或用 read -r var || [[ -n "$var" ]]）；pipefail 下“无匹配”断言用 ! grep -q；内嵌 Python 用 True/False/None，SQL 聚合遵守 GROUP BY，关键断言失败须非零退出。',
@@ -603,6 +611,28 @@ export function checkInjectionResult(value, record) {
   normalizeInjectionResult(value)
   if (!value || !Array.isArray(value.edits) || !value.edits.length) throw serviceError('Agent 未提供实际代码修改；本轮未形成修改，可重新生成')
   if (!Array.isArray(value.points) || !value.points.length || !Array.isArray(value.profiles)) throw serviceError('生成结果缺少桩点或逐用例执行说明')
+  if (record.generation_contract_version >= 2) {
+    const commands = items => Array.isArray(items) && items.length > 0
+      && items.every(item => typeof item === 'string' && item.trim())
+      && items.some(item => item.split('\n').some(line => line.trim() && !line.trim().startsWith('#')))
+    for (const point of value.points) {
+      const scope = point?.trigger_scope
+      if (!scope || typeof scope.current_input !== 'string' || !scope.current_input.trim()
+        || !Array.isArray(scope.excluded_inputs) || !scope.excluded_inputs.length
+        || scope.excluded_inputs.some(item => typeof item !== 'string' || !item.trim())) {
+        throw serviceError(`桩点 ${point?.id || '?'} 缺少当前输入来源与历史/非目标输入排除范围，请重新生成`)
+      }
+    }
+    for (const profile of value.profiles) {
+      const safety = profile?.safety
+      if (!safety || ['setup', 'negative_steps', 'cleanup', 'cleanup_verify'].some(key => !commands(safety[key]))
+        || !Array.isArray(safety.negative_point_ids) || !Array.isArray(profile.point_ids)
+        || profile.point_ids.some(id => !safety.negative_point_ids.includes(id))
+        || safety.negative_point_ids.some(id => !profile.point_ids.includes(id))) {
+        throw serviceError(`用例 ${profile?.case_key || '?'} 缺少触发范围负向验证、退出清理或恢复检查，请重新生成`)
+      }
+    }
+  }
   const repoIds = new Set(record.repositories.map(repo => repo.repo_id)), pointIds = new Set()
   for (const point of value.points) {
     if (!point || typeof point.id !== 'string' || !point.id || pointIds.has(point.id) || !repoIds.has(point.repo_id)) throw serviceError('生成结果包含重复桩点编号或未选择的仓库')
@@ -845,7 +875,7 @@ export class FaultInjectionService {
     }
     const pipeline = await this.configurePipeline(dataRoot, run.run_id, null, input.pipeline_url ?? defaults.pipeline_url)
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
-    const record = { schema_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
+    const record = { schema_version: 2, generation_contract_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
       name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch))].join('、'), case_keys: keys, cases: selected,
       analysis_context: run.analysis_context ?? extractAnalysisContext(run, selected), repositories: [], source_repositories: selectedRepositories,
       provider_id: providerId, agent_model: model, agent_catalog_id: input.agent_catalog_id || null,

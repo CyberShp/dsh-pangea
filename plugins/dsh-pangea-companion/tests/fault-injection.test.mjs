@@ -52,8 +52,8 @@ async function fixture(t, { multi = false } = {}) {
   return { root, dataRoot, repositories, run, input }
 }
 function generated(record) {
-  return { summary: '按用例控制故障', points: [{ id: 'A', repo_id: 'target', path: 'main.c', trigger: '队列创建', times: 1, action: '申请失败', enable: 'PANGEA_FI=A', disable: '清空 PANGEA_FI', observe: 'hit:A' }],
-    profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], steps: ['开启目标桩', '执行业务', '检查命中并撤销'] })),
+  return { summary: '按用例控制故障', points: [{ id: 'A', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'main.c', trigger: '队列创建', times: 1, action: '申请失败', enable: 'PANGEA_FI=A', disable: '清空 PANGEA_FI', observe: 'hit:A' }],
+    profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['A'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['开启目标桩', '执行业务', '检查命中并撤销'] })),
     edits: record.repositories.map(repo => ({ repo_id: repo.repo_id, path: 'main.c', before: original, after: instrumented })), limitations: [] }
 }
 async function wait(service) { await Promise.all([...service.active.values()].map(operation => operation.done)) }
@@ -530,4 +530,24 @@ test('push accepted before transport failure is reconciled even after remote adv
   const confirmed = await service.push(f.dataRoot, f.run.run_id, task.id)
   assert.equal(confirmed.status, 'pushed', confirmed.error)
   assert.equal(remotePushes, 1)
+})
+
+test('new task rejects missing safety contract before touching checkout and retains authored evidence', async t => {
+  const f = await fixture(t)
+  const service = new FaultInjectionService({ generate: async ({ record }) => {
+    assert.equal(record.generation_contract_version, 2)
+    const result = generated(record)
+    delete result.profiles[0].safety.cleanup
+    return result
+  } })
+  const started = await service.start({ ...f, cwd: f.root })
+  await wait(service)
+  const failed = await service.read(f.dataRoot, f.run.run_id, started.id)
+  assert.equal(failed.status, 'failed')
+  assert.match(failed.error, /退出清理/)
+  assert.equal(await readFile(path.join(failed.repositories[0].path, 'main.c'), 'utf8'), original)
+  assert.equal(await readFile(path.join(f.repositories[0].source_path, 'main.c'), 'utf8'), original)
+  const saved = await service.resolveSavedResultFile(await service.directory(f.dataRoot, f.run.run_id, started.id))
+  assert.ok(saved)
+  assert.ok(JSON.parse(await readFile(saved, 'utf8')).edits.length)
 })

@@ -106,12 +106,46 @@ export function buildVerificationShellScript(task) {
       if (pt?.enable) lines.push(`# 启用 ${pid}: ${shellQuoteComment(pt.enable)}`)
       if (pt?.disable) lines.push(`# 关闭 ${pid}: ${shellQuoteComment(pt.disable)}`)
     }
+    // Old saved tasks retain their original export; v2 generation requires safety.
+    const safety = profile.safety
+    if (task?.generation_contract_version >= 2 && !safety) throw new Error('缺少安全验证合同，请重新生成')
+    if (safety) {
+      const quote = text => "'" + String(text).replace(/'/g, "'\\''") + "'"
+      lines.push(
+        `trap 'kill -TERM "$__pangea_case_pid" 2>/dev/null || true; wait "$__pangea_case_pid" || true; exit 130' INT`,
+        `trap 'kill -TERM "$__pangea_case_pid" 2>/dev/null || true; wait "$__pangea_case_pid" || true; exit 143' TERM`,
+        '(',
+        '__pangea_finish() {',
+        '  local primary=$1 cleanup_status=0 verify_status=0 final_status',
+        '  trap - EXIT INT TERM',
+        '  set +e',
+        '  ( set -euo pipefail',
+        ...safety.cleanup,
+        '  )',
+        '  cleanup_status=$?',
+        '  ( set -euo pipefail',
+        ...safety.cleanup_verify,
+        '  )',
+        '  verify_status=$?',
+        '  final_status=$primary',
+        '  if [ "$final_status" -eq 0 ] && { [ "$cleanup_status" -ne 0 ] || [ "$verify_status" -ne 0 ]; }; then final_status=125; fi',
+        `  printf '[PANGEA_CLEANUP] case=%s cleanup=%s verify=%s\\n' ${quote(profile.case_key)} "$cleanup_status" "$verify_status"`,
+        `  printf '[PANGEA_CASE_END] case=%s status=%s\\n' ${quote(profile.case_key)} "$final_status"`,
+        '  exit "$final_status"',
+        '}',
+        `trap '__pangea_finish "$?"' EXIT`,
+        `trap 'exit 130' INT`,
+        `trap 'exit 143' TERM`,
+        ...safety.setup,
+        ...safety.negative_steps)
+    }
     const steps = Array.isArray(profile.steps) ? profile.steps : [profile.steps].filter(Boolean)
     for (const step of steps) {
       const text = String(step)
       if (text.trim()) lines.push(text)
     }
-    lines.push(`echo "[PANGEA_CASE_END] case=${profile.case_key} status=0"`)
+    if (safety) lines.push(') &', '__pangea_case_pid=$!', 'wait "$__pangea_case_pid"', 'trap - INT TERM')
+    else lines.push(`echo "[PANGEA_CASE_END] case=${profile.case_key} status=0"`)
     lines.push('')
   }
   return lines.join('\n')
@@ -166,6 +200,7 @@ export function parseVerificationLog(logText, task) {
   const sectionsByCase = new Map()
   const begunCases = new Set()
   const endedCases = new Set()
+  const failedCases = new Set(), cleanupCases = new Set()
   const rawLines = raw.split(/\r?\n/)
   let activeCase = null
   for (const line of rawLines) {
@@ -179,8 +214,15 @@ export function parseVerificationLog(logText, task) {
     const endMatch = line.match(/\[PANGEA_CASE_END\]\s+case=(\S+)/)
     if (endMatch) {
       endedCases.add(endMatch[1])
+      const status = line.match(/\bstatus=(-?\d+)\b/)
+      if ((status && Number(status[1]) !== 0) || (!status && task.generation_contract_version >= 2)) failedCases.add(endMatch[1])
       if (activeCase === endMatch[1]) activeCase = null
       continue
+    }
+    const cleanupMatch = line.match(/\[PANGEA_CLEANUP\]\s+case=(\S+)\s+cleanup=(-?\d+)\s+verify=(-?\d+)/)
+    if (cleanupMatch) {
+      cleanupCases.add(cleanupMatch[1])
+      if (Number(cleanupMatch[2]) !== 0 || Number(cleanupMatch[3]) !== 0) failedCases.add(cleanupMatch[1])
     }
     const verifyMatch = line.match(/\[PANGEA_VERIFY\]\s+case=(\S+)(?:\s+result=(passed|failed|not_triggered|not_run))?(?:\s+hits=(.+))?/)
     if (verifyMatch) {
@@ -219,13 +261,18 @@ export function parseVerificationLog(logText, task) {
       if (observedPairs.length > 0) result = hasFailureSignal ? 'failed' : 'passed'
       else if (begunCases.has(caseKey) || endedCases.has(caseKey)) result = hasFailureSignal ? 'failed' : 'not_triggered'
     }
+    const incompleteSafety = task.generation_contract_version >= 2
+      && (begunCases.has(caseKey) || structured || observedPairs.length > 0) && (!endedCases.has(caseKey) || !cleanupCases.has(caseKey))
+    if (failedCases.has(caseKey) || incompleteSafety) result = 'failed'
     if (!result && !hits) continue
     const excerptLines = [zeroTestLine, structured?.line, ...matchedLines].filter(Boolean)
     entries.push({
       case_key: caseKey,
       result: result || 'passed',
       hits: hits || (expectedPointIds.length ? expectedPointIds.map(pid => `${pid}=0`).join(', ') : ''),
-      notes: hasZeroTests
+      notes: failedCases.has(caseKey) || incompleteSafety
+        ? '执行退出码非零、清理失败或缺少完整退出清理记录；不能判为通过'
+        : hasZeroTests
         ? `检测到 0 条测试实际执行（未触发桩点）：\n${zeroTestLine}`
         : excerptLines.length ? `日志自动识别：\n${[...new Set(excerptLines)].slice(0, 3).join('\n')}` : '由执行日志自动解析填入',
     })

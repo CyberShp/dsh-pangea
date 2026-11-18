@@ -170,9 +170,13 @@ export function createFaultInjectionPanel(React) {
       h(options.multiline ? 'textarea' : 'input', { 'aria-label': label, value: readable(value), onChange: event => change(event.target.value),
         disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), placeholder: options.placeholder }))
     const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, alignItems: 'start' }
+    const renderSteps = steps => h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(steps) ? steps : [steps]).filter(step => step != null).map((step, at) => h('li', { key: at }, readable(step))))
     const renderPoints = points => Array.isArray(points) && points.length ? points.map((point, index) => h('details', { key: point.id || index, open: standalone, className: 'pangea-fi-point' },
       h('summary', null, `${readable(point.id)} · ${readable(point.action) || '桩点说明'}`),
       point.repo_id || point.path ? h('p', { className: 'b05-subtle' }, [readable(point.repo_id), readable(point.path)].filter(Boolean).join(':')) : null,
+      point.trigger_scope ? h('dl', { className: 'pangea-reading-fields' },
+        h('dt', null, '当前输入来源'), h('dd', null, readable(point.trigger_scope.current_input)),
+        h('dt', null, '排除的历史与非目标输入'), h('dd', null, (point.trigger_scope.excluded_inputs || []).map(readable).join('、'))) : null,
       h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : h('p', { className: 'b05-subtle' }, '该用例按需打桩，具体注入点将在源码生成阶段定位。')
     const renderCaseSummaryFields = item => {
       const rows = [
@@ -526,7 +530,10 @@ export function createFaultInjectionPanel(React) {
               } }, '复制验证脚本')),
             h('label', { className: 'pangea-fi-field' }, h('span', null, '选择执行说明'), h('select', { 'aria-label': '选择执行说明', value: profile?.case_key || '', onChange: event => setProfileKey(event.target.value) },
               profiles.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(task.cases.find(value => value.case_key === item.case_key)?.title || item.case_key))))),
-            h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(profile?.steps) ? profile.steps : [profile?.steps]).map((itemStep, at) => h('li', { key: at }, readable(itemStep))))) : null,
+            profile?.safety ? h('div', { 'aria-label': '安全执行流程' },
+              ...[['setup', '准备与原状态快照'], ['negative_steps', '历史与非目标输入验证'], ['steps', '故障命中与恢复'], ['cleanup', '退出清理'], ['cleanup_verify', '独立恢复检查']].map(([key, label]) =>
+                h('details', { key }, h('summary', null, label), renderSteps(key === 'steps' ? profile.steps : profile.safety[key]))))
+              : renderSteps(profile?.steps)) : null,
           task.result?.limitations?.length ? h('details', null, h('summary', null, `生成限制（${task.result.limitations.length}）`),
             Array.isArray(task.result.limitations)
               ? h('ul', { className: 'pangea-fi-steps pangea-fi-scroll' }, task.result.limitations.map((item, at) => h('li', { key: at }, readable(item))))

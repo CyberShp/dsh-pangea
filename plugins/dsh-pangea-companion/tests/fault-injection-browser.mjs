@@ -27,14 +27,14 @@ await injectionGit(source, ['remote', 'add', 'origin', remote])
   await mkdir(path.join(dataRoot, '.pangea', 'repository-settings'), { recursive: true })
   await writeFile(path.join(dataRoot, '.pangea', 'repository-settings', 'target.json'), JSON.stringify({ personal_branch: 'main', remote: 'origin' }))
 const run = { run_id: 'browser-run', source_snapshot: { repositories: [{ repo_id: 'target', git: { commit: base } }] },
-  details: { test_cases: [{ projection_id: 'unit/allocation', title: '队列资源申请失败后的恢复', instrumentation: { points: [{ id: 'queue-fail', repo_id: 'target', path: 'target.c', action: '资源申请失败' }] } }] } }
+  details: { test_cases: [{ projection_id: 'unit/allocation', title: '队列资源申请失败后的恢复', instrumentation: { points: [{ id: 'queue-fail', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c', action: '资源申请失败' }] } }] } }
 await mkdir(path.join(dataRoot, 'runs', run.run_id), { recursive: true })
 await writeFile(path.join(dataRoot, 'runs', run.run_id, 'progress.json'), JSON.stringify({ model_settings: { provider: 'fixture' }, model_id: 'fixture-model' }))
 const service = new FaultInjectionService({ generate: async ({ record }) => ({
   summary: '为所选队列增加一次性资源申请失败注入。',
   points: [{ id: 'queue-fail', case_keys: record.case_keys, repo_id: 'target', path: 'target.c', action: '模拟一次资源申请失败', trigger: '创建测试队列时', times: 1,
     enable: '测试夹具开启 queue-fail', disable: '测试夹具关闭 queue-fail', observe: '检查 queue-fail 命中次数', cleanup: '重新建立测试队列', depends_on: [], exclusive_with: [] }],
-  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['queue-fail'], steps: ['开启目标桩', '创建测试队列并检查失败上报', '撤桩后重新创建队列'] })),
+  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['queue-fail'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['queue-fail'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['开启目标桩', '创建测试队列并检查失败上报', '撤桩后重新创建队列'] })),
   edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1; /* browser fixture */' }], limitations: ['此处为浏览器工程测试夹具，不用于产品验证。'],
 }) })
 const assets = {

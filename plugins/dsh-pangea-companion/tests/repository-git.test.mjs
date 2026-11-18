@@ -89,7 +89,7 @@ test('plain project → link Git → compare analysis snapshot → relocate on t
   await writeFile(path.join(snapshot, 'target.c'), 'analysis-only change\n')
   assert.equal((await compareSnapshot(f.source, f.commit, snapshot)).changed_count, 1)
   const run = { run_id: 'run', repositories: ['target'], details: { test_cases: [{ projection_id: 'case/A', title: '失败恢复' }] } }
-  const service = new FaultInjectionService({ generate: async ({ record }) => ({ summary: 'test fixture', points: [{ id: 'p', repo_id: 'target' }], profiles: [{ case_key: record.case_keys[0], point_ids: ['p'], steps: ['触发故障'] }], edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
+  const service = new FaultInjectionService({ generate: async ({ record }) => ({ summary: 'test fixture', points: [{ id: 'p', trigger_scope: { current_input: 'fixture operation', excluded_inputs: ['previous calls'] }, repo_id: 'target' }], profiles: [{ case_key: record.case_keys[0], point_ids: ['p'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['p'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['触发故障'] }], edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
   t.after(() => service.dispose())
   const defaults = await service.defaults(f.dataRoot, run)
   assert.equal(defaults.pipeline_url, 'https://ci.example.test/pipeline'); assert.equal(defaults.repositories[0].comparison.changed_count, 1)

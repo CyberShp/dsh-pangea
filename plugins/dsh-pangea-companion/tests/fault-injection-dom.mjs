@@ -42,8 +42,8 @@ const service = new FaultInjectionService({ validateModel: options => requireAge
     else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
   })
   return injectionGit(cwd, args, signal)
-}, generate: async ({ record }) => ({ summary: '工程测试夹具', points: [{ id: 'A', repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
-  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], steps: ['开启 A', '执行业务', '关闭 A 并恢复'] })), edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
+}, generate: async ({ record }) => ({ summary: '工程测试夹具', points: [{ id: 'A', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
+  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['A'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['开启 A', '执行业务', '关闭 A 并恢复'] })), edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
 const calls = []
 globalThis.fetch = async (url, options = {}) => {
   const parsed = new URL(url, 'http://localhost')

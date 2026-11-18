@@ -35,7 +35,7 @@ test('fault injection HTTP acceptance', async t => {
     })
     if (record.instructions === 'fail') throw new Error('fixture generation failed')
     const current = await readFile(path.join(record.repositories[0].path, 'target.c'), 'utf8')
-    return { points: [{ id: 'A', repo_id: 'target', path: 'target.c' }], profiles: [{ case_key: 'unit/A', point_ids: ['A'], steps: ['测试夹具'] }], edits: [{ repo_id: 'target', path: 'target.c', before: current, after: current.replace('return 0;', 'return -1;') + `/* ${record.id} */\n` }] }
+    return { points: [{ id: 'A', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c' }], profiles: [{ case_key: 'unit/A', point_ids: ['A'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['A'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['测试夹具'] }], edits: [{ repo_id: 'target', path: 'target.c', before: current, after: current.replace('return 0;', 'return -1;') + `/* ${record.id} */\n` }] }
   }
   let service = new FaultInjectionService({ generate: generator })
   const server = createServer((req, res) => void faultInjectionRouteHandler(req, res, service, {}, { resolveRoot: async () => dataRoot, readRun: async () => run }))

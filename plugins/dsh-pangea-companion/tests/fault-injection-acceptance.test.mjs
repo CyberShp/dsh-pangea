@@ -50,8 +50,8 @@ async function fixture(t, { branch = 'main', lfs = false } = {}) {
   const input = { case_keys: ['unit/CASE-HANG'], repositories, provider_id: 'pangea-opencode', agent_model: 'fixture' }
   return { root, dataRoot, source, remote, repositories, run, input }
 }
-const generated = record => ({ summary: '初始化第 9 步挂起', points: [{ id: 'INIT_HANG', repo_id: 'target', path: 'init.c', action: '阻塞初始化', trigger: '控制文件存在', times: 1 }],
-  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['INIT_HANG'], steps: ['touch /tmp/pangea_init_hang', 'reload', 'check timeout log'] })),
+const generated = record => ({ summary: '初始化第 9 步挂起', points: [{ id: 'INIT_HANG', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'init.c', action: '阻塞初始化', trigger: '控制文件存在', times: 1 }],
+  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['INIT_HANG'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['INIT_HANG'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['touch /tmp/pangea_init_hang', 'reload', 'check timeout log'] })),
   edits: [{ repo_id: 'target', path: 'init.c', before: original, after: instrumented }], limitations: [] })
 const wait = service => Promise.all([...service.active.values()].map(operation => operation.done))
 const untracked = async checkout => (await injectionGit(checkout, ['status', '--porcelain', '--untracked-files=all'])).split('\n').filter(Boolean)
@@ -346,8 +346,8 @@ test('C/C++ driver repo: host pre-scans harness facts, deduplicates 80+ char sou
       capturedInput = JSON.parse(await readFile(inputPath, 'utf8'))
       return {
         summary: '在 XXX_SIMU_FAULT 宏下植入挂起开关并新增 gtest 覆盖超时分支',
-        points: [{ id: 'DRV_WAIT_HANG', repo_id: 'target', path: drvPath, action: '挂起就绪位', trigger: 'drv_simu_hang_count > 0', times: 1, observe: '[FI_HIT:DRV_WAIT_HANG]' }],
-        profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['DRV_WAIT_HANG'], steps: ['cmake -B build && cmake --build build --target mod_ut', './build/test/mod_ut --gtest_filter=DrvTimeout.HangTimeout'] }],
+        points: [{ id: 'DRV_WAIT_HANG', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: drvPath, action: '挂起就绪位', trigger: 'drv_simu_hang_count > 0', times: 1, observe: '[FI_HIT:DRV_WAIT_HANG]' }],
+        profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['DRV_WAIT_HANG'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['DRV_WAIT_HANG'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['cmake -B build && cmake --build build --target mod_ut', './build/test/mod_ut --gtest_filter=DrvTimeout.HangTimeout'] }],
         edits: [
           {
             repo_id: 'target',
@@ -406,8 +406,8 @@ test('checkInjectionResult guards against no-op edits and unlinked explicit_list
     }],
   }
   const baseValue = {
-    points: [{ id: 'P1', repo_id: 'target', path: 'src/a.c' }],
-    profiles: [{ case_key: 'unit/A', point_ids: ['P1'], steps: ['./run_ut'] }],
+    points: [{ id: 'P1', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'src/a.c' }],
+    profiles: [{ case_key: 'unit/A', point_ids: ['P1'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['P1'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['./run_ut'] }],
     edits: [{ repo_id: 'target', path: 'test/new_test.cpp', before: null, after: 'TEST(A, B) {}\n' }],
   }
   assert.throws(() => checkInjectionResult(baseValue, baseRecord), /显式构建列表.*test\/CMakeLists\.txt/)
@@ -503,7 +503,7 @@ test('Round 3 blank separator steps are normalized cleanly and generated bash sc
     generate: async ({ outputPath }) => {
       const payload = {
         ...generated({ case_keys: f.input.case_keys }),
-        profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['INIT_HANG'], steps: rawSteps }],
+        profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['INIT_HANG'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['INIT_HANG'], cleanup: [':'], cleanup_verify: [':'] }, steps: rawSteps }],
         limitations: ['ASAN 下超时约 30s', '', '  ', '正常构建约 4s'],
       }
       await writeFile(outputPath, JSON.stringify(payload, null, 2))
@@ -523,8 +523,8 @@ test('Round 3 blank separator steps are normalized cleanly and generated bash sc
   await exec('bash', ['-n', scriptPath])
 
   assert.throws(() => checkInjectionResult({
-    points: [{ id: 'INIT_HANG', repo_id: 'target', path: 'init.c' }],
-    profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['INIT_HANG'], steps: ['', '   '] }],
+    points: [{ id: 'INIT_HANG', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'init.c' }],
+    profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['INIT_HANG'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['INIT_HANG'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['', '   '] }],
     edits: [{ repo_id: 'target', path: 'init.c', before: original, after: instrumented }],
   }, { case_keys: ['unit/CASE-HANG'], repositories: [{ repo_id: 'target' }] }), /缺少可读取的桩点引用或执行说明/)
 })
@@ -640,10 +640,10 @@ test('real compiled C acceptance: multi-case batch shares one fault stub, compil
   const service = new FaultInjectionService({
     generate: async () => ({
       summary: '在 drv_init_step 植入环境变量控制的单点故障桩，同时覆盖超时与恢复两条用例',
-      points: [{ id: 'DRV_TIMEOUT_STUB', repo_id: 'target', path: 'init.c', action: '强制返回 -1', enable: 'DRV_FAULT=1', disable: 'unset DRV_FAULT', observe: '[FI_HIT:DRV_TIMEOUT_STUB]' }],
+      points: [{ id: 'DRV_TIMEOUT_STUB', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'init.c', action: '强制返回 -1', enable: 'DRV_FAULT=1', disable: 'unset DRV_FAULT', observe: '[FI_HIT:DRV_TIMEOUT_STUB]' }],
       profiles: [
-        { case_key: 'unit/CASE-TIMEOUT', point_ids: ['DRV_TIMEOUT_STUB'], steps: ['cc init.c -o drv_bin', '', 'DRV_FAULT=1 ./drv_bin 0 || true'] },
-        { case_key: 'unit/CASE-RECOVER', point_ids: ['DRV_TIMEOUT_STUB'], steps: ['cc init.c -o drv_bin', 'unset DRV_FAULT && ./drv_bin 0'] },
+        { case_key: 'unit/CASE-TIMEOUT', point_ids: ['DRV_TIMEOUT_STUB'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['DRV_TIMEOUT_STUB'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['cc init.c -o drv_bin', '', 'DRV_FAULT=1 ./drv_bin 0 || true'] },
+        { case_key: 'unit/CASE-RECOVER', point_ids: ['DRV_TIMEOUT_STUB'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['DRV_TIMEOUT_STUB'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['cc init.c -o drv_bin', 'unset DRV_FAULT && ./drv_bin 0'] },
       ],
       edits: [{
         repo_id: 'target',
@@ -717,8 +717,8 @@ test('existing_symbol_tests locates target C function calls in UT files and igno
       capturedInput = JSON.parse(await readFile(inputPath, 'utf8'))
       return {
         summary: '补充超时桩',
-        points: [{ id: 'WAIT_TIMEOUT', repo_id: 'target', path: drvPath, action: '返回 -1' }],
-        profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['WAIT_TIMEOUT'], steps: ['echo ok'] }],
+        points: [{ id: 'WAIT_TIMEOUT', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: drvPath, action: '返回 -1' }],
+        profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['WAIT_TIMEOUT'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['WAIT_TIMEOUT'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['echo ok'] }],
         edits: [{ repo_id: 'target', path: drvPath, before: '  return helper_noop();', after: '  return -1;' }],
       }
     },
