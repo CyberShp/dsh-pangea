@@ -10,6 +10,7 @@ import { caseIdentity } from './case-review-projection.js'
 import { caseContentHash } from './case-review-store.js'
 import { withGitLongPaths, disabledHooksPath, shellQuote } from './repositories/git-environment.js'
 import { protectedBranchReason } from './repositories/branch-policy.js'
+import { normalizeCommitConfig, resolveCommitMessage, validateRawCommitMessage } from './fault-injection-candidates.js'
 
 const execute = promisify(execFile)
 const activeStates = new Set(['preparing', 'generating', 'pushing'])
@@ -238,8 +239,17 @@ function parseRepoLocation(raw, repoId) {
   return parseRepoLocationSpec(raw, repoId)?.path ?? null
 }
 
+const C_CONTROL_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'return', 'sizeof', 'typeof', 'alignof', 'defined', 'catch', 'TEST', 'TEST_F', 'TEST_P'])
+
+function extractCleanSymbol(raw) {
+  if (typeof raw !== 'string') return null
+  const stripped = raw.trim().replace(/\s*\([^)]*\).*$/, '')
+  const match = stripped.match(/([A-Za-z_][A-Za-z0-9_]{2,})$/)
+  return match && !C_CONTROL_KEYWORDS.has(match[1]) ? match[1] : null
+}
+
 export function collectTargetEvidenceSpecs(repoId, cases = [], analysisContext = null) {
-  const paths = new Set(), rangesByPath = new Map()
+  const paths = new Set(), rangesByPath = new Map(), symbols = new Set()
   const addRange = (relPath, start, end) => {
     if (!relPath) return
     paths.add(relPath)
@@ -252,12 +262,18 @@ export function collectTargetEvidenceSpecs(repoId, cases = [], analysisContext =
     const spec = parseRepoLocationSpec(value, repoId)
     if (spec) addRange(spec.path, spec.start, spec.end)
   }
+  const addSym = value => {
+    const sym = extractCleanSymbol(value)
+    if (sym) symbols.add(sym)
+  }
   for (const item of cases) {
     const body = item?.source_record?.body ?? {}
     for (const ref of [...(Array.isArray(item?.source_evidence) ? item.source_evidence : []), ...(Array.isArray(body?.source_evidence) ? body.source_evidence : [])]) add(ref)
     for (const ev of Array.isArray(item?.evidence) ? item.evidence : []) add(ev?.location)
     const points = item?.instrumentation?.points ?? body?.instrumentation?.points ?? []
-    for (const pt of Array.isArray(points) ? points : []) if (!pt?.repo_id || pt.repo_id === repoId) add(pt?.path)
+    for (const pt of Array.isArray(points) ? points : []) {
+      if (!pt?.repo_id || pt.repo_id === repoId) { add(pt?.path); addSym(pt?.symbol) }
+    }
   }
   for (const risk of analysisContext?.risks ?? []) {
     for (const ref of Array.isArray(risk?.source_evidence) ? risk.source_evidence : []) add(ref)
@@ -270,9 +286,10 @@ export function collectTargetEvidenceSpecs(repoId, cases = [], analysisContext =
       const lineText = gap.line != null ? String(gap.line).trim() : ''
       const m = lineText.match(/^(\d+)(?:-(\d+))?$/)
       addRange(rel, m ? Number(m[1]) : null, m ? Number(m[2] || m[1]) : null)
+      addSym(gap.symbol)
     }
   }
-  return { paths: [...paths], rangesByPath }
+  return { paths: [...paths], rangesByPath, symbols: [...symbols] }
 }
 
 export function collectTargetSourcePaths(repoId, cases = [], analysisContext = null) {
@@ -306,10 +323,11 @@ async function readBoundedText(root, relPath, maxBytes = 262144) {
   } catch { return null }
 }
 
-export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPaths = [], rangesByPath = new Map()) {
+export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPaths = [], rangesByPath = new Map(), hintSymbols = []) {
   const root = await realpath(repositoryRoot)
-  const moduleFiles = [], conditionalMacros = [], cmakeRules = [], testDirectories = [], targetSnippets = []
+  const moduleFiles = [], conditionalMacros = [], cmakeRules = [], testDirectories = [], targetSnippets = [], existingSymbolTests = []
   let sampleTestSnippet = null
+  const targetSymbols = new Set((Array.isArray(hintSymbols) ? hintSymbols : []).map(extractCleanSymbol).filter(Boolean))
   const seenMacroLocs = new Set(), candidateDirs = new Set(['.']), moduleDirs = new Set()
   for (const rel of targetPaths.slice(0, 8)) {
     let dir = path.posix.dirname(rel)
@@ -356,11 +374,24 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
   }
   let snippetLinesBudget = 140
   for (const rel of targetPaths.slice(0, 4)) {
-    if (snippetLinesBudget <= 0) break
     const found = moduleSourceTexts.find(item => item.rel === rel)
     if (!found?.text) continue
     const lines = found.text.split(/\r?\n/)
-    const windows = mergeLineWindows(rangesByPath instanceof Map ? rangesByPath.get(rel) : null, lines.length)
+    const rawRanges = rangesByPath instanceof Map ? rangesByPath.get(rel) : null
+    const scanWindows = mergeLineWindows(rawRanges, lines.length, 36, 12)
+    for (const [scanStart, scanEnd] of scanWindows) {
+      for (let idx = scanStart - 1; idx < scanEnd && targetSymbols.size < 10; idx++) {
+        const line = lines[idx]
+        if (!line || /^\s*(?:#|\/\/|\/\*|\*)/.test(line)) continue
+        const fnMatch = line.match(/^(?:[A-Za-z_][\w\s*:]*?\s+\**)([A-Za-z_][A-Za-z0-9_]{2,})\s*\(/)
+        if (!fnMatch || C_CONTROL_KEYWORDS.has(fnMatch[1])) continue
+        const headSlice = lines.slice(idx, Math.min(lines.length, idx + 4)).join(' ')
+        const braceIdx = headSlice.indexOf('{'), semiIdx = headSlice.indexOf(';')
+        if (braceIdx >= 0 && (semiIdx < 0 || braceIdx < semiIdx)) targetSymbols.add(fnMatch[1])
+      }
+    }
+    if (snippetLinesBudget <= 0) continue
+    const windows = mergeLineWindows(rawRanges, lines.length)
     for (const [start, rawEnd] of windows) {
       if (snippetLinesBudget <= 0) break
       const end = Math.min(rawEnd, start + snippetLinesBudget - 1, start + 69)
@@ -392,6 +423,7 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
   // Discover nearby test subtrees along the ancestor chain without full-repo traversal.
   const queue = [...candidateDirs]
   const visitedDirs = new Set()
+  const nearbyTestTexts = []
   while (queue.length && visitedDirs.size < 60) {
     const relDir = queue.shift()
     if (visitedDirs.has(relDir)) continue
@@ -440,12 +472,33 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
           content: sampleLines.slice(0, take).map((line, idx) => `${idx + 1}: ${line.slice(0, 220)}`).join('\n'),
         }
       }
+      if (sampleText && nearbyTestTexts.length < 12) nearbyTestTexts.push({ rel: sampleRel, text: sampleText })
+      for (const extraName of testFiles.slice(1, 6)) {
+        if (nearbyTestTexts.length >= 12) break
+        const extraRel = relDir === '.' ? extraName : `${relDir}/${extraName}`
+        const extraText = await readBoundedText(root, extraRel, 65536)
+        if (extraText) nearbyTestTexts.push({ rel: extraRel, text: extraText })
+      }
     }
     for (const sub of entries) {
       if (!sub.isDirectory() || sub.name.startsWith('.')) continue
       const childRel = relDir === '.' ? sub.name : `${relDir}/${sub.name}`
       const depth = childRel.split('/').length
       if (TEST_DIR_NAME.test(sub.name) || (TEST_DIR_NAME.test(path.posix.basename(relDir)) && depth <= 6)) queue.push(childRel)
+    }
+  }
+  if (targetSymbols.size && nearbyTestTexts.length) {
+    const escaped = [...targetSymbols].map(sym => sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    const symbolRegex = new RegExp(`\\b(${escaped.join('|')})\\b`)
+    for (const { rel, text } of nearbyTestTexts) {
+      if (existingSymbolTests.length >= 12) break
+      const lines = text.split(/\r?\n/)
+      for (let idx = 0; idx < lines.length && existingSymbolTests.length < 12; idx++) {
+        const line = lines[idx]
+        if (!line || /^\s*(?:\/\/|\/\*|\*|#\s*include\b)/.test(line)) continue
+        const m = symbolRegex.exec(line)
+        if (m) existingSymbolTests.push({ symbol: m[1], path: rel, line: idx + 1, code: line.trim().slice(0, 180) })
+      }
     }
   }
   const allFaultDefs = new Map()
@@ -460,7 +513,7 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
     const usageCount = moduleSourceTexts.filter(item => token.test(item.text)).length
     return { name, defined_in: definedIn, module_usage_count: usageCount }
   })
-  if (!moduleFiles.length && !conditionalMacros.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length && !targetSnippets.length) return null
+  if (!moduleFiles.length && !conditionalMacros.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length && !targetSnippets.length && !existingSymbolTests.length) return null
   return {
     ...(targetPaths.length ? { target_files: targetPaths.slice(0, 8) } : {}),
     ...(targetSnippets.length ? { target_snippets: targetSnippets } : {}),
@@ -468,6 +521,7 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
     ...(conditionalMacros.length ? { conditional_macros: conditionalMacros } : {}),
     ...(testDirectories.length ? { test_directories: testDirectories } : {}),
     ...(sampleTestSnippet ? { sample_test_snippet: sampleTestSnippet } : {}),
+    ...(existingSymbolTests.length ? { existing_symbol_tests: existingSymbolTests } : {}),
     ...(cmakeRules.length ? { cmake_rules: cmakeRules } : {}),
     ...(faultMacros.length ? { fault_macros: faultMacros } : {}),
   }
@@ -508,7 +562,7 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
       : `先读取任务输入 JSON：${posixInput}。其中 cases 是已选用例，analysis_context 是关联风险/覆盖率缺口/流程证据，repositories 含本次独立源码副本、固定提交及宿主预扫描的 harness 事实。输入中 {"$same_as": "<路径>"} 表示该处内容与所指路径（$ 为输入根）的值完全相同，已去重以缩短输入。`,
     '宿主已确认的事实，无需再用工具探测：源码副本是宿主刚检出的干净固定提交（不必运行 git status/log 确认）；宿主写入 edits 时按每个文件现有的 CRLF/LF 风格换行，before/after 用 \\n 即可，不必检查换行符；Git、构建与推送均由宿主完成。',
     ...(posixRef ? [`参考结果：${posixRef} 是本任务上一次生成的完整结果 JSON。优先复用其中仍然成立的桩点设计、profiles 与 edits，只针对当前源码重新定位 before 原文并修正失效或被指出的问题；不要从零重新调查。与当前源码冲突时以源码为准。${referenceError ? `上一次未完成的原因：${referenceError}` : ''}`] : []),
-    '探索步数预算严格受限（<= 10 次只读工具调用）：repositories[].harness.target_snippets 已预附带目标源码区间的带行号原文，sample_test_snippet 已预附带同目录测试头部样板；若预切片上下文已足够唯一定位 edits[].before 与测试签名，无需重复 read 同一文件，仅按需补读缺失头文件或调用点后旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
+    '探索步数预算严格受限（<= 10 次只读工具调用）：repositories[].harness.target_snippets 已预附带目标源码区间的带行号原文，sample_test_snippet 与 existing_symbol_tests 已预附带同目录测试头部样板及目标函数既有测试调用定位；若预切片上下文已足够唯一定位 edits[].before 与测试签名，无需重复 read 同一文件，仅按需补读缺失头文件或调用点后旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
     '若 repositories[].harness 给出了 C/C++ 单元测试环境（test_directories 含 gtest/native 或 cmake_rules/fault_macros）：① 若 fault_macros 显示某测试编译宏（如 -D*_SIMU_FAULT）的 module_usage_count=0，说明当前模块无现成注入消费点，直接在目标函数对应的 #ifdef <测试宏> 保护下植入默认关闭的最小控制桩，不要全仓搜寻既有框架；② 按 Option A 在 test_directories 配套新增（before=null）或补充 gtest 用例文件，在同一测试目标内依次覆盖“桩默认关闭正常路径 → 启用桩命中目标超时/错误分支 → 复位后恢复正常”，同进程测试优先通过受控开关函数/原子计数或环境变量触发，阻塞等待必须有界且时长直接复用源码超时宏或兼容 harness.conditional_macros 中的 ASAN/非 ASAN 阈值（严禁写死小于 ASAN 超时阈值的短常数）；③ 若对应 cmake_rules 为 file_glob，无需修改构建文件，若 configure_depends=false 则在 steps 中先执行 cmake 重新生成以纳入新测试文件，运行 gtest 时指定 --gtest_filter 并校验实际执行用例数 >= 1（防止匹配 0 条用例时仍返回 0）。',
     '只在这些仓库内调查需要的实现与既有调测入口。核对所选用例引用的 analysis_source 冻结片段与本次源码副本，分析基线与本次基线不同则重新定位；只比较相关位置，差异对注入方案的影响写入 summary，不重做全仓分析。',
     '不要修改或推送源码仓库，不运行构建或安装命令。唯一交付是下述 JSON 文件；宿主负责精确写入、提交和推送。',
@@ -669,6 +723,30 @@ export class FaultInjectionService {
     }
     return taskId ? this.exclusive(dataRoot, runId, taskId, save) : save()
   }
+  async commitDefaultsPath(dataRoot) {
+    const root = await realpath(dataRoot)
+    const dir = path.join(root, '.pangea', 'fault-injection')
+    await mkdir(dir, { recursive: true })
+    if (!inside(root, await realpath(dir))) throw serviceError('打桩任务目录越出数据目录')
+    return path.join(dir, 'commit-defaults.json')
+  }
+  async readCommitDefaults(dataRoot) {
+    try { return normalizeCommitConfig(JSON.parse(await readFile(await this.commitDefaultsPath(dataRoot), 'utf8'))) }
+    catch (error) { if (error.code === 'ENOENT') return normalizeCommitConfig({}); throw error }
+  }
+  async saveCommitDefaults(dataRoot, config) {
+    const normalized = normalizeCommitConfig(config, await this.readCommitDefaults(dataRoot))
+    const reusable = {
+      mode: normalized.mode,
+      template: normalized.template,
+      issue: normalized.issue,
+      author: normalized.author,
+      reviewer: normalized.reviewer,
+      pattern: normalized.pattern,
+    }
+    await writeTaskStoreFile(await this.commitDefaultsPath(dataRoot), JSON.stringify(reusable, null, 2) + '\n')
+    return normalized
+  }
   async defaults(dataRoot, run) {
     const progressFile = path.join(dataRoot, 'runs', run.run_id, 'progress.json')
     let progress = {}
@@ -678,6 +756,7 @@ export class FaultInjectionService {
     const repos = run.source_snapshot?.repositories?.length ? run.source_snapshot.repositories : (run.repositories ?? []).map(repo_id => ({ repo_id }))
     let pipeline = {}
     try { pipeline = JSON.parse(await readFile(path.join(await this.directory(dataRoot, run.run_id), 'pipeline.json'), 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    const commit_config = await this.readCommitDefaults(dataRoot)
     const repositories = []
     for (const repo of repos) {
       const settings = await readRepositorySettings(dataRoot, repo.repo_id)
@@ -695,7 +774,7 @@ export class FaultInjectionService {
     }
     const projectPipeline = repositories.find(repo => repo.project_pipeline_configured)
     return { pipeline_url: projectPipeline ? projectPipeline.pipeline_url : pipeline.pipeline_url || '',
-      provider_id: contract.model_settings?.provider ?? progress.model_settings?.provider ?? '', agent_model: contract.model_id ?? progress.model_id ?? '', repositories }
+      provider_id: contract.model_settings?.provider ?? progress.model_settings?.provider ?? '', agent_model: contract.model_id ?? progress.model_id ?? '', commit_config, repositories }
   }
 
   async previewBaseline(dataRoot, run, input) {
@@ -755,13 +834,24 @@ export class FaultInjectionService {
       catch (error) { throw serviceError(error.message) }
     }
     if (!providerId || !model) throw serviceError('请选择打桩执行器和模型')
+    let commitConfig = null
+    if (input.commit_config && typeof input.commit_config === 'object') {
+      const normalizedCommit = normalizeCommitConfig(input.commit_config, defaults.commit_config)
+      if (normalizedCommit.mode === 'template') {
+        const precheck = resolveCommitMessage(normalizedCommit, { id: 'pending', name: input.name || selected[0]?.title || '' }, { allowPendingSummary: true })
+        if (!precheck.ok) throw serviceError(precheck.error)
+      }
+      commitConfig = await this.saveCommitDefaults(dataRoot, normalizedCommit)
+    }
     const pipeline = await this.configurePipeline(dataRoot, run.run_id, null, input.pipeline_url ?? defaults.pipeline_url)
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
     const record = { schema_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
       name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch))].join('、'), case_keys: keys, cases: selected,
       analysis_context: run.analysis_context ?? extractAnalysisContext(run, selected), repositories: [], source_repositories: selectedRepositories,
       provider_id: providerId, agent_model: model, agent_catalog_id: input.agent_catalog_id || null,
-      baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null,
+      baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''),
+      ...(commitConfig ? { commit_config: commitConfig } : {}),
+      result: null, generation_complete: false, verification: [], build: {}, error: null,
       reused_from: reused, reference_from: reference ? { ...reference, error: String(input.reference_error || '').slice(0, 1500) } : null, telemetry: null, notices: [] }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
     const controller = new AbortController(), key = this.key(dataRoot, run.run_id, taskId)
@@ -816,8 +906,8 @@ export class FaultInjectionService {
       source.comparison = await compareSnapshot(checkout, target, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
       // Anything present now was produced by the host checkout, not by the generator.
       const baseline = await workspaceSnapshot(this.git, checkout, signal)
-      const { paths: targetPaths, rangesByPath } = collectTargetEvidenceSpecs(source.repo_id, record.cases, record.analysis_context)
-      const harness = await inspectRepositoryHarness(checkout, source.repo_id, targetPaths, rangesByPath)
+      const { paths: targetPaths, rangesByPath, symbols: hintSymbols } = collectTargetEvidenceSpecs(source.repo_id, record.cases, record.analysis_context)
+      const harness = await inspectRepositoryHarness(checkout, source.repo_id, targetPaths, rangesByPath, hintSymbols)
       record.repositories.push({ repo_id: source.repo_id, path: checkout, source_path: sourcePath,
         base_commit: target, source_head: baseCommit, remote_head: remoteHead, remote_url: remoteUrl,
         outgoing_count: ahead, analysis_commit: source.analysis_commit,
@@ -998,14 +1088,34 @@ export class FaultInjectionService {
       return await guarded(0, signal)
     } finally { for (const release of releases.reverse()) await release() }
   }
-  async push(dataRoot, runId, taskId, { background = false, acknowledged_heads = {} } = {}) {
+  async push(dataRoot, runId, taskId, { background = false, acknowledged_heads = {}, commit_message, commit_config } = {}) {
     return this.exclusive(dataRoot, runId, taskId, async () => {
       const record = await this.read(dataRoot, runId, taskId), directory = await this.directory(dataRoot, runId, taskId)
       if (record.schema_version !== 2) throw serviceError('旧任务使用任务分支，请按项目个人分支配置重新生成；本次不会推送旧分支')
       if (record.status === 'pushed') return record
       if (!['ready', 'interrupted'].includes(record.status) || !record.generation_complete) throw serviceError('请先完整生成本次代码修改')
+      let desiredMessage
+      if (commit_config && typeof commit_config === 'object') {
+        const normalizedConfig = normalizeCommitConfig(commit_config, record.commit_config || await this.readCommitDefaults(dataRoot))
+        const checked = resolveCommitMessage(normalizedConfig, record)
+        if (!checked.ok) throw serviceError(checked.error)
+        desiredMessage = checked.message
+        await this.saveCommitDefaults(dataRoot, normalizedConfig)
+        record.commit_config = normalizedConfig
+      } else if (commit_message !== undefined && commit_message !== null) {
+        const checked = validateRawCommitMessage(String(commit_message), record.commit_config?.pattern || '')
+        if (!checked.ok) throw serviceError(checked.error)
+        desiredMessage = checked.message
+      } else if (record.commit_config) {
+        const checked = resolveCommitMessage(record.commit_config, record)
+        if (!checked.ok) throw serviceError(checked.error)
+        desiredMessage = checked.message
+      } else {
+        desiredMessage = record.commit_message || `test: fault injection ${record.id}`
+      }
       const controller = new AbortController(), key = this.key(dataRoot, runId, taskId)
       const operation = { controller, done: null, status: 'pushing' }
+      record.commit_message = desiredMessage
       record.status = 'pushing'; record.error = null
       this.active.set(key, operation)
       const published = this.save(directory, record)
@@ -1015,17 +1125,29 @@ export class FaultInjectionService {
           for (const repo of record.repositories) {
             signal.throwIfAborted()
             if (!repo.diff || repo.pushed) continue
-            // A cancellation may arrive after Git has written the commit but before
-            // its SHA was saved. Recover only this task's exact reviewed change.
+            // A cancellation may arrive after Git has written the commit (or amend)
+            // but before its SHA was saved. Recover only this task's exact change.
             if (repo.commit_started && !repo.commit) {
               const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
               if (head !== repo.base_commit) {
                 const parent = await this.git(repo.path, ['rev-parse', `${head}^`], signal)
-                const subject = await this.git(repo.path, ['log', '-1', '--format=%s', head], signal)
+                const body = (await this.git(repo.path, ['log', '-1', '--format=%B', head], signal)).trim()
                 const committedDiff = await this.git(repo.path, ['diff', '--no-ext-diff', '--no-textconv', repo.base_commit, head], signal)
-                if (parent !== repo.base_commit || subject !== `test: fault injection ${record.id}` || hash(committedDiff) !== repo.diff_sha256) throw serviceError(`${repo.repo_id}：中断后提交不匹配，请重新生成`)
+                const expectedMessage = (repo.committed_message || `test: fault injection ${record.id}`).trim()
+                if (parent !== repo.base_commit || body !== expectedMessage || hash(committedDiff) !== repo.diff_sha256) throw serviceError(`${repo.repo_id}：中断后提交不匹配，请重新生成`)
                 repo.commit = head; await this.save(directory, record)
               }
+            } else if (repo.amend_started && repo.commit) {
+              const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+              if (head !== repo.commit) {
+                const parent = await this.git(repo.path, ['rev-parse', `${head}^`], signal)
+                const body = (await this.git(repo.path, ['log', '-1', '--format=%B', head], signal)).trim()
+                const committedDiff = await this.git(repo.path, ['diff', '--no-ext-diff', '--no-textconv', repo.base_commit, head], signal)
+                const expectedMessage = (repo.committed_message || desiredMessage).trim()
+                if (parent !== repo.base_commit || body !== expectedMessage || hash(committedDiff) !== repo.diff_sha256) throw serviceError(`${repo.repo_id}：中断后重写提交不匹配，请重新生成`)
+                repo.commit = head
+              }
+              repo.amend_started = false; await this.save(directory, record)
             }
             const configured = await readRepositorySettings(dataRoot, repo.repo_id)
             const configuredPath = await realpath(configured.git_path || path.join(dataRoot, 'repositories', repo.repo_id))
@@ -1046,7 +1168,8 @@ export class FaultInjectionService {
               if (delivered) { repo.pushed = true; repo.push_result = 'confirmed'; await this.save(directory, record); continue }
             }
             const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
-            if (local !== repo.source_head && local !== repo.commit) throw serviceError(`${repo.repo_id}：个人分支已有新提交，请重新生成打桩修改`)
+            const priorCommits = Array.isArray(repo.previous_commits) ? repo.previous_commits : []
+            if (local !== repo.source_head && local !== repo.commit && !priorCommits.includes(local)) throw serviceError(`${repo.repo_id}：个人分支已有新提交，请重新生成打桩修改`)
             if (remote !== repo.remote_head) throw serviceError(`${repo.repo_id}：远端分支已更新，请重新生成打桩修改`)
             if (repo.outgoing_count > 0 && acknowledged_heads[repo.repo_id] !== repo.base_commit && !repo.commit) throw serviceError(`${repo.repo_id}：推送将包含个人分支上 ${repo.outgoing_count} 个已有未推送提交，请确认后继续`)
             if (!repo.commit) {
@@ -1055,6 +1178,17 @@ export class FaultInjectionService {
               const baselineUnstaged = new Set(repo.baseline_unstaged ?? [])
               const unstaged = (await this.git(repo.path, ['diff', '--name-only', '-z'], signal)).split('\0').filter(file => file && !baselineUnstaged.has(file))
               if (head !== repo.base_commit || hash(diff) !== repo.diff_sha256 || unstaged.length) throw serviceError(`${repo.repo_id}：待提交修改已变化，请重新生成`)
+            } else {
+              const currentMessage = (await this.git(repo.path, ['log', '-1', '--format=%B', repo.commit], signal)).trim()
+              if (currentMessage !== desiredMessage) {
+                const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+                const parent = await this.git(repo.path, ['rev-parse', `${repo.commit}^`], signal)
+                const committedDiff = await this.git(repo.path, ['diff', '--no-ext-diff', '--no-textconv', repo.base_commit, repo.commit], signal)
+                const extraStaged = await this.git(repo.path, ['diff', '--cached', '--name-only'], signal)
+                if (head !== repo.commit || parent !== repo.base_commit || hash(committedDiff) !== repo.diff_sha256 || extraStaged) {
+                  throw serviceError(`${repo.repo_id}：待重写提交状态已变化，请重新生成`)
+                }
+              }
             }
             const dirty = new Set([
               ...((await this.git(repo.source_path, ['diff', '--name-only', '-z'], signal)).split('\0')),
@@ -1067,29 +1201,63 @@ export class FaultInjectionService {
             signal.throwIfAborted()
             if (!repo.diff || repo.pushed) continue
             record.current_repository = repo.repo_id; await this.save(directory, record)
-            if (!repo.commit) {
-              repo.commit_started = true; await this.save(directory, record)
+            const resolveAuthorArgs = async () => {
               const author = []
               for (const [name, fallback] of [['user.name', 'PANGEA'], ['user.email', 'pangea@localhost']]) {
                 try { await this.git(repo.path, ['config', '--get', name], signal) }
                 catch (error) { signal.throwIfAborted(); author.push('-c', `${name}=${fallback}`) }
               }
-              await this.git(repo.path, [...author, 'commit', '--no-gpg-sign', '-m', `test: fault injection ${record.id}`], signal)
+              return author
+            }
+            if (!repo.commit) {
+              repo.commit_started = true; repo.committed_message = desiredMessage; await this.save(directory, record)
+              const author = await resolveAuthorArgs()
+              await this.git(repo.path, [...author, 'commit', '--no-gpg-sign', '-m', desiredMessage], signal)
               repo.commit = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
               await this.save(directory, record)
+            } else {
+              const currentMessage = (await this.git(repo.path, ['log', '-1', '--format=%B', repo.commit], signal)).trim()
+              if (currentMessage !== desiredMessage) {
+                const oldCommit = repo.commit
+                const oldTree = await this.git(repo.path, ['rev-parse', `${oldCommit}^{tree}`], signal)
+                repo.previous_commits = [...new Set([...(repo.previous_commits ?? []), oldCommit])].slice(-10)
+                repo.amend_started = true; repo.committed_message = desiredMessage; await this.save(directory, record)
+                const author = await resolveAuthorArgs()
+                await this.git(repo.path, [...author, 'commit', '--amend', '--no-gpg-sign', '-m', desiredMessage], signal)
+                const newCommit = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+                const newTree = await this.git(repo.path, ['rev-parse', `${newCommit}^{tree}`], signal)
+                if (newTree !== oldTree) throw serviceError(`${repo.repo_id}：重写提交信息时文件树异常变化，已中止`)
+                repo.commit = newCommit; repo.amend_started = false; await this.save(directory, record)
+              }
             }
             const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
             if (local !== repo.commit) {
-              if (local !== repo.source_head) throw serviceError(`${repo.repo_id}：个人分支已变化，请重新生成`)
-              // Address A explicitly, never merge into whichever branch happens to be
-              // checked out after preflight. updateInstead also protects dirty files.
-              await this.git(repo.path, ['push', `--receive-pack=git -c core.hooksPath=${shellQuote(await disabledHooksPath())} -c receive.denyCurrentBranch=updateInstead receive-pack`,
-                repo.source_path, `${repo.commit}:refs/heads/${repo.branch}`], signal)
+              if (local === repo.source_head) {
+                // Address A explicitly, never merge into whichever branch happens to be
+                // checked out after preflight. updateInstead also protects dirty files.
+                await this.git(repo.path, ['push', `--receive-pack=git -c core.hooksPath=${shellQuote(await disabledHooksPath())} -c receive.denyCurrentBranch=updateInstead receive-pack`,
+                  repo.source_path, `${repo.commit}:refs/heads/${repo.branch}`], signal)
+              } else if ((repo.previous_commits ?? []).includes(local)) {
+                const localTree = await this.git(repo.source_path, ['rev-parse', `${local}^{tree}`], signal)
+                const commitTree = await this.git(repo.path, ['rev-parse', `${repo.commit}^{tree}`], signal)
+                if (localTree !== commitTree) throw serviceError(`${repo.repo_id}：重写提交后文件树不一致，请重新生成`)
+                await this.git(repo.source_path, ['fetch', '--no-tags', '--', repo.path, repo.commit], signal)
+                await this.git(repo.source_path, ['update-ref', `refs/heads/${repo.branch}`, repo.commit, local], signal)
+              } else {
+                throw serviceError(`${repo.repo_id}：个人分支已变化，请重新生成`)
+              }
             }
             repo.local_applied = true; await this.save(directory, record)
             // Plain fast-forward push: never create a task ref or force overwrite.
             repo.push_result = 'unconfirmed'; await this.save(directory, record)
-            await this.git(repo.path, ['push', 'origin', `${repo.commit}:refs/heads/${repo.remote_branch || repo.branch}`], signal)
+            try {
+              await this.git(repo.path, ['push', 'origin', `${repo.commit}:refs/heads/${repo.remote_branch || repo.branch}`], signal)
+            } catch (pushError) {
+              if (/!\s*\[(?:remote )?rejected\]/i.test(String(pushError?.message || ''))) {
+                repo.push_result = 'rejected'; await this.save(directory, record)
+              }
+              throw pushError
+            }
             repo.pushed = true; repo.push_result = 'confirmed'; await this.save(directory, record)
           }
           record.status = 'pushed'
@@ -1114,6 +1282,7 @@ export class FaultInjectionService {
       input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })),
         baseline_acknowledged: previous.baseline_acknowledged, provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
         pipeline_url: previous.pipeline_url, name: previous.name,
+        ...(previous.commit_config ? { commit_config: previous.commit_config } : {}),
         ...(mode === 'reuse' ? { reuse_task_id: taskId } : mode === 'reference' ? { reference_task_id: taskId, reference_error: previous.error || '' } : {}) } }, { requireReceipt: false })
   }
   async recordVerification(dataRoot, runId, taskId, input) {

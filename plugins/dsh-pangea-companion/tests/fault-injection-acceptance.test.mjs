@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, lstat } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, lstat, chmod } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 import { Readable } from 'node:stream'
 import { FaultInjectionService, injectionGit, workspaceChanges, dedupeRepeatedValues, compactGenerationInput, checkInjectionResult } from '../src/fault-injection.js'
 import { createInjectionGenerator } from '../src/fault-injection-agent.js'
-import { buildVerificationShellScript } from '../src/fault-injection-candidates.js'
+import { MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE, buildVerificationShellScript } from '../src/fault-injection-candidates.js'
 import { faultInjectionRouteHandler } from '../src/index.js'
 import { protectedBranchReason } from '../src/repositories/branch-policy.js'
 import { disabledHooksPath } from '../src/repositories/git-environment.js'
@@ -278,7 +278,13 @@ test('C/C++ driver repo: host pre-scans harness facts, deduplicates 80+ char sou
     'target_compile_definitions(mod_ut PRIVATE -DXXX_SIMU_FAULT)',
     'add_test(NAME mod_ut COMMAND mod_ut)',
   ].join('\n'))
-  await writeFile(path.join(f.source, 'test/test_existing.cpp'), '#include <gtest/gtest.h>\nTEST_F(DrvSuite, Smoke) { EXPECT_EQ(0, 0); }\n')
+  await writeFile(path.join(f.source, 'test/test_existing.cpp'), [
+    '#include <gtest/gtest.h>',
+    'extern "C" int drv_wait_ready(int *state);',
+    '// drv_wait_ready(&commented_out_should_not_match);',
+    'TEST_F(DrvSuite, Smoke) { int ready = 1; EXPECT_EQ(0, drv_wait_ready(&ready)); }',
+    '',
+  ].join('\n'))
   await injectionGit(f.source, ['add', '.'])
   await injectionGit(f.source, ['commit', '-m', 'add driver module and gtest suite'])
   await injectionGit(f.source, ['push', 'origin', 'main'])
@@ -666,5 +672,201 @@ test('real compiled C acceptance: multi-case batch shares one fault stub, compil
   const recoverRun = await exec(binPath, ['0'], { env: cleanEnv })
   assert.match(recoverRun.stdout, /rc=0/)
 })
+
+test('existing_symbol_tests locates target C function calls in UT files and ignores commented-out lines', async t => {
+  const f = await fixture(t)
+  const drvPath = 'src/drv_wait.c'
+  await mkdir(path.join(f.source, 'src'), { recursive: true })
+  await writeFile(path.join(f.source, drvPath), [
+    'static int helper_noop(void) { return 0; }',
+    'int drv_wait_init_done(int timeout_ms) {',
+    '  if (timeout_ms <= 0) return -1;',
+    '  return helper_noop();',
+    '}',
+    '',
+  ].join('\n'))
+  await mkdir(path.join(f.source, 'test/ut'), { recursive: true })
+  await writeFile(path.join(f.source, 'test/ut/drv_wait_ut.cpp'), [
+    '#include <gtest/gtest.h>',
+    'extern "C" int drv_wait_init_done(int timeout_ms);',
+    '// drv_wait_init_done(999);',
+    'TEST(DrvWaitUt, NormalReady) {',
+    '  EXPECT_EQ(0, drv_wait_init_done(10));',
+    '}',
+    '',
+  ].join('\n'))
+  await injectionGit(f.source, ['add', '.'])
+  await injectionGit(f.source, ['commit', '-m', 'add drv_wait and ut'])
+  await injectionGit(f.source, ['push', 'origin', 'main'])
+  const head = await injectionGit(f.source, ['rev-parse', 'HEAD'])
+  f.repositories[0].git.commit = head
+  f.repositories[0].base_ref = head
+  f.run.details = {
+    test_cases: [{
+      projection_id: 'unit/CASE-HANG',
+      test_case_id: 'unit/CASE-HANG',
+      title: 'drv_wait_init_done 超时置失败',
+      execution_readiness: 'needs_instrumentation',
+      source_evidence: [`target:${drvPath}:2-5`],
+    }],
+  }
+  let capturedInput = null, capturedPrompt = ''
+  const service = new FaultInjectionService({
+    generate: async ({ inputPath, prompt }) => {
+      capturedPrompt = prompt
+      capturedInput = JSON.parse(await readFile(inputPath, 'utf8'))
+      return {
+        summary: '补充超时桩',
+        points: [{ id: 'WAIT_TIMEOUT', repo_id: 'target', path: drvPath, action: '返回 -1' }],
+        profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['WAIT_TIMEOUT'], steps: ['echo ok'] }],
+        edits: [{ repo_id: 'target', path: drvPath, before: '  return helper_noop();', after: '  return -1;' }],
+      }
+    },
+  })
+  const created = await service.start(f); await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, created.id)
+  assert.equal(ready.status, 'ready', ready.error)
+  const matches = capturedInput.repositories[0].harness?.existing_symbol_tests ?? []
+  assert.ok(matches.some(item => item.symbol === 'drv_wait_init_done' && item.path === 'test/ut/drv_wait_ut.cpp' && item.line === 5), JSON.stringify(matches))
+  assert.equal(matches.some(item => item.line === 3), false, 'commented-out lines must not be matched')
+  assert.match(capturedPrompt, /existing_symbol_tests/)
+})
+
+test('pre-receive commit gate rejection: local pre-check, in-place commit --amend, dirty unrelated source file, single/multi-line templates, and zero model re-runs', async t => {
+  const f = await fixture(t)
+  await writeFile(path.join(f.source, 'unrelated.txt'), 'baseline note\n')
+  await injectionGit(f.source, ['add', 'unrelated.txt'])
+  await injectionGit(f.source, ['commit', '-m', 'add unrelated file'])
+  await injectionGit(f.source, ['push', 'origin', 'main'])
+  const head = await injectionGit(f.source, ['rev-parse', 'HEAD'])
+  f.repositories[0].git.commit = head
+  f.repositories[0].base_ref = head
+
+  const hookPath = path.join(f.remote, 'hooks', 'pre-receive')
+  // Simulate an intranet hook that runs grep -E (line-by-line, non-DOTALL) over %B.
+  await writeFile(hookPath, [
+    '#!/bin/sh',
+    'set -eu',
+    'while read oldrev newrev refname; do',
+    '  full=$(git log -1 --format=%B "$newrev")',
+    '  case "$full" in',
+    '    *【问题单号/AR/STORY/CR】*【修改人】*【审核人】*【修改说明】*) ;;',
+    '    *) echo "门禁拦截：提交信息必须包含【问题单号/AR/STORY/CR】【修改人】【审核人】【修改说明】" >&2; exit 1 ;;',
+    '  esac',
+    '  if ! printf "%s\\n" "$full" | grep -Eq "【问题单号/AR/STORY/CR】.+【修改人】.+【审核人】.+【修改说明】.+"; then',
+    '    echo "门禁拦截：当前仓库钩子按单行 grep -E 校验，请切换单行门禁模板" >&2',
+    '    exit 1',
+    '  fi',
+    'done',
+    '',
+  ].join('\n'))
+  await chmod(hookPath, 0o755)
+
+  let modelCalls = 0
+  const service = new FaultInjectionService({
+    generate: async ({ record }) => { modelCalls += 1; return generated(record) },
+  })
+  const created = await service.start(f); await wait(service)
+  assert.equal(modelCalls, 1)
+
+  // 1) Default commit message ("test: fault injection <id>") is rejected by remote pre-receive hook.
+  const firstAttempt = await service.push(f.dataRoot, f.run.run_id, created.id)
+  assert.equal(firstAttempt.status, 'ready')
+  assert.equal(firstAttempt.generation_complete, true)
+  assert.equal(firstAttempt.repositories[0].push_result, 'rejected')
+  assert.match(firstAttempt.error, /门禁拦截：提交信息必须包含/)
+  assert.doesNotMatch(firstAttempt.error, /推送结果待确认/)
+  const firstCommit = firstAttempt.repositories[0].commit
+  assert.ok(firstCommit)
+  assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), firstCommit)
+
+  // 2) Local pre-check blocks incomplete template fields or mismatched custom regex BEFORE touching Git.
+  await assert.rejects(
+    service.push(f.dataRoot, f.run.run_id, created.id, {
+      commit_config: { mode: 'template', issue: 'AR20261118', author: 'h00123456', reviewer: '' },
+    }),
+    /请填写审核人/
+  )
+  await assert.rejects(
+    service.push(f.dataRoot, f.run.run_id, created.id, {
+      commit_config: { mode: 'template', issue: 'AR20261118', author: 'h00123456', reviewer: 'z00654321', pattern: '^\\[DTS-[0-9]+\\]' },
+    }),
+    /未通过本地预检正则/
+  )
+  assert.equal(await injectionGit(firstAttempt.repositories[0].path, ['rev-parse', 'HEAD']), firstCommit)
+
+  // 3) Simulate user editing an unrelated file in their local working tree while fixing commit message.
+  await writeFile(path.join(f.source, 'unrelated.txt'), 'local unstaged developer note\n')
+
+  // 4) Push with MULTILINE_GATE_COMMIT_TEMPLATE: amends C1 -> C2 and updates f.source safely despite dirty unrelated.txt,
+  //    then remote hook explains it requires SINGLELINE subject.
+  const secondAttempt = await service.push(f.dataRoot, f.run.run_id, created.id, {
+    commit_config: {
+      mode: 'template',
+      template: MULTILINE_GATE_COMMIT_TEMPLATE,
+      issue: 'AR20261118',
+      author: 'h00123456',
+      reviewer: 'z00654321',
+    },
+  })
+  assert.equal(secondAttempt.status, 'ready')
+  assert.match(secondAttempt.error, /单行门禁模板/)
+  const secondCommit = secondAttempt.repositories[0].commit
+  assert.notEqual(secondCommit, firstCommit)
+  assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), secondCommit)
+  assert.equal(await readFile(path.join(f.source, 'unrelated.txt'), 'utf8'), 'local unstaged developer note\n')
+
+  // 5) Switch to SINGLELINE_GATE_COMMIT_TEMPLATE via HTTP route handler: amends C2 -> C3 in-place and pushes cleanly!
+  const postPayload = JSON.stringify({
+    action: 'push',
+    run_id: f.run.run_id,
+    data_root: f.dataRoot,
+    task_id: created.id,
+    commit_config: {
+      mode: 'template',
+      template: SINGLELINE_GATE_COMMIT_TEMPLATE,
+      issue: 'AR20261118',
+      author: 'h00123456',
+      reviewer: 'z00654321',
+    },
+  })
+  const req = Readable.from([Buffer.from(postPayload)])
+  req.url = '/api/pangea-companion/fault-injection'
+  req.method = 'POST'
+  req.headers = { 'sec-fetch-site': 'same-origin' }
+  let resStatus = 0, resBody = ''
+  await faultInjectionRouteHandler(
+    req,
+    { writeHead(code) { resStatus = code }, end(body) { resBody = body } },
+    service,
+    {},
+    { resolveRoot: async () => f.dataRoot, readRun: async () => f.run }
+  )
+  assert.equal(resStatus, 200, resBody)
+  await wait(service)
+
+  const finalTask = await service.read(f.dataRoot, f.run.run_id, created.id)
+  assert.equal(finalTask.status, 'pushed', finalTask.error)
+  assert.equal(modelCalls, 1, 'fixing commit message must never re-run the generator')
+  const finalCommit = finalTask.repositories[0].commit
+  assert.notEqual(finalCommit, secondCommit)
+  const expectedMsg = '【问题单号/AR/STORY/CR】AR20261118 【修改人】h00123456 【审核人】z00654321 【修改说明】初始化第 9 步挂起'
+  assert.equal((await injectionGit(f.remote, ['log', '-1', '--format=%B', 'refs/heads/main'])).trim(), expectedMsg)
+  assert.equal((await injectionGit(f.source, ['log', '-1', '--format=%B', 'refs/heads/main'])).trim(), expectedMsg)
+  assert.equal(await injectionGit(f.source, ['diff', '--cached', '--name-only']), '')
+  assert.equal(await readFile(path.join(f.source, 'unrelated.txt'), 'utf8'), 'local unstaged developer note\n')
+  await injectionGit(f.source, ['fsck', '--full'])
+  await injectionGit(f.remote, ['fsck', '--full'])
+
+  // 6) Reusable defaults are persisted for the next task without leaking the previous task's summary.
+  const nextDefaults = await service.defaults(f.dataRoot, f.run, f.root)
+  assert.equal(nextDefaults.commit_config.mode, 'template')
+  assert.equal(nextDefaults.commit_config.template, SINGLELINE_GATE_COMMIT_TEMPLATE)
+  assert.equal(nextDefaults.commit_config.issue, 'AR20261118')
+  assert.equal(nextDefaults.commit_config.author, 'h00123456')
+  assert.equal(nextDefaults.commit_config.reviewer, 'z00654321')
+  assert.equal(nextDefaults.commit_config.summary, '')
+})
+
 
 

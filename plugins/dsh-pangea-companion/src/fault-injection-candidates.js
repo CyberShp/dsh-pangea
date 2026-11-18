@@ -232,3 +232,90 @@ export function parseVerificationLog(logText, task) {
   }
   return { entries, matchedCount: entries.length }
 }
+
+export const MULTILINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】{issue}\n【修改人】{author}\n【审核人】{reviewer}\n【修改说明】{summary}'
+export const SINGLELINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】{issue} 【修改人】{author} 【审核人】{reviewer} 【修改说明】{summary}'
+
+const EMPTY_GATE_FIELD = /(?:^\s*【([^】\r\n]+)】\s*$|【(问题单号[^】\r\n]*|(?:AR|STORY|CR|DTS)[^】\r\n]*|修改人|审核人|修改说明|提交人|检视人)】\s*(?=\r?\n|$|【))/mu
+
+export function defaultCommitSummary(task) {
+  const raw = typeof task?.result?.summary === 'string' && task.result.summary.trim()
+    ? task.result.summary
+    : typeof task?.name === 'string' && task.name.trim()
+      ? task.name
+      : task?.id ? `fault injection ${task.id}` : ''
+  return raw.replace(/\s*\r?\n\s*/g, '；').replace(/\s{2,}/g, ' ').trim().slice(0, 200)
+}
+
+export function normalizeCommitConfig(input = {}, fallback = {}) {
+  const src = input && typeof input === 'object' ? input : {}
+  const base = fallback && typeof fallback === 'object' ? fallback : {}
+  const mode = (src.mode ?? base.mode) === 'template' ? 'template' : 'default'
+  const clean = (val, max = 300) => typeof val === 'string' ? val.replace(/\0/g, '').trim().slice(0, max) : ''
+  const templateRaw = typeof src.template === 'string' ? src.template : typeof base.template === 'string' ? base.template : ''
+  return {
+    mode,
+    template: templateRaw.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 2000) || MULTILINE_GATE_COMMIT_TEMPLATE,
+    issue: clean(src.issue ?? base.issue, 300),
+    author: clean(src.author ?? base.author, 200),
+    reviewer: clean(src.reviewer ?? base.reviewer, 200),
+    summary: clean(src.summary, 500),
+    pattern: clean(src.pattern ?? base.pattern, 500),
+    custom_message: typeof src.custom_message === 'string' ? src.custom_message.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 8000) : '',
+  }
+}
+
+export function validateRawCommitMessage(rawMessage, pattern = '') {
+  if (typeof rawMessage !== 'string') return { ok: false, message: '', error: '提交信息不能为空' }
+  if (rawMessage.includes('\0')) return { ok: false, message: '', error: '提交信息包含无效空字符' }
+  const message = rawMessage.replace(/\r\n/g, '\n').trim()
+  if (!message) return { ok: false, message: '', error: '提交信息不能为空' }
+  if (message.length > 8000) return { ok: false, message, error: '提交信息过长（最多 8000 字符）' }
+  const emptyField = EMPTY_GATE_FIELD.exec(message)
+  if (emptyField) {
+    const label = emptyField[1] || emptyField[2] || '必填项'
+    return { ok: false, message, error: `提交信息中「【${label}】」未填写内容，请补全后再提交` }
+  }
+  const trimmedPattern = typeof pattern === 'string' ? pattern.trim() : ''
+  if (trimmedPattern) {
+    let regex
+    try { regex = new RegExp(trimmedPattern, 'u') }
+    catch (error) { return { ok: false, message, error: `本地预检正则无效：${error.message}` } }
+    if (!regex.test(message)) return { ok: false, message, error: `提交信息未通过本地预检正则（${trimmedPattern}）` }
+  }
+  return { ok: true, message, error: null }
+}
+
+export function resolveCommitMessage(config, task, { allowPendingSummary = false, allowDefaultSummary = true } = {}) {
+  const normalized = normalizeCommitConfig(config)
+  if (normalized.mode !== 'template') {
+    const fallback = task?.id ? `test: fault injection ${task.id}` : 'test: fault injection'
+    return validateRawCommitMessage(normalized.custom_message || fallback, normalized.pattern)
+  }
+  const template = normalized.template
+  const summary = normalized.summary || (allowDefaultSummary ? defaultCommitSummary(task) : '') || (allowPendingSummary ? '待生成打桩修改说明' : '')
+  const values = {
+    issue: normalized.issue,
+    author: normalized.author,
+    reviewer: normalized.reviewer,
+    summary,
+    task_id: String(task?.id || ''),
+  }
+  const labels = {
+    issue: '问题单号/AR/STORY/CR（无单号时按项目规范填 NA）',
+    author: '修改人',
+    reviewer: '审核人',
+    summary: '修改说明',
+  }
+  let preview = template
+  for (const [key, value] of Object.entries(values)) {
+    preview = preview.replace(new RegExp(`\\{${key}\\}`, 'g'), () => value)
+  }
+  for (const [key, label] of Object.entries(labels)) {
+    if (template.includes(`{${key}}`) && !values[key]) {
+      return { ok: false, message: preview.trim(), error: `请填写${label}` }
+    }
+  }
+  return validateRawCommitMessage(preview, normalized.pattern)
+}
+

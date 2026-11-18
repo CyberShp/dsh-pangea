@@ -1,5 +1,10 @@
 import { analysisExecutionState, loadAnalysisAgentModels } from './agent-model-selection.js'
-import { buildVerificationShellScript, caseKeyOf, classifyInjectionCandidate, duplicateCaseKeySet, parseVerificationLog } from './fault-injection-candidates.js'
+import {
+  MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
+  buildVerificationShellScript, caseKeyOf, classifyInjectionCandidate,
+  defaultCommitSummary, duplicateCaseKeySet, normalizeCommitConfig,
+  parseVerificationLog, resolveCommitMessage,
+} from './fault-injection-candidates.js'
 import { createRepositorySettings, sourceLabel } from './repository-settings-view.js'
 export const INJECTION_STATUS_LABELS = {
   preparing: '准备源码', generating: '生成打桩修改', ready: '修改已生成', pushing: '提交与推送中',
@@ -33,6 +38,7 @@ export function createFaultInjectionPanel(React) {
     const [working, setWorking] = React.useState(false)
     const [build, setBuild] = React.useState({ url: '', package_id: '', package_sha256: '', notes: '' })
     const [verification, setVerification] = React.useState({ case_key: '', result: 'not_run', hits: '', notes: '' })
+    const [commitDraft, setCommitDraft] = React.useState(() => ({ ...normalizeCommitConfig({}), summary: null }))
     const [modelState, setModelState] = React.useState({ status: 'idle' })
     const [modelRefresh, setModelRefresh] = React.useState(0)
     const [tierFilter, setTierFilter] = React.useState('all')
@@ -74,6 +80,15 @@ export function createFaultInjectionPanel(React) {
     const passedCount = [...latestResults.values()].filter(result => result === 'passed').length
     const activeTaskIds = tasks.filter(busy).map(item => item.id).join(',')
     const scope = JSON.stringify([runId, dataRoot, cwd])
+    const buildCommitDraftForTask = (targetTask, baseDefaults) => {
+      const normalized = normalizeCommitConfig(targetTask?.commit_config, baseDefaults)
+      const explicitSummary = typeof targetTask?.commit_config?.summary === 'string' && targetTask.commit_config.summary.trim()
+        ? targetTask.commit_config.summary
+        : null
+      const defaultAutoMsg = targetTask?.id ? `test: fault injection ${targetTask.id}` : ''
+      const customMessage = normalized.custom_message || (normalized.mode !== 'template' && targetTask?.commit_message && targetTask.commit_message !== defaultAutoMsg ? targetTask.commit_message : '')
+      return { ...normalized, summary: explicitSummary, custom_message: customMessage }
+    }
     const request = async (payload = null) => {
       const input = { run_id: runId, ...(dataRoot ? { data_root: dataRoot } : {}), ...(cwd ? { cwd } : {}), ...payload }
       const url = '/api/pangea-companion/fault-injection'
@@ -84,7 +99,7 @@ export function createFaultInjectionPanel(React) {
       return value
     }
     const selectTask = value => {
-      if (taskId) drafts.current[taskId] = { pipelineUrl, build, verification }
+      if (taskId) drafts.current[taskId] = { pipelineUrl, build, verification, commitDraft }
       setTaskId(value)
       setAcknowledged({})
       if (standalone && value) setStep(4)
@@ -109,7 +124,8 @@ export function createFaultInjectionPanel(React) {
         }
         setProviders(value.providers ?? [])
         const inheritedModel = value.defaults?.agent_model || ''
-        setSettings(previous => previous ?? { ...value.defaults, agent_model: inheritedModel, agent_model_inherited: Boolean(inheritedModel), instructions: '' })
+        const defaultCommit = normalizeCommitConfig(value.defaults?.commit_config)
+        setSettings(previous => previous ?? { ...value.defaults, commit_config: defaultCommit, agent_model: inheritedModel, agent_model_inherited: Boolean(inheritedModel), instructions: '' })
         setError('')
       }).catch(reason => { if (live) setError(reason.message) })
       return () => { live = false }
@@ -133,7 +149,8 @@ export function createFaultInjectionPanel(React) {
       setPipelineUrl(draft?.pipelineUrl ?? task?.pipeline_url ?? '')
       setBuild(draft?.build ?? { url: '', package_id: '', package_sha256: '', notes: '', ...task?.build })
       setVerification(draft?.verification ?? { result: 'not_run', hits: '', notes: '', ...task?.verification?.filter(item => item.case_key === task?.case_keys?.[0]).at(-1), case_key: task?.case_keys?.[0] || '' })
-    }, [taskId])
+      setCommitDraft(draft?.commitDraft ?? buildCommitDraftForTask(task, settings?.commit_config))
+    }, [taskId, Boolean(settings?.commit_config)])
     const act = async (action, extra = {}) => {
       setWorking(true); setError(''); setNotice('')
       try {
@@ -142,6 +159,10 @@ export function createFaultInjectionPanel(React) {
         if (action === 'generate') setStep(4)
         if (['configure', 'verify'].includes(action)) setNotice('已保存')
         if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url }))
+        if (extra.commit_config) {
+          const synced = normalizeCommitConfig(extra.commit_config, settings?.commit_config)
+          setSettings(previous => previous ? { ...previous, commit_config: synced } : previous)
+        }
       } catch (reason) { setError(reason.message) }
       finally { setWorking(false) }
     }
@@ -168,6 +189,12 @@ export function createFaultInjectionPanel(React) {
     const missingGit = Boolean(settings?.repositories?.some(repo => repo.enabled !== false && repo.source?.kind !== 'git'))
     const needsRepoSetup = missingBranch || missingGit
     const pipelineDirty = Boolean(task && pipelineUrl.trim() !== (task.pipeline_url || ''))
+    const step3CommitConfig = normalizeCommitConfig(settings?.commit_config)
+    const step3CommitCheck = step3CommitConfig.mode === 'template'
+      ? resolveCommitMessage(step3CommitConfig, { id: 'pending', name: settings?.name || selectedCases[0]?.title || '打桩任务' }, { allowPendingSummary: true })
+      : { ok: true, message: '', error: null }
+    const effectiveCommitConfig = task ? { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(task) } : null
+    const commitCheck = task ? resolveCommitMessage(effectiveCommitConfig, task, { allowDefaultSummary: commitDraft.summary === null }) : { ok: true, message: '', error: null }
     const statusTone = status => status === 'pushed' || status === 'ready' ? 'good' : ['failed', 'cancelled', 'interrupted'].includes(status) ? 'danger' : 'info'
     return h('section', { className: standalone ? 'pangea-injection-panel is-standalone' : 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
       h('style', null, `
@@ -348,10 +375,28 @@ export function createFaultInjectionPanel(React) {
             h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '先在独立副本中生成差异，查看后再提交并推送到项目个人分支；不会创建任务分支，不带入未提交内容。'),
             field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value }), { placeholder: '例如 https://ci.example.internal/pipeline/...' }),
             field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true, placeholder: '可选：补充触发边界、日志开关或构建宏约束…' }),
+            h('details', { open: step3CommitConfig.mode === 'template' || undefined },
+              h('summary', null, '提交门禁默认项（可选：问题单号 / 修改人 / 审核人，同库自动复用）'),
+              h('div', { style: { paddingTop: 8 } },
+                h('label', { className: 'pangea-fi-field' }, h('span', null, '预设提交信息格式'),
+                  h('select', { 'aria-label': '预设提交信息格式', value: step3CommitConfig.mode, disabled: working, onChange: event => setSettings({ ...settings, commit_config: { ...step3CommitConfig, mode: event.target.value } }) },
+                    h('option', { value: 'default' }, '默认简要格式（无门禁钩子仓库）'),
+                    h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'))),
+                step3CommitConfig.mode === 'template' ? h(React.Fragment, null,
+                  h('div', { style: grid },
+                    field('预设问题单号', step3CommitConfig.issue, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, issue: value } }), { placeholder: '如 AR2026xxxx / DTSxxxx / NA' }),
+                    field('预设修改人', step3CommitConfig.author, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, author: value } }), { placeholder: '工号或姓名' }),
+                    field('预设审核人', step3CommitConfig.reviewer, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, reviewer: value } }), { placeholder: '检视人工号或姓名' })),
+                  h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 } },
+                    h('button', { type: 'button', disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: MULTILINE_GATE_COMMIT_TEMPLATE } }) }, '多行标准模板'),
+                    h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: SINGLELINE_GATE_COMMIT_TEMPLATE } }) }, '单行标准模板')),
+                  field('预设提交信息模板', step3CommitConfig.template, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: value } }), { multiline: true }),
+                  field('预设本地预检正则', step3CommitConfig.pattern, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: value } }), { placeholder: '可选：粘贴项目 pre-receive 钩子正则进行本地预检' }),
+                  !step3CommitCheck.ok ? h('p', { role: 'status', style: { fontSize: 12, color: '#9c2330', margin: '4px 0 0' } }, step3CommitCheck.error) : null) : null)),
             h('footer', { className: 'pangea-fi-footer' },
               standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : h('span', null),
-              h('button', { type: 'button', className: 'btn primary', disabled: working || !modelSelection.ready || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
-                onClick: () => act('generate', { ...effectiveSettings, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
+              h('button', { type: 'button', className: 'btn primary', disabled: working || !step3CommitCheck.ok || !modelSelection.ready || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
+                onClick: () => act('generate', { ...effectiveSettings, commit_config: step3CommitConfig, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
           : !settings ? h('p', null, '正在读取打桩设置…') : null,
         task && (!standalone || step === 4) ? h('div', { className: 'pangea-fi-task-card', style: { marginTop: 16 } },
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
@@ -363,7 +408,7 @@ export function createFaultInjectionPanel(React) {
               busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null)),
           task.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
             h('p', { style: { margin: 0, fontWeight: 600 } }, task.failure_phase === 'preparing' ? '准备源码失败，尚未开始生成打桩修改。' : '本次操作未完成。'),
-            h('details', null, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, task.error))) : null,
+            h('details', { open: Boolean(task.generation_complete) || undefined }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, task.error))) : null,
           Array.isArray(task.notices) && task.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } }, task.notices.map((text, index) => h('p', { key: index, style: { margin: index ? '6px 0 0' : 0 } }, text))) : null,
           task.reused_from ? h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '本任务直接复用了已留存的生成结果，未调用模型。') : null,
           task.telemetry ? h('p', { className: 'b05-subtle', style: { fontSize: 12, margin: '6px 0 0' } }, `执行账本：模型轮次 ${task.telemetry.turns ?? 0} · 工具调用 ${task.telemetry.tool_calls ?? 0} 次 · 上下文压缩 ${task.telemetry.compactions ?? 0} 次${task.telemetry.budget_wrapup_triggered ? ' · 已触发探索预算收口' : ''}`) : null,
@@ -378,10 +423,31 @@ export function createFaultInjectionPanel(React) {
             h('input', { type: 'checkbox', 'aria-label': `确认推送已有提交 ${repo.repo_id}`, checked: acknowledged[repo.repo_id] === repo.base_commit,
               onChange: event => setAcknowledged(previous => ({ ...previous, [repo.repo_id]: event.target.checked ? repo.base_commit : '' })) }),
             `${repo.repo_id} 的 ${repo.branch} 上有 ${repo.outgoing_count} 个已有未推送提交；勾选确认后本次会一并推送。`)),
-          ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('div', { style: { marginTop: 14, display: 'flex', flexWrap: 'wrap', gap: 8 } },
-            h('button', { type: 'button', className: 'btn primary', disabled: working || task.schema_version !== 2 || task.repositories.some(repo => repo.outgoing_count > 0 && !repo.commit && acknowledged[repo.repo_id] !== repo.base_commit),
-              onClick: () => act('push', { acknowledged_heads: acknowledged }) }, working ? '正在提交…' : task.repositories.some(repo => repo.commit && !repo.pushed) ? `重试提交与推送到 ${task.branch}` : `提交并推送到 ${task.branch}`),
-            h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '按最新分支重新生成')) : null,
+          ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('div', { className: 'pangea-fi-repo-box', style: { marginTop: 14 } },
+            h('label', { className: 'pangea-fi-field' }, h('span', null, '提交信息格式'),
+              h('select', { 'aria-label': '提交信息格式', value: effectiveCommitConfig.mode, disabled: working, onChange: event => setCommitDraft(previous => ({ ...previous, mode: event.target.value })) },
+                h('option', { value: 'default' }, '默认简要格式（无门禁钩子仓库）'),
+                h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'))),
+            effectiveCommitConfig.mode === 'template' ? h(React.Fragment, null,
+              h('div', { style: grid },
+                field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 AR2026xxxx / DTSxxxx / NA' }),
+                field('修改人', effectiveCommitConfig.author, value => setCommitDraft(previous => ({ ...previous, author: value })), { placeholder: '工号或姓名' }),
+                field('审核人', effectiveCommitConfig.reviewer, value => setCommitDraft(previous => ({ ...previous, reviewer: value })), { placeholder: '检视人工号或姓名' })),
+              field('修改说明', effectiveCommitConfig.summary, value => setCommitDraft(previous => ({ ...previous, summary: value })), { placeholder: '简要说明本次打桩修改内容' }),
+              h('details', { style: { marginBottom: 10 } },
+                h('summary', { style: { fontSize: 12 } }, '自定义模板与本地正则预检（兼容单行 / 多行 pre-receive 钩子）'),
+                h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 8px' } },
+                  h('button', { type: 'button', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: MULTILINE_GATE_COMMIT_TEMPLATE })) }, '使用多行门禁模板'),
+                  h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: SINGLELINE_GATE_COMMIT_TEMPLATE })) }, '使用单行门禁模板')),
+                field('提交信息模板', effectiveCommitConfig.template, value => setCommitDraft(previous => ({ ...previous, template: value })), { multiline: true }),
+                field('本地预检正则', effectiveCommitConfig.pattern, value => setCommitDraft(previous => ({ ...previous, pattern: value })), { placeholder: '可选：粘贴项目钩子正则进行推送前校验' })),
+              h('pre', { 'aria-label': '提交信息预览', style: { whiteSpace: 'pre-wrap', margin: '6px 0', padding: '8px 10px', borderRadius: 6, background: '#f8f9fb', border: '1px solid #e2e6ec', fontSize: 12 } }, commitCheck.message || ''))
+              : field('提交信息', effectiveCommitConfig.custom_message, value => setCommitDraft(previous => ({ ...previous, custom_message: value })), { placeholder: `test: fault injection ${task.id}` }),
+            !commitCheck.ok ? h('p', { role: 'alert', style: { fontSize: 12, color: '#9c2330', margin: '6px 0 0' } }, commitCheck.error) : null,
+            h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
+              h('button', { type: 'button', className: 'btn primary', disabled: working || !commitCheck.ok || task.schema_version !== 2 || task.repositories.some(repo => repo.outgoing_count > 0 && !repo.commit && acknowledged[repo.repo_id] !== repo.base_commit),
+                onClick: () => act('push', { acknowledged_heads: acknowledged, commit_config: effectiveCommitConfig, commit_message: commitCheck.message }) }, working ? '正在提交…' : task.repositories.some(repo => repo.commit && !repo.pushed) ? `重试提交与推送到 ${task.branch}` : `提交并推送到 ${task.branch}`),
+              h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '按最新分支重新生成'))) : null,
           task.status === 'pushed' ? h('section', { className: 'pangea-fi-build', style: { marginTop: 14 } },
             h('h3', { style: { marginTop: 0 } }, '构建个人包'),
             h('details', { open: !task.pipeline_url || pipelineDirty || undefined },
