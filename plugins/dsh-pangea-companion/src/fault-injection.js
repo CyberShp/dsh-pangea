@@ -119,9 +119,9 @@ export async function applyInjectionEdits(repositoryRoot, edits) {
   return [...staged.keys()]
 }
 
-// Replace every repeated large value with a pointer to its first occurrence.
+// Replace every repeated value >= 80 chars with a pointer to its first occurrence.
 // Lossless: the first copy is kept verbatim and each repeat names where it is.
-const REPEAT_MIN_LENGTH = 160
+const REPEAT_MIN_LENGTH = 80
 export function dedupeRepeatedValues(root) {
   const seen = new Map()
   const visit = (node, at) => {
@@ -137,6 +137,264 @@ export function dedupeRepeatedValues(root) {
   return visit(root, '$')
 }
 
+const posixPath = value => typeof value === 'string' ? value.replaceAll('\\', '/') : value
+
+function stringIds(values) {
+  const result = []
+  for (const item of Array.isArray(values) ? values : []) {
+    if (typeof item === 'string' && item.trim()) result.push(item.trim())
+    else if (item && typeof item === 'object') {
+      const candidate = item.coverage_id ?? item.gap_id ?? item.risk_id ?? item.flow_id ?? item.id
+      if (typeof candidate === 'string' && candidate.trim()) result.push(candidate.trim())
+    }
+  }
+  return result
+}
+
+export function extractAnalysisContext(run, selectedCases = []) {
+  const details = run?.details ?? {}
+  const riskIds = new Set(), coverageIds = new Set(), flowIds = new Set(), caseIds = new Set()
+  for (const item of selectedCases) {
+    const body = item?.source_record?.body ?? {}
+    for (const id of [item?.case_key, item?.case_id, item?.test_case_id, body?.case_id]) if (typeof id === 'string' && id) caseIds.add(id)
+    for (const id of [...stringIds(item?.linked_risk_ids), ...stringIds(item?.risk_refs), ...stringIds(body?.risk_refs), ...stringIds(body?.linked_risk_ids)]) riskIds.add(id)
+    for (const id of [...stringIds(item?.coverage_refs), ...stringIds(item?.linked_gap_ids), ...stringIds(body?.coverage_refs), ...stringIds(body?.linked_gap_ids)]) coverageIds.add(id)
+    for (const id of [...stringIds(item?.flow_refs), ...stringIds(body?.flow_refs)]) flowIds.add(id)
+  }
+  const risks = (Array.isArray(details.risks) ? details.risks : [])
+    .filter(r => r?.risk_id && riskIds.has(r.risk_id))
+    .slice(0, 16)
+    .map(r => ({
+      risk_id: r.risk_id,
+      title: r.title ?? '',
+      trigger: r.trigger ?? r.reproduction ?? '',
+      system_result: r.system_result ?? r.system_outcome ?? '',
+      external_observation: r.external_observation ?? r.observation ?? '',
+      ...(Array.isArray(r.source_evidence) && r.source_evidence.length ? { source_evidence: r.source_evidence } : {}),
+      evidence: (Array.isArray(r.evidence) ? r.evidence : []).slice(0, 10).map(e => ({
+        location: e?.location ?? '',
+        observation: e?.observation ?? e?.narrative ?? '',
+      })).filter(e => e.location || e.observation),
+    }))
+  const rawGaps = Array.isArray(details.coverage_gaps) ? details.coverage_gaps : (Array.isArray(run?.coverage?.gaps) ? run.coverage.gaps : [])
+  const coverage_gaps = rawGaps
+    .filter(g => (g?.coverage_id && coverageIds.has(g.coverage_id)) || (g?.gap_id && coverageIds.has(g.gap_id)))
+    .slice(0, 20)
+    .map(g => ({
+      coverage_id: g.coverage_id ?? g.gap_id,
+      repo_id: g.repo_id ?? null,
+      path: g.path ?? g.file ?? '',
+      symbol: g.symbol ?? g.function_name ?? '',
+      line: g.line ?? g.lines ?? g.line_range ?? null,
+      summary: g.summary ?? g.description ?? g.reason ?? '',
+      ...(Array.isArray(g.source_evidence) && g.source_evidence.length ? { source_evidence: g.source_evidence } : {}),
+    }))
+  const flows = (Array.isArray(details.business_flows) ? details.business_flows : [])
+    .filter(f => (f?.flow_id && flowIds.has(f.flow_id))
+      || (Array.isArray(f?.paths) && f.paths.some(p => Array.isArray(p?.case_ids) && p.case_ids.some(cid => caseIds.has(cid)))))
+    .slice(0, 8)
+    .map(f => ({
+      flow_id: f.flow_id ?? '',
+      title: f.title ?? '',
+      paths: (Array.isArray(f.paths) ? f.paths : []).slice(0, 8).map(p => ({
+        path_id: p?.path_id ?? '',
+        title: p?.title ?? '',
+        node_ids: Array.isArray(p?.node_ids) ? p.node_ids : [],
+      })),
+    }))
+  if (!risks.length && !coverage_gaps.length && !flows.length) return null
+  return {
+    ...(risks.length ? { risks } : {}),
+    ...(coverage_gaps.length ? { coverage_gaps } : {}),
+    ...(flows.length ? { flows } : {}),
+  }
+}
+
+const SOURCE_EXT = /\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)$/i
+const TEST_DIR_NAME = /^(?:tests?|ut|llt|unittests?|unit_tests?)$/i
+const TEST_FILE_NAME = /(?:^|_|-)(?:test|tests|ut|llt)\.(?:c|cc|cpp|cxx)$|test.*\.(?:cc|cpp|cxx)$/i
+const MACRO_LINE = /^\s*#\s*(?:if|ifdef|ifndef|elif|define)\b.*\b\w*(?:SIMU|FAULT|INJECT|MOCK|STUB|ASAN|SANITIZE|TIMEOUT)\w*/i
+const FAULT_DEF_TOKEN = /(?:(?:^|[\s"'(])-D|(?<![-\w]))([A-Za-z_][A-Za-z0-9_]*(?:SIMU|FAULT|INJECT|MOCK|STUB)[A-Za-z0-9_]*)\b/g
+
+function parseRepoLocation(raw, repoId) {
+  if (typeof raw !== 'string') return null
+  let text = raw.trim()
+  if (!text) return null
+  const firstColon = text.indexOf(':')
+  if (firstColon > 0 && !text.slice(0, firstColon).includes('/') && !text.slice(0, firstColon).includes('\\')) {
+    const prefix = text.slice(0, firstColon)
+    if (prefix !== repoId && !/\.[A-Za-z0-9]+$/.test(prefix)) return null
+    if (prefix === repoId) text = text.slice(firstColon + 1)
+  }
+  text = text.replace(/:\d+(?:-\d+)?(?::.*)?$/, '').replaceAll('\\', '/').replace(/^\.\/+/, '')
+  if (!text || text.startsWith('/') || text.split('/').some(part => !part || part === '.' || part === '..')) return null
+  return text
+}
+
+export function collectTargetSourcePaths(repoId, cases = [], analysisContext = null) {
+  const paths = new Set()
+  const add = value => { const parsed = parseRepoLocation(value, repoId); if (parsed) paths.add(parsed) }
+  for (const item of cases) {
+    const body = item?.source_record?.body ?? {}
+    for (const ref of [...(Array.isArray(item?.source_evidence) ? item.source_evidence : []), ...(Array.isArray(body?.source_evidence) ? body.source_evidence : [])]) add(ref)
+    for (const ev of Array.isArray(item?.evidence) ? item.evidence : []) add(ev?.location)
+    const points = item?.instrumentation?.points ?? body?.instrumentation?.points ?? []
+    for (const pt of Array.isArray(points) ? points : []) if (!pt?.repo_id || pt.repo_id === repoId) add(pt?.path)
+  }
+  for (const risk of analysisContext?.risks ?? []) for (const ev of risk.evidence ?? []) add(ev?.location)
+  for (const gap of analysisContext?.coverage_gaps ?? []) if (!gap.repo_id || gap.repo_id === repoId) add(gap.path)
+  return [...paths]
+}
+
+async function readBoundedText(root, relPath, maxBytes = 262144) {
+  const full = path.resolve(root, relPath)
+  if (full !== root && !inside(root, full)) return null
+  try {
+    const st = await lstat(full)
+    if (!st.isFile() || st.size > maxBytes) return null
+    return await readFile(full, 'utf8')
+  } catch { return null }
+}
+
+export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPaths = []) {
+  const root = await realpath(repositoryRoot)
+  const moduleFiles = [], conditionalMacros = [], cmakeRules = [], testDirectories = []
+  const seenMacroLocs = new Set(), candidateDirs = new Set(['.']), moduleDirs = new Set()
+  for (const rel of targetPaths.slice(0, 8)) {
+    let dir = path.posix.dirname(rel)
+    if (dir && dir !== '.') moduleDirs.add(dir)
+    while (dir && dir !== '.') {
+      candidateDirs.add(dir)
+      const parent = path.posix.dirname(dir)
+      dir = parent === dir ? '.' : parent
+    }
+  }
+  const moduleSourceTexts = []
+  for (const dir of [...moduleDirs].slice(0, 4)) {
+    const fullDir = path.resolve(root, dir)
+    if (!inside(root, fullDir)) continue
+    let entries = []
+    try { entries = await readdir(fullDir, { withFileTypes: true }) } catch { continue }
+    const files = entries.filter(e => e.isFile() && SOURCE_EXT.test(e.name)).map(e => e.name).sort()
+    if (files.length) moduleFiles.push({ directory: dir, files: files.slice(0, 25) })
+    const parentDir = path.posix.dirname(dir)
+    for (const incName of ['include', 'inc']) {
+      const incRel = parentDir && parentDir !== '.' ? `${parentDir}/${incName}` : incName
+      try {
+        const incFull = path.resolve(root, incRel)
+        if (inside(root, incFull)) {
+          const incEntries = await readdir(incFull, { withFileTypes: true })
+          for (const entry of incEntries.filter(e => e.isFile() && SOURCE_EXT.test(e.name)).slice(0, 10)) {
+            const text = await readBoundedText(root, `${incRel}/${entry.name}`)
+            if (text) moduleSourceTexts.push({ rel: `${incRel}/${entry.name}`, text })
+          }
+        }
+      } catch {}
+    }
+    for (const name of files.slice(0, 16)) {
+      const rel = `${dir}/${name}`
+      const text = await readBoundedText(root, rel)
+      if (text) moduleSourceTexts.push({ rel, text })
+    }
+  }
+  for (const rel of targetPaths.slice(0, 8)) {
+    if (!moduleSourceTexts.some(item => item.rel === rel)) {
+      const text = await readBoundedText(root, rel)
+      if (text) moduleSourceTexts.unshift({ rel, text })
+    }
+  }
+  for (const { rel, text } of moduleSourceTexts) {
+    const lines = text.split(/\r?\n/)
+    let blockRemaining = 0
+    for (let index = 0; index < lines.length && conditionalMacros.length < 32; index++) {
+      const line = lines[index]
+      const matched = MACRO_LINE.test(line)
+      const isDirective = /^\s*#\s*(?:define|else|elif|endif)\b/.test(line)
+      if (!matched && !(blockRemaining > 0 && isDirective)) {
+        if (blockRemaining > 0) blockRemaining -= 1
+        continue
+      }
+      if (matched && /^\s*#\s*(?:if|ifdef|ifndef)\b/.test(line)) blockRemaining = 8
+      else if (/^\s*#\s*endif\b/.test(line)) blockRemaining = 0
+      else if (blockRemaining > 0) blockRemaining -= 1
+      const loc = `${rel}:${index + 1}`
+      if (seenMacroLocs.has(loc)) continue
+      seenMacroLocs.add(loc)
+      conditionalMacros.push({ location: loc, code: line.trim().slice(0, 180) })
+    }
+  }
+  // Discover nearby test subtrees along the ancestor chain without full-repo traversal.
+  const queue = [...candidateDirs]
+  const visitedDirs = new Set()
+  while (queue.length && visitedDirs.size < 60) {
+    const relDir = queue.shift()
+    if (visitedDirs.has(relDir)) continue
+    visitedDirs.add(relDir)
+    const fullDir = relDir === '.' ? root : path.resolve(root, relDir)
+    if (relDir !== '.' && !inside(root, fullDir)) continue
+    let entries = []
+    try { entries = await readdir(fullDir, { withFileTypes: true }) } catch { continue }
+    const fileNames = entries.filter(e => e.isFile()).map(e => e.name).sort()
+    if (fileNames.includes('CMakeLists.txt') && cmakeRules.length < 16) {
+      const cmakeRel = relDir === '.' ? 'CMakeLists.txt' : `${relDir}/CMakeLists.txt`
+      const cmakeText = await readBoundedText(root, cmakeRel)
+      if (cmakeText) {
+        const hasGlob = /\bfile\s*\(\s*GLOB(?:_RECURSE)?\b/i.test(cmakeText)
+        const configureDepends = hasGlob && /\bfile\s*\(\s*GLOB(?:_RECURSE)?[\s\S]{0,240}?CONFIGURE_DEPENDS\b/i.test(cmakeText)
+        const hasAux = /\baux_source_directory\s*\(/i.test(cmakeText)
+        const hasTarget = /\badd_(?:executable|library)\s*\(/i.test(cmakeText)
+        const defs = new Set()
+        for (const match of cmakeText.matchAll(FAULT_DEF_TOKEN)) defs.add(match[1])
+        cmakeRules.push({
+          path: cmakeRel,
+          directory: relDir,
+          source_collection: hasGlob ? 'file_glob' : hasAux ? 'aux_source_directory' : hasTarget ? 'explicit_list' : 'other',
+          ...(hasGlob ? { configure_depends: configureDepends } : {}),
+          ctest_or_gtest: /\b(?:enable_testing|add_test|gtest_discover_tests|GTest|gtest)\b/i.test(cmakeText),
+          ...(defs.size ? { fault_definitions: [...defs] } : {}),
+        })
+      }
+    }
+    const testFiles = fileNames.filter(name => TEST_FILE_NAME.test(name) || (TEST_DIR_NAME.test(path.posix.basename(relDir)) && /\.(?:c|cc|cpp|cxx)$/i.test(name)))
+    if (testFiles.length && testDirectories.length < 10) {
+      const sampleText = await readBoundedText(root, relDir === '.' ? testFiles[0] : `${relDir}/${testFiles[0]}`, 65536)
+      const isGtest = Boolean(sampleText && /\bgtest\b|TEST(?:_F|_P)?\s*\(/.test(sampleText))
+      testDirectories.push({
+        directory: relDir,
+        framework: isGtest ? 'gtest' : 'native',
+        sample_files: testFiles.slice(0, 8),
+      })
+    }
+    for (const sub of entries) {
+      if (!sub.isDirectory() || sub.name.startsWith('.')) continue
+      const childRel = relDir === '.' ? sub.name : `${relDir}/${sub.name}`
+      const depth = childRel.split('/').length
+      if (TEST_DIR_NAME.test(sub.name) || (TEST_DIR_NAME.test(path.posix.basename(relDir)) && depth <= 6)) queue.push(childRel)
+    }
+  }
+  const allFaultDefs = new Map()
+  for (const rule of cmakeRules) {
+    for (const macro of rule.fault_definitions ?? []) {
+      if (!allFaultDefs.has(macro)) allFaultDefs.set(macro, [])
+      allFaultDefs.get(macro).push(rule.path)
+    }
+  }
+  const faultMacros = [...allFaultDefs.entries()].map(([name, definedIn]) => {
+    const token = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
+    const usageCount = moduleSourceTexts.filter(item => token.test(item.text)).length
+    return { name, defined_in: definedIn, module_usage_count: usageCount }
+  })
+  if (!moduleFiles.length && !conditionalMacros.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length) return null
+  return {
+    ...(targetPaths.length ? { target_files: targetPaths.slice(0, 8) } : {}),
+    ...(moduleFiles.length ? { module_files: moduleFiles } : {}),
+    ...(conditionalMacros.length ? { conditional_macros: conditionalMacros } : {}),
+    ...(testDirectories.length ? { test_directories: testDirectories } : {}),
+    ...(cmakeRules.length ? { cmake_rules: cmakeRules } : {}),
+    ...(faultMacros.length ? { fault_macros: faultMacros } : {}),
+  }
+}
+
 // What the generator reads. The full task record repeats each selected case in
 // its projection, source_record and evidence copies and carries host bookkeeping
 // (status, model, pipeline, verification) the generator never needs.
@@ -149,43 +407,46 @@ export function compactGenerationInput(record, analysisSource) {
     task_id: record.id, run_id: record.run_id, case_keys: record.case_keys,
     instructions: record.instructions || '',
     analysis_source: analysisSource,
+    ...(record.analysis_context ? { analysis_context: record.analysis_context } : {}),
     repositories: record.repositories.map(repo => ({
       repo_id: repo.repo_id, path: repo.path, base_commit: repo.base_commit, analysis_commit: repo.analysis_commit ?? null,
       personal_branch: repo.branch, outgoing_count: repo.outgoing_count ?? 0,
       analysis_snapshot_comparison: comparison(sources.get(repo.repo_id)?.comparison),
+      ...(repo.harness ? { harness: repo.harness } : {}),
     })),
     cases: (record.cases ?? []).map(({ content_hash, ...item }) => item),
   })
 }
 
-export function injectionPrompt({ record, inputPath, outputPath, referencePath = null, referenceError = '' }) {
+const INLINE_INPUT_MAX_CHARS = 32000
+
+export function injectionPrompt({ record, inputPath, outputPath, compactInput = '', referencePath = null, referenceError = '' }) {
+  const posixInput = posixPath(inputPath), posixOutput = posixPath(outputPath), posixRef = referencePath ? posixPath(referencePath) : null
+  const inlined = typeof compactInput === 'string' && compactInput.length > 0 && compactInput.length <= INLINE_INPUT_MAX_CHARS
   return [
     '你正在执行独立的 PANGEA 用例打桩代码生成任务。不要创建分析 Run，也不要调用 Graph bind/settle/work-finish。',
-    `先读取任务输入 JSON：${inputPath}。其中 cases 是已选用例，repositories 是本次独立源码副本及固定提交。输入中 {"$same_as": "<路径>"} 表示该处内容与所指路径（$ 为输入根）的值完全相同，已去重以缩短输入。`,
+    inlined
+      ? `任务输入 JSON 已直接内联在本文末 <task_input_json> 中（无需首轮再调用 read 读取 ${posixInput}；若后续发生上下文压缩丢失细节，可重新读取 ${posixInput}）。其中 cases 是已选用例，analysis_context 是关联风险/覆盖率缺口/流程证据，repositories 含源码副本及宿主预扫描的 harness 事实。输入中 {"$same_as": "<路径>"} 表示该处内容与所指路径（$ 为输入根）的值完全相同，已去重以缩短输入。`
+      : `先读取任务输入 JSON：${posixInput}。其中 cases 是已选用例，analysis_context 是关联风险/覆盖率缺口/流程证据，repositories 含本次独立源码副本、固定提交及宿主预扫描的 harness 事实。输入中 {"$same_as": "<路径>"} 表示该处内容与所指路径（$ 为输入根）的值完全相同，已去重以缩短输入。`,
     '宿主已确认的事实，无需再用工具探测：源码副本是宿主刚检出的干净固定提交（不必运行 git status/log 确认）；宿主写入 edits 时按每个文件现有的 CRLF/LF 风格换行，before/after 用 \\n 即可，不必检查换行符；Git、构建与推送均由宿主完成。',
-    ...(referencePath ? [`参考结果：${referencePath} 是本任务上一次生成的完整结果 JSON。优先复用其中仍然成立的桩点设计、profiles 与 edits，只针对当前源码重新定位 before 原文并修正失效或被指出的问题；不要从零重新调查。与当前源码冲突时以源码为准。${referenceError ? `上一次未完成的原因：${referenceError}` : ''}`] : []),
-    '调查保持定向：先读输入中的用例与 instrumentation，再按函数名/符号用 grep 定位后读取相关片段；不要通读无关目录或整份大文件。',
-    '只在这些仓库内调查需要的实现、构建配置和既有故障注入/调测入口。输入里的 instrumentation 是候选方案，须结合本次提交源码定位。',
-    '核对所选用例引用的 analysis_source 冻结片段与本次源码副本；同一 commit 也可能存在分析时未提交的修改。只比较相关位置，差异对注入方案的影响写入 summary，不重做全仓分析。',
+    ...(posixRef ? [`参考结果：${posixRef} 是本任务上一次生成的完整结果 JSON。优先复用其中仍然成立的桩点设计、profiles 与 edits，只针对当前源码重新定位 before 原文并修正失效或被指出的问题；不要从零重新调查。与当前源码冲突时以源码为准。${referenceError ? `上一次未完成的原因：${referenceError}` : ''}`] : []),
+    '探索步数预算严格受限（<= 10 次只读工具调用）：优先消费输入中的 source_evidence、analysis_context、instrumentation 与 repositories[].harness，直接 read 目标源码区间及最多 1 个同目录参考测试文件，旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
+    '若 repositories[].harness 给出了 C/C++ 单元测试环境（test_directories 含 gtest/native 或 cmake_rules/fault_macros）：① 若 fault_macros 显示某测试编译宏（如 -D*_SIMU_FAULT）的 module_usage_count=0，说明当前模块无现成注入消费点，直接在目标函数对应的 #ifdef <测试宏> 保护下植入默认关闭的最小控制桩，不要全仓搜寻既有框架；② 按 Option A 在 test_directories 配套新增（before=null）或补充 gtest 用例文件，在同一测试目标内依次覆盖“桩默认关闭正常路径 → 启用桩命中目标超时/错误分支 → 复位后恢复正常”，同进程测试优先通过受控开关函数/原子计数或环境变量触发，阻塞等待必须有界且时长直接复用源码超时宏或兼容 harness.conditional_macros 中的 ASAN/非 ASAN 阈值（严禁写死小于 ASAN 超时阈值的短常数）；③ 若对应 cmake_rules 为 file_glob，无需修改构建文件，若 configure_depends=false 则在 steps 中先执行 cmake 重新生成以纳入新测试文件，运行 gtest 时指定 --gtest_filter 并校验实际执行用例数 >= 1（防止匹配 0 条用例时仍返回 0）。',
+    '只在这些仓库内调查需要的实现与既有调测入口。核对所选用例引用的 analysis_source 冻结片段与本次源码副本，分析基线与本次基线不同则重新定位；只比较相关位置，差异对注入方案的影响写入 summary，不重做全仓分析。',
     '不要修改或推送源码仓库，不运行构建或安装命令。唯一交付是下述 JSON 文件；宿主负责精确写入、提交和推送。',
     '源码副本是只读输入，包括拟新增文件的位置：禁止用 write/edit/apply_patch 或 shell 直接在 repositories 中创建或修改文件，也不要先写源文件再把它读回生成 edits。新增模块的完整源码放进 edits[].after 字符串，before=null；已有文件修改用 before/after 字符串描述。',
-    '可用 Python/Node 在内存中构造 JSON 对象并序列化到指定 outputPath；生成草稿或辅助脚本只能写在该输出文件的父目录。交付前读取输出文件并检查 JSON 能解析、edits 非空，然后结束；聊天里的代码块不能代替磁盘交付。',
+    '防单步超长输出截断：edits[].before 只截取当前文件中唯一匹配的最短 1~5 行原文，严禁整函数大段复制；不要在思考或回复正文中预先默写整份源码或完整 JSON。可直接用 write 工具写入目标 JSON，或在输出文件的父目录写简短脚本生成目标 JSON。交付前确认输出文件存在、JSON 可解析且 edits 非空，然后立即结束；聊天里的代码块不能代替磁盘交付。',
     '本任务不搭建模拟 HTTP/数据库/容器栈，不启动后台服务，不执行 profiles 中的部署或业务操作。自检限定为 JSON 合同、原文替换唯一性及源码语法；真实构建与端到端实测由宿主后续执行，不能把模拟结果写成实测结论。',
     '先完成调用路径与副作用判断，再生成实际可编译的修改。故障注入制造原因，保留原有错误处理和恢复逻辑，不直接篡改预期结果。',
-    '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中。优先复用真实已有调测入口；没有时实现符合项目语言与构建方式的最小控制入口，并把必要源文件/构建接入一起纳入 edits。',
-    '分别给出各用例的启停步骤：前置失败阻断后续桩时分轮执行；故障处理需要组合桩时写明触发顺序。关闭桩后说明需重建的业务状态。不要凭空列互斥关系，也不要做全仓两两组合审查。',
-    '逐用例说明必须按真实执行顺序串演：关闭全部桩建立并验证正常基线 → 保存基线证据 → 启用目标桩 → 执行业务并检查实际命中及故障后状态 → 关闭桩或耗尽次数后验证恢复。基线准备不得提前消耗一次性桩。',
-    '若开关仅在启动时读取，先用关闭桩的进程生成持久化基线，再正常停服并以目标模式启动，明确哪些状态保留、哪些内存状态需重建；把每次业务调用对触发计数的影响逐步核对。profiles 中命令、预期结果与 edits 的状态机必须一致，不能要求同一次调用既正常建立基线又触发故障。',
-    '逐步核对观测断言：目录中还包括步骤自己创建的日志、证据文件，不得断言只剩业务文件；临时文件清理应检查目标临时文件模式。时间戳须考虑实际精度，同一时间单位内的成功写入不保证时间戳变化，应结合内容哈希、数据读回或计数验证恢复。区分命令退出码与业务返回值，并说明 grep 无匹配等预期非零退出，不能用笼统忽略错误掩盖失败。',
-    '同一分支上可能已有其他打桩修改，必须复用兼容的桩点并保留已有开关；互斥方案应分别触发。分析基线与本次基线不同则重新定位，并在 summary 交代影响。不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
+    '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中，次数配置为零或负数时明确禁用。优先复用真实已有调测入口；没有时实现符合项目语言与构建方式的最小控制入口，并把必要源文件/构建接入一起纳入 edits。',
+    '逐用例说明按真实执行顺序组织：关闭全部桩验证正常基线 → 启用目标桩执行并检查实际命中及故障后状态 → 关闭桩或耗尽次数后验证恢复（若开关仅启动时读取则写明重启顺序与需重建状态；分轮/组合桩写明触发顺序，基线准备不得提前消耗一次性桩）。同一分支上已有兼容桩点须复用；不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
+    '逐步核对观测断言：不得断言目录只剩业务文件；时间戳考虑实际精度并结合内容/计数验证恢复；区分命令退出码与业务返回值。',
     'JSON 结构：{summary:string, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
     'case_key 必须逐字使用输入的 case_key。points/profiles 是业务说明；edits 才是实际修改。before 为当前文件中唯一出现的原文，after 为替换内容；新增文件 before=null。path 为仓库相对路径。不要包含 .git 文件，不删除文件。',
-    '每条选中用例都应有对应 profile；多个用例可复用一个 point。给出能直接执行的启用、关闭及命中检查方法，不把待实现的开关写成已有命令。',
-    'profiles 必须与输入 case_keys 一一对应：总数相同、case_key 集合相同且每个 case_key 只出现一次。同一用例的首次保存、已有会话、恢复等多轮场景合并在同一个 profile.steps 中，不得拆成重复 case_key 的多个 profile。写完后用程序核对上述计数与集合。',
-    '检查 shell 内嵌语言的命令：bash -n 不会检查 python -c 的名称或语义；Python 源码布尔/空值使用 True/False/None，JSON 字符串才使用 true/false/null。对可提取的内嵌 Python 做 AST 检查并排查裸 true/false/null 名称；SQL 聚合查询不得无 GROUP BY 混用 count(*) 与非聚合列，数据库客户端开启遇错停止。关键断言失败须以非零退出体现。自定义 shell 断言函数须核对定义和所有调用的实参数量，并在独立 shell 中用成功、失败、空值输入验证退出码，避免 set -u 下引用未传参数；这类无副作用自检允许执行，不得执行部署或业务命令来做自检。次数配置为零或负数时必须明确为禁用，不得隐式强制触发一次。',
-    '宿主会将同一 profile.steps 按顺序原样拼入头部带 set -euo pipefail 的单个 bash 脚本执行，并需兼容 macOS 默认 bash 3.2（UTF-8/C.UTF-8）：禁止使用 declare -A、mapfile/readarray、|&、${var,,} 等 Bash 4+ 语法；变量展开紧邻中文或非 ASCII 标点（如“，：；（）”）时必须加花括号写作 ${VAR}（建议统一使用 ${VAR}），因为 macOS bash 3.2 在 C.UTF-8 下会把 $VAR， 连同中文标点字节并入变量名而在 set -u 下报 unbound variable；严禁把缺少末尾换行的数据交给 read（例如 curl -w \'%{http_code}\' 未带 \\n 或响应末尾无换行时，read 遇到 EOF 返回 1 会在 set -e 下直接中断脚本；HTTP 请求应使用 code=$(curl -sS -o "$body_file" -w \'%{http_code}\' ...) 分离响应体与状态码，确需 read 读取可能无末尾换行的输入时须保证末尾换行或写作 read -r var || [[ -n "$var" ]]）；pipefail 下避免 grep -q/head 提前关闭管道导致 141 退出，“无匹配”断言显式用 ! grep -q。交付前将每个 profile.steps 拼上 set -euo pipefail 做 bash -n 检查，用脚本扫描排查未加花括号的 $VAR 紧邻非 ASCII 字符与 Bash 4+ 语法，并在子 shell（开启 set -euo pipefail）中用无末尾换行、成功、失败合成输入实测所有输出解析与 read 片段的退出码。',
-    'profiles.steps 按顺序给出目标平台可执行的 shell 命令，预期结果和说明放在 shell 注释里；变量在首次使用前定义。不能用箭头、SAVE#1 一类伪命令或“同上”省略组合轮次的命令。提交前逐条自查所有 profile（包括组合轮次）的状态、文件清单（含 pidfile）、时间精度及恢复步骤，不仅检查单桩轮次。',
-    `把完整 JSON 写入 ${outputPath}，写完结束。任务 ID：${record.id}。`,
+    'profiles 必须与输入 case_keys 一一对应：总数相同、case_key 集合相同且每个 case_key 只出现一次；同一用例的多轮场景合并在同一个 profile.steps 中，给出能直接执行的启用、关闭及命中检查方法，预期结果放在 shell 注释里，变量先定义后使用，不用伪命令或“同上”。',
+    '宿主会将同一 profile.steps 按顺序原样拼入头部带 set -euo pipefail 的单个 bash 脚本执行，并需兼容 macOS 默认 bash 3.2（UTF-8/C.UTF-8）：禁止 declare -A、mapfile/readarray、|&、${var,,} 等 Bash 4+ 语法；变量紧邻中文或非 ASCII 标点时必须写作 ${VAR}；严禁把缺少末尾换行的数据交给 read（如 curl 应用 code=$(curl -sS -o "$body_file" -w \'%{http_code}\' ...) 分离响应体与状态码，或用 read -r var || [[ -n "$var" ]]）；pipefail 下“无匹配”断言用 ! grep -q；内嵌 Python 用 True/False/None，SQL 聚合遵守 GROUP BY，关键断言失败须非零退出。',
+    `把完整 JSON 写入 ${posixOutput}，写完结束。任务 ID：${record.id}。`,
+    ...(inlined ? [`<task_input_json>\n${compactInput}\n</task_input_json>`] : []),
   ].join('\n')
 }
 
@@ -205,6 +466,27 @@ export function checkInjectionResult(value, record) {
       || profiles[0].point_ids.some(point => !pointIds.has(point))) throw serviceError(`用例 ${key} 缺少可读取的桩点引用或执行说明`)
   }
   if (value.edits.some(edit => !edit || !repoIds.has(edit.repo_id))) throw serviceError('代码修改引用了未选择的仓库')
+  for (const edit of value.edits) {
+    if (typeof edit.before === 'string' && edit.before === edit.after) throw serviceError(`代码修改前后内容相同：${edit.path}`)
+  }
+  const editedByRepo = new Map()
+  for (const edit of value.edits) {
+    if (!editedByRepo.has(edit.repo_id)) editedByRepo.set(edit.repo_id, new Set())
+    editedByRepo.get(edit.repo_id).add(posixPath(edit.path))
+  }
+  for (const edit of value.edits) {
+    if (edit.before !== null || !/\.(?:c|cc|cpp|cxx)$/i.test(edit.path || '')) continue
+    const repo = record.repositories.find(item => item.repo_id === edit.repo_id)
+    const rules = repo?.harness?.cmake_rules
+    if (!Array.isArray(rules) || !rules.length) continue
+    const normalized = posixPath(edit.path)
+    const covering = rules
+      .filter(rule => rule.directory === '.' || normalized.startsWith(`${rule.directory}/`))
+      .sort((a, b) => b.directory.length - a.directory.length)[0]
+    if (covering?.source_collection === 'explicit_list' && !editedByRepo.get(edit.repo_id)?.has(covering.path)) {
+      throw serviceError(`新增源文件 ${normalized} 所在目录使用显式构建列表（${covering.path}），请在 edits 中同步接入构建文件`)
+    }
+  }
   return value
 }
 
@@ -366,10 +648,11 @@ export class FaultInjectionService {
     const pipeline = await this.configurePipeline(dataRoot, run.run_id, null, input.pipeline_url ?? defaults.pipeline_url)
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
     const record = { schema_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
-      name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch))].join('、'), case_keys: keys, cases: selected, repositories: [], source_repositories: selectedRepositories,
+      name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch))].join('、'), case_keys: keys, cases: selected,
+      analysis_context: run.analysis_context ?? extractAnalysisContext(run, selected), repositories: [], source_repositories: selectedRepositories,
       provider_id: providerId, agent_model: model, agent_catalog_id: input.agent_catalog_id || null,
       baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''), result: null, generation_complete: false, verification: [], build: {}, error: null,
-      reused_from: reused, reference_from: reference ? { ...reference, error: String(input.reference_error || '').slice(0, 1500) } : null, notices: [] }
+      reused_from: reused, reference_from: reference ? { ...reference, error: String(input.reference_error || '').slice(0, 1500) } : null, telemetry: null, notices: [] }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
     const controller = new AbortController(), key = this.key(dataRoot, run.run_id, taskId)
     const operation = { controller, done: null, status: 'generating' }
@@ -423,12 +706,15 @@ export class FaultInjectionService {
       source.comparison = await compareSnapshot(checkout, target, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
       // Anything present now was produced by the host checkout, not by the generator.
       const baseline = await workspaceSnapshot(this.git, checkout, signal)
+      const targetPaths = collectTargetSourcePaths(source.repo_id, record.cases, record.analysis_context)
+      const harness = await inspectRepositoryHarness(checkout, source.repo_id, targetPaths)
       record.repositories.push({ repo_id: source.repo_id, path: checkout, source_path: sourcePath,
         base_commit: target, source_head: baseCommit, remote_head: remoteHead, remote_url: remoteUrl,
         outgoing_count: ahead, analysis_commit: source.analysis_commit,
         has_remote: true, branch, remote_branch: remoteBranch, commit: null, pushed: false,
         workspace_baseline: baseline,
-        baseline_unstaged: baseline.filter(entry => entry.status !== '??' && entry.status[1] !== ' ').map(entry => entry.path) })
+        baseline_unstaged: baseline.filter(entry => entry.status !== '??' && entry.status[1] !== ' ').map(entry => entry.path),
+        ...(harness ? { harness } : {}) })
       await this.save(directory, record)
       }, { wait: true, signal })
     }
@@ -457,8 +743,9 @@ export class FaultInjectionService {
         await writeFile(referencePath, await readFile(record.reference_from.file))
       }
       const result = await this.generate({ record, cwd, scratchDirectory, inputPath, outputPath, signal,
-        prompt: injectionPrompt({ record, inputPath, outputPath, referencePath, referenceError: record.reference_from?.error }) + `\n用户补充说明：${record.instructions || '无'}`,
-        onStarted: async session => { record.agent_session = session; await this.save(directory, record) } })
+        prompt: injectionPrompt({ record, inputPath, outputPath, compactInput, referencePath, referenceError: record.reference_from?.error }) + `\n用户补充说明：${record.instructions || '无'}`,
+        onStarted: async session => { record.agent_session = session; await this.save(directory, record) },
+        onTelemetry: async telemetry => { record.telemetry = telemetry; await this.save(directory, record) } })
       signal.throwIfAborted()
       generated = result ?? JSON.parse(await readFile(outputPath, 'utf8'))
     }
@@ -675,7 +962,7 @@ export class FaultInjectionService {
     if (!['regenerate', 'reference', 'reuse'].includes(mode)) throw serviceError('未知重试方式')
     if (mode !== 'regenerate' && !previous.result_saved) throw serviceError('该任务没有已保存的生成结果，请重新生成')
     return this.start({ dataRoot, cwd,
-      run: { run_id: runId, source_snapshot: { repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })) }, details: { test_cases: previous.cases } },
+      run: { run_id: runId, analysis_context: previous.analysis_context ?? null, source_snapshot: { repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })) }, details: { test_cases: previous.cases } },
       input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })),
         baseline_acknowledged: previous.baseline_acknowledged, provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
         pipeline_url: previous.pipeline_url, name: previous.name,

@@ -74,7 +74,8 @@ test('buildVerificationShellScript and parseVerificationLog support structured m
   assert.match(script, /^#!\/usr\/bin\/env bash/)
   assert.match(script, /BASH_VERSINFO\[0\]:-0[\s\S]*export -n LC_ALL LC_CTYPE[\s\S]*LC_CTYPE=C[\s\S]*set -euo pipefail/)
   assert.match(script, /\[PANGEA_CASE_BEGIN\] case=unit\/A points=FI_TIMEOUT/)
-  assert.match(script, /\[PANGEA_VERIFY\] case=unit\/A result=passed hits=FI_TIMEOUT=1/)
+  assert.match(script, /\[PANGEA_CASE_END\] case=unit\/A status=0/)
+  assert.doesNotMatch(script, /\[PANGEA_VERIFY\].*result=passed/, 'generated script must never self-certify hits=1')
 
   const fromStructured = parseVerificationLog([
     '[PANGEA_CASE_BEGIN] case=unit/A points=FI_TIMEOUT',
@@ -89,6 +90,33 @@ test('buildVerificationShellScript and parseVerificationLog support structured m
       { case_key: 'unit/B', result: 'not_triggered', hits: 'FI_CERT=0' },
     ],
   )
+
+  const fromCaseSections = parseVerificationLog([
+    '[PANGEA_CASE_BEGIN] case=unit/A points=FI_TIMEOUT',
+    '[FI_HIT:TIMEOUT] init hang injected once',
+    '[  PASSED  ] 1 test.',
+    '[PANGEA_CASE_END] case=unit/A status=0',
+    '[PANGEA_CASE_BEGIN] case=unit/B points=FI_CERT',
+    'all assertions finished cleanly without hitting stub',
+    '[PANGEA_CASE_END] case=unit/B status=0',
+  ].join('\n'), task)
+  assert.deepEqual(
+    fromCaseSections.entries.map(({ case_key, result, hits }) => ({ case_key, result, hits })),
+    [
+      { case_key: 'unit/A', result: 'passed', hits: 'FI_TIMEOUT=1' },
+      { case_key: 'unit/B', result: 'not_triggered', hits: 'FI_CERT=0' },
+    ],
+  )
+
+  const zeroGtest = parseVerificationLog([
+    '[PANGEA_CASE_BEGIN] case=unit/A points=FI_TIMEOUT',
+    'Note: Google Test filter = DrvInit.NonExistent*',
+    '[==========] Running 0 tests from 0 test suites.',
+    '[  PASSED  ] 0 tests.',
+    '[PANGEA_VERIFY] case=unit/A result=passed hits=FI_TIMEOUT=1',
+    '[PANGEA_CASE_END] case=unit/A status=0',
+  ].join('\n'), task)
+  assert.equal(zeroGtest.entries[0].result, 'not_triggered')
 
   const fromRawSyslog = parseVerificationLog([
     '2026-11-17T00:10:01Z kernel: [FI_HIT:TIMEOUT] injected ETIMEDOUT',

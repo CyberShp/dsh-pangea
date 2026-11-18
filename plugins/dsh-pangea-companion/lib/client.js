@@ -1102,8 +1102,7 @@ window.__ModuleLoader__.load({
         }
         const steps = Array.isArray(profile.steps) ? profile.steps : [profile.steps].filter(Boolean)
         for (const step of steps) lines.push(String(step))
-        const defaultHits = pointIds.map(pid => `${pid}=1`).join(', ')
-        lines.push(`echo "[PANGEA_VERIFY] case=${profile.case_key} result=passed${defaultHits ? ` hits=${defaultHits}` : ''}"`)
+        lines.push(`echo "[PANGEA_CASE_END] case=${profile.case_key} status=0"`)
         lines.push('')
       }
       return lines.join('\n')
@@ -1121,6 +1120,33 @@ window.__ModuleLoader__.load({
       return count
     }
 
+    const FAILURE_SIGNAL = /(?:FAIL(?:ED)?\b|AssertionError|Traceback|Segmentation fault|PANIC\b|ERROR:\s*assertion)/i
+    const ZERO_TESTS_SIGNAL = /(?:\[\s*PASSED\s*\]\s*0 tests\b|0 tests from 0 test suites ran|No tests were found)/i
+
+    function countPointHitsInLines(lines, points) {
+      const bodyLines = lines.filter(line => !/^\[PANGEA_(?:CASE_BEGIN|CASE_END|VERIFY)\]/.test(line.trim()))
+      const body = bodyLines.join('\n')
+      const counts = new Map(), samples = []
+      for (const point of points) {
+        if (!point?.id) continue
+        let count = 0
+        const observe = typeof point.observe === 'string' ? point.observe.trim() : ''
+        if (observe) count = countOccurrences(body, observe)
+        if (!count) count = countOccurrences(body, `hit:${point.id}`)
+        if (!count) {
+          const kvRegex = new RegExp(`(?:^|[\\s,;\\[\\(])${point.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(\\d+)`, 'g')
+          let match
+          while ((match = kvRegex.exec(body)) !== null) count = Math.max(count, Number(match[1]))
+        }
+        if (count > 0) {
+          counts.set(point.id, count)
+          const sample = bodyLines.find(line => (observe && line.includes(observe)) || line.includes(`hit:${point.id}`) || line.includes(`${point.id}=`))
+          if (sample && samples.length < 4) samples.push(sample.trim())
+        }
+      }
+      return { counts, samples }
+    }
+
     function parseVerificationLog(logText, task) {
       const raw = String(logText ?? '')
       if (!raw.trim() || !task) return { entries: [], matchedCount: 0 }
@@ -1128,10 +1154,25 @@ window.__ModuleLoader__.load({
       const profiles = Array.isArray(task?.result?.profiles) ? task.result.profiles : []
       const caseKeys = Array.isArray(task?.case_keys) && task.case_keys.length ? task.case_keys : profiles.map(item => item.case_key).filter(Boolean)
       const structuredByCase = new Map()
+      const sectionsByCase = new Map()
       const begunCases = new Set()
-      for (const line of raw.split(/\r?\n/)) {
+      const endedCases = new Set()
+      const rawLines = raw.split(/\r?\n/)
+      let activeCase = null
+      for (const line of rawLines) {
         const beginMatch = line.match(/\[PANGEA_CASE_BEGIN\]\s+case=(\S+)/)
-        if (beginMatch) begunCases.add(beginMatch[1])
+        if (beginMatch) {
+          activeCase = beginMatch[1]
+          begunCases.add(activeCase)
+          if (!sectionsByCase.has(activeCase)) sectionsByCase.set(activeCase, [])
+          continue
+        }
+        const endMatch = line.match(/\[PANGEA_CASE_END\]\s+case=(\S+)/)
+        if (endMatch) {
+          endedCases.add(endMatch[1])
+          if (activeCase === endMatch[1]) activeCase = null
+          continue
+        }
         const verifyMatch = line.match(/\[PANGEA_VERIFY\]\s+case=(\S+)(?:\s+result=(passed|failed|not_triggered|not_run))?(?:\s+hits=(.+))?/)
         if (verifyMatch) {
           structuredByCase.set(verifyMatch[1], {
@@ -1139,32 +1180,22 @@ window.__ModuleLoader__.load({
             hits: (verifyMatch[3] || '').trim(),
             line: line.trim(),
           })
+          continue
         }
+        if (activeCase) sectionsByCase.get(activeCase).push(line)
       }
-      const pointHitCounts = new Map()
-      const matchedLines = []
-      const rawLines = raw.split(/\r?\n/)
-      for (const point of points) {
-        if (!point?.id) continue
-        let count = 0
-        const observe = typeof point.observe === 'string' ? point.observe.trim() : ''
-        if (observe) count = countOccurrences(raw, observe)
-        if (!count) count = countOccurrences(raw, `hit:${point.id}`)
-        if (!count) {
-          const kvRegex = new RegExp(`(?:^|[\\s,;\\[\\(])${point.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(\\d+)`, 'g')
-          let match
-          while ((match = kvRegex.exec(raw)) !== null) count = Math.max(count, Number(match[1]))
-        }
-        if (count > 0) {
-          pointHitCounts.set(point.id, count)
-          const sample = rawLines.find(line => (observe && line.includes(observe)) || line.includes(`hit:${point.id}`) || line.includes(`${point.id}=`))
-          if (sample && matchedLines.length < 4) matchedLines.push(sample.trim())
-        }
-      }
-      const hasFailureSignal = /(?:FAIL(?:ED)?\b|AssertionError|Traceback|Segmentation fault|PANIC\b|ERROR:\s*assertion)/i.test(raw)
+      const globalHits = begunCases.size === 0 ? countPointHitsInLines(rawLines, points) : null
       const entries = []
       for (const caseKey of caseKeys) {
         const structured = structuredByCase.get(caseKey)
+        const sectionLines = sectionsByCase.get(caseKey)
+        const scopedLines = sectionLines ?? (begunCases.size === 0 ? rawLines : [])
+        const scopedText = scopedLines.join('\n')
+        const { counts: pointHitCounts, samples: matchedLines } = sectionLines
+          ? countPointHitsInLines(sectionLines, points)
+          : (globalHits ?? { counts: new Map(), samples: [] })
+        const hasFailureSignal = FAILURE_SIGNAL.test(scopedText)
+        const hasZeroTests = ZERO_TESTS_SIGNAL.test(scopedText)
         const profile = profiles.find(item => item.case_key === caseKey)
         const expectedPointIds = Array.isArray(profile?.point_ids) && profile.point_ids.length
           ? profile.point_ids
@@ -1172,19 +1203,22 @@ window.__ModuleLoader__.load({
         const observedPairs = expectedPointIds
           .filter(pid => pointHitCounts.has(pid))
           .map(pid => `${pid}=${pointHitCounts.get(pid)}`)
-        const hits = structured?.hits || observedPairs.join(', ')
-        let result = structured?.result || ''
+        const zeroTestLine = hasZeroTests ? scopedLines.find(line => ZERO_TESTS_SIGNAL.test(line))?.trim() : null
+        const hits = hasZeroTests ? '' : (structured?.hits || observedPairs.join(', '))
+        let result = hasZeroTests ? 'not_triggered' : (structured?.result || '')
         if (!result) {
           if (observedPairs.length > 0) result = hasFailureSignal ? 'failed' : 'passed'
-          else if (begunCases.has(caseKey)) result = hasFailureSignal ? 'failed' : 'not_triggered'
+          else if (begunCases.has(caseKey) || endedCases.has(caseKey)) result = hasFailureSignal ? 'failed' : 'not_triggered'
         }
         if (!result && !hits) continue
-        const excerptLines = [structured?.line, ...matchedLines].filter(Boolean)
+        const excerptLines = [zeroTestLine, structured?.line, ...matchedLines].filter(Boolean)
         entries.push({
           case_key: caseKey,
           result: result || 'passed',
           hits: hits || (expectedPointIds.length ? expectedPointIds.map(pid => `${pid}=0`).join(', ') : ''),
-          notes: excerptLines.length ? `日志自动识别：\n${[...new Set(excerptLines)].slice(0, 3).join('\n')}` : '由执行日志自动解析填入',
+          notes: hasZeroTests
+            ? `检测到 0 条测试实际执行（未触发桩点）：\n${zeroTestLine}`
+            : excerptLines.length ? `日志自动识别：\n${[...new Set(excerptLines)].slice(0, 3).join('\n')}` : '由执行日志自动解析填入',
         })
       }
       return { entries, matchedCount: entries.length }
@@ -1558,6 +1592,7 @@ window.__ModuleLoader__.load({
                 h('details', null, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, task.error))) : null,
               Array.isArray(task.notices) && task.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } }, task.notices.map((text, index) => h('p', { key: index, style: { margin: index ? '6px 0 0' : 0 } }, text))) : null,
               task.reused_from ? h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '本任务直接复用了已留存的生成结果，未调用模型。') : null,
+              task.telemetry ? h('p', { className: 'b05-subtle', style: { fontSize: 12, margin: '6px 0 0' } }, `执行账本：模型轮次 ${task.telemetry.turns ?? 0} · 工具调用 ${task.telemetry.tool_calls ?? 0} 次 · 上下文压缩 ${task.telemetry.compactions ?? 0} 次${task.telemetry.budget_wrapup_triggered ? ' · 已触发探索预算收口' : ''}`) : null,
               task.status === 'pushing' && task.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送：${task.current_repository}`) : null,
               ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
                 task.result_saved ? h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => act('reuse-result') }, '直接复用已留存的生成结果（不调用模型）') : null,

@@ -362,6 +362,7 @@ export function createFaultInjectionPanel(React) {
             h('details', null, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, task.error))) : null,
           Array.isArray(task.notices) && task.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } }, task.notices.map((text, index) => h('p', { key: index, style: { margin: index ? '6px 0 0' : 0 } }, text))) : null,
           task.reused_from ? h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '本任务直接复用了已留存的生成结果，未调用模型。') : null,
+          task.telemetry ? h('p', { className: 'b05-subtle', style: { fontSize: 12, margin: '6px 0 0' } }, `执行账本：模型轮次 ${task.telemetry.turns ?? 0} · 工具调用 ${task.telemetry.tool_calls ?? 0} 次 · 上下文压缩 ${task.telemetry.compactions ?? 0} 次${task.telemetry.budget_wrapup_triggered ? ' · 已触发探索预算收口' : ''}`) : null,
           task.status === 'pushing' && task.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送：${task.current_repository}`) : null,
           ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
             task.result_saved ? h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => act('reuse-result') }, '直接复用已留存的生成结果（不调用模型）') : null,
