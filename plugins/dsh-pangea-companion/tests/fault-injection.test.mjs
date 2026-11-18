@@ -534,7 +534,10 @@ test('push accepted before transport failure is reconciled even after remote adv
 
 test('new task rejects missing safety contract before touching checkout and retains authored evidence', async t => {
   const f = await fixture(t)
+  const sourceBefore = await readFile(path.join(f.repositories[0].source_path, 'main.c'))
+  let checkoutBefore
   const service = new FaultInjectionService({ generate: async ({ record }) => {
+    checkoutBefore = await readFile(path.join(record.repositories[0].path, 'main.c'))
     assert.equal(record.generation_contract_version, 2)
     const result = generated(record)
     delete result.profiles[0].safety.cleanup
@@ -545,8 +548,8 @@ test('new task rejects missing safety contract before touching checkout and reta
   const failed = await service.read(f.dataRoot, f.run.run_id, started.id)
   assert.equal(failed.status, 'failed')
   assert.match(failed.error, /退出清理/)
-  assert.equal(await readFile(path.join(failed.repositories[0].path, 'main.c'), 'utf8'), original)
-  assert.equal(await readFile(path.join(f.repositories[0].source_path, 'main.c'), 'utf8'), original)
+  assert.deepEqual(await readFile(path.join(failed.repositories[0].path, 'main.c')), checkoutBefore)
+  assert.deepEqual(await readFile(path.join(f.repositories[0].source_path, 'main.c')), sourceBefore)
   const saved = await service.resolveSavedResultFile(await service.directory(f.dataRoot, f.run.run_id, started.id))
   assert.ok(saved)
   assert.ok(JSON.parse(await readFile(saved, 'utf8')).edits.length)

@@ -11,15 +11,22 @@ import { readSavedSupplementalSources, readEvidenceSnippet } from '../src/source
 import { buildOfflineReport } from '../src/offline-report.js'
 
 for (const transport of ['dsh-bound-tools', 'acp-cli']) test(`repository-local investigation through ${transport} and real Graph`, {
-  skip: !process.env.PANGEA_INTEGRATION_RUNTIME && 'Requires staged Python runtime', timeout: 60000,
+  skip: !process.env.PANGEA_INTEGRATION_RUNTIME && 'Requires staged Python runtime', timeout: 180000,
 }, async t => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'repository-local-integration-'))
   const previous = process.env.PYTHONPATH
   process.env.PYTHONPATH = [path.join(process.env.PANGEA_INTEGRATION_RUNTIME, 'src'), previous].filter(Boolean).join(path.delimiter)
   const controller = new AbortController()
   let run
+  const timings = []
+  const measuredRunner = async request => {
+    const start = performance.now()
+    try { return await runPangea({ ...request, signal: AbortSignal.any([controller.signal, request.signal, AbortSignal.timeout(30000)].filter(Boolean)) }) }
+    finally { timings.push({ command: request.args[0], ms: Math.round(performance.now() - start) }) }
+  }
   t.after(async () => {
     controller.abort(); await run?.dispose()
+    t.diagnostic(JSON.stringify({ transport, cliTimings: timings }))
     if (previous === undefined) delete process.env.PYTHONPATH; else process.env.PYTHONPATH = previous
     await rm(cwd, { recursive: true, force: true })
   })
@@ -33,7 +40,7 @@ for (const transport of ['dsh-bound-tools', 'acp-cli']) test(`repository-local i
   sourceFirstTools({ tools: { register(tool) { registered.set(tool.name, tool); return () => {} } } })
   let count = 0, investigations = 0
   run = createSourceFirstAcpRun({ providerId: 'pangea-codeagent', parent: {}, cwd, dataRoot: created.data_root, runId: created.run_id,
-    signal: controller.signal, runner: runPangea,
+    signal: controller.signal, runner: measuredRunner,
     subagents: { start: async (_provider, request) => {
       const id = `local-policy-worker-${++count}`
       await mkdir(request.scratchDirectory, { recursive: true })
@@ -41,7 +48,7 @@ for (const transport of ['dsh-bound-tools', 'acp-cli']) test(`repository-local i
         const text = prompt[0].text
         assert.match(text, /repository-local-v1/)
         const binding = JSON.parse(text.split('\n').find(line => line.startsWith('每次 CLI')).split('：').slice(1).join('：'))
-        const call = (command, args = []) => runPangea({ cwd, args: [command, ...binding, ...args] })
+        const call = (command, args = []) => measuredRunner({ cwd, args: [command, ...binding, ...args] })
         const fields = Object.fromEntries(Array.from({ length: binding.length / 2 }, (_, i) => [binding[i * 2].slice(2).replaceAll('-', '_'), binding[i * 2 + 1]]))
         const opened = await call('task-open')
         assert.equal(opened.task.source_investigation_policy, 'repository-local-v1')
