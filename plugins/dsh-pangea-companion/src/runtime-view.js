@@ -64,7 +64,11 @@ export function sourceFirstExecutionView({ progress, plan = null, artifacts = []
     const declared = Boolean(result?.completion?.complete === true && result.completion.declared_revision === result.revision)
     let operation = 'none'
     if (!action.review_skipped && lifecycle !== 'complete' && status !== 'accepted' && !partialReporting) {
-      if (status === 'settled') operation = 'advance_workflow'
+      // Match the core: retained review/closure actions advance the workflow,
+      // rather than asking the host to restart a retired worker.
+      const retired = ['review', 'closure'].includes(action.role)
+        || ['independent_review', 'comparison_review', 'targeted_closure'].includes(action.stage)
+      if (retired || status === 'settled') operation = 'advance_workflow'
       else if (declared && taskId) operation = 'settle_action'
       else if (['pending', 'dispatched', 'paused'].includes(status) || (status === 'failed' && action.error === '用户停止 Run')) {
         operation = taskId ? 'continue_agent' : 'dispatch_agent'

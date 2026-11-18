@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -7,34 +7,71 @@ import test from 'node:test'
 import { AssetActionRuntime, dataRootFor, runPangea } from '../src/pangea-api.js'
 import { apply } from '../src/index.js'
 
-test('real Windows Python preserves Chinese asset titles and error messages', { skip: !process.env.PANGEA_TEST_PYTHON }, async () => {
+async function realPythonFixture(t) {
   const root = await workspace()
   const previousPython = process.env.PANGEA_PYTHON
   const previousUtf8 = process.env.PYTHONUTF8
   process.env.PANGEA_PYTHON = process.env.PANGEA_TEST_PYTHON
   process.env.PYTHONUTF8 = '0'
-  try {
-    const source = path.join(root, '中文资料.md')
-    await writeFile(source, '# 资产内容\n边界检查\n', 'utf8')
-    const args = ['assets', 'import', '--data-root', path.join(root, 'data'), '--path', source, '--type', 'reference', '--title', '中文标题验收']
-    await runPangea({ cwd: root, args })
-    const listed = await runPangea({ cwd: root, args: ['assets', 'list', '--data-root', path.join(root, 'data')] })
-    assert.equal(listed.items[0].title, '中文标题验收')
-    await assert.rejects(runPangea({ cwd: root, args }), /重复资产/)
-    const broken = path.join(root, 'broken.xlsx')
-    await writeFile(broken, 'not a workbook')
-    await assert.rejects(runPangea({ cwd: root, args: ['assets', 'import', '--data-root', path.join(root, 'data'), '--path', broken, '--type', 'coverage'] }))
-    const failed = await runPangea({ cwd: root, args: ['assets', 'list', '--data-root', path.join(root, 'data'), '--status', 'failed'] })
-    let route, response
-    await apply({ on: () => () => {}, tools: { register: () => () => {} }, apiProxy: {}, webServer: { register(value) { route = value; return () => {} } } })
-    await route.handler({ method: 'GET', headers: { 'sec-fetch-site': 'same-origin' }, url: `/api/pangea-asset-catalog/state?${new URLSearchParams({ cwd: root, data_root: path.join(root, 'data'), asset_id: failed.items[0].asset_id })}` }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
-    assert.equal(response.failure_record?.asset_id, failed.items[0].asset_id)
-    assert.match(response.failure_record.last_error, /zip/i)
-  } finally {
+  t.after(async () => {
     if (previousPython === undefined) delete process.env.PANGEA_PYTHON; else process.env.PANGEA_PYTHON = previousPython
     if (previousUtf8 === undefined) delete process.env.PYTHONUTF8; else process.env.PYTHONUTF8 = previousUtf8
     await rm(root, { recursive: true, force: true })
-  }
+  })
+  const dataRoot = path.join(root, 'data')
+  const run = args => runPangea({ cwd: root, args })
+  return { root, dataRoot, run }
+}
+
+const realPython = { skip: !process.env.PANGEA_TEST_PYTHON }
+
+test('real Python CLI preserves Chinese asset titles and errors with UTF8 disabled in the parent', realPython, async t => {
+  const { root, dataRoot, run } = await realPythonFixture(t)
+  const source = path.join(root, '中文资料.md')
+  await writeFile(source, '# 资产内容\n边界检查\n', 'utf8')
+  const imported = await run(['assets', 'import', '--data-root', dataRoot, '--path', source, '--type', 'reference', '--title', '中文标题验收'])
+  const listed = await run(['assets', 'list', '--data-root', dataRoot])
+  assert.equal(listed.items[0].title, '中文标题验收')
+  assert.equal(listed.items[0].asset_id, imported.asset_id)
+  await assert.rejects(run(['assets', 'get', '--data-root', dataRoot, '--asset-id', '不存在的资产']), /资产不存在：不存在的资产/)
+})
+
+test('source-first repeated imports create independent assets without overwriting the first copy', realPython, async t => {
+  const { root, dataRoot, run } = await realPythonFixture(t)
+  const capabilities = await run(['system', 'capabilities', '--data-root', dataRoot])
+  assert.equal(capabilities.asset_operations.preview, false)
+  assert.equal(capabilities.asset_operations.revisions, false)
+  const source = path.join(root, '中文资料.md'), content = '# 同一份资料\n'
+  await writeFile(source, content)
+  const args = ['assets', 'import', '--data-root', dataRoot, '--path', source, '--type', 'reference', '--title', '中文标题验收']
+  const first = await run(args), second = await run(args)
+  assert.notEqual(first.asset_id, second.asset_id)
+  assert.notEqual(first.source_path, second.source_path)
+  const listed = await run(['assets', 'list', '--data-root', dataRoot])
+  assert.equal(listed.total, 2)
+  assert.deepEqual(new Set(listed.items.map(item => item.asset_id)), new Set([first.asset_id, second.asset_id]))
+  await writeFile(source, '修改导入源文件')
+  assert.equal(await readFile(first.source_path, 'utf8'), content)
+  assert.equal(await readFile(second.source_path, 'utf8'), content)
+})
+
+test('malformed coverage fails during extraction and retains a readable persisted job error', realPython, async t => {
+  const { root, dataRoot, run } = await realPythonFixture(t)
+  const broken = path.join(root, 'broken.xlsx')
+  await writeFile(broken, 'not a workbook')
+  const imported = await run(['assets', 'import', '--data-root', dataRoot, '--path', broken, '--type', 'coverage'])
+  assert.equal(imported.status, 'imported')
+  const runtime = new AssetActionRuntime({})
+  await assert.rejects(runtime.start({ cwd: root, dataRoot, assetId: imported.asset_id }), /zip/i)
+  const job = runtime.job(dataRoot, imported.asset_id)
+  assert.equal(job.status, 'failed')
+  assert.match(job.error, /zip/i)
+  const reopened = new AssetActionRuntime({}).job(dataRoot, imported.asset_id)
+  assert.equal(reopened.status, 'failed')
+  assert.equal(reopened.error, job.error)
+  const detail = await run(['assets', 'get', '--data-root', dataRoot, '--asset-id', imported.asset_id])
+  assert.equal(detail.asset.asset_id, imported.asset_id)
+  assert.equal(await readFile(detail.asset.source_path, 'utf8'), 'not a workbook')
 })
 
 async function workspace() {

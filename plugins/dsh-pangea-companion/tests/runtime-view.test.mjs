@@ -44,7 +44,7 @@ test('counts the frozen plan once per unit and preserves accepted results while 
   assert.equal(projected.actions[2].elapsed_ms, 1500)
   assert.equal(projected.actions[2].current_turn_elapsed_ms, 1500)
   assert.equal(projected.actions[2].budget_ms, 1500)
-  assert.equal(projected.actions[2].resume_action, 'continue_agent')
+  assert.equal(projected.actions[2].resume_action, 'advance_workflow')
   assert.deepEqual(projected.preserved.map(item => item.acceptance), ['accepted', 'draft'])
   assert.equal(projected.unresolved[0].reason, '执行预算已用尽')
   assert.equal(projected.recovery.requires_host_quiescence, true)
@@ -215,4 +215,22 @@ test('skipped historical reviews preserve records without blocking units or reco
   assert.equal(view.recovery.requires_host_quiescence, false)
   assert.equal(view.unit_counts.completed, 1)
   assert.equal(sourceFirstUnitRows(plan, view)[0].status, 'accepted')
+})
+
+
+test('retired roles and stages advance without dispatching or continuing a worker', () => {
+  for (const identity of [
+    { role: 'review' }, { role: 'closure' },
+    { stage: 'independent_review' }, { stage: 'comparison_review' }, { stage: 'targeted_closure' },
+  ]) {
+    for (const status of ['pending', 'dispatched', 'paused', 'settled']) {
+      const retired = action('historical', 'one', { ...identity, status, task_id: null })
+      const projected = view([retired])
+      assert.equal(projected.actions[0].resume_action, 'advance_workflow')
+      assert.deepEqual(projected.recovery.resume_from, [{ action_id: 'historical', task_id: null, operation: 'advance_workflow' }])
+      assert.equal(view([retired], { lifecycle_status: 'complete' }).actions[0].resume_action, 'none')
+    }
+  }
+  assert.equal(view([action('active', 'one', { status: 'paused' })]).actions[0].resume_action, 'continue_agent')
+  assert.equal(view([action('pending', 'one', { status: 'pending', task_id: null })]).actions[0].resume_action, 'dispatch_agent')
 })
