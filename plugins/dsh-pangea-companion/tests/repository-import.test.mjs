@@ -63,3 +63,29 @@ test('rejects unsafe repository names', () => {
   assert.throws(() => normalizeRepositoryId('CON'), /not supported by Windows/)
   assert.equal(normalizeRepositoryId('open-iscsi'), 'open-iscsi')
 })
+
+test('repositoryStatus caches inspected entries and refreshes immediately after import or forceRefresh', async () => {
+  const root = await temporaryRoot()
+  const sourceA = path.join(root, 'source-a')
+  const sourceB = path.join(root, 'source-b')
+  const dataRoot = path.join(root, 'workspace', 'pangea-data')
+  await mkdir(sourceA, { recursive: true })
+  await mkdir(sourceB, { recursive: true })
+  await writeFile(path.join(sourceA, 'a.txt'), 'a')
+  await writeFile(path.join(sourceB, 'b.txt'), 'b')
+
+  await importRepository({ dataRoot, sourcePath: sourceA, repositoryId: 'alpha' })
+  const first = await repositoryStatus(dataRoot)
+  assert.deepEqual(first.repositories.map(item => item.repository_id), ['alpha'])
+
+  const cached = await repositoryStatus(dataRoot)
+  assert.deepEqual(cached.repositories.map(item => item.repository_id), ['alpha'])
+
+  await importRepository({ dataRoot, sourcePath: sourceB, repositoryId: 'beta' })
+  const afterImport = await repositoryStatus(dataRoot)
+  assert.deepEqual(afterImport.repositories.map(item => item.repository_id), ['alpha', 'beta'])
+
+  const forced = await repositoryStatus(dataRoot, { forceRefresh: true })
+  assert.deepEqual(forced.repositories.map(item => item.repository_id), ['alpha', 'beta'])
+})
+

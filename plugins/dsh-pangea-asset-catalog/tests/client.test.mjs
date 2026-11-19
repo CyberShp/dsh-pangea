@@ -173,7 +173,7 @@ function deferred() {
   return { promise: new Promise(done => { resolve = done }), resolve: value => resolve(value) }
 }
 
-async function assetHarness({ assets = [], onDetail, onJobs, onAction, features = { restore: true } } = {}) {
+async function assetHarness({ assets = [], onDetail, onJobs, onAction, onList, features = { restore: true } } = {}) {
   const hooks = [], pendingEffects = [], timers = new Map(), requests = [], reads = []
   let cursor = 0, dirty = true, tree, cwd = '/workspace'
   const same = (a, b) => a?.length === b?.length && a.every((value, index) => Object.is(value, b[index]))
@@ -202,7 +202,7 @@ async function assetHarness({ assets = [], onDetail, onJobs, onAction, features 
     },
   }
   const response = value => ({ ok: value.status === 'ok', status: value.status === 'ok' ? 200 : 400, json: async () => value })
-  const state = () => ({ status: 'ok', assets: structuredClone(assets), summary: { total: assets.length },
+  const state = () => ({ status: 'ok', assets: structuredClone(assets), summary: { total: assets.length, available: assets.filter(item => item.status === 'available').length },
     pagination: { page: 1, page_size: 20, total: assets.length, total_pages: 1 }, methodologies: { items: [] }, features, asset_types: ['design', 'requirement', 'historical_defect', 'coverage'] })
   const { exported } = await loadClient(react, {
     document: { body: { setAttribute() {}, getAttribute() {}, removeAttribute() {} } },
@@ -222,7 +222,7 @@ async function assetHarness({ assets = [], onDetail, onJobs, onAction, features 
         const id = url.searchParams.get('asset_id')
         return response(await (onDetail?.(id) ?? { status: 'ok', asset: structuredClone(assets.find(asset => asset.asset_id === id)), result: { items: [] } }))
       }
-      return response(state())
+      return response(await (onList?.(url) ?? state()))
     },
   })
   const pages = []
@@ -405,3 +405,26 @@ test('switching workspace stops submitting remaining batch files and ignores the
     assert.doesNotMatch(app.text(), /old-one|old-two|已提交 1/)
   } finally { app.cleanup() }
 })
+
+test('loaded asset catalog keeps rows and import action visible with sync pill during subsequent refresh', async () => {
+  const pendingRefresh = deferred()
+  let listCalls = 0
+  const asset = { asset_id: 'design-1', title: '共享设计', asset_type: 'design', status: 'available', revision: 1, structured_item_count: 3, repository_ids: [] }
+  const app = await assetHarness({
+    assets: [asset],
+    onList: () => {
+      listCalls += 1
+      return listCalls === 1 ? undefined : pendingRefresh.promise
+    },
+  })
+  try {
+    assert.match(app.text(), /共享设计/)
+    app.click('可用于分析1'); await app.settle()
+    assert.match(app.text(), /同步中/, 'shows non-blocking sync pill during refresh')
+    assert.match(app.text(), /共享设计/, 'keeps loaded asset rows visible during refresh')
+    assert.ok(app.find(node => node.type === 'button' && nodeText(node).includes('导入资产')), 'keeps import button visible')
+    pendingRefresh.resolve(app.state()); await app.settle()
+    assert.doesNotMatch(app.text(), /同步中/, 'clears sync pill once refresh completes')
+  } finally { app.cleanup() }
+})
+

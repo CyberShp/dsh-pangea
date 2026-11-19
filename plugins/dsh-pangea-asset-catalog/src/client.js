@@ -213,9 +213,21 @@ window.__ModuleLoader__.load({
         h('details', null, h('summary', { style: styles.meta }, '完整提取记录'), h('pre', { style: styles.pre }, JSON.stringify(result, null, 2))))
     }
 
-    function AssetPanel({ ctx, scope, visible }) {
+    function assetCacheKey(cwd, page, pageSize, type, status, kind, query) {
+      return JSON.stringify([cwd ?? '', page, pageSize, type, status, kind, query])
+    }
+
+    function clearAssetCacheForCwd(cache, cwd) {
+      if (!cache) return
+      const prefix = JSON.stringify([cwd ?? '']).slice(0, -1)
+      for (const key of cache.keys()) {
+        if (key.startsWith(prefix)) cache.delete(key)
+      }
+    }
+
+    function AssetPanel({ ctx, scope, visible, assetCache }) {
       const cwd = resolveWorkspaceCwd(scope, ctx.sessions)
-      const [state, setState] = React.useState(null)
+      const [state, setState] = React.useState(() => assetCache?.get(assetCacheKey(cwd, 1, 20, '', '', '', '')) ?? null)
       const [error, setError] = React.useState('')
       const [notice, setNotice] = React.useState('')
       const [busy, setBusy] = React.useState(false)
@@ -243,7 +255,8 @@ window.__ModuleLoader__.load({
         return navigation.current.cwd === view.cwd && navigation.current.version === view.version
       }
       React.useEffect(() => {
-        setState(null); setActiveAsset(null); setDetails({}); setSelectedAssets({}); setImportBatch([]); setImportOpen(false); setImportFile(null); setImportPath(''); setImportTitle(''); setError(''); setNotice('')
+        const cached = assetCache?.get(assetCacheKey(cwd, 1, 20, '', '', '', '')) ?? null
+        setState(cached); setActiveAsset(null); setDetails({}); setSelectedAssets({}); setImportBatch([]); setImportOpen(false); setImportFile(null); setImportPath(''); setImportTitle(''); setError(''); setNotice('')
       }, [cwd])
       const [detailTab, setDetailTab] = React.useState('content')
       const [details, setDetails] = React.useState({})
@@ -356,6 +369,7 @@ window.__ModuleLoader__.load({
         try {
           const value = await requestState({ cwd, page, pageSize, type, status, kind, query, signal })
           if (!isCurrent()) return
+          assetCache?.set(assetCacheKey(cwd, page, pageSize, type, status, kind, query), value)
           setError(''); setState(value)
           if (view.assetId && detailPending.current !== view.assetId) {
             const fresh = await requestAssetDetail({ cwd, assetId: view.assetId, signal })
@@ -438,6 +452,7 @@ window.__ModuleLoader__.load({
             }
           }
           const value = await requestAction({ cwd, action, payload, page, pageSize, type, status, kind, query })
+          clearAssetCacheForCwd(assetCache, cwd)
           if (!currentView(view)) return false
           ++loadSequence.current
           if (action === 'stop') {
@@ -539,6 +554,7 @@ window.__ModuleLoader__.load({
                 const payload = { ...await importSourcePayload(files[index]), ...execution, batch: true }
                 if (!currentView(view)) break
                 const value = await requestAction({ cwd, action: 'import', payload })
+                clearAssetCacheForCwd(assetCache, cwd)
                 update(index, { status: 'submitted', asset_id: value.imported_asset_id })
               } catch (value) { update(index, { status: 'failed', error: value instanceof Error ? value.message : String(value) }) }
             }
@@ -691,7 +707,7 @@ window.__ModuleLoader__.load({
         status ? STATUS_FILTERS.find(([value]) => value === status)?.[1] : '',
       ].filter(Boolean).join(' / ')
       const hasFilters = hasAppliedFilters || Boolean(queryDraft)
-      const waitingForAssets = (loading && !error) || (!state && !error)
+      const waitingForAssets = !state && !error
       const emptyCatalogError = Boolean(error && showLibrary && !activeAsset && !displayAssets.length)
       function clearFilters() {
         setPage(1); setType(''); setKind(''); setQuery(''); setQueryDraft('')
@@ -1285,8 +1301,8 @@ window.__ModuleLoader__.load({
                     detailHeaderActions && detailTab !== 'source' && detailTab !== 'history' && state?.features?.metadata !== false ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: event => startEdit(activeAsset, event) }, '编辑信息') : null,
                     isExtracting(activeAsset) ? h('button', { type: 'button', disabled: busy || activeAsset.extraction_job?.status === 'stopping' && !activeAsset.extraction_job?.error && !activeAsset.extraction_job?.stop_error, style: styles.button, onClick: () => { void act('stop', { asset_id: activeAsset.asset_id }) } }, activeAsset.extraction_job?.status === 'stopping' ? activeAsset.extraction_job.error || activeAsset.extraction_job.stop_error ? '重试停止' : '正在停止…' : '停止提取') : null,
                     activeAsset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, title: state?.features?.restore === false ? '停止提取后归档，原始材料与已有结果保留' : isExtracting(activeAsset) ? '停止提取后移入已删除 / 已归档，原始材料与已有结果可恢复' : '移入已删除 / 已归档，可恢复', style: styles.button, onClick: () => { void act('archive', { asset_id: activeAsset.asset_id }) } }, state?.features?.restore === false ? '归档' : '删除（可恢复）') : null)
-                : waitingForAssets ? h('span', { role: 'status', style: styles.meta }, '刷新中') : null,
-              !importOpen && !activeAsset && !waitingForAssets && !loading ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary, display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 400, lineHeight: 'normal' }, onClick: openImport }, plusIcon(), '导入资产') : null) }) : h('header', { className: 'pangea-page-header' }, h('h1', { style: styles.title }, '测试资产'), h('div', { className: 'pangea-asset-header-actions', style: styles.wrap },
+                : waitingForAssets ? h('span', { role: 'status', style: styles.meta }, '刷新中') : loading ? h('span', { role: 'status', className: 'pangea-sync-pill' }, '同步中') : null,
+              !importOpen && !activeAsset && !waitingForAssets ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary, display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 400, lineHeight: 'normal' }, onClick: openImport }, plusIcon(), '导入资产') : null) }) : h('header', { className: 'pangea-page-header' }, h('h1', { style: styles.title }, '测试资产'), h('div', { className: 'pangea-asset-header-actions', style: styles.wrap },
                 importOpen ? h('button', { type: 'button', className: 'pangea-asset-return', disabled: busy, style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 7 }, onClick: closeImport }, h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'm14 18-6-6 6-6M8 12h13' })), '返回资产库')
                 : activeAsset ? h('div', { style: styles.wrap },
                     h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => { selectAsset(null); setEditingAssetId(''); setError(''); setNotice('') } }, '返回资产库'),
@@ -1294,8 +1310,8 @@ window.__ModuleLoader__.load({
                     detailHeaderActions && detailTab !== 'source' && detailTab !== 'history' && state?.features?.metadata !== false ? h('button', { type: 'button', disabled: busy, style: styles.button, onClick: event => startEdit(activeAsset, event) }, '编辑信息') : null,
                     isExtracting(activeAsset) ? h('button', { type: 'button', disabled: busy || activeAsset.extraction_job?.status === 'stopping' && !activeAsset.extraction_job?.error && !activeAsset.extraction_job?.stop_error, style: styles.button, onClick: () => { void act('stop', { asset_id: activeAsset.asset_id }) } }, activeAsset.extraction_job?.status === 'stopping' ? activeAsset.extraction_job.error || activeAsset.extraction_job.stop_error ? '重试停止' : '正在停止…' : '停止提取') : null,
                     activeAsset.status !== 'archived' ? h('button', { type: 'button', disabled: busy, title: state?.features?.restore === false ? '停止提取后归档，原始材料与已有结果保留' : isExtracting(activeAsset) ? '停止提取后移入已删除 / 已归档，原始材料与已有结果可恢复' : '移入已删除 / 已归档，可恢复', style: styles.button, onClick: () => { void act('archive', { asset_id: activeAsset.asset_id }) } }, state?.features?.restore === false ? '归档' : '删除（可恢复）') : null)
-                : waitingForAssets ? h('span', { role: 'status', style: styles.meta }, '刷新中') : null,
-              !importOpen && !activeAsset && !waitingForAssets && !loading ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary, display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 400, lineHeight: 'normal' }, onClick: openImport }, plusIcon(), '导入资产') : null))),
+                : waitingForAssets ? h('span', { role: 'status', style: styles.meta }, '刷新中') : loading ? h('span', { role: 'status', className: 'pangea-sync-pill' }, '同步中') : null,
+              !importOpen && !activeAsset && !waitingForAssets ? h('button', { type: 'button', disabled: busy, style: { ...styles.button, ...styles.primary, display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 400, lineHeight: 'normal' }, onClick: openImport }, plusIcon(), '导入资产') : null))),
           h('nav', { className: 'pangea-asset-tabs', 'aria-label': '资产管理导航' },
             [['library', '资产库'], ['review', '待审核'], ['methodologies', '方法论'], ['archived', '已删除 / 已归档']].map(([value, label]) =>
               h('button', { key: value, type: 'button', disabled: busy, 'aria-current': section === value ? 'page' : undefined,
@@ -1315,7 +1331,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', disabled: busy || !generalImportTypes.length, 'aria-pressed': !coverageOnly, onClick: () => { setImportFile(null); setImportPath(''); setError(''); setImportType(defaultGeneralType) } }, assetFileIcon('design'), '一般资料'),
               h('button', { type: 'button', disabled: busy || !importTypes.some(([value]) => value === 'coverage'), 'aria-pressed': coverageOnly, onClick: () => { setImportFile(null); setImportPath(''); setError(''); setImportType('coverage') } }, assetFileIcon('coverage'), '覆盖率文件')),
             h('div', { className: 'pangea-asset-import-fields' },
-              h('label', { style: styles.field }, h('span', { style: styles.label }, '资料类型'),
+              h('label', { style: styles.field }, h('span', { style: styles.label }, '资料类型', h('span', { className: 'pangea-req', 'aria-hidden': true }, '*')),
                 h('select', { 'aria-label': '资产类型', disabled: busy, style: { ...styles.input, width: '100%' }, value: importType, onChange: event => { if ((event.target.value === 'coverage') !== coverageOnly) { setImportFile(null); setImportPath('') } setImportType(event.target.value) } },
                   (coverageOnly ? importTypes.filter(([value]) => value === 'coverage') : generalImportTypes).map(([value, label]) => h('option', { key: value, value }, label)))),
               h('label', { style: styles.field }, h('span', { style: styles.label }, '资产标题', h('small', null, '可选')),
@@ -1326,7 +1342,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => importFileInput.current?.click() }, '重新选择'))
               : h('div', { className: 'pangea-asset-dropzone', onDragOver: event => event.preventDefault(), onDrop: event => { event.preventDefault(); const files = Array.from(event.dataTransfer?.files ?? []); if (!busy && files.length) { setImportFiles(files); setImportPath(''); setError('') } } },
                 h('svg', { className: 'pangea-asset-dropzone-icon', width: 28, height: 28, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'M12 16V4m0 0L7 9m5-5 5 5M4 16v4h16v-4' })),
-                h('h3', null, '选择要加入资产库的文件'),
+                h('h3', null, '选择要加入资产库的文件', h('span', { className: 'pangea-req', 'aria-hidden': true }, '*')),
                 h('p', null, coverageOnly ? 'Excel 工作簿或覆盖率 combined JSON' : 'Markdown、TXT、PDF、Word、Excel', h('br'), '支持多选，单文件最大 24 MiB'),
                 h('button', { type: 'button', disabled: busy, style: styles.button, onClick: () => importFileInput.current?.click() }, '选择文件')),
             h('input', { ref: importFileInput, className: 'pangea-asset-sr-only', type: 'file', 'aria-label': '选择资产文件', multiple: true, disabled: busy, accept: coverageOnly ? '.xlsx,.json' : '.md,.txt,.pdf,.docx,.xlsx', onChange: event => { setImportFiles(Array.from(event.target.files ?? [])); setImportBatch([]); setImportPath(''); setError('') } }),
@@ -1342,6 +1358,7 @@ window.__ModuleLoader__.load({
                 : importType === 'historical_defect' ? '历史缺陷提取后需人工审核，通过后才可用于分析。' : '需求、设计、参考资料与用例示例会形成可核对的内容条目。历史缺陷提取后需人工审核。'),
             h('div', { className: 'pangea-asset-import-footer' },
               h('button', { type: 'button', className: 'pangea-asset-cancel', disabled: busy, style: styles.button, onClick: closeImport }, '取消'),
+              !importFile && !importPath.trim() ? h('span', { className: 'pangea-asset-import-hint' }, '请先选择文件或填写本机路径') : null,
               h('button', { type: 'button', disabled: busy || (!importFile && !importPath.trim()) || Boolean(importFileIssue) || !importEnvironmentReady, style: { ...styles.button, ...styles.primary }, onClick: () => { void submitImport() } }, busy ? importFiles.length > 1 ? '正在逐个提交…' : '正在导入…' : importFiles.length > 1 ? `导入并处理 ${importFiles.length} 个文件` : '导入并处理'))) : null,
           importBatch.length && !activeAsset ? h('section', { 'aria-label': '批量导入进度', style: styles.card },
             h('div', { style: styles.row }, h('h2', { style: styles.itemTitle }, `批量提交 · ${importBatch.filter(item => ['submitted', 'failed'].includes(item.status)).length} / ${importBatch.length}`),
@@ -1556,10 +1573,11 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       if (!ctx.pangea) return
+      const assetCache = new Map()
       ctx.effect(() => ctx.pangea.registerPage({
         id: 'assets', title: () => '资产管理', icon, order: 30,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(AssetPanel, { ...props, ctx }),
+        component: props => h(AssetPanel, { ...props, ctx, assetCache }),
       }), 'dsh-pangea-asset-catalog: asset page')
     }
 

@@ -536,20 +536,54 @@ export async function homeSnapshot({ cwd, dataRoot, tasks = [], cursor = 0, limi
   }
 }
 
+const CAPABILITIES_CACHE = new Map()
+const CAPABILITIES_TTL_MS = 60_000
+
+async function cachedCapabilities({ cwd, dataRoot, runner }) {
+  if (runner !== runPangea) {
+    return runner({ cwd, args: ['system', 'capabilities', '--data-root', dataRoot] })
+  }
+  const key = `${cwd}\0${dataRoot}`
+  const cached = CAPABILITIES_CACHE.get(key)
+  if (cached && Date.now() - cached.at < CAPABILITIES_TTL_MS) {
+    const repositories = (await homeDirectories(path.join(dataRoot, 'repositories')))
+      .filter(id => !id.startsWith('.pangea-import-'))
+      .sort()
+    return { ...cached.value, repositories }
+  }
+  const value = await runner({ cwd, args: ['system', 'capabilities', '--data-root', dataRoot] })
+  CAPABILITIES_CACHE.set(key, { at: Date.now(), value })
+  return value
+}
+
 export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limit = DEFAULT_PAGE_SIZE, runner = runPangea }) {
   const root = workspaceRoot(cwd)
   const resolvedDataRoot = dataRootFor(root, dataRoot)
   const pageCursor = boundedInteger(cursor, 0, 0, Number.MAX_SAFE_INTEGER)
   const pageLimit = boundedInteger(limit, DEFAULT_PAGE_SIZE, 1, 100)
   try {
-    const capabilities = await runner({
-      cwd: root,
-      args: ['system', 'capabilities', '--data-root', resolvedDataRoot],
-    })
-    const runs = await runner({
-      cwd: root,
-      args: ['runs', 'list', '--data-root', resolvedDataRoot, '--cursor', String(pageCursor), '--limit', String(pageLimit)],
-    })
+    const requestedRunId = typeof runId === 'string' ? runId.trim() : ''
+    const [capabilities, runs, detailResult] = await Promise.all([
+      cachedCapabilities({ cwd: root, dataRoot: resolvedDataRoot, runner }),
+      runner({
+        cwd: root,
+        args: ['runs', 'list', '--data-root', resolvedDataRoot, '--cursor', String(pageCursor), '--limit', String(pageLimit)],
+      }),
+      requestedRunId
+        ? runner({
+            cwd: root,
+            args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', requestedRunId],
+          })
+            .then(async value => ({
+              run: await withRunReports(value, resolvedDataRoot),
+              runDetail: { run_id: requestedRunId, status: 'ok', error: null },
+            }))
+            .catch(error => ({
+              run: null,
+              runDetail: { run_id: requestedRunId, status: 'error', error: error instanceof Error ? error.message : String(error) },
+            }))
+        : Promise.resolve({ run: null, runDetail: null }),
+    ])
     runs.items = await Promise.all((runs.items ?? []).map(async run => {
       try { return await withRunReports(run, resolvedDataRoot) }
       catch (error) {
@@ -557,30 +591,14 @@ export async function workbenchSnapshot({ cwd, dataRoot, runId, cursor = 0, limi
           reader_error: error instanceof Error ? error.message : String(error) }
       }
     }))
-    const requestedRunId = typeof runId === 'string' ? runId.trim() : ''
-    let run = null
-    let runDetail = null
-    if (requestedRunId) {
-      try {
-        run = await runner({
-          cwd: root,
-          args: ['runs', 'get', '--data-root', resolvedDataRoot, '--run-id', requestedRunId],
-        })
-        run = await withRunReports(run, resolvedDataRoot)
-        runDetail = { run_id: requestedRunId, status: 'ok', error: null }
-      } catch (error) {
-        run = null
-        runDetail = { run_id: requestedRunId, status: 'error', error: error instanceof Error ? error.message : String(error) }
-      }
-    }
     return {
       status: 'ok',
       data_root: resolvedDataRoot,
       compatibility: { compatible: true, api_version: '1.0' },
       capabilities,
       runs,
-      run,
-      run_detail: runDetail,
+      run: detailResult.run,
+      run_detail: detailResult.runDetail,
       pagination: { cursor: pageCursor, limit: pageLimit },
     }
   } catch (error) {

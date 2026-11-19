@@ -29,7 +29,7 @@ import { PangeaSshRuntime } from './execution/ssh.js'
 import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { inspectSource, configureRepository } from './repositories/git-source.js'
-import { importRepository, reimportRepository, repositoryStatus } from './repositories/import.js'
+import { importRepository, invalidateRepositoryStatusCache, reimportRepository, repositoryStatus } from './repositories/import.js'
 import { scopeTree, validateScope, previewScope, confirmScope, previewTestTools, confirmTestTools } from './repositories/scope.js'
 import { FaultInjectionService } from './fault-injection.js'
 import { summarizeRunVerifications } from './fault-injection-summary.js'
@@ -1637,20 +1637,34 @@ export async function repositoryRouteHandler(req, res, runner = runPangea) {
   try {
     const dataRoot = dataRootFor(workspaceRoot(cwd), explicitDataRoot ?? process.env.PANGEA_DATA_ROOT)
     if (req.method === 'GET' && url.searchParams.get('view') === 'tree') return json(res, 200, await scopeTree({ dataRoot, ...Object.fromEntries(url.searchParams) }))
-    if (req.method === 'GET') return json(res, 200, await repositoryStatus(dataRoot))
+    if (req.method === 'GET') return json(res, 200, await repositoryStatus(dataRoot, { forceRefresh: url.searchParams.get('fresh') === '1' }))
     if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
     const body = await requestJson(req)
     if (body.action === 'reimport-repository') {
       if (sourceFirstAcpUpdateBusy()) throw Object.assign(new Error('请先结束正在执行的分析，再重新导入仓库'), { statusCode: 409 })
-      return json(res, 200, { status: 'ok', repository: await repositoryOperation(dataRoot, body.repository_name, () => reimportRepository({ dataRoot, repositoryId: body.repository_name, baseRef: body.base_ref })) })
+      const repository = await repositoryOperation(dataRoot, body.repository_name, () => reimportRepository({ dataRoot, repositoryId: body.repository_name, baseRef: body.base_ref }))
+      invalidateRepositoryStatusCache(dataRoot)
+      return json(res, 200, { status: 'ok', repository })
     }
-    if (body.action === 'pull-lfs') return json(res, 200, { status: 'ok', ...await repositoryOperation(dataRoot, body.repository_name, () => pullRepositoryLfs(dataRoot, body.repository_name, body)) })
+    if (body.action === 'pull-lfs') {
+      const result = await repositoryOperation(dataRoot, body.repository_name, () => pullRepositoryLfs(dataRoot, body.repository_name, body))
+      invalidateRepositoryStatusCache(dataRoot)
+      return json(res, 200, { status: 'ok', ...result })
+    }
     if (body.action === 'cancel-import') return json(res, 200, { status: 'ok', ...await cancelRepositoryOperation(dataRoot, body.repository_name) })
     if (body.action === 'remote-branches') return json(res, 200, { status: 'ok', ...await discoverRemoteBranches(workspaceRoot(cwd), body.git_url) })
     if (body.action === 'repository-branches') return json(res, 200, { status: 'ok', ...await repositoryBranches(dataRoot, body.repository_name, body) })
-    if (body.action === 'create-tracking-branch') return json(res, 200, { status: 'ok', ...await repositoryOperation(dataRoot, body.repository_name, () => createTrackingBranch(dataRoot, body.repository_name, body)) })
+    if (body.action === 'create-tracking-branch') {
+      const result = await repositoryOperation(dataRoot, body.repository_name, () => createTrackingBranch(dataRoot, body.repository_name, body))
+      invalidateRepositoryStatusCache(dataRoot)
+      return json(res, 200, { status: 'ok', ...result })
+    }
     if (body.action === 'inspect-source') return json(res, 200, { status: 'ok', source: await inspectSource(body.source_path) })
-    if (body.action === 'configure-repository') return json(res, 200, { status: 'ok', settings: await repositoryOperation(dataRoot, body.repository_name, () => configureRepository(dataRoot, body.repository_name, body)) })
+    if (body.action === 'configure-repository') {
+      const settings = await repositoryOperation(dataRoot, body.repository_name, () => configureRepository(dataRoot, body.repository_name, body))
+      invalidateRepositoryStatusCache(dataRoot)
+      return json(res, 200, { status: 'ok', settings })
+    }
     if (body.action === 'validate-scope') return json(res, 200, await validateScope({ ...body, dataRoot }))
     if (body.action === 'preview-test-tools') return json(res, 200, await previewTestTools({ ...body, dataRoot, cwd }, runner))
     if (body.action === 'preview-scope') return json(res, 200, await previewScope({ ...body, dataRoot, cwd }, runner))
@@ -1659,6 +1673,7 @@ export async function repositoryRouteHandler(req, res, runner = runPangea) {
       sourcePath: body.source_path,
       repositoryId: body.repository_name, gitUrl: body.git_url, baseRef: body.base_ref, pipelineUrl: body.pipeline_url,
     }))
+    invalidateRepositoryStatusCache(dataRoot)
     return json(res, 200, { status: 'ok', repository: imported })
   } catch (error) {
     return json(res, error.statusCode ?? 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })

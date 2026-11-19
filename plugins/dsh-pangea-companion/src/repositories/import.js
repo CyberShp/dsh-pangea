@@ -119,22 +119,54 @@ async function reusableClone(attempt) {
   return true
 }
 
-export async function repositoryStatus(dataRoot) {
+const REPOSITORY_STATUS_CACHE = new Map()
+const REPOSITORY_STATUS_TTL_MS = 15_000
+
+export function invalidateRepositoryStatusCache(dataRoot) {
+  if (!dataRoot) { REPOSITORY_STATUS_CACHE.clear(); return }
+  REPOSITORY_STATUS_CACHE.delete(path.resolve(dataRoot))
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length)
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++
+      results[index] = await worker(items[index], index)
+    }
+  }))
+  return results
+}
+
+export async function repositoryStatus(dataRoot, { forceRefresh = false } = {}) {
   await recoverRepositoryImports(dataRoot)
-  const repositoriesRoot = path.join(dataRoot, 'repositories')
+  const resolvedRoot = path.resolve(dataRoot)
+  const repositoriesRoot = path.join(resolvedRoot, 'repositories')
   const repositories = await repositoryItems(repositoriesRoot)
-  for (const repo of repositories) {
-    repo.source = await inspectSource(path.join(repositoriesRoot, repo.repository_id))
-    repo.settings = await readRepositorySettings(dataRoot, repo.repository_id)
+  const fingerprint = repositories.map(repo => repo.repository_id).join('\0')
+  const cached = !forceRefresh ? REPOSITORY_STATUS_CACHE.get(resolvedRoot) : null
+  if (cached && cached.fingerprint === fingerprint && Date.now() - cached.at < REPOSITORY_STATUS_TTL_MS) {
+    return structuredClone(cached.value)
   }
-  const marker = await readMarker(path.join(dataRoot, '.pangea', MARKER_NAME))
-  const existingData = repositories.length > 0 || await hasMeaningfulData(dataRoot)
-  return {
+  await mapWithConcurrency(repositories, 6, async repo => {
+    const [source, settings] = await Promise.all([
+      inspectSource(path.join(repositoriesRoot, repo.repository_id)),
+      readRepositorySettings(resolvedRoot, repo.repository_id),
+    ])
+    repo.source = source
+    repo.settings = settings
+  })
+  const marker = await readMarker(path.join(resolvedRoot, '.pangea', MARKER_NAME))
+  const existingData = repositories.length > 0 || await hasMeaningfulData(resolvedRoot)
+  const value = {
     status: 'ok',
     initialized: Boolean(marker) || existingData,
     onboarding_required: !marker && !existingData,
     repositories,
   }
+  REPOSITORY_STATUS_CACHE.set(resolvedRoot, { at: Date.now(), fingerprint, value })
+  return structuredClone(value)
 }
 
 export async function importRepository({ dataRoot, sourcePath, repositoryId, gitUrl, baseRef, pipelineUrl }) {
@@ -242,6 +274,7 @@ export async function importRepository({ dataRoot, sourcePath, repositoryId, git
   // Diagnostics are ancillary after publication; a log write cannot turn a
   // successfully imported repository into a failed import.
   if (attempt) await recordAttempt({ status: 'completed', clone_complete: false }).catch(() => {})
+  invalidateRepositoryStatusCache(dataRoot)
 
   return { repository_id: name, name, source: await inspectSource(destination) }
 }
@@ -297,6 +330,7 @@ export async function reimportRepository({ dataRoot, repositoryId, baseRef }) {
     await rename(staging, root); published = true
     await writeMarker(dataRoot, name)
     await rm(journal, { force: true })
+    invalidateRepositoryStatusCache(dataRoot)
     return { repository_id: name, source: await inspectSource(root), backup_path: backup, settings }
   } catch (error) {
     if (moved) {

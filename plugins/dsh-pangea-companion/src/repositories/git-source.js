@@ -57,14 +57,16 @@ export async function inspectSource(sourcePath) {
   try {
     const top = await sourceGit(root, ['rev-parse', '--show-toplevel'])
     if (await realpath(top) !== root) return { kind: 'folder', path: root }
-    const commit = await sourceGit(root, ['rev-parse', '--verify', 'HEAD^{commit}'])
-    const branch = await sourceGit(root, ['branch', '--show-current'])
-    const status = await sourceGit(root, ['status', '--porcelain'])
+    const [commit, branch, status, remote] = await Promise.all([
+      sourceGit(root, ['rev-parse', '--verify', 'HEAD^{commit}']),
+      sourceGit(root, ['branch', '--show-current']),
+      sourceGit(root, ['status', '--porcelain']),
+      sourceGit(root, ['remote', 'get-url', '--push', 'origin']).catch(() => ''),
+    ])
     const dirty = Boolean(status)
     const entries = status.split('\n').filter(Boolean)
     const tracked_changes = entries.some(line => !line.startsWith('?? '))
     const untracked_files = entries.some(line => line.startsWith('?? '))
-    let remote = ''; try { remote = await sourceGit(root, ['remote', 'get-url', '--push', 'origin']) } catch {}
     return { kind: 'git', path: root, commit, branch, dirty, tracked_changes, untracked_files, remote: remote.replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@') }
   } catch (error) { return { kind: 'git-unavailable', path: root, error: error.message } }
 }

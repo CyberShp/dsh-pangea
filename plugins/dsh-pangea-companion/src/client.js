@@ -3174,10 +3174,11 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function PangeaPanel({ ctx, scope, visible, initialScreen = 'overview', pageMode = 'analysis' }) {
+    function PangeaPanel({ ctx, scope, visible, initialScreen = 'overview', pageMode = 'analysis', panelCache }) {
       const cwd = scope?.cwd
+      const workbenchCacheKey = cwd ? `${cwd}\0${pageMode}` : ''
       const [snapshot, setSnapshot] = React.useState(undefined)
-      const [workbench, setWorkbench] = React.useState(undefined)
+      const [workbench, setWorkbench] = React.useState(() => (workbenchCacheKey ? panelCache?.workbench?.get(workbenchCacheKey) : undefined))
       const [error, setError] = React.useState(undefined)
       const [workbenchError, setWorkbenchError] = React.useState(undefined)
       const [selectedRun, setSelectedRun] = React.useState(undefined)
@@ -3188,7 +3189,7 @@ window.__ModuleLoader__.load({
       const [taskStatus, setTaskStatus] = React.useState('全部')
       const [loading, setLoading] = React.useState(false)
       const [workbenchLoading, setWorkbenchLoading] = React.useState(false)
-      const [repositoryState, setRepositoryState] = React.useState(undefined)
+      const [repositoryState, setRepositoryState] = React.useState(() => (cwd ? panelCache?.repositories?.get(cwd) : undefined))
       const [repositoryLoading, setRepositoryLoading] = React.useState(false)
       const [repositoryForm, setRepositoryForm] = React.useState({ sourcePath: '', repositoryName: '' })
       const [repositoryImporting, setRepositoryImporting] = React.useState(false)
@@ -3427,7 +3428,9 @@ window.__ModuleLoader__.load({
             signal: controller.signal,
           })
           if (controller.signal.aborted || sequence !== workbenchRequestRef.current.sequence) return
-          setWorkbench({ ...body, __clientSyncedAt: new Date().toISOString() })
+          const synced = { ...body, __clientSyncedAt: new Date().toISOString() }
+          if (workbenchCacheKey) panelCache?.workbench?.set(workbenchCacheKey, synced)
+          setWorkbench(synced)
           setWorkbenchError(undefined)
           return body
         } catch (reason) {
@@ -3438,7 +3441,7 @@ window.__ModuleLoader__.load({
         } finally {
           if (sequence === workbenchRequestRef.current.sequence) setWorkbenchLoading(false)
         }
-      }, [cwd, pageMode, runCursor, workbenchSessionId, workbenchRunId, workbenchTaskId])
+      }, [cwd, pageMode, panelCache, runCursor, workbenchCacheKey, workbenchSessionId, workbenchRunId, workbenchTaskId])
 
       const latestTaskRefreshRef = React.useRef(null)
       latestTaskRefreshRef.current = { load, loadWorkbench }
@@ -3461,6 +3464,7 @@ window.__ModuleLoader__.load({
         try {
           const value = await requestRepositoryStatus({ cwd })
           if (!stillCurrent()) return undefined
+          panelCache?.repositories?.set(cwd, value)
           setRepositoryState(value)
           setRepositoryError('')
           return value
@@ -3471,7 +3475,7 @@ window.__ModuleLoader__.load({
         } finally {
           if (stillCurrent()) setRepositoryLoading(false)
         }
-      }, [cwd, pageMode])
+      }, [cwd, pageMode, panelCache])
 
       React.useEffect(() => {
         snapshotRef.current = undefined
@@ -3479,7 +3483,7 @@ window.__ModuleLoader__.load({
         setSnapshot(undefined)
         ++workbenchRequestRef.current.sequence
         workbenchRequestRef.current.controller?.abort()
-        setWorkbench(undefined)
+        setWorkbench(workbenchCacheKey ? panelCache?.workbench?.get(workbenchCacheKey) : undefined)
         setWorkbenchError(undefined)
         setWorkbenchLoading(false)
         setSelectedRun(undefined)
@@ -3493,12 +3497,12 @@ window.__ModuleLoader__.load({
         setInjectionBuild(null)
         ++repositoryRequestRef.current
         ++repositoryImportRef.current
-        setRepositoryState(undefined)
+        setRepositoryState(cwd ? panelCache?.repositories?.get(cwd) : undefined)
         setRepositoryLoading(false)
         setRepositoryForm({ sourcePath: '', repositoryName: '' })
         setRepositoryImporting(false)
         setRepositoryError('')
-      }, [cwd, initialScreen])
+      }, [cwd, initialScreen, panelCache, workbenchCacheKey])
       React.useEffect(() => {
         requestRef.current.sequence += 1
         requestRef.current.controller?.abort()
@@ -5246,7 +5250,12 @@ window.__ModuleLoader__.load({
       }
 
       function renderCreate() {
-        const repositories = workbench?.capabilities?.repositories ?? []
+        const cachedRepos = [
+          ...(workbench?.capabilities?.repositories ?? []),
+          ...((cwd ? panelCache?.workbench?.get(`${cwd}\0home`)?.capabilities?.repositories : null) ?? []),
+          ...((cwd ? panelCache?.repositories?.get(cwd)?.repositories?.map(item => item.repository_id) : null) ?? []),
+        ].filter(Boolean)
+        const repositories = [...new Set(cachedRepos)]
         const providerOptions = workbench?.acp_providers ?? []
         const selectedProvider = providerOptions.find(item => item.id === createForm.provider_id)
         const unavailableProvider = Boolean(createForm.provider_id) && !selectedProvider
@@ -5304,6 +5313,26 @@ window.__ModuleLoader__.load({
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
         const targetReady = Boolean(validScopePreview?.matched_file_count > 0 && createForm.repository && createForm.target.trim() && objectiveReady && sourceScope.length && sourceScope.every(__sourceScopePicker.isSubdirectoryPath) && supported('scenarios', createForm.scenario))
         const inputsReady = (!createForm.test_tool_sources?.length || createForm.test_tool_preview?.matched_file_count > 0) && coverageReady && !coverageQueryBusy && (!sceneOptions || selectedAssets.every(item => item.input_revision))
+        const step1Pending = [
+          !createForm.repository ? '选择源码仓库' : null,
+          !createForm.target.trim() ? '填写分析目标' : null,
+          !objectiveReady ? '选择测试对象层级' : null,
+          !supported('scenarios', createForm.scenario) ? '选择分析场景' : null,
+          sourceScope.length === 0 || !sourceScope.every(__sourceScopePicker.isSubdirectoryPath) ? '选择下级目录' : !validScopePreview?.matched_file_count ? '预览起始文件' : null,
+        ].filter(Boolean)
+        const step2Pending = [
+          createForm.test_tool_sources?.length && !createForm.test_tool_preview?.matched_file_count ? '预览测试工具参考文件' : null,
+          !coverageReady ? '添加可用覆盖率输入' : null,
+          coverageQueryBusy ? '等待覆盖率查询完成' : null,
+          sceneOptions && !selectedAssets.every(item => item.input_revision) ? '等待已选资产版本读取' : null,
+        ].filter(Boolean)
+        const step3Pending = executionReady ? [] : [!createForm.provider_id ? '选择外部 Agent' : '确认可用模型']
+        const stepGuide = (pending, readyCopy) => h('div', { className: `pangea-step-guide${pending.length ? '' : ' is-ready'}`, role: 'status' },
+          h('div', { className: 'pangea-step-guide-main' },
+            runIcon(pending.length ? 'CircleAlert' : 'CircleCheck'),
+            h('strong', null, pending.length ? `还需完成 ${pending.length} 项必填设置：` : readyCopy),
+            pending.length ? h('div', { className: 'pangea-step-guide-chips' }, pending.map(item => h('span', { key: item, className: 'pangea-step-chip' }, item))) : null))
+        const reqLabel = label => h(React.Fragment, null, label, h('span', { className: 'pangea-req', 'aria-hidden': true }, '*'))
         const go = (next, nextView = 'inputs') => {
           if (creatingRun) return
           if (next > 1 && !targetReady || next > 2 && !inputsReady || next > 3 && !executionReady) { showActionNotice(submitBlockReason || '请先完成前面的设置。', true); return }
@@ -5316,11 +5345,16 @@ window.__ModuleLoader__.load({
         }
         const button = (text, onClick, variant = '', iconName, disabled = false) => h('button', { type: 'button', className: `btn ${variant}`, onClick, disabled: creatingRun || disabled }, iconName && runIcon(iconName), text)
         const badge = (text, kind = '') => h('span', { className: `badge ${kind}` }, text)
-        const field = (label, control, hint) => h('label', { className: 'field' }, h('span', null, label), control, hint && h('span', { className: 'hint' }, hint))
-        const input = (label, key, hint, multiline = false) => field(key === 'coverage_b_version' ? h(React.Fragment, null, label, h('span', { className: 'muted small' }, ' 可选')) : label, h(multiline ? 'textarea' : 'input', { 'aria-label': label, className: multiline ? 'mono' : undefined, value: createForm[key] ?? '', placeholder: key === 'coverage_b_version' ? '需要对比的基线版本' : undefined, disabled: creatingRun, onChange: event => update(key, event.target.value) }), hint)
+        const field = (label, control, hint, needed = false) => h('label', { className: `field${needed ? ' is-needed' : ''}` }, h('span', null, label), control, hint && h('span', { className: 'hint' }, hint))
+        const input = (label, key, hint, multiline = false, { required = false, placeholder, needed = false } = {}) => field(
+          key === 'coverage_b_version' ? h(React.Fragment, null, label, h('span', { className: 'pangea-opt-tag' }, '可选')) : required ? reqLabel(label) : label,
+          h(multiline ? 'textarea' : 'input', { 'aria-label': label, className: multiline ? 'mono' : undefined, value: createForm[key] ?? '', placeholder: placeholder ?? (key === 'coverage_b_version' ? '需要对比的基线版本' : undefined), disabled: creatingRun, onChange: event => update(key, event.target.value) }),
+          hint,
+          needed,
+        )
         const notice = (title, detail, kind = 'blue', actions) => h('div', { className: `notice ${kind}`, role: 'status' }, h('div', { className: 'notice-main' }, runIcon(kind === 'good' ? 'CircleCheck' : kind === 'warn' ? 'CircleAlert' : 'Info'), h('div', null, h('strong', null, title), h('p', null, detail))), actions)
         const panel = (content, extra = '') => h('section', { className: `panel ${extra}` }, content)
-        const footer = (prev, next, text, disabled = false) => h('div', { className: 'wizard-footer' }, button(step === 1 ? '上一步' : view !== 'inputs' && step === 2 ? '返回输入资料' : '上一步', prev, 'ghost', 'ArrowLeft'), h('div', { className: 'row' }, step === 1 && h('span', { className: 'create-footer-note' }, '第 1 步，共 4 步'), step === 3 && disabled ? h(React.Fragment, null, h('span', { className: 'small', style: { color: '#aa6e33' } }, '模型就绪后可继续'), h('button', { type: 'button', className: 'create-disabled', disabled: true }, text)) : button(text, next, 'primary', step === 4 ? 'Play' : 'ArrowRight', disabled)))
+        const footer = (prev, next, text, disabled = false) => h('div', { className: 'wizard-footer' }, button(step === 1 ? '上一步' : view !== 'inputs' && step === 2 ? '返回输入资料' : '上一步', prev, 'ghost', 'ArrowLeft'), h('div', { className: 'row' }, step === 1 && h('span', { className: 'create-footer-note' }, step1Pending.length ? `第 1 步，共 4 步 · 还差 ${step1Pending.length} 项` : '第 1 步，共 4 步 · 已就绪'), step === 3 && disabled ? h(React.Fragment, null, h('span', { className: 'small', style: { color: '#aa6e33' } }, '模型就绪后可继续'), h('button', { type: 'button', className: 'create-disabled', disabled: true }, text)) : button(text, next, 'primary', step === 4 ? 'Play' : 'ArrowRight', disabled)))
         const assetCard = item => h('div', { key: item.asset_id, className: 'create-asset' }, h('div', { className: 'create-asset-icon' }, runIcon(item.asset_type === 'coverage' ? 'ChartNoAxesCombined' : 'FileText')), h('div', { className: 'create-asset-main' }, h('strong', null, item.title), h('small', null, `${assetTypeLabels[item.asset_type] ?? '资产'} · 修订 ${item.revision ?? '待读取'} · 输入版本 ${item.input_revision ?? '待读取'}${(item.repository_ids ?? []).length ? ` · ${(item.repository_ids ?? []).join('、')}` : ''}`)), badge(item.status === 'available' ? '可用' : item.status ?? '待读取', item.status === 'available' ? 'good' : 'warn'), h('button', { type: 'button', className: 'create-close', 'aria-label': `移除资产 ${item.title}`, disabled: creatingRun, onClick: () => toggleCreateAsset(item.asset_id) }, runIcon('X')))
         const openAssets = (coverageOnly = false) => { setAssetType(coverageOnly ? 'coverage' : ''); setAssetPage(1); setAssetSelectorOpen(true) }
         const draftName = taskDisplayName({ ...createForm, source_scope: sourceScope })
@@ -5344,23 +5378,27 @@ window.__ModuleLoader__.load({
           h('p', { className: 'create-side-note', style: { marginTop: 0 } }, '分析开始后可以随时查看阶段产物。最终结果数量由源码与分析过程决定。')))
         let content
         if (step === 1) content = panel(h(React.Fragment, null,
-          h('h2', { className: 'create-heading' }, '想分析什么？'), h('p', { className: 'create-copy' }, '选择源码仓库，并明确这次分析关注的行为与边界。'),
-          h('div', { className: 'form-grid' }, field('源码仓库', h('div', { className: 'row', style: { flexWrap: 'nowrap' } }, h('select', { 'aria-label': '源码仓库', value: createForm.repository, onChange: event => update('repository', event.target.value) }, h('option', { value: '' }, '选择仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository))), button('添加', openRepositoryImport, 'ghost', 'Plus'))), input('分析目标', 'target')),
-          sceneOptions?.objectives ? field('测试对象层级', h('select', { 'aria-label': '测试对象层级', value: createForm.objective, onChange: event => update('objective', event.target.value) }, h('option', { value: '' }, '请选择测试对象层级'), h('option', { value: 'product-behavior' }, '产品行为 · 验证实际操作与外部结果（通常选此项）'), h('option', { value: 'interface-contract' }, '接口契约 · 验证公开 API 的调用规则与结果'))) : null,
-          h('div', { className: 'create-subhead' }, '分析场景'),
+          h('h2', { className: 'create-heading' }, '想分析什么？'), h('p', { className: 'create-copy' }, '带 * 为必填项。按顺序选仓库、填目标、选场景并预览目录后即可进入下一步。'),
+          stepGuide(step1Pending, '第 1 步必填项已全部完成，可继续下一步'),
+          h('div', { className: 'form-grid' },
+            field(reqLabel('源码仓库'), h('div', { className: 'row', style: { flexWrap: 'nowrap' } }, h('select', { 'aria-label': '源码仓库', value: createForm.repository, onChange: event => update('repository', event.target.value) }, h('option', { value: '' }, workbenchLoading && !repositories.length ? '正在读取仓库…' : '选择仓库'), repositories.map(repository => h('option', { key: repository, value: repository }, repository))), button('添加', openRepositoryImport, 'ghost', 'Plus')), null, !createForm.repository),
+            input('分析目标', 'target', null, false, { required: true, placeholder: '例如：梳理 TLS 握手与重连路径的业务分支与异常处理', needed: !createForm.target.trim() })),
+          sceneOptions?.objectives ? h('div', { style: { marginTop: 16 } }, field(reqLabel('测试对象层级'), h('select', { 'aria-label': '测试对象层级', value: createForm.objective, onChange: event => update('objective', event.target.value) }, h('option', { value: '' }, '请选择测试对象层级'), h('option', { value: 'product-behavior' }, '产品行为 · 验证实际操作与外部结果（通常选此项）'), h('option', { value: 'interface-contract' }, '接口契约 · 验证公开 API 的调用规则与结果')), null, !objectiveReady)) : null,
+          h('div', { className: 'create-subhead' }, reqLabel('分析场景')),
           h('div', { className: 'choice-grid create-scenes', role: 'group', 'aria-label': '分析场景' }, Object.entries(scenes).map(([id, item]) => h('button', { key: id, type: 'button', className: `choice create-option ${createForm.scenario === id ? 'selected' : ''}`, 'aria-pressed': createForm.scenario === id, disabled: !supported('scenarios', id), 'data-scenario': id, onClick: () => update('scenario', id) }, runIcon(item[1]), h('div', null, h('strong', null, item[0]), h('p', null, item[2])), h('span', { className: 'create-scene-check' }, runIcon('CircleCheck'))))),
-          h('div', { className: 'create-scope', style: { marginTop: 22 } }, field('起始代码范围', h('textarea', { 'aria-label': '起始代码范围', value: createForm.source_scope_text, readOnly: true, placeholder: '请通过下方目录选择器选择真实下级目录' }))),
+          h('div', { className: 'create-scope', style: { marginTop: 22 } }, field(reqLabel('起始代码范围'), h('textarea', { 'aria-label': '起始代码范围', className: 'pangea-scope-readonly', value: createForm.source_scope_text, readOnly: true, placeholder: '只读显示：请点击下方「选择下级目录」勾选目标目录，再点击「预览起始文件」确认命中' }), null, !validScopePreview?.matched_file_count)),
           h('p', { className: 'b05-subtle' }, '从所选目录开始分析，可追查当前代码仓内的相关实现。补充调查不扩大本次分析目标。'),
           h(SourceScopePicker, { renderIcon: runIcon, cwd, dataRoot: workbench?.data_root, repository: createForm.repository, value: createForm.source_scope_text, preview: validScopePreview, onChange: value => update('source_scope_text', value), onPreview: value => setScopePreview({ ...value, key: createScopeKey }) }),
           footer(() => navigate({ type: 'tasks' }), () => go(2), '下一步 · 输入资料', !targetReady)), 'create-target-panel')
         else if (step === 2 && view === 'inputs') content = panel(h(React.Fragment, null,
           h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '让分析理解更多上下文'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '选择与目标相关的需求、设计或已有测试资料。')), button('选择资产', () => openAssets(), '', 'Plus')),
+          step2Pending.length ? h('div', { style: { marginTop: 14 } }, stepGuide(step2Pending, '输入资料已就绪，可继续下一步')) : null,
           h(TestToolPicker, { cwd, dataRoot: workbench?.data_root, repositories, sources: createForm.test_tool_sources || [], preview: createForm.test_tool_preview, onChange: sources => setCreateForm(form => ({ ...form, test_tool_sources: sources, test_tool_preview: null })), onPreview: preview => update('test_tool_preview', preview), renderIcon: runIcon }),
           h('div', { className: 'row between', style: { margin: '24px 0 12px' } }, h('strong', { className: 'small' }, `已选资料 ${selectedAssets.length}`), h('span', { className: 'small muted' }, '版本将在创建时绑定')),
           pendingAssetDetails.length ? notice('正在读取资产资料', `正在按资产 ID 读取 ${pendingAssetDetails.length} 份资料的名称与输入版本。`, 'blue') : null,
           failedAssetDetails.length ? notice('资产详情读取失败', '无法确认所选资料的名称与输入版本，请重试后再继续。', 'warn', button('重试读取', retryAssetDetails, '', 'RefreshCw')) : null,
           h('div', { className: 'stack', style: { gap: 10 } }, selectedAssets.length ? selectedAssets.map(assetCard) : h('p', { className: 'create-copy' }, '未选择资产，可直接分析源码。')),
-          h('div', { className: 'divider' }), h('div', { className: 'row between' }, h('div', null, h('strong', { className: 'small' }, '覆盖率输入'), h('p', { className: 'create-copy', style: { margin: '7px 0 0' } }, '分支与风险分析可按需添加覆盖率；覆盖率分析需要一份可用输入。')), button('添加覆盖率', () => go(2, 'coverage'), '', 'ChartNoAxesCombined')),
+          h('div', { className: 'divider' }), h('div', { className: 'row between' }, h('div', null, h('strong', { className: 'small' }, '覆盖率输入', createForm.scenario === 'coverage-analysis' ? h('span', { className: 'pangea-req-tag' }, '必填') : h('span', { className: 'pangea-opt-tag' }, '可选')), h('p', { className: 'create-copy', style: { margin: '7px 0 0' } }, '分支与风险分析可按需添加覆盖率；覆盖率分析需要一份可用输入。')), button('添加覆盖率', () => go(2, 'coverage'), createForm.scenario === 'coverage-analysis' && !coverageReady ? 'primary' : '', 'ChartNoAxesCombined')),
           h('div', { className: 'callout', style: { marginTop: 20 } }, h('div', { className: 'row' }, runIcon('Info'), h('span', { className: 'small' }, `补充资料将用于约束条件与用例设计。${scene[3]}。`))), footer(() => go(1), () => go(3), '下一步 · 执行设置', !inputsReady)))
         else if (step === 2) {
           const acquisition = coverageQueryResult
@@ -5380,7 +5418,7 @@ window.__ModuleLoader__.load({
               h('div', { className: 'create-subhead' }, '数据完整性'), h('table', null, h('thead', null, h('tr', null, ['数据来源', '获取结果', '后续处理'].map(text => h('th', { key: text }, text)))), h('tbody', null, h('tr', null, h('td', null, '覆盖记录'), h('td', null, badge(acquisition.asset.status === 'available' ? '已获取' : '不可用', acquisition.asset.status === 'available' ? 'good' : 'warn')), h('td', null, '随本次源码范围匹配')), (acquisition.missing ?? []).map((item, index) => h('tr', { key: index }, h('td', null, typeof item === 'string' ? item : JSON.stringify(item)), h('td', null, badge('未返回', 'warn')), h('td', null, '可重新查询或补充本地文件'))), h('tr', null, h('td', null, '代码路径映射'), h('td', null, badge('待核验', 'neutral')), h('td', null, '在运行中核对冻结源码')))),
               h('p', { className: 'create-copy', style: { margin: '14px 0 0' } }, `${acquisition.record_count ?? '已取得的'} 条记录不等于 ${acquisition.record_count ?? '相同数量的'} 个已确认缺口；最终结论以分析与证据核验结果为准。`)) : h(React.Fragment, null,
               h('div', { className: 'divider' }), h('div', { className: 'create-subhead', style: { marginTop: 0 } }, '从覆盖率平台查询'),
-              h('div', { className: 'form-grid' }, input('产品', 'coverage_product'), input('C 版本', 'coverage_version', '精确填写版本原文，保留空格。'), input('目录范围', 'coverage_module', '完整路径，例如 nvmf_tcp/transxxx/tls/handshake；首段为模块名。'), input('B 版本', 'coverage_b_version'),
+              h('div', { className: 'form-grid' }, input('产品', 'coverage_product', null, false, { required: true, needed: !createForm.coverage_product?.trim() }), input('C 版本', 'coverage_version', '精确填写版本原文，保留空格。', false, { required: true, needed: !createForm.coverage_version?.trim() }), input('目录范围', 'coverage_module', '完整路径，例如 nvmf_tcp/transxxx/tls/handshake；首段为模块名。', false, { required: true, needed: !createForm.coverage_module?.trim() }), input('B 版本', 'coverage_b_version'),
                 field('包含子目录', h('input', { type: 'checkbox', 'aria-label': '包含子目录', checked: createForm.coverage_recursive !== false, onChange: event => update('coverage_recursive', event.target.checked) })),
                 field('报告来源', h('select', { 'aria-label': '报告来源', value: createForm.coverage_source || 'summary', onChange: event => update('coverage_source', event.target.value) }, ...['summary', 'auto', 'llt'].map(value => h('option', { key: value, value }, value))))),
               h('div', { className: 'row between', style: { marginTop: 18 } }, h('div', { className: 'create-footer-note' }, runIcon(workbench?.capabilities?.coverage_query_skill?.available ? 'CircleCheck' : 'CircleAlert'), workbench?.capabilities?.coverage_query_skill?.available ? '查询服务已就绪' : '覆盖率查询服务尚未就绪'), button(coverageQueryBusy ? '正在查询…' : '查询并添加', query, 'primary', 'Search', !queryReady)),
@@ -5395,7 +5433,8 @@ window.__ModuleLoader__.load({
           }
           content = panel(h(React.Fragment, null,
             h('h2', { className: 'create-heading' }, '选择执行分析的 Agent'), h('p', { className: 'create-copy' }, MODEL_REVIEW_ENABLED ? '分析与复核统一使用外部 Agent。模型读取完成并确认可用后，才能继续创建。' : '分析使用外部 Agent，审核暂不执行。模型读取完成并确认可用后，才能继续创建。'),
-            h('div', { className: 'form-grid', style: { marginTop: 22 } }, field('外部 Agent', h('select', { 'aria-label': '外部 Agent', value: createForm.provider_id, disabled: creatingRun, onChange: event => selectProvider(event.target.value) }, !createForm.provider_id && h('option', { value: '', disabled: true }, '请选择外部 Agent'), unavailableProvider && h('option', { value: createForm.provider_id, disabled: true }, selectedProviderLabel), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: !item.registered }, item.label)))), createForm.provider_id && selectedProvider && h(AgentModelSelect, { providerId: createForm.provider_id, cwd, state: analysisAgentModels, value: createForm.agent_model, disabled: creatingRun, onChange: value => update('agent_model', value), onRefresh: refreshAnalysisAgentModels })),
+            stepGuide(step3Pending, '执行 Agent 与模型已就绪，可继续确认创建'),
+            h('div', { className: 'form-grid', style: { marginTop: 18 } }, field(reqLabel('外部 Agent'), h('select', { 'aria-label': '外部 Agent', value: createForm.provider_id, disabled: creatingRun, onChange: event => selectProvider(event.target.value) }, !createForm.provider_id && h('option', { value: '', disabled: true }, '请选择外部 Agent'), unavailableProvider && h('option', { value: createForm.provider_id, disabled: true }, selectedProviderLabel), providerOptions.map(item => h('option', { key: item.id, value: item.id, disabled: !item.registered }, item.label))), null, !createForm.provider_id), createForm.provider_id && selectedProvider && h(AgentModelSelect, { providerId: createForm.provider_id, cwd, state: analysisAgentModels, value: createForm.agent_model, disabled: creatingRun, onChange: value => update('agent_model', value), onRefresh: refreshAnalysisAgentModels })),
             h('div', { style: { marginTop: 22 } }, unavailableProvider ? notice(retiredProvider ? 'Claude Code 支持已移除' : '原执行器不可用', unavailableProviderMessage, 'warn') : executionReady ? notice('执行环境已就绪', execution.message, 'good', badge('可用', 'good')) : notice('执行设置尚未就绪', execution.message, 'warn', !analysisProviderRegistered && h('div', { className: 'row' }, button('打开 Agent 设置', () => window.dispatchEvent(new CustomEvent('pangea:open-model-settings', { detail: { mode: 'external' } })), '', 'Settings'), button('重新检测', () => { void loadWorkbench() }, '', 'RefreshCw')))),
             h('div', { className: 'create-subhead' }, '本次执行包含'), h('div', { className: 'grid3' }, (MODEL_REVIEW_ENABLED ? [['单元分析', scene[2]], ...(createForm.mode === 'depth' ? [['独立盲审', '独立检查结果与源码'], ['对照复核', '核对分歧，形成交付']] : [['直接审核', '检查结果与源码']])] : [['分析规划', '划分源码范围和分析单元'], ['单元分析', scene[2]], ['生成报告', '汇总已保存的分析结果']]).map(([title, copy]) => h('div', { key: title, className: 'callout' }, h('strong', { className: 'small' }, title), h('p', { className: 'create-copy', style: { margin: '8px 0 0' } }, copy)))), footer(() => go(2), () => go(4), '下一步 · 确认创建', !executionReady)))
         } else {
@@ -6247,10 +6286,13 @@ window.__ModuleLoader__.load({
         const unlinkedSection = !firstUse && !filteredEmpty && unlinkedRuns.length
           ? h('details', { className: 'b03-unlinked-runs' }, h('summary', null, '未关联任务的运行 · ' + unlinkedRuns.length), h('div', null, unlinkedRunRows))
           : null
+        const syncBadge = workbench && workbenchLoading ? h('span', { role: 'status', className: 'pangea-sync-pill' }, '同步中') : null
         const standardActions = h('div', { className: 'b03-task-actions' },
+          syncBadge,
           h('button', { type: 'button', className: 'b03-task-action', onClick: openRepositoryImport }, runIcon('FolderPlus'), '添加仓库'),
           h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, className: 'b03-task-action b03-task-action-primary', onClick: () => jump('create') }, runIcon('Plus'), '新建分析'))
         const simpleAction = h('div', { className: 'b03-task-actions' },
+          syncBadge,
           h('button', { type: 'button', disabled: workbench?.compatibility?.compatible !== true, className: 'b03-task-action b03-task-action-primary', onClick: () => jump('create') }, runIcon('Plus'), '新建分析'))
         const taskActions = firstUse || filteredEmpty ? simpleAction : standardActions
         const taskSubtitle = firstUse
@@ -7335,25 +7377,26 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       const pangea = ctx.pangea
       if (!pangea) return
+      const panelCache = { workbench: new Map(), repositories: new Map() }
       ctx.effect(() => pangea.registerPage({
         id: 'workbench', title: () => '工作台', icon, order: 0, default: true,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'home', pageMode: 'home' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'home', pageMode: 'home', panelCache }),
       }), 'dsh-pangea-companion: workbench page')
       ctx.effect(() => pangea.registerPage({
         id: 'analysis', title: () => 'PANGEA 分析', icon, order: 10,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'tasks', pageMode: 'analysis' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'tasks', pageMode: 'analysis', panelCache }),
       }), 'dsh-pangea-companion: analysis page')
       ctx.effect(() => pangea.registerPage({
         id: 'injection', title: () => '代码打桩', icon, order: 15,
         available: (_ctx, scope) => Boolean(scope?.cwd),
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'injection', pageMode: 'injection' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'injection', pageMode: 'injection', panelCache }),
       }), 'dsh-pangea-companion: injection page')
       ctx.effect(() => pangea.registerPage({
         id: 'execution', title: () => '环境配置', icon, order: 20,
         available: () => false,
-        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'environment', pageMode: 'execution' }),
+        component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'environment', pageMode: 'execution', panelCache }),
       }), 'dsh-pangea-companion: execution page')
       ctx.effect(() => pangea.registerPage({
         id: 'agent-runtime', title: () => 'Agent Runtime', icon, order: 30,

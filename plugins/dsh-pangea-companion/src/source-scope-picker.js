@@ -53,10 +53,12 @@ export function createSourceScopePicker(React) {
       finally { if (activeRequest.current === token) activeRequest.current = null; if (sequence.current === token) setBusy(false) }
     }
     const toggle = path => isSubdirectoryPath(path) && setDraft(scope.includes(path) ? scope.filter(item => item !== path).join('\n') : [...scope.filter(item => item !== '.'), path].join('\n'))
+    const needsDirectory = Boolean(repository) && (!scope.length || !scope.every(isSubdirectoryPath))
+    const needsPreview = !selectionOnly && Boolean(repository) && !needsDirectory && !preview
     return h('section', { className: 'pangea-scope-picker', 'aria-label': '源码范围选择与预览' },
       h('div', { className: 'pangea-page-actions pangea-scope-toolbar' },
-        h('button', { type: 'button', className: 'btn', ref: trigger, disabled: !repository, 'aria-disabled': busy, onClick: () => { if (activeRequest.current !== null) return; setDraft(value || ''); setOpen(true); void request({ path: '.' }, true) } }, renderIcon('FolderOpen'), '选择下级目录'),
-        !selectionOnly && h('button', { type: 'button', className: 'btn', ref: previewTrigger, 'aria-busy': busy, 'aria-disabled': busy, disabled: !repository || !scope.length || !scope.every(isSubdirectoryPath), onClick: () => { void request({}) } }, renderIcon(busy ? 'LoaderCircle' : 'Search'), busy ? '正在读取范围…' : '预览起始文件')),
+        h('button', { type: 'button', className: `btn${needsDirectory ? ' is-next-action' : ''}`, ref: trigger, disabled: !repository, 'aria-disabled': busy, onClick: () => { if (activeRequest.current !== null) return; setDraft(value || ''); setOpen(true); void request({ path: '.' }, true) } }, renderIcon('FolderOpen'), '选择下级目录'),
+        !selectionOnly && h('button', { type: 'button', className: `btn${needsPreview ? ' is-next-action' : ''}`, ref: previewTrigger, 'aria-busy': busy, 'aria-disabled': busy, disabled: !repository || !scope.length || !scope.every(isSubdirectoryPath), onClick: () => { void request({}) } }, renderIcon(busy ? 'LoaderCircle' : 'Search'), busy ? '正在读取范围…' : '预览起始文件')),
       error ? h('p', { role: 'alert', className: 'notice danger pangea-scope-feedback' }, `范围预览失败：${error}`) : null,
       selectionOnly ? null : preview ? h('div', { className: 'pangea-scope-preview', role: 'status' },
         h('div', { className: 'pangea-scope-preview-summary' }, renderIcon('Files'), h('strong', null, `起始范围 · 命中 ${preview.matched_file_count} 个源码文件`)),

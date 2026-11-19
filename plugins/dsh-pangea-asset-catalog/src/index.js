@@ -134,9 +134,37 @@ export async function semanticAssetList({ cwd, dataRoot, options, runtime, runne
       review: filtered.filter(x => x.status === 'awaiting_review').length, failed: filtered.filter(x => displayStatus(x) === 'failed').length } }
 }
 
+const ASSET_CAPABILITIES_CACHE = new Map()
+const ASSET_METHODOLOGIES_CACHE = new Map()
+const ASSET_CAPABILITIES_TTL_MS = 60_000
+const ASSET_METHODOLOGIES_TTL_MS = 30_000
+
+async function cachedAssetCapabilities(cwd, resolvedDataRoot) {
+  const key = `${cwd ?? ''}\0${resolvedDataRoot}`
+  const cached = ASSET_CAPABILITIES_CACHE.get(key)
+  if (cached && Date.now() - cached.at < ASSET_CAPABILITIES_TTL_MS) return cached.value
+  const value = await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] })
+  ASSET_CAPABILITIES_CACHE.set(key, { at: Date.now(), value })
+  return value
+}
+
+async function cachedMethodologiesList(cwd, resolvedDataRoot) {
+  const key = `${cwd ?? ''}\0${resolvedDataRoot}`
+  const cached = ASSET_METHODOLOGIES_CACHE.get(key)
+  if (cached && Date.now() - cached.at < ASSET_METHODOLOGIES_TTL_MS) return cached.value
+  const value = await runPangea({ cwd, args: ['methodologies', 'list', '--data-root', resolvedDataRoot, '--limit', '200'] })
+  ASSET_METHODOLOGIES_CACHE.set(key, { at: Date.now(), value })
+  return value
+}
+
+function invalidateAssetCatalogCaches(cwd, resolvedDataRoot) {
+  const key = `${cwd ?? ''}\0${resolvedDataRoot}`
+  ASSET_METHODOLOGIES_CACHE.delete(key)
+}
+
 async function listState({ cwd, dataRoot, runtime, options }) {
   const resolvedDataRoot = dataRootFor(cwd, dataRoot)
-  const capabilities = await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] })
+  const capabilities = await cachedAssetCapabilities(cwd, resolvedDataRoot)
   const features = assetFeatures(capabilities)
   const cursor = (options.page - 1) * options.pageSize
   const args = [
@@ -152,7 +180,7 @@ async function listState({ cwd, dataRoot, runtime, options }) {
   if (options.query) args.push('--query', options.query)
   const [result, methodologies, methodologyJob] = await Promise.all([
     !features.list_filters ? semanticAssetList({ cwd, dataRoot: resolvedDataRoot, options, runtime }) : runPangea({ cwd, args }),
-    runPangea({ cwd, args: ['methodologies', 'list', '--data-root', resolvedDataRoot, '--limit', '200'] }),
+    cachedMethodologiesList(cwd, resolvedDataRoot),
     runtime.methodologies.job(cwd, resolvedDataRoot),
   ])
   const totalPages = Math.max(1, Math.ceil(result.total / options.pageSize))
@@ -234,9 +262,10 @@ async function routeHandler(req, res, runtime) {
       const result = await extractionRuntime(runtime).stop({ cwd, dataRoot: resolvedDataRoot, assetId: body.asset_id })
       return json(res, 200, { status: 'ok', ...result })
     }
-    const capabilities = await runPangea({ cwd, args: ['system', 'capabilities', '--data-root', resolvedDataRoot] })
+    const capabilities = await cachedAssetCapabilities(cwd, resolvedDataRoot)
     const features = assetFeatures(capabilities)
     const semantic = !features.preview
+    invalidateAssetCatalogCaches(cwd, resolvedDataRoot)
     const required = { restore: 'restore', update_metadata: 'metadata', review_items: 'item_review' }[body.action]
     if (required && !features[required]) throw new Error('当前分析引擎尚未提供此资产操作')
     if (['import', 'preview_import'].includes(body.action) && Array.isArray(capabilities.asset_types) && !capabilities.asset_types.includes(body.asset_type)) throw new Error('当前分析引擎不支持此资产类型')
