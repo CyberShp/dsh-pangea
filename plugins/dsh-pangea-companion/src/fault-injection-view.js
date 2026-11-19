@@ -1,8 +1,8 @@
 import { analysisExecutionState, loadAnalysisAgentModels } from './agent-model-selection.js'
 import {
-  MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
+  DEFAULT_INTRANET_COMMIT_REGEX, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
   buildVerificationShellScript, caseKeyOf, classifyInjectionCandidate,
-  defaultCommitSummary, duplicateCaseKeySet, normalizeCommitConfig,
+  defaultCommitSummary, duplicateCaseKeySet, extractRemoteHookRegex, normalizeCommitConfig,
   parseVerificationLog, resolveCommitMessage,
 } from './fault-injection-candidates.js'
 import { createRepositorySettings, sourceLabel } from './repository-settings-view.js'
@@ -199,6 +199,9 @@ export function createFaultInjectionPanel(React) {
       : { ok: true, message: '', error: null }
     const effectiveCommitConfig = task ? { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(task) } : null
     const commitCheck = task ? resolveCommitMessage(effectiveCommitConfig, task, { allowDefaultSummary: commitDraft.summary === null }) : { ok: true, message: '', error: null }
+    const remoteHookRegex = extractRemoteHookRegex(task?.error)
+    const targetGateRegex = remoteHookRegex || DEFAULT_INTRANET_COMMIT_REGEX
+    const showRemoteGateHelper = Boolean(task && (remoteHookRegex || /【问题单号/.test(task.error || '')) && (effectiveCommitConfig?.mode !== 'template' || (remoteHookRegex && effectiveCommitConfig?.pattern !== remoteHookRegex)))
     const statusTone = status => status === 'pushed' || status === 'ready' ? 'good' : ['failed', 'cancelled', 'interrupted'].includes(status) ? 'danger' : 'info'
     return h('section', { className: standalone ? 'pangea-injection-panel is-standalone' : 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
       h('style', null, `
@@ -383,17 +386,22 @@ export function createFaultInjectionPanel(React) {
               h('summary', null, '提交门禁默认项（可选：问题单号 / 修改人 / 审核人，同库自动复用）'),
               h('div', { style: { paddingTop: 8 } },
                 h('label', { className: 'pangea-fi-field' }, h('span', null, '预设提交信息格式'),
-                  h('select', { 'aria-label': '预设提交信息格式', value: step3CommitConfig.mode, disabled: working, onChange: event => setSettings({ ...settings, commit_config: { ...step3CommitConfig, mode: event.target.value } }) },
+                  h('select', { 'aria-label': '预设提交信息格式', value: step3CommitConfig.mode, disabled: working, onChange: event => {
+                    const nextMode = event.target.value
+                    setSettings({ ...settings, commit_config: { ...step3CommitConfig, mode: nextMode, pattern: nextMode === 'template' && !step3CommitConfig.pattern ? DEFAULT_INTRANET_COMMIT_REGEX : step3CommitConfig.pattern } })
+                  } },
                     h('option', { value: 'default' }, '默认简要格式（无门禁钩子仓库）'),
                     h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'))),
                 step3CommitConfig.mode === 'template' ? h(React.Fragment, null,
                   h('div', { style: grid },
-                    field('预设问题单号', step3CommitConfig.issue, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, issue: value } }), { placeholder: '如 AR2026xxxx / DTSxxxx / NA' }),
+                    field('预设问题单号', step3CommitConfig.issue, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, issue: value } }), { placeholder: '如 AR20261118000001 / SR... / DTS...（多个用分号分隔）' }),
                     field('预设修改人', step3CommitConfig.author, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, author: value } }), { placeholder: '工号或姓名' }),
                     field('预设审核人', step3CommitConfig.reviewer, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, reviewer: value } }), { placeholder: '检视人工号或姓名' })),
                   h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 } },
                     h('button', { type: 'button', disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: MULTILINE_GATE_COMMIT_TEMPLATE } }) }, '多行标准模板'),
-                    h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: SINGLELINE_GATE_COMMIT_TEMPLATE } }) }, '单行标准模板')),
+                    h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: SINGLELINE_GATE_COMMIT_TEMPLATE } }) }, '单行标准模板'),
+                    h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: DEFAULT_INTRANET_COMMIT_REGEX } }) }, '填入默认门禁正则'),
+                    step3CommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: '' } }) }, '清空预检正则') : null),
                   field('预设提交信息模板', step3CommitConfig.template, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: value } }), { multiline: true }),
                   field('预设本地预检正则', step3CommitConfig.pattern, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: value } }), { placeholder: '可选：粘贴项目 pre-receive 钩子正则进行本地预检' }),
                   !step3CommitCheck.ok ? h('p', { role: 'status', style: { fontSize: 12, color: '#9c2330', margin: '4px 0 0' } }, step3CommitCheck.error) : null) : null)),
@@ -428,13 +436,19 @@ export function createFaultInjectionPanel(React) {
               onChange: event => setAcknowledged(previous => ({ ...previous, [repo.repo_id]: event.target.checked ? repo.base_commit : '' })) }),
             `${repo.repo_id} 的 ${repo.branch} 上有 ${repo.outgoing_count} 个已有未推送提交；勾选确认后本次会一并推送。`)),
           ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('div', { className: 'pangea-fi-repo-box', style: { marginTop: 14 } },
+            showRemoteGateHelper ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { marginTop: 0 } },
+              h('span', null, '检测到远端 pre-receive 提交门禁规则，可一键载入规则并在原地修正提交说明（无需重新调用模型）。'),
+              h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, mode: 'template', template: previous.template || MULTILINE_GATE_COMMIT_TEMPLATE, pattern: targetGateRegex })) }, '按远端门禁规则填写')) : null,
             h('label', { className: 'pangea-fi-field' }, h('span', null, '提交信息格式'),
-              h('select', { 'aria-label': '提交信息格式', value: effectiveCommitConfig.mode, disabled: working, onChange: event => setCommitDraft(previous => ({ ...previous, mode: event.target.value })) },
+              h('select', { 'aria-label': '提交信息格式', value: effectiveCommitConfig.mode, disabled: working, onChange: event => {
+                const nextMode = event.target.value
+                setCommitDraft(previous => ({ ...previous, mode: nextMode, pattern: nextMode === 'template' && !previous.pattern ? targetGateRegex : previous.pattern }))
+              } },
                 h('option', { value: 'default' }, '默认简要格式（无门禁钩子仓库）'),
                 h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'))),
             effectiveCommitConfig.mode === 'template' ? h(React.Fragment, null,
               h('div', { style: grid },
-                field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 AR2026xxxx / DTSxxxx / NA' }),
+                field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 AR20261118000001 / SR... / DTS...（多个用分号分隔）' }),
                 field('修改人', effectiveCommitConfig.author, value => setCommitDraft(previous => ({ ...previous, author: value })), { placeholder: '工号或姓名' }),
                 field('审核人', effectiveCommitConfig.reviewer, value => setCommitDraft(previous => ({ ...previous, reviewer: value })), { placeholder: '检视人工号或姓名' })),
               field('修改说明', effectiveCommitConfig.summary, value => setCommitDraft(previous => ({ ...previous, summary: value })), { placeholder: '简要说明本次打桩修改内容' }),
@@ -442,7 +456,9 @@ export function createFaultInjectionPanel(React) {
                 h('summary', { style: { fontSize: 12 } }, '自定义模板与本地正则预检（兼容单行 / 多行 pre-receive 钩子）'),
                 h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 8px' } },
                   h('button', { type: 'button', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: MULTILINE_GATE_COMMIT_TEMPLATE })) }, '使用多行门禁模板'),
-                  h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: SINGLELINE_GATE_COMMIT_TEMPLATE })) }, '使用单行门禁模板')),
+                  h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: SINGLELINE_GATE_COMMIT_TEMPLATE })) }, '使用单行门禁模板'),
+                  h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, pattern: DEFAULT_INTRANET_COMMIT_REGEX })) }, '填入默认门禁正则'),
+                  effectiveCommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, pattern: '' })) }, '清空预检正则') : null),
                 field('提交信息模板', effectiveCommitConfig.template, value => setCommitDraft(previous => ({ ...previous, template: value })), { multiline: true }),
                 field('本地预检正则', effectiveCommitConfig.pattern, value => setCommitDraft(previous => ({ ...previous, pattern: value })), { placeholder: '可选：粘贴项目钩子正则进行推送前校验' })),
               h('pre', { 'aria-label': '提交信息预览', style: { whiteSpace: 'pre-wrap', margin: '6px 0', padding: '8px 10px', borderRadius: 6, background: '#f8f9fb', border: '1px solid #e2e6ec', fontSize: 12 } }, commitCheck.message || ''))

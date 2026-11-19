@@ -219,32 +219,36 @@ try {
   await writeFile(hookPath, [
     '#!/bin/sh',
     'set -eu',
+    'RULE=\'^(\\s*【问题单号\\/AR\\/STORY\\/CR】[:：]\\s*((SR\\d{14}|AR\\d{14}|DTS\\d{13}|DTS\\d{8}\\w{11})[;；]*)+([^\\diISAD;；].*)*\\s+【修改人】[:：]\\s*.+\\s+【审核人】[:：]\\s*.+\\s+【修改说明】[:：]\\s*.+\\s*)+$\'',
     'while read oldrev newrev refname; do',
     '  full=$(git log -1 --format=%B "$newrev")',
     '  case "$full" in',
-    '    *【问题单号/AR/STORY/CR】*【修改人】*【审核人】*【修改说明】*) ;;',
-    '    *) echo "门禁拦截：缺少问题单号/修改人/审核人/修改说明" >&2; exit 1 ;;',
+    '    *【问题单号/AR/STORY/CR】：AR2026*【修改人】：*【审核人】：*【修改说明】：*) ;;',
+    '    *) printf "Commit message does not follow the pattern %s\\n" "$RULE" >&2; exit 1 ;;',
     '  esac',
     'done',
     '',
   ].join('\n'))
   await chmod(hookPath, 0o755)
   await click('提交并推送到 main')
-  await until(() => button('重试提交与推送到 main') && container.textContent.includes('门禁拦截：缺少问题单号'))
+  await until(() => button('重试提交与推送到 main') && button('按远端门禁规则填写'))
   assert.ok(container.querySelector('.pangea-fi-banner.danger details[open]'), 'push hook error details must auto-expand')
-  await change('提交信息格式', 'template')
+  await click('按远端门禁规则填写')
   assert.equal(button('重试提交与推送到 main').disabled, true)
   assert.match(container.textContent, /请填写问题单号/)
   assert.equal(container.querySelector('[aria-label="修改说明"]').value, '工程测试夹具')
   await change('问题单号', 'AR20269999')
   await change('修改人', 'h00111111')
   await change('审核人', 'z00222222')
+  assert.equal(button('重试提交与推送到 main').disabled, true)
+  assert.match(container.textContent, /不符合门禁规则.*SR\+14位数字/)
+  await change('问题单号', 'AR20261118000001')
   await until(() => !button('重试提交与推送到 main').disabled)
-  assert.match(container.querySelector('[aria-label="提交信息预览"]').textContent, /【问题单号\/AR\/STORY\/CR】AR20269999\n【修改人】h00111111\n【审核人】z00222222\n【修改说明】工程测试夹具/)
+  assert.match(container.querySelector('[aria-label="提交信息预览"]').textContent, /【问题单号\/AR\/STORY\/CR】：AR20261118000001\n【修改人】：h00111111\n【审核人】：z00222222\n【修改说明】：工程测试夹具/)
   await click('重试提交与推送到 main')
   await until(() => button('在 DSH 浏览器打开构建流水线'))
   assert.equal(modelCalls, callsBeforeRevalidate)
-  assert.match(await injectionGit(remote, ['log', '-1', '--format=%B', 'refs/heads/main']), /【问题单号\/AR\/STORY\/CR】AR20269999/)
+  assert.match(await injectionGit(remote, ['log', '-1', '--format=%B', 'refs/heads/main']), /【问题单号\/AR\/STORY\/CR】：AR20261118000001/)
   await click('更换分析任务')
   await choose('任务甲')
   await until(() => button('在 DSH 浏览器打开构建流水线'))

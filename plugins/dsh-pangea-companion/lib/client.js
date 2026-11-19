@@ -1274,10 +1274,350 @@ window.__ModuleLoader__.load({
       return { entries, matchedCount: entries.length }
     }
 
-    const MULTILINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】{issue}\n【修改人】{author}\n【审核人】{reviewer}\n【修改说明】{summary}'
-    const SINGLELINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】{issue} 【修改人】{author} 【审核人】{reviewer} 【修改说明】{summary}'
+    const MULTILINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】：{issue}\n【修改人】：{author}\n【审核人】：{reviewer}\n【修改说明】：{summary}'
+    const SINGLELINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】：{issue} 【修改人】：{author} 【审核人】：{reviewer} 【修改说明】：{summary}'
+    const DEFAULT_INTRANET_COMMIT_REGEX = '^(\\s*【问题单号\\/AR\\/STORY\\/CR】[:：]\\s*((SR\\d{14}|AR\\d{14}|DTS\\d{13}|DTS\\d{8}\\w{11})[;；]*)+([^\\diISAD;；].*)*\\s+【修改人】[:：]\\s*.+\\s+【审核人】[:：]\\s*.+\\s+【修改说明】[:：]\\s*.+\\s*)+$'
 
-    const EMPTY_GATE_FIELD = /(?:^\s*【([^】\r\n]+)】\s*$|【(问题单号[^】\r\n]*|(?:AR|STORY|CR|DTS)[^】\r\n]*|修改人|审核人|修改说明|提交人|检视人)】\s*(?=\r?\n|$|【))/mu
+    const LEGACY_MULTILINE_GATE_TEMPLATE = '【问题单号/AR/STORY/CR】{issue}\n【修改人】{author}\n【审核人】{reviewer}\n【修改说明】{summary}'
+    const LEGACY_SINGLELINE_GATE_TEMPLATE = '【问题单号/AR/STORY/CR】{issue} 【修改人】{author} 【审核人】{reviewer} 【修改说明】{summary}'
+
+    const EMPTY_GATE_FIELD = /(?:^\s*【([^】\r\n]+)】\s*[:：]?\s*$|【(问题单号[^】\r\n]*|(?:AR|STORY|CR|DTS)[^】\r\n]*|修改人|审核人|修改说明|提交人|检视人)】\s*[:：]?\s*(?=\r?\n|$|【))/mu
+
+    const LINEAR_WS = new Set([' ', '\t', '\n', '\r', '\v', '\f', '\u00a0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000', '\ufeff'])
+    const LINEAR_LINE_TERM = new Set(['\n', '\r', '\u2028', '\u2029'])
+    const isAsciiDigit = c => c >= '0' && c <= '9'
+    const isAsciiWord = c => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_'
+    const linearRegexCache = new Map()
+
+    function normalizeRegexPattern(value) {
+      if (typeof value !== 'string') return ''
+      let trimmed = value.replace(/\0/g, '').replace(/\r?\n/g, '').trim().slice(0, 1000)
+      if (trimmed.length >= 4 && ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"')))) {
+        const inner = trimmed.slice(1, -1).trim()
+        if (inner.startsWith('^') || inner.endsWith('$')) trimmed = inner
+      }
+      return trimmed
+    }
+
+    function extractRemoteHookRegex(errorText) {
+      if (typeof errorText !== 'string' || !errorText) return ''
+      const singleQuoted = errorText.match(/'(\^[^'\r\n]{4,950}\$)'/)
+      if (singleQuoted) return normalizeRegexPattern(singleQuoted[1])
+      const doubleQuoted = errorText.match(/"(\^[^"\r\n]{4,950}\$)"/)
+      if (doubleQuoted) return normalizeRegexPattern(doubleQuoted[1])
+      const bare = errorText.match(/(\^\(\\s\*【问题单号[^\r\n]{4,950}\$)/)
+      if (bare) return normalizeRegexPattern(bare[1])
+      return ''
+    }
+
+    function compilePatternMatcher(rawPattern) {
+      if (linearRegexCache.has(rawPattern)) return linearRegexCache.get(rawPattern)
+      let pattern = rawPattern, ignoreCase = false, multiline = false, dotAll = false
+      const flagMatch = pattern.match(/^\(\?([ims]+)\)/)
+      if (flagMatch) {
+        if (flagMatch[1].includes('i')) ignoreCase = true
+        if (flagMatch[1].includes('m')) multiline = true
+        if (flagMatch[1].includes('s')) dotAll = true
+        pattern = pattern.slice(flagMatch[0].length)
+      }
+      const v8Flags = `u${ignoreCase ? 'i' : ''}${multiline ? 'm' : ''}${dotAll ? 's' : ''}`
+      const v8Regex = new RegExp(pattern, v8Flags)
+
+      const chars = Array.from(pattern)
+      let pos = 0, aborted = false
+      const states = []
+      const newState = (op, extra = {}) => {
+        if (states.length > 4096) { aborted = true; return 0 }
+        const id = states.length
+        states.push({ id, op, out: [], ...extra })
+        return id
+      }
+      const matchChar = target => {
+        if (!ignoreCase) return ch => ch === target
+        const folded = target.toLowerCase()
+        return ch => ch === target || ch.toLowerCase() === folded
+      }
+
+      function readEscape() {
+        const c = chars[pos++]
+        if (c === undefined) return null
+        if (c === 'd') return { kind: 'pred', fn: isAsciiDigit }
+        if (c === 'D') return { kind: 'pred', fn: x => !isAsciiDigit(x) }
+        if (c === 'w') return { kind: 'pred', fn: isAsciiWord }
+        if (c === 'W') return { kind: 'pred', fn: x => !isAsciiWord(x) }
+        if (c === 's') return { kind: 'pred', fn: x => LINEAR_WS.has(x) }
+        if (c === 'S') return { kind: 'pred', fn: x => !LINEAR_WS.has(x) }
+        if (c === 'b') return { kind: 'assert', mode: 'wb' }
+        if (c === 'B') return { kind: 'assert', mode: 'nwb' }
+        if (c >= '1' && c <= '9') return null
+        if (c === 'n') return { kind: 'char', ch: '\n' }
+        if (c === 'r') return { kind: 'char', ch: '\r' }
+        if (c === 't') return { kind: 'char', ch: '\t' }
+        if (c === 'v') return { kind: 'char', ch: '\v' }
+        if (c === 'f') return { kind: 'char', ch: '\f' }
+        if (c === '0') return { kind: 'char', ch: '\0' }
+        if (c === 'x') {
+          const hex = chars.slice(pos, pos + 2).join(''); pos += 2
+          return { kind: 'char', ch: String.fromCodePoint(parseInt(hex, 16)) }
+        }
+        if (c === 'u') {
+          if (chars[pos] === '{') {
+            const end = chars.indexOf('}', pos + 1)
+            const hex = chars.slice(pos + 1, end).join(''); pos = end + 1
+            return { kind: 'char', ch: String.fromCodePoint(parseInt(hex, 16)) }
+          }
+          const hex = chars.slice(pos, pos + 4).join(''); pos += 4
+          return { kind: 'char', ch: String.fromCodePoint(parseInt(hex, 16)) }
+        }
+        if (c === 'p' || c === 'P') return null
+        return { kind: 'char', ch: c }
+      }
+
+      function parseClass() {
+        let negate = false
+        if (chars[pos] === '^') { negate = true; pos++ }
+        const items = []
+        while (pos < chars.length && chars[pos] !== ']') {
+          let first
+          if (chars[pos] === '\\') { pos++; first = readEscape(); if (!first || first.kind === 'assert') return null }
+          else first = { kind: 'char', ch: chars[pos++] }
+          if (first.kind === 'char' && chars[pos] === '-' && pos + 1 < chars.length && chars[pos + 1] !== ']') {
+            const save = pos; pos++
+            let second
+            if (chars[pos] === '\\') { pos++; second = readEscape(); if (!second) return null }
+            else second = { kind: 'char', ch: chars[pos++] }
+            if (second.kind === 'char') {
+              const lo = first.ch.codePointAt(0), hi = second.ch.codePointAt(0)
+              const inRange = c => { const cp = c.codePointAt(0); return cp >= lo && cp <= hi }
+              items.push(ignoreCase ? ch => inRange(ch) || inRange(ch.toLowerCase()) || inRange(ch.toUpperCase()) : inRange)
+              continue
+            }
+            pos = save
+          }
+          items.push(first.kind === 'char' ? matchChar(first.ch) : first.fn)
+        }
+        pos++
+        const matchFn = ch => {
+          const hit = items.some(fn => fn(ch))
+          return negate ? !hit : hit
+        }
+        return () => { const s = newState('pred', { fn: matchFn }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+      }
+
+      function repeatFrag(factory, min, max) {
+        if (aborted || (max !== Infinity && max > 256) || min > 256) return null
+        const start = newState('eps')
+        let cur = start
+        for (let i = 0; i < min; i++) {
+          const f = factory()
+          if (!f || aborted) return null
+          states[cur].out.push(f.start)
+          cur = f.end
+        }
+        if (max === Infinity) {
+          const loop = newState('eps'), after = newState('eps')
+          const f = factory()
+          if (!f || aborted) return null
+          states[cur].out.push(loop)
+          states[loop].out.push(f.start, after)
+          states[f.end].out.push(loop)
+          return { start, end: after }
+        }
+        const after = newState('eps')
+        for (let i = min; i < max; i++) {
+          const f = factory()
+          if (!f || aborted) return null
+          states[cur].out.push(f.start, after)
+          cur = f.end
+        }
+        states[cur].out.push(after)
+        return { start, end: after }
+      }
+
+      function parseAtom() {
+        const c = chars[pos]
+        if (c === '(') {
+          pos++
+          if (chars[pos] === '?') {
+            if (chars[pos + 1] === ':') pos += 2
+            else return null
+          }
+          const inner = parseAlt()
+          if (!inner || chars[pos] !== ')') return null
+          pos++
+          return inner
+        }
+        if (c === '[') { pos++; return parseClass() }
+        if (c === '.') {
+          pos++
+          const fn = dotAll ? () => true : ch => !LINEAR_LINE_TERM.has(ch)
+          return () => { const s = newState('pred', { fn }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+        }
+        if (c === '^') { pos++; return () => { const s = newState('assert', { mode: 'bol' }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } } }
+        if (c === '$') { pos++; return () => { const s = newState('assert', { mode: 'eol' }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } } }
+        if (c === '\\') {
+          pos++
+          const esc = readEscape()
+          if (!esc) return null
+          if (esc.kind === 'assert') return () => { const s = newState('assert', { mode: esc.mode }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+          const fn = esc.kind === 'pred' ? esc.fn : matchChar(esc.ch)
+          return () => { const s = newState('pred', { fn }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+        }
+        pos++
+        const fn = matchChar(c)
+        return () => { const s = newState('pred', { fn }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+      }
+
+      function parseQuantified() {
+        const atom = parseAtom()
+        if (!atom) return null
+        let min = 1, max = 1, hasQuant = false
+        const q = chars[pos]
+        if (q === '*') { min = 0; max = Infinity; pos++; hasQuant = true }
+        else if (q === '+') { min = 1; max = Infinity; pos++; hasQuant = true }
+        else if (q === '?') { min = 0; max = 1; pos++; hasQuant = true }
+        else if (q === '{') {
+          const rest = chars.slice(pos).join('')
+          const m = rest.match(/^\{(\d+)(?:,(\d*))?\}/)
+          if (m) {
+            min = Number(m[1])
+            max = m[2] === undefined ? min : m[2] === '' ? Infinity : Number(m[2])
+            pos += m[0].length
+            hasQuant = true
+          }
+        }
+        if (hasQuant && chars[pos] === '?') pos++
+        if (!hasQuant) return atom
+        return () => repeatFrag(atom, min, max)
+      }
+
+      function parseSeq() {
+        const parts = []
+        while (pos < chars.length && chars[pos] !== '|' && chars[pos] !== ')') {
+          const item = parseQuantified()
+          if (!item) return null
+          parts.push(item)
+        }
+        if (!parts.length) return () => { const s = newState('eps'); return { start: s, end: s } }
+        return () => {
+          const built = parts.map(fn => fn())
+          if (aborted || built.some(x => !x)) return null
+          for (let i = 0; i < built.length - 1; i++) states[built[i].end].out.push(built[i + 1].start)
+          return { start: built[0].start, end: built[built.length - 1].end }
+        }
+      }
+
+      function parseAlt() {
+        let left = parseSeq()
+        if (!left) return null
+        while (chars[pos] === '|') {
+          pos++
+          const right = parseSeq()
+          if (!right) return null
+          const prev = left
+          left = () => {
+            const a = prev(), b = right()
+            if (aborted || !a || !b) return null
+            const s = newState('eps'), e = newState('eps')
+            states[s].out.push(a.start, b.start)
+            states[a.end].out.push(e)
+            states[b.end].out.push(e)
+            return { start: s, end: e }
+          }
+        }
+        return left
+      }
+
+      const rootFactory = parseAlt()
+      let matcher = null
+      if (rootFactory && pos === chars.length && !aborted) {
+        const root = rootFactory()
+        if (root && !aborted) {
+          const searchStart = newState('eps')
+          const anyChar = newState('pred', { fn: () => true })
+          const accept = newState('accept')
+          if (!aborted) {
+            states[searchStart].out.push(root.start, anyChar)
+            states[anyChar].out.push(searchStart)
+            states[root.end].out.push(accept)
+            const assertHolds = (mode, input, idx) => {
+              if (mode === 'bol') return idx === 0 || (multiline && LINEAR_LINE_TERM.has(input[idx - 1]))
+              if (mode === 'eol') return idx === input.length || (multiline && LINEAR_LINE_TERM.has(input[idx]))
+              const leftW = idx > 0 && isAsciiWord(input[idx - 1])
+              const rightW = idx < input.length && isAsciiWord(input[idx])
+              return mode === 'wb' ? leftW !== rightW : leftW === rightW
+            }
+            matcher = text => {
+              const input = Array.from(text)
+              const seen = new Int32Array(states.length).fill(-1)
+              let stepToken = 0, current = []
+              const addState = (id, list, idx) => {
+                if (seen[id] === stepToken) return
+                seen[id] = stepToken
+                const st = states[id]
+                if (st.op === 'eps') {
+                  for (const next of st.out) addState(next, list, idx)
+                } else if (st.op === 'assert') {
+                  if (assertHolds(st.mode, input, idx)) {
+                    for (const next of st.out) addState(next, list, idx)
+                  }
+                } else {
+                  list.push(id)
+                }
+              }
+              stepToken++
+              addState(searchStart, current, 0)
+              if (seen[accept] === stepToken) return true
+              for (let i = 0; i < input.length; i++) {
+                const ch = input[i], nextList = []
+                stepToken++
+                for (const id of current) {
+                  const st = states[id]
+                  if (st.op === 'pred' && st.fn(ch)) {
+                    for (const next of st.out) addState(next, nextList, i + 1)
+                  }
+                }
+                if (seen[accept] === stepToken) return true
+                current = nextList
+                if (!current.length) return false
+              }
+              return false
+            }
+          }
+        }
+      }
+      if (!matcher) {
+        // Only allow V8 backtracking fallback for JS lookaround expressions without nested quantifiers
+        if (/\([^)]*[*+}][^)]*\)\s*[*+{]/.test(pattern)) {
+          throw new Error('包含不支持的回溯嵌套结构，请改用 RE2 兼容门禁正则')
+        }
+        matcher = text => v8Regex.test(text)
+      }
+      if (linearRegexCache.size >= 32) linearRegexCache.delete(linearRegexCache.keys().next().value)
+      linearRegexCache.set(rawPattern, matcher)
+      return matcher
+    }
+
+    const GATE_ISSUE_LINE_REGEX = '^((SR\\d{14}|AR\\d{14}|DTS\\d{13}|DTS\\d{8}\\w{11})[;；]*)+([^\\diISAD;；\\r\\n][^\\r\\n]*)*$'
+
+    function diagnoseGatePatternMismatch(message, trimmedPattern) {
+      if (trimmedPattern.includes('SR\\d{14}') && trimmedPattern.includes('AR\\d{14}')) {
+        const requiredHeaders = ['问题单号/AR/STORY/CR', '修改人', '审核人', '修改说明']
+        const missingColonHeader = requiredHeaders.find(label => !new RegExp(`【${label.replace(/\//g, '\\/')}】[:：]`, 'u').test(message))
+        if (missingColonHeader) {
+          return `提交信息中「【${missingColonHeader}】」缺少标题或紧邻冒号（示例：【${missingColonHeader}】：内容）`
+        }
+        const issueMatch = message.match(/【问题单号\/AR\/STORY\/CR】[:：]\s*([\s\S]*?)(?=\r?\n|\s+【修改人】[:：]|$)/u)
+        const issueVal = (issueMatch?.[1] || '').trim()
+        const issueMatcher = compilePatternMatcher(GATE_ISSUE_LINE_REGEX)
+        if (!issueMatcher(issueVal)) {
+          const shown = issueVal.length > 32 ? `${issueVal.slice(0, 32)}…` : (issueVal || '空')
+          return `问题单号「${shown}」不符合门禁规则：需为 SR+14位数字、AR+14位数字、DTS+13位数字 或 DTS+8位数字+11位字符（多个单号用分号紧邻分隔，不支持 NA）`
+        }
+        return '提交信息未通过门禁正则校验：请确保按「问题单号 → 修改人 → 审核人 → 修改说明」顺序排列，且单字段内不含换行'
+      }
+      return `提交信息未通过本地预检正则（${trimmedPattern}）`
+    }
 
     function defaultCommitSummary(task) {
       const raw = typeof task?.result?.summary === 'string' && task.result.summary.trim()
@@ -1292,16 +1632,19 @@ window.__ModuleLoader__.load({
       const src = input && typeof input === 'object' ? input : {}
       const base = fallback && typeof fallback === 'object' ? fallback : {}
       const mode = (src.mode ?? base.mode) === 'template' ? 'template' : 'default'
-      const clean = (val, max = 300) => typeof val === 'string' ? val.replace(/\0/g, '').trim().slice(0, max) : ''
+      const cleanLine = (val, max = 300, joiner = ' ') => typeof val === 'string' ? val.replace(/\0/g, '').replace(/\s*\r?\n\s*/g, joiner).trim().slice(0, max) : ''
       const templateRaw = typeof src.template === 'string' ? src.template : typeof base.template === 'string' ? base.template : ''
+      let normalizedTemplate = templateRaw.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 2000) || MULTILINE_GATE_COMMIT_TEMPLATE
+      if (normalizedTemplate === LEGACY_MULTILINE_GATE_TEMPLATE) normalizedTemplate = MULTILINE_GATE_COMMIT_TEMPLATE
+      else if (normalizedTemplate === LEGACY_SINGLELINE_GATE_TEMPLATE) normalizedTemplate = SINGLELINE_GATE_COMMIT_TEMPLATE
       return {
         mode,
-        template: templateRaw.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 2000) || MULTILINE_GATE_COMMIT_TEMPLATE,
-        issue: clean(src.issue ?? base.issue, 300),
-        author: clean(src.author ?? base.author, 200),
-        reviewer: clean(src.reviewer ?? base.reviewer, 200),
-        summary: clean(src.summary, 500),
-        pattern: clean(src.pattern ?? base.pattern, 500),
+        template: normalizedTemplate,
+        issue: cleanLine(src.issue ?? base.issue, 300, ' '),
+        author: cleanLine(src.author ?? base.author, 200, ' '),
+        reviewer: cleanLine(src.reviewer ?? base.reviewer, 200, ' '),
+        summary: cleanLine(src.summary, 500, '；'),
+        pattern: normalizeRegexPattern(src.pattern ?? base.pattern),
         custom_message: typeof src.custom_message === 'string' ? src.custom_message.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 8000) : '',
       }
     }
@@ -1317,12 +1660,12 @@ window.__ModuleLoader__.load({
         const label = emptyField[1] || emptyField[2] || '必填项'
         return { ok: false, message, error: `提交信息中「【${label}】」未填写内容，请补全后再提交` }
       }
-      const trimmedPattern = typeof pattern === 'string' ? pattern.trim() : ''
+      const trimmedPattern = normalizeRegexPattern(pattern)
       if (trimmedPattern) {
-        let regex
-        try { regex = new RegExp(trimmedPattern, 'u') }
+        let matcher
+        try { matcher = compilePatternMatcher(trimmedPattern) }
         catch (error) { return { ok: false, message, error: `本地预检正则无效：${error.message}` } }
-        if (!regex.test(message)) return { ok: false, message, error: `提交信息未通过本地预检正则（${trimmedPattern}）` }
+        if (!matcher(message)) return { ok: false, message, error: diagnoseGatePatternMismatch(message, trimmedPattern) }
       }
       return { ok: true, message, error: null }
     }
@@ -1343,7 +1686,7 @@ window.__ModuleLoader__.load({
         task_id: String(task?.id || ''),
       }
       const labels = {
-        issue: '问题单号/AR/STORY/CR（无单号时按项目规范填 NA）',
+        issue: '问题单号（如 AR/SR+14位数字 或 DTS单号）',
         author: '修改人',
         reviewer: '审核人',
         summary: '修改说明',
@@ -1361,15 +1704,16 @@ window.__ModuleLoader__.load({
     }
 
 
-    return { caseKeyOf, duplicateCaseKeySet, classifyInjectionCandidate, buildVerificationShellScript, parseVerificationLog, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE, defaultCommitSummary, normalizeCommitConfig, validateRawCommitMessage, resolveCommitMessage }
+
+    return { caseKeyOf, duplicateCaseKeySet, classifyInjectionCandidate, buildVerificationShellScript, parseVerificationLog, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE, DEFAULT_INTRANET_COMMIT_REGEX, normalizeRegexPattern, extractRemoteHookRegex, defaultCommitSummary, normalizeCommitConfig, validateRawCommitMessage, resolveCommitMessage }
     })()
 
     const __faultInjectionView = (() => {
     const { analysisExecutionState, loadAnalysisAgentModels } = __agentModelSelection
     const {
-      MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
+      DEFAULT_INTRANET_COMMIT_REGEX, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
       buildVerificationShellScript, caseKeyOf, classifyInjectionCandidate,
-      defaultCommitSummary, duplicateCaseKeySet, normalizeCommitConfig,
+      defaultCommitSummary, duplicateCaseKeySet, extractRemoteHookRegex, normalizeCommitConfig,
       parseVerificationLog, resolveCommitMessage,
     } = __faultInjectionCandidates
     const { createRepositorySettings, sourceLabel } = __repositorySettingsView
@@ -1566,6 +1910,9 @@ window.__ModuleLoader__.load({
           : { ok: true, message: '', error: null }
         const effectiveCommitConfig = task ? { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(task) } : null
         const commitCheck = task ? resolveCommitMessage(effectiveCommitConfig, task, { allowDefaultSummary: commitDraft.summary === null }) : { ok: true, message: '', error: null }
+        const remoteHookRegex = extractRemoteHookRegex(task?.error)
+        const targetGateRegex = remoteHookRegex || DEFAULT_INTRANET_COMMIT_REGEX
+        const showRemoteGateHelper = Boolean(task && (remoteHookRegex || /【问题单号/.test(task.error || '')) && (effectiveCommitConfig?.mode !== 'template' || (remoteHookRegex && effectiveCommitConfig?.pattern !== remoteHookRegex)))
         const statusTone = status => status === 'pushed' || status === 'ready' ? 'good' : ['failed', 'cancelled', 'interrupted'].includes(status) ? 'danger' : 'info'
         return h('section', { className: standalone ? 'pangea-injection-panel is-standalone' : 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
           h('style', null, `
@@ -1750,17 +2097,22 @@ window.__ModuleLoader__.load({
                   h('summary', null, '提交门禁默认项（可选：问题单号 / 修改人 / 审核人，同库自动复用）'),
                   h('div', { style: { paddingTop: 8 } },
                     h('label', { className: 'pangea-fi-field' }, h('span', null, '预设提交信息格式'),
-                      h('select', { 'aria-label': '预设提交信息格式', value: step3CommitConfig.mode, disabled: working, onChange: event => setSettings({ ...settings, commit_config: { ...step3CommitConfig, mode: event.target.value } }) },
+                      h('select', { 'aria-label': '预设提交信息格式', value: step3CommitConfig.mode, disabled: working, onChange: event => {
+                        const nextMode = event.target.value
+                        setSettings({ ...settings, commit_config: { ...step3CommitConfig, mode: nextMode, pattern: nextMode === 'template' && !step3CommitConfig.pattern ? DEFAULT_INTRANET_COMMIT_REGEX : step3CommitConfig.pattern } })
+                      } },
                         h('option', { value: 'default' }, '默认简要格式（无门禁钩子仓库）'),
                         h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'))),
                     step3CommitConfig.mode === 'template' ? h(React.Fragment, null,
                       h('div', { style: grid },
-                        field('预设问题单号', step3CommitConfig.issue, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, issue: value } }), { placeholder: '如 AR2026xxxx / DTSxxxx / NA' }),
+                        field('预设问题单号', step3CommitConfig.issue, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, issue: value } }), { placeholder: '如 AR20261118000001 / SR... / DTS...（多个用分号分隔）' }),
                         field('预设修改人', step3CommitConfig.author, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, author: value } }), { placeholder: '工号或姓名' }),
                         field('预设审核人', step3CommitConfig.reviewer, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, reviewer: value } }), { placeholder: '检视人工号或姓名' })),
                       h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 } },
                         h('button', { type: 'button', disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: MULTILINE_GATE_COMMIT_TEMPLATE } }) }, '多行标准模板'),
-                        h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: SINGLELINE_GATE_COMMIT_TEMPLATE } }) }, '单行标准模板')),
+                        h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: SINGLELINE_GATE_COMMIT_TEMPLATE } }) }, '单行标准模板'),
+                        h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: DEFAULT_INTRANET_COMMIT_REGEX } }) }, '填入默认门禁正则'),
+                        step3CommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: '' } }) }, '清空预检正则') : null),
                       field('预设提交信息模板', step3CommitConfig.template, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: value } }), { multiline: true }),
                       field('预设本地预检正则', step3CommitConfig.pattern, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: value } }), { placeholder: '可选：粘贴项目 pre-receive 钩子正则进行本地预检' }),
                       !step3CommitCheck.ok ? h('p', { role: 'status', style: { fontSize: 12, color: '#9c2330', margin: '4px 0 0' } }, step3CommitCheck.error) : null) : null)),
@@ -1795,13 +2147,19 @@ window.__ModuleLoader__.load({
                   onChange: event => setAcknowledged(previous => ({ ...previous, [repo.repo_id]: event.target.checked ? repo.base_commit : '' })) }),
                 `${repo.repo_id} 的 ${repo.branch} 上有 ${repo.outgoing_count} 个已有未推送提交；勾选确认后本次会一并推送。`)),
               ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('div', { className: 'pangea-fi-repo-box', style: { marginTop: 14 } },
+                showRemoteGateHelper ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { marginTop: 0 } },
+                  h('span', null, '检测到远端 pre-receive 提交门禁规则，可一键载入规则并在原地修正提交说明（无需重新调用模型）。'),
+                  h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, mode: 'template', template: previous.template || MULTILINE_GATE_COMMIT_TEMPLATE, pattern: targetGateRegex })) }, '按远端门禁规则填写')) : null,
                 h('label', { className: 'pangea-fi-field' }, h('span', null, '提交信息格式'),
-                  h('select', { 'aria-label': '提交信息格式', value: effectiveCommitConfig.mode, disabled: working, onChange: event => setCommitDraft(previous => ({ ...previous, mode: event.target.value })) },
+                  h('select', { 'aria-label': '提交信息格式', value: effectiveCommitConfig.mode, disabled: working, onChange: event => {
+                    const nextMode = event.target.value
+                    setCommitDraft(previous => ({ ...previous, mode: nextMode, pattern: nextMode === 'template' && !previous.pattern ? targetGateRegex : previous.pattern }))
+                  } },
                     h('option', { value: 'default' }, '默认简要格式（无门禁钩子仓库）'),
                     h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'))),
                 effectiveCommitConfig.mode === 'template' ? h(React.Fragment, null,
                   h('div', { style: grid },
-                    field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 AR2026xxxx / DTSxxxx / NA' }),
+                    field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 AR20261118000001 / SR... / DTS...（多个用分号分隔）' }),
                     field('修改人', effectiveCommitConfig.author, value => setCommitDraft(previous => ({ ...previous, author: value })), { placeholder: '工号或姓名' }),
                     field('审核人', effectiveCommitConfig.reviewer, value => setCommitDraft(previous => ({ ...previous, reviewer: value })), { placeholder: '检视人工号或姓名' })),
                   field('修改说明', effectiveCommitConfig.summary, value => setCommitDraft(previous => ({ ...previous, summary: value })), { placeholder: '简要说明本次打桩修改内容' }),
@@ -1809,7 +2167,9 @@ window.__ModuleLoader__.load({
                     h('summary', { style: { fontSize: 12 } }, '自定义模板与本地正则预检（兼容单行 / 多行 pre-receive 钩子）'),
                     h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 8px' } },
                       h('button', { type: 'button', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: MULTILINE_GATE_COMMIT_TEMPLATE })) }, '使用多行门禁模板'),
-                      h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: SINGLELINE_GATE_COMMIT_TEMPLATE })) }, '使用单行门禁模板')),
+                      h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: SINGLELINE_GATE_COMMIT_TEMPLATE })) }, '使用单行门禁模板'),
+                      h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, pattern: DEFAULT_INTRANET_COMMIT_REGEX })) }, '填入默认门禁正则'),
+                      effectiveCommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, pattern: '' })) }, '清空预检正则') : null),
                     field('提交信息模板', effectiveCommitConfig.template, value => setCommitDraft(previous => ({ ...previous, template: value })), { multiline: true }),
                     field('本地预检正则', effectiveCommitConfig.pattern, value => setCommitDraft(previous => ({ ...previous, pattern: value })), { placeholder: '可选：粘贴项目钩子正则进行推送前校验' })),
                   h('pre', { 'aria-label': '提交信息预览', style: { whiteSpace: 'pre-wrap', margin: '6px 0', padding: '8px 10px', borderRadius: 6, background: '#f8f9fb', border: '1px solid #e2e6ec', fontSize: 12 } }, commitCheck.message || ''))

@@ -280,10 +280,350 @@ export function parseVerificationLog(logText, task) {
   return { entries, matchedCount: entries.length }
 }
 
-export const MULTILINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】{issue}\n【修改人】{author}\n【审核人】{reviewer}\n【修改说明】{summary}'
-export const SINGLELINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】{issue} 【修改人】{author} 【审核人】{reviewer} 【修改说明】{summary}'
+export const MULTILINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】：{issue}\n【修改人】：{author}\n【审核人】：{reviewer}\n【修改说明】：{summary}'
+export const SINGLELINE_GATE_COMMIT_TEMPLATE = '【问题单号/AR/STORY/CR】：{issue} 【修改人】：{author} 【审核人】：{reviewer} 【修改说明】：{summary}'
+export const DEFAULT_INTRANET_COMMIT_REGEX = '^(\\s*【问题单号\\/AR\\/STORY\\/CR】[:：]\\s*((SR\\d{14}|AR\\d{14}|DTS\\d{13}|DTS\\d{8}\\w{11})[;；]*)+([^\\diISAD;；].*)*\\s+【修改人】[:：]\\s*.+\\s+【审核人】[:：]\\s*.+\\s+【修改说明】[:：]\\s*.+\\s*)+$'
 
-const EMPTY_GATE_FIELD = /(?:^\s*【([^】\r\n]+)】\s*$|【(问题单号[^】\r\n]*|(?:AR|STORY|CR|DTS)[^】\r\n]*|修改人|审核人|修改说明|提交人|检视人)】\s*(?=\r?\n|$|【))/mu
+const LEGACY_MULTILINE_GATE_TEMPLATE = '【问题单号/AR/STORY/CR】{issue}\n【修改人】{author}\n【审核人】{reviewer}\n【修改说明】{summary}'
+const LEGACY_SINGLELINE_GATE_TEMPLATE = '【问题单号/AR/STORY/CR】{issue} 【修改人】{author} 【审核人】{reviewer} 【修改说明】{summary}'
+
+const EMPTY_GATE_FIELD = /(?:^\s*【([^】\r\n]+)】\s*[:：]?\s*$|【(问题单号[^】\r\n]*|(?:AR|STORY|CR|DTS)[^】\r\n]*|修改人|审核人|修改说明|提交人|检视人)】\s*[:：]?\s*(?=\r?\n|$|【))/mu
+
+const LINEAR_WS = new Set([' ', '\t', '\n', '\r', '\v', '\f', '\u00a0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200a', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000', '\ufeff'])
+const LINEAR_LINE_TERM = new Set(['\n', '\r', '\u2028', '\u2029'])
+const isAsciiDigit = c => c >= '0' && c <= '9'
+const isAsciiWord = c => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_'
+const linearRegexCache = new Map()
+
+export function normalizeRegexPattern(value) {
+  if (typeof value !== 'string') return ''
+  let trimmed = value.replace(/\0/g, '').replace(/\r?\n/g, '').trim().slice(0, 1000)
+  if (trimmed.length >= 4 && ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"')))) {
+    const inner = trimmed.slice(1, -1).trim()
+    if (inner.startsWith('^') || inner.endsWith('$')) trimmed = inner
+  }
+  return trimmed
+}
+
+export function extractRemoteHookRegex(errorText) {
+  if (typeof errorText !== 'string' || !errorText) return ''
+  const singleQuoted = errorText.match(/'(\^[^'\r\n]{4,950}\$)'/)
+  if (singleQuoted) return normalizeRegexPattern(singleQuoted[1])
+  const doubleQuoted = errorText.match(/"(\^[^"\r\n]{4,950}\$)"/)
+  if (doubleQuoted) return normalizeRegexPattern(doubleQuoted[1])
+  const bare = errorText.match(/(\^\(\\s\*【问题单号[^\r\n]{4,950}\$)/)
+  if (bare) return normalizeRegexPattern(bare[1])
+  return ''
+}
+
+function compilePatternMatcher(rawPattern) {
+  if (linearRegexCache.has(rawPattern)) return linearRegexCache.get(rawPattern)
+  let pattern = rawPattern, ignoreCase = false, multiline = false, dotAll = false
+  const flagMatch = pattern.match(/^\(\?([ims]+)\)/)
+  if (flagMatch) {
+    if (flagMatch[1].includes('i')) ignoreCase = true
+    if (flagMatch[1].includes('m')) multiline = true
+    if (flagMatch[1].includes('s')) dotAll = true
+    pattern = pattern.slice(flagMatch[0].length)
+  }
+  const v8Flags = `u${ignoreCase ? 'i' : ''}${multiline ? 'm' : ''}${dotAll ? 's' : ''}`
+  const v8Regex = new RegExp(pattern, v8Flags)
+
+  const chars = Array.from(pattern)
+  let pos = 0, aborted = false
+  const states = []
+  const newState = (op, extra = {}) => {
+    if (states.length > 4096) { aborted = true; return 0 }
+    const id = states.length
+    states.push({ id, op, out: [], ...extra })
+    return id
+  }
+  const matchChar = target => {
+    if (!ignoreCase) return ch => ch === target
+    const folded = target.toLowerCase()
+    return ch => ch === target || ch.toLowerCase() === folded
+  }
+
+  function readEscape() {
+    const c = chars[pos++]
+    if (c === undefined) return null
+    if (c === 'd') return { kind: 'pred', fn: isAsciiDigit }
+    if (c === 'D') return { kind: 'pred', fn: x => !isAsciiDigit(x) }
+    if (c === 'w') return { kind: 'pred', fn: isAsciiWord }
+    if (c === 'W') return { kind: 'pred', fn: x => !isAsciiWord(x) }
+    if (c === 's') return { kind: 'pred', fn: x => LINEAR_WS.has(x) }
+    if (c === 'S') return { kind: 'pred', fn: x => !LINEAR_WS.has(x) }
+    if (c === 'b') return { kind: 'assert', mode: 'wb' }
+    if (c === 'B') return { kind: 'assert', mode: 'nwb' }
+    if (c >= '1' && c <= '9') return null
+    if (c === 'n') return { kind: 'char', ch: '\n' }
+    if (c === 'r') return { kind: 'char', ch: '\r' }
+    if (c === 't') return { kind: 'char', ch: '\t' }
+    if (c === 'v') return { kind: 'char', ch: '\v' }
+    if (c === 'f') return { kind: 'char', ch: '\f' }
+    if (c === '0') return { kind: 'char', ch: '\0' }
+    if (c === 'x') {
+      const hex = chars.slice(pos, pos + 2).join(''); pos += 2
+      return { kind: 'char', ch: String.fromCodePoint(parseInt(hex, 16)) }
+    }
+    if (c === 'u') {
+      if (chars[pos] === '{') {
+        const end = chars.indexOf('}', pos + 1)
+        const hex = chars.slice(pos + 1, end).join(''); pos = end + 1
+        return { kind: 'char', ch: String.fromCodePoint(parseInt(hex, 16)) }
+      }
+      const hex = chars.slice(pos, pos + 4).join(''); pos += 4
+      return { kind: 'char', ch: String.fromCodePoint(parseInt(hex, 16)) }
+    }
+    if (c === 'p' || c === 'P') return null
+    return { kind: 'char', ch: c }
+  }
+
+  function parseClass() {
+    let negate = false
+    if (chars[pos] === '^') { negate = true; pos++ }
+    const items = []
+    while (pos < chars.length && chars[pos] !== ']') {
+      let first
+      if (chars[pos] === '\\') { pos++; first = readEscape(); if (!first || first.kind === 'assert') return null }
+      else first = { kind: 'char', ch: chars[pos++] }
+      if (first.kind === 'char' && chars[pos] === '-' && pos + 1 < chars.length && chars[pos + 1] !== ']') {
+        const save = pos; pos++
+        let second
+        if (chars[pos] === '\\') { pos++; second = readEscape(); if (!second) return null }
+        else second = { kind: 'char', ch: chars[pos++] }
+        if (second.kind === 'char') {
+          const lo = first.ch.codePointAt(0), hi = second.ch.codePointAt(0)
+          const inRange = c => { const cp = c.codePointAt(0); return cp >= lo && cp <= hi }
+          items.push(ignoreCase ? ch => inRange(ch) || inRange(ch.toLowerCase()) || inRange(ch.toUpperCase()) : inRange)
+          continue
+        }
+        pos = save
+      }
+      items.push(first.kind === 'char' ? matchChar(first.ch) : first.fn)
+    }
+    pos++
+    const matchFn = ch => {
+      const hit = items.some(fn => fn(ch))
+      return negate ? !hit : hit
+    }
+    return () => { const s = newState('pred', { fn: matchFn }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+  }
+
+  function repeatFrag(factory, min, max) {
+    if (aborted || (max !== Infinity && max > 256) || min > 256) return null
+    const start = newState('eps')
+    let cur = start
+    for (let i = 0; i < min; i++) {
+      const f = factory()
+      if (!f || aborted) return null
+      states[cur].out.push(f.start)
+      cur = f.end
+    }
+    if (max === Infinity) {
+      const loop = newState('eps'), after = newState('eps')
+      const f = factory()
+      if (!f || aborted) return null
+      states[cur].out.push(loop)
+      states[loop].out.push(f.start, after)
+      states[f.end].out.push(loop)
+      return { start, end: after }
+    }
+    const after = newState('eps')
+    for (let i = min; i < max; i++) {
+      const f = factory()
+      if (!f || aborted) return null
+      states[cur].out.push(f.start, after)
+      cur = f.end
+    }
+    states[cur].out.push(after)
+    return { start, end: after }
+  }
+
+  function parseAtom() {
+    const c = chars[pos]
+    if (c === '(') {
+      pos++
+      if (chars[pos] === '?') {
+        if (chars[pos + 1] === ':') pos += 2
+        else return null
+      }
+      const inner = parseAlt()
+      if (!inner || chars[pos] !== ')') return null
+      pos++
+      return inner
+    }
+    if (c === '[') { pos++; return parseClass() }
+    if (c === '.') {
+      pos++
+      const fn = dotAll ? () => true : ch => !LINEAR_LINE_TERM.has(ch)
+      return () => { const s = newState('pred', { fn }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+    }
+    if (c === '^') { pos++; return () => { const s = newState('assert', { mode: 'bol' }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } } }
+    if (c === '$') { pos++; return () => { const s = newState('assert', { mode: 'eol' }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } } }
+    if (c === '\\') {
+      pos++
+      const esc = readEscape()
+      if (!esc) return null
+      if (esc.kind === 'assert') return () => { const s = newState('assert', { mode: esc.mode }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+      const fn = esc.kind === 'pred' ? esc.fn : matchChar(esc.ch)
+      return () => { const s = newState('pred', { fn }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+    }
+    pos++
+    const fn = matchChar(c)
+    return () => { const s = newState('pred', { fn }), e = newState('eps'); states[s].out.push(e); return { start: s, end: e } }
+  }
+
+  function parseQuantified() {
+    const atom = parseAtom()
+    if (!atom) return null
+    let min = 1, max = 1, hasQuant = false
+    const q = chars[pos]
+    if (q === '*') { min = 0; max = Infinity; pos++; hasQuant = true }
+    else if (q === '+') { min = 1; max = Infinity; pos++; hasQuant = true }
+    else if (q === '?') { min = 0; max = 1; pos++; hasQuant = true }
+    else if (q === '{') {
+      const rest = chars.slice(pos).join('')
+      const m = rest.match(/^\{(\d+)(?:,(\d*))?\}/)
+      if (m) {
+        min = Number(m[1])
+        max = m[2] === undefined ? min : m[2] === '' ? Infinity : Number(m[2])
+        pos += m[0].length
+        hasQuant = true
+      }
+    }
+    if (hasQuant && chars[pos] === '?') pos++
+    if (!hasQuant) return atom
+    return () => repeatFrag(atom, min, max)
+  }
+
+  function parseSeq() {
+    const parts = []
+    while (pos < chars.length && chars[pos] !== '|' && chars[pos] !== ')') {
+      const item = parseQuantified()
+      if (!item) return null
+      parts.push(item)
+    }
+    if (!parts.length) return () => { const s = newState('eps'); return { start: s, end: s } }
+    return () => {
+      const built = parts.map(fn => fn())
+      if (aborted || built.some(x => !x)) return null
+      for (let i = 0; i < built.length - 1; i++) states[built[i].end].out.push(built[i + 1].start)
+      return { start: built[0].start, end: built[built.length - 1].end }
+    }
+  }
+
+  function parseAlt() {
+    let left = parseSeq()
+    if (!left) return null
+    while (chars[pos] === '|') {
+      pos++
+      const right = parseSeq()
+      if (!right) return null
+      const prev = left
+      left = () => {
+        const a = prev(), b = right()
+        if (aborted || !a || !b) return null
+        const s = newState('eps'), e = newState('eps')
+        states[s].out.push(a.start, b.start)
+        states[a.end].out.push(e)
+        states[b.end].out.push(e)
+        return { start: s, end: e }
+      }
+    }
+    return left
+  }
+
+  const rootFactory = parseAlt()
+  let matcher = null
+  if (rootFactory && pos === chars.length && !aborted) {
+    const root = rootFactory()
+    if (root && !aborted) {
+      const searchStart = newState('eps')
+      const anyChar = newState('pred', { fn: () => true })
+      const accept = newState('accept')
+      if (!aborted) {
+        states[searchStart].out.push(root.start, anyChar)
+        states[anyChar].out.push(searchStart)
+        states[root.end].out.push(accept)
+        const assertHolds = (mode, input, idx) => {
+          if (mode === 'bol') return idx === 0 || (multiline && LINEAR_LINE_TERM.has(input[idx - 1]))
+          if (mode === 'eol') return idx === input.length || (multiline && LINEAR_LINE_TERM.has(input[idx]))
+          const leftW = idx > 0 && isAsciiWord(input[idx - 1])
+          const rightW = idx < input.length && isAsciiWord(input[idx])
+          return mode === 'wb' ? leftW !== rightW : leftW === rightW
+        }
+        matcher = text => {
+          const input = Array.from(text)
+          const seen = new Int32Array(states.length).fill(-1)
+          let stepToken = 0, current = []
+          const addState = (id, list, idx) => {
+            if (seen[id] === stepToken) return
+            seen[id] = stepToken
+            const st = states[id]
+            if (st.op === 'eps') {
+              for (const next of st.out) addState(next, list, idx)
+            } else if (st.op === 'assert') {
+              if (assertHolds(st.mode, input, idx)) {
+                for (const next of st.out) addState(next, list, idx)
+              }
+            } else {
+              list.push(id)
+            }
+          }
+          stepToken++
+          addState(searchStart, current, 0)
+          if (seen[accept] === stepToken) return true
+          for (let i = 0; i < input.length; i++) {
+            const ch = input[i], nextList = []
+            stepToken++
+            for (const id of current) {
+              const st = states[id]
+              if (st.op === 'pred' && st.fn(ch)) {
+                for (const next of st.out) addState(next, nextList, i + 1)
+              }
+            }
+            if (seen[accept] === stepToken) return true
+            current = nextList
+            if (!current.length) return false
+          }
+          return false
+        }
+      }
+    }
+  }
+  if (!matcher) {
+    // Only allow V8 backtracking fallback for JS lookaround expressions without nested quantifiers
+    if (/\([^)]*[*+}][^)]*\)\s*[*+{]/.test(pattern)) {
+      throw new Error('包含不支持的回溯嵌套结构，请改用 RE2 兼容门禁正则')
+    }
+    matcher = text => v8Regex.test(text)
+  }
+  if (linearRegexCache.size >= 32) linearRegexCache.delete(linearRegexCache.keys().next().value)
+  linearRegexCache.set(rawPattern, matcher)
+  return matcher
+}
+
+const GATE_ISSUE_LINE_REGEX = '^((SR\\d{14}|AR\\d{14}|DTS\\d{13}|DTS\\d{8}\\w{11})[;；]*)+([^\\diISAD;；\\r\\n][^\\r\\n]*)*$'
+
+function diagnoseGatePatternMismatch(message, trimmedPattern) {
+  if (trimmedPattern.includes('SR\\d{14}') && trimmedPattern.includes('AR\\d{14}')) {
+    const requiredHeaders = ['问题单号/AR/STORY/CR', '修改人', '审核人', '修改说明']
+    const missingColonHeader = requiredHeaders.find(label => !new RegExp(`【${label.replace(/\//g, '\\/')}】[:：]`, 'u').test(message))
+    if (missingColonHeader) {
+      return `提交信息中「【${missingColonHeader}】」缺少标题或紧邻冒号（示例：【${missingColonHeader}】：内容）`
+    }
+    const issueMatch = message.match(/【问题单号\/AR\/STORY\/CR】[:：]\s*([\s\S]*?)(?=\r?\n|\s+【修改人】[:：]|$)/u)
+    const issueVal = (issueMatch?.[1] || '').trim()
+    const issueMatcher = compilePatternMatcher(GATE_ISSUE_LINE_REGEX)
+    if (!issueMatcher(issueVal)) {
+      const shown = issueVal.length > 32 ? `${issueVal.slice(0, 32)}…` : (issueVal || '空')
+      return `问题单号「${shown}」不符合门禁规则：需为 SR+14位数字、AR+14位数字、DTS+13位数字 或 DTS+8位数字+11位字符（多个单号用分号紧邻分隔，不支持 NA）`
+    }
+    return '提交信息未通过门禁正则校验：请确保按「问题单号 → 修改人 → 审核人 → 修改说明」顺序排列，且单字段内不含换行'
+  }
+  return `提交信息未通过本地预检正则（${trimmedPattern}）`
+}
 
 export function defaultCommitSummary(task) {
   const raw = typeof task?.result?.summary === 'string' && task.result.summary.trim()
@@ -298,16 +638,19 @@ export function normalizeCommitConfig(input = {}, fallback = {}) {
   const src = input && typeof input === 'object' ? input : {}
   const base = fallback && typeof fallback === 'object' ? fallback : {}
   const mode = (src.mode ?? base.mode) === 'template' ? 'template' : 'default'
-  const clean = (val, max = 300) => typeof val === 'string' ? val.replace(/\0/g, '').trim().slice(0, max) : ''
+  const cleanLine = (val, max = 300, joiner = ' ') => typeof val === 'string' ? val.replace(/\0/g, '').replace(/\s*\r?\n\s*/g, joiner).trim().slice(0, max) : ''
   const templateRaw = typeof src.template === 'string' ? src.template : typeof base.template === 'string' ? base.template : ''
+  let normalizedTemplate = templateRaw.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 2000) || MULTILINE_GATE_COMMIT_TEMPLATE
+  if (normalizedTemplate === LEGACY_MULTILINE_GATE_TEMPLATE) normalizedTemplate = MULTILINE_GATE_COMMIT_TEMPLATE
+  else if (normalizedTemplate === LEGACY_SINGLELINE_GATE_TEMPLATE) normalizedTemplate = SINGLELINE_GATE_COMMIT_TEMPLATE
   return {
     mode,
-    template: templateRaw.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 2000) || MULTILINE_GATE_COMMIT_TEMPLATE,
-    issue: clean(src.issue ?? base.issue, 300),
-    author: clean(src.author ?? base.author, 200),
-    reviewer: clean(src.reviewer ?? base.reviewer, 200),
-    summary: clean(src.summary, 500),
-    pattern: clean(src.pattern ?? base.pattern, 500),
+    template: normalizedTemplate,
+    issue: cleanLine(src.issue ?? base.issue, 300, ' '),
+    author: cleanLine(src.author ?? base.author, 200, ' '),
+    reviewer: cleanLine(src.reviewer ?? base.reviewer, 200, ' '),
+    summary: cleanLine(src.summary, 500, '；'),
+    pattern: normalizeRegexPattern(src.pattern ?? base.pattern),
     custom_message: typeof src.custom_message === 'string' ? src.custom_message.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 8000) : '',
   }
 }
@@ -323,12 +666,12 @@ export function validateRawCommitMessage(rawMessage, pattern = '') {
     const label = emptyField[1] || emptyField[2] || '必填项'
     return { ok: false, message, error: `提交信息中「【${label}】」未填写内容，请补全后再提交` }
   }
-  const trimmedPattern = typeof pattern === 'string' ? pattern.trim() : ''
+  const trimmedPattern = normalizeRegexPattern(pattern)
   if (trimmedPattern) {
-    let regex
-    try { regex = new RegExp(trimmedPattern, 'u') }
+    let matcher
+    try { matcher = compilePatternMatcher(trimmedPattern) }
     catch (error) { return { ok: false, message, error: `本地预检正则无效：${error.message}` } }
-    if (!regex.test(message)) return { ok: false, message, error: `提交信息未通过本地预检正则（${trimmedPattern}）` }
+    if (!matcher(message)) return { ok: false, message, error: diagnoseGatePatternMismatch(message, trimmedPattern) }
   }
   return { ok: true, message, error: null }
 }
@@ -349,7 +692,7 @@ export function resolveCommitMessage(config, task, { allowPendingSummary = false
     task_id: String(task?.id || ''),
   }
   const labels = {
-    issue: '问题单号/AR/STORY/CR（无单号时按项目规范填 NA）',
+    issue: '问题单号（如 AR/SR+14位数字 或 DTS单号）',
     author: '修改人',
     reviewer: '审核人',
     summary: '修改说明',
@@ -365,4 +708,5 @@ export function resolveCommitMessage(config, task, { allowPendingSummary = false
   }
   return validateRawCommitMessage(preview, normalized.pattern)
 }
+
 

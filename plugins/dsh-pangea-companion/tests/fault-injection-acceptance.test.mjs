@@ -8,7 +8,11 @@ import { promisify } from 'node:util'
 import { Readable } from 'node:stream'
 import { FaultInjectionService, injectionGit, workspaceChanges, dedupeRepeatedValues, compactGenerationInput, checkInjectionResult } from '../src/fault-injection.js'
 import { createInjectionGenerator } from '../src/fault-injection-agent.js'
-import { MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE, buildVerificationShellScript } from '../src/fault-injection-candidates.js'
+import {
+  DEFAULT_INTRANET_COMMIT_REGEX, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
+  buildVerificationShellScript, extractRemoteHookRegex, normalizeCommitConfig,
+  resolveCommitMessage, validateRawCommitMessage,
+} from '../src/fault-injection-candidates.js'
 import { faultInjectionRouteHandler } from '../src/index.js'
 import { protectedBranchReason } from '../src/repositories/branch-policy.js'
 import { disabledHooksPath } from '../src/repositories/git-environment.js'
@@ -743,17 +747,17 @@ test('pre-receive commit gate rejection: local pre-check, in-place commit --amen
   f.repositories[0].base_ref = head
 
   const hookPath = path.join(f.remote, 'hooks', 'pre-receive')
-  // Simulate an intranet hook that runs grep -E (line-by-line, non-DOTALL) over %B.
+  // Simulate an intranet hook that runs grep -E (line-by-line, non-DOTALL) over %B with mandatory colons.
   await writeFile(hookPath, [
     '#!/bin/sh',
     'set -eu',
     'while read oldrev newrev refname; do',
     '  full=$(git log -1 --format=%B "$newrev")',
     '  case "$full" in',
-    '    *【问题单号/AR/STORY/CR】*【修改人】*【审核人】*【修改说明】*) ;;',
-    '    *) echo "门禁拦截：提交信息必须包含【问题单号/AR/STORY/CR】【修改人】【审核人】【修改说明】" >&2; exit 1 ;;',
+    '    *【问题单号/AR/STORY/CR】：*【修改人】：*【审核人】：*【修改说明】：*) ;;',
+    '    *) echo "门禁拦截：提交信息必须包含【问题单号/AR/STORY/CR】：【修改人】：【审核人】：【修改说明】：" >&2; exit 1 ;;',
     '  esac',
-    '  if ! printf "%s\\n" "$full" | grep -Eq "【问题单号/AR/STORY/CR】.+【修改人】.+【审核人】.+【修改说明】.+"; then',
+    '  if ! printf "%s\\n" "$full" | grep -Eq "【问题单号/AR/STORY/CR】[:：].+【修改人】[:：].+【审核人】[:：].+【修改说明】[:：].+"; then',
     '    echo "门禁拦截：当前仓库钩子按单行 grep -E 校验，请切换单行门禁模板" >&2',
     '    exit 1',
     '  fi',
@@ -783,13 +787,13 @@ test('pre-receive commit gate rejection: local pre-check, in-place commit --amen
   // 2) Local pre-check blocks incomplete template fields or mismatched custom regex BEFORE touching Git.
   await assert.rejects(
     service.push(f.dataRoot, f.run.run_id, created.id, {
-      commit_config: { mode: 'template', issue: 'AR20261118', author: 'h00123456', reviewer: '' },
+      commit_config: { mode: 'template', issue: 'AR20261118000001', author: 'h00123456', reviewer: '' },
     }),
     /请填写审核人/
   )
   await assert.rejects(
     service.push(f.dataRoot, f.run.run_id, created.id, {
-      commit_config: { mode: 'template', issue: 'AR20261118', author: 'h00123456', reviewer: 'z00654321', pattern: '^\\[DTS-[0-9]+\\]' },
+      commit_config: { mode: 'template', issue: 'AR20261118000001', author: 'h00123456', reviewer: 'z00654321', pattern: '^\\[DTS-[0-9]+\\]' },
     }),
     /未通过本地预检正则/
   )
@@ -804,7 +808,8 @@ test('pre-receive commit gate rejection: local pre-check, in-place commit --amen
     commit_config: {
       mode: 'template',
       template: MULTILINE_GATE_COMMIT_TEMPLATE,
-      issue: 'AR20261118',
+      pattern: DEFAULT_INTRANET_COMMIT_REGEX,
+      issue: 'AR20261118000001',
       author: 'h00123456',
       reviewer: 'z00654321',
     },
@@ -825,7 +830,8 @@ test('pre-receive commit gate rejection: local pre-check, in-place commit --amen
     commit_config: {
       mode: 'template',
       template: SINGLELINE_GATE_COMMIT_TEMPLATE,
-      issue: 'AR20261118',
+      pattern: DEFAULT_INTRANET_COMMIT_REGEX,
+      issue: 'AR20261118000001',
       author: 'h00123456',
       reviewer: 'z00654321',
     },
@@ -850,7 +856,7 @@ test('pre-receive commit gate rejection: local pre-check, in-place commit --amen
   assert.equal(modelCalls, 1, 'fixing commit message must never re-run the generator')
   const finalCommit = finalTask.repositories[0].commit
   assert.notEqual(finalCommit, secondCommit)
-  const expectedMsg = '【问题单号/AR/STORY/CR】AR20261118 【修改人】h00123456 【审核人】z00654321 【修改说明】初始化第 9 步挂起'
+  const expectedMsg = '【问题单号/AR/STORY/CR】：AR20261118000001 【修改人】：h00123456 【审核人】：z00654321 【修改说明】：初始化第 9 步挂起'
   assert.equal((await injectionGit(f.remote, ['log', '-1', '--format=%B', 'refs/heads/main'])).trim(), expectedMsg)
   assert.equal((await injectionGit(f.source, ['log', '-1', '--format=%B', 'refs/heads/main'])).trim(), expectedMsg)
   assert.equal(await injectionGit(f.source, ['diff', '--cached', '--name-only']), '')
@@ -862,10 +868,83 @@ test('pre-receive commit gate rejection: local pre-check, in-place commit --amen
   const nextDefaults = await service.defaults(f.dataRoot, f.run, f.root)
   assert.equal(nextDefaults.commit_config.mode, 'template')
   assert.equal(nextDefaults.commit_config.template, SINGLELINE_GATE_COMMIT_TEMPLATE)
-  assert.equal(nextDefaults.commit_config.issue, 'AR20261118')
+  assert.equal(nextDefaults.commit_config.pattern, DEFAULT_INTRANET_COMMIT_REGEX)
+  assert.equal(nextDefaults.commit_config.issue, 'AR20261118000001')
   assert.equal(nextDefaults.commit_config.author, 'h00123456')
   assert.equal(nextDefaults.commit_config.reviewer, 'z00654321')
   assert.equal(nextDefaults.commit_config.summary, '')
+})
+
+test('real intranet push-rule regex: outer quotes, ticket IDs, legacy colon upgrade, diagnostics, and linear-time ReDoS immunity', () => {
+  const quotedServerRegex = "'^(\\s*【问题单号\\/AR\\/STORY\\/CR】[:：]\\s*((SR\\d{14}|AR\\d{14}|DTS\\d{13}|DTS\\d{8}\\w{11})[;；]*)+([^\\diISAD;；].*)*\\s+【修改人】[:：]\\s*.+\\s+【审核人】[:：]\\s*.+\\s+【修改说明】[:：]\\s*.+\\s*)+$'"
+  const remoteError = `remote: GitLab: Commit message does not follow the pattern ${quotedServerRegex}\nTo https://codehub.internal/group/repo.git\n ! [remote rejected] dev -> dev (pre-receive hook declined)`
+  assert.equal(extractRemoteHookRegex(remoteError), DEFAULT_INTRANET_COMMIT_REGEX)
+
+  // Legacy colon-less templates saved in older commit-defaults.json auto-upgrade to colon templates
+  const migratedMulti = normalizeCommitConfig({ mode: 'template', template: '【问题单号/AR/STORY/CR】{issue}\n【修改人】{author}\n【审核人】{reviewer}\n【修改说明】{summary}' })
+  assert.equal(migratedMulti.template, MULTILINE_GATE_COMMIT_TEMPLATE)
+  const migratedSingle = normalizeCommitConfig({ mode: 'template', template: '【问题单号/AR/STORY/CR】{issue} 【修改人】{author} 【审核人】{reviewer} 【修改说明】{summary}' })
+  assert.equal(migratedSingle.template, SINGLELINE_GATE_COMMIT_TEMPLATE)
+
+  // Valid SR14, AR14, DTS13, DTS8+11, multi-IDs, and multi-line summary auto-flattening
+  for (const issue of [
+    'AR20261118000001',
+    'SR20261118000002',
+    'DTS2026111800001',
+    'DTS20261118AbCdEf12345',
+    'AR20261118000001;DTS2026111800001 补充故障注入桩',
+  ]) {
+    const res = resolveCommitMessage({
+      mode: 'template',
+      template: MULTILINE_GATE_COMMIT_TEMPLATE,
+      pattern: quotedServerRegex,
+      issue,
+      author: 'h00123456',
+      reviewer: 'z00654321',
+      summary: '第一行说明\n第二行说明自动合并为单行',
+    }, { id: 'fi-1' })
+    assert.equal(res.ok, true, `${issue} should pass: ${res.error}`)
+    assert.doesNotMatch(res.message.split('【修改说明】：')[1], /\n/)
+  }
+
+  // Missing colon after header is pinpointed
+  const missingColon = validateRawCommitMessage(
+    '【问题单号/AR/STORY/CR】AR20261118000001\n【修改人】：h00123456\n【审核人】：z00654321\n【修改说明】：补充打桩',
+    quotedServerRegex
+  )
+  assert.equal(missingColon.ok, false)
+  assert.match(missingColon.error, /缺少标题或紧邻冒号/)
+
+  // Empty field with colon ("【审核人】：\n") is caught by EMPTY_GATE_FIELD
+  const emptyWithColon = validateRawCommitMessage(
+    '【问题单号/AR/STORY/CR】：AR20261118000001\n【修改人】：h00123456\n【审核人】：\n【修改说明】：补充打桩',
+    quotedServerRegex
+  )
+  assert.equal(emptyWithColon.ok, false)
+  assert.match(emptyWithColon.error, /【审核人】.*未填写内容/)
+
+  // NA, short AR, and malformed second ticket ID produce human-readable ticket format guidance
+  for (const badIssue of ['NA', 'AR20261118', 'AR20261118000001;AR99', 'CR20261118000001']) {
+    const res = resolveCommitMessage({
+      mode: 'template',
+      pattern: quotedServerRegex,
+      issue: badIssue,
+      author: 'h00123456',
+      reviewer: 'z00654321',
+      summary: '补充打桩',
+    }, { id: 'fi-1' })
+    assert.equal(res.ok, false, `${badIssue} must be rejected`)
+    assert.match(res.error, /不符合门禁规则.*SR\+14位数字/)
+  }
+
+  // Adversarial V8 catastrophic backtracking string (~6,000 chars) completes in < 150ms via Thompson NFA
+  const block = '【问题单号/AR/STORY/CR】：AR20261118000001\n【修改人】：h00123456\n【审核人】：z00654321\n【修改说明】：补充初始化等待超时故障注入桩\n'
+  const adversarial = `${block.repeat(75)}TRAILING_UNCLOSED_LINE`
+  const t0 = performance.now()
+  const stressRes = validateRawCommitMessage(adversarial, quotedServerRegex)
+  const elapsedMs = performance.now() - t0
+  assert.equal(stressRes.ok, false)
+  assert.ok(elapsedMs < 150, `linear regex took ${elapsedMs.toFixed(1)}ms (expected < 150ms without backtracking hang)`)
 })
 
 
