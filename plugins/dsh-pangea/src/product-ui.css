@@ -796,7 +796,9 @@ body:has([role="dialog"].pangea-model-query-state-dialog) [data-pangea-model-set
 .pangea-model-candidate-table-head,.pangea-model-candidate-item{display:grid!important;grid-template-columns:156px minmax(0,1fr) 265px!important;align-items:center!important;gap:12px!important}
 .pangea-model-candidate-table-head{height:50px!important;box-sizing:border-box!important;padding:0 12px!important;border-radius:7px 7px 0 0!important;background:#f3f4f2!important;color:#70767d!important;font-size:12px!important;line-height:18px!important}
 .pangea-model-candidate-table-head>span:first-child{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:6px!important}
-.pangea-model-candidate-select-all{display:none!important}
+.pangea-model-candidate-select-all{display:inline-flex!important;align-items:center;flex-shrink:0;white-space:nowrap;min-height:28px;padding:4px 6px;color:#496988;background:transparent;border-radius:4px}
+.pangea-model-candidate-select-all:hover{background:#edf3f8}
+.pangea-model-candidate-select-all:focus-visible{outline:2px solid #6589b7;outline-offset:2px}
 .pangea-model-candidate-list{max-height:216px!important;margin:0!important;padding:0!important;overflow:auto!important;list-style:none!important}
 .pangea-model-candidate-row{height:53px!important;box-sizing:border-box!important;border-bottom:1px solid #e5e7e4!important;border-radius:0!important}
 .pangea-model-candidate-item{height:100%!important;padding:0 12px!important;cursor:pointer!important}
