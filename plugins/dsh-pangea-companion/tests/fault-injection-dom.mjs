@@ -90,6 +90,7 @@ const Harness = () => {
 }
 const render = async () => act(async () => { renderer.render(React.createElement(Harness)) })
 const button = label => [...container.querySelectorAll('button')].find(node => node.textContent === label)
+const enabled = label => { const node = button(label); return Boolean(node && !node.disabled) }
 const click = async label => { const node = button(label); assert.ok(node, label); assert.equal(node.disabled, false); await act(async () => { node.click() }) }
 const until = async predicate => {
   for (let count = 0; count < 160; count++) {
@@ -105,9 +106,9 @@ const change = async (label, value) => {
 }
 try {
   await render(); await click('打开打桩工作区')
-  await until(() => button('生成打桩修改（2 条用例）') && !button('生成打桩修改（2 条用例）').disabled)
+  await until(() => enabled('生成打桩修改（2 条用例）'))
   await click('生成打桩修改（2 条用例）')
-  await until(() => button('加入出包 / 推送个人分支'))
+  await until(() => enabled('加入出包 / 推送个人分支'))
   assert.match(container.textContent, /逐用例执行说明/)
   assert.equal(calls[0].cwd, root)
   assert.deepEqual(calls[0].case_keys, ['unit/A', 'unit/B'])
@@ -117,22 +118,22 @@ try {
   await change('问题单号', 'DTS2026111111059')
   await change('修改人', 'h00600350')
   await change('审核人', 'h00600350')
-  await until(() => !button('合成并推送到个人分支（1 个任务）').disabled)
+  await until(() => enabled('合成并推送到个人分支（1 个任务）'))
   await change('构建流水线 URL', 'https://ci.example.test/pipeline')
   assert.equal(button('在 DSH 浏览器打开构建流水线'), undefined)
   await click('合成并推送到个人分支（1 个任务）')
-  await until(() => button('停止本次出包') && !button('停止本次出包').disabled)
+  await until(() => enabled('停止本次出包'))
   await click('停止本次出包')
-  await until(() => button('重试本次出包'))
+  await until(() => enabled('重试本次出包'))
   holdPush = false
   await click('重试本次出包')
-  await until(() => container.textContent.includes('个人分支已推送'))
+  await until(() => container.textContent.includes('个人分支已推送') && enabled('在 DSH 浏览器打开构建流水线'))
   await click('在 DSH 浏览器打开构建流水线')
   assert.deepEqual(openedPipelines, ['https://ci.example.test/pipeline'])
   await change('构建流水线 URL', 'https://ci.example.test/updated')
   assert.equal(button('在 DSH 浏览器打开构建流水线').disabled, true)
   await click('保存流水线地址')
-  await until(() => !button('在 DSH 浏览器打开构建流水线').disabled)
+  await until(() => enabled('在 DSH 浏览器打开构建流水线'))
   await click('在 DSH 浏览器打开构建流水线')
   assert.equal(openedPipelines.at(-1), 'https://ci.example.test/updated')
   await click('资源申请失败后的恢复')

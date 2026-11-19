@@ -109,6 +109,7 @@ const registration = pages.find(page => page.id === 'injection')
 assert.ok(registration)
 const render = async () => act(async () => { renderer.render(registration.component({ scope: { cwd: root }, visible: true })) })
 const button = label => [...container.querySelectorAll('button')].find(node => node.textContent === label)
+const enabled = label => { const node = button(label); return Boolean(node && !node.disabled) }
 const click = async label => { const node = button(label); assert.ok(node, label); assert.equal(node.disabled, false); await act(async () => { node.click() }) }
 const until = async predicate => {
   for (let count = 0; count < 160; count++) {
@@ -125,7 +126,7 @@ const change = async (label, value) => {
 try {
   // §7 #13: Entering 代码打桩 lands directly on FaultInjectionHome, never the wizard.
   await render()
-  await until(() => container.textContent.includes('暂无打桩任务') && button('新建打桩任务') && button('合成出包'))
+  await until(() => container.textContent.includes('暂无打桩任务') && enabled('新建打桩任务') && enabled('合成出包'))
   assert.equal(container.querySelector('[aria-label="新建打桩步骤"]'), null)
 
   // Create Task 1 from 任务甲 via 3-step wizard (Step 1 → Step 2 → Step 3 设置与生成)
@@ -148,16 +149,16 @@ try {
   assert.match(container.textContent, /已选择 3 条/)
   await choose('资源申请失败后的恢复')
   assert.match(container.querySelector('[aria-label="打桩用例详情"]').textContent, /模拟资源不足/)
-  await until(() => !button('下一步：设置与生成').disabled)
+  await until(() => enabled('下一步：设置与生成'))
   await click('下一步：设置与生成')
   assert.equal(button('核对打桩基线'), undefined)
   assert.equal(container.querySelector('[aria-label="使用所选 Git 提交作为打桩基线"]'), null)
   await click('上一步')
   assert.match(container.textContent, /已选择 3 条/)
   await click('下一步：设置与生成')
-  await until(() => button('生成打桩修改') && !button('生成打桩修改').disabled)
+  await until(() => enabled('生成打桩修改'))
   await click('生成打桩修改')
-  await until(() => button('加入出包 / 推送个人分支'))
+  await until(() => enabled('加入出包 / 推送个人分支'))
   const generate = calls.find(item => item.action === 'generate')
   assert.deepEqual(generate.case_keys, ['unit/A', 'unit/B', 'unit/C'])
   assert.equal(generate.run_id, run.run_id)
@@ -168,7 +169,7 @@ try {
 
   // Return to Home and create Task 2 from 任务乙 (exercising preparing failure + hotfix revalidate)
   await click('返回打桩任务列表')
-  await until(() => container.querySelector('[aria-label="打桩任务列表"]') && button('合成出包（1 个可用）'))
+  await until(() => container.querySelector('[aria-label="打桩任务列表"]') && enabled('合成出包（1 个可用）'))
   assert.match(container.textContent, /任务甲/)
   await click('新建打桩任务')
   await until(() => container.textContent.includes('任务乙'))
@@ -176,18 +177,18 @@ try {
   await until(() => container.querySelector('[aria-label="选择打桩用例 乙任务用例"]'))
   assert.equal(button('下一步：设置与生成').disabled, true)
   await toggle('乙任务用例')
-  await until(() => !button('下一步：设置与生成').disabled)
+  await until(() => enabled('下一步：设置与生成'))
   await click('下一步：设置与生成')
-  await until(() => button('生成打桩修改') && !button('生成打桩修改').disabled)
+  await until(() => enabled('生成打桩修改'))
   failCheckout = true
   await click('生成打桩修改')
-  await until(() => container.textContent.includes('准备源码失败，尚未开始生成打桩修改。'))
+  await until(() => container.textContent.includes('准备源码失败，尚未开始生成打桩修改。') && enabled('沿用本任务配置重新生成'))
   assert.match(container.textContent, /Filename too long/)
   assert.equal(button('加入出包 / 推送个人分支'), undefined)
   failCheckout = false
   emitBrokenBefore = true
   await click('沿用本任务配置重新生成')
-  await until(() => button('原地重新验收（不调用模型）'))
+  await until(() => enabled('原地重新验收（不调用模型）'))
   const callsBeforeRevalidate = modelCalls
   const run2Task = (await service.list(dataRoot, run2.run_id)).find(item => item.result_saved)
   const hotfixPath = path.join(dataRoot, '.pangea', 'fault-injection', run2.run_id, run2Task.id, 'generation', 'result.json')
@@ -198,7 +199,7 @@ try {
   await writeFile(hotfixPath, JSON.stringify(brokenPayload, null, 2))
   emitBrokenBefore = false
   await click('原地重新验收（不调用模型）')
-  await until(() => button('加入出包 / 推送个人分支'))
+  await until(() => enabled('加入出包 / 推送个人分支'))
   assert.equal(modelCalls, callsBeforeRevalidate)
   assert.ok(calls.some(item => item.action === 'revalidate' && item.task_id === run2Task.id))
 
@@ -229,9 +230,9 @@ try {
   await change('构建流水线 URL', 'https://ci.example.test/pipeline')
   // Switch to hookless default mode to exercise remote pre-receive rejection + helper recovery
   await change('提交信息格式', 'default')
-  await until(() => !button('合成并推送到个人分支（2 个任务）').disabled)
+  await until(() => enabled('合成并推送到个人分支（2 个任务）'))
   await click('合成并推送到个人分支（2 个任务）')
-  await until(() => button('重试本次出包') && button('按远端门禁规则填写'))
+  await until(() => enabled('重试本次出包') && enabled('按远端门禁规则填写'))
   assert.ok(container.querySelector('.pangea-fi-banner.danger details[open]'), 'push hook error details must auto-expand')
   await click('按远端门禁规则填写')
   assert.equal(button('重试本次出包').disabled, true)
@@ -243,10 +244,10 @@ try {
   assert.equal(button('重试本次出包').disabled, true)
   assert.match(container.textContent, /不符合门禁规则.*SR\+14位数字/)
   await change('问题单号', 'AR20261118000001')
-  await until(() => !button('重试本次出包').disabled)
+  await until(() => enabled('重试本次出包'))
   assert.match(container.querySelector('[aria-label="提交信息预览"]').textContent, /【问题单号\/AR\/STORY\/CR】：AR20261118000001\n【修改人】：h00111111\n【审核人】：z00222222\n【修改说明】：合成打桩：/)
   await click('重试本次出包')
-  await until(() => button('在 DSH 浏览器打开构建流水线'))
+  await until(() => enabled('在 DSH 浏览器打开构建流水线'))
   assert.equal(modelCalls, callsBeforeRevalidate)
   await click('在 DSH 浏览器打开构建流水线')
   assert.deepEqual(openedPipelines, ['https://ci.example.test/pipeline'])
@@ -258,7 +259,7 @@ try {
 
   // Re-enter 合成出包 from Home: default selection equals the 2 tasks from the latest pushed build
   await click('返回打桩任务列表')
-  await until(() => button('合成出包（2 个可用）'))
+  await until(() => enabled('合成出包（2 个可用）'))
   await click('合成出包（2 个可用）')
   await until(() => container.querySelector('[aria-label="可出包打桩任务列表"]'))
   assert.equal(container.querySelector('[aria-label="勾选出包任务 资源申请失败后的恢复"]').checked, true)
@@ -300,8 +301,9 @@ try {
   await click('加入出包 / 推送个人分支')
   await until(() => button('合成并推送到个人分支（2 个任务）'))
   await change('问题单号', 'AR20261118000001')
+  await until(() => enabled('合成并推送到个人分支（2 个任务）'))
   await click('合成并推送到个人分支（2 个任务）')
-  await until(() => button('打开任务重新生成'))
+  await until(() => enabled('打开任务重新生成'))
   assert.match(container.textContent, /部分打桩补丁与当前 HEAD 失配，本次未提交且未推送/)
   assert.match(container.textContent, /任务「资源申请失败后的恢复」失配/)
   assert.equal(await injectionGit(source, ['rev-parse', 'HEAD']), advancedHead)
@@ -314,9 +316,9 @@ try {
   await writeFile(path.join(dataRoot, '.pangea', 'fault-injection', run.run_id, 'corrupt-task', 'task.json'), '{not-json')
   tasks.splice(0, 1)
   await click('返回打桩任务列表')
-  await until(() => container.querySelector('[aria-label="打桩任务列表"]') && container.textContent.includes('corrupt-task'))
+  await until(() => container.querySelector('[aria-label="打桩任务列表"]') && container.textContent.includes('corrupt-task') && enabled('刷新'))
   await click('刷新')
-  await until(() => container.textContent.includes('Run dom-run（分析任务已删除或不在当前工作区）'))
+  await until(() => container.textContent.includes('Run dom-run（分析任务已删除或不在当前工作区）') && enabled('资源申请失败后的恢复'))
   assert.match(container.textContent, /任务乙/)
   assert.match(container.textContent, /记录不可读/)
   await click('资源申请失败后的恢复')

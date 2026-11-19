@@ -653,7 +653,7 @@ export function createFaultInjectionBuild(React) {
 
     const buildRunning = busy(activeBuild)
     React.useEffect(() => {
-      if (!buildRunning || !activeBuild?.id) return
+      if (!buildRunning || !activeBuild?.id || working) return
       let live = true, pending = false
       const poll = async () => {
         if (pending || !live) return
@@ -661,8 +661,11 @@ export function createFaultInjectionBuild(React) {
         try {
           const value = await request({ build_id: activeBuild.id })
           if (!live) return
+          if (!busy(value.build)) {
+            try { await loadContext({ preserveSelection: true }) } catch (err) { if (live) setError(err.message) }
+          }
+          if (!live) return
           setActiveBuild(value.build)
-          if (!busy(value.build)) await loadContext({ preserveSelection: true })
         } catch (reason) {
           if (live) setError(reason.message)
         } finally {
@@ -672,7 +675,7 @@ export function createFaultInjectionBuild(React) {
       const fast = setTimeout(poll, 120)
       const timer = setInterval(poll, 1000)
       return () => { live = false; clearTimeout(fast); clearInterval(timer) }
-    }, [buildRunning, activeBuild?.id, dataRoot, cwd, loadContext])
+    }, [buildRunning, activeBuild?.id, working, dataRoot, cwd, loadContext])
 
     const { field } = viewHelpers(h, { working: working || buildRunning, openPoints: false })
     if (!context) {
@@ -718,6 +721,7 @@ export function createFaultInjectionBuild(React) {
 
     const startBuild = async ({ retryId = null } = {}) => {
       setWorking(true); setError(''); setNotice('')
+      let latestBuild = null
       try {
         const retrySubject = retryId && activeBuild
           ? { id: activeBuild.id, items: activeBuild.items || [] }
@@ -735,11 +739,12 @@ export function createFaultInjectionBuild(React) {
               pipeline_url: pipelineUrl,
             }
         const value = await request(payload)
-        setActiveBuild(value.build)
+        latestBuild = value.build
         if (!busy(value.build)) await loadContext({ preserveSelection: true })
       } catch (reason) {
         setError(reason.message)
       } finally {
+        if (latestBuild) setActiveBuild(latestBuild)
         setWorking(false)
       }
     }
@@ -747,13 +752,15 @@ export function createFaultInjectionBuild(React) {
     const cancelActive = async () => {
       if (!activeBuild?.id) return
       setWorking(true); setError('')
+      let latestBuild = null
       try {
         const value = await request({ action: 'build-cancel', build_id: activeBuild.id })
-        setActiveBuild(value.build)
+        latestBuild = value.build
         await loadContext({ preserveSelection: true })
       } catch (reason) {
         setError(reason.message)
       } finally {
+        if (latestBuild) setActiveBuild(latestBuild)
         setWorking(false)
       }
     }
