@@ -196,7 +196,7 @@ test('stale reuse explains that only relocation is needed; reference regeneratio
   const f = await fixture(t); const prompts = []
   const service = new FaultInjectionService({ generate: async ({ record, prompt, scratchDirectory }) => {
     prompts.push({ prompt, scratchDirectory })
-    const cur = await readFile(path.join(record.repositories[0].path, 'init.c'), 'utf8')
+    const cur = (await readFile(path.join(record.repositories[0].path, 'init.c'), 'utf8')).replace(/\r\n/g, '\n')
     return { ...generated(record), edits: [{ repo_id: 'target', path: 'init.c', before: cur, after: instrumented }] }
   } })
   t.after(() => service.dispose())
@@ -213,7 +213,9 @@ test('stale reuse explains that only relocation is needed; reference regeneratio
   assert.match(last.prompt, /参考结果：.*reference-result\.json/)
   assert.match(last.prompt, /上一次未完成的原因：复用的结果与当前源码不一致/)
   assert.deepEqual(JSON.parse(await readFile(path.join(last.scratchDirectory, 'reference-result.json'), 'utf8')).edits, generated({ case_keys: f.input.case_keys }).edits)
-  assert.equal((await service.read(f.dataRoot, f.run.run_id, referenced.id)).reference_from.task_id, stale.id)
+  const referencedRead = await service.read(f.dataRoot, f.run.run_id, referenced.id)
+  assert.equal(referencedRead.status, 'ready', referencedRead.error)
+  assert.equal(referencedRead.reference_from.task_id, stale.id)
   await assert.rejects(service.retry(f.dataRoot, f.run.run_id, first.id, f.root, { mode: 'bogus' }), /未知重试方式/)
 })
 
