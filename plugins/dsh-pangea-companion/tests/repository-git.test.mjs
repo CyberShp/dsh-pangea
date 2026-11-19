@@ -95,7 +95,12 @@ test('plain project → link Git → compare analysis snapshot → relocate on t
   assert.equal(defaults.pipeline_url, 'https://ci.example.test/pipeline'); assert.equal(defaults.repositories[0].comparison.changed_count, 1)
   const preview = await service.previewBaseline(f.dataRoot, run, { repositories: defaults.repositories })
   assert.equal(preview[0].comparison.files[0], 'target.c'); assert.equal(preview[0].base_ref, f.commit)
-  const input = { case_keys: ['case/A'], provider_id: 'fixture', agent_model: 'fixture' }
+  const input = {
+    case_keys: ['case/A'],
+    provider_id: 'fixture',
+    agent_model: 'fixture',
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  }
   const next = await service.start({ dataRoot: f.dataRoot, run, input }); await Promise.all([...service.active.values()].map(op => op.done))
   const ready = await service.read(f.dataRoot, 'run', next.id)
   assert.equal(ready.status, 'ready', ready.error)

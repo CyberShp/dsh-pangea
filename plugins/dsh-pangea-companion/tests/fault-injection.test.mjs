@@ -48,7 +48,14 @@ async function fixture(t, { multi = false } = {}) {
   }
   const cases = ['A', 'B', 'C'].map(letter => ({ projection_id: `unit/CASE-${letter}`, test_case_id: `unit/CASE-${letter}`, title: `场景 ${letter}`, execution_readiness: 'needs_instrumentation' }))
   const run = { run_id: 'run-fi', repositories: repositories.map(repo => repo.repo_id), source_snapshot: { repositories }, details: { test_cases: cases } }
-  const input = { case_keys: cases.map(item => item.test_case_id), repositories, provider_id: 'pangea-opencode', agent_model: 'fixture', branch_prefix: 'tester/fault' }
+  const input = {
+    case_keys: cases.map(item => item.test_case_id),
+    repositories,
+    provider_id: 'pangea-opencode',
+    agent_model: 'fixture',
+    branch_prefix: 'tester/fault',
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  }
   return { root, dataRoot, repositories, run, input }
 }
 function generated(record) {

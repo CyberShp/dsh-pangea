@@ -79,7 +79,12 @@ const change = async (label, value) => {
 }
 try {
   await render(); await click('打开打桩工作区')
-  await until(() => button('生成打桩修改（2 条用例）') && !button('生成打桩修改（2 条用例）').disabled)
+  await until(() => button('生成打桩修改（2 条用例）'))
+  assert.equal(button('生成打桩修改（2 条用例）').disabled, true)
+  await change('派发问题单号', 'DTS2026111111059')
+  await change('派发修改人', 'h00600350')
+  await change('派发审核人', 'h00600350')
+  await until(() => !button('生成打桩修改（2 条用例）').disabled)
   await change('构建流水线 URL', 'https://ci.example.test/pipeline')
   assert.equal(button('在 DSH 浏览器打开构建流水线'), undefined)
   await click('生成打桩修改（2 条用例）')
@@ -121,6 +126,7 @@ try {
   assert.equal(task.build.package_id, 'personal-001.zip')
   assert.equal(task.verification[0].hits, 'A=1')
   assert.equal(await injectionGit(remote, ['rev-parse', `refs/heads/${task.branch}`]), task.repositories[0].commit)
+  assert.match(await injectionGit(remote, ['log', '-1', '--format=%B', `refs/heads/${task.branch}`]), /【问题单号\/AR\/STORY\/CR】：DTS2026111111059\n【修改人】：h00600350\n【审核人】：h00600350\n【修改说明】：工程测试夹具/)
   await act(async () => renderer.unmount()); renderer = createRoot(container)
   await render(); await click('打开打桩工作区')
   await until(() => container.querySelector('[aria-label="已有打桩任务"]'))

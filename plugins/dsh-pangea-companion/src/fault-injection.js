@@ -10,7 +10,26 @@ import { caseIdentity } from './case-review-projection.js'
 import { caseContentHash } from './case-review-store.js'
 import { withGitLongPaths, disabledHooksPath, shellQuote } from './repositories/git-environment.js'
 import { protectedBranchReason } from './repositories/branch-policy.js'
-import { normalizeCommitConfig, resolveCommitMessage, validateRawCommitMessage } from './fault-injection-candidates.js'
+import {
+  DEFAULT_INTRANET_COMMIT_REGEX, DEFAULT_REGEX_TIMEOUT_MS, extractRemoteHookRegex,
+  normalizeCommitConfig, resolveCommitMessage, setBacktrackingMatcherRunner, validateRawCommitMessage,
+} from './fault-injection-candidates.js'
+import { runInNewContext } from 'node:vm'
+
+setBacktrackingMatcherRunner((v8Regex, text, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS) => {
+  const budget = Math.max(1, Math.ceil(timeoutMs))
+  try {
+    return Boolean(runInNewContext('re.test(text)', { re: v8Regex, text }, { timeout: budget }))
+  } catch (error) {
+    if (error?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT' || /timed out/i.test(String(error?.message || ''))) {
+      throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
+    }
+    throw error
+  }
+})
+
+const REMOTE_PUSH_REJECTED_PATTERN = /(?:!\s*\[(?:(?:remote\s+)?rejected|远程拒绝|被拒绝)\]|(?:pre-receive|update)\s+hook\s+declined)/i
+const isRemotePushRejected = error => REMOTE_PUSH_REJECTED_PATTERN.test(String(error?.stderr || error?.message || error || ''))
 
 const execute = promisify(execFile)
 const activeStates = new Set(['preparing', 'generating', 'pushing'])
@@ -707,6 +726,12 @@ export class FaultInjectionService {
       if (!value.result_saved) {
         if (await this.resolveSavedResultFile(directory)) value.result_saved = true
       }
+      if (value.commit_config && typeof value.commit_config === 'object' && value.commit_config.mode === 'default' && !value.commit_config.explicit_default_mode) {
+        const upgraded = { ...value.commit_config }
+        delete upgraded.mode
+        if (!upgraded.pattern) delete upgraded.pattern
+        value.commit_config = normalizeCommitConfig(upgraded)
+      }
       return value
     }
     let record = await withSavedResult(JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8')))
@@ -761,13 +786,23 @@ export class FaultInjectionService {
     return path.join(dir, 'commit-defaults.json')
   }
   async readCommitDefaults(dataRoot) {
-    try { return normalizeCommitConfig(JSON.parse(await readFile(await this.commitDefaultsPath(dataRoot), 'utf8'))) }
-    catch (error) { if (error.code === 'ENOENT') return normalizeCommitConfig({}); throw error }
+    try {
+      const parsed = JSON.parse(await readFile(await this.commitDefaultsPath(dataRoot), 'utf8'))
+      if (parsed && typeof parsed === 'object' && parsed.mode === 'default' && !parsed.explicit_default_mode) {
+        delete parsed.mode
+        if (!parsed.pattern) delete parsed.pattern
+      }
+      return normalizeCommitConfig(parsed)
+    } catch (error) {
+      if (error.code === 'ENOENT') return normalizeCommitConfig({})
+      throw error
+    }
   }
   async saveCommitDefaults(dataRoot, config) {
     const normalized = normalizeCommitConfig(config, await this.readCommitDefaults(dataRoot))
     const reusable = {
       mode: normalized.mode,
+      ...(normalized.explicit_default_mode ? { explicit_default_mode: true } : {}),
       template: normalized.template,
       issue: normalized.issue,
       author: normalized.author,
@@ -867,11 +902,12 @@ export class FaultInjectionService {
     let commitConfig = null
     if (input.commit_config && typeof input.commit_config === 'object') {
       const normalizedCommit = normalizeCommitConfig(input.commit_config, defaults.commit_config)
-      if (normalizedCommit.mode === 'template') {
-        const precheck = resolveCommitMessage(normalizedCommit, { id: 'pending', name: input.name || selected[0]?.title || '' }, { allowPendingSummary: true })
-        if (!precheck.ok) throw serviceError(precheck.error)
-      }
+      const precheck = resolveCommitMessage(normalizedCommit, { id: 'pending', name: input.name || selected[0]?.title || '' }, { allowPendingSummary: true })
+      if (!precheck.ok) throw serviceError(precheck.error)
       commitConfig = await this.saveCommitDefaults(dataRoot, normalizedCommit)
+    } else if (defaults.commit_config) {
+      const precheck = resolveCommitMessage(defaults.commit_config, { id: 'pending', name: input.name || selected[0]?.title || '' }, { allowPendingSummary: true })
+      if (precheck.ok) commitConfig = defaults.commit_config
     }
     const pipeline = await this.configurePipeline(dataRoot, run.run_id, null, input.pipeline_url ?? defaults.pipeline_url)
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
@@ -1118,30 +1154,54 @@ export class FaultInjectionService {
       return await guarded(0, signal)
     } finally { for (const release of releases.reverse()) await release() }
   }
-  async push(dataRoot, runId, taskId, { background = false, acknowledged_heads = {}, commit_message, commit_config } = {}) {
+  async push(dataRoot, runId, taskId, { background = false, acknowledged_heads = {}, commit_message, commit_config, precheck_timeout_ms = DEFAULT_REGEX_TIMEOUT_MS } = {}) {
     return this.exclusive(dataRoot, runId, taskId, async () => {
       const record = await this.read(dataRoot, runId, taskId), directory = await this.directory(dataRoot, runId, taskId)
       if (record.schema_version !== 2) throw serviceError('旧任务使用任务分支，请按项目个人分支配置重新生成；本次不会推送旧分支')
       if (record.status === 'pushed') return record
       if (!['ready', 'interrupted'].includes(record.status) || !record.generation_complete) throw serviceError('请先完整生成本次代码修改')
+      const savedDefaults = await this.readCommitDefaults(dataRoot)
+      const detectedHookRegex = extractRemoteHookRegex(record.error)
+        || (/【问题单号|Commit message does not follow|pre-receive hook declined/i.test(record.error || '') ? DEFAULT_INTRANET_COMMIT_REGEX : '')
       let desiredMessage
       if (commit_config && typeof commit_config === 'object') {
-        const normalizedConfig = normalizeCommitConfig(commit_config, record.commit_config || await this.readCommitDefaults(dataRoot))
-        const checked = resolveCommitMessage(normalizedConfig, record)
+        const normalizedConfig = normalizeCommitConfig(commit_config, record.commit_config || savedDefaults)
+        if (detectedHookRegex && !normalizedConfig.pattern) normalizedConfig.pattern = detectedHookRegex
+        const checked = resolveCommitMessage(normalizedConfig, record, { timeoutMs: precheck_timeout_ms })
         if (!checked.ok) throw serviceError(checked.error)
         desiredMessage = checked.message
         await this.saveCommitDefaults(dataRoot, normalizedConfig)
         record.commit_config = normalizedConfig
       } else if (commit_message !== undefined && commit_message !== null) {
-        const checked = validateRawCommitMessage(String(commit_message), record.commit_config?.pattern || '')
-        if (!checked.ok) throw serviceError(checked.error)
-        desiredMessage = checked.message
-      } else if (record.commit_config) {
-        const checked = resolveCommitMessage(record.commit_config, record)
+        const baseConfig = normalizeCommitConfig(record.commit_config, savedDefaults)
+        const activePattern = detectedHookRegex || (baseConfig.mode === 'default' ? baseConfig.pattern : (baseConfig.pattern || DEFAULT_INTRANET_COMMIT_REGEX))
+        const checked = validateRawCommitMessage(String(commit_message), activePattern, { timeoutMs: precheck_timeout_ms })
         if (!checked.ok) throw serviceError(checked.error)
         desiredMessage = checked.message
       } else {
-        desiredMessage = record.commit_message || `test: fault injection ${record.id}`
+        const effectiveConfig = normalizeCommitConfig(record.commit_config, savedDefaults)
+        if (detectedHookRegex && !effectiveConfig.pattern) effectiveConfig.pattern = detectedHookRegex
+        if (effectiveConfig.mode === 'default' && !effectiveConfig.custom_message && record.commit_message) {
+          effectiveConfig.custom_message = record.commit_message
+        }
+        const checked = resolveCommitMessage(effectiveConfig, record, { timeoutMs: precheck_timeout_ms })
+        if (!checked.ok) throw serviceError(checked.error)
+        desiredMessage = checked.message
+      }
+      const rollbackSourceBranch = async (repo, expectedCommit) => {
+        if (!repo.source_head || !expectedCommit || expectedCommit === repo.source_head) return false
+        const currentRef = (await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`])).trim()
+        if (currentRef !== expectedCommit) return false
+        const isBare = (await this.git(repo.source_path, ['rev-parse', '--is-bare-repository'])).trim() === 'true'
+        if (!isBare) {
+          let headRef = ''
+          try { headRef = (await this.git(repo.source_path, ['symbolic-ref', '-q', 'HEAD'])).trim() } catch {}
+          if (headRef === `refs/heads/${repo.branch}`) {
+            await this.git(repo.source_path, ['read-tree', '-u', '-m', expectedCommit, repo.source_head])
+          }
+        }
+        await this.git(repo.source_path, ['update-ref', `refs/heads/${repo.branch}`, repo.source_head, expectedCommit])
+        return true
       }
       const controller = new AbortController(), key = this.key(dataRoot, runId, taskId)
       const operation = { controller, done: null, status: 'pushing' }
@@ -1163,7 +1223,7 @@ export class FaultInjectionService {
                 const parent = await this.git(repo.path, ['rev-parse', `${head}^`], signal)
                 const body = (await this.git(repo.path, ['log', '-1', '--format=%B', head], signal)).trim()
                 const committedDiff = await this.git(repo.path, ['diff', '--no-ext-diff', '--no-textconv', repo.base_commit, head], signal)
-                const expectedMessage = (repo.committed_message || `test: fault injection ${record.id}`).trim()
+                const expectedMessage = (repo.committed_message || desiredMessage).trim()
                 if (parent !== repo.base_commit || body !== expectedMessage || hash(committedDiff) !== repo.diff_sha256) throw serviceError(`${repo.repo_id}：中断后提交不匹配，请重新生成`)
                 repo.commit = head; await this.save(directory, record)
               }
@@ -1197,9 +1257,15 @@ export class FaultInjectionService {
               }
               if (delivered) { repo.pushed = true; repo.push_result = 'confirmed'; await this.save(directory, record); continue }
             }
-            const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
+            const localBefore = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
             const priorCommits = Array.isArray(repo.previous_commits) ? repo.previous_commits : []
-            if (local !== repo.source_head && local !== repo.commit && !priorCommits.includes(local)) throw serviceError(`${repo.repo_id}：个人分支已有新提交，请重新生成打桩修改`)
+            if ((repo.commit && localBefore === repo.commit) || priorCommits.includes(localBefore)) {
+              await rollbackSourceBranch(repo, localBefore)
+              repo.local_applied = false
+              await this.save(directory, record)
+            }
+            const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
+            if (local !== repo.source_head) throw serviceError(`${repo.repo_id}：个人分支已有新提交，请重新生成打桩修改`)
             if (remote !== repo.remote_head) throw serviceError(`${repo.repo_id}：远端分支已更新，请重新生成打桩修改`)
             if (repo.outgoing_count > 0 && acknowledged_heads[repo.repo_id] !== repo.base_commit && !repo.commit) throw serviceError(`${repo.repo_id}：推送将包含个人分支上 ${repo.outgoing_count} 个已有未推送提交，请确认后继续`)
             if (!repo.commit) {
@@ -1263,16 +1329,25 @@ export class FaultInjectionService {
             const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
             if (local !== repo.commit) {
               if (local === repo.source_head) {
-                // Address A explicitly, never merge into whichever branch happens to be
-                // checked out after preflight. updateInstead also protects dirty files.
-                await this.git(repo.path, ['push', `--receive-pack=git -c core.hooksPath=${shellQuote(await disabledHooksPath())} -c receive.denyCurrentBranch=updateInstead receive-pack`,
-                  repo.source_path, `${repo.commit}:refs/heads/${repo.branch}`], signal)
-              } else if ((repo.previous_commits ?? []).includes(local)) {
-                const localTree = await this.git(repo.source_path, ['rev-parse', `${local}^{tree}`], signal)
-                const commitTree = await this.git(repo.path, ['rev-parse', `${repo.commit}^{tree}`], signal)
-                if (localTree !== commitTree) throw serviceError(`${repo.repo_id}：重写提交后文件树不一致，请重新生成`)
-                await this.git(repo.source_path, ['fetch', '--no-tags', '--', repo.path, repo.commit], signal)
-                await this.git(repo.source_path, ['update-ref', `refs/heads/${repo.branch}`, repo.commit, local], signal)
+                // Address branch explicitly inside receive-pack so a concurrent checkout
+                // cannot write into another branch; if unrelated tracked files are dirty,
+                // fall back to two-way read-tree + CAS update-ref (which still rejects dirty target files).
+                try {
+                  await this.git(repo.path, ['push', `--receive-pack=git -c core.hooksPath=${shellQuote(await disabledHooksPath())} -c receive.denyCurrentBranch=updateInstead receive-pack`,
+                    repo.source_path, `${repo.commit}:refs/heads/${repo.branch}`], signal)
+                } catch (localPushError) {
+                  if (!/Working directory has unstaged changes/i.test(String(localPushError?.message || ''))) throw localPushError
+                  await this.git(repo.source_path, ['fetch', '--no-tags', '--', repo.path, repo.commit], signal)
+                  const isBare = (await this.git(repo.source_path, ['rev-parse', '--is-bare-repository'], signal)).trim() === 'true'
+                  if (!isBare) {
+                    let headRef = ''
+                    try { headRef = (await this.git(repo.source_path, ['symbolic-ref', '-q', 'HEAD'], signal)).trim() } catch {}
+                    if (headRef === `refs/heads/${repo.branch}`) {
+                      await this.git(repo.source_path, ['read-tree', '-u', '-m', repo.source_head, repo.commit], signal)
+                    }
+                  }
+                  await this.git(repo.source_path, ['update-ref', `refs/heads/${repo.branch}`, repo.commit, repo.source_head], signal)
+                }
               } else {
                 throw serviceError(`${repo.repo_id}：个人分支已变化，请重新生成`)
               }
@@ -1283,15 +1358,25 @@ export class FaultInjectionService {
             try {
               await this.git(repo.path, ['push', 'origin', `${repo.commit}:refs/heads/${repo.remote_branch || repo.branch}`], signal)
             } catch (pushError) {
-              if (/!\s*\[(?:remote )?rejected\]/i.test(String(pushError?.message || ''))) {
+              if (isRemotePushRejected(pushError)) {
+                let rollbackWarning = ''
+                try {
+                  const rolledBack = await rollbackSourceBranch(repo, repo.commit)
+                  if (rolledBack || (await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`])).trim() === repo.source_head) {
+                    repo.local_applied = false
+                  }
+                } catch (rollbackError) {
+                  rollbackWarning = `\n本地上游分支回滚失败（请检查 ${repo.source_path} 的 ${repo.branch} 分支）：${cleanError(rollbackError)}`
+                }
                 repo.push_result = 'rejected'; await this.save(directory, record)
+                if (rollbackWarning) throw serviceError(`${cleanError(pushError)}${rollbackWarning}`, pushError.statusCode || 422)
               }
               throw pushError
             }
             repo.pushed = true; repo.push_result = 'confirmed'; await this.save(directory, record)
           }
           record.status = 'pushed'
-        } catch (error) { record.status = 'ready'; record.error = (record.repositories.some(repo => !repo.pushed && repo.push_result === 'unconfirmed') ? '推送结果待确认；重试时将先查询远端，不会重复生成提交。\n' : '') + (controller.signal.aborted ? '提交或推送已停止，已提交内容保留，可重试' : cleanError(error)) }
+        } catch (error) { record.status = 'ready'; record.error = (record.repositories.some(repo => !repo.pushed && repo.push_result === 'unconfirmed') ? '推送结果待确认；重试时将先本地校验提交信息合规，再查询远端决定确认或重推。\n' : '') + (controller.signal.aborted ? '提交或推送已停止，已提交内容保留，可重试' : cleanError(error)) }
         await this.save(directory, record)
         return record
       }, controller.signal, dataRoot)).catch(async error => { record.status = 'ready'; record.error = cleanError(error); await this.save(directory, record); return record }).finally(() => this.active.delete(key))

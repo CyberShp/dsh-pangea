@@ -553,7 +553,9 @@ function compilePatternMatcher(rawPattern) {
           const rightW = idx < input.length && isAsciiWord(input[idx])
           return mode === 'wb' ? leftW !== rightW : leftW === rightW
         }
-        matcher = text => {
+        matcher = (text, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS) => {
+          const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_REGEX_TIMEOUT_MS
+          const startMs = Date.now()
           const input = Array.from(text)
           const seen = new Int32Array(states.length).fill(-1)
           let stepToken = 0, current = []
@@ -575,6 +577,9 @@ function compilePatternMatcher(rawPattern) {
           addState(searchStart, current, 0)
           if (seen[accept] === stepToken) return true
           for (let i = 0; i < input.length; i++) {
+            if ((i & 31) === 0 && Date.now() - startMs > budget) {
+              throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
+            }
             const ch = input[i], nextList = []
             stepToken++
             for (const id of current) {
@@ -587,21 +592,78 @@ function compilePatternMatcher(rawPattern) {
             current = nextList
             if (!current.length) return false
           }
+          if (Date.now() - startMs > budget) {
+            throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
+          }
           return false
         }
       }
     }
   }
   if (!matcher) {
-    // Only allow V8 backtracking fallback for JS lookaround expressions without nested quantifiers
-    if (/\([^)]*[*+}][^)]*\)\s*[*+{]/.test(pattern)) {
+    const nestedQuant = hasNestedQuantifier(pattern)
+    if (!backtrackingMatcherRunner && nestedQuant) {
       throw new Error('包含不支持的回溯嵌套结构，请改用 RE2 兼容门禁正则')
     }
-    matcher = text => v8Regex.test(text)
+    matcher = (text, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS) => {
+      const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_REGEX_TIMEOUT_MS
+      if (backtrackingMatcherRunner) return backtrackingMatcherRunner(v8Regex, text, budget)
+      if (nestedQuant) throw new Error('包含不支持的回溯嵌套结构，请改用 RE2 兼容门禁正则')
+      const startMs = Date.now()
+      const matched = v8Regex.test(text)
+      if (Date.now() - startMs > budget) {
+        throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
+      }
+      return matched
+    }
   }
   if (linearRegexCache.size >= 32) linearRegexCache.delete(linearRegexCache.keys().next().value)
   linearRegexCache.set(rawPattern, matcher)
   return matcher
+}
+
+export const DEFAULT_REGEX_TIMEOUT_MS = 500
+let backtrackingMatcherRunner = null
+export function setBacktrackingMatcherRunner(runner) {
+  backtrackingMatcherRunner = typeof runner === 'function' ? runner : null
+}
+
+function hasNestedQuantifier(pattern) {
+  const stack = []
+  let inClass = false
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if (ch === '\\') { i++; continue }
+    if (inClass) { if (ch === ']') inClass = false; continue }
+    if (ch === '[') { inClass = true; continue }
+    if (ch === '(') { stack.push({ hasQuant: false }); continue }
+    if (ch === ')') {
+      const closed = stack.pop() || { hasQuant: false }
+      const next = pattern[i + 1]
+      let repeats = next === '*' || next === '+'
+      if (!repeats && next === '{') {
+        const m = pattern.slice(i + 1).match(/^\{(\d+)(?:,(\d*))?\}/)
+        if (m) {
+          const max = m[2] === undefined ? Number(m[1]) : m[2] === '' ? Infinity : Number(m[2])
+          repeats = max > 1
+        }
+      }
+      if (repeats && closed.hasQuant) return true
+      if ((repeats || closed.hasQuant) && stack.length) stack[stack.length - 1].hasQuant = true
+      continue
+    }
+    if (ch === '*' || ch === '+') {
+      if (stack.length) stack[stack.length - 1].hasQuant = true
+    } else if (ch === '{') {
+      const m = pattern.slice(i).match(/^\{(\d+)(?:,(\d*))?\}/)
+      if (m) {
+        const max = m[2] === undefined ? Number(m[1]) : m[2] === '' ? Infinity : Number(m[2])
+        if (max > 1 && stack.length) stack[stack.length - 1].hasQuant = true
+        i += m[0].length - 1
+      }
+    }
+  }
+  return false
 }
 
 const GATE_ISSUE_LINE_REGEX = '^((SR\\d{14}|AR\\d{14}|DTS\\d{13}|DTS\\d{8}\\w{11})[;；]*)+([^\\diISAD;；\\r\\n][^\\r\\n]*)*$'
@@ -631,31 +693,47 @@ export function defaultCommitSummary(task) {
     : typeof task?.name === 'string' && task.name.trim()
       ? task.name
       : task?.id ? `fault injection ${task.id}` : ''
-  return raw.replace(/\s*\r?\n\s*/g, '；').replace(/\s{2,}/g, ' ').trim().slice(0, 200)
+  const flattened = raw.replace(/\s*\r?\n\s*/g, '；').replace(/\s{2,}/g, ' ').trim()
+  return Array.from(flattened).slice(0, 16).join('')
 }
 
 export function normalizeCommitConfig(input = {}, fallback = {}) {
   const src = input && typeof input === 'object' ? input : {}
   const base = fallback && typeof fallback === 'object' ? fallback : {}
-  const mode = (src.mode ?? base.mode) === 'template' ? 'template' : 'default'
+  const rawMode = src.mode ?? base.mode
+  const mode = rawMode === 'default' ? 'default' : 'template'
+  const explicitDefaultMode = src.mode === 'default'
+    ? true
+    : src.mode === 'template'
+      ? false
+      : Boolean(base.explicit_default_mode)
   const cleanLine = (val, max = 300, joiner = ' ') => typeof val === 'string' ? val.replace(/\0/g, '').replace(/\s*\r?\n\s*/g, joiner).trim().slice(0, max) : ''
   const templateRaw = typeof src.template === 'string' ? src.template : typeof base.template === 'string' ? base.template : ''
   let normalizedTemplate = templateRaw.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 2000) || MULTILINE_GATE_COMMIT_TEMPLATE
   if (normalizedTemplate === LEGACY_MULTILINE_GATE_TEMPLATE) normalizedTemplate = MULTILINE_GATE_COMMIT_TEMPLATE
   else if (normalizedTemplate === LEGACY_SINGLELINE_GATE_TEMPLATE) normalizedTemplate = SINGLELINE_GATE_COMMIT_TEMPLATE
+  let pattern
+  if (src.pattern !== undefined) {
+    pattern = normalizeRegexPattern(src.pattern)
+  } else if (base.pattern !== undefined && (base.mode ?? 'template') === mode) {
+    pattern = normalizeRegexPattern(base.pattern)
+  } else {
+    pattern = mode === 'template' ? DEFAULT_INTRANET_COMMIT_REGEX : ''
+  }
   return {
     mode,
+    ...(explicitDefaultMode ? { explicit_default_mode: true } : {}),
     template: normalizedTemplate,
     issue: cleanLine(src.issue ?? base.issue, 300, ' '),
     author: cleanLine(src.author ?? base.author, 200, ' '),
     reviewer: cleanLine(src.reviewer ?? base.reviewer, 200, ' '),
     summary: cleanLine(src.summary, 500, '；'),
-    pattern: normalizeRegexPattern(src.pattern ?? base.pattern),
+    pattern,
     custom_message: typeof src.custom_message === 'string' ? src.custom_message.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 8000) : '',
   }
 }
 
-export function validateRawCommitMessage(rawMessage, pattern = '') {
+export function validateRawCommitMessage(rawMessage, pattern = '', { timeoutMs = DEFAULT_REGEX_TIMEOUT_MS } = {}) {
   if (typeof rawMessage !== 'string') return { ok: false, message: '', error: '提交信息不能为空' }
   if (rawMessage.includes('\0')) return { ok: false, message: '', error: '提交信息包含无效空字符' }
   const message = rawMessage.replace(/\r\n/g, '\n').trim()
@@ -671,16 +749,19 @@ export function validateRawCommitMessage(rawMessage, pattern = '') {
     let matcher
     try { matcher = compilePatternMatcher(trimmedPattern) }
     catch (error) { return { ok: false, message, error: `本地预检正则无效：${error.message}` } }
-    if (!matcher(message)) return { ok: false, message, error: diagnoseGatePatternMismatch(message, trimmedPattern) }
+    let matched
+    try { matched = matcher(message, timeoutMs) }
+    catch (error) { return { ok: false, message, error: error.message || `本地预检正则执行超时` } }
+    if (!matched) return { ok: false, message, error: diagnoseGatePatternMismatch(message, trimmedPattern) }
   }
   return { ok: true, message, error: null }
 }
 
-export function resolveCommitMessage(config, task, { allowPendingSummary = false, allowDefaultSummary = true } = {}) {
+export function resolveCommitMessage(config, task, { allowPendingSummary = false, allowDefaultSummary = true, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS } = {}) {
   const normalized = normalizeCommitConfig(config)
   if (normalized.mode !== 'template') {
     const fallback = task?.id ? `test: fault injection ${task.id}` : 'test: fault injection'
-    return validateRawCommitMessage(normalized.custom_message || fallback, normalized.pattern)
+    return validateRawCommitMessage(normalized.custom_message || fallback, normalized.pattern, { timeoutMs })
   }
   const template = normalized.template
   const summary = normalized.summary || (allowDefaultSummary ? defaultCommitSummary(task) : '') || (allowPendingSummary ? '待生成打桩修改说明' : '')
@@ -706,7 +787,7 @@ export function resolveCommitMessage(config, task, { allowPendingSummary = false
       return { ok: false, message: preview.trim(), error: `请填写${label}` }
     }
   }
-  return validateRawCommitMessage(preview, normalized.pattern)
+  return validateRawCommitMessage(preview, normalized.pattern, { timeoutMs })
 }
 
 

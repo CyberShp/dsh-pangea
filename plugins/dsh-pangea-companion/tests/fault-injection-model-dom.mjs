@@ -22,12 +22,25 @@ const container = document.createElement('div'); document.body.append(container)
 const root = createRoot(container), Panel = createFaultInjectionPanel(React)
 const findButton = text => [...container.querySelectorAll('button')].find(item => item.textContent.startsWith(text))
 const click = async text => { const button = findButton(text); assert.ok(button, text); assert.equal(button.disabled, false); await act(async () => button.click()) }
-const change = async (label, value) => { const select = container.querySelector(`[aria-label="${label}"]`); await act(async () => { select.value = value; select.dispatchEvent(new window.Event('change', { bubbles: true })) }) }
+const change = async (label, value) => {
+  const el = container.querySelector(`[aria-label="${label}"]`)
+  assert.ok(el, label)
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value').set
+  await act(async () => {
+    setter.call(el, value)
+    el.dispatchEvent(new window.Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }))
+  })
+}
 try {
   await act(async () => root.render(React.createElement(Panel, { runId: 'run', cwd: '/workspace', cases: [{ projection_id: 'case', title: 'case' }] })))
   await click('打开打桩工作区')
   assert.equal(container.querySelector('[aria-label="打桩模型"]').tagName, 'SELECT')
   assert.equal(container.querySelector('[aria-label="打桩模型"]').value, '')
+  assert.equal(findButton('生成打桩修改').disabled, true)
+  assert.match(container.textContent, /请填写问题单号/)
+  await change('派发问题单号', 'DTS2026111111059')
+  await change('派发修改人', 'h00600350')
+  await change('派发审核人', 'h00600350')
   assert.equal(findButton('生成打桩修改').disabled, false)
   await change('打桩模型', 'a/other')
   await change('打桩执行器', 'b')
@@ -40,6 +53,7 @@ try {
   catalogMode = 'ready'; await click('刷新模型'); await click('生成打桩修改')
   const sent = calls.find(body => body?.action === 'generate')
   assert.equal(sent.agent_catalog_id, 'receipt-b'); assert.equal(sent.agent_model, 'b/default')
+  assert.equal(sent.commit_config.issue, 'DTS2026111111059')
 
   // Verify Round 4 model-inheritance fix: when Run defaults.agent_model ('a/other') exists in provider catalog, keep fast model instead of falling back to 'a/default'
   calls.length = 0
@@ -47,9 +61,12 @@ try {
   await act(async () => root.render(React.createElement(Panel, { key: 'run-fast', runId: 'run-fast', cwd: '/workspace', cases: [{ projection_id: 'case', title: 'case' }] })))
   await click('打开打桩工作区')
   assert.equal(container.querySelector('[aria-label="打桩模型"]').value, 'a/other')
+  await change('派发问题单号', 'DTS2026111111059')
+  await change('派发修改人', 'h00600350')
+  await change('派发审核人', 'h00600350')
   await click('生成打桩修改')
   const fastSent = calls.find(body => body?.action === 'generate')
   assert.equal(fastSent.agent_catalog_id, 'receipt-a')
   assert.equal(fastSent.agent_model, 'a/other')
-  console.log('PASS: model dropdown, Run fast-model inheritance, stale-model fallback, provider reset, blocked error/empty catalog and receipt payload in React DOM')
+  console.log('PASS: model dropdown, mandatory commit gate fields, Run fast-model inheritance, stale-model fallback, provider reset, blocked error/empty catalog and receipt payload in React DOM')
 } finally { await act(async () => root.unmount()); window.happyDOM.abort() }

@@ -1547,7 +1547,9 @@ window.__ModuleLoader__.load({
               const rightW = idx < input.length && isAsciiWord(input[idx])
               return mode === 'wb' ? leftW !== rightW : leftW === rightW
             }
-            matcher = text => {
+            matcher = (text, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS) => {
+              const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_REGEX_TIMEOUT_MS
+              const startMs = Date.now()
               const input = Array.from(text)
               const seen = new Int32Array(states.length).fill(-1)
               let stepToken = 0, current = []
@@ -1569,6 +1571,9 @@ window.__ModuleLoader__.load({
               addState(searchStart, current, 0)
               if (seen[accept] === stepToken) return true
               for (let i = 0; i < input.length; i++) {
+                if ((i & 31) === 0 && Date.now() - startMs > budget) {
+                  throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
+                }
                 const ch = input[i], nextList = []
                 stepToken++
                 for (const id of current) {
@@ -1581,21 +1586,78 @@ window.__ModuleLoader__.load({
                 current = nextList
                 if (!current.length) return false
               }
+              if (Date.now() - startMs > budget) {
+                throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
+              }
               return false
             }
           }
         }
       }
       if (!matcher) {
-        // Only allow V8 backtracking fallback for JS lookaround expressions without nested quantifiers
-        if (/\([^)]*[*+}][^)]*\)\s*[*+{]/.test(pattern)) {
+        const nestedQuant = hasNestedQuantifier(pattern)
+        if (!backtrackingMatcherRunner && nestedQuant) {
           throw new Error('包含不支持的回溯嵌套结构，请改用 RE2 兼容门禁正则')
         }
-        matcher = text => v8Regex.test(text)
+        matcher = (text, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS) => {
+          const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_REGEX_TIMEOUT_MS
+          if (backtrackingMatcherRunner) return backtrackingMatcherRunner(v8Regex, text, budget)
+          if (nestedQuant) throw new Error('包含不支持的回溯嵌套结构，请改用 RE2 兼容门禁正则')
+          const startMs = Date.now()
+          const matched = v8Regex.test(text)
+          if (Date.now() - startMs > budget) {
+            throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
+          }
+          return matched
+        }
       }
       if (linearRegexCache.size >= 32) linearRegexCache.delete(linearRegexCache.keys().next().value)
       linearRegexCache.set(rawPattern, matcher)
       return matcher
+    }
+
+    const DEFAULT_REGEX_TIMEOUT_MS = 500
+    let backtrackingMatcherRunner = null
+    function setBacktrackingMatcherRunner(runner) {
+      backtrackingMatcherRunner = typeof runner === 'function' ? runner : null
+    }
+
+    function hasNestedQuantifier(pattern) {
+      const stack = []
+      let inClass = false
+      for (let i = 0; i < pattern.length; i++) {
+        const ch = pattern[i]
+        if (ch === '\\') { i++; continue }
+        if (inClass) { if (ch === ']') inClass = false; continue }
+        if (ch === '[') { inClass = true; continue }
+        if (ch === '(') { stack.push({ hasQuant: false }); continue }
+        if (ch === ')') {
+          const closed = stack.pop() || { hasQuant: false }
+          const next = pattern[i + 1]
+          let repeats = next === '*' || next === '+'
+          if (!repeats && next === '{') {
+            const m = pattern.slice(i + 1).match(/^\{(\d+)(?:,(\d*))?\}/)
+            if (m) {
+              const max = m[2] === undefined ? Number(m[1]) : m[2] === '' ? Infinity : Number(m[2])
+              repeats = max > 1
+            }
+          }
+          if (repeats && closed.hasQuant) return true
+          if ((repeats || closed.hasQuant) && stack.length) stack[stack.length - 1].hasQuant = true
+          continue
+        }
+        if (ch === '*' || ch === '+') {
+          if (stack.length) stack[stack.length - 1].hasQuant = true
+        } else if (ch === '{') {
+          const m = pattern.slice(i).match(/^\{(\d+)(?:,(\d*))?\}/)
+          if (m) {
+            const max = m[2] === undefined ? Number(m[1]) : m[2] === '' ? Infinity : Number(m[2])
+            if (max > 1 && stack.length) stack[stack.length - 1].hasQuant = true
+            i += m[0].length - 1
+          }
+        }
+      }
+      return false
     }
 
     const GATE_ISSUE_LINE_REGEX = '^((SR\\d{14}|AR\\d{14}|DTS\\d{13}|DTS\\d{8}\\w{11})[;；]*)+([^\\diISAD;；\\r\\n][^\\r\\n]*)*$'
@@ -1625,31 +1687,47 @@ window.__ModuleLoader__.load({
         : typeof task?.name === 'string' && task.name.trim()
           ? task.name
           : task?.id ? `fault injection ${task.id}` : ''
-      return raw.replace(/\s*\r?\n\s*/g, '；').replace(/\s{2,}/g, ' ').trim().slice(0, 200)
+      const flattened = raw.replace(/\s*\r?\n\s*/g, '；').replace(/\s{2,}/g, ' ').trim()
+      return Array.from(flattened).slice(0, 16).join('')
     }
 
     function normalizeCommitConfig(input = {}, fallback = {}) {
       const src = input && typeof input === 'object' ? input : {}
       const base = fallback && typeof fallback === 'object' ? fallback : {}
-      const mode = (src.mode ?? base.mode) === 'template' ? 'template' : 'default'
+      const rawMode = src.mode ?? base.mode
+      const mode = rawMode === 'default' ? 'default' : 'template'
+      const explicitDefaultMode = src.mode === 'default'
+        ? true
+        : src.mode === 'template'
+          ? false
+          : Boolean(base.explicit_default_mode)
       const cleanLine = (val, max = 300, joiner = ' ') => typeof val === 'string' ? val.replace(/\0/g, '').replace(/\s*\r?\n\s*/g, joiner).trim().slice(0, max) : ''
       const templateRaw = typeof src.template === 'string' ? src.template : typeof base.template === 'string' ? base.template : ''
       let normalizedTemplate = templateRaw.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 2000) || MULTILINE_GATE_COMMIT_TEMPLATE
       if (normalizedTemplate === LEGACY_MULTILINE_GATE_TEMPLATE) normalizedTemplate = MULTILINE_GATE_COMMIT_TEMPLATE
       else if (normalizedTemplate === LEGACY_SINGLELINE_GATE_TEMPLATE) normalizedTemplate = SINGLELINE_GATE_COMMIT_TEMPLATE
+      let pattern
+      if (src.pattern !== undefined) {
+        pattern = normalizeRegexPattern(src.pattern)
+      } else if (base.pattern !== undefined && (base.mode ?? 'template') === mode) {
+        pattern = normalizeRegexPattern(base.pattern)
+      } else {
+        pattern = mode === 'template' ? DEFAULT_INTRANET_COMMIT_REGEX : ''
+      }
       return {
         mode,
+        ...(explicitDefaultMode ? { explicit_default_mode: true } : {}),
         template: normalizedTemplate,
         issue: cleanLine(src.issue ?? base.issue, 300, ' '),
         author: cleanLine(src.author ?? base.author, 200, ' '),
         reviewer: cleanLine(src.reviewer ?? base.reviewer, 200, ' '),
         summary: cleanLine(src.summary, 500, '；'),
-        pattern: normalizeRegexPattern(src.pattern ?? base.pattern),
+        pattern,
         custom_message: typeof src.custom_message === 'string' ? src.custom_message.replace(/\0/g, '').replace(/\r\n/g, '\n').trim().slice(0, 8000) : '',
       }
     }
 
-    function validateRawCommitMessage(rawMessage, pattern = '') {
+    function validateRawCommitMessage(rawMessage, pattern = '', { timeoutMs = DEFAULT_REGEX_TIMEOUT_MS } = {}) {
       if (typeof rawMessage !== 'string') return { ok: false, message: '', error: '提交信息不能为空' }
       if (rawMessage.includes('\0')) return { ok: false, message: '', error: '提交信息包含无效空字符' }
       const message = rawMessage.replace(/\r\n/g, '\n').trim()
@@ -1665,16 +1743,19 @@ window.__ModuleLoader__.load({
         let matcher
         try { matcher = compilePatternMatcher(trimmedPattern) }
         catch (error) { return { ok: false, message, error: `本地预检正则无效：${error.message}` } }
-        if (!matcher(message)) return { ok: false, message, error: diagnoseGatePatternMismatch(message, trimmedPattern) }
+        let matched
+        try { matched = matcher(message, timeoutMs) }
+        catch (error) { return { ok: false, message, error: error.message || `本地预检正则执行超时` } }
+        if (!matched) return { ok: false, message, error: diagnoseGatePatternMismatch(message, trimmedPattern) }
       }
       return { ok: true, message, error: null }
     }
 
-    function resolveCommitMessage(config, task, { allowPendingSummary = false, allowDefaultSummary = true } = {}) {
+    function resolveCommitMessage(config, task, { allowPendingSummary = false, allowDefaultSummary = true, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS } = {}) {
       const normalized = normalizeCommitConfig(config)
       if (normalized.mode !== 'template') {
         const fallback = task?.id ? `test: fault injection ${task.id}` : 'test: fault injection'
-        return validateRawCommitMessage(normalized.custom_message || fallback, normalized.pattern)
+        return validateRawCommitMessage(normalized.custom_message || fallback, normalized.pattern, { timeoutMs })
       }
       const template = normalized.template
       const summary = normalized.summary || (allowDefaultSummary ? defaultCommitSummary(task) : '') || (allowPendingSummary ? '待生成打桩修改说明' : '')
@@ -1700,12 +1781,12 @@ window.__ModuleLoader__.load({
           return { ok: false, message: preview.trim(), error: `请填写${label}` }
         }
       }
-      return validateRawCommitMessage(preview, normalized.pattern)
+      return validateRawCommitMessage(preview, normalized.pattern, { timeoutMs })
     }
 
 
 
-    return { caseKeyOf, duplicateCaseKeySet, classifyInjectionCandidate, buildVerificationShellScript, parseVerificationLog, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE, DEFAULT_INTRANET_COMMIT_REGEX, normalizeRegexPattern, extractRemoteHookRegex, defaultCommitSummary, normalizeCommitConfig, validateRawCommitMessage, resolveCommitMessage }
+    return { caseKeyOf, duplicateCaseKeySet, classifyInjectionCandidate, buildVerificationShellScript, parseVerificationLog, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE, DEFAULT_INTRANET_COMMIT_REGEX, normalizeRegexPattern, extractRemoteHookRegex, DEFAULT_REGEX_TIMEOUT_MS, setBacktrackingMatcherRunner, defaultCommitSummary, normalizeCommitConfig, validateRawCommitMessage, resolveCommitMessage }
     })()
 
     const __faultInjectionView = (() => {
@@ -1878,7 +1959,7 @@ window.__ModuleLoader__.load({
           finally { setWorking(false) }
         }
         const field = (label, value, change, options = {}) => h('label', { className: 'pangea-fi-field' }, h('span', null, label),
-          h(options.multiline ? 'textarea' : 'input', { 'aria-label': label, value: readable(value), onChange: event => change(event.target.value),
+          h(options.multiline ? 'textarea' : 'input', { 'aria-label': options.ariaLabel || label, value: readable(value), onChange: event => change(event.target.value),
             disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), placeholder: options.placeholder }))
         const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, alignItems: 'start' }
         const renderSteps = steps => h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(steps) ? steps : [steps]).filter(step => step != null).map((step, at) => h('li', { key: at }, readable(step))))
@@ -1905,9 +1986,7 @@ window.__ModuleLoader__.load({
         const needsRepoSetup = missingBranch || missingGit
         const pipelineDirty = Boolean(task && pipelineUrl.trim() !== (task.pipeline_url || ''))
         const step3CommitConfig = normalizeCommitConfig(settings?.commit_config)
-        const step3CommitCheck = step3CommitConfig.mode === 'template'
-          ? resolveCommitMessage(step3CommitConfig, { id: 'pending', name: settings?.name || selectedCases[0]?.title || '打桩任务' }, { allowPendingSummary: true })
-          : { ok: true, message: '', error: null }
+        const step3CommitCheck = resolveCommitMessage(step3CommitConfig, { id: 'pending', name: settings?.name || selectedCases[0]?.title || '打桩任务' }, { allowPendingSummary: true })
         const effectiveCommitConfig = task ? { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(task) } : null
         const commitCheck = task ? resolveCommitMessage(effectiveCommitConfig, task, { allowDefaultSummary: commitDraft.summary === null }) : { ok: true, message: '', error: null }
         const remoteHookRegex = extractRemoteHookRegex(task?.error)
@@ -2093,29 +2172,39 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '先在独立副本中生成差异，查看后再提交并推送到项目个人分支；不会创建任务分支，不带入未提交内容。'),
                 field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value }), { placeholder: '例如 https://ci.example.internal/pipeline/...' }),
                 field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true, placeholder: '可选：补充触发边界、日志开关或构建宏约束…' }),
-                h('details', { open: step3CommitConfig.mode === 'template' || undefined },
-                  h('summary', null, '提交门禁默认项（可选：问题单号 / 修改人 / 审核人，同库自动复用）'),
-                  h('div', { style: { paddingTop: 8 } },
-                    h('label', { className: 'pangea-fi-field' }, h('span', null, '预设提交信息格式'),
-                      h('select', { 'aria-label': '预设提交信息格式', value: step3CommitConfig.mode, disabled: working, onChange: event => {
-                        const nextMode = event.target.value
-                        setSettings({ ...settings, commit_config: { ...step3CommitConfig, mode: nextMode, pattern: nextMode === 'template' && !step3CommitConfig.pattern ? DEFAULT_INTRANET_COMMIT_REGEX : step3CommitConfig.pattern } })
-                      } },
-                        h('option', { value: 'default' }, '默认简要格式（无门禁钩子仓库）'),
-                        h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'))),
-                    step3CommitConfig.mode === 'template' ? h(React.Fragment, null,
-                      h('div', { style: grid },
-                        field('预设问题单号', step3CommitConfig.issue, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, issue: value } }), { placeholder: '如 AR20261118000001 / SR... / DTS...（多个用分号分隔）' }),
-                        field('预设修改人', step3CommitConfig.author, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, author: value } }), { placeholder: '工号或姓名' }),
-                        field('预设审核人', step3CommitConfig.reviewer, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, reviewer: value } }), { placeholder: '检视人工号或姓名' })),
-                      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 } },
-                        h('button', { type: 'button', disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: MULTILINE_GATE_COMMIT_TEMPLATE } }) }, '多行标准模板'),
-                        h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: SINGLELINE_GATE_COMMIT_TEMPLATE } }) }, '单行标准模板'),
-                        h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: DEFAULT_INTRANET_COMMIT_REGEX } }) }, '填入默认门禁正则'),
-                        step3CommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: '' } }) }, '清空预检正则') : null),
-                      field('预设提交信息模板', step3CommitConfig.template, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: value } }), { multiline: true }),
-                      field('预设本地预检正则', step3CommitConfig.pattern, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: value } }), { placeholder: '可选：粘贴项目 pre-receive 钩子正则进行本地预检' }),
-                      !step3CommitCheck.ok ? h('p', { role: 'status', style: { fontSize: 12, color: '#9c2330', margin: '4px 0 0' } }, step3CommitCheck.error) : null) : null)),
+                h('div', { className: 'pangea-fi-repo-box', style: { marginTop: 12 } },
+                  h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 10 } },
+                    h('strong', { style: { fontSize: 13 } }, '提交门禁信息（必填，同项目自动复用）'),
+                    h('span', { className: 'b05-subtle', style: { fontSize: 12 } }, '按项目 pre-receive 钩子模板生成提交信息并在本地预检')),
+                  step3CommitConfig.mode === 'template' ? h(React.Fragment, null,
+                    h('div', { style: grid },
+                      field('问题单号 *', step3CommitConfig.issue, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, issue: value } }), { ariaLabel: '派发问题单号', placeholder: '如 DTS2026111111059 / AR... / SR...（多个用分号分隔）' }),
+                      field('修改人 *', step3CommitConfig.author, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, author: value } }), { ariaLabel: '派发修改人', placeholder: '工号或姓名（如 h00600350）' }),
+                      field('审核人 *', step3CommitConfig.reviewer, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, reviewer: value } }), { ariaLabel: '派发审核人', placeholder: '检视人工号或姓名' })),
+                    field('修改说明（可选）', step3CommitConfig.summary, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, summary: value } }), { ariaLabel: '派发修改说明', placeholder: '留空则按生成结果自动填入单行简要说明' }))
+                    : field('自定义提交信息（可选）', step3CommitConfig.custom_message, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, custom_message: value } }), { ariaLabel: '派发自定义提交信息', placeholder: '留空则使用默认简要格式（仅无门禁钩子仓库）' }),
+                  !step3CommitCheck.ok ? h('p', { role: 'status', style: { fontSize: 12, color: '#9c2330', margin: '4px 0 8px' } }, step3CommitCheck.error) : null,
+                  h('details', null,
+                    h('summary', { style: { fontSize: 12 } }, '提交格式、模板与本地预检正则设置'),
+                    h('div', { style: { paddingTop: 8 } },
+                      h('label', { className: 'pangea-fi-field' }, h('span', null, '预设提交信息格式'),
+                        h('select', { 'aria-label': '预设提交信息格式', value: step3CommitConfig.mode, disabled: working, onChange: event => {
+                          const nextMode = event.target.value
+                          const nextPattern = nextMode === 'template'
+                            ? (step3CommitConfig.pattern || DEFAULT_INTRANET_COMMIT_REGEX)
+                            : (step3CommitConfig.pattern === DEFAULT_INTRANET_COMMIT_REGEX ? '' : step3CommitConfig.pattern)
+                          setSettings({ ...settings, commit_config: { ...step3CommitConfig, mode: nextMode, explicit_default_mode: nextMode === 'default', pattern: nextPattern } })
+                        } },
+                          h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'),
+                          h('option', { value: 'default' }, '默认简要格式（仅无门禁钩子仓库）'))),
+                      step3CommitConfig.mode === 'template' ? h(React.Fragment, null,
+                        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 } },
+                          h('button', { type: 'button', disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: MULTILINE_GATE_COMMIT_TEMPLATE } }) }, '多行标准模板'),
+                          h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: SINGLELINE_GATE_COMMIT_TEMPLATE } }) }, '单行标准模板'),
+                          h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: DEFAULT_INTRANET_COMMIT_REGEX } }) }, '填入默认门禁正则'),
+                          step3CommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: '' } }) }, '清空预检正则') : null),
+                        field('预设提交信息模板', step3CommitConfig.template, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: value } }), { multiline: true }),
+                        field('预设本地预检正则', step3CommitConfig.pattern, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: value } }), { placeholder: '粘贴项目 pre-receive 钩子正则进行本地预检（带超时护栏）' })) : null))),
                 h('footer', { className: 'pangea-fi-footer' },
                   standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : h('span', null),
                   h('button', { type: 'button', className: 'btn primary', disabled: working || !step3CommitCheck.ok || !modelSelection.ready || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
@@ -2149,20 +2238,27 @@ window.__ModuleLoader__.load({
               ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('div', { className: 'pangea-fi-repo-box', style: { marginTop: 14 } },
                 showRemoteGateHelper ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { marginTop: 0 } },
                   h('span', null, '检测到远端 pre-receive 提交门禁规则，可一键载入规则并在原地修正提交说明（无需重新调用模型）。'),
-                  h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, mode: 'template', template: previous.template || MULTILINE_GATE_COMMIT_TEMPLATE, pattern: targetGateRegex })) }, '按远端门禁规则填写')) : null,
+                  h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, mode: 'template', explicit_default_mode: false, template: previous.template || MULTILINE_GATE_COMMIT_TEMPLATE, pattern: targetGateRegex })) }, '按远端门禁规则填写')) : null,
                 h('label', { className: 'pangea-fi-field' }, h('span', null, '提交信息格式'),
                   h('select', { 'aria-label': '提交信息格式', value: effectiveCommitConfig.mode, disabled: working, onChange: event => {
                     const nextMode = event.target.value
-                    setCommitDraft(previous => ({ ...previous, mode: nextMode, pattern: nextMode === 'template' && !previous.pattern ? targetGateRegex : previous.pattern }))
+                    setCommitDraft(previous => ({
+                      ...previous,
+                      mode: nextMode,
+                      explicit_default_mode: nextMode === 'default',
+                      pattern: nextMode === 'template'
+                        ? (previous.pattern || targetGateRegex)
+                        : (previous.pattern === DEFAULT_INTRANET_COMMIT_REGEX || previous.pattern === remoteHookRegex ? '' : previous.pattern),
+                    }))
                   } },
-                    h('option', { value: 'default' }, '默认简要格式（无门禁钩子仓库）'),
-                    h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'))),
+                    h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'),
+                    h('option', { value: 'default' }, '默认简要格式（仅无门禁钩子仓库）'))),
                 effectiveCommitConfig.mode === 'template' ? h(React.Fragment, null,
                   h('div', { style: grid },
-                    field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 AR20261118000001 / SR... / DTS...（多个用分号分隔）' }),
-                    field('修改人', effectiveCommitConfig.author, value => setCommitDraft(previous => ({ ...previous, author: value })), { placeholder: '工号或姓名' }),
+                    field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 DTS2026111111059 / AR... / SR...（多个用分号分隔）' }),
+                    field('修改人', effectiveCommitConfig.author, value => setCommitDraft(previous => ({ ...previous, author: value })), { placeholder: '工号或姓名（如 h00600350）' }),
                     field('审核人', effectiveCommitConfig.reviewer, value => setCommitDraft(previous => ({ ...previous, reviewer: value })), { placeholder: '检视人工号或姓名' })),
-                  field('修改说明', effectiveCommitConfig.summary, value => setCommitDraft(previous => ({ ...previous, summary: value })), { placeholder: '简要说明本次打桩修改内容' }),
+                  field('修改说明', effectiveCommitConfig.summary, value => setCommitDraft(previous => ({ ...previous, summary: value })), { placeholder: '简要说明本次打桩修改内容（单行）' }),
                   h('details', { style: { marginBottom: 10 } },
                     h('summary', { style: { fontSize: 12 } }, '自定义模板与本地正则预检（兼容单行 / 多行 pre-receive 钩子）'),
                     h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 8px' } },

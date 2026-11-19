@@ -50,7 +50,13 @@ test('fault injection HTTP acceptance', async t => {
     return { status: response.status, body: await response.json() }
   }
   const post = input => request(input, 'POST')
-  const generate = (instructions = '') => post({ action: 'generate', case_keys: ['unit/A'], instructions })
+  const generate = (instructions = '', extra = {}) => post({
+    action: 'generate',
+    case_keys: ['unit/A'],
+    instructions,
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+    ...extra,
+  })
   const terminal = async id => {
     // Real Windows Git/process I/O is not a 2.5-second performance contract.
     const deadline = Date.now() + 30000
@@ -65,6 +71,8 @@ test('fault injection HTTP acceptance', async t => {
   await t.test('GET defaults and empty history', async () => {
     const r = await request(); assert.equal(r.status, 200); assert.deepEqual(r.body.tasks, [])
     assert.equal(r.body.defaults.repositories[0].personal_branch, 'main')
+    assert.equal(r.body.defaults.commit_config.mode, 'template')
+    assert.equal((await post({ action: 'generate', case_keys: ['unit/A'], commit_config: { mode: 'template', issue: '', author: '', reviewer: '' } })).status, 400)
   })
   await t.test('POST generate exposes ready only after cleanup, with exact diff and no commit', async () => {
     const finished = Promise.withResolvers(), release = Promise.withResolvers()
