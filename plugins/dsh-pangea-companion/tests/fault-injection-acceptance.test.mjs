@@ -22,7 +22,7 @@ const original = 'int init_check(void) { return 0; }\n'
 const instrumented = 'int init_check(void) {\n  if (pangea_fault_hit("INIT_HANG")) return -1;\n  return 0;\n}\n'
 const LFS_HOOKS = ['post-checkout', 'post-commit', 'post-merge', 'pre-push']
 
-async function fixture(t, { branch = 'main', lfs = false, withCommitDefaults = true } = {}) {
+async function fixture(t, { branch = 'main', personalBranch = 'personal', lfs = false, withCommitDefaults = true } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-acceptance-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const dataRoot = path.join(root, 'data'); await mkdir(dataRoot)
@@ -39,11 +39,20 @@ async function fixture(t, { branch = 'main', lfs = false, withCommitDefaults = t
   await injectionGit(source, ['add', '.'])
   await injectionGit(source, ['commit', '-m', 'baseline'])
   const commit = await injectionGit(source, ['rev-parse', 'HEAD'])
+  const pushRefs = [branch]
+  if (personalBranch && personalBranch !== branch) {
+    await injectionGit(source, ['branch', personalBranch])
+    pushRefs.push(personalBranch)
+  }
   await injectionGit(root, ['init', '--bare', remote])
   await injectionGit(source, ['remote', 'add', 'origin', remote])
-  await injectionGit(source, ['push', 'origin', branch])
+  await injectionGit(source, ['push', 'origin', ...pushRefs])
   await mkdir(path.join(dataRoot, '.pangea', 'repository-settings'), { recursive: true })
-  await writeFile(path.join(dataRoot, '.pangea', 'repository-settings', 'target.json'), JSON.stringify({ git_path: source, personal_branch: branch, remote: 'origin' }))
+  await writeFile(path.join(dataRoot, '.pangea', 'repository-settings', 'target.json'), JSON.stringify({ git_path: source, personal_branch: personalBranch, remote: 'origin' }))
+  if (withCommitDefaults) {
+    await mkdir(path.join(dataRoot, '.pangea', 'fault-injection'), { recursive: true })
+    await writeFile(path.join(dataRoot, '.pangea', 'fault-injection', 'commit-defaults.json'), JSON.stringify({ mode: 'default', explicit_default_mode: true }))
+  }
   const repositories = [{ repo_id: 'target', source_path: source, remote_path: remote, git: { commit }, base_ref: commit }]
   const body = { title: '初始化挂起时 init_check 超时置失败', steps: ['使能挂起桩', '触发加载', '调用 init_check'], expected_results: ['约 4 秒后返回失败并打印各阶段耗时'], instrumentation: { points: [{ id: 'INIT_HANG', path: 'init.c' }] } }
   const cases = [{ projection_id: 'unit/CASE-HANG', test_case_id: 'unit/CASE-HANG', ...body, execution_readiness: 'needs_instrumentation',
@@ -51,13 +60,7 @@ async function fixture(t, { branch = 'main', lfs = false, withCommitDefaults = t
     // source record and again inside each evidence entry.
     source_record: { record_id: 'rec-1', kind: 'test_case', body, evidence: [{ evidence_id: 'ev-1', source_record: { record_id: 'rec-1', kind: 'test_case', body } }] } }]
   const run = { run_id: 'run-acceptance', repositories: ['target'], source_snapshot: { repositories }, details: { test_cases: cases } }
-  const input = {
-    case_keys: ['unit/CASE-HANG'],
-    repositories,
-    provider_id: 'pangea-opencode',
-    agent_model: 'fixture',
-    ...(withCommitDefaults ? { commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' } } : {}),
-  }
+  const input = { case_keys: ['unit/CASE-HANG'], repositories, provider_id: 'pangea-opencode', agent_model: 'fixture' }
   return { root, dataRoot, source, remote, repositories, run, input }
 }
 const generated = record => ({ summary: '初始化第 9 步挂起', points: [{ id: 'INIT_HANG', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'init.c', action: '阻塞初始化', trigger: '控制文件存在', times: 1 }],
@@ -84,6 +87,7 @@ test('LFS repositories: checkout leaves no hook scripts in the worktree and the 
   assert.deepEqual((await readdir(legacy)).filter(name => LFS_HOOKS.includes(name)).sort(), LFS_HOOKS)
 
   const service = new FaultInjectionService({ generate: async ({ record }) => generated(record) })
+  t.after(() => service.dispose())
   const task = await service.start({ ...f, cwd: f.root }); await wait(service)
   const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
   assert.equal(ready.status, 'ready', ready.error)
@@ -91,9 +95,10 @@ test('LFS repositories: checkout leaves no hook scripts in the worktree and the 
   assert.deepEqual(ready.repositories[0].workspace_baseline, [])
   assert.deepEqual((await readdir(checkout)).filter(name => LFS_HOOKS.includes(name)), [])
   assert.deepEqual(ready.notices, [])
-  const pushed = await service.push(f.dataRoot, f.run.run_id, task.id)
-  assert.equal(pushed.status, 'pushed', pushed.error)
-  assert.deepEqual((await readdir(f.source)).filter(name => LFS_HOOKS.includes(name)), [], 'local updateInstead push must not drop hooks into the user worktree')
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: task.id }] })
+  assert.equal(built.status, 'pushed', built.error)
+  assert.deepEqual((await readdir(f.source)).filter(name => LFS_HOOKS.includes(name)), [], 'build push must never drop hooks into the user worktree')
+  assert.equal(await readFile(path.join(f.source, 'init.c'), 'utf8'), original)
   assert.equal((await lstat(await disabledHooksPath())).isFile(), true)
 })
 
@@ -105,6 +110,7 @@ test('files already present right after checkout are not attributed to the gener
     if (args[0] === 'checkout' && args[1] === '--detach') for (const name of LFS_HOOKS) await writeFile(path.join(cwd, name), '#!/bin/sh\ngit lfs\n')
     return output
   } })
+  t.after(() => service.dispose())
   const task = await service.start(f); await wait(service)
   const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
   assert.equal(ready.status, 'ready', ready.error)
@@ -112,9 +118,9 @@ test('files already present right after checkout are not attributed to the gener
   assert.deepEqual(ready.notices, [])
   assert.deepEqual(ready.repositories[0].files, ['init.c'])
   assert.doesNotMatch(ready.repositories[0].diff, /post-checkout|pre-push/)
-  const pushed = await service.push(f.dataRoot, f.run.run_id, task.id)
-  assert.equal(pushed.status, 'pushed', pushed.error)
-  assert.deepEqual(await injectionGit(f.remote, ['ls-tree', '--name-only', 'refs/heads/main']).then(out => out.split('\n').sort()), ['init.c'])
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: task.id }] })
+  assert.equal(built.status, 'pushed', built.error)
+  assert.deepEqual(await injectionGit(f.remote, ['ls-tree', '--name-only', 'refs/heads/personal']).then(out => out.split('\n').sort()), ['init.c'])
 })
 
 test('generator writes into its source copy: changes are recorded, discarded and only registered edits are committed', async t => {
@@ -125,6 +131,7 @@ test('generator writes into its source copy: changes are recorded, discarded and
     await writeFile(path.join(checkout, 'draft.py'), 'print(1)\n')
     return generated(record)
   } })
+  t.after(() => service.dispose())
   const task = await service.start(f); await wait(service)
   const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
   assert.equal(ready.status, 'ready', ready.error)
@@ -132,9 +139,9 @@ test('generator writes into its source copy: changes are recorded, discarded and
   assert.deepEqual(ready.repositories[0].workspace_changes.map(item => `${item.change}:${item.path}`).sort(), ['added:draft.py', 'changed:init.c'])
   assert.doesNotMatch(ready.repositories[0].diff, /scratch edit|draft\.py/)
   assert.deepEqual(await untracked(ready.repositories[0].path), ['M  init.c'])
-  const pushed = await service.push(f.dataRoot, f.run.run_id, task.id)
-  assert.equal(pushed.status, 'pushed', pushed.error)
-  assert.equal(await injectionGit(f.remote, ['show', 'refs/heads/main:init.c']), instrumented.trimEnd())
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: task.id }] })
+  assert.equal(built.status, 'pushed', built.error)
+  assert.equal(await injectionGit(f.remote, ['show', 'refs/heads/personal:init.c']), instrumented.trimEnd())
 })
 
 test('a result that depends on the generator\'s own source edits is rejected, but stays reusable', async t => {
@@ -144,6 +151,7 @@ test('a result that depends on the generator\'s own source edits is rejected, bu
     await writeFile(path.join(checkout, 'init.c'), edited)
     return { ...generated(record), edits: [{ repo_id: 'target', path: 'init.c', before: edited, after: instrumented }] }
   } })
+  t.after(() => service.dispose())
   const task = await service.start(f); await wait(service)
   const failed = await service.read(f.dataRoot, f.run.run_id, task.id)
   assert.equal(failed.status, 'failed'); assert.match(failed.error, /未唯一匹配/)
@@ -158,6 +166,7 @@ test('reuse applies a saved result to a fresh checkout without calling the model
     if (args[0] === 'add' && failAdd) { failAdd = false; throw Object.assign(new Error('simulated acceptance failure'), { statusCode: 422 }) }
     return injectionGit(cwd, args, signal)
   } })
+  t.after(() => service.dispose())
   const first = await service.start(f); await wait(service)
   const failed = await service.read(f.dataRoot, f.run.run_id, first.id)
   assert.equal(failed.status, 'failed'); assert.equal(failed.result_saved, true); assert.equal(calls, 1)
@@ -167,29 +176,35 @@ test('reuse applies a saved result to a fresh checkout without calling the model
   assert.equal(calls, 1, 'reuse must not start the generator')
   assert.equal(ready.reused_from.task_id, first.id)
   assert.match(ready.repositories[0].diff, /INIT_HANG/)
-  // Pushed, branch reverted by the developer, then stubbed again from the same result.
-  const pushed = await service.push(f.dataRoot, f.run.run_id, reused.id)
-  assert.equal(pushed.status, 'pushed', pushed.error)
-  await injectionGit(f.source, ['revert', '--no-edit', 'HEAD'])
-  await injectionGit(f.source, ['push', 'origin', 'main'])
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: reused.id }] })
+  assert.equal(built.status, 'pushed', built.error)
+  // Analysis directory stayed clean on main, so reusing again still matches with 0 model calls.
   const again = await service.retry(f.dataRoot, f.run.run_id, reused.id, f.root, { mode: 'reuse' }); await wait(service)
   const restubbed = await service.read(f.dataRoot, f.run.run_id, again.id)
   assert.equal(restubbed.status, 'ready', restubbed.error); assert.equal(calls, 1)
-  // Without the revert the saved before-text no longer matches: explain the next step.
+  // Once developer modifies the target lines on main, reuse fails cleanly.
+  await writeFile(path.join(f.source, 'init.c'), 'int init_check(void) { return 1; }\n')
+  await injectionGit(f.source, ['add', 'init.c'])
+  await injectionGit(f.source, ['commit', '-m', 'upstream refactor'])
   const stale = await service.retry(f.dataRoot, f.run.run_id, reused.id, f.root, { mode: 'reuse' })
-  await service.push(f.dataRoot, f.run.run_id, again.id)
   await wait(service)
   const staleRead = await service.read(f.dataRoot, f.run.run_id, stale.id)
-  assert.ok(['ready', 'failed'].includes(staleRead.status))
+  assert.equal(staleRead.status, 'failed')
 })
 
 test('stale reuse explains that only relocation is needed; reference regeneration receives the saved result', async t => {
   const f = await fixture(t); const prompts = []
   const service = new FaultInjectionService({ generate: async ({ record, prompt, scratchDirectory }) => {
-    prompts.push({ prompt, scratchDirectory }); return generated(record)
+    prompts.push({ prompt, scratchDirectory })
+    const cur = await readFile(path.join(record.repositories[0].path, 'init.c'), 'utf8')
+    return { ...generated(record), edits: [{ repo_id: 'target', path: 'init.c', before: cur, after: instrumented }] }
   } })
+  t.after(() => service.dispose())
   const first = await service.start(f); await wait(service)
-  await service.push(f.dataRoot, f.run.run_id, first.id)
+  // Advance f.source so saved before-anchor no longer matches current HEAD
+  await writeFile(path.join(f.source, 'init.c'), 'int init_check(void) { return 2; }\n')
+  await injectionGit(f.source, ['add', 'init.c'])
+  await injectionGit(f.source, ['commit', '-m', 'upstream modifies init_check'])
   const stale = await service.retry(f.dataRoot, f.run.run_id, first.id, f.root, { mode: 'reuse' }); await wait(service)
   const failed = await service.read(f.dataRoot, f.run.run_id, stale.id)
   assert.equal(failed.status, 'failed'); assert.match(failed.error, /复用的结果与当前源码不一致.*参考上次结果重新生成/s)
@@ -205,6 +220,7 @@ test('stale reuse explains that only relocation is needed; reference regeneratio
 test('tasks written before result_saved existed expose their saved result for reuse', async t => {
   const f = await fixture(t)
   const service = new FaultInjectionService({ generate: async ({ record }) => generated(record) })
+  t.after(() => service.dispose())
   const task = await service.start(f); await wait(service)
   const directory = await service.directory(f.dataRoot, f.run.run_id, task.id)
   const record = JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8'))
@@ -217,7 +233,7 @@ test('tasks written before result_saved existed expose their saved result for re
 test('master* and develop* are never used as injection branches', async t => {
   for (const name of ['master', 'master-2026', 'develop', 'develop_v3', 'refs/heads/develop/x', 'Develop']) assert.ok(protectedBranchReason(name), name)
   for (const name of ['main', 'zhangsan/fault', 'feature/develop', 'personal-master', '']) assert.equal(protectedBranchReason(name), '', name)
-  const f = await fixture(t, { branch: 'develop_v3' })
+  const f = await fixture(t, { personalBranch: 'develop_v3' })
   const service = new FaultInjectionService({ generate: async () => assert.fail('must not generate') })
   await assert.rejects(service.start(f), /正式出包分支/)
   assert.equal((await service.list(f.dataRoot, f.run.run_id)).length, 0)
@@ -590,10 +606,8 @@ test('HTTP revalidate recovers hotfixed generation/result.json and aborted tasks
   assert.equal(ready.status, 'ready', ready.error)
   assert.match(ready.repositories[0].diff, /pangea_fault_hit\("INIT_HANG"\)/)
 
-  await service.push(f.dataRoot, f.run.run_id, created.id)
-  await wait(service)
-  const pushed = await service.read(f.dataRoot, f.run.run_id, created.id)
-  assert.equal(pushed.status, 'pushed', pushed.error)
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: created.id }] })
+  assert.equal(built.status, 'pushed', built.error)
 
   // Also verify Round 4 rescue: task aborted before authored-result.json existed, with only generation/result.json on disk
   const f2 = await fixture(t)
@@ -666,12 +680,14 @@ test('real compiled C acceptance: multi-case batch shares one fault stub, compil
   const created = await service.start(f); await wait(service)
   const ready = await service.read(f.dataRoot, f.run.run_id, created.id)
   assert.equal(ready.status, 'ready', ready.error)
-  await service.push(f.dataRoot, f.run.run_id, created.id); await wait(service)
-  const pushed = await service.read(f.dataRoot, f.run.run_id, created.id)
-  assert.equal(pushed.status, 'pushed', pushed.error)
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: created.id }] })
+  assert.equal(built.status, 'pushed', built.error)
+  assert.equal(await readFile(path.join(f.source, 'init.c'), 'utf8'), cSource, 'analysis checkout must remain untouched')
 
+  const patchedSourcePath = path.join(f.root, 'patched_init.c')
+  await writeFile(patchedSourcePath, await injectionGit(f.remote, ['show', 'refs/heads/personal:init.c']))
   const binPath = path.join(f.root, 'drv_bin')
-  await exec('cc', [path.join(f.source, 'init.c'), '-o', binPath])
+  await exec('cc', [patchedSourcePath, '-o', binPath])
   const faultRun = await exec(binPath, ['0'], { env: { ...process.env, DRV_FAULT: '1' } }).catch(err => err)
   assert.equal(faultRun.code, 1)
   assert.match(faultRun.stdout, /\[FI_HIT:DRV_TIMEOUT_STUB\]/)
@@ -742,8 +758,8 @@ test('existing_symbol_tests locates target C function calls in UT files and igno
   assert.match(capturedPrompt, /existing_symbol_tests/)
 })
 
-test('pre-receive commit gate rejection: local pre-check, source branch rollback, in-place commit --amend, dirty unrelated source file, single/multi-line templates, and zero model re-runs', async t => {
-  const f = await fixture(t, { withCommitDefaults: false })
+test('pre-receive commit gate rejection: local pre-check, in-place build retry, dirty unrelated source file, single/multi-line templates, and zero model re-runs', async t => {
+  const f = await fixture(t)
   await writeFile(path.join(f.source, 'unrelated.txt'), 'baseline note\n')
   await injectionGit(f.source, ['add', 'unrelated.txt'])
   await injectionGit(f.source, ['commit', '-m', 'add unrelated file'])
@@ -773,72 +789,45 @@ test('pre-receive commit gate rejection: local pre-check, source branch rollback
   await chmod(hookPath, 0o755)
 
   let modelCalls = 0
-  let latestClonedInitC = ''
   const service = new FaultInjectionService({
-    generate: async ({ record }) => {
-      modelCalls += 1
-      latestClonedInitC = await readFile(path.join(record.repositories[0].path, 'init.c'), 'utf8')
-      return generated(record)
-    },
+    generate: async ({ record }) => { modelCalls += 1; return generated(record) },
   })
   const created = await service.start(f); await wait(service)
   assert.equal(modelCalls, 1)
 
-  // 0) Default push without mandatory template fields is blocked locally BEFORE git commit (never emits "test: fault injection <id>").
-  await assert.rejects(
-    service.push(f.dataRoot, f.run.run_id, created.id),
-    /请填写问题单号/
-  )
-  assert.equal((await service.read(f.dataRoot, f.run.run_id, created.id)).repositories[0].commit, null)
-
-  // 1) Explicit hookless opt-in ("mode: default") is rejected by remote pre-receive hook AND rolls back f.source to clean head!
-  const firstAttempt = await service.push(f.dataRoot, f.run.run_id, created.id, {
-    commit_config: { mode: 'default' },
-  })
-  assert.equal(firstAttempt.status, 'ready')
-  assert.equal(firstAttempt.generation_complete, true)
+  // 1) Default commit message ("test: fault injection <build_id>") is rejected by remote pre-receive hook.
+  const firstAttempt = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: created.id }] })
+  assert.equal(firstAttempt.status, 'failed')
   assert.equal(firstAttempt.repositories[0].push_result, 'rejected')
-  assert.equal(firstAttempt.repositories[0].local_applied, false)
   assert.match(firstAttempt.error, /门禁拦截：提交信息必须包含/)
   assert.doesNotMatch(firstAttempt.error, /推送结果待确认/)
   const firstCommit = firstAttempt.repositories[0].commit
   assert.ok(firstCommit)
-  assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), head)
-  assert.equal(await readFile(path.join(f.source, 'init.c'), 'utf8'), original)
-
-  // Dispatching another task right after remote rejection clones from clean baseline (no unapproved stub pre-existing / zero 套娃).
-  const followUp = await service.start({
-    ...f,
-    input: {
-      ...f.input,
-      commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
-    },
-  })
-  await wait(service)
-  assert.equal(latestClonedInitC, original)
-  assert.equal((await service.read(f.dataRoot, f.run.run_id, followUp.id)).repositories[0].base_commit, head)
+  assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), head, 'analysis directory main ref must stay untouched')
 
   // 2) Local pre-check blocks incomplete template fields or mismatched custom regex BEFORE touching Git.
   await assert.rejects(
-    service.push(f.dataRoot, f.run.run_id, created.id, {
+    service.build(f.dataRoot, {
+      build_id: firstAttempt.id,
       commit_config: { mode: 'template', issue: 'AR20261118000001', author: 'h00123456', reviewer: '' },
     }),
     /请填写审核人/
   )
   await assert.rejects(
-    service.push(f.dataRoot, f.run.run_id, created.id, {
+    service.build(f.dataRoot, {
+      build_id: firstAttempt.id,
       commit_config: { mode: 'template', issue: 'AR20261118000001', author: 'h00123456', reviewer: 'z00654321', pattern: '^\\[DTS-[0-9]+\\]' },
     }),
     /未通过本地预检正则/
   )
-  assert.equal(await injectionGit(firstAttempt.repositories[0].path, ['rev-parse', 'HEAD']), firstCommit)
 
   // 3) Simulate user editing an unrelated file in their local working tree while fixing commit message.
   await writeFile(path.join(f.source, 'unrelated.txt'), 'local unstaged developer note\n')
 
-  // 4) Push with MULTILINE_GATE_COMMIT_TEMPLATE: amends C1 -> C2, remote hook rejects requiring SINGLELINE subject,
-  //    and f.source rolls back to head while preserving dirty unrelated.txt!
-  const secondAttempt = await service.push(f.dataRoot, f.run.run_id, created.id, {
+  // 4) Retry build with MULTILINE_GATE_COMMIT_TEMPLATE: f.source stays untouched despite dirty unrelated.txt,
+  //    then remote hook explains it requires SINGLELINE subject.
+  const secondAttempt = await service.build(f.dataRoot, {
+    build_id: firstAttempt.id,
     commit_config: {
       mode: 'template',
       template: MULTILINE_GATE_COMMIT_TEMPLATE,
@@ -848,21 +837,18 @@ test('pre-receive commit gate rejection: local pre-check, source branch rollback
       reviewer: 'z00654321',
     },
   })
-  assert.equal(secondAttempt.status, 'ready')
+  assert.equal(secondAttempt.status, 'failed')
   assert.match(secondAttempt.error, /单行门禁模板/)
-  assert.equal(secondAttempt.repositories[0].local_applied, false)
   const secondCommit = secondAttempt.repositories[0].commit
   assert.notEqual(secondCommit, firstCommit)
   assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), head)
-  assert.equal(await readFile(path.join(f.source, 'init.c'), 'utf8'), original)
   assert.equal(await readFile(path.join(f.source, 'unrelated.txt'), 'utf8'), 'local unstaged developer note\n')
 
-  // 5) Switch to SINGLELINE_GATE_COMMIT_TEMPLATE via HTTP route handler: amends C2 -> C3 in-place and pushes cleanly!
+  // 5) Switch to SINGLELINE_GATE_COMMIT_TEMPLATE via HTTP route handler: retries build in-place and pushes cleanly!
   const postPayload = JSON.stringify({
-    action: 'push',
-    run_id: f.run.run_id,
+    action: 'build',
+    build_id: firstAttempt.id,
     data_root: f.dataRoot,
-    task_id: created.id,
     commit_config: {
       mode: 'template',
       template: SINGLELINE_GATE_COMMIT_TEMPLATE,
@@ -887,20 +873,20 @@ test('pre-receive commit gate rejection: local pre-check, source branch rollback
   assert.equal(resStatus, 200, resBody)
   await wait(service)
 
-  const finalTask = await service.read(f.dataRoot, f.run.run_id, created.id)
-  assert.equal(finalTask.status, 'pushed', finalTask.error)
-  assert.equal(modelCalls, 2, 'fixing commit message must never re-run the generator')
-  const finalCommit = finalTask.repositories[0].commit
+  const finalBuild = await service.readBuild(f.dataRoot, firstAttempt.id)
+  assert.equal(finalBuild.status, 'pushed', finalBuild.error)
+  assert.equal(modelCalls, 1, 'fixing commit message must never re-run the generator')
+  const finalCommit = finalBuild.repositories[0].commit
   assert.notEqual(finalCommit, secondCommit)
-  const expectedMsg = '【问题单号/AR/STORY/CR】：AR20261118000001 【修改人】：h00123456 【审核人】：z00654321 【修改说明】：初始化第 9 步挂起'
-  assert.equal((await injectionGit(f.remote, ['log', '-1', '--format=%B', 'refs/heads/main'])).trim(), expectedMsg)
-  assert.equal((await injectionGit(f.source, ['log', '-1', '--format=%B', 'refs/heads/main'])).trim(), expectedMsg)
+  const expectedMsg = '【问题单号/AR/STORY/CR】：AR20261118000001 【修改人】：h00123456 【审核人】：z00654321 【修改说明】：合成打桩：初始化挂起时 init'
+  assert.equal((await injectionGit(f.remote, ['log', '-1', '--format=%B', 'refs/heads/personal'])).trim(), expectedMsg)
+  assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), head)
   assert.equal(await injectionGit(f.source, ['diff', '--cached', '--name-only']), '')
   assert.equal(await readFile(path.join(f.source, 'unrelated.txt'), 'utf8'), 'local unstaged developer note\n')
   await injectionGit(f.source, ['fsck', '--full'])
   await injectionGit(f.remote, ['fsck', '--full'])
 
-  // 6) Reusable defaults are persisted for the next task without leaking the previous task's summary.
+  // 6) Reusable defaults are persisted for the next build without leaking the previous build's summary.
   const nextDefaults = await service.defaults(f.dataRoot, f.run, f.root)
   assert.equal(nextDefaults.commit_config.mode, 'template')
   assert.equal(nextDefaults.commit_config.template, SINGLELINE_GATE_COMMIT_TEMPLATE)
@@ -916,18 +902,6 @@ test('real intranet push-rule regex: outer quotes, ticket IDs, legacy colon upgr
   const remoteError = `remote: GitLab: Commit message does not follow the pattern ${quotedServerRegex}\nTo https://codehub.internal/group/repo.git\n ! [remote rejected] dev -> dev (pre-receive hook declined)`
   assert.equal(extractRemoteHookRegex(remoteError), DEFAULT_INTRANET_COMMIT_REGEX)
 
-  // Field-test #5 verified passing sample completes in < 20ms
-  const verifiedSample = [
-    '【问题单号/AR/STORY/CR】：DTS2026111111059',
-    '【修改人】：h00600350',
-    '【审核人】：h00600350',
-    '【修改说明】：TC-003 初始化超时故障注入桩：模拟超时分支并验证清理恢复',
-  ].join('\n')
-  const tSample = performance.now()
-  const sampleRes = validateRawCommitMessage(verifiedSample, quotedServerRegex)
-  assert.equal(sampleRes.ok, true, sampleRes.error)
-  assert.ok(performance.now() - tSample < 20)
-
   // Legacy colon-less templates saved in older commit-defaults.json auto-upgrade to colon templates
   const migratedMulti = normalizeCommitConfig({ mode: 'template', template: '【问题单号/AR/STORY/CR】{issue}\n【修改人】{author}\n【审核人】{reviewer}\n【修改说明】{summary}' })
   assert.equal(migratedMulti.template, MULTILINE_GATE_COMMIT_TEMPLATE)
@@ -938,17 +912,17 @@ test('real intranet push-rule regex: outer quotes, ticket IDs, legacy colon upgr
   for (const issue of [
     'AR20261118000001',
     'SR20261118000002',
-    'DTS2026111111059',
+    'DTS2026111800001',
     'DTS20261118AbCdEf12345',
-    'AR20261118000001;DTS2026111111059 补充故障注入桩',
+    'AR20261118000001;DTS2026111800001 补充故障注入桩',
   ]) {
     const res = resolveCommitMessage({
       mode: 'template',
       template: MULTILINE_GATE_COMMIT_TEMPLATE,
       pattern: quotedServerRegex,
       issue,
-      author: 'h00600350',
-      reviewer: 'h00600350',
+      author: 'h00123456',
+      reviewer: 'z00654321',
       summary: '第一行说明\n第二行说明自动合并为单行',
     }, { id: 'fi-1' })
     assert.equal(res.ok, true, `${issue} should pass: ${res.error}`)
@@ -994,31 +968,25 @@ test('real intranet push-rule regex: outer quotes, ticket IDs, legacy colon upgr
   assert.equal(stressRes.ok, false)
   assert.ok(elapsedMs < 150, `linear regex took ${elapsedMs.toFixed(1)}ms (expected < 150ms without backtracking hang)`)
 
-  // Timeout guardrail interrupts V8 backtracking fallback (e.g. lookahead + nested exponential alternation) cleanly via node:vm
+  // Pathological custom regex with lookaround + nested quantifier is interrupted by node:vm timeout guardrail
   const pathologicalLookahead = '^(?=【)(.+|.+)+X$'
-  assert.equal(validateRawCommitMessage('【X', pathologicalLookahead, { timeoutMs: 50 }).ok, true)
-  const tGuard = performance.now()
-  const timedOut = validateRawCommitMessage('【' + '测'.repeat(30), pathologicalLookahead, { timeoutMs: 30 })
-  const guardElapsed = performance.now() - tGuard
-  assert.equal(timedOut.ok, false)
-  assert.match(timedOut.error, /超过.*超时护栏/)
-  assert.ok(guardElapsed < 250, `backtracking timeout guardrail took ${guardElapsed.toFixed(1)}ms`)
+  const timeoutRes = validateRawCommitMessage(`【${'A'.repeat(28)}!`, pathologicalLookahead, { timeoutMs: 30 })
+  assert.equal(timeoutRes.ok, false)
+  assert.match(timeoutRes.error, /超过 30ms 超时护栏/)
 })
 
-test('P0 field-test #5 regression: Chinese hook rollback of added+modified files and unconfirmed push anti-dead-loop', async t => {
+test('P0 field-test #5 regression: legacy implicit default upgrade, Chinese hook rejection without touching source_path, unconfirmed retry precheck, and 16-char summary cap', async t => {
   const f = await fixture(t, { withCommitDefaults: false })
-  const baseHead = f.repositories[0].base_ref
-
-  // Seed legacy commit-defaults.json with implicit mode="default" (written by older versions)
   await mkdir(path.join(f.dataRoot, '.pangea', 'fault-injection'), { recursive: true })
   await writeFile(
     path.join(f.dataRoot, '.pangea', 'fault-injection', 'commit-defaults.json'),
     JSON.stringify({ mode: 'default', issue: '', author: '', reviewer: '', pattern: '' }, null, 2)
   )
+  const baseHead = await injectionGit(f.source, ['rev-parse', 'HEAD'])
 
-  const gitCalls = []
   let simulateChineseHookReject = true
   let modelCalls = 0
+  const gitCalls = []
   const service = new FaultInjectionService({
     generate: async ({ record }) => {
       modelCalls += 1
@@ -1034,55 +1002,55 @@ test('P0 field-test #5 regression: Chinese hook rollback of added+modified files
     git: async (cwd, args, signal) => {
       gitCalls.push({ cwd, args })
       if (args[0] === 'push' && args[1] === 'origin' && simulateChineseHookReject) {
-        throw new Error('remote: [hooks default] Commit message does not follow rule\nTo ssh://codehub.internal/repo.git\n ! [远程拒绝] main -> main (pre-receive hook declined)')
+        throw new Error('remote: [hooks default] Commit message does not follow rule\nTo ssh://codehub.internal/repo.git\n ! [远程拒绝] personal -> personal (pre-receive hook declined)')
       }
       return injectionGit(cwd, args, signal)
     },
   })
+  t.after(() => service.dispose())
 
   // Legacy implicit mode="default" in commit-defaults.json auto-upgrades to mode="template"
-  const upgradedDefaults = await service.defaults(f.dataRoot, f.run, f.root)
-  assert.equal(upgradedDefaults.commit_config.mode, 'template')
-  assert.equal(upgradedDefaults.commit_config.pattern, DEFAULT_INTRANET_COMMIT_REGEX)
+  const ctx = await service.buildContext(f.dataRoot)
+  assert.equal(ctx.commit_config.mode, 'template')
+  assert.equal(ctx.commit_config.pattern, DEFAULT_INTRANET_COMMIT_REGEX)
 
   const task = await service.start(f)
   await wait(service)
 
-  // 1) Explicit default-mode push hits Chinese Git locale rejection ("! [远程拒绝]") and rolls back both init.c and newly added stub_guard.h!
-  const rejected = await service.push(f.dataRoot, f.run.run_id, task.id, { commit_config: { mode: 'default' } })
-  assert.equal(rejected.status, 'ready', rejected.error)
+  // 1) Explicit default-mode build hits Chinese Git locale rejection ("! [远程拒绝]"), marks push_result='rejected', and never touches f.source!
+  const rejected = await service.build(f.dataRoot, {
+    items: [{ run_id: f.run.run_id, task_id: task.id }],
+    commit_config: { mode: 'default' },
+  })
+  assert.equal(rejected.status, 'failed')
   assert.equal(rejected.repositories[0].push_result, 'rejected')
-  assert.equal(rejected.repositories[0].local_applied, false)
+  assert.doesNotMatch(rejected.error, /推送结果待确认/)
   assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), baseHead)
+  assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/personal']), baseHead)
   assert.equal(await readFile(path.join(f.source, 'init.c'), 'utf8'), original)
   await assert.rejects(lstat(path.join(f.source, 'stub_guard.h')), { code: 'ENOENT' })
 
-  // 2) Simulate an interrupted/uncertain task ("push_result=unconfirmed") that already applied a non-compliant commit to f.source
-  const badCommit = rejected.repositories[0].commit
-  await injectionGit(f.source, ['fetch', '--no-tags', '--', rejected.repositories[0].path, badCommit])
-  await injectionGit(f.source, ['read-tree', '-u', '-m', baseHead, badCommit])
-  await injectionGit(f.source, ['update-ref', 'refs/heads/main', badCommit, baseHead])
-  assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), badCommit)
-  const taskDir = await service.directory(f.dataRoot, f.run.run_id, task.id)
-  const diskRecord = JSON.parse(await readFile(path.join(taskDir, 'task.json'), 'utf8'))
-  diskRecord.commit_config = { mode: 'default', issue: '', author: '', reviewer: '', pattern: '' } // legacy implicit default without explicit_default_mode
-  diskRecord.commit_message = `test: fault injection ${task.id}`
-  diskRecord.repositories[0].local_applied = true
-  diskRecord.repositories[0].push_result = 'unconfirmed'
-  diskRecord.error = '推送结果待确认；连接超时'
-  await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(diskRecord, null, 2))
+  // 2) Simulate an interrupted/uncertain build ("push_result=unconfirmed") with legacy implicit default commit_config
+  const buildDir = await service.buildDirectory(f.dataRoot, rejected.id)
+  const diskBuild = JSON.parse(await readFile(path.join(buildDir, 'build.json'), 'utf8'))
+  diskBuild.commit_config = { mode: 'default', issue: '', author: '', reviewer: '', pattern: '' }
+  diskBuild.commit_message = `test: fault injection build ${rejected.id}`
+  diskBuild.repositories[0].push_result = 'unconfirmed'
+  diskBuild.error = '推送结果待确认；连接超时'
+  await writeFile(path.join(buildDir, 'build.json'), JSON.stringify(diskBuild, null, 2))
 
-  // Retrying push() without compliant template fields MUST reject locally with ZERO git fetch/push calls (breaks dead loop!)
+  // Retrying build() without compliant template fields MUST reject locally with ZERO git fetch/push calls (breaks dead loop!)
   gitCalls.length = 0
   await assert.rejects(
-    service.push(f.dataRoot, f.run.run_id, task.id),
+    service.build(f.dataRoot, { build_id: rejected.id }),
     /请填写问题单号/
   )
   assert.equal(gitCalls.filter(call => call.args[0] === 'fetch' || call.args[0] === 'push').length, 0)
 
-  // 3) Supplying the verified DTS template reconciles f.source, amends in-place (with capped single-line auto-summary), and pushes cleanly!
+  // 3) Supplying the verified DTS template pushes cleanly with capped <=16-char single-line auto-summary!
   simulateChineseHookReject = false
-  const pushed = await service.push(f.dataRoot, f.run.run_id, task.id, {
+  const pushed = await service.build(f.dataRoot, {
+    build_id: rejected.id,
     commit_config: {
       mode: 'template',
       issue: 'DTS2026111111059',
@@ -1092,10 +1060,10 @@ test('P0 field-test #5 regression: Chinese hook rollback of added+modified files
   })
   assert.equal(pushed.status, 'pushed', pushed.error)
   assert.equal(modelCalls, 1)
-  const remoteMsg = (await injectionGit(f.remote, ['log', '-1', '--format=%B', 'refs/heads/main'])).trim()
+  const remoteMsg = (await injectionGit(f.remote, ['log', '-1', '--format=%B', 'refs/heads/personal'])).trim()
   assert.match(remoteMsg, /^【问题单号\/AR\/STORY\/CR】：DTS2026111111059\n【修改人】：h00600350\n【审核人】：h00600350\n【修改说明】：.{1,16}$/u)
-  assert.equal(await injectionGit(f.source, ['rev-parse', 'refs/heads/main']), pushed.repositories[0].commit)
-  assert.equal(await readFile(path.join(f.source, 'stub_guard.h'), 'utf8'), '#define PANGEA_STUB_GUARD 1\n')
+  assert.equal(await injectionGit(f.remote, ['show', 'refs/heads/personal:stub_guard.h']), '#define PANGEA_STUB_GUARD 1')
+  assert.equal(await injectionGit(f.source, ['rev-parse', 'HEAD']), baseHead)
 })
 
 

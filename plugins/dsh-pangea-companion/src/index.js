@@ -510,8 +510,29 @@ export async function faultInjectionRouteHandler(req, res, service, runtime, { r
   try {
     const url = new URL(req.url ?? FAULT_INJECTION_API_PATH, 'http://localhost')
     const input = req.method === 'POST' ? await requestJson(req) : Object.fromEntries(url.searchParams)
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.run_id || '')) throw Object.assign(new Error('run_id 无效'), { statusCode: 400 })
     const dataRoot = await resolveRoot({ cwd: input.cwd, dataRoot: input.data_root })
+    if (req.method === 'GET' && input.view === 'all') {
+      const [tasks, builds] = await Promise.all([service.listAll(dataRoot), service.listBuilds(dataRoot)])
+      return json(res, 200, { status: 'ok', tasks, builds })
+    }
+    if (req.method === 'GET' && input.view === 'build-context') {
+      return json(res, 200, { status: 'ok', ...await service.buildContext(dataRoot) })
+    }
+    if (req.method === 'GET' && input.build_id && !input.run_id) {
+      return json(res, 200, { status: 'ok', build: await service.readBuild(dataRoot, input.build_id) })
+    }
+    if (req.method === 'POST' && ['build', 'build-cancel', 'build-configure'].includes(input.action)) {
+      if (input.action === 'build-cancel') {
+        return json(res, 200, { status: 'ok', build: await service.cancelBuild(dataRoot, input.build_id) })
+      }
+      updateAdmission(runtime)?.assertOpen()
+      if (input.action === 'build-configure') {
+        return json(res, 200, { status: 'ok', ...await service.configureBuildPipeline(dataRoot, input.build_id, input.pipeline_url) })
+      }
+      const build = await service.build(dataRoot, { ...input, background: input.background !== false })
+      return json(res, 200, { status: 'ok', build })
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.run_id || '')) throw Object.assign(new Error('run_id 无效'), { statusCode: 400 })
     if (req.method === 'GET' && input.task_id) return json(res, 200, { status: 'ok', task: await service.read(dataRoot, input.run_id, input.task_id) })
     if (req.method === 'POST') {
       let task
@@ -519,8 +540,7 @@ export async function faultInjectionRouteHandler(req, res, service, runtime, { r
       else {
         updateAdmission(runtime)?.assertOpen()
         if (input.action === 'configure') return json(res, 200, { status: 'ok', ...await service.configurePipeline(dataRoot, input.run_id, input.task_id, input.pipeline_url) })
-        if (input.action === 'push') task = await service.push(dataRoot, input.run_id, input.task_id, { background: true, acknowledged_heads: input.acknowledged_heads, commit_message: input.commit_message, commit_config: input.commit_config })
-        else if (input.action === 'revalidate') task = await service.revalidate(dataRoot, input.run_id, input.task_id)
+        if (input.action === 'revalidate') task = await service.revalidate(dataRoot, input.run_id, input.task_id)
         else if (input.action === 'retry') task = await service.retry(dataRoot, input.run_id, input.task_id, input.cwd)
         else if (input.action === 'reuse-result') task = await service.retry(dataRoot, input.run_id, input.task_id, input.cwd, { mode: 'reuse' })
         else if (input.action === 'retry-with-reference') task = await service.retry(dataRoot, input.run_id, input.task_id, input.cwd, { mode: 'reference' })
@@ -533,7 +553,7 @@ export async function faultInjectionRouteHandler(req, res, service, runtime, { r
     if (run.run_id !== input.run_id) throw Object.assign(new Error('读取的用例不属于当前 Run'), { statusCode: 409 })
     if (req.method === 'POST' && input.action === 'preview-baseline') return json(res, 200, { status: 'ok', repositories: await service.previewBaseline(dataRoot, run, input) })
     if (req.method === 'POST') return json(res, 202, { status: 'ok', task: await service.start({ dataRoot, run, input, cwd: input.cwd }) })
-    return json(res, 200, { status: 'ok', tasks: await service.list(dataRoot, input.run_id), defaults: await service.defaults(dataRoot, run),
+    return json(res, 200, { status: 'ok', defaults: await service.defaults(dataRoot, run),
       providers: acpProviderOptions().filter(provider => provider.available).map(provider => ({ id: provider.id, label: provider.label })) })
   } catch (error) { return json(res, error.statusCode ?? (error.code === 'ENOENT' ? 404 : 500), { status: 'error', error: error.message }) }
 }

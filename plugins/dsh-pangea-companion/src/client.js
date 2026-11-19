@@ -35,6 +35,9 @@ window.__ModuleLoader__.load({
     const RepositorySettings = __repositorySettingsView.createRepositorySettings(React)
     const { requestAgentModels, analysisExecutionState, loadAnalysisAgentModels } = __agentModelSelection
     const FaultInjectionPanel = __faultInjectionView.createFaultInjectionPanel(React)
+    const FaultInjectionTaskDetail = __faultInjectionView.createFaultInjectionTaskDetail(React)
+    const FaultInjectionHome = __faultInjectionView.createFaultInjectionHome(React)
+    const FaultInjectionBuild = __faultInjectionView.createFaultInjectionBuild(React)
     const { classifyRiskGrounding, summarizeIncrementalInputs } = __riskIncrementalInsights
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
@@ -3485,6 +3488,9 @@ window.__ModuleLoader__.load({
         setHistory([])
         setSelectedCaseIds([])
         setInjectionRun('')
+        setInjectionTask(null)
+        setInjectionPicking(false)
+        setInjectionBuild(null)
         ++repositoryRequestRef.current
         ++repositoryImportRef.current
         setRepositoryState(undefined)
@@ -3900,6 +3906,10 @@ window.__ModuleLoader__.load({
       const [caseDrawer, setCaseDrawer] = React.useState(null)
       const [caseEvidenceSelection, setCaseEvidenceSelection] = React.useState({ scope: '', key: '' })
       const [injectionRun, setInjectionRun] = React.useState('')
+      const [injectionTask, setInjectionTask] = React.useState(null)
+      const [injectionPicking, setInjectionPicking] = React.useState(false)
+      const [injectionBuild, setInjectionBuild] = React.useState(null)
+      const [injectionReload, setInjectionReload] = React.useState(0)
       const [injectionDraft, setInjectionDraft] = React.useState(() => ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
       const [riskGroundingFilter, setRiskGroundingFilter] = React.useState('all')
       const handledInjectionDraftRequest = React.useRef(0)
@@ -3913,6 +3923,9 @@ window.__ModuleLoader__.load({
         if (pageMode !== 'injection' || !injectionDraft?.requestId || injectionDraft.requestId === handledInjectionDraftRequest.current) return
         handledInjectionDraftRequest.current = injectionDraft.requestId
         if (injectionDraft.runId) {
+          setInjectionTask(null)
+          setInjectionBuild(null)
+          setInjectionPicking(true)
           setSelectedTaskId(injectionDraft.taskId)
           setSelectedRun(injectionDraft.runId)
           setInjectionRun(injectionDraft.runId)
@@ -5077,9 +5090,12 @@ window.__ModuleLoader__.load({
           disabled: refreshBusy,
           'aria-busy': refreshBusy,
           style: { ...styles.button, ...(refreshBusy ? styles.buttonDisabled : {}) },
-          onClick: () => { void (pageMode === 'execution' ? loadEnvironments()
-            : pageMode === 'home' ? Promise.all([loadWorkbench(), loadRepositories()])
-              : Promise.all([load({ foreground: true }), loadWorkbench()])) },
+          onClick: () => {
+            if (pageMode === 'injection') setInjectionReload(value => value + 1)
+            void (pageMode === 'execution' ? loadEnvironments()
+              : pageMode === 'home' ? Promise.all([loadWorkbench(), loadRepositories()])
+                : Promise.all([load({ foreground: true }), loadWorkbench()]))
+          },
         }, refreshBusy ? '刷新中…' : '刷新')
       }
 
@@ -6866,15 +6882,50 @@ window.__ModuleLoader__.load({
         const available = workbench?.tasks?.items || []
         const allRuns = workbench?.runs?.items ?? snapshot?.runs ?? []
         const back = () => { setInjectionRun(''); setSelectedRun(undefined); setSelectedTaskId(undefined) }
+        const dataRoot = workbench?.data_root ?? snapshot?.data_root
+        const home = () => { back(); setInjectionPicking(false); setInjectionTask(null); setInjectionBuild(null) }
+        const openTask = task => { back(); setInjectionPicking(false); setInjectionBuild(null); setInjectionTask({ run_id: task.run_id, task_id: task.id }) }
+        const openBuild = item => {
+          back()
+          setInjectionPicking(false)
+          setInjectionTask(null)
+          setInjectionBuild({ initialItems: item && item.run_id && item.task_id ? [{ run_id: item.run_id, task_id: item.task_id }] : null })
+        }
+        const openPipeline = url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用') }
+        const analysisLabel = runId => {
+          const task = available.find(item => item.run_id === runId)
+          return task ? taskDisplayName(task, allRuns.find(run => run.run_id === runId)) : `Run ${runId}（分析任务已删除或不在当前工作区）`
+        }
         const matchedTasks = available.filter(task => [taskDisplayName(task), task.repository, task.target, task.run_id].filter(Boolean).join(' ').toLowerCase().includes(taskQuery.trim().toLowerCase()))
         return h('section', { className: 'pangea-injection-page', 'aria-label': '代码打桩工作区' },
-          pageHeader({ title: '代码打桩', subtitle: '从分析结果选择用例，在独立源码副本中生成修改，核对结果后推送到个人测试分支。', ui: ctx.pangea?.ui, actions: renderRefreshButton() }),
-          !injectionRun ? h('section', { className: 'b03-task-panel', style: { padding: 20 } },
+          pageHeader({ title: '代码打桩', subtitle: '基于当前代码生成独立打桩补丁，按需勾选多个打桩任务合成并推送到个人测试分支。', ui: ctx.pangea?.ui, actions: renderRefreshButton() }),
+          injectionBuild ? h(FaultInjectionBuild, {
+            key: `${cwd}:${dataRoot}:build`,
+            dataRoot,
+            cwd,
+            reload: injectionReload,
+            initialItems: injectionBuild.initialItems,
+            analysisLabel,
+            onOpenTask: openTask,
+            onOpenPipeline: openPipeline,
+            onBack: home,
+          })
+          : injectionTask ? h(React.Fragment, null,
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 } },
+              h('span', { style: { fontSize: 13, color: '#6b7280' } }, `分析任务：${analysisLabel(injectionTask.run_id)}`),
+              h('button', { type: 'button', className: 'b03-task-action', onClick: home }, '返回打桩任务列表')),
+            h(FaultInjectionTaskDetail, { key: `${cwd}:${dataRoot}:${injectionTask.run_id}:${injectionTask.task_id}:${injectionReload}`, runId: injectionTask.run_id, taskId: injectionTask.task_id, dataRoot, cwd, onSwitch: openTask, onOpenBuild: openBuild }))
+          : injectionRun ? (current?.run_id !== injectionRun ? h('div', { className: 'b05-card', style: { padding: 24 } }, h('p', { role: error ? 'alert' : 'status', style: { margin: '0 0 12px' } }, error || '正在读取所选分析任务的用例…'), h('div', { style: { display: 'flex', gap: 10 } }, error ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', className: 'b03-task-action', onClick: back }, '返回选择任务')))
+          : h(FaultInjectionPanel, { key: `${cwd}:${current.data_root ?? snapshot?.data_root}:${injectionRun}`, standalone: true, onBack: () => { back(); setInjectionPicking(true) }, runId: injectionRun, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases,
+            initialCaseKeys: injectionDraft?.runId === injectionRun ? injectionDraft.caseKeys : [],
+            handoffRevision: injectionDraft?.runId === injectionRun ? injectionDraft.requestId : 0,
+            onCreated: openTask }))
+          : injectionPicking ? h('section', { className: 'b03-task-panel', style: { padding: 20 } },
             h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 14 } },
               h('div', null,
                 h('h2', { style: { margin: 0, fontSize: 16, fontWeight: 600, color: '#25292e' } }, '第一步 · 选择分析任务'),
                 h('p', { style: { margin: '4px 0 0', fontSize: 13, color: '#6b7280' } }, '选择一个已完成或已生成用例的分析任务作为打桩起点。')),
-              h('span', { style: { fontSize: 12, color: '#6b7280' } }, `共 ${matchedTasks.length} 个任务`)),
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } }, h('span', { style: { fontSize: 12, color: '#6b7280' } }, `共 ${matchedTasks.length} 个任务`), h('button', { type: 'button', className: 'b03-task-action', onClick: home }, '返回打桩任务列表'))),
             h('input', { type: 'search', className: 'b03-task-search', 'aria-label': '搜索打桩分析任务', placeholder: '搜索分析任务、仓库或范围…', value: taskQuery, onChange: event => setTaskQuery(event.target.value), style: { maxWidth: '100%', width: '100%', boxSizing: 'border-box', marginBottom: 16 } }),
             workbenchError ? h('p', { role: 'alert', style: { color: '#9c2330' } }, workbenchError) : null,
             !workbench ? h('p', { role: 'status', style: { color: '#6b7280' } }, '正在读取分析任务…') : !available.length ? h('div', { className: 'pangea-empty-state' }, h('p', null, '暂无分析任务，请先创建分析。'), h('button', { type: 'button', className: 'b03-task-action b03-task-action-primary', onClick: () => openAnalysisTasks() }, '前往分析任务')) : null,
@@ -6891,13 +6942,9 @@ window.__ModuleLoader__.load({
                   h('span', { className: `b03-task-status ${taskStatusTone(task.status)}` }, task.run_id ? taskRunLabel(task.run_id) : '待生成结果')),
                 h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginTop: 6, fontSize: 12, color: '#6b7280' } },
                   h('span', null, scopeText),
-                  h('span', { style: { color: task.run_id ? '#b62836' : '#8a919a', fontWeight: task.run_id ? 600 : 400 } }, task.run_id ? '选择用例与查看已有打桩任务 →' : '尚未生成分析结果')))
+                  h('span', { style: { color: task.run_id ? '#b62836' : '#8a919a', fontWeight: task.run_id ? 600 : 400 } }, task.run_id ? '选择用例 →' : '尚未生成分析结果')))
             })))
-          : current?.run_id !== injectionRun ? h('div', { className: 'b05-card', style: { padding: 24 } }, h('p', { role: error ? 'alert' : 'status', style: { margin: '0 0 12px' } }, error || '正在读取所选分析任务的用例…'), h('div', { style: { display: 'flex', gap: 10 } }, error ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', className: 'b03-task-action', onClick: back }, '返回选择任务')))
-          : h(FaultInjectionPanel, { key: `${cwd}:${current.data_root ?? snapshot?.data_root}:${injectionRun}`, standalone: true, onBack: back, runId: injectionRun, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases,
-            initialCaseKeys: injectionDraft?.runId === injectionRun ? injectionDraft.caseKeys : [],
-            handoffRevision: injectionDraft?.runId === injectionRun ? injectionDraft.requestId : 0,
-            onOpenPipeline: url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用') } }))
+          : h(FaultInjectionHome, { key: `${cwd}:${dataRoot}`, dataRoot, cwd, reload: injectionReload, analysisLabel, onOpen: openTask, onCreate: () => setInjectionPicking(true), onOpenBuild: openBuild }))
       }
 
       function renderCaseExportDialog() {

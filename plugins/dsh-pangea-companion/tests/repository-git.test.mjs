@@ -79,11 +79,13 @@ test('linked worktree becomes a standalone copy including uncommitted edits', as
   assert.equal(await sourceGit(worktree, ['branch', '--show-current']), 'work')
   assert.equal(await readFile(path.join(destination, 'target.c'), 'utf8'), 'worktree edits')
 })
-test('plain project → link Git → compare analysis snapshot → relocate on target without acknowledgement → generate and push', async t => {
+test('plain project → link Git → compare analysis snapshot → relocate on target without acknowledgement → generate and build', async t => {
   const f = await fixture(t), plain = path.join(f.root, 'plain'); await mkdir(plain)
+  await sourceGit(f.source, ['branch', 'personal'])
+  await sourceGit(f.source, ['push', 'origin', 'personal'])
   await writeFile(path.join(plain, 'target.c'), 'analysis-only change\n')
   assert.equal((await f.request({ source_path: plain, repository_name: 'target' })).code, 200)
-  const configured = await f.request({ action: 'configure-repository', repository_name: 'target', git_path: f.source, base_ref: 'main', personal_branch: 'main', pipeline_url: 'https://ci.example.test/pipeline' })
+  const configured = await f.request({ action: 'configure-repository', repository_name: 'target', git_path: f.source, base_ref: 'main', personal_branch: 'personal', pipeline_url: 'https://ci.example.test/pipeline' })
   assert.equal(configured.code, 200, configured.error)
   const snapshot = path.join(f.dataRoot, 'runs', 'run', 'inputs', 'source', 'target'); await mkdir(snapshot, { recursive: true })
   await writeFile(path.join(snapshot, 'target.c'), 'analysis-only change\n')
@@ -95,21 +97,19 @@ test('plain project → link Git → compare analysis snapshot → relocate on t
   assert.equal(defaults.pipeline_url, 'https://ci.example.test/pipeline'); assert.equal(defaults.repositories[0].comparison.changed_count, 1)
   const preview = await service.previewBaseline(f.dataRoot, run, { repositories: defaults.repositories })
   assert.equal(preview[0].comparison.files[0], 'target.c'); assert.equal(preview[0].base_ref, f.commit)
-  const input = {
-    case_keys: ['case/A'],
-    provider_id: 'fixture',
-    agent_model: 'fixture',
-    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
-  }
+  const input = { case_keys: ['case/A'], provider_id: 'fixture', agent_model: 'fixture' }
   const next = await service.start({ dataRoot: f.dataRoot, run, input }); await Promise.all([...service.active.values()].map(op => op.done))
   const ready = await service.read(f.dataRoot, 'run', next.id)
   assert.equal(ready.status, 'ready', ready.error)
   assert.equal(ready.source_repositories[0].comparison.changed_count, 1)
-  const pushed = await service.push(f.dataRoot, 'run', next.id)
-  assert.equal(pushed.status, 'pushed', pushed.error)
-  assert.equal(await sourceGit(f.remote, ['rev-parse', `refs/heads/${pushed.branch}`]), pushed.repositories[0].commit)
+  const built = await service.build(f.dataRoot, {
+    items: [{ run_id: 'run', task_id: next.id }],
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(built.status, 'pushed', built.error)
+  assert.equal(await sourceGit(f.remote, ['rev-parse', `refs/heads/${built.repositories[0].remote_branch}`]), built.repositories[0].commit)
   assert.equal(await readFile(path.join(f.dataRoot, 'repositories', 'target', 'target.c'), 'utf8'), 'analysis-only change\n')
-  assert.equal(await sourceGit(f.source, ['rev-parse', 'HEAD']), pushed.repositories[0].commit)
+  assert.equal(await sourceGit(f.source, ['rev-parse', 'HEAD']), f.commit)
   assert.equal((await readRepositorySettings(f.dataRoot, 'target')).base_ref, f.commit)
   assert.equal((await f.request({ action: 'configure-repository', repository_name: 'target', pipeline_url: 'https://ci.example.test/new' })).code, 200)
   assert.equal((await service.defaults(f.dataRoot, run)).pipeline_url, 'https://ci.example.test/new')

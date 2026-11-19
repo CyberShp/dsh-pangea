@@ -38,10 +38,37 @@ export async function summarizeRunVerifications(dataRoot, runId) {
       if (error.code !== 'ENOENT') continue
     }
   }
+  const pushedByTask = new Map()
+  try {
+    const buildsRoot = path.join(root, '.pangea', 'fault-injection-builds')
+    if (inside(root, buildsRoot)) {
+      const buildEntries = await readdir(buildsRoot, { withFileTypes: true })
+      const builds = []
+      for (const entry of buildEntries) {
+        if (!entry.isDirectory() || !validId(entry.name)) continue
+        try {
+          const build = JSON.parse(await readFile(path.join(buildsRoot, entry.name, 'build.json'), 'utf8'))
+          if (build && build.id === entry.name && build.status === 'pushed') builds.push(build)
+        } catch {}
+      }
+      builds.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
+      for (const build of builds) {
+        const branch = [...new Set((build.repositories || []).map(repo => repo.remote_branch || repo.personal_branch).filter(Boolean))].join('、')
+        for (const item of Array.isArray(build.items) ? build.items : []) {
+          if (item?.run_id === runId && validId(item.task_id)) pushedByTask.set(item.task_id, { branch, at: build.updated_at || build.created_at || '' })
+        }
+      }
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') { /* Ignore unreadable builds dir in summary projection */ }
+  }
   // Oldest first so newer tasks and newer verification records win cleanly.
   tasks.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
   const byCase = Object.create(null)
   for (const task of tasks) {
+    const pushedBuild = pushedByTask.get(task.id)
+    const effectiveStatus = task.status === 'ready' && pushedBuild ? 'pushed' : task.status
+    const effectiveBranch = pushedBuild?.branch || task.branch || ''
     const caseKeys = Array.isArray(task.case_keys) ? task.case_keys : []
     for (const caseKey of caseKeys) {
       if (!caseKey) continue
@@ -49,17 +76,17 @@ export async function summarizeRunVerifications(dataRoot, runId) {
       // Only update task-level status if no actual verification result is recorded yet,
       // or if this task also has a newer verification below.
       if (!existing || !existing.verified) {
-        if (['ready', 'pushed', 'generating', 'preparing'].includes(task.status)) {
+        if (['ready', 'pushed', 'generating', 'preparing'].includes(effectiveStatus)) {
           byCase[caseKey] = {
             case_key: caseKey,
             task_id: task.id,
             task_name: task.name || '',
-            task_status: task.status,
-            branch: task.branch || '',
+            task_status: effectiveStatus,
+            branch: effectiveBranch,
             verified: false,
             result: 'not_run',
             hits: '',
-            at: task.updated_at || task.created_at || '',
+            at: pushedBuild?.at || task.updated_at || task.created_at || '',
           }
         }
       }
@@ -74,8 +101,8 @@ export async function summarizeRunVerifications(dataRoot, runId) {
           case_key: item.case_key,
           task_id: task.id,
           task_name: task.name || '',
-          task_status: task.status,
-          branch: task.branch || '',
+          task_status: effectiveStatus,
+          branch: effectiveBranch,
           verified: item.result !== 'not_run',
           result: item.result,
           hits: String(item.hits || ''),

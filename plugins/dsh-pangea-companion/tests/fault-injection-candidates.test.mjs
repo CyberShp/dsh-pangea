@@ -211,4 +211,31 @@ test('summarizeRunVerifications projects read-only overlay onto case-reviews wit
   assert.equal(posted.code, 200)
   assert.equal(posted.body.injection_counts.passed, 1)
   assert.equal(await readFile(originalFile, 'utf8'), originalText)
+
+  const v3TaskDir = path.join(dataRoot, '.pangea', 'fault-injection', 'run-fi-2', 'task-v3')
+  await mkdir(v3TaskDir, { recursive: true })
+  await writeFile(path.join(v3TaskDir, 'task.json'), JSON.stringify({
+    schema_version: 3,
+    id: 'task-v3',
+    run_id: 'run-fi-2',
+    name: '合成补丁任务',
+    status: 'ready',
+    created_at: '2026-11-18T00:00:00Z',
+    updated_at: '2026-11-18T00:05:00Z',
+    case_keys: ['unit/case-c'],
+    verification: [],
+  }))
+  const buildDir = path.join(dataRoot, '.pangea', 'fault-injection-builds', 'build-01')
+  await mkdir(buildDir, { recursive: true })
+  await writeFile(path.join(buildDir, 'build.json'), JSON.stringify({
+    id: 'build-01',
+    status: 'pushed',
+    created_at: '2026-11-18T00:10:00Z',
+    updated_at: '2026-11-18T00:11:00Z',
+    items: [{ run_id: 'run-fi-2', task_id: 'task-v3' }],
+    repositories: [{ repo_id: 'target', personal_branch: 'personal/fi', commit: '1234567890abcdef', pushed: true }],
+  }))
+  const v3Summary = await summarizeRunVerifications(dataRoot, 'run-fi-2')
+  assert.equal(v3Summary.injection_by_case['unit/case-c'].task_status, 'pushed')
+  assert.equal(v3Summary.injection_by_case['unit/case-c'].branch, 'personal/fi')
 })

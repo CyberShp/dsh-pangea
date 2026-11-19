@@ -21,11 +21,12 @@ await writeFile(path.join(source, 'target.c'), 'int allocate(void) { return 0; }
 await injectionGit(source, ['add', 'target.c'])
 await injectionGit(source, ['commit', '-m', 'baseline'])
 const base = await injectionGit(source, ['rev-parse', 'HEAD'])
+await injectionGit(source, ['branch', 'personal'])
 await injectionGit(root, ['init', '--bare', remote])
 await injectionGit(source, ['remote', 'add', 'origin', remote])
-  await injectionGit(source, ['push', 'origin', 'main'])
-  await mkdir(path.join(dataRoot, '.pangea', 'repository-settings'), { recursive: true })
-  await writeFile(path.join(dataRoot, '.pangea', 'repository-settings', 'target.json'), JSON.stringify({ personal_branch: 'main', remote: 'origin' }))
+await injectionGit(source, ['push', 'origin', 'main', 'personal'])
+await mkdir(path.join(dataRoot, '.pangea', 'repository-settings'), { recursive: true })
+await writeFile(path.join(dataRoot, '.pangea', 'repository-settings', 'target.json'), JSON.stringify({ personal_branch: 'personal', remote: 'origin' }))
 const run = { run_id: 'browser-run', source_snapshot: { repositories: [{ repo_id: 'target', git: { commit: base } }] },
   details: { test_cases: [{ projection_id: 'unit/allocation', title: '队列资源申请失败后的恢复', instrumentation: { points: [{ id: 'queue-fail', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c', action: '资源申请失败' }] } }] } }
 await mkdir(path.join(dataRoot, 'runs', run.run_id), { recursive: true })
@@ -42,6 +43,7 @@ const assets = {
   '/react-dom.js': path.join(path.dirname(require.resolve('react-dom/package.json')), 'umd', 'react-dom.development.js'),
   '/panel.js': new URL('../src/fault-injection-view.js', import.meta.url),
   '/repository-settings-view.js': new URL('../src/repository-settings-view.js', import.meta.url),
+  '/fault-injection-candidates.js': new URL('../src/fault-injection-candidates.js', import.meta.url),
 }
 const server = createServer(async (req, res) => {
   try {
@@ -51,7 +53,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.url !== '/') { res.writeHead(404); res.end('Not found'); return }
     res.writeHead(200, { 'content-type': 'text/html;charset=utf-8' })
-    res.end(`<!doctype html><html lang="zh"><meta charset="utf-8"><title>用例打桩工作区</title><style>body{font:15px system-ui;background:#f5f7fb;color:#19243b;margin:32px}main{max-width:1040px;margin:auto}.b05-card{padding:24px;border:1px solid #e2e7ef;border-radius:16px;background:white}.b05-head-actions{display:flex;gap:12px;align-items:center}.b05-subtle{color:#66758b}button,input,textarea,select{font:inherit;padding:9px;border:1px solid #cfd7e5;border-radius:7px}button{cursor:pointer;background:white}.primary{background:#3157d5;color:white}dt{font-weight:600}dd{margin:4px 0 12px}summary{cursor:pointer;padding:12px 0}label select{display:block;width:100%;margin-top:6px}pre{white-space:pre-wrap}</style><main><h1>队列资源申请失败后的恢复</h1><div id="app"></div></main><script src="/react.js"></script><script src="/react-dom.js"></script><script type="module">import {createFaultInjectionPanel} from '/panel.js'; const Panel=createFaultInjectionPanel(React); ReactDOM.createRoot(document.getElementById('app')).render(React.createElement(Panel,${JSON.stringify({ runId: run.run_id, dataRoot, cases: run.details.test_cases })}));</script></html>`)
+    res.end(`<!doctype html><html lang="zh"><meta charset="utf-8"><title>用例打桩工作区</title><style>body{font:15px system-ui;background:#f5f7fb;color:#19243b;margin:32px}main{max-width:1040px;margin:auto}.b05-card{padding:24px;border:1px solid #e2e7ef;border-radius:16px;background:white}.b05-head-actions{display:flex;gap:12px;align-items:center}.b05-subtle{color:#66758b}button,input,textarea,select{font:inherit;padding:9px;border:1px solid #cfd7e5;border-radius:7px}button{cursor:pointer;background:white}.primary{background:#3157d5;color:white}dt{font-weight:600}dd{margin:4px 0 12px}summary{cursor:pointer;padding:12px 0}label select{display:block;width:100%;margin-top:6px}pre{white-space:pre-wrap}</style><main><h1>队列资源申请失败后的恢复</h1><div id="app"></div></main><script src="/react.js"></script><script src="/react-dom.js"></script><script type="module">import {createFaultInjectionBuild,createFaultInjectionHome,createFaultInjectionPanel,createFaultInjectionTaskDetail} from '/panel.js'; const Home=createFaultInjectionHome(React),Panel=createFaultInjectionPanel(React),Detail=createFaultInjectionTaskDetail(React),Build=createFaultInjectionBuild(React),props=${JSON.stringify({ runId: run.run_id, dataRoot, cases: run.details.test_cases })}; const App=()=>{const [view,setView]=React.useState({mode:location.hash==='#home'?'home':'create'}); return view.mode==='home'?React.createElement(Home,{dataRoot:props.dataRoot,analysisLabel:id=>id,onOpen:t=>setView({mode:'detail',task:t}),onCreate:()=>setView({mode:'create'}),onOpenBuild:()=>setView({mode:'build',initialItems:null})}):view.mode==='build'?React.createElement(Build,{dataRoot:props.dataRoot,initialItems:view.initialItems,onOpenTask:t=>setView({mode:'detail',task:t}),onBack:()=>setView({mode:'home'})}):view.mode==='detail'?React.createElement(Detail,{runId:view.task.run_id,taskId:view.task.id,dataRoot:props.dataRoot,onSwitch:t=>setView({mode:'detail',task:t}),onOpenBuild:item=>setView({mode:'build',initialItems:[item]})}):React.createElement(Panel,{...props,onCreated:t=>setView({mode:'detail',task:t})});}; ReactDOM.createRoot(document.getElementById('app')).render(React.createElement(App));</script></html>`)
   } catch (error) { res.writeHead(500); res.end(error.message) }
 })
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -64,10 +66,15 @@ try {
   await page.getByRole('button', { name: '打开打桩工作区' }).click()
   await page.getByLabel('打桩模型').waitFor()
   await page.getByRole('button', { name: '生成打桩修改（1 条用例）' }).click()
-  await page.getByRole('button', { name: '提交并推送到 main', exact: true }).waitFor({ timeout: 20000 })
-  assert.match(await page.locator('[data-testid="fault-injection-panel"]').innerText(), /逐用例执行说明/)
-  await page.getByRole('button', { name: '提交并推送到 main', exact: true }).click()
+  await page.getByRole('button', { name: '加入出包 / 推送个人分支', exact: true }).waitFor({ timeout: 20000 })
+  assert.match(await page.locator('[data-testid="fault-injection-task"]').innerText(), /逐用例执行说明/)
+  await page.getByRole('button', { name: '加入出包 / 推送个人分支', exact: true }).click()
+  await page.getByLabel('问题单号', { exact: true }).fill('DTS2026111111059')
+  await page.getByLabel('修改人', { exact: true }).fill('h00600350')
+  await page.getByLabel('审核人', { exact: true }).fill('h00600350')
+  await page.getByRole('button', { name: '合成并推送到个人分支（1 个任务）', exact: true }).click()
   await page.getByRole('status').filter({ hasText: '个人分支已推送' }).waitFor()
+  await page.getByRole('button', { name: '队列资源申请失败后的恢复' }).click()
   await page.getByText('构建包与验证记录', { exact: true }).click()
   await page.getByLabel('构建链接', { exact: true }).fill('https://ci.example.test/build/001')
   await page.getByLabel('个人包名称或版本').fill('personal-001.zip')
@@ -77,17 +84,18 @@ try {
   await page.getByRole('button', { name: '保存构建与验证记录' }).click()
   await page.getByText(/通过 · queue-fail=1/).waitFor()
   const stored = (await service.list(dataRoot, run.run_id))[0]
+  const builds = await service.listBuilds(dataRoot)
   assert.equal(stored.verification[0].result, 'passed')
-  assert.equal(await injectionGit(remote, ['rev-parse', `refs/heads/${stored.branch}`]), stored.repositories[0].commit)
-  await page.reload(); await page.getByRole('button', { name: '打开打桩工作区' }).click()
-  await page.getByLabel('已有打桩任务').selectOption(stored.id)
+  assert.equal(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), builds[0].repositories[0].commit)
+  await page.goto(`http://127.0.0.1:${server.address().port}/#home`)
+  await page.getByRole('button', { name: stored.name || '队列资源申请失败后的恢复' }).click()
   await page.getByText('构建包与验证记录', { exact: true }).click()
   await page.getByText(/通过 · queue-fail=1/).waitFor()
   assert.equal(await page.getByLabel('个人包名称或版本').inputValue(), 'personal-001.zip')
   assert.equal(await page.getByRole('button', { name: /导出/ }).count(), 0)
   await page.screenshot({ path: process.env.INJECTION_SCREENSHOT || path.join(root, 'injection.png'), fullPage: true })
   assert.deepEqual(errors, [])
-  console.log('PASS: real browser selected case → generated diff → pushed Git branch → recorded build and result → reopened persisted task; no export control or browser errors.')
+  console.log('PASS: real browser selected case → generated diff → synthesized and pushed personal Git branch → recorded build and result → reopened persisted task; no export control or browser errors.')
 } finally {
   await browser?.close(); await service.dispose(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true })
 }

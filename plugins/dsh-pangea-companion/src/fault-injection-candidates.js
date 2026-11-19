@@ -67,13 +67,19 @@ export function buildVerificationShellScript(task) {
   const profiles = Array.isArray(task?.result?.profiles) ? task.result.profiles : []
   const points = Array.isArray(task?.result?.points) ? task.result.points : []
   const pointById = new Map(points.map(point => [point.id, point]))
-  const commits = (task?.repositories || []).filter(repo => repo.commit).map(repo => `${repo.repo_id}@${String(repo.commit).slice(0, 12)}`).join(', ')
+  const commitItems = Array.isArray(task?.build?.commits) && task.build.commits.length
+    ? task.build.commits
+    : Array.isArray(task?.latest_build?.commits) && task.latest_build.commits.length
+      ? task.latest_build.commits
+      : (task?.repositories || []).filter(repo => repo.commit)
+  const commits = commitItems.map(repo => `${repo.repo_id}@${String(repo.commit).slice(0, 12)}`).join(', ')
+  const branchLabel = task?.latest_build?.branch || task?.branch || '未记录'
   const lines = [
     '#!/usr/bin/env bash',
     '# PANGEA 故障注入可执行验证脚本',
     `# 任务名称: ${shellQuoteComment(task?.name || task?.id || '打桩任务')}`,
     `# 任务 ID : ${shellQuoteComment(task?.id || '')}`,
-    `# 个人分支: ${shellQuoteComment(task?.branch || '未记录')}${commits ? ` (${commits})` : ''}`,
+    `# 个人分支: ${shellQuoteComment(branchLabel)}${commits ? ` (${commits})` : ''}`,
     '# 用法示例: bash pangea-verify.sh 2>&1 | tee pangea-verify.log',
     '# macOS 默认 bash 3.2 在 C.UTF-8 下会把紧邻中文标点的未加花括号 $VAR 误判进变量名；仅将当前 shell 内部 LC_CTYPE 设为 C，子进程仍保留 UTF-8 LANG',
     'if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then',
@@ -553,9 +559,7 @@ function compilePatternMatcher(rawPattern) {
           const rightW = idx < input.length && isAsciiWord(input[idx])
           return mode === 'wb' ? leftW !== rightW : leftW === rightW
         }
-        matcher = (text, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS) => {
-          const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_REGEX_TIMEOUT_MS
-          const startMs = Date.now()
+        matcher = text => {
           const input = Array.from(text)
           const seen = new Int32Array(states.length).fill(-1)
           let stepToken = 0, current = []
@@ -577,9 +581,6 @@ function compilePatternMatcher(rawPattern) {
           addState(searchStart, current, 0)
           if (seen[accept] === stepToken) return true
           for (let i = 0; i < input.length; i++) {
-            if ((i & 31) === 0 && Date.now() - startMs > budget) {
-              throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
-            }
             const ch = input[i], nextList = []
             stepToken++
             for (const id of current) {
@@ -591,9 +592,6 @@ function compilePatternMatcher(rawPattern) {
             if (seen[accept] === stepToken) return true
             current = nextList
             if (!current.length) return false
-          }
-          if (Date.now() - startMs > budget) {
-            throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
           }
           return false
         }
@@ -687,12 +685,17 @@ function diagnoseGatePatternMismatch(message, trimmedPattern) {
   return `提交信息未通过本地预检正则（${trimmedPattern}）`
 }
 
-export function defaultCommitSummary(task) {
-  const raw = typeof task?.result?.summary === 'string' && task.result.summary.trim()
-    ? task.result.summary
-    : typeof task?.name === 'string' && task.name.trim()
-      ? task.name
-      : task?.id ? `fault injection ${task.id}` : ''
+export function defaultCommitSummary(subject) {
+  const itemNames = Array.isArray(subject?.items) && subject.items.length
+    ? subject.items.map(item => item?.name || item?.task_id).filter(Boolean).join('、')
+    : ''
+  const raw = typeof subject?.result?.summary === 'string' && subject.result.summary.trim()
+    ? subject.result.summary
+    : itemNames
+      ? `合成打桩：${itemNames}`
+      : typeof subject?.name === 'string' && subject.name.trim()
+        ? subject.name
+        : subject?.id ? `fault injection ${subject.id}` : ''
   const flattened = raw.replace(/\s*\r?\n\s*/g, '；').replace(/\s{2,}/g, ' ').trim()
   return Array.from(flattened).slice(0, 16).join('')
 }
@@ -738,7 +741,7 @@ export function validateRawCommitMessage(rawMessage, pattern = '', { timeoutMs =
   if (rawMessage.includes('\0')) return { ok: false, message: '', error: '提交信息包含无效空字符' }
   const message = rawMessage.replace(/\r\n/g, '\n').trim()
   if (!message) return { ok: false, message: '', error: '提交信息不能为空' }
-  if (message.length > 8000) return { ok: false, message, error: '提交信息过长（最多 8000 字符）' }
+  if (message.length > 8000) return { ok: false, message: '', error: '提交信息过长（最多 8000 字符）' }
   const emptyField = EMPTY_GATE_FIELD.exec(message)
   if (emptyField) {
     const label = emptyField[1] || emptyField[2] || '必填项'
@@ -751,7 +754,7 @@ export function validateRawCommitMessage(rawMessage, pattern = '', { timeoutMs =
     catch (error) { return { ok: false, message, error: `本地预检正则无效：${error.message}` } }
     let matched
     try { matched = matcher(message, timeoutMs) }
-    catch (error) { return { ok: false, message, error: error.message || `本地预检正则执行超时` } }
+    catch (error) { return { ok: false, message, error: error.message || '本地预检正则执行超时' } }
     if (!matched) return { ok: false, message, error: diagnoseGatePatternMismatch(message, trimmedPattern) }
   }
   return { ok: true, message, error: null }

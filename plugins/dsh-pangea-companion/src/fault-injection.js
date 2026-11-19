@@ -3,12 +3,12 @@ import { inspectSource, readRepositorySettings, compareSnapshot } from './reposi
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, realpath, lstat, writeFile, open, unlink } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, lstat, writeFile, open, unlink, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { writeTaskStoreFile } from './task-store.js'
 import { caseIdentity } from './case-review-projection.js'
 import { caseContentHash } from './case-review-store.js'
-import { withGitLongPaths, disabledHooksPath, shellQuote } from './repositories/git-environment.js'
+import { withGitLongPaths, disabledHooksPath } from './repositories/git-environment.js'
 import { protectedBranchReason } from './repositories/branch-policy.js'
 import {
   DEFAULT_INTRANET_COMMIT_REGEX, DEFAULT_REGEX_TIMEOUT_MS, extractRemoteHookRegex,
@@ -32,7 +32,8 @@ const REMOTE_PUSH_REJECTED_PATTERN = /(?:!\s*\[(?:(?:remote\s+)?rejected|远程�
 const isRemotePushRejected = error => REMOTE_PUSH_REJECTED_PATTERN.test(String(error?.stderr || error?.message || error || ''))
 
 const execute = promisify(execFile)
-const activeStates = new Set(['preparing', 'generating', 'pushing'])
+const activeStates = new Set(['preparing', 'generating'])
+const activeBuildStates = new Set(['composing', 'pushing'])
 const hash = value => createHash('sha256').update(value).digest('hex')
 const id = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)
 const serviceError = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode })
@@ -560,8 +561,9 @@ export function compactGenerationInput(record, analysisSource) {
     analysis_source: analysisSource,
     ...(record.analysis_context ? { analysis_context: record.analysis_context } : {}),
     repositories: record.repositories.map(repo => ({
-      repo_id: repo.repo_id, path: repo.path, base_commit: repo.base_commit, analysis_commit: repo.analysis_commit ?? null,
-      personal_branch: repo.branch, outgoing_count: repo.outgoing_count ?? 0,
+      repo_id: repo.repo_id, path: repo.path, base_commit: repo.base_commit,
+      ...(repo.base_branch ? { base_branch: repo.base_branch } : {}),
+      analysis_commit: repo.analysis_commit ?? null,
       analysis_snapshot_comparison: comparison(sources.get(repo.repo_id)?.comparison),
       ...(repo.harness ? { harness: repo.harness } : {}),
     })),
@@ -689,9 +691,63 @@ export function checkInjectionResult(value, record) {
   return value
 }
 
+function buildSummaryForTask(build) {
+  if (!build || build.status === 'unreadable') return null
+  const branch = [...new Set((build.repositories || []).map(repo => repo.remote_branch || repo.personal_branch).filter(Boolean))].join('、')
+  const commits = (build.repositories || []).filter(repo => repo.commit).map(repo => ({ repo_id: repo.repo_id, commit: repo.commit }))
+  return {
+    build_id: build.id,
+    status: build.status,
+    created_at: build.created_at,
+    updated_at: build.updated_at,
+    pushed: build.status === 'pushed',
+    branch,
+    commits,
+    pipeline_url: build.pipeline_url || '',
+    error: build.error || null,
+  }
+}
+
+function taskSummary(task, { latestBuild = null, latestPushedBuild = null } = {}) {
+  if (task.status === 'unreadable') return task
+  const latest = new Map((task.verification || []).map(item => [item.case_key, item.result]))
+  const repoIds = (task.repositories || []).length
+    ? task.repositories.map(repo => repo.repo_id)
+    : (task.source_repositories || []).map(repo => repo.repo_id)
+  return {
+    id: task.id, run_id: task.run_id, name: task.name || task.cases?.[0]?.title || '', status: task.status, failure_phase: task.failure_phase, error: task.error,
+    created_at: task.created_at, updated_at: task.updated_at, schema_version: task.schema_version,
+    case_count: task.case_keys?.length ?? 0, point_count: task.result?.points?.length ?? 0,
+    repo_ids: repoIds,
+    result_saved: Boolean(task.result_saved),
+    result_sha256: task.result_sha256 || null,
+    includable: Boolean(task.result_saved && task.generation_complete !== false && ['ready', 'pushed'].includes(task.status)),
+    base_commits: Object.fromEntries((task.repositories || []).map(repo => [repo.repo_id, repo.base_commit || null])),
+    analysis_commits: Object.fromEntries(
+      ((task.repositories || []).length ? task.repositories : (task.source_repositories || []))
+        .map(repo => [repo.repo_id, repo.analysis_commit ?? null]),
+    ),
+    passed_count: [...latest.values()].filter(result => result === 'passed').length,
+    verified_count: [...latest.values()].filter(result => result !== 'not_run').length,
+    latest_build: latestBuild,
+    latest_pushed_build: latestPushedBuild,
+  }
+}
+
+function validateHttpPipelineUrl(value) {
+  const url = String(value || '').trim()
+  if (url) {
+    let parsed
+    try { parsed = new URL(url) } catch { throw serviceError('请输入完整的构建流水线 HTTP/HTTPS 地址') }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw serviceError('流水线地址需使用 HTTP/HTTPS，且不能包含账号密码')
+  }
+  return url
+}
+
 export class FaultInjectionService {
   constructor({ generate, git = injectionGit, validateModel } = {}) { this.validateModel = validateModel; this.generate = generate; this.git = git; this.active = new Map(); this.queues = new Map(); this.branchQueues = new Map() }
   key(dataRoot, runId, taskId) { return JSON.stringify([path.resolve(dataRoot), runId, taskId]) }
+  buildKey(dataRoot, buildId) { return JSON.stringify([path.resolve(dataRoot), '__build__', buildId]) }
   async directory(dataRoot, runId, taskId) {
     if (!id(runId) || (taskId != null && !id(taskId))) throw serviceError('打桩任务或 Run 标识无效')
     const root = await realpath(dataRoot)
@@ -700,9 +756,40 @@ export class FaultInjectionService {
     if (!inside(root, await realpath(base))) throw serviceError('打桩任务目录越出数据目录')
     return base
   }
+  async buildsRoot(dataRoot, { create = false } = {}) {
+    const root = await realpath(dataRoot)
+    const base = path.join(root, '.pangea', 'fault-injection-builds')
+    if (create) {
+      await mkdir(base, { recursive: true })
+      if (!inside(root, await realpath(base))) throw serviceError('出包目录越出数据目录')
+    } else if (!inside(root, base)) {
+      throw serviceError('出包目录越出数据目录')
+    }
+    return base
+  }
+  async buildDirectory(dataRoot, buildId, { create = true } = {}) {
+    if (!id(buildId)) throw serviceError('出包标识无效')
+    const root = await realpath(dataRoot)
+    const base = path.join(root, '.pangea', 'fault-injection-builds', buildId)
+    if (create) {
+      await mkdir(base, { recursive: true })
+      if (!inside(root, await realpath(base))) throw serviceError('出包目录越出数据目录')
+    } else if (!inside(root, base)) {
+      throw serviceError('出包目录越出数据目录')
+    }
+    return base
+  }
   async save(directory, record) {
     record.updated_at = new Date().toISOString()
     await writeTaskStoreFile(path.join(directory, 'task.json'), JSON.stringify(record, null, 2) + '\n')
+  }
+  async saveBuild(directory, build) {
+    build.updated_at = new Date().toISOString()
+    const persisted = {
+      ...build,
+      repositories: (build.repositories || []).map(({ checkout, remote_url, ...repo }) => repo),
+    }
+    await writeTaskStoreFile(path.join(directory, 'build.json'), JSON.stringify(persisted, null, 2) + '\n')
   }
   async resolveSavedResultFile(directory) {
     const genDir = path.join(directory, 'generation')
@@ -718,19 +805,126 @@ export class FaultInjectionService {
     if (aStat) return authoredFile
     return null
   }
-  async read(dataRoot, runId, taskId) {
-    const directory = await this.directory(dataRoot, runId, taskId)
-    // Tasks written before result_saved existed (or aborted right after result.json
-    // landed on disk) still expose their saved result for revalidate / reuse.
-    const withSavedResult = async value => {
-      if (!value.result_saved) {
-        if (await this.resolveSavedResultFile(directory)) value.result_saved = true
-      }
-      if (value.commit_config && typeof value.commit_config === 'object' && value.commit_config.mode === 'default' && !value.commit_config.explicit_default_mode) {
+  async readBuild(dataRoot, buildId) {
+    const directory = await this.buildDirectory(dataRoot, buildId, { create: false })
+    const file = path.join(directory, 'build.json')
+    const upgradeCommit = value => {
+      if (value?.commit_config && typeof value.commit_config === 'object' && value.commit_config.mode === 'default' && !value.commit_config.explicit_default_mode) {
         const upgraded = { ...value.commit_config }
         delete upgraded.mode
         if (!upgraded.pattern) delete upgraded.pattern
         value.commit_config = normalizeCommitConfig(upgraded)
+      }
+      return value
+    }
+    let build = upgradeCommit(JSON.parse(await readFile(file, 'utf8')))
+    if (build.id !== buildId) throw serviceError('出包记录身份不匹配')
+    const key = this.buildKey(dataRoot, buildId)
+    if (activeBuildStates.has(build.status) && !this.active.has(key)) {
+      build = upgradeCommit(JSON.parse(await readFile(file, 'utf8')))
+      if (build.id !== buildId) throw serviceError('出包记录身份不匹配')
+      if (activeBuildStates.has(build.status) && !this.active.has(key)) {
+        return { ...build, status: 'interrupted', error: '上次出包操作已中断，可重试本次出包' }
+      }
+    }
+    const operation = this.active.get(key)
+    if (operation && !activeBuildStates.has(build.status)) return { ...build, status: operation.status }
+    return build
+  }
+  async listBuilds(dataRoot) {
+    const base = await this.buildsRoot(dataRoot, { create: false })
+    let entries
+    try { entries = await readdir(base, { withFileTypes: true }) }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error }
+    const builds = []
+    for (const item of entries) {
+      if (!item.isDirectory() || !id(item.name)) continue
+      try { builds.push(await this.readBuild(dataRoot, item.name)) }
+      catch (error) {
+        if (error.code === 'ENOENT') continue
+        builds.push({ id: item.name, status: 'unreadable', error: `出包记录不可读：${error.message}` })
+      }
+    }
+    return builds.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+  }
+  async taskBuildIndex(dataRoot) {
+    const latestAny = new Map(), latestPushed = new Map()
+    let builds = []
+    try { builds = await this.listBuilds(dataRoot) } catch { return { builds: [], latestAny, latestPushed } }
+    for (const build of builds) {
+      const summary = buildSummaryForTask(build)
+      if (!summary) continue
+      for (const item of Array.isArray(build.items) ? build.items : []) {
+        const taskKey = `${item.run_id}\0${item.task_id}`
+        if (!latestAny.has(taskKey)) latestAny.set(taskKey, summary)
+        if (build.status === 'pushed' && !latestPushed.has(taskKey)) latestPushed.set(taskKey, summary)
+      }
+    }
+    return { builds, latestAny, latestPushed }
+  }
+  async collectRecordedInjectionCommits(dataRoot, repoId) {
+    const root = await realpath(dataRoot)
+    const seen = new Map()
+    const addCommit = (commit, source_type, source_id) => {
+      if (typeof commit === 'string' && /^[0-9a-f]{7,64}$/i.test(commit) && !seen.has(commit) && seen.size < 64) {
+        seen.set(commit, { commit, source_type, source_id })
+      }
+    }
+    try {
+      const buildsDir = path.join(root, '.pangea', 'fault-injection-builds')
+      for (const entry of await readdir(buildsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !id(entry.name)) continue
+        try {
+          const build = JSON.parse(await readFile(path.join(buildsDir, entry.name, 'build.json'), 'utf8'))
+          for (const repo of build?.repositories || []) {
+            if (repo?.repo_id === repoId && repo.commit && repo.push_result !== 'unchanged') addCommit(repo.commit, 'build', entry.name)
+          }
+        } catch {}
+      }
+    } catch {}
+    try {
+      const fiDir = path.join(root, '.pangea', 'fault-injection')
+      for (const runEntry of await readdir(fiDir, { withFileTypes: true })) {
+        if (!runEntry.isDirectory() || !id(runEntry.name)) continue
+        try {
+          for (const taskEntry of await readdir(path.join(fiDir, runEntry.name), { withFileTypes: true })) {
+            if (!taskEntry.isDirectory() || !id(taskEntry.name)) continue
+            try {
+              const task = JSON.parse(await readFile(path.join(fiDir, runEntry.name, taskEntry.name, 'task.json'), 'utf8'))
+              for (const repo of task?.repositories || []) {
+                if (repo?.repo_id === repoId && repo.commit) addCommit(repo.commit, 'legacy_task', taskEntry.name)
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    } catch {}
+    return [...seen.values()]
+  }
+  async findAncestorInjectionCommits(dataRoot, repoId, sourcePath, headCommit, signal) {
+    const recorded = await this.collectRecordedInjectionCommits(dataRoot, repoId)
+    if (!recorded.length || !headCommit) return []
+    const matched = []
+    for (const item of recorded) {
+      signal?.throwIfAborted?.()
+      if (item.commit === headCommit) { matched.push(item); continue }
+      try {
+        if (await this.git(sourcePath, ['merge-base', item.commit, headCommit], signal) === item.commit) matched.push(item)
+      } catch {
+        signal?.throwIfAborted?.()
+      }
+    }
+    return matched
+  }
+  async read(dataRoot, runId, taskId, { buildIndex = null } = {}) {
+    const directory = await this.directory(dataRoot, runId, taskId)
+    // Tasks written before result_saved existed (or aborted right after result.json
+    // landed on disk) still expose their saved result for revalidate / reuse.
+    const withSavedResult = async value => {
+      const savedFile = await this.resolveSavedResultFile(directory)
+      if (savedFile) {
+        value.result_saved = true
+        if (!value.result_sha256) value.result_sha256 = hash(await readFile(savedFile))
       }
       return value
     }
@@ -741,31 +935,57 @@ export class FaultInjectionService {
       // Our first asynchronous read may have observed the preceding generation.
       record = await withSavedResult(JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8')))
       if (record.id !== taskId || record.run_id !== runId) throw serviceError('打桩任务身份不匹配')
-      if (activeStates.has(record.status) && !this.active.has(this.key(dataRoot, runId, taskId))) return { ...record, status: 'interrupted', error: '上次操作已中断；可重新生成，已提交的修改仍保留' }
+      if (activeStates.has(record.status) && !this.active.has(this.key(dataRoot, runId, taskId))) {
+        record = { ...record, status: 'interrupted', error: '上次操作已中断；可重新生成，已保存的结果仍可复用' }
+      }
+    } else {
+      const operation = this.active.get(this.key(dataRoot, runId, taskId))
+      if (operation && !activeStates.has(record.status)) record = { ...record, status: operation.status }
     }
-    const operation = this.active.get(this.key(dataRoot, runId, taskId))
-    // A terminal file can be visible before branch-lock cleanup finishes. Keep
-    // HTTP callers in the active state until mutations can actually be accepted.
-    if (operation && !activeStates.has(record.status)) return { ...record, status: operation.status }
+    const index = buildIndex || await this.taskBuildIndex(dataRoot)
+    const taskKey = `${runId}\0${taskId}`
+    const latestPushed = index.latestPushed.get(taskKey) || null
+    const latestAny = index.latestAny.get(taskKey) || null
+    record.latest_pushed_build = latestPushed
+    record.latest_build = latestPushed || latestAny
     return record
   }
-  async list(dataRoot, runId) {
+  async list(dataRoot, runId, { buildIndex = null } = {}) {
     const directory = await this.directory(dataRoot, runId)
+    const index = buildIndex || await this.taskBuildIndex(dataRoot)
     const records = []
     for (const item of await readdir(directory, { withFileTypes: true })) {
       if (!item.isDirectory() || !id(item.name)) continue
-      try { records.push(await this.read(dataRoot, runId, item.name)) }
-      catch (error) { if (error.code !== 'ENOENT') throw error }
+      try { records.push(await this.read(dataRoot, runId, item.name, { buildIndex: index })) }
+      catch (error) {
+        if (error.code === 'ENOENT') continue
+        // One damaged record must not hide the other tasks of the same Run.
+        records.push({ id: item.name, run_id: runId, status: 'unreadable', error: `记录不可读：${error.message}` })
+      }
     }
-    return records.sort((a, b) => b.created_at.localeCompare(a.created_at))
+    return records.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+  }
+  async listAll(dataRoot) {
+    const root = await realpath(dataRoot)
+    const index = await this.taskBuildIndex(dataRoot)
+    let entries
+    try { entries = await readdir(path.join(root, '.pangea', 'fault-injection'), { withFileTypes: true }) }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error }
+    const tasks = []
+    for (const item of entries) {
+      if (!item.isDirectory() || !id(item.name)) continue
+      for (const task of await this.list(dataRoot, item.name, { buildIndex: index })) {
+        const taskKey = `${task.run_id}\0${task.id}`
+        tasks.push(taskSummary(task, {
+          latestBuild: index.latestPushed.get(taskKey) || index.latestAny.get(taskKey) || null,
+          latestPushedBuild: index.latestPushed.get(taskKey) || null,
+        }))
+      }
+    }
+    return tasks.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
   }
   async configurePipeline(dataRoot, runId, taskId, value) {
-    const url = String(value || '').trim()
-    if (url) {
-      let parsed
-      try { parsed = new URL(url) } catch { throw serviceError('请输入完整的构建流水线 HTTP/HTTPS 地址') }
-      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw serviceError('流水线地址需使用 HTTP/HTTPS，且不能包含账号密码')
-    }
+    const url = validateHttpPipelineUrl(value)
     const save = async () => {
       let task
       if (taskId) {
@@ -777,6 +997,18 @@ export class FaultInjectionService {
       return { pipeline_url: url, task }
     }
     return taskId ? this.exclusive(dataRoot, runId, taskId, save) : save()
+  }
+  async configureBuildPipeline(dataRoot, buildId, value) {
+    const url = validateHttpPipelineUrl(value)
+    const buildsBase = await this.buildsRoot(dataRoot, { create: true })
+    await writeTaskStoreFile(path.join(buildsBase, 'pipeline.json'), JSON.stringify({ pipeline_url: url }) + '\n')
+    if (!buildId) return { pipeline_url: url, build: null }
+    return this.buildExclusive(dataRoot, buildId, async () => {
+      const build = await this.readBuild(dataRoot, buildId)
+      build.pipeline_url = url
+      await this.saveBuild(await this.buildDirectory(dataRoot, buildId), build)
+      return { pipeline_url: url, build }
+    })
   }
   async commitDefaultsPath(dataRoot) {
     const root = await realpath(dataRoot)
@@ -812,6 +1044,43 @@ export class FaultInjectionService {
     await writeTaskStoreFile(await this.commitDefaultsPath(dataRoot), JSON.stringify(reusable, null, 2) + '\n')
     return normalized
   }
+  async inspectRepositoryStatus(dataRoot, repoId, { analysisCommit = null, runId = null } = {}) {
+    const settings = await readRepositorySettings(dataRoot, repoId)
+    const sourcePath = settings.git_path || path.join(dataRoot, 'repositories', repoId)
+    let source
+    try { source = await inspectSource(sourcePath) } catch (error) { source = { kind: 'unavailable', error: error.message } }
+    const personalBranch = settings.personal_branch || ''
+    const remoteBranch = settings.remote_branch || personalBranch || ''
+    const currentBranch = source.kind === 'git' ? (source.branch || '') : ''
+    const headEqualsPersonalBranch = Boolean(source.kind === 'git' && personalBranch && currentBranch && currentBranch === personalBranch)
+    const protectedBranchError = personalBranch ? (protectedBranchReason(personalBranch) || protectedBranchReason(remoteBranch) || '') : ''
+    let comparison = { available: false, changed_count: 0, files: [] }
+    if (source.kind === 'git' && runId) {
+      try { comparison = await compareSnapshot(source.path || sourcePath, 'HEAD', path.join(dataRoot, 'runs', runId, 'inputs', 'source', repoId)) }
+      catch (error) { comparison = { available: false, error: error.message } }
+    }
+    const injectionCommitsInHead = source.kind === 'git' && source.commit
+      ? await this.findAncestorInjectionCommits(dataRoot, repoId, source.path || sourcePath, source.commit)
+      : []
+    return {
+      repo_id: repoId,
+      source_path: sourcePath,
+      base_ref: 'HEAD',
+      current_branch: currentBranch,
+      personal_branch: personalBranch,
+      remote_branch: remoteBranch,
+      remote: settings.remote || 'origin',
+      head_equals_personal_branch: headEqualsPersonalBranch,
+      protected_branch_error: protectedBranchError,
+      injection_commits_in_head: injectionCommitsInHead,
+      analysis_commit: analysisCommit,
+      source,
+      ...(runId ? { comparison } : {}),
+      linked: Boolean(settings.git_path),
+      project_pipeline_configured: Object.hasOwn(settings, 'pipeline_url'),
+      pipeline_url: settings.pipeline_url || '',
+    }
+  }
   async defaults(dataRoot, run) {
     const progressFile = path.join(dataRoot, 'runs', run.run_id, 'progress.json')
     let progress = {}
@@ -824,18 +1093,10 @@ export class FaultInjectionService {
     const commit_config = await this.readCommitDefaults(dataRoot)
     const repositories = []
     for (const repo of repos) {
-      const settings = await readRepositorySettings(dataRoot, repo.repo_id)
-      const sourcePath = settings.git_path || path.join(dataRoot, 'repositories', repo.repo_id)
-      let source
-      try { source = await inspectSource(sourcePath) } catch (error) { source = { kind: 'unavailable', error: error.message } }
-      const baseline = settings.personal_branch ? `refs/heads/${settings.personal_branch}` : 'HEAD'
-      let comparison = { available: false, changed_count: 0, files: [] }
-      if (source.kind === 'git') {
-        try { comparison = await compareSnapshot(sourcePath, baseline, path.join(dataRoot, 'runs', run.run_id, 'inputs', 'source', repo.repo_id)) }
-        catch (error) { comparison = { available: false, error: error.message } }
-      }
-      repositories.push({ repo_id: repo.repo_id, source_path: sourcePath, base_ref: baseline, personal_branch: settings.personal_branch || '', remote_branch: settings.remote_branch || settings.personal_branch || '', remote: settings.remote || 'origin',
-        analysis_commit: repo.git?.commit ?? repo.git?.head ?? null, source, comparison, linked: Boolean(settings.git_path), project_pipeline_configured: Object.hasOwn(settings, 'pipeline_url'), pipeline_url: settings.pipeline_url || '' })
+      repositories.push(await this.inspectRepositoryStatus(dataRoot, repo.repo_id, {
+        analysisCommit: repo.git?.commit ?? repo.git?.head ?? null,
+        runId: run.run_id,
+      }))
     }
     const projectPipeline = repositories.find(repo => repo.project_pipeline_configured)
     return { pipeline_url: projectPipeline ? projectPipeline.pipeline_url : pipeline.pipeline_url || '',
@@ -875,9 +1136,13 @@ export class FaultInjectionService {
     const selectedRepositories = repositories.map(repo => {
       if (typeof repo.repo_id !== 'string' || !repo.repo_id || /[\\/:\x00-\x1f]/.test(repo.repo_id) || ['.', '..'].includes(repo.repo_id)) throw serviceError('仓库标识无效')
       const configured = known.get(repo.repo_id)
-      if (!configured.personal_branch) throw serviceError(`${repo.repo_id}：请先在项目配置选择个人开发分支`)
-      const forbidden = protectedBranchReason(configured.personal_branch) || protectedBranchReason(configured.remote_branch)
-      if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}。请在项目配置改选个人开发分支`)
+      if (configured.personal_branch) {
+        const forbidden = protectedBranchReason(configured.personal_branch) || protectedBranchReason(configured.remote_branch)
+        if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}。请在项目配置改选个人开发分支`)
+        if (configured.head_equals_personal_branch) {
+          throw serviceError(`${repo.repo_id}：分析目录当前检出的正是个人分支 ${configured.personal_branch}，请先切回开发分支或目标提交后再生成打桩修改`)
+        }
+      }
       return { ...configured }
     })
     // A saved result of an earlier task in this Run: either applied as-is (reuse,
@@ -899,25 +1164,15 @@ export class FaultInjectionService {
       catch (error) { throw serviceError(error.message) }
     }
     if (!providerId || !model) throw serviceError('请选择打桩执行器和模型')
-    let commitConfig = null
-    if (input.commit_config && typeof input.commit_config === 'object') {
-      const normalizedCommit = normalizeCommitConfig(input.commit_config, defaults.commit_config)
-      const precheck = resolveCommitMessage(normalizedCommit, { id: 'pending', name: input.name || selected[0]?.title || '' }, { allowPendingSummary: true })
-      if (!precheck.ok) throw serviceError(precheck.error)
-      commitConfig = await this.saveCommitDefaults(dataRoot, normalizedCommit)
-    } else if (defaults.commit_config) {
-      const precheck = resolveCommitMessage(defaults.commit_config, { id: 'pending', name: input.name || selected[0]?.title || '' }, { allowPendingSummary: true })
-      if (precheck.ok) commitConfig = defaults.commit_config
-    }
-    const pipeline = await this.configurePipeline(dataRoot, run.run_id, null, input.pipeline_url ?? defaults.pipeline_url)
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
-    const record = { schema_version: 2, generation_contract_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
-      name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: pipeline.pipeline_url, branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch))].join('、'), case_keys: keys, cases: selected,
+    const record = { schema_version: 3, generation_contract_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
+      name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: defaults.pipeline_url || '',
+      branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch).filter(Boolean))].join('、'),
+      case_keys: keys, cases: selected,
       analysis_context: run.analysis_context ?? extractAnalysisContext(run, selected), repositories: [], source_repositories: selectedRepositories,
       provider_id: providerId, agent_model: model, agent_catalog_id: input.agent_catalog_id || null,
       baseline_acknowledged: input.baseline_acknowledged === true, instructions: String(input.instructions || ''),
-      ...(commitConfig ? { commit_config: commitConfig } : {}),
-      result: null, generation_complete: false, verification: [], build: {}, error: null,
+      result: null, result_saved: false, result_sha256: null, generation_complete: false, verification: [], build: {}, error: null,
       reused_from: reused, reference_from: reference ? { ...reference, error: String(input.reference_error || '').slice(0, 1500) } : null, telemetry: null, notices: [] }
     if (!record.provider_id || !record.agent_model) throw serviceError('请选择打桩执行器和模型，可复用本次分析的设置')
     const controller = new AbortController(), key = this.key(dataRoot, run.run_id, taskId)
@@ -933,55 +1188,58 @@ export class FaultInjectionService {
   async prepareAndGenerate({ dataRoot, directory, record, cwd, signal }) {
     for (const source of record.source_repositories) {
       await repositoryOperation(dataRoot, source.repo_id, async operationSignal => {
-      const signal = operationSignal
-      signal.throwIfAborted()
-      const sourcePath = await realpath(source.source_path)
-      const top = await this.git(sourcePath, ['rev-parse', '--show-toplevel'], signal)
-      if (await realpath(top) !== sourcePath) throw serviceError(`请指定 Git 仓库根目录：${source.repo_id}`)
-      const branch = source.personal_branch
-      const remoteBranch = source.remote_branch || branch
-      await this.git(sourcePath, ['check-ref-format', '--branch', remoteBranch], signal)
-      await this.git(sourcePath, ['check-ref-format', '--branch', branch], signal)
-      const baseCommit = await this.git(sourcePath, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], signal)
-      const comparison = await compareSnapshot(sourcePath, baseCommit, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
-      const dirty = Boolean(await this.git(sourcePath, ['status', '--porcelain'], signal))
-      // Differences are supplied to the generator for relocation against the target
-      // checkout. A dirty original or a linked repository is not itself a conflict.
-      source.comparison = comparison
-      source.working_tree_dirty = dirty
-      const remote = String(source.remote || 'origin')
-      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) throw serviceError('远端名称无效')
-      const remoteUrl = await this.git(sourcePath, ['remote', 'get-url', '--push', remote], signal)
-      const checkout = path.join(directory, 'repositories', source.repo_id)
-      await mkdir(path.dirname(checkout), { recursive: true })
-      await this.git(directory, ['clone', '--no-hardlinks', '--no-checkout', '--', sourcePath, checkout], signal)
-      // Clone does not carry local user config; preserve attribution when set.
-      for (const setting of ['user.name', 'user.email']) {
-        try { const value = await this.git(sourcePath, ['config', '--get', setting], signal); if (value) await this.git(checkout, ['config', setting, value], signal) }
-        catch (error) { if (signal.aborted) throw error }
-      }
-      await this.git(checkout, ['remote', 'set-url', 'origin', remoteUrl], signal)
-      // Fetch exactly the configured existing branch. Missing remote branches are not created.
-      await this.git(checkout, ['fetch', '--no-tags', 'origin', `refs/heads/${remoteBranch}`], signal)
-      const remoteHead = await this.git(checkout, ['rev-parse', 'FETCH_HEAD'], signal)
-      const ancestor = await this.git(checkout, ['merge-base', baseCommit, remoteHead], signal)
-      if (ancestor !== baseCommit && ancestor !== remoteHead) throw serviceError(`${source.repo_id}：个人分支与远端已分叉，请先处理冲突`)
-      const target = ancestor === baseCommit ? remoteHead : baseCommit
-      const ahead = Number(await this.git(checkout, ['rev-list', '--count', `${remoteHead}..${target}`], signal))
-      await this.git(checkout, ['checkout', '--detach', target], signal)
-      source.comparison = await compareSnapshot(checkout, target, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
-      // Anything present now was produced by the host checkout, not by the generator.
-      const baseline = await workspaceSnapshot(this.git, checkout, signal)
-      const { paths: targetPaths, rangesByPath, symbols: hintSymbols } = collectTargetEvidenceSpecs(source.repo_id, record.cases, record.analysis_context)
-      const harness = await inspectRepositoryHarness(checkout, source.repo_id, targetPaths, rangesByPath, hintSymbols)
-      record.repositories.push({ repo_id: source.repo_id, path: checkout, source_path: sourcePath,
-        base_commit: target, source_head: baseCommit, remote_head: remoteHead, remote_url: remoteUrl,
-        outgoing_count: ahead, analysis_commit: source.analysis_commit,
-        has_remote: true, branch, remote_branch: remoteBranch, commit: null, pushed: false,
-        workspace_baseline: baseline,
-        baseline_unstaged: baseline.filter(entry => entry.status !== '??' && entry.status[1] !== ' ').map(entry => entry.path),
-        ...(harness ? { harness } : {}) })
-      await this.save(directory, record)
+        const signal = operationSignal
+        signal.throwIfAborted()
+        const settings = await readRepositorySettings(dataRoot, source.repo_id)
+        const sourcePath = await realpath(settings.git_path || source.source_path)
+        const top = await this.git(sourcePath, ['rev-parse', '--show-toplevel'], signal)
+        if (await realpath(top) !== sourcePath) throw serviceError(`请指定 Git 仓库根目录：${source.repo_id}`)
+        const personalBranch = settings.personal_branch || source.personal_branch || ''
+        const remoteBranch = settings.remote_branch || source.remote_branch || personalBranch
+        if (personalBranch) {
+          const forbidden = protectedBranchReason(personalBranch) || protectedBranchReason(remoteBranch)
+          if (forbidden) throw serviceError(`${source.repo_id}：${forbidden}。请在项目配置改选个人开发分支`)
+        }
+        const currentBranch = await this.git(sourcePath, ['branch', '--show-current'], signal)
+        if (personalBranch && currentBranch && currentBranch === personalBranch) {
+          throw serviceError(`${source.repo_id}：分析目录当前检出的正是个人分支 ${personalBranch}，请先切回开发分支或目标提交后再生成打桩修改`)
+        }
+        const baseCommit = await this.git(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}'], signal)
+        const dirty = Boolean(await this.git(sourcePath, ['status', '--porcelain'], signal))
+        source.working_tree_dirty = dirty
+        const ancestorInjections = await this.findAncestorInjectionCommits(dataRoot, source.repo_id, sourcePath, baseCommit, signal)
+        if (ancestorInjections.length) {
+          const listed = ancestorInjections.slice(0, 5).map(item => `${item.commit.slice(0, 12)}（${item.source_type === 'build' ? `出包 ${item.source_id.slice(0, 8)}` : `旧任务 ${item.source_id.slice(0, 8)}`}）`).join('、')
+          record.notices.push(`${source.repo_id}：当前分析目录 HEAD 含有历史打桩提交 ${listed}。宿主不会代为回退分析目录，请确认当前基线是否为预期开发代码。`)
+        }
+        const checkout = path.join(directory, 'repositories', source.repo_id)
+        await mkdir(path.dirname(checkout), { recursive: true })
+        await this.git(directory, ['clone', '--no-hardlinks', '--no-checkout', '--', sourcePath, checkout], signal)
+        for (const setting of ['user.name', 'user.email']) {
+          try { const value = await this.git(sourcePath, ['config', '--get', setting], signal); if (value) await this.git(checkout, ['config', setting, value], signal) }
+          catch (error) { if (signal.aborted) throw error }
+        }
+        await this.git(checkout, ['checkout', '--detach', baseCommit], signal)
+        source.comparison = await compareSnapshot(checkout, baseCommit, path.join(dataRoot, 'runs', record.run_id, 'inputs', 'source', source.repo_id))
+        // Anything present now was produced by the host checkout, not by the generator.
+        const baseline = await workspaceSnapshot(this.git, checkout, signal)
+        const { paths: targetPaths, rangesByPath, symbols: hintSymbols } = collectTargetEvidenceSpecs(source.repo_id, record.cases, record.analysis_context)
+        const harness = await inspectRepositoryHarness(checkout, source.repo_id, targetPaths, rangesByPath, hintSymbols)
+        record.repositories.push({
+          repo_id: source.repo_id,
+          path: checkout,
+          source_path: sourcePath,
+          base_commit: baseCommit,
+          base_branch: currentBranch || '',
+          analysis_commit: source.analysis_commit ?? null,
+          working_tree_dirty: dirty,
+          branch: personalBranch,
+          remote_branch: remoteBranch,
+          workspace_baseline: baseline,
+          baseline_unstaged: baseline.filter(entry => entry.status !== '??' && entry.status[1] !== ' ').map(entry => entry.path),
+          ...(harness ? { harness } : {}),
+        })
+        await this.save(directory, record)
       }, { wait: true, signal })
     }
     signal.throwIfAborted()
@@ -1022,7 +1280,9 @@ export class FaultInjectionService {
     await mkdir(scratchDirectory, { recursive: true })
     // Keep the authored result available even if its transport shape is broken.
     await writeFile(path.join(scratchDirectory, 'authored-result.json'), JSON.stringify(generated, null, 2))
+    const savedFile = await this.resolveSavedResultFile(directory)
     record.result_saved = true
+    record.result_sha256 = savedFile ? hash(await readFile(savedFile)) : null
     await this.save(directory, record)
     checkInjectionResult(generated, record)
     record.result = { ...generated }; delete record.result.edits
@@ -1109,11 +1369,18 @@ export class FaultInjectionService {
     const work = Promise.resolve().then(callback); this.queues.set(key, work)
     try { return await work } finally { this.queues.delete(key) }
   }
+  async buildExclusive(dataRoot, buildId, callback) {
+    const key = this.buildKey(dataRoot, buildId)
+    if (this.queues.has(key) || this.active.has(key)) throw serviceError('本次出包操作正在执行', 409)
+    const work = Promise.resolve().then(callback); this.queues.set(key, work)
+    try { return await work } finally { this.queues.delete(key) }
+  }
   async branchExclusive(record, callback, signal, dataRoot) {
     const keys = []
     for (const repo of record.repositories) {
       const common = await this.git(repo.source_path, ['rev-parse', '--git-common-dir'])
-      keys.push(path.join(await realpath(path.resolve(repo.source_path, common)), `pangea-injection-${hash(repo.branch).slice(0, 24)}.lock`))
+      const branchLockName = repo.remote_branch || repo.personal_branch || repo.branch
+      keys.push(path.join(await realpath(path.resolve(repo.source_path, common)), `pangea-injection-${hash(branchLockName).slice(0, 24)}.lock`))
     }
     const releases = []
     try {
@@ -1127,7 +1394,7 @@ export class FaultInjectionService {
         let onAbort
         try {
           await Promise.race([previous, new Promise((_, reject) => {
-            onAbort = () => reject(signal.reason || new Error('打桩任务已停止'))
+            onAbort = () => reject(signal.reason || new Error('出包任务已停止'))
             signal?.addEventListener('abort', onAbort, { once: true })
           })])
         } finally { if (onAbort) signal?.removeEventListener('abort', onAbort) }
@@ -1142,248 +1409,497 @@ export class FaultInjectionService {
           if (Number.isInteger(owner?.pid) && owner.pid > 0) {
             try { process.kill(owner.pid, 0) } catch (reason) { dead = reason.code === 'ESRCH' }
           }
-          if (!dead) throw serviceError('同一分支正在被另一打桩操作使用，请稍后重试', 409)
+          if (!dead) throw serviceError('同一分支正在被另一出包操作使用，请稍后重试', 409)
           await unlink(key)
           handle = await open(key, 'wx')
         }
         releases.push(async () => { await handle.close(); await unlink(key) })
-        await handle.writeFile(JSON.stringify({ pid: process.pid, task: record.id }))
+        await handle.writeFile(JSON.stringify({ pid: process.pid, build: record.id }))
       }
       const ids = [...new Set(record.repositories.map(repo => repo.repo_id))].sort()
       const guarded = (index, inheritedSignal) => index === ids.length ? callback(inheritedSignal) : repositoryOperation(dataRoot, ids[index], operationSignal => guarded(index + 1, operationSignal), { signal: inheritedSignal })
       return await guarded(0, signal)
     } finally { for (const release of releases.reverse()) await release() }
   }
-  async push(dataRoot, runId, taskId, { background = false, acknowledged_heads = {}, commit_message, commit_config, precheck_timeout_ms = DEFAULT_REGEX_TIMEOUT_MS } = {}) {
-    return this.exclusive(dataRoot, runId, taskId, async () => {
-      const record = await this.read(dataRoot, runId, taskId), directory = await this.directory(dataRoot, runId, taskId)
-      if (record.schema_version !== 2) throw serviceError('旧任务使用任务分支，请按项目个人分支配置重新生成；本次不会推送旧分支')
-      if (record.status === 'pushed') return record
-      if (!['ready', 'interrupted'].includes(record.status) || !record.generation_complete) throw serviceError('请先完整生成本次代码修改')
+  async buildContext(dataRoot) {
+    const root = await realpath(dataRoot)
+    const tasks = await this.listAll(dataRoot)
+    const builds = await this.listBuilds(dataRoot)
+    const includableSet = new Set(tasks.filter(task => task.includable).map(task => `${task.run_id}\0${task.id}`))
+    const pushedItemsByRepoSet = {}
+    let defaultItems = []
+    let defaultResolved = false
+    for (const build of builds) {
+      if (build.status !== 'pushed') continue
+      const repoSetKey = [...new Set((build.repositories || []).map(repo => repo.repo_id).filter(Boolean))].sort().join(',')
+      const validItems = (build.items || [])
+        .filter(item => includableSet.has(`${item.run_id}\0${item.task_id}`))
+        .map(item => ({ run_id: item.run_id, task_id: item.task_id }))
+      if (!defaultResolved) {
+        defaultItems = validItems
+        defaultResolved = true
+      }
+      if (repoSetKey && !Object.hasOwn(pushedItemsByRepoSet, repoSetKey)) {
+        pushedItemsByRepoSet[repoSetKey] = validItems
+      }
+    }
+    const repoIds = new Set(tasks.flatMap(task => task.repo_ids || []))
+    for (const dirPath of [path.join(root, '.pangea', 'repository-settings'), path.join(root, 'repositories')]) {
+      try {
+        for (const entry of await readdir(dirPath, { withFileTypes: true })) {
+          const name = entry.isFile() && entry.name.endsWith('.json') ? entry.name.slice(0, -5) : entry.isDirectory() ? entry.name : ''
+          if (id(name)) repoIds.add(name)
+        }
+      } catch {}
+    }
+    const repositories = []
+    for (const repoId of [...repoIds].sort()) {
+      repositories.push(await this.inspectRepositoryStatus(dataRoot, repoId))
+    }
+    let buildPipeline = {}
+    try { buildPipeline = JSON.parse(await readFile(path.join(await this.buildsRoot(dataRoot, { create: false }), 'pipeline.json'), 'utf8')) } catch {}
+    const projectPipeline = repositories.find(repo => repo.project_pipeline_configured)
+    const latestPipeline = builds.find(b => b.pipeline_url)?.pipeline_url || ''
+    const commit_config = await this.readCommitDefaults(dataRoot)
+    return {
+      tasks,
+      builds,
+      default_items: defaultItems,
+      pushed_items_by_repo_set: pushedItemsByRepoSet,
+      commit_config,
+      pipeline_url: projectPipeline ? projectPipeline.pipeline_url : (buildPipeline.pipeline_url || latestPipeline || ''),
+      repositories,
+    }
+  }
+  async loadAndValidateBuildTask(dataRoot, item, { expectedSha = null } = {}) {
+    if (!item || !id(item.run_id) || !id(item.task_id)) throw serviceError('所选打桩任务标识无效')
+    const directory = await this.directory(dataRoot, item.run_id, item.task_id)
+    let rawDiskRecord
+    try { rawDiskRecord = JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8')) }
+    catch (error) {
+      if (error.code === 'ENOENT') throw serviceError(`打桩任务不存在：${item.task_id}`)
+      throw serviceError(`打桩任务记录不可读（${item.task_id}）：${error.message}`)
+    }
+    const record = await this.read(dataRoot, item.run_id, item.task_id)
+    if (activeStates.has(record.status)) throw serviceError(`打桩任务「${record.name || record.id}」仍在生成中，请等待完成后再出包`)
+    if (!['ready', 'pushed'].includes(record.status) || record.generation_complete === false) {
+      throw serviceError(`请先完整生成打桩任务「${record.name || record.id}」后再加入出包`)
+    }
+    const savedFile = await this.resolveSavedResultFile(directory)
+    if (!savedFile) throw serviceError(`打桩任务「${record.name || record.id}」缺少已保存的结果文件，请重新生成`)
+    const bytes = await readFile(savedFile)
+    const actualSha = hash(bytes)
+    if (rawDiskRecord.result_sha256 && rawDiskRecord.result_sha256 !== actualSha) {
+      throw serviceError(`打桩任务「${record.name || record.id}」的结果文件已被篡改（SHA-256 不符），请重新验收或重新生成`)
+    }
+    const callerExpected = expectedSha || item.result_sha256 || null
+    if (callerExpected && callerExpected !== actualSha) {
+      throw serviceError(`打桩任务「${record.name || record.id}」的结果文件在选入后被改动（SHA-256 不符）`)
+    }
+    let parsed
+    try { parsed = JSON.parse(bytes.toString('utf8')) }
+    catch (error) { throw serviceError(`打桩任务「${record.name || record.id}」结果文件 JSON 损坏：${error.message}`) }
+    normalizeInjectionResult(parsed)
+    if (!Array.isArray(parsed?.edits) || !parsed.edits.length) {
+      throw serviceError(`打桩任务「${record.name || record.id}」结果文件不包含代码修改`)
+    }
+    return { record, edits: parsed.edits, resultSha256: actualSha }
+  }
+  async build(dataRoot, input = {}) {
+    const background = input.background === true
+    const retryBuildId = input.build_id ? String(input.build_id) : ''
+    const runBuild = async () => {
+      let build, buildDir, loadedTasks
+      if (retryBuildId) {
+        build = await this.readBuild(dataRoot, retryBuildId)
+        if (build.status === 'pushed') return build
+        if (activeBuildStates.has(build.status)) throw serviceError('本次出包正在执行', 409)
+        buildDir = await this.buildDirectory(dataRoot, retryBuildId)
+        loadedTasks = []
+        for (const item of build.items || []) {
+          loadedTasks.push(await this.loadAndValidateBuildTask(dataRoot, item, { expectedSha: item.result_sha256 }))
+        }
+      } else {
+        const rawItems = input.items
+        if (!Array.isArray(rawItems) || !rawItems.length) throw serviceError('请至少勾选一个就绪的打桩任务加入出包')
+        const itemKeys = rawItems.map(item => `${item?.run_id || ''}\0${item?.task_id || ''}`)
+        if (new Set(itemKeys).size !== itemKeys.length) throw serviceError('出包任务列表中包含重复项')
+        const unsorted = []
+        for (const item of rawItems) {
+          unsorted.push(await this.loadAndValidateBuildTask(dataRoot, item))
+        }
+        loadedTasks = unsorted.sort((a, b) =>
+          String(a.record.created_at || '').localeCompare(String(b.record.created_at || ''))
+          || String(a.record.id).localeCompare(String(b.record.id)))
+      }
+      const targetRepoIds = retryBuildId
+        ? [...new Set((build.repositories || []).map(repo => repo.repo_id))]
+        : [...new Set(loadedTasks.flatMap(entry => entry.edits.map(edit => edit?.repo_id).filter(Boolean)))]
+      if (!targetRepoIds.length) throw serviceError('所选打桩任务没有目标仓库修改')
+      const repoConfigs = new Map()
+      for (const repoId of targetRepoIds) {
+        if (!id(repoId)) throw serviceError(`仓库标识无效：${repoId}`)
+        const settings = await readRepositorySettings(dataRoot, repoId)
+        if (!settings.personal_branch) throw serviceError(`${repoId}：请先在仓库配置中选择个人开发分支`)
+        const personalBranch = settings.personal_branch
+        const remoteBranch = settings.remote_branch || personalBranch
+        const forbidden = protectedBranchReason(personalBranch) || protectedBranchReason(remoteBranch)
+        if (forbidden) throw serviceError(`${repoId}：${forbidden}。请在仓库配置改选个人开发分支`)
+        const remote = String(settings.remote || 'origin')
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) throw serviceError(`${repoId}：远端名称无效`)
+        const rawSourcePath = settings.git_path || path.join(dataRoot, 'repositories', repoId)
+        let source
+        try { source = await inspectSource(rawSourcePath) } catch (error) { throw serviceError(`${repoId}：${error.message}`) }
+        if (source.kind !== 'git') throw serviceError(source.error || `${repoId} 尚未关联 Git 仓库`)
+        if (source.branch && source.branch === personalBranch) {
+          throw serviceError(`${repoId}：分析目录当前检出的正是个人分支 ${personalBranch}，请先切回开发分支或目标提交后再出包`)
+        }
+        repoConfigs.set(repoId, {
+          repo_id: repoId,
+          source_path: source.path,
+          personal_branch: personalBranch,
+          remote_branch: remoteBranch,
+          remote,
+          pipeline_url: Object.hasOwn(settings, 'pipeline_url') ? (settings.pipeline_url || '') : null,
+        })
+      }
+      const buildId = retryBuildId || randomUUID()
+      const commitSubject = {
+        id: buildId,
+        items: loadedTasks.map(entry => ({
+          run_id: entry.record.run_id,
+          task_id: entry.record.id,
+          name: entry.record.name || entry.record.cases?.[0]?.title || entry.record.id,
+        })),
+      }
+      const precheckTimeoutMs = input.precheck_timeout_ms ?? DEFAULT_REGEX_TIMEOUT_MS
       const savedDefaults = await this.readCommitDefaults(dataRoot)
-      const detectedHookRegex = extractRemoteHookRegex(record.error)
-        || (/【问题单号|Commit message does not follow|pre-receive hook declined/i.test(record.error || '') ? DEFAULT_INTRANET_COMMIT_REGEX : '')
+      const detectedHookRegex = extractRemoteHookRegex(build?.error)
+        || (/【问题单号|Commit message does not follow|pre-receive hook declined/i.test(build?.error || '') ? DEFAULT_INTRANET_COMMIT_REGEX : '')
       let desiredMessage
-      if (commit_config && typeof commit_config === 'object') {
-        const normalizedConfig = normalizeCommitConfig(commit_config, record.commit_config || savedDefaults)
+      let nextCommitConfig = build?.commit_config || null
+      if (input.commit_config && typeof input.commit_config === 'object') {
+        const normalizedConfig = normalizeCommitConfig(input.commit_config, build?.commit_config || savedDefaults)
         if (detectedHookRegex && !normalizedConfig.pattern) normalizedConfig.pattern = detectedHookRegex
-        const checked = resolveCommitMessage(normalizedConfig, record, { timeoutMs: precheck_timeout_ms })
+        const checked = resolveCommitMessage(normalizedConfig, commitSubject, { timeoutMs: precheckTimeoutMs })
         if (!checked.ok) throw serviceError(checked.error)
         desiredMessage = checked.message
         await this.saveCommitDefaults(dataRoot, normalizedConfig)
-        record.commit_config = normalizedConfig
-      } else if (commit_message !== undefined && commit_message !== null) {
-        const baseConfig = normalizeCommitConfig(record.commit_config, savedDefaults)
+        nextCommitConfig = normalizedConfig
+      } else if (input.commit_message !== undefined && input.commit_message !== null) {
+        const baseConfig = normalizeCommitConfig(build?.commit_config, savedDefaults)
         const activePattern = detectedHookRegex || (baseConfig.mode === 'default' ? baseConfig.pattern : (baseConfig.pattern || DEFAULT_INTRANET_COMMIT_REGEX))
-        const checked = validateRawCommitMessage(String(commit_message), activePattern, { timeoutMs: precheck_timeout_ms })
+        const checked = validateRawCommitMessage(String(input.commit_message), activePattern, { timeoutMs: precheckTimeoutMs })
         if (!checked.ok) throw serviceError(checked.error)
         desiredMessage = checked.message
       } else {
-        const effectiveConfig = normalizeCommitConfig(record.commit_config, savedDefaults)
+        const effectiveConfig = normalizeCommitConfig(build?.commit_config, savedDefaults)
         if (detectedHookRegex && !effectiveConfig.pattern) effectiveConfig.pattern = detectedHookRegex
-        if (effectiveConfig.mode === 'default' && !effectiveConfig.custom_message && record.commit_message) {
-          effectiveConfig.custom_message = record.commit_message
+        if (effectiveConfig.mode === 'default' && !effectiveConfig.custom_message && build?.commit_message && !/^test: fault injection\b/.test(build.commit_message)) {
+          effectiveConfig.custom_message = build.commit_message
         }
-        const checked = resolveCommitMessage(effectiveConfig, record, { timeoutMs: precheck_timeout_ms })
+        const checked = resolveCommitMessage(effectiveConfig, commitSubject, { timeoutMs: precheckTimeoutMs })
         if (!checked.ok) throw serviceError(checked.error)
         desiredMessage = checked.message
+        nextCommitConfig = effectiveConfig
       }
-      const rollbackSourceBranch = async (repo, expectedCommit) => {
-        if (!repo.source_head || !expectedCommit || expectedCommit === repo.source_head) return false
-        const currentRef = (await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`])).trim()
-        if (currentRef !== expectedCommit) return false
-        const isBare = (await this.git(repo.source_path, ['rev-parse', '--is-bare-repository'])).trim() === 'true'
-        if (!isBare) {
-          let headRef = ''
-          try { headRef = (await this.git(repo.source_path, ['symbolic-ref', '-q', 'HEAD'])).trim() } catch {}
-          if (headRef === `refs/heads/${repo.branch}`) {
-            await this.git(repo.source_path, ['read-tree', '-u', '-m', expectedCommit, repo.source_head])
-          }
+      const configuredPipeline = input.pipeline_url !== undefined
+        ? validateHttpPipelineUrl(input.pipeline_url)
+        : (build?.pipeline_url ?? ([...repoConfigs.values()].find(cfg => cfg.pipeline_url !== null)?.pipeline_url || ''))
+      if (input.pipeline_url !== undefined) {
+        const buildsBase = await this.buildsRoot(dataRoot, { create: true })
+        await writeTaskStoreFile(path.join(buildsBase, 'pipeline.json'), JSON.stringify({ pipeline_url: configuredPipeline }) + '\n')
+      }
+      buildDir = buildDir || await this.buildDirectory(dataRoot, buildId)
+      if (!build) {
+        build = {
+          id: buildId,
+          created_at: new Date().toISOString(),
+          status: 'composing',
+          items: loadedTasks.map(entry => ({
+            run_id: entry.record.run_id,
+            task_id: entry.record.id,
+            name: entry.record.name || entry.record.cases?.[0]?.title || entry.record.id,
+            created_at: entry.record.created_at,
+            result_sha256: entry.resultSha256,
+          })),
+          repositories: targetRepoIds.map(repoId => {
+            const cfg = repoConfigs.get(repoId)
+            return {
+              repo_id: repoId,
+              source_path: cfg.source_path,
+              base_commit: null,
+              base_branch: '',
+              personal_branch: cfg.personal_branch,
+              remote: cfg.remote,
+              remote_branch: cfg.remote_branch,
+              remote_head: null,
+              tree: null,
+              commit: null,
+              committed_message: null,
+              pushed: false,
+              push_result: null,
+              applied: [],
+              failures: [],
+            }
+          }),
+          commit_message: desiredMessage,
+          ...(nextCommitConfig ? { commit_config: nextCommitConfig } : {}),
+          pipeline_url: configuredPipeline,
+          notices: [],
+          error: null,
         }
-        await this.git(repo.source_path, ['update-ref', `refs/heads/${repo.branch}`, repo.source_head, expectedCommit])
-        return true
+      } else {
+        build.commit_message = desiredMessage
+        if (nextCommitConfig) build.commit_config = nextCommitConfig
+        build.pipeline_url = configuredPipeline
+        build.error = null
+        build.status = 'composing'
       }
-      const controller = new AbortController(), key = this.key(dataRoot, runId, taskId)
-      const operation = { controller, done: null, status: 'pushing' }
-      record.commit_message = desiredMessage
-      record.status = 'pushing'; record.error = null
-      this.active.set(key, operation)
-      const published = this.save(directory, record)
-      operation.done = published.then(() => this.branchExclusive(record, async signal => {
+      const controller = new AbortController()
+      const bKey = this.buildKey(dataRoot, buildId)
+      const operation = { controller, done: null, status: 'composing' }
+      this.active.set(bKey, operation)
+      const published = this.saveBuild(buildDir, build)
+      operation.done = published.then(async () => {
         try {
-          // Check all repositories before making the first local commit.
-          for (const repo of record.repositories) {
+          const signal = controller.signal
+          // Phase A: compose clean detached baseline + apply selected tasks' edits per repository
+          for (const repo of build.repositories) {
             signal.throwIfAborted()
-            if (!repo.diff || repo.pushed) continue
-            // A cancellation may arrive after Git has written the commit (or amend)
-            // but before its SHA was saved. Recover only this task's exact change.
-            if (repo.commit_started && !repo.commit) {
-              const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
-              if (head !== repo.base_commit) {
-                const parent = await this.git(repo.path, ['rev-parse', `${head}^`], signal)
-                const body = (await this.git(repo.path, ['log', '-1', '--format=%B', head], signal)).trim()
-                const committedDiff = await this.git(repo.path, ['diff', '--no-ext-diff', '--no-textconv', repo.base_commit, head], signal)
-                const expectedMessage = (repo.committed_message || desiredMessage).trim()
-                if (parent !== repo.base_commit || body !== expectedMessage || hash(committedDiff) !== repo.diff_sha256) throw serviceError(`${repo.repo_id}：中断后提交不匹配，请重新生成`)
-                repo.commit = head; await this.save(directory, record)
-              }
-            } else if (repo.amend_started && repo.commit) {
-              const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
-              if (head !== repo.commit) {
-                const parent = await this.git(repo.path, ['rev-parse', `${head}^`], signal)
-                const body = (await this.git(repo.path, ['log', '-1', '--format=%B', head], signal)).trim()
-                const committedDiff = await this.git(repo.path, ['diff', '--no-ext-diff', '--no-textconv', repo.base_commit, head], signal)
-                const expectedMessage = (repo.committed_message || desiredMessage).trim()
-                if (parent !== repo.base_commit || body !== expectedMessage || hash(committedDiff) !== repo.diff_sha256) throw serviceError(`${repo.repo_id}：中断后重写提交不匹配，请重新生成`)
-                repo.commit = head
-              }
-              repo.amend_started = false; await this.save(directory, record)
+            const checkout = path.join(buildDir, 'repositories', repo.repo_id)
+            repo.checkout = checkout
+            if (repo.pushed) continue
+            let hasReusableTree = false
+            if (repo.tree && repo.base_commit) {
+              try { hasReusableTree = (await lstat(checkout)).isDirectory() } catch { hasReusableTree = false }
             }
-            const configured = await readRepositorySettings(dataRoot, repo.repo_id)
-            const configuredPath = await realpath(configured.git_path || path.join(dataRoot, 'repositories', repo.repo_id))
-            if (configuredPath !== repo.source_path) throw serviceError(`${repo.repo_id}：项目源码目录已变更，请重新生成`)
-            if (configured.personal_branch !== repo.branch || (configured.remote_branch || configured.personal_branch) !== (repo.remote_branch || repo.branch)) throw serviceError(`${repo.repo_id}：项目个人分支已变更，请重新生成`)
-            const forbidden = protectedBranchReason(repo.branch) || protectedBranchReason(repo.remote_branch)
-            if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}；本次不会提交或推送`)
-            const remoteUrl = await this.git(repo.source_path, ['remote', 'get-url', '--push', configured.remote || 'origin'], signal)
-            if (remoteUrl !== repo.remote_url) throw serviceError(`${repo.repo_id}：推送远端已变更，请重新生成`)
-            await this.git(repo.path, ['fetch', '--no-tags', 'origin', `refs/heads/${repo.remote_branch || repo.branch}`], signal)
-            const remote = await this.git(repo.path, ['rev-parse', 'FETCH_HEAD'], signal)
-            if (repo.commit) {
-              let delivered = remote === repo.commit
-              if (!delivered) {
-                try { delivered = await this.git(repo.path, ['merge-base', repo.commit, remote], signal) === repo.commit }
-                catch (error) { signal.throwIfAborted() }
+            if (hasReusableTree) {
+              const cfg = repoConfigs.get(repo.repo_id)
+              repo.remote_url = await this.git(cfg.source_path, ['remote', 'get-url', '--push', cfg.remote], signal)
+              continue
+            }
+            await repositoryOperation(dataRoot, repo.repo_id, async opSignal => {
+              opSignal.throwIfAborted()
+              const cfg = repoConfigs.get(repo.repo_id)
+              const sourcePath = await realpath(cfg.source_path)
+              const top = await this.git(sourcePath, ['rev-parse', '--show-toplevel'], opSignal)
+              if (await realpath(top) !== sourcePath) throw serviceError(`请指定 Git 仓库根目录：${repo.repo_id}`)
+              const baseBranch = await this.git(sourcePath, ['branch', '--show-current'], opSignal)
+              if (baseBranch && baseBranch === cfg.personal_branch) {
+                throw serviceError(`${repo.repo_id}：分析目录当前检出的正是个人分支 ${cfg.personal_branch}，请先切回开发分支后再出包`)
               }
-              if (delivered) { repo.pushed = true; repo.push_result = 'confirmed'; await this.save(directory, record); continue }
-            }
-            const localBefore = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
-            const priorCommits = Array.isArray(repo.previous_commits) ? repo.previous_commits : []
-            if ((repo.commit && localBefore === repo.commit) || priorCommits.includes(localBefore)) {
-              await rollbackSourceBranch(repo, localBefore)
-              repo.local_applied = false
-              await this.save(directory, record)
-            }
-            const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
-            if (local !== repo.source_head) throw serviceError(`${repo.repo_id}：个人分支已有新提交，请重新生成打桩修改`)
-            if (remote !== repo.remote_head) throw serviceError(`${repo.repo_id}：远端分支已更新，请重新生成打桩修改`)
-            if (repo.outgoing_count > 0 && acknowledged_heads[repo.repo_id] !== repo.base_commit && !repo.commit) throw serviceError(`${repo.repo_id}：推送将包含个人分支上 ${repo.outgoing_count} 个已有未推送提交，请确认后继续`)
-            if (!repo.commit) {
-              const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
-              const diff = await this.git(repo.path, ['diff', '--cached', '--no-ext-diff', '--no-textconv'], signal)
-              const baselineUnstaged = new Set(repo.baseline_unstaged ?? [])
-              const unstaged = (await this.git(repo.path, ['diff', '--name-only', '-z'], signal)).split('\0').filter(file => file && !baselineUnstaged.has(file))
-              if (head !== repo.base_commit || hash(diff) !== repo.diff_sha256 || unstaged.length) throw serviceError(`${repo.repo_id}：待提交修改已变化，请重新生成`)
-            } else {
-              const currentMessage = (await this.git(repo.path, ['log', '-1', '--format=%B', repo.commit], signal)).trim()
-              if (currentMessage !== desiredMessage) {
-                const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
-                const parent = await this.git(repo.path, ['rev-parse', `${repo.commit}^`], signal)
-                const committedDiff = await this.git(repo.path, ['diff', '--no-ext-diff', '--no-textconv', repo.base_commit, repo.commit], signal)
-                const extraStaged = await this.git(repo.path, ['diff', '--cached', '--name-only'], signal)
-                if (head !== repo.commit || parent !== repo.base_commit || hash(committedDiff) !== repo.diff_sha256 || extraStaged) {
-                  throw serviceError(`${repo.repo_id}：待重写提交状态已变化，请重新生成`)
-                }
+              const baseCommit = repo.base_commit || await this.git(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}'], opSignal)
+              const remoteUrl = await this.git(sourcePath, ['remote', 'get-url', '--push', cfg.remote], opSignal)
+              const ancestorInjections = await this.findAncestorInjectionCommits(dataRoot, repo.repo_id, sourcePath, baseCommit, opSignal)
+              if (ancestorInjections.length) {
+                const listed = ancestorInjections.slice(0, 5).map(item => `${item.commit.slice(0, 12)}（${item.source_type === 'build' ? `出包 ${item.source_id.slice(0, 8)}` : `旧任务 ${item.source_id.slice(0, 8)}`}）`).join('、')
+                const notice = `${repo.repo_id}：当前分析目录 HEAD 含有历史打桩提交 ${listed}；宿主不会自动回退分析目录。`
+                if (!build.notices.includes(notice)) build.notices.push(notice)
               }
-            }
-            const dirty = new Set([
-              ...((await this.git(repo.source_path, ['diff', '--name-only', '-z'], signal)).split('\0')),
-              ...((await this.git(repo.source_path, ['diff', '--cached', '--name-only', '-z'], signal)).split('\0')),
-              ...((await this.git(repo.source_path, ['ls-files', '--others', '--exclude-standard', '-z'], signal)).split('\0')),
-            ].filter(Boolean))
-            if (repo.files.some(file => dirty.has(file))) throw serviceError(`${repo.repo_id}：本次修改文件存在未提交内容，请先处理后重试`)
-          }
-          for (const repo of record.repositories) {
-            signal.throwIfAborted()
-            if (!repo.diff || repo.pushed) continue
-            record.current_repository = repo.repo_id; await this.save(directory, record)
-            const resolveAuthorArgs = async () => {
-              const author = []
-              for (const [name, fallback] of [['user.name', 'PANGEA'], ['user.email', 'pangea@localhost']]) {
-                try { await this.git(repo.path, ['config', '--get', name], signal) }
-                catch (error) { signal.throwIfAborted(); author.push('-c', `${name}=${fallback}`) }
+              repo.source_path = sourcePath
+              repo.base_commit = baseCommit
+              repo.base_branch = baseBranch || ''
+              repo.remote_url = remoteUrl
+              repo.applied = []
+              repo.failures = []
+              await rm(checkout, { recursive: true, force: true })
+              await mkdir(path.dirname(checkout), { recursive: true })
+              await this.git(buildDir, ['clone', '--no-hardlinks', '--no-checkout', '--', sourcePath, checkout], opSignal)
+              for (const setting of ['user.name', 'user.email']) {
+                try { const value = await this.git(sourcePath, ['config', '--get', setting], opSignal); if (value) await this.git(checkout, ['config', setting, value], opSignal) }
+                catch { if (opSignal.aborted) throw opSignal.reason }
               }
-              return author
-            }
-            if (!repo.commit) {
-              repo.commit_started = true; repo.committed_message = desiredMessage; await this.save(directory, record)
-              const author = await resolveAuthorArgs()
-              await this.git(repo.path, [...author, 'commit', '--no-gpg-sign', '-m', desiredMessage], signal)
-              repo.commit = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
-              await this.save(directory, record)
-            } else {
-              const currentMessage = (await this.git(repo.path, ['log', '-1', '--format=%B', repo.commit], signal)).trim()
-              if (currentMessage !== desiredMessage) {
-                const oldCommit = repo.commit
-                const oldTree = await this.git(repo.path, ['rev-parse', `${oldCommit}^{tree}`], signal)
-                repo.previous_commits = [...new Set([...(repo.previous_commits ?? []), oldCommit])].slice(-10)
-                repo.amend_started = true; repo.committed_message = desiredMessage; await this.save(directory, record)
-                const author = await resolveAuthorArgs()
-                await this.git(repo.path, [...author, 'commit', '--amend', '--no-gpg-sign', '-m', desiredMessage], signal)
-                const newCommit = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
-                const newTree = await this.git(repo.path, ['rev-parse', `${newCommit}^{tree}`], signal)
-                if (newTree !== oldTree) throw serviceError(`${repo.repo_id}：重写提交信息时文件树异常变化，已中止`)
-                repo.commit = newCommit; repo.amend_started = false; await this.save(directory, record)
-              }
-            }
-            const local = await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`], signal)
-            if (local !== repo.commit) {
-              if (local === repo.source_head) {
-                // Address branch explicitly inside receive-pack so a concurrent checkout
-                // cannot write into another branch; if unrelated tracked files are dirty,
-                // fall back to two-way read-tree + CAS update-ref (which still rejects dirty target files).
+              await this.git(checkout, ['remote', 'set-url', 'origin', remoteUrl], opSignal)
+              await this.git(checkout, ['checkout', '--detach', baseCommit], opSignal)
+              const touchedBy = new Map()
+              const allFiles = new Set()
+              for (const entry of loadedTasks) {
+                const edits = entry.edits.filter(edit => edit.repo_id === repo.repo_id)
+                if (!edits.length) continue
                 try {
-                  await this.git(repo.path, ['push', `--receive-pack=git -c core.hooksPath=${shellQuote(await disabledHooksPath())} -c receive.denyCurrentBranch=updateInstead receive-pack`,
-                    repo.source_path, `${repo.commit}:refs/heads/${repo.branch}`], signal)
-                } catch (localPushError) {
-                  if (!/Working directory has unstaged changes/i.test(String(localPushError?.message || ''))) throw localPushError
-                  await this.git(repo.source_path, ['fetch', '--no-tags', '--', repo.path, repo.commit], signal)
-                  const isBare = (await this.git(repo.source_path, ['rev-parse', '--is-bare-repository'], signal)).trim() === 'true'
-                  if (!isBare) {
-                    let headRef = ''
-                    try { headRef = (await this.git(repo.source_path, ['symbolic-ref', '-q', 'HEAD'], signal)).trim() } catch {}
-                    if (headRef === `refs/heads/${repo.branch}`) {
-                      await this.git(repo.source_path, ['read-tree', '-u', '-m', repo.source_head, repo.commit], signal)
-                    }
+                  for (const edit of edits) {
+                    const attributes = await this.git(checkout, ['check-attr', '-z', 'filter', '--', edit.path], opSignal)
+                    if (attributes.split('\0')[2] === 'lfs') throw serviceError(`不支持修改 LFS 文件：${edit.path}`)
                   }
-                  await this.git(repo.source_path, ['update-ref', `refs/heads/${repo.branch}`, repo.commit, repo.source_head], signal)
-                }
-              } else {
-                throw serviceError(`${repo.repo_id}：个人分支已变化，请重新生成`)
-              }
-            }
-            repo.local_applied = true; await this.save(directory, record)
-            // Plain fast-forward push: never create a task ref or force overwrite.
-            repo.push_result = 'unconfirmed'; await this.save(directory, record)
-            try {
-              await this.git(repo.path, ['push', 'origin', `${repo.commit}:refs/heads/${repo.remote_branch || repo.branch}`], signal)
-            } catch (pushError) {
-              if (isRemotePushRejected(pushError)) {
-                let rollbackWarning = ''
-                try {
-                  const rolledBack = await rollbackSourceBranch(repo, repo.commit)
-                  if (rolledBack || (await this.git(repo.source_path, ['rev-parse', `refs/heads/${repo.branch}`])).trim() === repo.source_head) {
-                    repo.local_applied = false
+                  const files = await applyInjectionEdits(checkout, edits)
+                  repo.applied.push({ task_id: entry.record.id, run_id: entry.record.run_id, name: entry.record.name || entry.record.id, files })
+                  for (const file of files) {
+                    const norm = posixPath(file)
+                    allFiles.add(norm)
+                    if (!touchedBy.has(norm)) touchedBy.set(norm, [])
+                    touchedBy.get(norm).push(entry.record)
                   }
-                } catch (rollbackError) {
-                  rollbackWarning = `\n本地上游分支回滚失败（请检查 ${repo.source_path} 的 ${repo.branch} 分支）：${cleanError(rollbackError)}`
+                } catch (applyErr) {
+                  opSignal.throwIfAborted()
+                  const overlaps = [...new Set(edits.flatMap(edit => {
+                    const norm = posixPath(edit?.path || '')
+                    return (touchedBy.get(norm) || []).map(other => `「${other.name || other.id}」（${norm}）`)
+                  }))]
+                  const overlapHint = overlaps.length ? `；与已应用的打桩任务修改同一文件冲突：${overlaps.join('、')}` : ''
+                  repo.failures.push({
+                    task_id: entry.record.id,
+                    run_id: entry.record.run_id,
+                    name: entry.record.name || entry.record.id,
+                    error: `${cleanError(applyErr)}${overlapHint}`,
+                  })
                 }
-                repo.push_result = 'rejected'; await this.save(directory, record)
-                if (rollbackWarning) throw serviceError(`${cleanError(pushError)}${rollbackWarning}`, pushError.statusCode || 422)
               }
-              throw pushError
-            }
-            repo.pushed = true; repo.push_result = 'confirmed'; await this.save(directory, record)
+              if (!repo.failures.length) {
+                if (allFiles.size) await this.git(checkout, ['add', '--', ...allFiles], opSignal)
+                repo.tree = (await this.git(checkout, ['write-tree'], opSignal)).trim()
+              }
+              await this.saveBuild(buildDir, build)
+            }, { wait: true, signal })
           }
-          record.status = 'pushed'
-        } catch (error) { record.status = 'ready'; record.error = (record.repositories.some(repo => !repo.pushed && repo.push_result === 'unconfirmed') ? '推送结果待确认；重试时将先本地校验提交信息合规，再查询远端决定确认或重推。\n' : '') + (controller.signal.aborted ? '提交或推送已停止，已提交内容保留，可重试' : cleanError(error)) }
-        await this.save(directory, record)
-        return record
-      }, controller.signal, dataRoot)).catch(async error => { record.status = 'ready'; record.error = cleanError(error); await this.save(directory, record); return record }).finally(() => this.active.delete(key))
+          const failedRepos = build.repositories.filter(repo => repo.failures?.length)
+          if (failedRepos.length) {
+            build.status = 'failed'
+            const details = failedRepos.flatMap(repo => repo.failures.map(item => `${repo.repo_id} · 任务「${item.name}」：${item.error}`))
+            build.error = `共有 ${details.length} 项补丁失配，本次未生成提交且未推送：\n${details.join('\n')}`
+            await this.saveBuild(buildDir, build)
+            await rm(path.join(buildDir, 'repositories'), { recursive: true, force: true })
+            return build
+          }
+          // Phase B: inside branchExclusive, fetch remote personal branch, synthesize commit-tree, and fast-forward push
+          operation.status = 'pushing'
+          build.status = 'pushing'
+          await this.saveBuild(buildDir, build)
+          await this.branchExclusive(build, async lockSignal => {
+            const msgFile = path.join(buildDir, 'commit-message.txt')
+            await writeFile(msgFile, desiredMessage, 'utf8')
+            // Pass 1: verify settings, fetch remote head, reconcile or synthesize commit-tree for every unfinished repository
+            for (const repo of build.repositories) {
+              lockSignal.throwIfAborted()
+              if (repo.pushed) continue
+              const configured = await readRepositorySettings(dataRoot, repo.repo_id)
+              const configuredPath = await realpath(configured.git_path || path.join(dataRoot, 'repositories', repo.repo_id))
+              if (configuredPath !== repo.source_path) throw serviceError(`${repo.repo_id}：仓库目录已变更，请重新发起出包`)
+              const personalBranch = configured.personal_branch || ''
+              const remoteBranch = configured.remote_branch || personalBranch
+              if (personalBranch !== repo.personal_branch || remoteBranch !== repo.remote_branch) {
+                throw serviceError(`${repo.repo_id}：个人分支配置已变更，请重新发起出包`)
+              }
+              const forbidden = protectedBranchReason(personalBranch) || protectedBranchReason(remoteBranch)
+              if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}；本次不会提交或推送`)
+              const currentBranch = await this.git(repo.source_path, ['branch', '--show-current'], lockSignal)
+              if (currentBranch && currentBranch === personalBranch) {
+                throw serviceError(`${repo.repo_id}：分析目录当前检出的正是个人分支 ${personalBranch}，请先切回开发分支后再出包`)
+              }
+              const remoteUrl = await this.git(repo.source_path, ['remote', 'get-url', '--push', configured.remote || 'origin'], lockSignal)
+              if (remoteUrl !== repo.remote_url) {
+                await this.git(repo.checkout, ['remote', 'set-url', 'origin', remoteUrl], lockSignal)
+                repo.remote_url = remoteUrl
+              }
+              try {
+                await this.git(repo.checkout, ['fetch', '--no-tags', 'origin', `refs/heads/${repo.remote_branch}`], lockSignal)
+              } catch (fetchError) {
+                lockSignal.throwIfAborted()
+                if (/couldn't find remote ref|not found/i.test(String(fetchError?.message || ''))) {
+                  throw serviceError(`${repo.repo_id}：远端 ${repo.remote} 上不存在个人分支 ${repo.remote_branch}，请先在远端创建该分支`)
+                }
+                throw fetchError
+              }
+              const remoteHead = (await this.git(repo.checkout, ['rev-parse', 'FETCH_HEAD'], lockSignal)).trim()
+              if (repo.commit) {
+                let delivered = remoteHead === repo.commit
+                if (!delivered) {
+                  try { delivered = await this.git(repo.checkout, ['merge-base', repo.commit, remoteHead], lockSignal) === repo.commit }
+                  catch { lockSignal.throwIfAborted() }
+                }
+                if (delivered) {
+                  repo.remote_head = remoteHead
+                  repo.pushed = true
+                  repo.push_result = 'confirmed'
+                  await this.saveBuild(buildDir, build)
+                  continue
+                }
+              }
+              const remoteTree = (await this.git(repo.checkout, ['rev-parse', `${remoteHead}^{tree}`], lockSignal)).trim()
+              if (remoteTree === repo.tree) {
+                repo.remote_head = remoteHead
+                repo.commit = remoteHead
+                repo.pushed = true
+                repo.push_result = 'unchanged'
+                await this.saveBuild(buildDir, build)
+                continue
+              }
+              if (!repo.commit || repo.remote_head !== remoteHead || repo.committed_message !== desiredMessage) {
+                let baseIsAncestor = remoteHead === repo.base_commit
+                if (!baseIsAncestor) {
+                  try { baseIsAncestor = await this.git(repo.checkout, ['merge-base', repo.base_commit, remoteHead], lockSignal) === repo.base_commit }
+                  catch { lockSignal.throwIfAborted() }
+                }
+                const parents = ['-p', remoteHead, ...(baseIsAncestor ? [] : ['-p', repo.base_commit])]
+                const author = ['-c', 'commit.gpgsign=false']
+                for (const [name, fallback] of [['user.name', 'PANGEA'], ['user.email', 'pangea@localhost']]) {
+                  try { await this.git(repo.checkout, ['config', '--get', name], lockSignal) }
+                  catch { lockSignal.throwIfAborted(); author.push('-c', `${name}=${fallback}`) }
+                }
+                const commit = (await this.git(repo.checkout, [...author, 'commit-tree', repo.tree, ...parents, '-F', msgFile], lockSignal)).trim()
+                repo.remote_head = remoteHead
+                repo.commit = commit
+                repo.committed_message = desiredMessage
+                await this.saveBuild(buildDir, build)
+              }
+            }
+            // Pass 2: plain fast-forward push to remote personal branch (never writes local source_path)
+            for (const repo of build.repositories) {
+              lockSignal.throwIfAborted()
+              if (repo.pushed) continue
+              build.current_repository = repo.repo_id
+              repo.push_result = 'unconfirmed'
+              await this.saveBuild(buildDir, build)
+              try {
+                await this.git(repo.checkout, ['push', 'origin', `${repo.commit}:refs/heads/${repo.remote_branch}`], lockSignal)
+              } catch (pushError) {
+                if (isRemotePushRejected(pushError) || /non-fast-forward|fetch first/i.test(String(pushError?.stderr || pushError?.message || ''))) {
+                  repo.push_result = 'rejected'
+                  await this.saveBuild(buildDir, build)
+                }
+                throw pushError
+              }
+              repo.pushed = true
+              repo.push_result = 'confirmed'
+              await this.saveBuild(buildDir, build)
+            }
+          }, controller.signal, dataRoot)
+          delete build.current_repository
+          build.status = 'pushed'
+          build.error = null
+          await this.saveBuild(buildDir, build)
+          await rm(path.join(buildDir, 'repositories'), { recursive: true, force: true })
+          await rm(path.join(buildDir, 'commit-message.txt'), { force: true })
+          return build
+        } catch (error) {
+          delete build.current_repository
+          build.status = controller.signal.aborted ? 'cancelled' : 'failed'
+          const rawErr = cleanError(error)
+          const unconfirmed = build.repositories.some(repo => !repo.pushed && repo.push_result === 'unconfirmed')
+          const nonFastForward = build.repositories.some(repo => !repo.pushed && repo.push_result === 'rejected') && /non-fast-forward|fetch first/i.test(rawErr)
+          build.error = (unconfirmed ? '推送结果待确认；重试本次出包时将先本地校验提交信息合规，再查询远端决定确认或重推。\n' : '')
+            + (controller.signal.aborted ? '出包操作已停止，可重试本次出包' : rawErr)
+            + (nonFastForward ? '\n远端个人分支已被推进；重试本次出包将以新的远端分支头重新合成提交。' : '')
+          await this.saveBuild(buildDir, build)
+          return build
+        }
+      }).finally(() => this.active.delete(bKey))
       if (background) operation.done.catch(() => {})
       await published
-      return background ? structuredClone(record) : operation.done
-    })
+      if (background) {
+        const { repositories, ...rest } = build
+        return structuredClone({ ...rest, repositories: repositories.map(({ checkout, remote_url, ...repo }) => repo) })
+      }
+      const completed = await operation.done
+      const { repositories, ...rest } = completed
+      return { ...rest, repositories: repositories.map(({ checkout, remote_url, ...repo }) => repo) }
+    }
+    return retryBuildId ? this.buildExclusive(dataRoot, retryBuildId, runBuild) : runBuild()
+  }
+  async cancelBuild(dataRoot, buildId) {
+    const operation = this.active.get(this.buildKey(dataRoot, buildId))
+    if (operation) { operation.controller.abort(new Error('用户停止出包任务')); await operation.done }
+    return this.readBuild(dataRoot, buildId)
   }
   // mode: 'regenerate' (fresh generation), 'reference' (generation starting from
   // this task's saved result) or 'reuse' (apply the saved result; no model call).
@@ -1397,18 +1913,32 @@ export class FaultInjectionService {
       input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })),
         baseline_acknowledged: previous.baseline_acknowledged, provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
         pipeline_url: previous.pipeline_url, name: previous.name,
-        ...(previous.commit_config ? { commit_config: previous.commit_config } : {}),
         ...(mode === 'reuse' ? { reuse_task_id: taskId } : mode === 'reference' ? { reference_task_id: taskId, reference_error: previous.error || '' } : {}) } }, { requireReceipt: false })
   }
   async recordVerification(dataRoot, runId, taskId, input) {
     return this.exclusive(dataRoot, runId, taskId, async () => {
       const record = await this.read(dataRoot, runId, taskId)
-      if (!record.repositories.some(repo => repo.commit)) throw serviceError('尚未生成可关联的修改提交')
-      if (input.build) {
-        const { url = '', package_id = '', package_sha256 = '', notes = '' } = input.build
+      const pushedBuild = record.latest_pushed_build
+      const legacyCommits = (record.repositories || []).filter(repo => repo.commit).map(repo => ({ repo_id: repo.repo_id, commit: repo.commit }))
+      const commits = pushedBuild?.commits?.length ? pushedBuild.commits : legacyCommits
+      if (!commits.length) throw serviceError('请先将本打桩任务加入出包并推送到个人分支，再记录验证结果')
+      const buildId = pushedBuild?.build_id || record.build?.build_id || null
+      if (input.build || !record.build?.commits?.length || (buildId && record.build?.build_id !== buildId)) {
+        const {
+          url = record.build?.url || '',
+          package_id = record.build?.package_id || '',
+          package_sha256 = record.build?.package_sha256 || '',
+          notes = record.build?.notes || '',
+        } = input.build || {}
         if (url && !/^https?:\/\//i.test(url)) throw serviceError('构建链接必须是 HTTP/HTTPS 地址')
-        record.build = { url: String(url), package_id: String(package_id), package_sha256: String(package_sha256), notes: String(notes),
-          commits: record.repositories.filter(repo => repo.commit).map(repo => ({ repo_id: repo.repo_id, commit: repo.commit })) }
+        record.build = {
+          ...(buildId ? { build_id: buildId } : {}),
+          url: String(url),
+          package_id: String(package_id),
+          package_sha256: String(package_sha256),
+          notes: String(notes),
+          commits,
+        }
       }
       if (input.verification) {
         const value = input.verification
@@ -1416,8 +1946,11 @@ export class FaultInjectionService {
         record.verification.push({ case_key: value.case_key, result: value.result, notes: String(value.notes || ''),
           hits: String(value.hits || ''), build: structuredClone(record.build), at: new Date().toISOString() })
       }
-      await this.save(await this.directory(dataRoot, runId, taskId), record)
-      return record
+      const persisted = { ...record }
+      delete persisted.latest_build
+      delete persisted.latest_pushed_build
+      await this.save(await this.directory(dataRoot, runId, taskId), persisted)
+      return { ...persisted, latest_build: record.latest_build, latest_pushed_build: record.latest_pushed_build }
     })
   }
   async cancel(dataRoot, runId, taskId) {

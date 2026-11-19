@@ -1061,13 +1061,19 @@ window.__ModuleLoader__.load({
       const profiles = Array.isArray(task?.result?.profiles) ? task.result.profiles : []
       const points = Array.isArray(task?.result?.points) ? task.result.points : []
       const pointById = new Map(points.map(point => [point.id, point]))
-      const commits = (task?.repositories || []).filter(repo => repo.commit).map(repo => `${repo.repo_id}@${String(repo.commit).slice(0, 12)}`).join(', ')
+      const commitItems = Array.isArray(task?.build?.commits) && task.build.commits.length
+        ? task.build.commits
+        : Array.isArray(task?.latest_build?.commits) && task.latest_build.commits.length
+          ? task.latest_build.commits
+          : (task?.repositories || []).filter(repo => repo.commit)
+      const commits = commitItems.map(repo => `${repo.repo_id}@${String(repo.commit).slice(0, 12)}`).join(', ')
+      const branchLabel = task?.latest_build?.branch || task?.branch || '未记录'
       const lines = [
         '#!/usr/bin/env bash',
         '# PANGEA 故障注入可执行验证脚本',
         `# 任务名称: ${shellQuoteComment(task?.name || task?.id || '打桩任务')}`,
         `# 任务 ID : ${shellQuoteComment(task?.id || '')}`,
-        `# 个人分支: ${shellQuoteComment(task?.branch || '未记录')}${commits ? ` (${commits})` : ''}`,
+        `# 个人分支: ${shellQuoteComment(branchLabel)}${commits ? ` (${commits})` : ''}`,
         '# 用法示例: bash pangea-verify.sh 2>&1 | tee pangea-verify.log',
         '# macOS 默认 bash 3.2 在 C.UTF-8 下会把紧邻中文标点的未加花括号 $VAR 误判进变量名；仅将当前 shell 内部 LC_CTYPE 设为 C，子进程仍保留 UTF-8 LANG',
         'if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then',
@@ -1547,9 +1553,7 @@ window.__ModuleLoader__.load({
               const rightW = idx < input.length && isAsciiWord(input[idx])
               return mode === 'wb' ? leftW !== rightW : leftW === rightW
             }
-            matcher = (text, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS) => {
-              const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_REGEX_TIMEOUT_MS
-              const startMs = Date.now()
+            matcher = text => {
               const input = Array.from(text)
               const seen = new Int32Array(states.length).fill(-1)
               let stepToken = 0, current = []
@@ -1571,9 +1575,6 @@ window.__ModuleLoader__.load({
               addState(searchStart, current, 0)
               if (seen[accept] === stepToken) return true
               for (let i = 0; i < input.length; i++) {
-                if ((i & 31) === 0 && Date.now() - startMs > budget) {
-                  throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
-                }
                 const ch = input[i], nextList = []
                 stepToken++
                 for (const id of current) {
@@ -1585,9 +1586,6 @@ window.__ModuleLoader__.load({
                 if (seen[accept] === stepToken) return true
                 current = nextList
                 if (!current.length) return false
-              }
-              if (Date.now() - startMs > budget) {
-                throw new Error(`本地预检正则执行超过 ${budget}ms 超时护栏，已中止`)
               }
               return false
             }
@@ -1681,12 +1679,17 @@ window.__ModuleLoader__.load({
       return `提交信息未通过本地预检正则（${trimmedPattern}）`
     }
 
-    function defaultCommitSummary(task) {
-      const raw = typeof task?.result?.summary === 'string' && task.result.summary.trim()
-        ? task.result.summary
-        : typeof task?.name === 'string' && task.name.trim()
-          ? task.name
-          : task?.id ? `fault injection ${task.id}` : ''
+    function defaultCommitSummary(subject) {
+      const itemNames = Array.isArray(subject?.items) && subject.items.length
+        ? subject.items.map(item => item?.name || item?.task_id).filter(Boolean).join('、')
+        : ''
+      const raw = typeof subject?.result?.summary === 'string' && subject.result.summary.trim()
+        ? subject.result.summary
+        : itemNames
+          ? `合成打桩：${itemNames}`
+          : typeof subject?.name === 'string' && subject.name.trim()
+            ? subject.name
+            : subject?.id ? `fault injection ${subject.id}` : ''
       const flattened = raw.replace(/\s*\r?\n\s*/g, '；').replace(/\s{2,}/g, ' ').trim()
       return Array.from(flattened).slice(0, 16).join('')
     }
@@ -1732,7 +1735,7 @@ window.__ModuleLoader__.load({
       if (rawMessage.includes('\0')) return { ok: false, message: '', error: '提交信息包含无效空字符' }
       const message = rawMessage.replace(/\r\n/g, '\n').trim()
       if (!message) return { ok: false, message: '', error: '提交信息不能为空' }
-      if (message.length > 8000) return { ok: false, message, error: '提交信息过长（最多 8000 字符）' }
+      if (message.length > 8000) return { ok: false, message: '', error: '提交信息过长（最多 8000 字符）' }
       const emptyField = EMPTY_GATE_FIELD.exec(message)
       if (emptyField) {
         const label = emptyField[1] || emptyField[2] || '必填项'
@@ -1745,7 +1748,7 @@ window.__ModuleLoader__.load({
         catch (error) { return { ok: false, message, error: `本地预检正则无效：${error.message}` } }
         let matched
         try { matched = matcher(message, timeoutMs) }
-        catch (error) { return { ok: false, message, error: error.message || `本地预检正则执行超时` } }
+        catch (error) { return { ok: false, message, error: error.message || '本地预检正则执行超时' } }
         if (!matched) return { ok: false, message, error: diagnoseGatePatternMismatch(message, trimmedPattern) }
       }
       return { ok: true, message, error: null }
@@ -1799,202 +1802,19 @@ window.__ModuleLoader__.load({
     } = __faultInjectionCandidates
     const { createRepositorySettings, sourceLabel } = __repositorySettingsView
     const INJECTION_STATUS_LABELS = {
-      preparing: '准备源码', generating: '生成打桩修改', ready: '修改已生成', pushing: '提交与推送中',
-      pushed: '个人分支已推送', failed: '生成失败', cancelled: '已停止', interrupted: '操作已中断',
+      preparing: '准备源码', generating: '生成打桩修改', ready: '补丁就绪',
+      composing: '合成补丁中', pushing: '推送个人分支中',
+      pushed: '个人分支已推送', failed: '生成失败', cancelled: '已停止', interrupted: '操作已中断', unreadable: '记录不可读',
     }
+
+    const BUILD_STATUS_LABELS = {
+      composing: '合成补丁中', pushing: '推送个人分支中', pushed: '个人分支已推送',
+      failed: '出包失败', cancelled: '已停止', interrupted: '操作已中断', unreadable: '记录不可读',
+    }
+
     const readable = value => value == null ? '' : typeof value === 'string' ? value : Array.isArray(value) ? value.map(item => typeof item === 'string' ? item : JSON.stringify(item)).join('\n') : JSON.stringify(value, null, 2)
 
-    function createFaultInjectionPanel(React) {
-      const h = React.createElement
-      const RepositorySettings = createRepositorySettings(React)
-      const busy = task => ['preparing', 'generating', 'pushing'].includes(task?.status)
-      return function FaultInjectionPanel({ runId, dataRoot, cwd, onOpenPipeline, cases = [], standalone = false, onBack, initialCaseKeys = [], handoffRevision = 0 }) {
-        const [open, setOpen] = React.useState(standalone)
-        const [profileKey, setProfileKey] = React.useState('')
-        const [tasks, setTasks] = React.useState([])
-        const [taskId, setTaskId] = React.useState('')
-        const [acknowledged, setAcknowledged] = React.useState({})
-        const [step, setStep] = React.useState(2)
-        const [chosen, setChosen] = React.useState(() => Array.isArray(initialCaseKeys) ? [...initialCaseKeys] : [])
-        const [handoffNote, setHandoffNote] = React.useState('')
-        const [repoSetupOpen, setRepoSetupOpen] = React.useState(false)
-        const [query, setQuery] = React.useState('')
-        const [focused, setFocused] = React.useState('')
-        const [settings, setSettings] = React.useState(null)
-        const [providers, setProviders] = React.useState([])
-        const [pipelineUrl, setPipelineUrl] = React.useState('')
-        const drafts = React.useRef({})
-        const repoDetailsRef = React.useRef(null)
-        const [notice, setNotice] = React.useState('')
-        const [error, setError] = React.useState('')
-        const [working, setWorking] = React.useState(false)
-        const [build, setBuild] = React.useState({ url: '', package_id: '', package_sha256: '', notes: '' })
-        const [verification, setVerification] = React.useState({ case_key: '', result: 'not_run', hits: '', notes: '' })
-        const [commitDraft, setCommitDraft] = React.useState(() => ({ ...normalizeCommitConfig({}), summary: null }))
-        const [modelState, setModelState] = React.useState({ status: 'idle' })
-        const [modelRefresh, setModelRefresh] = React.useState(0)
-        const [tierFilter, setTierFilter] = React.useState('all')
-        const [logText, setLogText] = React.useState('')
-        const keyOf = caseKeyOf
-        const duplicateKeys = duplicateCaseKeySet(cases)
-        const candidateOf = item => classifyInjectionCandidate(item, duplicateKeys)
-        const selectableKeys = cases.filter(item => candidateOf(item).selectable).map(keyOf)
-        const recommendedKeys = cases.filter(item => ['explicit', 'recommended'].includes(candidateOf(item).tier)).map(keyOf)
-        const explicitKeys = cases.filter(item => candidateOf(item).tier === 'explicit').map(keyOf)
-        React.useEffect(() => {
-          if (!handoffRevision || !Array.isArray(initialCaseKeys) || !initialCaseKeys.length) return
-          const valid = initialCaseKeys.filter(key => cases.some(item => keyOf(item) === key && candidateOf(item).selectable))
-          const requested = initialCaseKeys.length
-          setChosen(valid)
-          setTierFilter('all')
-          if (valid[0]) setFocused(valid[0])
-          setStep(2)
-          setHandoffNote(valid.length
-            ? `已带入 ${valid.length} 条用例${valid.length < requested ? `（其余 ${requested - valid.length} 条缺少唯一身份）` : ''}；未预设桩点的用例将在生成阶段结合源码自动定位。`
-            : '所选用例缺少唯一编号，请在下方列表中选择可用用例。')
-        }, [handoffRevision, runId, cases.length])
-        React.useEffect(() => {
-          if (!open || !settings?.provider_id) return
-          return loadAnalysisAgentModels({ providerId: settings.provider_id, cwd, onState: setModelState })
-        }, [open, settings?.provider_id, cwd, modelRefresh])
-        const modelCatalog = modelState.provider_id === settings?.provider_id && modelState.cwd === cwd && modelState.status === 'ready' ? modelState.catalog : null
-        const effectiveSettings = settings && settings.agent_model_inherited && modelCatalog && Array.isArray(modelCatalog.models) && !modelCatalog.models.some(item => item.id === settings.agent_model)
-          ? { ...settings, agent_model: '', agent_model_inherited: false }
-          : settings
-        const modelSelection = analysisExecutionState(effectiveSettings || {}, providers.map(item => ({ ...item, registered: true })), modelState, cwd)
-        const selectedKeys = standalone ? chosen.filter(key => selectableKeys.includes(key)) : cases.map(keyOf).filter(Boolean)
-        const selectedCases = cases.filter(item => selectedKeys.includes(keyOf(item)))
-        const focusedCase = cases.find(item => keyOf(item) === focused) || selectedCases[0] || cases[0]
-        const task = tasks.find(item => item.id === taskId)
-        const profiles = Array.isArray(task?.result?.profiles) ? task.result.profiles : []
-        const profile = profiles.find(item => item.case_key === profileKey) || profiles[0]
-        const latestResults = new Map((task?.verification || []).map(item => [item.case_key, item.result]))
-        const passedCount = [...latestResults.values()].filter(result => result === 'passed').length
-        const activeTaskIds = tasks.filter(busy).map(item => item.id).join(',')
-        const scope = JSON.stringify([runId, dataRoot, cwd])
-        const buildCommitDraftForTask = (targetTask, baseDefaults) => {
-          const normalized = normalizeCommitConfig(targetTask?.commit_config, baseDefaults)
-          const explicitSummary = typeof targetTask?.commit_config?.summary === 'string' && targetTask.commit_config.summary.trim()
-            ? targetTask.commit_config.summary
-            : null
-          const defaultAutoMsg = targetTask?.id ? `test: fault injection ${targetTask.id}` : ''
-          const customMessage = normalized.custom_message || (normalized.mode !== 'template' && targetTask?.commit_message && targetTask.commit_message !== defaultAutoMsg ? targetTask.commit_message : '')
-          return { ...normalized, summary: explicitSummary, custom_message: customMessage }
-        }
-        const request = async (payload = null) => {
-          const input = { run_id: runId, ...(dataRoot ? { data_root: dataRoot } : {}), ...(cwd ? { cwd } : {}), ...payload }
-          const url = '/api/pangea-companion/fault-injection'
-          const response = await fetch(payload?.action ? url : `${url}?${new URLSearchParams(input)}`, payload?.action
-            ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) } : {})
-          const value = await response.json()
-          if (!response.ok || value.status === 'error') throw new Error(value.error || '打桩操作失败')
-          return value
-        }
-        const selectTask = value => {
-          if (taskId) drafts.current[taskId] = { pipelineUrl, build, verification, commitDraft }
-          setTaskId(value)
-          setAcknowledged({})
-          if (standalone && value) setStep(4)
-          setProfileKey('')
-          try { localStorage.setItem(`pangea-fi:${scope}`, value) } catch {}
-        }
-        const remember = value => {
-          setTasks(previous => [value, ...previous.filter(item => item.id !== value.id)])
-          selectTask(value.id)
-        }
-        React.useEffect(() => {
-          if (!open) return
-          let live = true
-          request().then(value => {
-            if (!live) return
-            setTasks(value.tasks ?? [])
-            if (!taskId && !(initialCaseKeys?.length > 0)) {
-              try {
-                const last = localStorage.getItem(`pangea-fi:${scope}`)
-                if (value.tasks?.some(item => item.id === last)) { setTaskId(last); if (standalone) setStep(4) }
-              } catch {}
-            }
-            setProviders(value.providers ?? [])
-            const inheritedModel = value.defaults?.agent_model || ''
-            const defaultCommit = normalizeCommitConfig(value.defaults?.commit_config)
-            setSettings(previous => previous ?? { ...value.defaults, commit_config: defaultCommit, agent_model: inheritedModel, agent_model_inherited: Boolean(inheritedModel), instructions: '' })
-            setError('')
-          }).catch(reason => { if (live) setError(reason.message) })
-          return () => { live = false }
-        }, [open, scope])
-        React.useEffect(() => {
-          if (!open || !activeTaskIds) return
-          let live = true, pending = false
-          const timer = setInterval(async () => {
-            if (pending) return
-            pending = true
-            try {
-              const values = await Promise.all(activeTaskIds.split(',').map(task_id => request({ task_id })))
-              if (live) setTasks(previous => previous.map(item => values.find(value => value.task.id === item.id)?.task || item))
-            } catch (reason) { if (live) setError(reason.message) }
-            finally { pending = false }
-          }, 2000)
-          return () => { live = false; clearInterval(timer) }
-        }, [open, scope, activeTaskIds])
-        React.useEffect(() => {
-          const draft = drafts.current[taskId]
-          setPipelineUrl(draft?.pipelineUrl ?? task?.pipeline_url ?? '')
-          setBuild(draft?.build ?? { url: '', package_id: '', package_sha256: '', notes: '', ...task?.build })
-          setVerification(draft?.verification ?? { result: 'not_run', hits: '', notes: '', ...task?.verification?.filter(item => item.case_key === task?.case_keys?.[0]).at(-1), case_key: task?.case_keys?.[0] || '' })
-          setCommitDraft(draft?.commitDraft ?? buildCommitDraftForTask(task, settings?.commit_config))
-        }, [taskId, Boolean(settings?.commit_config)])
-        const act = async (action, extra = {}) => {
-          setWorking(true); setError(''); setNotice('')
-          try {
-            const value = await request({ action, task_id: taskId, ...extra })
-            remember(value.task)
-            if (action === 'generate') setStep(4)
-            if (['configure', 'verify'].includes(action)) setNotice('已保存')
-            if (action === 'configure') setSettings(previous => ({ ...previous, pipeline_url: value.pipeline_url }))
-            if (extra.commit_config) {
-              const synced = normalizeCommitConfig(extra.commit_config, settings?.commit_config)
-              setSettings(previous => previous ? { ...previous, commit_config: synced } : previous)
-            }
-          } catch (reason) { setError(reason.message) }
-          finally { setWorking(false) }
-        }
-        const field = (label, value, change, options = {}) => h('label', { className: 'pangea-fi-field' }, h('span', null, label),
-          h(options.multiline ? 'textarea' : 'input', { 'aria-label': options.ariaLabel || label, value: readable(value), onChange: event => change(event.target.value),
-            disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), placeholder: options.placeholder }))
-        const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, alignItems: 'start' }
-        const renderSteps = steps => h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(steps) ? steps : [steps]).filter(step => step != null).map((step, at) => h('li', { key: at }, readable(step))))
-        const renderPoints = points => Array.isArray(points) && points.length ? points.map((point, index) => h('details', { key: point.id || index, open: standalone, className: 'pangea-fi-point' },
-          h('summary', null, `${readable(point.id)} · ${readable(point.action) || '桩点说明'}`),
-          point.repo_id || point.path ? h('p', { className: 'b05-subtle' }, [readable(point.repo_id), readable(point.path)].filter(Boolean).join(':')) : null,
-          point.trigger_scope ? h('dl', { className: 'pangea-reading-fields' },
-            h('dt', null, '当前输入来源'), h('dd', null, readable(point.trigger_scope.current_input)),
-            h('dt', null, '排除的历史与非目标输入'), h('dd', null, (point.trigger_scope.excluded_inputs || []).map(readable).join('、'))) : null,
-          h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : h('p', { className: 'b05-subtle' }, '该用例按需打桩，具体注入点将在源码生成阶段定位。')
-        const renderCaseSummaryFields = item => {
-          const rows = [
-            ['用例编号', item.display_id || item.test_case_id || '未标注'],
-            ['验证目标', item.verification_goal || item.summary],
-            ['用例类型', item.case_type || item.test_level],
-            ['观察点', Array.isArray(item.observability) ? item.observability.join('；') : item.observability],
-            ['清理动作', Array.isArray(item.cleanup) ? item.cleanup.join('；') : item.cleanup],
-          ].filter(([, value]) => value != null && String(value).trim() !== '')
-          return h('dl', { className: 'pangea-reading-fields', style: { marginTop: 8 } },
-            ...rows.flatMap(([label, value]) => [h('dt', { key: `${label}-dt` }, label), h('dd', { key: `${label}-dd` }, readable(value))]))
-        }
-        const missingBranch = Boolean(settings?.repositories?.some(repo => repo.enabled !== false && !repo.personal_branch))
-        const missingGit = Boolean(settings?.repositories?.some(repo => repo.enabled !== false && repo.source?.kind !== 'git'))
-        const needsRepoSetup = missingBranch || missingGit
-        const pipelineDirty = Boolean(task && pipelineUrl.trim() !== (task.pipeline_url || ''))
-        const step3CommitConfig = normalizeCommitConfig(settings?.commit_config)
-        const step3CommitCheck = resolveCommitMessage(step3CommitConfig, { id: 'pending', name: settings?.name || selectedCases[0]?.title || '打桩任务' }, { allowPendingSummary: true })
-        const effectiveCommitConfig = task ? { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(task) } : null
-        const commitCheck = task ? resolveCommitMessage(effectiveCommitConfig, task, { allowDefaultSummary: commitDraft.summary === null }) : { ok: true, message: '', error: null }
-        const remoteHookRegex = extractRemoteHookRegex(task?.error)
-        const targetGateRegex = remoteHookRegex || DEFAULT_INTRANET_COMMIT_REGEX
-        const showRemoteGateHelper = Boolean(task && (remoteHookRegex || /【问题单号/.test(task.error || '')) && (effectiveCommitConfig?.mode !== 'template' || (remoteHookRegex && effectiveCommitConfig?.pattern !== remoteHookRegex)))
-        const statusTone = status => status === 'pushed' || status === 'ready' ? 'good' : ['failed', 'cancelled', 'interrupted'].includes(status) ? 'danger' : 'info'
-        return h('section', { className: standalone ? 'pangea-injection-panel is-standalone' : 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
-          h('style', null, `
+    const PANEL_CSS = `
             .pangea-injection-panel { min-width: 0; font-size: 14px; color: var(--pangea-ink, #1d232a); }
             .pangea-injection-panel.is-standalone { background: transparent; border: 0; padding: 0; box-shadow: none; }
             .pangea-injection-panel .pangea-fi-workspace { overflow: visible; overscroll-behavior: contain; scrollbar-gutter: stable; }
@@ -2033,15 +1853,20 @@ window.__ModuleLoader__.load({
             .pangea-injection-panel .pangea-fi-records > li { padding: 12px 0; border-top: 1px solid var(--pangea-line, #e2e6ec); }
             .pangea-injection-panel .pangea-fi-records pre { white-space: pre-wrap; font: inherit; background: var(--pangea-subtle, #f1f3f6); padding: 8px 10px; border-radius: 6px; }
             .pangea-injection-panel .pangea-reading-fields dd { overflow-wrap: anywhere; }
-            .pangea-fi-progress { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 0; margin: 0 0 18px; list-style: none; }
+            .pangea-fi-progress { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 0; margin: 0 0 18px; list-style: none; }
             .pangea-fi-progress li { display: flex; align-items: center; gap: 9px; padding: 8px 0 12px; border-bottom: 2px solid var(--pangea-line, #e2e6ec); color: var(--pangea-muted, #5e6773); font-size: 13px; }
             .pangea-fi-progress li b { width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--pangea-line, #d5dbe3); background: #fff; display: inline-flex; align-items: center; justify-content: center; font: 600 11px Consolas, monospace; flex-shrink: 0; }
             .pangea-fi-progress li[data-done="true"] b { background: #eaf5ee; border-color: transparent; color: #20765a; }
             .pangea-fi-progress li[aria-current="step"] { color: var(--pangea-ink, #1d232a); border-bottom-color: var(--pangea-red, #b62836); font-weight: 600; }
             .pangea-fi-progress li[aria-current="step"] b { background: var(--pangea-red, #b62836); border-color: var(--pangea-red, #b62836); color: #fff; }
-            .pangea-fi-switcher { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 14px; margin: 0 0 16px; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 8px; background: #fff; }
-            .pangea-fi-switcher label { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 240px; font-size: 13px; font-weight: 600; }
-            .pangea-fi-switcher label > select { margin-top: 0; flex: 1; max-width: 520px; font-weight: 400; }
+            .pangea-fi-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 14px; }
+            .pangea-fi-filters label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+            .pangea-fi-filters label > select { margin-top: 0; width: auto; font-weight: 400; }
+            .pangea-fi-table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; overflow: hidden; }
+            .pangea-fi-table th, .pangea-fi-table td { padding: 10px 12px; border-bottom: 1px solid var(--pangea-line, #e2e6ec); text-align: left; vertical-align: top; font-size: 13px; }
+            .pangea-fi-table th { color: var(--pangea-muted, #5e6773); font-weight: 600; background: var(--pangea-subtle, #f8f9fb); }
+            .pangea-fi-table td button.link-btn { min-height: 0; padding: 0; border: 0; background: transparent; color: var(--pangea-red, #b62836); font-weight: 600; text-align: left; }
+            .pangea-fi-table small { display: block; margin-top: 4px; color: var(--pangea-muted, #5e6773); }
             .pangea-fi-picker { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(0, 1.85fr); gap: 20px; margin: 16px 0; align-items: start; }
             .pangea-fi-case-list { max-height: 62vh; overflow: auto; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; padding: 8px; background: #fff; }
             .pangea-fi-case-row { display: flex; align-items: flex-start; gap: 8px; padding: 4px; border-bottom: 1px solid #f1f3f6; }
@@ -2070,32 +1895,172 @@ window.__ModuleLoader__.load({
             .pangea-fi-filter-pills button { min-height: 28px; padding: 3px 10px; border: 0; border-radius: 5px; background: transparent; font-size: 12px; }
             .pangea-fi-filter-pills button[aria-pressed="true"] { background: #fff; color: var(--pangea-red, #b62836); font-weight: 600; box-shadow: 0 1px 2px rgba(16,24,40,.08); }
             @media(max-width: 820px) { .pangea-fi-picker { grid-template-columns: 1fr; } .pangea-fi-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-          `),
+    `
+
+    const statusTone = status => status === 'pushed' || status === 'ready' ? 'good' : ['failed', 'cancelled', 'interrupted', 'unreadable'].includes(status) ? 'danger' : 'info'
+
+    const busy = item => ['preparing', 'generating', 'composing', 'pushing'].includes(item?.status)
+
+    const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, alignItems: 'start' }
+
+    const itemKey = (runId, taskId) => `${runId}\0${taskId}`
+
+    async function injectionRequest(input) {
+      const url = '/api/pangea-companion/fault-injection'
+      const response = await fetch(input.action ? url : `${url}?${new URLSearchParams(input)}`, input.action
+        ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) } : {})
+      const value = await response.json()
+      if (!response.ok || value.status === 'error') throw new Error(value.error || '打桩操作失败')
+      return value
+    }
+
+    const buildCommitDraft = (sourceConfig, fallbackMessage = '') => {
+      const normalized = normalizeCommitConfig(sourceConfig)
+      const explicitSummary = typeof sourceConfig?.summary === 'string' && sourceConfig.summary.trim()
+        ? sourceConfig.summary
+        : null
+      const customMessage = normalized.custom_message || (normalized.mode !== 'template' && fallbackMessage && !/^test: fault injection\b/.test(fallbackMessage) ? fallbackMessage : '')
+      return { ...normalized, summary: explicitSummary, custom_message: customMessage }
+    }
+
+    function formatInjectionCommitNotice(repo) {
+      if (!Array.isArray(repo?.injection_commits_in_head) || !repo.injection_commits_in_head.length) return ''
+      const listed = repo.injection_commits_in_head
+        .slice(0, 5)
+        .map(item => `${String(item.commit || '').slice(0, 12)}（${item.source_type === 'build' ? `出包 ${String(item.source_id || '').slice(0, 8)}` : `旧任务 ${String(item.source_id || '').slice(0, 8)}`}）`)
+        .join('、')
+      return `${repo.repo_id}：当前分析目录 HEAD 含有历史打桩提交 ${listed}。宿主不会自动回退分析目录，请确认当前基线是否为预期开发代码。`
+    }
+
+    function repoBlockingReason(repo, { requirePersonalBranch = false } = {}) {
+      if (!repo) return ''
+      if (repo.source?.kind !== 'git') return `${repo.repo_id}：源码尚未关联 Git 仓库（${repo.source?.error || '普通目录'}）`
+      if (requirePersonalBranch && !repo.personal_branch) return `${repo.repo_id}：尚未配置个人开发分支`
+      if (repo.protected_branch_error) return `${repo.repo_id}：${repo.protected_branch_error}`
+      if (repo.head_equals_personal_branch) return `${repo.repo_id}：分析目录当前检出的正是个人分支 ${repo.personal_branch}，请先切回开发分支或目标提交`
+      return ''
+    }
+
+    function viewHelpers(h, { working, openPoints }) {
+      const field = (label, value, change, options = {}) => h('label', { className: 'pangea-fi-field' }, h('span', null, label),
+        h(options.multiline ? 'textarea' : 'input', { 'aria-label': label, value: readable(value), onChange: event => change(event.target.value),
+          disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), placeholder: options.placeholder }))
+      const renderSteps = steps => h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(steps) ? steps : [steps]).filter(step => step != null).map((step, at) => h('li', { key: at }, readable(step))))
+      const renderPoints = points => Array.isArray(points) && points.length ? points.map((point, index) => h('details', { key: point.id || index, open: openPoints, className: 'pangea-fi-point' },
+        h('summary', null, `${readable(point.id)} · ${readable(point.action) || '桩点说明'}`),
+        point.repo_id || point.path ? h('p', { className: 'b05-subtle' }, [readable(point.repo_id), readable(point.path)].filter(Boolean).join(':')) : null,
+        point.trigger_scope ? h('dl', { className: 'pangea-reading-fields' },
+          h('dt', null, '当前输入来源'), h('dd', null, readable(point.trigger_scope.current_input)),
+          h('dt', null, '排除的历史与非目标输入'), h('dd', null, (point.trigger_scope.excluded_inputs || []).map(readable).join('、'))) : null,
+        h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : h('p', { className: 'b05-subtle' }, '该用例按需打桩，具体注入点将在源码生成阶段定位。')
+      return { field, renderSteps, renderPoints }
+    }
+
+    function createFaultInjectionPanel(React) {
+      const h = React.createElement
+      const RepositorySettings = createRepositorySettings(React)
+      return function FaultInjectionPanel({ runId, dataRoot, cwd, cases = [], standalone = false, onBack, onCreated, initialCaseKeys = [], handoffRevision = 0 }) {
+        const [open, setOpen] = React.useState(standalone)
+        const [step, setStep] = React.useState(2)
+        const [chosen, setChosen] = React.useState(() => Array.isArray(initialCaseKeys) ? [...initialCaseKeys] : [])
+        const [handoffNote, setHandoffNote] = React.useState('')
+        const [repoSetupOpen, setRepoSetupOpen] = React.useState(false)
+        const [query, setQuery] = React.useState('')
+        const [focused, setFocused] = React.useState('')
+        const [settings, setSettings] = React.useState(null)
+        const [providers, setProviders] = React.useState([])
+        const repoDetailsRef = React.useRef(null)
+        const [error, setError] = React.useState('')
+        const [working, setWorking] = React.useState(false)
+        const [modelState, setModelState] = React.useState({ status: 'idle' })
+        const [modelRefresh, setModelRefresh] = React.useState(0)
+        const [tierFilter, setTierFilter] = React.useState('all')
+        const keyOf = caseKeyOf
+        const duplicateKeys = duplicateCaseKeySet(cases)
+        const candidateOf = item => classifyInjectionCandidate(item, duplicateKeys)
+        const selectableKeys = cases.filter(item => candidateOf(item).selectable).map(keyOf)
+        const recommendedKeys = cases.filter(item => ['explicit', 'recommended'].includes(candidateOf(item).tier)).map(keyOf)
+        const explicitKeys = cases.filter(item => candidateOf(item).tier === 'explicit').map(keyOf)
+        React.useEffect(() => {
+          if (!handoffRevision || !Array.isArray(initialCaseKeys) || !initialCaseKeys.length) return
+          const valid = initialCaseKeys.filter(key => cases.some(item => keyOf(item) === key && candidateOf(item).selectable))
+          const requested = initialCaseKeys.length
+          setChosen(valid)
+          setTierFilter('all')
+          if (valid[0]) setFocused(valid[0])
+          setStep(2)
+          setHandoffNote(valid.length
+            ? `已带入 ${valid.length} 条用例${valid.length < requested ? `（其余 ${requested - valid.length} 条缺少唯一身份）` : ''}；未预设桩点的用例将在生成阶段结合源码自动定位。`
+            : '所选用例缺少唯一编号，请在下方列表中选择可用用例。')
+        }, [handoffRevision, runId, cases.length])
+        React.useEffect(() => {
+          if (!open || !settings?.provider_id) return
+          return loadAnalysisAgentModels({ providerId: settings.provider_id, cwd, onState: setModelState })
+        }, [open, settings?.provider_id, cwd, modelRefresh])
+        const modelCatalog = modelState.provider_id === settings?.provider_id && modelState.cwd === cwd && modelState.status === 'ready' ? modelState.catalog : null
+        const effectiveSettings = settings && settings.agent_model_inherited && modelCatalog && Array.isArray(modelCatalog.models) && !modelCatalog.models.some(item => item.id === settings.agent_model)
+          ? { ...settings, agent_model: '', agent_model_inherited: false }
+          : settings
+        const modelSelection = analysisExecutionState(effectiveSettings || {}, providers.map(item => ({ ...item, registered: true })), modelState, cwd)
+        const selectedKeys = standalone ? chosen.filter(key => selectableKeys.includes(key)) : cases.map(keyOf).filter(Boolean)
+        const selectedCases = cases.filter(item => selectedKeys.includes(keyOf(item)))
+        const focusedCase = cases.find(item => keyOf(item) === focused) || selectedCases[0] || cases[0]
+        const scope = JSON.stringify([runId, dataRoot, cwd])
+        const request = (payload = null) => injectionRequest({ run_id: runId, ...(dataRoot ? { data_root: dataRoot } : {}), ...(cwd ? { cwd } : {}), ...payload })
+        React.useEffect(() => {
+          if (!open) return
+          let live = true
+          request().then(value => {
+            if (!live) return
+            setProviders(value.providers ?? [])
+            const inheritedModel = value.defaults?.agent_model || ''
+            setSettings(previous => previous ?? { ...value.defaults, agent_model: inheritedModel, agent_model_inherited: Boolean(inheritedModel), instructions: '' })
+            setError('')
+          }).catch(reason => { if (live) setError(reason.message) })
+          return () => { live = false }
+        }, [open, scope])
+        const generate = async payload => {
+          setWorking(true); setError('')
+          try { onCreated((await request({ action: 'generate', ...payload })).task) }
+          catch (reason) { setError(reason.message) }
+          finally { setWorking(false) }
+        }
+        const { field, renderPoints } = viewHelpers(h, { working, openPoints: standalone })
+        const renderCaseSummaryFields = item => {
+          const rows = [
+            ['用例编号', item.display_id || item.test_case_id || '未标注'],
+            ['验证目标', item.verification_goal || item.summary],
+            ['用例类型', item.case_type || item.test_level],
+            ['观察点', Array.isArray(item.observability) ? item.observability.join('；') : item.observability],
+            ['清理动作', Array.isArray(item.cleanup) ? item.cleanup.join('；') : item.cleanup],
+          ].filter(([, value]) => value != null && String(value).trim() !== '')
+          return h('dl', { className: 'pangea-reading-fields', style: { marginTop: 8 } },
+            ...rows.flatMap(([label, value]) => [h('dt', { key: `${label}-dt` }, label), h('dd', { key: `${label}-dd` }, readable(value))]))
+        }
+        const enabledRepos = (settings?.repositories || []).filter(repo => repo.enabled !== false)
+        const blockingErrors = enabledRepos.map(repo => repoBlockingReason(repo, { requirePersonalBranch: false })).filter(Boolean)
+        const headInjectionNotices = enabledRepos.map(formatInjectionCommitNotice).filter(Boolean)
+        const dirtyRepos = enabledRepos.filter(repo => repo.source?.dirty)
+        const needsRepoSetup = blockingErrors.length > 0
+        return h('section', { className: standalone ? 'pangea-injection-panel is-standalone' : 'b05-card pangea-injection-panel', 'data-testid': 'fault-injection-panel' },
+          h('style', null, PANEL_CSS),
           !standalone ? h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between', marginBottom: open ? 14 : 0 } },
-            h('div', null, h('strong', null, '打桩与个人分支'), h('p', { className: 'b05-subtle', style: { margin: '4px 0 0' } }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可一起生成打桩修改。` : '选择用例生成打桩修改，或查看已有打桩任务。')),
+            h('div', null, h('strong', null, '打桩补丁生成'), h('p', { className: 'b05-subtle', style: { margin: '4px 0 0' } }, selectedKeys.length ? `已选择 ${selectedKeys.length} 条用例，可在独立源码副本中生成打桩补丁。` : '选择用例生成打桩补丁。')),
             h('button', { type: 'button', className: 'btn', 'aria-expanded': open, onClick: () => setOpen(value => !value) }, open ? '收起打桩' : '打开打桩工作区'))
             : h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between', marginBottom: 14 } },
-              h('p', { className: 'b05-subtle', style: { margin: 0 } }, selectedKeys.length ? `当前已选 ${selectedKeys.length} 条打桩用例（推荐 ${recommendedKeys.length} 条 · 可选 ${selectableKeys.length} 条）` : `当前运行共 ${cases.length} 条用例：推荐打桩 ${recommendedKeys.length} 条（预设桩点 ${explicitKeys.length} 条），其余 ${ Math.max(0, selectableKeys.length - recommendedKeys.length) } 条支持按需定位桩点。`),
-              h('div', null,
-                step === 4 ? h('button', { type: 'button', onClick: () => { setTaskId(''); setStep(2) } }, '新建打桩任务') : null,
-                h('button', { type: 'button', onClick: onBack }, '更换分析任务'))),
-          open ? h('div', { className: 'pangea-fi-workspace', role: 'region', 'aria-label': '打桩任务详情', tabIndex: 0 },
-            tasks.length ? h('div', { className: 'pangea-fi-switcher' },
-              h('label', null, '已有打桩任务', h('select', { 'aria-label': '已有打桩任务', value: taskId, onChange: event => selectTask(event.target.value) },
-                h('option', { value: '' }, '选择任务查看'),
-                tasks.map(item => h('option', { key: item.id, value: item.id }, `${item.name || item.cases?.[0]?.title || '打桩任务'} · ${new Date(item.created_at).toLocaleString()} · ${item.case_keys.length} 条 · ${INJECTION_STATUS_LABELS[item.status] || item.status}`)))),
-              standalone && taskId && step === 4 ? h('span', { className: `pangea-fi-status-pill ${statusTone(task?.status)}` }, INJECTION_STATUS_LABELS[task?.status] || task?.status) : null) : null,
+              h('p', { className: 'b05-subtle', style: { margin: 0 } }, selectedKeys.length ? `当前已选 ${selectedKeys.length} 条打桩用例（推荐 ${recommendedKeys.length} 条 · 可选 ${selectableKeys.length} 条）` : `当前运行共 ${cases.length} 条用例：推荐打桩 ${recommendedKeys.length} 条（预设桩点 ${explicitKeys.length} 条），其余 ${Math.max(0, selectableKeys.length - recommendedKeys.length)} 条支持按需定位桩点。`),
+              h('button', { type: 'button', onClick: onBack }, '更换分析任务')),
+          open ? h('div', { className: 'pangea-fi-workspace', role: 'region', 'aria-label': '新建打桩任务', tabIndex: 0 },
             standalone ? h('ol', { className: 'pangea-fi-progress', 'aria-label': '新建打桩步骤' },
-              ['选择分析任务', '选择用例', '设置与提交', '结果与推送'].map((label, index) => h('li', {
+              ['选择分析任务', '选择用例', '设置与生成'].map((label, index) => h('li', {
                 key: label,
                 'data-done': step > index + 1 ? 'true' : undefined,
                 'aria-current': step === index + 1 ? 'step' : undefined,
               }, h('b', null, step > index + 1 ? '✓' : `0${index + 1}`), label))) : null,
             error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger' }, h('span', null, error)) : null,
-            notice ? h('div', { role: 'status', className: 'pangea-fi-banner good' }, h('span', null, notice)) : null,
             handoffNote && standalone && step === 2 ? h('div', { role: 'status', className: 'pangea-fi-banner info' },
               h('span', null, handoffNote),
-              selectedKeys.length && settings ? h('button', { type: 'button', className: 'primary', onClick: () => setStep(3) }, '直接进入设置与提交') : null) : null,
+              selectedKeys.length && settings ? h('button', { type: 'button', className: 'primary', onClick: () => setStep(3) }, '直接进入设置与生成') : null) : null,
             standalone && step === 2 ? h('section', null,
               h('div', { className: 'pangea-fi-toolbar' },
                 h('input', { type: 'search', 'aria-label': '搜索打桩用例', placeholder: '搜索用例编号或名称…', value: query, onChange: event => setQuery(event.target.value) }),
@@ -2136,15 +2101,17 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', onClick: onBack }, '上一步'),
                 h('div', { style: { display: 'flex', alignItems: 'center', gap: 12 } },
                   !selectedKeys.length ? h('span', { style: { fontSize: 12, color: '#5e6773' } }, '请先勾选至少 1 条用例') : null,
-                  h('button', { type: 'button', className: 'primary', disabled: !selectedKeys.length || !settings, onClick: () => setStep(3) }, '下一步：设置与提交')))) : null,
+                  h('button', { type: 'button', className: 'primary', disabled: !selectedKeys.length || !settings, onClick: () => setStep(3) }, '下一步：设置与生成')))) : null,
             (!standalone || step === 3) && settings ? h('section', { className: 'pangea-fi-create' },
-              h('h3', { style: { marginTop: 0 } }, '设置与提交'),
+              h('h3', { style: { marginTop: 0 } }, '设置与生成'),
               h('details', null, h('summary', null, `已选择 ${selectedKeys.length} 条用例`), h('p', { className: 'pangea-fi-scroll' }, selectedCases.map(item => `${item.display_id ? `${item.display_id} ` : ''}${readable(item.title)}`).join('、') || '请先选择用例')),
-              needsRepoSetup ? h('div', { role: 'status', className: 'pangea-fi-banner warn' },
-                h('span', null, missingGit
-                  ? '所选源码尚未关联 Git 仓库：请在下方“代码仓库与构建”中关联本地或远端 Git 仓库并选择个人开发分支。普通分析不受影响。'
-                  : '请先在下方“代码仓库与构建”中选择已有的个人开发分支后再生成打桩修改。'),
+              blockingErrors.length ? h('div', { role: 'alert', className: 'pangea-fi-banner danger' },
+                h('div', null, blockingErrors.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))),
                 h('button', { type: 'button', onClick: () => { setRepoSetupOpen(true); repoDetailsRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }) } }, '定位仓库配置')) : null,
+              headInjectionNotices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } },
+                headInjectionNotices.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))) : null,
+              dirtyRepos.length ? h('div', { role: 'status', className: 'pangea-fi-banner info' },
+                h('span', null, `${dirtyRepos.map(repo => repo.repo_id).join('、')} 工作区存在未提交改动；打桩基线仅读取当前 HEAD 已提交内容，不会修改分析目录或带入未提交改动。`)) : null,
               h('div', { style: { marginTop: 14 } },
                 h('div', { style: grid },
                   h('label', { className: 'pangea-fi-field' }, h('span', null, '执行器'), h('select', { 'aria-label': '打桩执行器', value: settings.provider_id, disabled: working, onChange: event => setSettings({ ...settings, provider_id: event.target.value, agent_model: '', agent_model_inherited: false }) },
@@ -2158,218 +2125,642 @@ window.__ModuleLoader__.load({
                       h('span', { role: modelState.status === 'error' ? 'alert' : 'status', style: { fontSize: 12, fontWeight: 400, color: modelState.status === 'error' ? '#b62836' : '#5e6773' } }, modelSelection.message),
                       h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, disabled: working || !settings.provider_id || modelState.status === 'loading', onClick: () => setModelRefresh(value => value + 1) }, '刷新模型'))),
                   field('任务名称', settings.name, value => setSettings({ ...settings, name: value }), { placeholder: '可选，便于区分多次打桩任务' })),
-                h('p', { style: { fontSize: 13 } }, h('strong', null, '目标个人分支：'), (settings.repositories || []).filter(repo => repo.enabled !== false).map(repo => `${repo.repo_id} → ${repo.personal_branch || '尚未配置'}`).join('；')),
+                h('p', { style: { fontSize: 13 } }, h('strong', null, '当前代码基线：'), enabledRepos.map(repo => `${repo.repo_id} → ${sourceLabel(repo.source)}`).join('；')),
                 h('details', { ref: repoDetailsRef, className: 'pangea-fi-technical', open: needsRepoSetup || repoSetupOpen || undefined },
                   h('summary', null, '代码来源与高级设置'),
                   h(RepositorySettings, { cwd, dataRoot, defaultOpen: needsRepoSetup || repoSetupOpen, repositories: settings.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, repositories: value.defaults.repositories, pipeline_url: value.defaults.pipeline_url })) } }),
                   (settings.repositories ?? []).map((repo, index) => h('fieldset', { key: repo.repo_id, className: 'pangea-fi-repo-box' },
                     h('legend', null, h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 600 } }, h('input', { type: 'checkbox', checked: repo.enabled !== false, disabled: working, 'aria-label': `本次包含 ${repo.repo_id}`, onChange: event => setSettings({ ...settings, repositories: settings.repositories.map((item, at) => at === index ? { ...item, enabled: event.target.checked } : item) }) }), readable(repo.repo_id))),
-                    h('p', { style: { fontSize: 12, color: '#5e6773' } }, '当前源码：', sourceLabel(repo.source)),
-                    repo.comparison?.changed_count ? h('p', { style: { fontSize: 12 } }, `分析快照中有 ${repo.comparison.changed_count} 个文件与目标提交不同。这是源码版本比较，不是本次打桩修改文件数；生成时将基于目标代码重新定位桩点。`) : null,
+                    h('p', { style: { fontSize: 12, color: '#5e6773' } }, '分析目录当前源码：', sourceLabel(repo.source)),
+                    repo.comparison?.changed_count ? h('p', { style: { fontSize: 12 } }, `分析快照中有 ${repo.comparison.changed_count} 个文件与当前 HEAD 不同。生成时将基于当前 HEAD 代码重新定位桩点。`) : null,
                     repo.comparison?.eol_only_count ? h('p', { style: { fontSize: 12, color: '#5e6773' } }, `${repo.comparison.eol_only_count} 个文件仅 CRLF/LF 换行符不同，单独记录，不计入内容变化。`) : null,
                     repo.comparison?.error ? h('p', { role: 'alert', style: { color: '#b62836', fontSize: 12 } }, repo.comparison.error) : null,
-                    h('p', { style: { fontSize: 12, color: '#5e6773' } }, `Git 仓库：${repo.source_path}；远端：${repo.remote}；个人分支：${repo.personal_branch || '未配置'}`)))),
-                h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '先在独立副本中生成差异，查看后再提交并推送到项目个人分支；不会创建任务分支，不带入未提交内容。'),
-                field('构建流水线 URL', settings.pipeline_url, value => setSettings({ ...settings, pipeline_url: value }), { placeholder: '例如 https://ci.example.internal/pipeline/...' }),
+                    h('p', { style: { fontSize: 12, color: '#5e6773' } }, `Git 仓库：${repo.source_path}；远端：${repo.remote}；个人分支：${repo.personal_branch || '未配置（可在合成出包前配置）'}`)))),
+                h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '在独立副本中基于当前分析目录 HEAD 生成打桩补丁；生成过程不触碰分析目录与本地分支，门禁提交信息与推送统一在“合成出包”完成。'),
                 field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true, placeholder: '可选：补充触发边界、日志开关或构建宏约束…' }),
-                h('div', { className: 'pangea-fi-repo-box', style: { marginTop: 12 } },
-                  h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 10 } },
-                    h('strong', { style: { fontSize: 13 } }, '提交门禁信息（必填，同项目自动复用）'),
-                    h('span', { className: 'b05-subtle', style: { fontSize: 12 } }, '按项目 pre-receive 钩子模板生成提交信息并在本地预检')),
-                  step3CommitConfig.mode === 'template' ? h(React.Fragment, null,
-                    h('div', { style: grid },
-                      field('问题单号 *', step3CommitConfig.issue, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, issue: value } }), { ariaLabel: '派发问题单号', placeholder: '如 DTS2026111111059 / AR... / SR...（多个用分号分隔）' }),
-                      field('修改人 *', step3CommitConfig.author, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, author: value } }), { ariaLabel: '派发修改人', placeholder: '工号或姓名（如 h00600350）' }),
-                      field('审核人 *', step3CommitConfig.reviewer, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, reviewer: value } }), { ariaLabel: '派发审核人', placeholder: '检视人工号或姓名' })),
-                    field('修改说明（可选）', step3CommitConfig.summary, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, summary: value } }), { ariaLabel: '派发修改说明', placeholder: '留空则按生成结果自动填入单行简要说明' }))
-                    : field('自定义提交信息（可选）', step3CommitConfig.custom_message, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, custom_message: value } }), { ariaLabel: '派发自定义提交信息', placeholder: '留空则使用默认简要格式（仅无门禁钩子仓库）' }),
-                  !step3CommitCheck.ok ? h('p', { role: 'status', style: { fontSize: 12, color: '#9c2330', margin: '4px 0 8px' } }, step3CommitCheck.error) : null,
-                  h('details', null,
-                    h('summary', { style: { fontSize: 12 } }, '提交格式、模板与本地预检正则设置'),
-                    h('div', { style: { paddingTop: 8 } },
-                      h('label', { className: 'pangea-fi-field' }, h('span', null, '预设提交信息格式'),
-                        h('select', { 'aria-label': '预设提交信息格式', value: step3CommitConfig.mode, disabled: working, onChange: event => {
-                          const nextMode = event.target.value
-                          const nextPattern = nextMode === 'template'
-                            ? (step3CommitConfig.pattern || DEFAULT_INTRANET_COMMIT_REGEX)
-                            : (step3CommitConfig.pattern === DEFAULT_INTRANET_COMMIT_REGEX ? '' : step3CommitConfig.pattern)
-                          setSettings({ ...settings, commit_config: { ...step3CommitConfig, mode: nextMode, explicit_default_mode: nextMode === 'default', pattern: nextPattern } })
-                        } },
-                          h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'),
-                          h('option', { value: 'default' }, '默认简要格式（仅无门禁钩子仓库）'))),
-                      step3CommitConfig.mode === 'template' ? h(React.Fragment, null,
-                        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 } },
-                          h('button', { type: 'button', disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: MULTILINE_GATE_COMMIT_TEMPLATE } }) }, '多行标准模板'),
-                          h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: SINGLELINE_GATE_COMMIT_TEMPLATE } }) }, '单行标准模板'),
-                          h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: DEFAULT_INTRANET_COMMIT_REGEX } }) }, '填入默认门禁正则'),
-                          step3CommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: '' } }) }, '清空预检正则') : null),
-                        field('预设提交信息模板', step3CommitConfig.template, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, template: value } }), { multiline: true }),
-                        field('预设本地预检正则', step3CommitConfig.pattern, value => setSettings({ ...settings, commit_config: { ...step3CommitConfig, pattern: value } }), { placeholder: '粘贴项目 pre-receive 钩子正则进行本地预检（带超时护栏）' })) : null))),
                 h('footer', { className: 'pangea-fi-footer' },
                   standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : h('span', null),
-                  h('button', { type: 'button', className: 'btn primary', disabled: working || !step3CommitCheck.ok || !modelSelection.ready || !selectedKeys.length || !settings.repositories.some(repo => repo.enabled !== false) || settings.repositories.some(repo => repo.enabled !== false && (repo.source?.kind !== 'git' || !repo.personal_branch)),
-                    onClick: () => act('generate', { ...effectiveSettings, commit_config: step3CommitConfig, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: settings.repositories.filter(repo => repo.enabled !== false), case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
+                  h('button', { type: 'button', className: 'btn primary', disabled: working || !modelSelection.ready || !selectedKeys.length || !enabledRepos.length || blockingErrors.length > 0,
+                    onClick: () => generate({ ...effectiveSettings, agent_model: modelSelection.model, agent_catalog_id: modelSelection.catalogId, repositories: enabledRepos, case_keys: selectedKeys }) }, working ? '正在提交…' : standalone ? '生成打桩修改' : `生成打桩修改（${selectedKeys.length} 条用例）`))))
               : !settings ? h('p', null, '正在读取打桩设置…') : null,
-            task && (!standalone || step === 4) ? h('div', { className: 'pangea-fi-task-card', style: { marginTop: 16 } },
-              h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
-                h('div', null,
-                  h('h3', { style: { margin: 0 } }, `正在查看：${task.name || task.cases?.[0]?.title || '打桩任务'}`),
-                  h('p', { className: 'b05-subtle', style: { margin: '6px 0 0', fontSize: 13 } }, `${task.case_keys.length} 条用例 · ${task.result?.points?.length || 0} 个桩点 · 最新记录 ${passedCount}/${task.case_keys.length} 通过 · 个人分支 `, h('code', null, task.branch))),
-                h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-                  h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(task.status)}` }, task.status === 'failed' && task.failure_phase === 'preparing' ? '准备源码失败' : INJECTION_STATUS_LABELS[task.status] || task.status),
-                  busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null)),
-              task.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
-                h('p', { style: { margin: 0, fontWeight: 600 } }, task.failure_phase === 'preparing' ? '准备源码失败，尚未开始生成打桩修改。' : '本次操作未完成。'),
-                h('details', { open: Boolean(task.generation_complete) || undefined }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, task.error))) : null,
-              Array.isArray(task.notices) && task.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } }, task.notices.map((text, index) => h('p', { key: index, style: { margin: index ? '6px 0 0' : 0 } }, text))) : null,
-              task.reused_from ? h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '本任务直接复用了已留存的生成结果，未调用模型。') : null,
-              task.telemetry ? h('p', { className: 'b05-subtle', style: { fontSize: 12, margin: '6px 0 0' } }, `执行账本：模型轮次 ${task.telemetry.turns ?? 0} · 工具调用 ${task.telemetry.tool_calls ?? 0} 次 · 上下文压缩 ${task.telemetry.compactions ?? 0} 次${task.telemetry.budget_wrapup_triggered ? ' · 已触发探索预算收口' : ''}`) : null,
-              task.status === 'pushing' && task.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送：${task.current_repository}`) : null,
-              ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
-                task.result_saved ? h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => act('revalidate') }, '原地重新验收（不调用模型）') : null,
-                task.result_saved ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('reuse-result') }, '直接复用已留存的生成结果（不调用模型）') : null,
-                task.result_saved ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry-with-reference') }, '参考上次结果重新生成') : null,
-                h('button', { type: 'button', className: task.result_saved ? '' : 'primary', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成')) : null,
-              task.schema_version !== 2 ? h('div', { role: 'status', className: 'pangea-fi-banner warn' }, '此历史任务使用旧任务分支。请先配置项目个人分支，再按最新分支重新生成；旧分支不会被推送。') : null,
-              task.repositories.filter(repo => repo.outgoing_count > 0 && !repo.commit).map(repo => h('label', { key: repo.repo_id, className: 'pangea-fi-banner warn', style: { display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: 10, cursor: 'pointer' } },
-                h('input', { type: 'checkbox', 'aria-label': `确认推送已有提交 ${repo.repo_id}`, checked: acknowledged[repo.repo_id] === repo.base_commit,
-                  onChange: event => setAcknowledged(previous => ({ ...previous, [repo.repo_id]: event.target.checked ? repo.base_commit : '' })) }),
-                `${repo.repo_id} 的 ${repo.branch} 上有 ${repo.outgoing_count} 个已有未推送提交；勾选确认后本次会一并推送。`)),
-              ['ready', 'interrupted'].includes(task.status) && task.generation_complete ? h('div', { className: 'pangea-fi-repo-box', style: { marginTop: 14 } },
-                showRemoteGateHelper ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { marginTop: 0 } },
-                  h('span', null, '检测到远端 pre-receive 提交门禁规则，可一键载入规则并在原地修正提交说明（无需重新调用模型）。'),
-                  h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, mode: 'template', explicit_default_mode: false, template: previous.template || MULTILINE_GATE_COMMIT_TEMPLATE, pattern: targetGateRegex })) }, '按远端门禁规则填写')) : null,
-                h('label', { className: 'pangea-fi-field' }, h('span', null, '提交信息格式'),
-                  h('select', { 'aria-label': '提交信息格式', value: effectiveCommitConfig.mode, disabled: working, onChange: event => {
-                    const nextMode = event.target.value
-                    setCommitDraft(previous => ({
-                      ...previous,
-                      mode: nextMode,
-                      explicit_default_mode: nextMode === 'default',
-                      pattern: nextMode === 'template'
-                        ? (previous.pattern || targetGateRegex)
-                        : (previous.pattern === DEFAULT_INTRANET_COMMIT_REGEX || previous.pattern === remoteHookRegex ? '' : previous.pattern),
-                    }))
-                  } },
-                    h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'),
-                    h('option', { value: 'default' }, '默认简要格式（仅无门禁钩子仓库）'))),
-                effectiveCommitConfig.mode === 'template' ? h(React.Fragment, null,
-                  h('div', { style: grid },
-                    field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 DTS2026111111059 / AR... / SR...（多个用分号分隔）' }),
-                    field('修改人', effectiveCommitConfig.author, value => setCommitDraft(previous => ({ ...previous, author: value })), { placeholder: '工号或姓名（如 h00600350）' }),
-                    field('审核人', effectiveCommitConfig.reviewer, value => setCommitDraft(previous => ({ ...previous, reviewer: value })), { placeholder: '检视人工号或姓名' })),
-                  field('修改说明', effectiveCommitConfig.summary, value => setCommitDraft(previous => ({ ...previous, summary: value })), { placeholder: '简要说明本次打桩修改内容（单行）' }),
-                  h('details', { style: { marginBottom: 10 } },
-                    h('summary', { style: { fontSize: 12 } }, '自定义模板与本地正则预检（兼容单行 / 多行 pre-receive 钩子）'),
-                    h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 8px' } },
-                      h('button', { type: 'button', disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: MULTILINE_GATE_COMMIT_TEMPLATE })) }, '使用多行门禁模板'),
-                      h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, template: SINGLELINE_GATE_COMMIT_TEMPLATE })) }, '使用单行门禁模板'),
-                      h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, pattern: DEFAULT_INTRANET_COMMIT_REGEX })) }, '填入默认门禁正则'),
-                      effectiveCommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => setCommitDraft(previous => ({ ...previous, pattern: '' })) }, '清空预检正则') : null),
-                    field('提交信息模板', effectiveCommitConfig.template, value => setCommitDraft(previous => ({ ...previous, template: value })), { multiline: true }),
-                    field('本地预检正则', effectiveCommitConfig.pattern, value => setCommitDraft(previous => ({ ...previous, pattern: value })), { placeholder: '可选：粘贴项目钩子正则进行推送前校验' })),
-                  h('pre', { 'aria-label': '提交信息预览', style: { whiteSpace: 'pre-wrap', margin: '6px 0', padding: '8px 10px', borderRadius: 6, background: '#f8f9fb', border: '1px solid #e2e6ec', fontSize: 12 } }, commitCheck.message || ''))
-                  : field('提交信息', effectiveCommitConfig.custom_message, value => setCommitDraft(previous => ({ ...previous, custom_message: value })), { placeholder: `test: fault injection ${task.id}` }),
-                !commitCheck.ok ? h('p', { role: 'alert', style: { fontSize: 12, color: '#9c2330', margin: '6px 0 0' } }, commitCheck.error) : null,
-                h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
-                  h('button', { type: 'button', className: 'btn primary', disabled: working || !commitCheck.ok || task.schema_version !== 2 || task.repositories.some(repo => repo.outgoing_count > 0 && !repo.commit && acknowledged[repo.repo_id] !== repo.base_commit),
-                    onClick: () => act('push', { acknowledged_heads: acknowledged, commit_config: effectiveCommitConfig, commit_message: commitCheck.message }) }, working ? '正在提交…' : task.repositories.some(repo => repo.commit && !repo.pushed) ? `重试提交与推送到 ${task.branch}` : `提交并推送到 ${task.branch}`),
-                  h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '按最新分支重新生成'))) : null,
-              task.status === 'pushed' ? h('section', { className: 'pangea-fi-build', style: { marginTop: 14 } },
-                h('h3', { style: { marginTop: 0 } }, '构建个人包'),
-                h('details', { open: !task.pipeline_url || pipelineDirty || undefined },
-                  h('summary', null, '流水线设置'),
-                  field('本任务流水线 URL', pipelineUrl, setPipelineUrl),
-                  h('button', { type: 'button', className: pipelineDirty ? 'primary' : '', disabled: working, onClick: () => act('configure', { pipeline_url: pipelineUrl }) }, '保存流水线地址')),
-                pipelineDirty ? h('p', { role: 'status', style: { fontSize: 12, color: '#8c5a12', margin: '10px 0 6px' } }, '流水线地址已更改，请先点击“保存流水线地址”后再打开流水线。') : null,
-                h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
-                  h('button', { type: 'button', className: 'btn primary', disabled: working || !task.pipeline_url || pipelineDirty,
-                    onClick: async () => { try { if (!onOpenPipeline) throw new Error('当前会话的 DSH 浏览器不可用'); await onOpenPipeline(task.pipeline_url) } catch (reason) { setError(reason.message) } } }, '在 DSH 浏览器打开构建流水线'),
-                  h('button', { type: 'button', style: { marginLeft: 0 }, onClick: async () => { try { await navigator.clipboard.writeText(task.branch); setNotice(`已复制个人分支：${task.branch}`) } catch { setError('复制失败，请复制上方个人分支名称') } } }, '复制个人分支')),
-                h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '使用上方个人分支出包，在验证记录中关联构建结果。'),
-                task.result_saved ? h('div', { style: { marginTop: 10 } },
-                  h('button', { type: 'button', disabled: working, onClick: () => act('reuse-result') }, '再次出桩（复用本次结果，不调用模型）'),
-                  h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '个人分支回退后需要重新打上同样的桩时使用：在当前分支最新代码上直接应用本次留存的修改；代码位置变化时会提示改用“参考上次结果重新生成”。')) : null) : null,
-              task.repositories.some(repo => repo.commit) ? h('details', { key: `verification:${task.id}`, style: { marginTop: 12 } },
-                h('summary', null, '构建包与验证记录'),
-                h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '在已有流水线选择上面的个人分支或修改提交出包；烧包测试后，在这里记录结果。'),
-                h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),
-                h('details', { style: { margin: '4px 0 12px' } },
-                  h('summary', null, '从执行日志自动填充'),
-                  h('div', { style: { display: 'grid', gap: 8, paddingTop: 6 } },
-                    h('input', { type: 'file', 'aria-label': '选择执行日志文件', accept: '.log,.txt,text/plain', disabled: working, onChange: async event => {
-                      const file = event.target.files?.[0]
-                      if (!file) return
-                      try { setLogText(await file.text()) } catch (reason) { setError(reason?.message || '读取日志文件失败') }
-                    } }),
-                    h('textarea', { 'aria-label': '执行日志内容', rows: 3, disabled: working, value: logText, placeholder: '粘贴串口或脚本输出日志（自动识别 [PANGEA_VERIFY] 或桩点命中特征）…', onChange: event => setLogText(event.target.value) }),
-                    h('div', null, h('button', { type: 'button', disabled: working || !logText.trim(), onClick: () => {
-                      const parsed = parseVerificationLog(logText, task)
-                      if (!parsed.entries.length) {
-                        setError('日志中未识别到匹配的桩点命中或 [PANGEA_VERIFY] 记录，请核对日志或手动填写')
-                        return
-                      }
-                      setError('')
-                      if (verification.case_key) drafts.current[`${taskId}:${verification.case_key}`] = verification
-                      for (const entry of parsed.entries) drafts.current[`${taskId}:${entry.case_key}`] = entry
-                      const target = parsed.entries.find(item => item.case_key === verification.case_key) || parsed.entries[0]
-                      setVerification(target)
-                      setNotice(`已从日志自动填充 ${parsed.matchedCount} 条用例结果，请核对后点击“保存构建与验证记录”`)
-                    } }, '解析日志填充')))),
-                h('div', { style: grid },
-                  h('label', { className: 'pangea-fi-field' }, h('span', null, '验证用例'), h('select', { 'aria-label': '验证用例', value: verification.case_key, onChange: event => {
-                    drafts.current[`${taskId}:${verification.case_key}`] = verification
-                    const key = event.target.value
-                    setVerification(drafts.current[`${taskId}:${key}`] ?? { result: 'not_run', hits: '', notes: '', ...task.verification.filter(item => item.case_key === key).at(-1), case_key: key })
-                  } }, task.cases.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(item.title))))),
-                  h('label', { className: 'pangea-fi-field' }, h('span', null, '实际结果'), h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => setVerification({ ...verification, result: event.target.value }) }, [['not_run', '未执行'], ['passed', '通过'], ['failed', '失败'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
-                  field('桩点实际命中', verification.hits, value => setVerification({ ...verification, hits: value }))),
-                field('验证现象与记录', verification.notes, value => setVerification({ ...verification, notes: value }), { multiline: true }),
-                h('button', { type: 'button', className: 'btn primary', disabled: working || busy(task), onClick: () => act('verify', { build, verification }) }, '保存构建与验证记录'),
-                task.verification.length ? h('ul', { className: 'pangea-fi-records pangea-fi-scroll', 'aria-label': '验证历史' }, [...task.verification].reverse().map((value, index) => h('li', { key: index }, `${value.at} · ${readable(task.cases.find(item => item.case_key === value.case_key)?.title || value.case_key)} · ${({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result]} · ${value.hits}`,
-                  value.notes ? h('details', null, h('summary', null, '查看验证记录'), h('pre', null, value.notes)) : null,
-                  h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, `验证包：${value.build?.package_id || '未填写'}；提交：${(value.build?.commits || []).map(repo => `${repo.repo_id} ${repo.commit.slice(0, 12)}`).join('、')}`),
-                  value.build?.url ? h('a', { href: value.build.url, target: '_blank', rel: 'noreferrer' }, '查看本次构建') : null))) : null) : null,
-              task.result?.summary ? h('details', null, h('summary', null, '修改摘要与用例'), h('div', { className: 'pangea-fi-scroll' }, h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)), h('p', { style: { fontSize: 12, color: '#5e6773' } }, task.cases.map(item => readable(item.title)).join('、')))) : null,
-              task.result?.points?.length ? h('details', null, h('summary', null, `桩点说明（${task.result.points.length}）`), h('div', { className: 'pangea-fi-scroll' }, renderPoints(task.result.points))) : null,
-              profiles.length ? h('details', { key: `profiles:${task.id}` }, h('summary', null, `逐用例执行说明（${profiles.length}）`),
-                h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 12px' } },
-                  h('button', { type: 'button', onClick: () => {
-                    try {
-                      const content = buildVerificationShellScript(task)
-                      const blob = new Blob([content], { type: 'text/x-shellscript;charset=utf-8' })
-                      const href = URL.createObjectURL(blob)
-                      const link = document.createElement('a')
-                      link.href = href
-                      link.download = `pangea-verify-${String(task.id || 'task').slice(0, 8)}.sh`
-                      link.click()
-                      setTimeout(() => URL.revokeObjectURL(href), 0)
-                      setNotice('已生成可执行验证脚本')
-                    } catch (reason) { setError(reason?.message || '生成验证脚本失败') }
-                  } }, '下载验证脚本'),
-                  h('button', { type: 'button', style: { marginLeft: 0 }, onClick: async () => {
-                    try { await navigator.clipboard.writeText(buildVerificationShellScript(task)); setNotice('已复制验证脚本') }
-                    catch { setError('复制失败，请使用“下载验证脚本”') }
-                  } }, '复制验证脚本')),
-                h('label', { className: 'pangea-fi-field' }, h('span', null, '选择执行说明'), h('select', { 'aria-label': '选择执行说明', value: profile?.case_key || '', onChange: event => setProfileKey(event.target.value) },
-                  profiles.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(task.cases.find(value => value.case_key === item.case_key)?.title || item.case_key))))),
-                profile?.safety ? h('div', { 'aria-label': '安全执行流程' },
-                  ...[['setup', '准备与原状态快照'], ['negative_steps', '历史与非目标输入验证'], ['steps', '故障命中与恢复'], ['cleanup', '退出清理'], ['cleanup_verify', '独立恢复检查']].map(([key, label]) =>
-                    h('details', { key }, h('summary', null, label), renderSteps(key === 'steps' ? profile.steps : profile.safety[key]))))
-                  : renderSteps(profile?.steps)) : null,
-              task.result?.limitations?.length ? h('details', null, h('summary', null, `生成限制（${task.result.limitations.length}）`),
-                Array.isArray(task.result.limitations)
-                  ? h('ul', { className: 'pangea-fi-steps pangea-fi-scroll' }, task.result.limitations.map((item, at) => h('li', { key: at }, readable(item))))
-                  : h('p', { className: 'pangea-fi-scroll', style: { whiteSpace: 'pre-wrap' } }, readable(task.result.limitations))) : null,
-              task.repositories.map(repo => h('details', { key: repo.repo_id, open: Boolean(repo.diff && !repo.pushed), style: { marginTop: 12 } },
-                h('summary', null, `${repo.repo_id} · ${repo.branch} · ${repo.commit ? repo.pushed ? '已推送' : '已提交' : repo.diff ? '待提交差异' : '未修改'}`),
-                h('p', { style: { fontSize: 12, color: '#5e6773' } }, '基线：', h('code', null, repo.base_commit), repo.commit ? h(React.Fragment, null, ' · 修改提交：', h('code', null, repo.commit)) : null),
-                repo.diff ? h('pre', { style: { maxHeight: 400, overflow: 'auto', padding: 12, borderRadius: 8, border: '1px solid #e2e6ec', background: '#f8f9fb', font: '12px/1.6 Consolas, monospace' } }, repo.diff) : null))
-              ) : null) : null)
+            ) : null)
       }
     }
 
-    return { INJECTION_STATUS_LABELS, createFaultInjectionPanel }
+    function createFaultInjectionTaskDetail(React) {
+      const h = React.createElement
+      return function FaultInjectionTaskDetail({ runId, taskId, dataRoot, cwd, onSwitch, onOpenBuild }) {
+        const [task, setTask] = React.useState(null)
+        const [profileKey, setProfileKey] = React.useState('')
+        const drafts = React.useRef({})
+        const [notice, setNotice] = React.useState('')
+        const [error, setError] = React.useState('')
+        const [working, setWorking] = React.useState(false)
+        const [build, setBuild] = React.useState({ url: '', package_id: '', package_sha256: '', notes: '' })
+        const [verification, setVerification] = React.useState({ case_key: '', result: 'not_run', hits: '', notes: '' })
+        const [logText, setLogText] = React.useState('')
+        const scope = JSON.stringify([runId, taskId, dataRoot, cwd])
+        const request = payload => injectionRequest({ run_id: runId, ...(dataRoot ? { data_root: dataRoot } : {}), ...(cwd ? { cwd } : {}), task_id: taskId, ...payload })
+        React.useEffect(() => {
+          let live = true
+          request().then(value => { if (live) setTask(value.task) }).catch(reason => { if (live) setError(reason.message) })
+          return () => { live = false }
+        }, [scope])
+        const running = busy(task)
+        React.useEffect(() => {
+          if (!running) return
+          let live = true, pending = false
+          const timer = setInterval(async () => {
+            if (pending) return
+            pending = true
+            try { const value = await request(); if (live) setTask(value.task) }
+            catch (reason) { if (live) setError(reason.message) }
+            finally { pending = false }
+          }, 1000)
+          return () => { live = false; clearInterval(timer) }
+        }, [scope, running])
+        React.useEffect(() => {
+          if (!task) return
+          setBuild({ url: '', package_id: '', package_sha256: '', notes: '', ...task.build })
+          setVerification({ result: 'not_run', hits: '', notes: '', ...task.verification?.filter(item => item.case_key === task.case_keys?.[0]).at(-1), case_key: task.case_keys?.[0] || '' })
+        }, [task?.id])
+        const act = async (action, extra = {}) => {
+          setWorking(true); setError(''); setNotice('')
+          try {
+            const value = await request({ action, ...extra })
+            if (value.task.id !== taskId) { onSwitch(value.task); return }
+            setTask(value.task)
+            if (['configure', 'verify'].includes(action)) setNotice('已保存')
+          } catch (reason) { setError(reason.message) }
+          finally { setWorking(false) }
+        }
+        const { field, renderSteps, renderPoints } = viewHelpers(h, { working, openPoints: true })
+        const banners = [
+          error ? h('div', { key: 'error', role: 'alert', className: 'pangea-fi-banner danger' }, h('span', null, error)) : null,
+          notice ? h('div', { key: 'notice', role: 'status', className: 'pangea-fi-banner good' }, h('span', null, notice)) : null,
+        ]
+        if (!task) return h('section', { className: 'pangea-injection-panel is-standalone', 'data-testid': 'fault-injection-task' }, h('style', null, PANEL_CSS),
+          ...banners, error ? null : h('p', { role: 'status' }, '正在读取打桩任务…'))
+        const profiles = Array.isArray(task.result?.profiles) ? task.result.profiles : []
+        const profile = profiles.find(item => item.case_key === profileKey) || profiles[0]
+        const latestResults = new Map((task.verification || []).map(item => [item.case_key, item.result]))
+        const passedCount = [...latestResults.values()].filter(result => result === 'passed').length
+        const branchText = task.latest_build?.branch || task.branch || ''
+        const includable = Boolean(task.result_saved && task.generation_complete !== false && ['ready', 'pushed'].includes(task.status))
+        const canVerify = Boolean(task.latest_pushed_build?.commits?.length) || (task.repositories || []).some(repo => repo.commit)
+        const activeCommits = task.latest_pushed_build?.commits?.length
+          ? task.latest_pushed_build.commits
+          : (task.repositories || []).filter(repo => repo.commit).map(repo => ({ repo_id: repo.repo_id, commit: repo.commit }))
+        return h('section', { className: 'pangea-injection-panel is-standalone', 'data-testid': 'fault-injection-task' }, h('style', null, PANEL_CSS),
+          ...banners,
+          h('div', { className: 'pangea-fi-task-card' },
+            h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
+              h('div', null,
+                h('h3', { style: { margin: 0 } }, `正在查看：${task.name || task.cases?.[0]?.title || '打桩任务'}`),
+                h('p', { className: 'b05-subtle', style: { margin: '6px 0 0', fontSize: 13 } },
+                  `${task.case_keys.length} 条用例 · ${task.result?.points?.length || 0} 个桩点 · 最新记录 ${passedCount}/${task.case_keys.length} 通过`,
+                  branchText ? h(React.Fragment, null, ' · 个人分支 ', h('code', null, branchText)) : null)),
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(task.status)}` }, task.status === 'failed' && task.failure_phase === 'preparing' ? '准备源码失败' : INJECTION_STATUS_LABELS[task.status] || task.status),
+                busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null)),
+            task.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
+              h('p', { style: { margin: 0, fontWeight: 600 } }, task.failure_phase === 'preparing' ? '准备源码失败，尚未开始生成打桩修改。' : '本次操作未完成。'),
+              h('details', { open: Boolean(task.generation_complete) || undefined }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, task.error))) : null,
+            Array.isArray(task.notices) && task.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } }, task.notices.map((text, index) => h('p', { key: index, style: { margin: index ? '6px 0 0' : 0 } }, text))) : null,
+            task.reused_from ? h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '本任务直接复用了已留存的生成结果，未调用模型。') : null,
+            task.telemetry ? h('p', { className: 'b05-subtle', style: { fontSize: 12, margin: '6px 0 0' } }, `执行账本：模型轮次 ${task.telemetry.turns ?? 0} · 工具调用 ${task.telemetry.tool_calls ?? 0} 次 · 上下文压缩 ${task.telemetry.compactions ?? 0} 次${task.telemetry.budget_wrapup_triggered ? ' · 已触发探索预算收口' : ''}`) : null,
+            ['failed', 'cancelled', 'interrupted'].includes(task.status) && !task.generation_complete ? h('div', { style: { marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 8 } },
+              task.result_saved ? h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => act('revalidate') }, '原地重新验收（不调用模型）') : null,
+              task.result_saved ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('reuse-result') }, '直接复用已留存的生成结果（不调用模型）') : null,
+              task.result_saved ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry-with-reference') }, '参考上次结果重新生成') : null,
+              h('button', { type: 'button', className: task.result_saved ? '' : 'primary', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成')) : null,
+            includable ? h('section', { className: 'pangea-fi-repo-box', style: { marginTop: 14 } },
+              h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
+                h('div', null,
+                  h('strong', null, '补丁就绪，可加入合成出包'),
+                  h('p', { className: 'b05-subtle', style: { margin: '4px 0 0', fontSize: 12 } },
+                    task.latest_build
+                      ? `最近出包状态：${BUILD_STATUS_LABELS[task.latest_build.status] || task.latest_build.status}${task.latest_build.commits?.length ? `（${task.latest_build.commits.map(c => `${c.repo_id} ${String(c.commit || '').slice(0, 12)}`).join('、')}）` : ''}`
+                      : '本任务只保存打桩补丁与执行说明，可与其他打桩任务一起按当前分析目录 HEAD 合成并推送到个人分支。')),
+                h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                  onOpenBuild ? h('button', { type: 'button', className: 'btn primary', disabled: working, onClick: () => onOpenBuild({ run_id: task.run_id, task_id: task.id }) }, '加入出包 / 推送个人分支') : null,
+                  task.result_saved ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry-with-reference') }, '参考上次结果重新生成') : null,
+                  h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成')))) : null,
+            !includable && !busy(task) && task.schema_version === 1 ? h('div', { role: 'status', className: 'pangea-fi-banner warn' }, '此历史任务缺少可复用的结构化修改记录，请按当前最新代码重新生成。') : null,
+            canVerify ? h('details', { key: `verification:${task.id}`, style: { marginTop: 12 } },
+              h('summary', null, '构建包与验证记录'),
+              h('p', { className: 'b05-subtle', style: { fontSize: 12 } },
+                '当前关联提交：',
+                activeCommits.map(item => `${item.repo_id} ${String(item.commit || '').slice(0, 12)}`).join('、'),
+                '。烧包测试后，在这里记录验证结果。'),
+              h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),
+              h('details', { style: { margin: '4px 0 12px' } },
+                h('summary', null, '从执行日志自动填充'),
+                h('div', { style: { display: 'grid', gap: 8, paddingTop: 6 } },
+                  h('input', { type: 'file', 'aria-label': '选择执行日志文件', accept: '.log,.txt,text/plain', disabled: working, onChange: async event => {
+                    const file = event.target.files?.[0]
+                    if (!file) return
+                    try { setLogText(await file.text()) } catch (reason) { setError(reason?.message || '读取日志文件失败') }
+                  } }),
+                  h('textarea', { 'aria-label': '执行日志内容', rows: 3, disabled: working, value: logText, placeholder: '粘贴串口或脚本输出日志（自动识别 [PANGEA_VERIFY] 或桩点命中特征）…', onChange: event => setLogText(event.target.value) }),
+                  h('div', null, h('button', { type: 'button', disabled: working || !logText.trim(), onClick: () => {
+                    const parsed = parseVerificationLog(logText, task)
+                    if (!parsed.entries.length) {
+                      setError('日志中未识别到匹配的桩点命中或 [PANGEA_VERIFY] 记录，请核对日志或手动填写')
+                      return
+                    }
+                    setError('')
+                    if (verification.case_key) drafts.current[`${taskId}:${verification.case_key}`] = verification
+                    for (const entry of parsed.entries) drafts.current[`${taskId}:${entry.case_key}`] = entry
+                    const target = parsed.entries.find(item => item.case_key === verification.case_key) || parsed.entries[0]
+                    setVerification(target)
+                    setNotice(`已从日志自动填充 ${parsed.matchedCount} 条用例结果，请核对后点击“保存构建与验证记录”`)
+                  } }, '解析日志填充')))),
+              h('div', { style: grid },
+                h('label', { className: 'pangea-fi-field' }, h('span', null, '验证用例'), h('select', { 'aria-label': '验证用例', value: verification.case_key, onChange: event => {
+                  drafts.current[`${taskId}:${verification.case_key}`] = verification
+                  const key = event.target.value
+                  setVerification(drafts.current[`${taskId}:${key}`] ?? { result: 'not_run', hits: '', notes: '', ...task.verification.filter(item => item.case_key === key).at(-1), case_key: key })
+                } }, task.cases.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(item.title))))),
+                h('label', { className: 'pangea-fi-field' }, h('span', null, '实际结果'), h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => setVerification({ ...verification, result: event.target.value }) }, [['not_run', '未执行'], ['passed', '通过'], ['failed', '失败'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
+                field('桩点实际命中', verification.hits, value => setVerification({ ...verification, hits: value }))),
+              field('验证现象与记录', verification.notes, value => setVerification({ ...verification, notes: value }), { multiline: true }),
+              h('button', { type: 'button', className: 'btn primary', disabled: working || busy(task), onClick: () => act('verify', { build, verification }) }, '保存构建与验证记录'),
+              task.verification.length ? h('ul', { className: 'pangea-fi-records pangea-fi-scroll', 'aria-label': '验证历史' }, [...task.verification].reverse().map((value, index) => h('li', { key: index }, `${value.at} · ${readable(task.cases.find(item => item.case_key === value.case_key)?.title || value.case_key)} · ${({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result]} · ${value.hits}`,
+                value.notes ? h('details', null, h('summary', null, '查看验证记录'), h('pre', null, value.notes)) : null,
+                h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, `验证包：${value.build?.package_id || '未填写'}；提交：${(value.build?.commits || []).map(repo => `${repo.repo_id} ${String(repo.commit || '').slice(0, 12)}`).join('、')}`),
+                value.build?.url ? h('a', { href: value.build.url, target: '_blank', rel: 'noreferrer' }, '查看本次构建') : null))) : null) : null,
+            task.result?.summary ? h('details', null, h('summary', null, '修改摘要与用例'), h('div', { className: 'pangea-fi-scroll' }, h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)), h('p', { style: { fontSize: 12, color: '#5e6773' } }, task.cases.map(item => readable(item.title)).join('、')))) : null,
+            task.result?.points?.length ? h('details', null, h('summary', null, `桩点说明（${task.result.points.length}）`), h('div', { className: 'pangea-fi-scroll' }, renderPoints(task.result.points))) : null,
+            profiles.length ? h('details', { key: `profiles:${task.id}` }, h('summary', null, `逐用例执行说明（${profiles.length}）`),
+              h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 12px' } },
+                h('button', { type: 'button', onClick: () => {
+                  try {
+                    const content = buildVerificationShellScript(task)
+                    const blob = new Blob([content], { type: 'text/x-shellscript;charset=utf-8' })
+                    const href = URL.createObjectURL(blob)
+                    const link = document.createElement('a')
+                    link.href = href
+                    link.download = `pangea-verify-${String(task.id || 'task').slice(0, 8)}.sh`
+                    link.click()
+                    setTimeout(() => URL.revokeObjectURL(href), 0)
+                    setNotice('已生成可执行验证脚本')
+                  } catch (reason) { setError(reason?.message || '生成验证脚本失败') }
+                } }, '下载验证脚本'),
+                h('button', { type: 'button', style: { marginLeft: 0 }, onClick: async () => {
+                  try { await navigator.clipboard.writeText(buildVerificationShellScript(task)); setNotice('已复制验证脚本') }
+                  catch { setError('复制失败，请使用“下载验证脚本”') }
+                } }, '复制验证脚本')),
+              h('label', { className: 'pangea-fi-field' }, h('span', null, '选择执行说明'), h('select', { 'aria-label': '选择执行说明', value: profile?.case_key || '', onChange: event => setProfileKey(event.target.value) },
+                profiles.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(task.cases.find(value => value.case_key === item.case_key)?.title || item.case_key))))),
+              profile?.safety ? h('div', { 'aria-label': '安全执行流程' },
+                ...[['setup', '准备与原状态快照'], ['negative_steps', '历史与非目标输入验证'], ['steps', '故障命中与恢复'], ['cleanup', '退出清理'], ['cleanup_verify', '独立恢复检查']].map(([key, label]) =>
+                  h('details', { key }, h('summary', null, label), renderSteps(key === 'steps' ? profile.steps : profile.safety[key]))))
+                : renderSteps(profile?.steps)) : null,
+            task.result?.limitations?.length ? h('details', null, h('summary', null, `生成限制（${task.result.limitations.length}）`),
+              Array.isArray(task.result.limitations)
+                ? h('ul', { className: 'pangea-fi-steps pangea-fi-scroll' }, task.result.limitations.map((item, at) => h('li', { key: at }, readable(item))))
+                : h('p', { className: 'pangea-fi-scroll', style: { whiteSpace: 'pre-wrap' } }, readable(task.result.limitations))) : null,
+            (task.repositories || []).map(repo => h('details', { key: repo.repo_id, open: Boolean(repo.diff), style: { marginTop: 12 } },
+              h('summary', null, `${repo.repo_id}${repo.base_branch ? ` · 基线分支 ${repo.base_branch}` : ''} · ${repo.diff ? '待合成补丁差异' : '未修改'}`),
+              h('p', { style: { fontSize: 12, color: '#5e6773' } },
+                '生成基线：', h('code', null, repo.base_commit),
+                repo.analysis_commit && repo.analysis_commit !== repo.base_commit ? h(React.Fragment, null, ' · 分析快照：', h('code', null, repo.analysis_commit)) : null,
+                repo.commit ? h(React.Fragment, null, ' · 历史单任务提交：', h('code', null, repo.commit)) : null),
+              repo.diff ? h('pre', { style: { maxHeight: 400, overflow: 'auto', padding: 12, borderRadius: 8, border: '1px solid #e2e6ec', background: '#f8f9fb', font: '12px/1.6 Consolas, monospace' } }, repo.diff) : null)),
+          ))
+      }
+    }
+
+    function createFaultInjectionHome(React) {
+      const h = React.createElement
+      return function FaultInjectionHome({ dataRoot, cwd, reload = 0, analysisLabel, onOpen, onCreate, onOpenBuild }) {
+        const [tasks, setTasks] = React.useState(null)
+        const [error, setError] = React.useState('')
+        const [filters, setFilters] = React.useState({ status: '', run_id: '', repo_id: '', order: 'desc' })
+        React.useEffect(() => {
+          let live = true
+          setError('')
+          injectionRequest({ view: 'all', ...(dataRoot ? { data_root: dataRoot } : {}), ...(cwd ? { cwd } : {}) })
+            .then(value => { if (live) setTasks(value.tasks) })
+            .catch(reason => { if (live) setError(reason.message) })
+          return () => { live = false }
+        }, [dataRoot, cwd, reload])
+        const statusLabel = task => task.status === 'failed' && task.failure_phase === 'preparing' ? '准备源码失败' : INJECTION_STATUS_LABELS[task.status] || task.status
+        const buildLabel = task => {
+          if (task.status === 'unreadable') return ''
+          if (task.latest_build) {
+            if (task.latest_build.pushed) {
+              const shortSha = String(task.latest_build.commits?.[0]?.commit || '').slice(0, 8)
+              return shortSha ? `已推送 ${shortSha}` : '已推送'
+            }
+            return BUILD_STATUS_LABELS[task.latest_build.status] || task.latest_build.status
+          }
+          if (task.status === 'pushed') return '历史推送'
+          return '未出包'
+        }
+        const all = tasks || []
+        const includableCount = all.filter(task => task.includable).length
+        const options = values => [...new Set(values)].sort()
+        const shown = all
+          .filter(task => (!filters.status || task.status === filters.status) && (!filters.run_id || task.run_id === filters.run_id) && (!filters.repo_id || task.repo_ids?.includes(filters.repo_id)))
+          .sort((a, b) => (filters.order === 'asc' ? 1 : -1) * String(a.created_at || '').localeCompare(String(b.created_at || '')))
+        const filter = (label, key, values) => h('label', null, label, h('select', { 'aria-label': label, value: filters[key], onChange: event => setFilters({ ...filters, [key]: event.target.value }) }, ...values))
+        return h('section', { className: 'pangea-injection-panel is-standalone', 'data-testid': 'fault-injection-home' }, h('style', null, PANEL_CSS),
+          h('div', { className: 'b05-head-actions', style: { justifyContent: 'space-between', marginBottom: 14 } },
+            h('h3', { style: { margin: 0 } }, `打桩任务（${all.length}）`),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+              onOpenBuild ? h('button', { type: 'button', onClick: () => onOpenBuild() }, includableCount ? `合成出包（${includableCount} 个可用）` : '合成出包') : null,
+              h('button', { type: 'button', className: 'primary', onClick: onCreate }, '新建打桩任务'))),
+          h('div', { className: 'pangea-fi-filters' },
+            filter('按状态筛选', 'status', [h('option', { key: '', value: '' }, '全部状态'), ...options(all.map(task => task.status)).map(value => h('option', { key: value, value }, INJECTION_STATUS_LABELS[value] || value))]),
+            filter('按分析任务筛选', 'run_id', [h('option', { key: '', value: '' }, '全部分析任务'), ...options(all.map(task => task.run_id)).map(value => h('option', { key: value, value }, analysisLabel(value)))]),
+            filter('按仓库筛选', 'repo_id', [h('option', { key: '', value: '' }, '全部仓库'), ...options(all.flatMap(task => task.repo_ids || [])).map(value => h('option', { key: value, value }, value))]),
+            filter('排序', 'order', [h('option', { key: 'desc', value: 'desc' }, '最新在前'), h('option', { key: 'asc', value: 'asc' }, '最早在前')])),
+          error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger' }, h('span', null, error)) : null,
+          !tasks && !error ? h('p', { role: 'status' }, '正在读取打桩任务…') : null,
+          tasks && !all.length ? h('p', { role: 'status' }, '暂无打桩任务。点击“新建打桩任务”从分析结果选择用例。') : null,
+          all.length ? h('table', { className: 'pangea-fi-table', 'aria-label': '打桩任务列表' },
+            h('thead', null, h('tr', null, ...['名称', '分析任务', '用例', '桩点', '状态', '最近出包', '验证', '创建时间'].map(label => h('th', { key: label }, label)))),
+            h('tbody', null, shown.map(task => h('tr', { key: `${task.run_id}/${task.id}` },
+              h('td', null, task.status === 'unreadable'
+                ? h(React.Fragment, null, task.id, h('small', { role: 'alert' }, task.error))
+                : h('button', { type: 'button', className: 'link-btn', onClick: () => onOpen(task) }, task.name || '打桩任务')),
+              h('td', null, analysisLabel(task.run_id)),
+              h('td', null, task.case_count ?? ''),
+              h('td', null, task.point_count ?? ''),
+              h('td', null, h('span', { className: `pangea-fi-status-pill ${statusTone(task.status)}` }, statusLabel(task))),
+              h('td', null, buildLabel(task)),
+              h('td', null, task.status === 'unreadable' ? '' : task.verified_count ? `${task.passed_count}/${task.case_count} 通过` : '未记录'),
+              h('td', null, task.created_at ? new Date(task.created_at).toLocaleString() : ''))))) : null)
+      }
+    }
+
+    function createFaultInjectionBuild(React) {
+      const h = React.createElement
+      const RepositorySettings = createRepositorySettings(React)
+      return function FaultInjectionBuild({ dataRoot, cwd, reload = 0, initialItems = null, analysisLabel = id => id, onOpenTask, onOpenPipeline, onBack }) {
+        const [context, setContext] = React.useState(null)
+        const [selectedKeys, setSelectedKeys] = React.useState([])
+        const [activeBuild, setActiveBuild] = React.useState(null)
+        const [commitDraft, setCommitDraft] = React.useState(() => ({ ...normalizeCommitConfig({}), summary: null }))
+        const [pipelineUrl, setPipelineUrl] = React.useState('')
+        const [repoSetupOpen, setRepoSetupOpen] = React.useState(false)
+        const [query, setQuery] = React.useState('')
+        const [working, setWorking] = React.useState(false)
+        const [notice, setNotice] = React.useState('')
+        const [error, setError] = React.useState('')
+        const initializedSelection = React.useRef('')
+        const initialSignature = JSON.stringify(initialItems || [])
+        const request = payload => injectionRequest({ ...(dataRoot ? { data_root: dataRoot } : {}), ...(cwd ? { cwd } : {}), ...payload })
+
+        const loadContext = React.useCallback(async ({ preserveSelection = false } = {}) => {
+          const value = await request({ view: 'build-context' })
+          setContext(value)
+          const includableKeys = new Set((value.tasks || []).filter(item => item.includable).map(item => itemKey(item.run_id, item.id)))
+          const selectionToken = `${dataRoot || ''}:${cwd || ''}:${initialSignature}`
+          if (!preserveSelection && initializedSelection.current !== selectionToken) {
+            initializedSelection.current = selectionToken
+            const baseDefault = (value.default_items || []).map(item => itemKey(item.run_id, item.task_id)).filter(key => includableKeys.has(key))
+            const requested = Array.isArray(initialItems)
+              ? initialItems.map(item => itemKey(item.run_id, item.task_id)).filter(key => includableKeys.has(key))
+              : []
+            setSelectedKeys([...new Set([...baseDefault, ...requested])])
+            setCommitDraft(buildCommitDraft(value.commit_config))
+            setPipelineUrl(value.pipeline_url || '')
+            const runningOrLatest = (value.builds || []).find(item => busy(item)) || (value.builds || [])[0] || null
+            setActiveBuild(runningOrLatest)
+          } else {
+            setSelectedKeys(prev => prev.filter(key => includableKeys.has(key)))
+            setPipelineUrl(prev => prev || value.pipeline_url || '')
+          }
+          return value
+        }, [dataRoot, cwd, initialSignature])
+
+        React.useEffect(() => {
+          let live = true
+          setError('')
+          loadContext({ preserveSelection: initializedSelection.current === `${dataRoot || ''}:${cwd || ''}:${initialSignature}` })
+            .catch(reason => { if (live) setError(reason.message) })
+          return () => { live = false }
+        }, [loadContext, reload])
+
+        const buildRunning = busy(activeBuild)
+        React.useEffect(() => {
+          if (!buildRunning || !activeBuild?.id) return
+          let live = true, pending = false
+          const poll = async () => {
+            if (pending || !live) return
+            pending = true
+            try {
+              const value = await request({ build_id: activeBuild.id })
+              if (!live) return
+              setActiveBuild(value.build)
+              if (!busy(value.build)) await loadContext({ preserveSelection: true })
+            } catch (reason) {
+              if (live) setError(reason.message)
+            } finally {
+              pending = false
+            }
+          }
+          const fast = setTimeout(poll, 120)
+          const timer = setInterval(poll, 1000)
+          return () => { live = false; clearTimeout(fast); clearInterval(timer) }
+        }, [buildRunning, activeBuild?.id, dataRoot, cwd, loadContext])
+
+        const { field } = viewHelpers(h, { working: working || buildRunning, openPoints: false })
+        if (!context) {
+          return h('section', { className: 'pangea-injection-panel is-standalone', 'data-testid': 'fault-injection-build' },
+            h('style', null, PANEL_CSS),
+            error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger' }, h('span', null, error)) : h('p', { role: 'status' }, '正在读取合成出包上下文…'))
+        }
+
+        const includableTasks = (context.tasks || []).filter(item => item.includable)
+        const selectedSet = new Set(selectedKeys)
+        const selectedTasks = includableTasks
+          .filter(item => selectedSet.has(itemKey(item.run_id, item.id)))
+          .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || String(a.id).localeCompare(String(b.id)))
+        const repoMap = new Map((context.repositories || []).map(repo => [repo.repo_id, repo]))
+        const touchedRepoIds = [...new Set(selectedTasks.flatMap(task => task.repo_ids || []))].sort()
+        const shownRepos = (touchedRepoIds.length ? touchedRepoIds.map(id => repoMap.get(id)).filter(Boolean) : (context.repositories || []))
+        const blockingErrors = touchedRepoIds.map(id => repoBlockingReason(repoMap.get(id), { requirePersonalBranch: true })).filter(Boolean)
+        const headInjectionNotices = shownRepos.map(formatInjectionCommitNotice).filter(Boolean)
+        const dirtyRepos = shownRepos.filter(repo => repo.source?.dirty)
+        const repoSetKey = touchedRepoIds.join('\0')
+        const defaultForRepoSet = (repoSetKey && context.pushed_items_by_repo_set?.[repoSetKey]) || context.default_items || []
+
+        const commitSubject = {
+          id: activeBuild?.id || 'pending',
+          items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, name: task.name || task.id })),
+        }
+        const effectiveCommitConfig = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(commitSubject) }
+        const commitCheck = selectedTasks.length
+          ? resolveCommitMessage(effectiveCommitConfig, commitSubject, { allowDefaultSummary: commitDraft.summary === null })
+          : { ok: true, message: '', error: null }
+        const remoteHookRegex = extractRemoteHookRegex(activeBuild?.error)
+        const targetGateRegex = remoteHookRegex || DEFAULT_INTRANET_COMMIT_REGEX
+        const showRemoteGateHelper = Boolean(activeBuild && (remoteHookRegex || /【问题单号/.test(activeBuild.error || '')) && (effectiveCommitConfig.mode !== 'template' || (remoteHookRegex && effectiveCommitConfig.pattern !== remoteHookRegex)))
+
+        const savedPipelineUrl = activeBuild?.pipeline_url ?? context.pipeline_url ?? ''
+        const pipelineDirty = pipelineUrl.trim() !== savedPipelineUrl
+        const hasPatchFailures = Boolean(activeBuild?.repositories?.some(repo => repo.failures?.length > 0))
+        const canRetryActiveBuild = Boolean(
+          activeBuild
+          && ['failed', 'cancelled', 'interrupted'].includes(activeBuild.status)
+          && !hasPatchFailures,
+        )
+
+        const startBuild = async ({ retryId = null } = {}) => {
+          setWorking(true); setError(''); setNotice('')
+          try {
+            const retrySubject = retryId && activeBuild
+              ? { id: activeBuild.id, items: activeBuild.items || [] }
+              : commitSubject
+            const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(retrySubject) }
+            const checked = resolveCommitMessage(cfg, retrySubject, { allowDefaultSummary: commitDraft.summary === null })
+            if (!checked.ok) throw new Error(checked.error)
+            const payload = retryId
+              ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, pipeline_url: pipelineUrl }
+              : {
+                  action: 'build',
+                  items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, result_sha256: task.result_sha256 })),
+                  commit_config: cfg,
+                  commit_message: checked.message,
+                  pipeline_url: pipelineUrl,
+                }
+            const value = await request(payload)
+            setActiveBuild(value.build)
+            if (!busy(value.build)) await loadContext({ preserveSelection: true })
+          } catch (reason) {
+            setError(reason.message)
+          } finally {
+            setWorking(false)
+          }
+        }
+
+        const cancelActive = async () => {
+          if (!activeBuild?.id) return
+          setWorking(true); setError('')
+          try {
+            const value = await request({ action: 'build-cancel', build_id: activeBuild.id })
+            setActiveBuild(value.build)
+            await loadContext({ preserveSelection: true })
+          } catch (reason) {
+            setError(reason.message)
+          } finally {
+            setWorking(false)
+          }
+        }
+
+        const savePipeline = async () => {
+          setWorking(true); setError(''); setNotice('')
+          try {
+            const value = await request({ action: 'build-configure', ...(activeBuild?.id ? { build_id: activeBuild.id } : {}), pipeline_url: pipelineUrl })
+            if (value.build) setActiveBuild(value.build)
+            setContext(prev => prev ? { ...prev, pipeline_url: value.pipeline_url } : prev)
+            setNotice('已保存流水线地址')
+          } catch (reason) {
+            setError(reason.message)
+          } finally {
+            setWorking(false)
+          }
+        }
+
+        const filteredTasks = includableTasks.filter(task =>
+          `${task.name || ''} ${analysisLabel(task.run_id)} ${(task.repo_ids || []).join(' ')}`.toLowerCase().includes(query.trim().toLowerCase()))
+
+        return h('section', { className: 'pangea-injection-panel is-standalone', 'data-testid': 'fault-injection-build' },
+          h('style', null, PANEL_CSS),
+          error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger' }, h('span', null, error)) : null,
+          notice ? h('div', { role: 'status', className: 'pangea-fi-banner good' }, h('span', null, notice)) : null,
+          h('div', { className: 'pangea-fi-task-card' },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 } },
+              h('div', null,
+                h('h3', { style: { margin: 0 } }, '合成打桩补丁并推送个人分支'),
+                h('p', { className: 'b05-subtle', style: { margin: '4px 0 0', fontSize: 13 } },
+                  '每次出包从分析目录当前 HEAD 干净合成所选打桩任务：勾上的进入个人分支，取消勾选的自动不包含；不触碰分析目录工作区，不使用强推。')),
+              onBack ? h('button', { type: 'button', onClick: onBack }, '返回打桩任务列表') : null),
+
+            h('h4', null, `1. 选择纳入本次出包的打桩任务（已选 ${selectedTasks.length} / 可用 ${includableTasks.length}）`),
+            h('div', { className: 'pangea-fi-toolbar', style: { marginBottom: 12 } },
+              h('input', { type: 'search', 'aria-label': '搜索可出包任务', placeholder: '搜索任务名称、分析任务或仓库…', value: query, onChange: event => setQuery(event.target.value) }),
+              includableTasks.length ? h('button', { type: 'button', disabled: working || buildRunning || selectedTasks.length === includableTasks.length, onClick: () => setSelectedKeys(includableTasks.map(t => itemKey(t.run_id, t.id))) }, `全选可用（${includableTasks.length}）`) : null,
+              defaultForRepoSet.length ? h('button', { type: 'button', disabled: working || buildRunning, onClick: () => setSelectedKeys(defaultForRepoSet.map(i => itemKey(i.run_id, i.task_id))) }, `恢复上次已推送勾选（${defaultForRepoSet.length}）`) : null,
+              selectedTasks.length ? h('button', { type: 'button', disabled: working || buildRunning, onClick: () => setSelectedKeys([]) }, '清空勾选') : null),
+
+            !includableTasks.length
+              ? h('p', { role: 'status', className: 'b05-subtle' }, '当前没有就绪的打桩任务。请先新建打桩任务并等待补丁生成完成。')
+              : h('table', { className: 'pangea-fi-table', 'aria-label': '可出包打桩任务列表' },
+                  h('thead', null, h('tr', null, ...['选择', '打桩任务', '分析任务', '规模', '源码基线对比', '创建时间'].map(label => h('th', { key: label }, label)))),
+                  h('tbody', null, filteredTasks.map(task => {
+                    const key = itemKey(task.run_id, task.id)
+                    const checked = selectedSet.has(key)
+                    const baselineNotes = (task.repo_ids || []).map(repoId => {
+                      const headSha = repoMap.get(repoId)?.source?.commit || ''
+                      const genSha = task.base_commits?.[repoId] || ''
+                      const anaSha = task.analysis_commits?.[repoId] || ''
+                      const parts = [`${repoId}: 生成 ${genSha ? genSha.slice(0, 8) : '未知'}`]
+                      if (headSha && genSha && headSha !== genSha) parts.push(`当前 HEAD ${headSha.slice(0, 8)}`)
+                      if (headSha && anaSha && headSha !== anaSha) parts.push(`分析快照 ${anaSha.slice(0, 8)} ≠ 当前 HEAD`)
+                      return parts.join(' · ')
+                    })
+                    return h('tr', { key },
+                      h('td', null, h('input', {
+                        type: 'checkbox',
+                        'aria-label': `勾选出包任务 ${task.name || task.id}`,
+                        checked,
+                        disabled: working || buildRunning,
+                        onChange: event => setSelectedKeys(prev => event.target.checked ? [...new Set([...prev, key])] : prev.filter(item => item !== key)),
+                      })),
+                      h('td', null, onOpenTask
+                        ? h('button', { type: 'button', className: 'link-btn', onClick: () => onOpenTask({ run_id: task.run_id, id: task.id }) }, task.name || '打桩任务')
+                        : (task.name || '打桩任务')),
+                      h('td', null, analysisLabel(task.run_id)),
+                      h('td', null, `${task.case_count ?? 0} 用例 · ${task.point_count ?? 0} 桩点`),
+                      h('td', null, baselineNotes.map((line, idx) => h('div', { key: idx, style: { fontSize: 12, color: '#5e6773' } }, line))),
+                      h('td', null, task.created_at ? new Date(task.created_at).toLocaleString() : ''))
+                  }))),
+
+            h('h4', null, '2. 目标仓库与基线检查'),
+            blockingErrors.length ? h('div', { role: 'alert', className: 'pangea-fi-banner danger' },
+              h('div', null, blockingErrors.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))),
+              h('button', { type: 'button', onClick: () => setRepoSetupOpen(true) }, '打开仓库配置')) : null,
+            headInjectionNotices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } },
+              headInjectionNotices.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))) : null,
+            dirtyRepos.length ? h('div', { role: 'status', className: 'pangea-fi-banner info' },
+              h('span', null, `${dirtyRepos.map(r => r.repo_id).join('、')} 分析目录存在未提交修改；合成基线仅读取当前 HEAD 提交，不触碰分析目录工作区。`)) : null,
+            shownRepos.map(repo => h('div', { key: repo.repo_id, className: 'pangea-fi-repo-box', style: { fontSize: 13 } },
+              h('strong', null, repo.repo_id),
+              h('span', { style: { marginLeft: 10, color: '#5e6773' } }, `当前基线：${sourceLabel(repo.source)} · 远端 ${repo.remote} · 个人分支 `, h('code', null, repo.personal_branch || '未配置')))),
+            h('details', { className: 'pangea-fi-technical', open: blockingErrors.length > 0 || repoSetupOpen || undefined },
+              h('summary', null, '仓库与个人分支配置'),
+              h(RepositorySettings, {
+                cwd,
+                dataRoot,
+                defaultOpen: blockingErrors.length > 0 || repoSetupOpen,
+                repositories: context.repositories || [],
+                onSaved: async () => { await loadContext({ preserveSelection: true }) },
+              })),
+
+            h('h4', null, '3. 提交门禁信息与构建流水线'),
+            h('div', { className: 'pangea-fi-repo-box' },
+              showRemoteGateHelper ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { marginTop: 0 } },
+                h('span', null, '检测到远端 pre-receive 提交门禁规则，可一键载入规则并在原地修正提交说明（无需重新调用模型）。'),
+                h('button', { type: 'button', className: 'primary', disabled: working || buildRunning, onClick: () => setCommitDraft(previous => ({ ...previous, mode: 'template', explicit_default_mode: false, template: previous.template || MULTILINE_GATE_COMMIT_TEMPLATE, pattern: targetGateRegex })) }, '按远端门禁规则填写')) : null,
+              h('label', { className: 'pangea-fi-field' }, h('span', null, '提交信息格式'),
+                h('select', { 'aria-label': '提交信息格式', value: effectiveCommitConfig.mode, disabled: working || buildRunning, onChange: event => {
+                  const nextMode = event.target.value
+                  setCommitDraft(previous => ({
+                    ...previous,
+                    mode: nextMode,
+                    explicit_default_mode: nextMode === 'default',
+                    pattern: nextMode === 'template'
+                      ? (previous.pattern || targetGateRegex)
+                      : (previous.pattern === DEFAULT_INTRANET_COMMIT_REGEX || previous.pattern === remoteHookRegex ? '' : previous.pattern),
+                  }))
+                } },
+                  h('option', { value: 'template' }, '项目门禁模板（问题单号 / 修改人 / 审核人 / 修改说明）'),
+                  h('option', { value: 'default' }, '默认简要格式（仅无门禁钩子仓库）'))),
+              effectiveCommitConfig.mode === 'template' ? h(React.Fragment, null,
+                h('div', { style: grid },
+                  field('问题单号', effectiveCommitConfig.issue, value => setCommitDraft(previous => ({ ...previous, issue: value })), { placeholder: '如 DTS2026111111059 / AR... / SR...（多个用分号分隔）' }),
+                  field('修改人', effectiveCommitConfig.author, value => setCommitDraft(previous => ({ ...previous, author: value })), { placeholder: '工号或姓名（如 h00600350）' }),
+                  field('审核人', effectiveCommitConfig.reviewer, value => setCommitDraft(previous => ({ ...previous, reviewer: value })), { placeholder: '检视人工号或姓名' })),
+                field('修改说明', effectiveCommitConfig.summary, value => setCommitDraft(previous => ({ ...previous, summary: value })), { placeholder: '简要说明本次合成打桩内容（单行）' }),
+                h('details', { style: { marginBottom: 10 } },
+                  h('summary', { style: { fontSize: 12 } }, '自定义模板与本地正则预检（兼容单行 / 多行 pre-receive 钩子）'),
+                  h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, margin: '6px 0 8px' } },
+                    h('button', { type: 'button', disabled: working || buildRunning, onClick: () => setCommitDraft(previous => ({ ...previous, template: MULTILINE_GATE_COMMIT_TEMPLATE })) }, '使用多行门禁模板'),
+                    h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working || buildRunning, onClick: () => setCommitDraft(previous => ({ ...previous, template: SINGLELINE_GATE_COMMIT_TEMPLATE })) }, '使用单行门禁模板'),
+                    h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working || buildRunning, onClick: () => setCommitDraft(previous => ({ ...previous, pattern: DEFAULT_INTRANET_COMMIT_REGEX })) }, '填入默认门禁正则'),
+                    effectiveCommitConfig.pattern ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working || buildRunning, onClick: () => setCommitDraft(previous => ({ ...previous, pattern: '' })) }, '清空预检正则') : null),
+                  field('提交信息模板', effectiveCommitConfig.template, value => setCommitDraft(previous => ({ ...previous, template: value })), { multiline: true }),
+                  field('本地预检正则', effectiveCommitConfig.pattern, value => setCommitDraft(previous => ({ ...previous, pattern: value })), { placeholder: '可选：粘贴项目钩子正则进行推送前校验' })),
+                h('pre', { 'aria-label': '提交信息预览', style: { whiteSpace: 'pre-wrap', margin: '6px 0', padding: '8px 10px', borderRadius: 6, background: '#f8f9fb', border: '1px solid #e2e6ec', fontSize: 12 } }, commitCheck.message || ''))
+                : field('提交信息', effectiveCommitConfig.custom_message, value => setCommitDraft(previous => ({ ...previous, custom_message: value })), { placeholder: '可选：留空使用默认合成打桩提交说明' }),
+              !commitCheck.ok ? h('p', { role: 'alert', style: { fontSize: 12, color: '#9c2330', margin: '6px 0 0' } }, commitCheck.error) : null,
+              field('构建流水线 URL', pipelineUrl, setPipelineUrl, { placeholder: '例如 https://ci.example.internal/pipeline/...' }),
+              pipelineDirty && activeBuild?.status === 'pushed' ? h('div', { style: { marginBottom: 10 } },
+                h('p', { role: 'status', style: { fontSize: 12, color: '#8c5a12', margin: '0 0 6px' } }, '流水线地址已更改，请先点击“保存流水线地址”后再打开流水线。'),
+                h('button', { type: 'button', className: 'primary', disabled: working, onClick: savePipeline }, '保存流水线地址')) : null,
+              h('div', { style: { marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                h('button', {
+                  type: 'button',
+                  className: 'btn primary',
+                  disabled: working || buildRunning || !selectedTasks.length || blockingErrors.length > 0 || !commitCheck.ok,
+                  onClick: () => startBuild(),
+                }, buildRunning ? (BUILD_STATUS_LABELS[activeBuild?.status] || '正在出包…') : `合成并推送到个人分支（${selectedTasks.length} 个任务）`),
+                canRetryActiveBuild ? h('button', {
+                  type: 'button',
+                  style: { marginLeft: 0 },
+                  disabled: working || buildRunning || !commitCheck.ok,
+                  onClick: () => startBuild({ retryId: activeBuild.id }),
+                }, '重试本次出包') : null,
+                buildRunning ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: cancelActive }, '停止本次出包') : null)),
+
+            activeBuild ? h('section', { className: 'pangea-fi-build', style: { marginTop: 16 }, 'data-testid': 'fault-injection-build-result' },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
+                h('div', null,
+                  h('h3', { style: { margin: 0 } }, '最近一次合成出包结果'),
+                  h('p', { className: 'b05-subtle', style: { margin: '4px 0 0', fontSize: 12 } },
+                    `包含 ${(activeBuild.items || []).length} 个打桩任务${activeBuild.created_at ? ` · ${new Date(activeBuild.created_at).toLocaleString()}` : ''}`)),
+                h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(activeBuild.status)}` }, BUILD_STATUS_LABELS[activeBuild.status] || activeBuild.status)),
+              activeBuild.status === 'pushing' && activeBuild.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送仓库：${activeBuild.current_repository}`) : null,
+              activeBuild.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
+                h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : '本次出包未完成。'),
+                h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error))) : null,
+              Array.isArray(activeBuild.notices) && activeBuild.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } },
+                activeBuild.notices.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))) : null,
+              (activeBuild.repositories || []).map(repo => h('div', { key: repo.repo_id, className: 'pangea-fi-repo-box', style: { fontSize: 13 } },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 } },
+                  h('strong', null, `${repo.repo_id} → ${repo.remote}/${repo.remote_branch}`),
+                  h('span', { style: { color: repo.pushed ? '#20765a' : repo.failures?.length ? '#9c2330' : '#5e6773', fontWeight: 600 } },
+                    repo.pushed ? (repo.push_result === 'unchanged' ? '远端分支内容已一致（无需新提交）' : '已推送') : repo.failures?.length ? '补丁失配' : '待推送')),
+                h('p', { style: { fontSize: 12, color: '#5e6773', margin: '4px 0' } },
+                  '合成基线：', h('code', null, repo.base_commit || '待读取'),
+                  repo.commit ? h(React.Fragment, null, ' · 个人分支提交：', h('code', null, repo.commit)) : null),
+                repo.applied?.length ? h('p', { style: { fontSize: 12, margin: '4px 0' } },
+                  `已合成补丁（${repo.applied.length}）：`,
+                  repo.applied.map(item => `${item.name}（${(item.files || []).join(', ')}）`).join('；')) : null,
+                (repo.failures || []).map((failure, idx) => h('div', { key: `${failure.task_id}:${idx}`, className: 'pangea-fi-banner danger', style: { margin: '8px 0 0' } },
+                  h('div', null,
+                    h('strong', null, `任务「${failure.name}」失配：`),
+                    h('span', null, failure.error)),
+                  onOpenTask ? h('button', { type: 'button', onClick: () => onOpenTask({ run_id: failure.run_id, id: failure.task_id }) }, '打开任务重新生成') : null)))),
+              activeBuild.status === 'pushed' ? h('div', { style: { marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                h('button', {
+                  type: 'button',
+                  className: 'btn primary',
+                  disabled: working || !savedPipelineUrl || pipelineDirty,
+                  onClick: async () => {
+                    try {
+                      if (!onOpenPipeline) throw new Error('当前会话的 DSH 浏览器不可用')
+                      await onOpenPipeline(savedPipelineUrl)
+                    } catch (reason) {
+                      setError(reason.message)
+                    }
+                  },
+                }, '在 DSH 浏览器打开构建流水线'),
+                h('button', {
+                  type: 'button',
+                  style: { marginLeft: 0 },
+                  onClick: async () => {
+                    const branches = [...new Set((activeBuild.repositories || []).map(r => r.personal_branch).filter(Boolean))].join('、')
+                    try { await navigator.clipboard.writeText(branches); setNotice(`已复制个人分支：${branches}`) }
+                    catch { setError('复制失败，请手动复制上方个人分支名称') }
+                  },
+                }, '复制个人分支')) : null) : null,
+
+            (context.builds || []).length > 1 ? h('details', { style: { marginTop: 14 } },
+              h('summary', null, `历史出包记录（${context.builds.length}）`),
+              h('ul', { className: 'pangea-fi-records pangea-fi-scroll' }, context.builds.map(b => h('li', { key: b.id },
+                h('button', { type: 'button', className: 'link-btn', onClick: () => setActiveBuild(b) },
+                  `${b.created_at ? new Date(b.created_at).toLocaleString() : b.id} · ${BUILD_STATUS_LABELS[b.status] || b.status} · ${(b.items || []).map(i => i.name).join('、') || b.id}`))))) : null),
+        )
+      }
+    }
+
+    return { INJECTION_STATUS_LABELS, BUILD_STATUS_LABELS, createFaultInjectionPanel, createFaultInjectionTaskDetail, createFaultInjectionHome, createFaultInjectionBuild }
     })()
 
     const __riskIncrementalInsights = (() => {
@@ -5177,6 +5568,9 @@ window.__ModuleLoader__.load({
     const RepositorySettings = __repositorySettingsView.createRepositorySettings(React)
     const { requestAgentModels, analysisExecutionState, loadAnalysisAgentModels } = __agentModelSelection
     const FaultInjectionPanel = __faultInjectionView.createFaultInjectionPanel(React)
+    const FaultInjectionTaskDetail = __faultInjectionView.createFaultInjectionTaskDetail(React)
+    const FaultInjectionHome = __faultInjectionView.createFaultInjectionHome(React)
+    const FaultInjectionBuild = __faultInjectionView.createFaultInjectionBuild(React)
     const { classifyRiskGrounding, summarizeIncrementalInputs } = __riskIncrementalInsights
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
@@ -8627,6 +9021,9 @@ window.__ModuleLoader__.load({
         setHistory([])
         setSelectedCaseIds([])
         setInjectionRun('')
+        setInjectionTask(null)
+        setInjectionPicking(false)
+        setInjectionBuild(null)
         ++repositoryRequestRef.current
         ++repositoryImportRef.current
         setRepositoryState(undefined)
@@ -9042,6 +9439,10 @@ window.__ModuleLoader__.load({
       const [caseDrawer, setCaseDrawer] = React.useState(null)
       const [caseEvidenceSelection, setCaseEvidenceSelection] = React.useState({ scope: '', key: '' })
       const [injectionRun, setInjectionRun] = React.useState('')
+      const [injectionTask, setInjectionTask] = React.useState(null)
+      const [injectionPicking, setInjectionPicking] = React.useState(false)
+      const [injectionBuild, setInjectionBuild] = React.useState(null)
+      const [injectionReload, setInjectionReload] = React.useState(0)
       const [injectionDraft, setInjectionDraft] = React.useState(() => ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
       const [riskGroundingFilter, setRiskGroundingFilter] = React.useState('all')
       const handledInjectionDraftRequest = React.useRef(0)
@@ -9055,6 +9456,9 @@ window.__ModuleLoader__.load({
         if (pageMode !== 'injection' || !injectionDraft?.requestId || injectionDraft.requestId === handledInjectionDraftRequest.current) return
         handledInjectionDraftRequest.current = injectionDraft.requestId
         if (injectionDraft.runId) {
+          setInjectionTask(null)
+          setInjectionBuild(null)
+          setInjectionPicking(true)
           setSelectedTaskId(injectionDraft.taskId)
           setSelectedRun(injectionDraft.runId)
           setInjectionRun(injectionDraft.runId)
@@ -10219,9 +10623,12 @@ window.__ModuleLoader__.load({
           disabled: refreshBusy,
           'aria-busy': refreshBusy,
           style: { ...styles.button, ...(refreshBusy ? styles.buttonDisabled : {}) },
-          onClick: () => { void (pageMode === 'execution' ? loadEnvironments()
-            : pageMode === 'home' ? Promise.all([loadWorkbench(), loadRepositories()])
-              : Promise.all([load({ foreground: true }), loadWorkbench()])) },
+          onClick: () => {
+            if (pageMode === 'injection') setInjectionReload(value => value + 1)
+            void (pageMode === 'execution' ? loadEnvironments()
+              : pageMode === 'home' ? Promise.all([loadWorkbench(), loadRepositories()])
+                : Promise.all([load({ foreground: true }), loadWorkbench()]))
+          },
         }, refreshBusy ? '刷新中…' : '刷新')
       }
 
@@ -12008,15 +12415,50 @@ window.__ModuleLoader__.load({
         const available = workbench?.tasks?.items || []
         const allRuns = workbench?.runs?.items ?? snapshot?.runs ?? []
         const back = () => { setInjectionRun(''); setSelectedRun(undefined); setSelectedTaskId(undefined) }
+        const dataRoot = workbench?.data_root ?? snapshot?.data_root
+        const home = () => { back(); setInjectionPicking(false); setInjectionTask(null); setInjectionBuild(null) }
+        const openTask = task => { back(); setInjectionPicking(false); setInjectionBuild(null); setInjectionTask({ run_id: task.run_id, task_id: task.id }) }
+        const openBuild = item => {
+          back()
+          setInjectionPicking(false)
+          setInjectionTask(null)
+          setInjectionBuild({ initialItems: item && item.run_id && item.task_id ? [{ run_id: item.run_id, task_id: item.task_id }] : null })
+        }
+        const openPipeline = url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用') }
+        const analysisLabel = runId => {
+          const task = available.find(item => item.run_id === runId)
+          return task ? taskDisplayName(task, allRuns.find(run => run.run_id === runId)) : `Run ${runId}（分析任务已删除或不在当前工作区）`
+        }
         const matchedTasks = available.filter(task => [taskDisplayName(task), task.repository, task.target, task.run_id].filter(Boolean).join(' ').toLowerCase().includes(taskQuery.trim().toLowerCase()))
         return h('section', { className: 'pangea-injection-page', 'aria-label': '代码打桩工作区' },
-          pageHeader({ title: '代码打桩', subtitle: '从分析结果选择用例，在独立源码副本中生成修改，核对结果后推送到个人测试分支。', ui: ctx.pangea?.ui, actions: renderRefreshButton() }),
-          !injectionRun ? h('section', { className: 'b03-task-panel', style: { padding: 20 } },
+          pageHeader({ title: '代码打桩', subtitle: '基于当前代码生成独立打桩补丁，按需勾选多个打桩任务合成并推送到个人测试分支。', ui: ctx.pangea?.ui, actions: renderRefreshButton() }),
+          injectionBuild ? h(FaultInjectionBuild, {
+            key: `${cwd}:${dataRoot}:build`,
+            dataRoot,
+            cwd,
+            reload: injectionReload,
+            initialItems: injectionBuild.initialItems,
+            analysisLabel,
+            onOpenTask: openTask,
+            onOpenPipeline: openPipeline,
+            onBack: home,
+          })
+          : injectionTask ? h(React.Fragment, null,
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 } },
+              h('span', { style: { fontSize: 13, color: '#6b7280' } }, `分析任务：${analysisLabel(injectionTask.run_id)}`),
+              h('button', { type: 'button', className: 'b03-task-action', onClick: home }, '返回打桩任务列表')),
+            h(FaultInjectionTaskDetail, { key: `${cwd}:${dataRoot}:${injectionTask.run_id}:${injectionTask.task_id}:${injectionReload}`, runId: injectionTask.run_id, taskId: injectionTask.task_id, dataRoot, cwd, onSwitch: openTask, onOpenBuild: openBuild }))
+          : injectionRun ? (current?.run_id !== injectionRun ? h('div', { className: 'b05-card', style: { padding: 24 } }, h('p', { role: error ? 'alert' : 'status', style: { margin: '0 0 12px' } }, error || '正在读取所选分析任务的用例…'), h('div', { style: { display: 'flex', gap: 10 } }, error ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', className: 'b03-task-action', onClick: back }, '返回选择任务')))
+          : h(FaultInjectionPanel, { key: `${cwd}:${current.data_root ?? snapshot?.data_root}:${injectionRun}`, standalone: true, onBack: () => { back(); setInjectionPicking(true) }, runId: injectionRun, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases,
+            initialCaseKeys: injectionDraft?.runId === injectionRun ? injectionDraft.caseKeys : [],
+            handoffRevision: injectionDraft?.runId === injectionRun ? injectionDraft.requestId : 0,
+            onCreated: openTask }))
+          : injectionPicking ? h('section', { className: 'b03-task-panel', style: { padding: 20 } },
             h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 14 } },
               h('div', null,
                 h('h2', { style: { margin: 0, fontSize: 16, fontWeight: 600, color: '#25292e' } }, '第一步 · 选择分析任务'),
                 h('p', { style: { margin: '4px 0 0', fontSize: 13, color: '#6b7280' } }, '选择一个已完成或已生成用例的分析任务作为打桩起点。')),
-              h('span', { style: { fontSize: 12, color: '#6b7280' } }, `共 ${matchedTasks.length} 个任务`)),
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } }, h('span', { style: { fontSize: 12, color: '#6b7280' } }, `共 ${matchedTasks.length} 个任务`), h('button', { type: 'button', className: 'b03-task-action', onClick: home }, '返回打桩任务列表'))),
             h('input', { type: 'search', className: 'b03-task-search', 'aria-label': '搜索打桩分析任务', placeholder: '搜索分析任务、仓库或范围…', value: taskQuery, onChange: event => setTaskQuery(event.target.value), style: { maxWidth: '100%', width: '100%', boxSizing: 'border-box', marginBottom: 16 } }),
             workbenchError ? h('p', { role: 'alert', style: { color: '#9c2330' } }, workbenchError) : null,
             !workbench ? h('p', { role: 'status', style: { color: '#6b7280' } }, '正在读取分析任务…') : !available.length ? h('div', { className: 'pangea-empty-state' }, h('p', null, '暂无分析任务，请先创建分析。'), h('button', { type: 'button', className: 'b03-task-action b03-task-action-primary', onClick: () => openAnalysisTasks() }, '前往分析任务')) : null,
@@ -12033,13 +12475,9 @@ window.__ModuleLoader__.load({
                   h('span', { className: `b03-task-status ${taskStatusTone(task.status)}` }, task.run_id ? taskRunLabel(task.run_id) : '待生成结果')),
                 h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginTop: 6, fontSize: 12, color: '#6b7280' } },
                   h('span', null, scopeText),
-                  h('span', { style: { color: task.run_id ? '#b62836' : '#8a919a', fontWeight: task.run_id ? 600 : 400 } }, task.run_id ? '选择用例与查看已有打桩任务 →' : '尚未生成分析结果')))
+                  h('span', { style: { color: task.run_id ? '#b62836' : '#8a919a', fontWeight: task.run_id ? 600 : 400 } }, task.run_id ? '选择用例 →' : '尚未生成分析结果')))
             })))
-          : current?.run_id !== injectionRun ? h('div', { className: 'b05-card', style: { padding: 24 } }, h('p', { role: error ? 'alert' : 'status', style: { margin: '0 0 12px' } }, error || '正在读取所选分析任务的用例…'), h('div', { style: { display: 'flex', gap: 10 } }, error ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', className: 'b03-task-action', onClick: back }, '返回选择任务')))
-          : h(FaultInjectionPanel, { key: `${cwd}:${current.data_root ?? snapshot?.data_root}:${injectionRun}`, standalone: true, onBack: back, runId: injectionRun, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases,
-            initialCaseKeys: injectionDraft?.runId === injectionRun ? injectionDraft.caseKeys : [],
-            handoffRevision: injectionDraft?.runId === injectionRun ? injectionDraft.requestId : 0,
-            onOpenPipeline: url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用') } }))
+          : h(FaultInjectionHome, { key: `${cwd}:${dataRoot}`, dataRoot, cwd, reload: injectionReload, analysisLabel, onOpen: openTask, onCreate: () => setInjectionPicking(true), onOpenBuild: openBuild }))
       }
 
       function renderCaseExportDialog() {
