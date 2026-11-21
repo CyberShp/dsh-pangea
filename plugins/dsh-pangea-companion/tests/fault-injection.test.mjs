@@ -445,8 +445,23 @@ test('checking out personal_branch in analysis directory blocks generation and b
 
   // Switch analysis directory to personal -> blocks both start() and build()
   await injectionGit(source, ['checkout', 'personal'])
-  await assert.rejects(service.start(f), /分析目录当前检出的正是个人分支 personal/)
-  await assert.rejects(service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: readyTask.id }] }), /分析目录当前检出的正是个人分支 personal/)
+  // Set origin/HEAD -> origin/main as a cloned repository has
+  await injectionGit(source, ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
+  const defaultsWithHead = await service.defaults(f.dataRoot, f.run)
+  assert.equal(defaultsWithHead.repositories[0].default_branch, 'main')
+  assert.equal(defaultsWithHead.repositories[0].suggested_checkout_ref, 'main')
+  assert.match(defaultsWithHead.repositories[0].suggested_checkout_command, /git -C ".*" checkout main/)
+  await assert.rejects(service.start(f), /分析目录当前检出的正是个人分支 personal，请先切回 main 后再生成打桩修改（可执行：git -C ".*" checkout main）/)
+  await assert.rejects(service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: readyTask.id }] }), /分析目录当前检出的正是个人分支 personal，请先切回 main 后再出包（可执行：git -C ".*" checkout main）/)
+
+  // Without origin/HEAD: falls back to run analysis_commit when present, or generic prompt when absent
+  await injectionGit(source, ['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
+  const mainCommit = await injectionGit(source, ['rev-parse', 'main'])
+  const runWithCommit = { ...f.run, source_snapshot: { repositories: [{ repo_id: 'target', git: { commit: mainCommit } }] } }
+  const defaultsWithCommit = await service.defaults(f.dataRoot, runWithCommit)
+  assert.equal(defaultsWithCommit.repositories[0].suggested_checkout_ref, mainCommit)
+  await assert.rejects(service.start({ ...f, run: runWithCommit }), new RegExp(`请先切回 ${mainCommit} 后再生成打桩修改（可执行：git -C ".*" checkout ${mainCommit}）`))
+  await assert.rejects(service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: readyTask.id }] }), /分析目录当前检出的正是个人分支 personal，请先切回开发分支或目标提交后再出包$/)
 
   // Switch back to main; test protected branch rejection
   await injectionGit(source, ['checkout', 'main'])
@@ -883,3 +898,65 @@ test('new task rejects missing safety contract before touching checkout and reta
   assert.ok(saved)
   assert.ok(JSON.parse(await readFile(saved, 'utf8')).edits.length)
 })
+
+test('restore_baseline build clears injected changes on remote personal branch without touching analysis directory', async t => {
+  const f = await fixture(t)
+  const source = f.repositories[0].source_path
+  const remote = f.repositories[0].remote_path
+  const service = new FaultInjectionService({ generate: async ({ record }) => generated(record) })
+  t.after(() => service.dispose())
+
+  // Push one injected build first
+  const task = await service.start(f); await wait(service)
+  const injectedBuild = await service.build(f.dataRoot, {
+    items: [{ run_id: f.run.run_id, task_id: task.id }],
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(injectedBuild.status, 'pushed', injectedBuild.error)
+  assert.match(await injectionGit(remote, ['show', 'refs/heads/personal:main.c']), /hit:A queue_failed/)
+
+  // Invalid restore_baseline payloads are rejected
+  await assert.rejects(
+    service.build(f.dataRoot, { restore_baseline: true, repo_ids: ['target'], items: [{ run_id: f.run.run_id, task_id: task.id }] }),
+    /恢复干净基线模式不能同时包含打桩任务/,
+  )
+  await assert.rejects(
+    service.build(f.dataRoot, { restore_baseline: true, repo_ids: [] }),
+    /请选择需要恢复干净基线的目标仓库/,
+  )
+
+  // Restore clean baseline through build pipeline (BOM-free gate template, no local checkout change)
+  const restored = await service.build(f.dataRoot, {
+    restore_baseline: true,
+    repo_ids: ['target'],
+    commit_config: { mode: 'template', issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(restored.status, 'pushed', restored.error)
+  assert.equal(restored.restore_baseline, true)
+  assert.deepEqual(restored.items, [])
+  assert.equal(restored.repositories[0].push_result, 'confirmed')
+  assert.equal(await injectionGit(remote, ['rev-parse', 'refs/heads/personal^{tree}']), await injectionGit(source, ['rev-parse', 'main^{tree}']))
+  assert.equal(await injectionGit(remote, ['show', 'refs/heads/personal:main.c']), original.trimEnd())
+
+  const commitMsg = await injectionGit(remote, ['log', '-1', '--format=%B', 'refs/heads/personal'])
+  assert.equal(commitMsg, '【问题单号/AR/STORY/CR】：DTS2026111111059\n【修改人】：h00600350\n【审核人】：h00600350\n【修改说明】：恢复干净基线（清空打桩）')
+
+  // Analysis directory remains untouched on main
+  assert.equal(await injectionGit(source, ['branch', '--show-current']), 'main')
+  assert.equal(await injectionGit(source, ['status', '--porcelain']), '')
+
+  // Restore commit is not flagged as a historical fault-injection commit
+  const recorded = await service.collectRecordedInjectionCommits(f.dataRoot, 'target')
+  assert.ok(!recorded.some(item => item.commit === restored.repositories[0].commit))
+
+  // Second restore is idempotent (unchanged, no extra commit)
+  const again = await service.build(f.dataRoot, {
+    restore_baseline: true,
+    repo_ids: ['target'],
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(again.status, 'pushed', again.error)
+  assert.equal(again.repositories[0].push_result, 'unchanged')
+  assert.equal(again.repositories[0].commit, restored.repositories[0].commit)
+})
+

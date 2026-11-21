@@ -1682,6 +1682,7 @@ window.__ModuleLoader__.load({
     }
 
     function defaultCommitSummary(subject) {
+      if (subject?.restore_baseline) return '恢复干净基线（清空打桩）'
       const itemNames = Array.isArray(subject?.items) && subject.items.length
         ? subject.items.map(item => item?.name || item?.task_id).filter(Boolean).join('、')
         : ''
@@ -1759,7 +1760,9 @@ window.__ModuleLoader__.load({
     function resolveCommitMessage(config, task, { allowPendingSummary = false, allowDefaultSummary = true, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS } = {}) {
       const normalized = normalizeCommitConfig(config)
       if (normalized.mode !== 'template') {
-        const fallback = task?.id ? `test: fault injection ${task.id}` : 'test: fault injection'
+        const fallback = task?.restore_baseline
+          ? (task?.id ? `revert: restore clean baseline ${task.id}` : 'revert: restore clean baseline')
+          : (task?.id ? `test: fault injection ${task.id}` : 'test: fault injection')
         return validateRawCommitMessage(normalized.custom_message || fallback, normalized.pattern, { timeoutMs })
       }
       const template = normalized.template
@@ -1939,7 +1942,11 @@ window.__ModuleLoader__.load({
       if (repo.source?.kind !== 'git') return `${repo.repo_id}：源码尚未关联 Git 仓库（${repo.source?.error || '普通目录'}）`
       if (requirePersonalBranch && !repo.personal_branch) return `${repo.repo_id}：尚未配置个人开发分支`
       if (repo.protected_branch_error) return `${repo.repo_id}：${repo.protected_branch_error}`
-      if (repo.head_equals_personal_branch) return `${repo.repo_id}：分析目录当前检出的正是个人分支 ${repo.personal_branch}，请先切回开发分支或目标提交`
+      if (repo.head_equals_personal_branch) {
+        const target = repo.suggested_checkout_ref ? ` ${repo.suggested_checkout_ref}` : '开发分支或目标提交'
+        const command = repo.suggested_checkout_command ? `（可执行：${repo.suggested_checkout_command}）` : ''
+        return `${repo.repo_id}：分析目录当前检出的正是个人分支 ${repo.personal_branch}，请先切回${target}${command}`
+      }
       return ''
     }
 
@@ -2489,19 +2496,24 @@ window.__ModuleLoader__.load({
         const touchedRepoIds = [...new Set(selectedTasks.flatMap(task => task.repo_ids || []))].sort()
         const shownRepos = (touchedRepoIds.length ? touchedRepoIds.map(id => repoMap.get(id)).filter(Boolean) : (context.repositories || []))
         const blockingErrors = touchedRepoIds.map(id => repoBlockingReason(repoMap.get(id), { requirePersonalBranch: true })).filter(Boolean)
+        const restoreTargetRepos = shownRepos.filter(repo => repo?.source?.kind === 'git' && repo.personal_branch)
+        const restoreBlockingErrors = restoreTargetRepos.map(repo => repoBlockingReason(repo, { requirePersonalBranch: true })).filter(Boolean)
         const headInjectionNotices = shownRepos.map(formatInjectionCommitNotice).filter(Boolean)
         const dirtyRepos = shownRepos.filter(repo => repo.source?.dirty)
         const repoSetKey = touchedRepoIds.join('\0')
         const defaultForRepoSet = (repoSetKey && context.pushed_items_by_repo_set?.[repoSetKey]) || context.default_items || []
 
-        const commitSubject = {
-          id: activeBuild?.id || 'pending',
-          items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, name: task.name || task.id })),
-        }
+        const restoreCommitSubject = { id: 'restore', restore_baseline: true, items: [] }
+        const commitSubject = selectedTasks.length
+          ? { id: activeBuild?.id || 'pending', items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, name: task.name || task.id })) }
+          : restoreCommitSubject
         const effectiveCommitConfig = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(commitSubject) }
-        const commitCheck = selectedTasks.length
+        const commitCheck = (selectedTasks.length || restoreTargetRepos.length)
           ? resolveCommitMessage(effectiveCommitConfig, commitSubject, { allowDefaultSummary: commitDraft.summary === null })
           : { ok: true, message: '', error: null }
+        const restoreCommitCheck = restoreTargetRepos.length
+          ? resolveCommitMessage({ ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(restoreCommitSubject) }, restoreCommitSubject, { allowDefaultSummary: commitDraft.summary === null })
+          : { ok: false, message: '', error: null }
         const remoteHookRegex = extractRemoteHookRegex(activeBuild?.error)
         const targetGateRegex = remoteHookRegex || DEFAULT_INTRANET_COMMIT_REGEX
         const showRemoteGateHelper = Boolean(activeBuild && (remoteHookRegex || /【问题单号/.test(activeBuild.error || '')) && (effectiveCommitConfig.mode !== 'template' || (remoteHookRegex && effectiveCommitConfig.pattern !== remoteHookRegex)))
@@ -2515,25 +2527,42 @@ window.__ModuleLoader__.load({
           && !hasPatchFailures,
         )
 
-        const startBuild = async ({ retryId = null } = {}) => {
+        const startBuild = async ({ retryId = null, restoreBaseline = false } = {}) => {
+          if (restoreBaseline) {
+            const targets = restoreTargetRepos.map(r => `${r.repo_id}（${r.remote}/${r.remote_branch}）`).join('、')
+            if (typeof window?.confirm === 'function' && !window.confirm(`确认将 ${targets} 恢复为分析目录当前干净基线（清空所有打桩改动）并推送到远端个人分支？\n该操作不会修改本地分析目录，也不使用强推。`)) {
+              return
+            }
+          }
           setWorking(true); setError(''); setNotice('')
           let latestBuild = null
           try {
-            const retrySubject = retryId && activeBuild
-              ? { id: activeBuild.id, items: activeBuild.items || [] }
-              : commitSubject
-            const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(retrySubject) }
-            const checked = resolveCommitMessage(cfg, retrySubject, { allowDefaultSummary: commitDraft.summary === null })
+            const subject = retryId && activeBuild
+              ? { id: activeBuild.id, restore_baseline: activeBuild.restore_baseline === true, items: activeBuild.items || [] }
+              : restoreBaseline
+                ? restoreCommitSubject
+                : commitSubject
+            const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(subject) }
+            const checked = resolveCommitMessage(cfg, subject, { allowDefaultSummary: commitDraft.summary === null })
             if (!checked.ok) throw new Error(checked.error)
             const payload = retryId
               ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, pipeline_url: pipelineUrl }
-              : {
-                  action: 'build',
-                  items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, result_sha256: task.result_sha256 })),
-                  commit_config: cfg,
-                  commit_message: checked.message,
-                  pipeline_url: pipelineUrl,
-                }
+              : restoreBaseline
+                ? {
+                    action: 'build',
+                    restore_baseline: true,
+                    repo_ids: restoreTargetRepos.map(repo => repo.repo_id),
+                    commit_config: cfg,
+                    commit_message: checked.message,
+                    pipeline_url: pipelineUrl,
+                  }
+                : {
+                    action: 'build',
+                    items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, result_sha256: task.result_sha256 })),
+                    commit_config: cfg,
+                    commit_message: checked.message,
+                    pipeline_url: pipelineUrl,
+                  }
             const value = await request(payload)
             latestBuild = value.build
             if (!busy(value.build)) await loadContext({ preserveSelection: true })
@@ -2699,6 +2728,12 @@ window.__ModuleLoader__.load({
                   disabled: working || buildRunning || !selectedTasks.length || blockingErrors.length > 0 || !commitCheck.ok,
                   onClick: () => startBuild(),
                 }, buildRunning ? (BUILD_STATUS_LABELS[activeBuild?.status] || '正在出包…') : `合成并推送到个人分支（${selectedTasks.length} 个任务）`),
+                restoreTargetRepos.length ? h('button', {
+                  type: 'button',
+                  style: { marginLeft: 0 },
+                  disabled: working || buildRunning || restoreBlockingErrors.length > 0 || !restoreCommitCheck.ok,
+                  onClick: () => startBuild({ restoreBaseline: true }),
+                }, '恢复干净基线（清空打桩）') : null,
                 canRetryActiveBuild ? h('button', {
                   type: 'button',
                   style: { marginLeft: 0 },
@@ -2710,9 +2745,9 @@ window.__ModuleLoader__.load({
             activeBuild ? h('section', { className: 'pangea-fi-build', style: { marginTop: 16 }, 'data-testid': 'fault-injection-build-result' },
               h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
                 h('div', null,
-                  h('h3', { style: { margin: 0 } }, '最近一次合成出包结果'),
+                  h('h3', { style: { margin: 0 } }, activeBuild.restore_baseline ? '最近一次基线恢复结果' : '最近一次合成出包结果'),
                   h('p', { className: 'b05-subtle', style: { margin: '4px 0 0', fontSize: 12 } },
-                    `包含 ${(activeBuild.items || []).length} 个打桩任务${activeBuild.created_at ? ` · ${new Date(activeBuild.created_at).toLocaleString()}` : ''}`)),
+                    `${activeBuild.restore_baseline ? '恢复干净基线（清空打桩）' : `包含 ${(activeBuild.items || []).length} 个打桩任务`}${activeBuild.created_at ? ` · ${new Date(activeBuild.created_at).toLocaleString()}` : ''}`)),
                 h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(activeBuild.status)}` }, BUILD_STATUS_LABELS[activeBuild.status] || activeBuild.status)),
               activeBuild.status === 'pushing' && activeBuild.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送仓库：${activeBuild.current_repository}`) : null,
               activeBuild.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
@@ -2764,7 +2799,7 @@ window.__ModuleLoader__.load({
               h('summary', null, `历史出包记录（${context.builds.length}）`),
               h('ul', { className: 'pangea-fi-records pangea-fi-scroll' }, context.builds.map(b => h('li', { key: b.id },
                 h('button', { type: 'button', className: 'link-btn', onClick: () => setActiveBuild(b) },
-                  `${b.created_at ? new Date(b.created_at).toLocaleString() : b.id} · ${BUILD_STATUS_LABELS[b.status] || b.status} · ${(b.items || []).map(i => i.name).join('、') || b.id}`))))) : null),
+                  `${b.created_at ? new Date(b.created_at).toLocaleString() : b.id} · ${BUILD_STATUS_LABELS[b.status] || b.status} · ${b.restore_baseline ? '恢复干净基线（清空打桩）' : ((b.items || []).map(i => i.name).join('、') || b.id)}`))))) : null),
         )
       }
     }

@@ -166,6 +166,15 @@ export async function compareSnapshot(gitRoot, ref, snapshotRoot) {
   return { available: true, compared_count: compared, changed_count: changed, files, eol_only_count: eolOnly, eol_only_files: eolFiles, lfs_equivalent_count: lfsEquivalent }
 }
 
+export async function readRemoteDefaultBranch(sourcePath, remote = 'origin') {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) return ''
+  try {
+    const ref = await sourceGit(sourcePath, ['symbolic-ref', '--quiet', `refs/remotes/${remote}/HEAD`])
+    const prefix = `refs/remotes/${remote}/`
+    return ref.startsWith(prefix) ? ref.slice(prefix.length) : ''
+  } catch { return '' }
+}
+
 export async function configureRepository(dataRoot, repoId, input) {
   if (!input.git_url) return saveRepositorySettings(dataRoot, repoId, input)
   configPath(dataRoot, repoId)
@@ -176,7 +185,19 @@ export async function configureRepository(dataRoot, repoId, input) {
   const target = path.join(parent, randomUUID())
   try {
     await sourceGit(parent, ['clone', '--no-checkout', '--', url, target])
-    await checkoutImportedBranch(target, input.personal_branch || ref)
+    await checkoutImportedBranch(target, ref)
+    const personalBranch = String(input.personal_branch ?? '').trim()
+    const remote = String(input.remote ?? 'origin').trim()
+    const remoteBranch = String(input.remote_branch ?? personalBranch).trim()
+    if (personalBranch && personalBranch !== 'HEAD' && !personalBranch.startsWith('refs/') && !remoteBranch.startsWith('refs/') && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) {
+      const hasLocal = await sourceGit(target, ['rev-parse', '--verify', `refs/heads/${personalBranch}^{commit}`]).then(() => true, () => false)
+      const tracked = `refs/remotes/${remote}/${remoteBranch}`
+      const hasRemote = !hasLocal && await sourceGit(target, ['rev-parse', '--verify', `${tracked}^{commit}`]).then(() => true, () => false)
+      if (hasRemote) {
+        await sourceGit(target, ['check-ref-format', '--branch', personalBranch])
+        await sourceGit(target, ['branch', '--track', personalBranch, tracked])
+      }
+    }
     const commit = await sourceGit(target, ['rev-parse', '--verify', `${ref}^{commit}`]).catch(() => sourceGit(target, ['rev-parse', '--verify', `refs/remotes/origin/${ref}^{commit}`]))
     return await saveRepositorySettings(dataRoot, repoId, { ...input, git_path: target, base_ref: commit })
   } catch (error) { await rm(target, { recursive: true, force: true }); throw error }

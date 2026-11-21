@@ -686,6 +686,7 @@ function diagnoseGatePatternMismatch(message, trimmedPattern) {
 }
 
 export function defaultCommitSummary(subject) {
+  if (subject?.restore_baseline) return '恢复干净基线（清空打桩）'
   const itemNames = Array.isArray(subject?.items) && subject.items.length
     ? subject.items.map(item => item?.name || item?.task_id).filter(Boolean).join('、')
     : ''
@@ -763,7 +764,9 @@ export function validateRawCommitMessage(rawMessage, pattern = '', { timeoutMs =
 export function resolveCommitMessage(config, task, { allowPendingSummary = false, allowDefaultSummary = true, timeoutMs = DEFAULT_REGEX_TIMEOUT_MS } = {}) {
   const normalized = normalizeCommitConfig(config)
   if (normalized.mode !== 'template') {
-    const fallback = task?.id ? `test: fault injection ${task.id}` : 'test: fault injection'
+    const fallback = task?.restore_baseline
+      ? (task?.id ? `revert: restore clean baseline ${task.id}` : 'revert: restore clean baseline')
+      : (task?.id ? `test: fault injection ${task.id}` : 'test: fault injection')
     return validateRawCommitMessage(normalized.custom_message || fallback, normalized.pattern, { timeoutMs })
   }
   const template = normalized.template

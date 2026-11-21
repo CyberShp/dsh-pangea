@@ -1,5 +1,5 @@
 import { repositoryOperation } from './repositories/operations.js'
-import { inspectSource, readRepositorySettings, compareSnapshot } from './repositories/git-source.js'
+import { inspectSource, readRepositorySettings, compareSnapshot, readRemoteDefaultBranch } from './repositories/git-source.js'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
@@ -41,6 +41,11 @@ const inside = (root, file) => { const r = path.relative(root, file); return r &
 const cleanError = error => {
   const message = String(error?.stderr || error?.message || error).replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@')
   return message.length <= 6000 ? message : `${message.slice(0, 2900)}\n…错误输出过长，中间已省略…\n${message.slice(-2900)}`
+}
+const formatPersonalBranchBlockMessage = ({ repoId, personalBranch, sourcePath = '', suggestedRef = '', actionLabel = '' }) => {
+  const target = suggestedRef ? ` ${suggestedRef}${actionLabel ? ` 后${actionLabel}` : ''}` : `开发分支或目标提交${actionLabel ? `后${actionLabel}` : ''}`
+  const command = suggestedRef && sourcePath ? `（可执行：git -C "${sourcePath}" checkout ${suggestedRef}）` : ''
+  return `${repoId}：分析目录当前检出的正是个人分支 ${personalBranch}，请先切回${target}${command}`
 }
 
 export async function injectionGit(cwd, args, signal) {
@@ -876,6 +881,7 @@ export class FaultInjectionService {
         if (!entry.isDirectory() || !id(entry.name)) continue
         try {
           const build = JSON.parse(await readFile(path.join(buildsDir, entry.name, 'build.json'), 'utf8'))
+          if (build?.restore_baseline) continue
           for (const repo of build?.repositories || []) {
             if (repo?.repo_id === repoId && repo.commit && repo.push_result !== 'unchanged') addCommit(repo.commit, 'build', entry.name)
           }
@@ -1044,6 +1050,19 @@ export class FaultInjectionService {
     await writeTaskStoreFile(await this.commitDefaultsPath(dataRoot), JSON.stringify(reusable, null, 2) + '\n')
     return normalized
   }
+  async resolveSuggestedCheckoutRef(sourcePath, { remote = 'origin', personalBranch = '', analysisCommit = null, signal = undefined } = {}) {
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) {
+      try {
+        const ref = await this.git(sourcePath, ['symbolic-ref', '--quiet', `refs/remotes/${remote}/HEAD`], signal)
+        const prefix = `refs/remotes/${remote}/`
+        const branch = ref.startsWith(prefix) ? ref.slice(prefix.length) : ''
+        if (branch && branch !== personalBranch) return branch
+      } catch (error) {
+        if (signal?.aborted) throw error
+      }
+    }
+    return analysisCommit ? String(analysisCommit) : ''
+  }
   async inspectRepositoryStatus(dataRoot, repoId, { analysisCommit = null, runId = null } = {}) {
     const settings = await readRepositorySettings(dataRoot, repoId)
     const sourcePath = settings.git_path || path.join(dataRoot, 'repositories', repoId)
@@ -1051,16 +1070,23 @@ export class FaultInjectionService {
     try { source = await inspectSource(sourcePath) } catch (error) { source = { kind: 'unavailable', error: error.message } }
     const personalBranch = settings.personal_branch || ''
     const remoteBranch = settings.remote_branch || personalBranch || ''
+    const remote = settings.remote || 'origin'
     const currentBranch = source.kind === 'git' ? (source.branch || '') : ''
     const headEqualsPersonalBranch = Boolean(source.kind === 'git' && personalBranch && currentBranch && currentBranch === personalBranch)
     const protectedBranchError = personalBranch ? (protectedBranchReason(personalBranch) || protectedBranchReason(remoteBranch) || '') : ''
+    const resolvedSourcePath = source.path || sourcePath
+    const defaultBranch = source.kind === 'git' ? await readRemoteDefaultBranch(resolvedSourcePath, remote) : ''
+    const suggestedCheckoutRef = source.kind === 'git'
+      ? ((defaultBranch && defaultBranch !== personalBranch) ? defaultBranch : (analysisCommit ? String(analysisCommit) : ''))
+      : ''
+    const suggestedCheckoutCommand = suggestedCheckoutRef ? `git -C "${resolvedSourcePath}" checkout ${suggestedCheckoutRef}` : ''
     let comparison = { available: false, changed_count: 0, files: [] }
     if (source.kind === 'git' && runId) {
-      try { comparison = await compareSnapshot(source.path || sourcePath, 'HEAD', path.join(dataRoot, 'runs', runId, 'inputs', 'source', repoId)) }
+      try { comparison = await compareSnapshot(resolvedSourcePath, 'HEAD', path.join(dataRoot, 'runs', runId, 'inputs', 'source', repoId)) }
       catch (error) { comparison = { available: false, error: error.message } }
     }
     const injectionCommitsInHead = source.kind === 'git' && source.commit
-      ? await this.findAncestorInjectionCommits(dataRoot, repoId, source.path || sourcePath, source.commit)
+      ? await this.findAncestorInjectionCommits(dataRoot, repoId, resolvedSourcePath, source.commit)
       : []
     return {
       repo_id: repoId,
@@ -1069,7 +1095,10 @@ export class FaultInjectionService {
       current_branch: currentBranch,
       personal_branch: personalBranch,
       remote_branch: remoteBranch,
-      remote: settings.remote || 'origin',
+      remote,
+      default_branch: defaultBranch,
+      suggested_checkout_ref: suggestedCheckoutRef,
+      suggested_checkout_command: suggestedCheckoutCommand,
       head_equals_personal_branch: headEqualsPersonalBranch,
       protected_branch_error: protectedBranchError,
       injection_commits_in_head: injectionCommitsInHead,
@@ -1140,7 +1169,13 @@ export class FaultInjectionService {
         const forbidden = protectedBranchReason(configured.personal_branch) || protectedBranchReason(configured.remote_branch)
         if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}。请在项目配置改选个人开发分支`)
         if (configured.head_equals_personal_branch) {
-          throw serviceError(`${repo.repo_id}：分析目录当前检出的正是个人分支 ${configured.personal_branch}，请先切回开发分支或目标提交后再生成打桩修改`)
+          throw serviceError(formatPersonalBranchBlockMessage({
+            repoId: repo.repo_id,
+            personalBranch: configured.personal_branch,
+            sourcePath: configured.source?.path || configured.source_path,
+            suggestedRef: configured.suggested_checkout_ref,
+            actionLabel: '再生成打桩修改',
+          }))
         }
       }
       return { ...configured }
@@ -1202,7 +1237,19 @@ export class FaultInjectionService {
         }
         const currentBranch = await this.git(sourcePath, ['branch', '--show-current'], signal)
         if (personalBranch && currentBranch && currentBranch === personalBranch) {
-          throw serviceError(`${source.repo_id}：分析目录当前检出的正是个人分支 ${personalBranch}，请先切回开发分支或目标提交后再生成打桩修改`)
+          const suggestedRef = await this.resolveSuggestedCheckoutRef(sourcePath, {
+            remote: settings.remote || source.remote || 'origin',
+            personalBranch,
+            analysisCommit: source.analysis_commit,
+            signal,
+          }) || source.suggested_checkout_ref || ''
+          throw serviceError(formatPersonalBranchBlockMessage({
+            repoId: source.repo_id,
+            personalBranch,
+            sourcePath,
+            suggestedRef,
+            actionLabel: '再生成打桩修改',
+          }))
         }
         const baseCommit = await this.git(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}'], signal)
         const dirty = Boolean(await this.git(sourcePath, ['status', '--porcelain'], signal))
@@ -1509,17 +1556,23 @@ export class FaultInjectionService {
     const background = input.background === true
     const retryBuildId = input.build_id ? String(input.build_id) : ''
     const runBuild = async () => {
-      let build, buildDir, loadedTasks
+      let build, buildDir, loadedTasks, restoreBaseline
       if (retryBuildId) {
         build = await this.readBuild(dataRoot, retryBuildId)
         if (build.status === 'pushed') return build
         if (activeBuildStates.has(build.status)) throw serviceError('本次出包正在执行', 409)
         buildDir = await this.buildDirectory(dataRoot, retryBuildId)
+        restoreBaseline = build.restore_baseline === true
         loadedTasks = []
         for (const item of build.items || []) {
           loadedTasks.push(await this.loadAndValidateBuildTask(dataRoot, item, { expectedSha: item.result_sha256 }))
         }
+      } else if (input.restore_baseline === true) {
+        if (Array.isArray(input.items) && input.items.length) throw serviceError('恢复干净基线模式不能同时包含打桩任务')
+        restoreBaseline = true
+        loadedTasks = []
       } else {
+        restoreBaseline = false
         const rawItems = input.items
         if (!Array.isArray(rawItems) || !rawItems.length) throw serviceError('请至少勾选一个就绪的打桩任务加入出包')
         const itemKeys = rawItems.map(item => `${item?.run_id || ''}\0${item?.task_id || ''}`)
@@ -1532,10 +1585,18 @@ export class FaultInjectionService {
           String(a.record.created_at || '').localeCompare(String(b.record.created_at || ''))
           || String(a.record.id).localeCompare(String(b.record.id)))
       }
-      const targetRepoIds = retryBuildId
-        ? [...new Set((build.repositories || []).map(repo => repo.repo_id))]
-        : [...new Set(loadedTasks.flatMap(entry => entry.edits.map(edit => edit?.repo_id).filter(Boolean)))]
-      if (!targetRepoIds.length) throw serviceError('所选打桩任务没有目标仓库修改')
+      let targetRepoIds
+      if (retryBuildId) {
+        targetRepoIds = [...new Set((build.repositories || []).map(repo => repo.repo_id))]
+      } else if (restoreBaseline) {
+        const rawRepoIds = input.repo_ids
+        if (!Array.isArray(rawRepoIds) || !rawRepoIds.length) throw serviceError('请选择需要恢复干净基线的目标仓库')
+        if (new Set(rawRepoIds).size !== rawRepoIds.length) throw serviceError('恢复干净基线的目标仓库列表中包含重复项')
+        targetRepoIds = rawRepoIds.map(repoId => String(repoId))
+      } else {
+        targetRepoIds = [...new Set(loadedTasks.flatMap(entry => entry.edits.map(edit => edit?.repo_id).filter(Boolean)))]
+      }
+      if (!targetRepoIds.length) throw serviceError(restoreBaseline ? '请选择需要恢复干净基线的目标仓库' : '所选打桩任务没有目标仓库修改')
       const repoConfigs = new Map()
       for (const repoId of targetRepoIds) {
         if (!id(repoId)) throw serviceError(`仓库标识无效：${repoId}`)
@@ -1552,7 +1613,14 @@ export class FaultInjectionService {
         try { source = await inspectSource(rawSourcePath) } catch (error) { throw serviceError(`${repoId}：${error.message}`) }
         if (source.kind !== 'git') throw serviceError(source.error || `${repoId} 尚未关联 Git 仓库`)
         if (source.branch && source.branch === personalBranch) {
-          throw serviceError(`${repoId}：分析目录当前检出的正是个人分支 ${personalBranch}，请先切回开发分支或目标提交后再出包`)
+          const suggestedRef = await this.resolveSuggestedCheckoutRef(source.path, { remote, personalBranch })
+          throw serviceError(formatPersonalBranchBlockMessage({
+            repoId,
+            personalBranch,
+            sourcePath: source.path,
+            suggestedRef,
+            actionLabel: '再出包',
+          }))
         }
         repoConfigs.set(repoId, {
           repo_id: repoId,
@@ -1566,6 +1634,7 @@ export class FaultInjectionService {
       const buildId = retryBuildId || randomUUID()
       const commitSubject = {
         id: buildId,
+        restore_baseline: restoreBaseline,
         items: loadedTasks.map(entry => ({
           run_id: entry.record.run_id,
           task_id: entry.record.id,
@@ -1595,7 +1664,7 @@ export class FaultInjectionService {
       } else {
         const effectiveConfig = normalizeCommitConfig(build?.commit_config, savedDefaults)
         if (detectedHookRegex && !effectiveConfig.pattern) effectiveConfig.pattern = detectedHookRegex
-        if (effectiveConfig.mode === 'default' && !effectiveConfig.custom_message && build?.commit_message && !/^test: fault injection\b/.test(build.commit_message)) {
+        if (effectiveConfig.mode === 'default' && !effectiveConfig.custom_message && build?.commit_message && !/^(?:test: fault injection|revert: restore clean baseline)\b/.test(build.commit_message)) {
           effectiveConfig.custom_message = build.commit_message
         }
         const checked = resolveCommitMessage(effectiveConfig, commitSubject, { timeoutMs: precheckTimeoutMs })
@@ -1616,6 +1685,7 @@ export class FaultInjectionService {
           id: buildId,
           created_at: new Date().toISOString(),
           status: 'composing',
+          ...(restoreBaseline ? { restore_baseline: true } : {}),
           items: loadedTasks.map(entry => ({
             run_id: entry.record.run_id,
             task_id: entry.record.id,
@@ -1687,7 +1757,14 @@ export class FaultInjectionService {
               if (await realpath(top) !== sourcePath) throw serviceError(`请指定 Git 仓库根目录：${repo.repo_id}`)
               const baseBranch = await this.git(sourcePath, ['branch', '--show-current'], opSignal)
               if (baseBranch && baseBranch === cfg.personal_branch) {
-                throw serviceError(`${repo.repo_id}：分析目录当前检出的正是个人分支 ${cfg.personal_branch}，请先切回开发分支后再出包`)
+                const suggestedRef = await this.resolveSuggestedCheckoutRef(sourcePath, { remote: cfg.remote, personalBranch: cfg.personal_branch, signal: opSignal })
+                throw serviceError(formatPersonalBranchBlockMessage({
+                  repoId: repo.repo_id,
+                  personalBranch: cfg.personal_branch,
+                  sourcePath,
+                  suggestedRef,
+                  actionLabel: '再出包',
+                }))
               }
               const baseCommit = repo.base_commit || await this.git(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}'], opSignal)
               const remoteUrl = await this.git(sourcePath, ['remote', 'get-url', '--push', cfg.remote], opSignal)
@@ -1784,7 +1861,18 @@ export class FaultInjectionService {
               if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}；本次不会提交或推送`)
               const currentBranch = await this.git(repo.source_path, ['branch', '--show-current'], lockSignal)
               if (currentBranch && currentBranch === personalBranch) {
-                throw serviceError(`${repo.repo_id}：分析目录当前检出的正是个人分支 ${personalBranch}，请先切回开发分支后再出包`)
+                const suggestedRef = await this.resolveSuggestedCheckoutRef(repo.source_path, {
+                  remote: configured.remote || repo.remote || 'origin',
+                  personalBranch,
+                  signal: lockSignal,
+                })
+                throw serviceError(formatPersonalBranchBlockMessage({
+                  repoId: repo.repo_id,
+                  personalBranch,
+                  sourcePath: repo.source_path,
+                  suggestedRef,
+                  actionLabel: '再出包',
+                }))
               }
               const remoteUrl = await this.git(repo.source_path, ['remote', 'get-url', '--push', configured.remote || 'origin'], lockSignal)
               if (remoteUrl !== repo.remote_url) {
