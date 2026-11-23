@@ -1234,10 +1234,10 @@ test('F1/F4/F5 product_package mode: scans build_targets, blocks missing replace
   await writeFile(patchedBin, 'archive with NVMF_TCP_INJECT_FAIL and [FI_HIT:TCP_SEND_FAIL]\n')
 
   await assert.rejects(
-    exec('bash', [scriptPath], { env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: baselineBin } }),
+    exec('bash', ['verify-artifact-gate.sh'], { cwd: f.root, env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: 'libnvmf_tcp_baseline.a' } }),
     err => err.code === 2 && /missing stub marker "NVMF_TCP_INJECT_FAIL"/.test(err.stderr),
   )
-  const okRun = await exec('bash', [scriptPath], { env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: patchedBin } })
+  const okRun = await exec('bash', ['verify-artifact-gate.sh'], { cwd: f.root, env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: 'libnvmf_tcp_patched.a' } })
   assert.match(okRun.stdout, /\[PANGEA_ARTIFACT_CHECK\] OK:/)
 
   // Aggregated replace_files merge deduplicates across multiple tasks
@@ -1334,16 +1334,17 @@ test('multi-artifact verification, duplicate basename source_files disambiguatio
     build_variant: 'debug',
     result: { ...dupBasePayload, delivery: validMultiDelivery },
   }), 'utf8')
-  const scriptCompOk = await exec('bash', [multiScriptPath], {
-    env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: `${libA} ${libB}`, PANGEA_VERIFY_FINAL_BINARY: hostOk },
+  const scriptCompOk = await exec('bash', ['verify-multi.sh'], {
+    cwd: artifactDir,
+    env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: 'libmod_a.a libmod_b.a', PANGEA_VERIFY_FINAL_BINARY: 'host_ok' },
   })
   assert.match(scriptCompOk.stdout, /\[PANGEA_ARTIFACT_CHECK\] OK:/)
   await assert.rejects(
-    exec('bash', [multiScriptPath], { env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: `${libA} ${libBBaseline}` } }),
+    exec('bash', ['verify-multi.sh'], { cwd: artifactDir, env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: 'libmod_a.a libmod_b_baseline.a' } }),
     err => err.code === 2 && /missing stub marker "MARKER_MOD_B"/.test(err.stderr),
   )
   await assert.rejects(
-    exec('bash', [multiScriptPath], { env: { ...process.env, PANGEA_VERIFY_FINAL_BINARY: hostPartial } }),
+    exec('bash', ['verify-multi.sh'], { cwd: artifactDir, env: { ...process.env, PANGEA_VERIFY_FINAL_BINARY: 'host_partial' } }),
     err => err.code === 2 && /missing stub marker "MARKER_MOD_B"/.test(err.stderr),
   )
 
@@ -1373,7 +1374,9 @@ test('multi-artifact verification, duplicate basename source_files disambiguatio
   assert.equal(dirtyReady.notices.filter(n => n.includes('改动了源码副本')).length, 1)
 })
 
-test('F3 + F4 real gcc/ld reproduction: PANGEA safe-relink defeats DSO missing from command line, swallowed ld exit codes, and prebaked hitest tail overwrite without modifying environment relink script', async t => {
+test('F3 + F4 real gcc/ld reproduction: PANGEA safe-relink defeats DSO missing from command line, swallowed ld exit codes, and prebaked hitest tail overwrite without modifying environment relink script', {
+  skip: process.platform !== 'linux' && 'ELF DSO DT_NEEDED relink reproduction requires Linux gcc/ld',
+}, async t => {
   const work = await mkdtemp(path.join(os.tmpdir(), 'pangea-f3-f4-relink-'))
   t.after(() => rm(work, { recursive: true, force: true }))
   const libDir = path.join(work, 'lib64')
