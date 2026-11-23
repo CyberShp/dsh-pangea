@@ -25,7 +25,7 @@ test('WP3.4: buildDiagnosticBundle produces sanitized ZIP with manifest, progres
       },
     },
     degradations: [],
-    errors: [],
+    errors: ['def shepard_canary():', {env: {SECRET_VALUE: 'environment-canary'}}],
   }))
   await assert.rejects(() => buildDiagnosticBundle({ dataRoot: root, runId: '..' }), /run_id 无效/)
   const bundle = await buildDiagnosticBundle({
@@ -40,9 +40,9 @@ test('WP3.4: buildDiagnosticBundle produces sanitized ZIP with manifest, progres
   assert.match(text, /manifest\.json/)
   assert.match(text, /progress\.json/)
   assert.match(text, /fault-injection-summary\.json/)
-  assert.match(text, /\/home\/<user>/)
-  assert.match(text, /https:\/\/<redacted>@git\.local/)
-  assert.doesNotMatch(text, /alice|sk-secret-token|ci_user|ci_pass/)
+  assert.match(text, /"has_error": true/)
+  assert.match(text, /"errors_count": 2/)
+  assert.doesNotMatch(text, /alice|sk-secret-token|ci_user|ci_pass|shepard_canary|environment-canary/)
 })
 
 test('WP3.3: CaseReviewStore.inheritFromParent copies unchanged parent decisions without overwriting child decisions', async t => {

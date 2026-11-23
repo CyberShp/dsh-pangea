@@ -41,7 +41,7 @@ function sanitizeProgress(raw) {
       auto_continuations: act.auto_continuations ?? 0,
       execution_elapsed_ms: act.execution_elapsed_ms ?? 0,
       validation_failures: act.validation_failures ?? 0,
-      error: sanitizeText(act.error ?? null),
+      has_error: Boolean(act.error),
     }
   }
   return {
@@ -54,7 +54,7 @@ function sanitizeProgress(raw) {
     partial_delivery: Boolean(raw.partial_delivery),
     actions,
     degradations_count: Array.isArray(raw.degradations) ? raw.degradations.length : 0,
-    errors: Array.isArray(raw.errors) ? raw.errors.slice(0, 20).map(e => sanitizeText(typeof e === 'string' ? e : JSON.stringify(e))) : [],
+    errors_count: Array.isArray(raw.errors) ? raw.errors.length : 0,
   }
 }
 
@@ -78,7 +78,8 @@ export async function buildDiagnosticBundle({ dataRoot, runId, summary = null, v
       }
     } catch {}
     try {
-      injectionSummary = sanitizeDeep(await summarizeRunVerifications(dataRoot, runId))
+      const { injection_counts } = await summarizeRunVerifications(dataRoot, runId)
+      injectionSummary = { injection_counts }
     } catch {}
   }
   const manifest = {
@@ -97,7 +98,7 @@ export async function buildDiagnosticBundle({ dataRoot, runId, summary = null, v
       workflow_version: summary.workflow_version ?? null,
       counts: summary.counts ?? null,
       case_readiness: summary.case_readiness ?? null,
-      reader_health: summary.reader_health ?? null,
+      reader_health: summary.reader_health ? { status: summary.reader_health.status } : null,
     }) : null,
   }
   const entries = [

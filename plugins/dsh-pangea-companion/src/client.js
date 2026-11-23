@@ -4895,12 +4895,14 @@ window.__ModuleLoader__.load({
       async function inheritParentCaseReviews() {
         const parentRunId = current?.incremental_summary?.parent_run_id || selectedTask?.origin?.parent_run_id || ''
         if (!current?.run_id || !snapshot?.data_root || !parentRunId) return
+        const scopeKey = reviewScope
         try {
           const next = await requestCaseReviews({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, input: { action: 'inherit_parent', parent_run_id: parentRunId } })
-          setReviews(next)
+          if (activeReviewScope.current !== scopeKey) return
+          acceptReview(next, scopeKey)
           setReviewError('')
           showActionNotice(next.inherited_count ? `已从来源任务继承 ${next.inherited_count} 条未变更用例评审。` : '当前没有可继承的未变更用例评审。')
-        } catch (error) { showActionNotice(`继承来源评审失败：${error.message}`, true) }
+        } catch (error) { if (activeReviewScope.current === scopeKey) showActionNotice(`继承来源评审失败：${error.message}`, true) }
       }
       function caseParseCopyLines(item) {
         const notice = caseRecordParseNotice(item)

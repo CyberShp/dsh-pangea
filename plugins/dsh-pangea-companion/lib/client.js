@@ -714,9 +714,10 @@ window.__ModuleLoader__.load({
 
     function caseReadinessState(item) {
       const declared = item?.execution_readiness ?? item?.source_record?.body?.execution_readiness
-      if (declared === 'ready' || item?.readiness === 'ready') return { key: 'ready', label: '具备执行条件', tone: 'good' }
+      if (declared === 'ready') return { key: 'ready', label: '具备执行条件', tone: 'good' }
       if (declared === 'needs_instrumentation') return { key: 'needs_instrumentation', label: '待代码打桩', tone: 'warn' }
       if (declared === 'unknown') return { key: 'unknown', label: '依据待核实', tone: 'info' }
+      if (item?.readiness === 'ready') return { key: 'ready', label: '具备执行条件', tone: 'good' }
       if (item?.readiness === 'needs_setup') return { key: 'needs_setup', label: '待补执行条件', tone: 'warn' }
       return { key: 'unclassified', label: '未标注', tone: 'unreviewed' }
     }
@@ -758,10 +759,9 @@ window.__ModuleLoader__.load({
       return items.filter(item => {
         const review = reviews[caseIdentity(item)]?.review_status ?? 'unreviewed'
         const readiness = filters.readiness
-        const readinessMatch = !readiness
-          || (readiness === 'needs_instrumentation' || readiness === 'unknown'
-            ? caseReadinessState(item).key === readiness
-            : (['ready', 'needs_setup'].includes(item.readiness) ? item.readiness : 'unclassified') === readiness)
+        const state = caseReadinessState(item).key
+        const readinessMatch = !readiness || readiness === state
+          || (readiness === 'needs_setup' && ['needs_instrumentation', 'unknown'].includes(state))
         return (!query || JSON.stringify(item).toLocaleLowerCase().includes(query))
           && (!filters.unit || item.unit_id === filters.unit)
           && (!filters.type || (item.case_type || item.test_level || 'unclassified') === filters.type)
@@ -10879,12 +10879,14 @@ window.__ModuleLoader__.load({
       async function inheritParentCaseReviews() {
         const parentRunId = current?.incremental_summary?.parent_run_id || selectedTask?.origin?.parent_run_id || ''
         if (!current?.run_id || !snapshot?.data_root || !parentRunId) return
+        const scopeKey = reviewScope
         try {
           const next = await requestCaseReviews({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, input: { action: 'inherit_parent', parent_run_id: parentRunId } })
-          setReviews(next)
+          if (activeReviewScope.current !== scopeKey) return
+          acceptReview(next, scopeKey)
           setReviewError('')
           showActionNotice(next.inherited_count ? `已从来源任务继承 ${next.inherited_count} 条未变更用例评审。` : '当前没有可继承的未变更用例评审。')
-        } catch (error) { showActionNotice(`继承来源评审失败：${error.message}`, true) }
+        } catch (error) { if (activeReviewScope.current === scopeKey) showActionNotice(`继承来源评审失败：${error.message}`, true) }
       }
       function caseParseCopyLines(item) {
         const notice = caseRecordParseNotice(item)

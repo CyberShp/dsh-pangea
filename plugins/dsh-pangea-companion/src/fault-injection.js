@@ -2199,6 +2199,7 @@ export class FaultInjectionService {
         if (nextCommitConfig) build.commit_config = nextCommitConfig
         build.pipeline_url = configuredPipeline
         build.error = null
+        delete build.error_code
         build.status = 'composing'
       }
       const controller = new AbortController()
@@ -2520,6 +2521,7 @@ export class FaultInjectionService {
         } catch (error) {
           delete build.current_repository
           build.status = controller.signal.aborted ? 'cancelled' : 'failed'
+          if (error.code === 'REMOTE_BRANCH_DIVERGED') build.error_code = error.code
           const rawErr = cleanError(error)
           const unconfirmed = build.repositories.some(repo => !repo.pushed && repo.push_result === 'unconfirmed')
           const nonFastForward = build.repositories.some(repo => !repo.pushed && repo.push_result === 'rejected') && /non-fast-forward|fetch first/i.test(rawErr)

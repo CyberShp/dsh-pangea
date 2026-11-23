@@ -63,3 +63,10 @@ test('caseReadinessState and filterTestCases distinguish needs_instrumentation f
   assert.deepEqual(filterTestCases(cases, { readiness: 'needs_setup' }).map(i => i.projection_id), ['u/2', 'u/3'])
   assert.deepEqual(filterTestCases(cases, { readiness: 'ready' }).map(i => i.projection_id), ['u/1'])
 })
+
+test('display and filtering agree for declared, conflicting and legacy readiness', () => {
+  const items = [{ execution_readiness: 'ready' }, { execution_readiness: 'unknown', readiness: 'ready' }, { readiness: 'ready' }]
+  assert.deepEqual(items.map(item => caseReadinessState(item).key), ['ready', 'unknown', 'ready'])
+  assert.deepEqual(filterTestCases(items, { readiness: 'ready' }), [items[0], items[2]])
+  assert.deepEqual(filterTestCases(items, { readiness: 'unclassified' }), [])
+})
