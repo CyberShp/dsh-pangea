@@ -65,3 +65,30 @@ test('Analysis keeps full frozen rubric and tool-reference instructions without 
   assert.match(prompt, /先 result-read --view compact 获取当前 revision/)
   assert.doesNotMatch(prompt, /当前 task-open 回包：|plan-write-batch|coverage-read/)
 })
+
+test('WP2.1/WP2.2: Analysis with analysis-startup-v1 injects bounded initial snapshot and supports contextHint on continuation', () => {
+  const analysisOpened = {
+    format_version: 'source-first-task-open-v1',
+    binding: opened.binding,
+    task: { ...opened.task, task_type: 'source_first_analysis', analysis_io_policy: 'analysis-io-v1' },
+    write_contract: { revision: 0, capabilities: ['analysis-startup-v1', 'read-batch', 'coverage-read'] },
+    analysis_startup: { pages: [{ input_id: 'rubric_scene_flow', text: 'frozen-flow-rubric-page' }], pending_inputs: [], complete: true, max_chars: 24000 },
+  }
+  const initial = workerPrompt({ ...args, action: { ...args.action, role: 'analysis', stage: 'unit_analysis' }, opened: analysisOpened })
+  assert.match(initial, /当前 task-open 回包：/)
+  assert.match(initial, /frozen-flow-rubric-page/)
+  assert.match(initial, /本任务提供 analysis_startup/)
+  assert.match(initial, /read-batch --requests-file/)
+  assert.doesNotMatch(initial, /PowerShell 直接执行 task-open/)
+
+  const cont = workerContinuationPrompt({
+    ...args,
+    action: { ...args.action, role: 'analysis', stage: 'unit_analysis' },
+    opened: analysisOpened,
+    sameAction: true,
+    contextHint: '上下文窗口占用已达 78%，请优先将已核实的流程、用例或依据通过 result-write 增量落盘。',
+  })
+  assert.match(cont, /上下文窗口占用已达 78%/)
+  assert.doesNotMatch(cont, /当前 task-open 回包：/)
+})
+

@@ -143,7 +143,7 @@ export function createRepositorySettings(React) {
           h('button', { type: 'button', className: 'btn', disabled: busy || !selected, onClick: () => setRefresh(value => value + 1) }, '刷新远端分支'),
           h('button', { type: 'button', className: 'btn', disabled: busy || !form.remote_branch || !branches || branches.local.some(item => item.name === form.remote_branch), onClick: createBranch }, '创建本地跟踪分支'),
           h('span', { role: 'status', style: { fontSize: 12, color: branchError ? '#b62836' : '#5e6773' } }, branchError || (branches?.live ? '已读取推送端的远端分支' : '远端分支为本地缓存，可刷新查询服务器'))),
-        h('p', { style: { margin: 0, fontSize: 12, color: '#5e6773' } }, '打桩只提交到这个已有分支；任务不会创建新分支。'),
+        h('p', { style: { margin: 0, fontSize: 12, color: '#5e6773' } }, '请使用专用打桩构建分支，勿填正在开发的特性分支；打桩推送会将该分支同步为当前基线与所选桩代码，任务不会自动新建分支。'),
         h('details', { className: 'pangea-repo-subdetails', open: needsGitLink || undefined },
           h('summary', null, '关联或更换打桩 Git 仓库'),
           h('p', { style: { margin: '6px 0 10px', fontSize: 12, color: '#5e6773' } }, '选择与分析源码对应的 Git 仓库。关联后保留原分析目录；打桩前展示源码差异。'),

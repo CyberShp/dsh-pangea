@@ -70,6 +70,39 @@ export class CaseReviewStore {
     queues.set(file, operation)
     try { return await operation } finally { if (queues.get(file) === operation) queues.delete(file) }
   }
+  async inheritFromParent(items, parentRunId) {
+    if (!/^[A-Za-z0-9._-]+$/.test(parentRunId || '') || parentRunId === this.runId) {
+      return { ...(await this.project(items)), inherited_count: 0 }
+    }
+    const parentStore = new CaseReviewStore({ dataRoot: this.dataRoot, runId: parentRunId, write: this.write })
+    const parentSaved = await parentStore.read()
+    const parentDecisions = parentSaved.content_hash_version === 1 ? parentSaved.decisions : {}
+    if (!Object.keys(parentDecisions).length) return { ...(await this.project(items)), inherited_count: 0 }
+    const file = await this.file(), previous = queues.get(file) ?? Promise.resolve()
+    const operation = previous.catch(() => {}).then(async () => {
+      const saved = await this.read(), set = caseSet(items)
+      const decisions = Object.assign(Object.create(null), saved.content_hash_version === 1 ? saved.decisions : {})
+      let inheritedCount = 0
+      for (const [key, parentDecision] of Object.entries(parentDecisions)) {
+        if (Object.hasOwn(decisions, key)) continue
+        if (!Object.hasOwn(set.hashes, key) || set.duplicates.has(key)) continue
+        if (parentDecision.content_hash !== set.hashes[key]) continue
+        decisions[key] = {
+          decision: parentDecision.decision,
+          content_hash: set.hashes[key],
+          inherited_from: parentRunId,
+          updated_at: new Date().toISOString(),
+        }
+        inheritedCount += 1
+      }
+      if (inheritedCount > 0) {
+        await this.write(file, `${JSON.stringify({ schema_version: 1, content_hash_version: 1, run_id: this.runId, revision: saved.revision + 1, decisions }, null, 2)}\n`)
+      }
+      return { ...(await this.project(items)), inherited_count: inheritedCount }
+    })
+    queues.set(file, operation)
+    try { return await operation } finally { if (queues.get(file) === operation) queues.delete(file) }
+  }
 }
 
 export async function selectExportCases(items, input, store) {

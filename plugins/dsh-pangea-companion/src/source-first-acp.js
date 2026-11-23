@@ -100,6 +100,10 @@ const analysisRecordInstructions = (action, opened) => ['unit_analysis', 'target
     '当前 behavior-test-v1 的字段定位（只解释写法，全部语义由你按冻结 rubric 判断）：test_case.body 使用 format_version=behavior-test-case-v1，steps=[{action,expected}]，external_observations=[]，variants=[{input,expected}]；case_id/title/purpose/test_level/entry/preconditions/cleanup/flow_refs/coverage_refs/risk_refs/execution_readiness/readiness_reason/source_evidence 依冻结样例填写。execution_status=executed 仅表示有真实执行证据；未执行仍为 not_run。',
     '同一冻结 profile 的 flow.body 使用 format_version=behavior-flow-v1，flow_id/title/description/role/attach_to/nodes/edges/paths；节点为 {id,kind,label}，kind 为 entry/main/branch/error/propagation/recovery/exit，边为 {source_step_key,target_step_key,condition}，路径为 {path_id,title,node_ids,case_ids}，引用本条实际节点及用例 ID。role 为 main/sub，attach_to 按真实归属填写。字段依据就是已读 behavior_test_generation 冻结样例，无须查 flow_schema 或 report 源码；此速查不代替该 rubric 的其他交付要求。',
   ] : []),
+  ...(opened?.write_contract?.capabilities?.includes('analysis-startup-v1') ? [
+    '本任务提供 analysis_startup：直接消费其中 pages 原文，仅沿 pending_inputs 的 input_id/cursor 补读缺失页；已完整交付的冻结 rubric 无需再次 input-read。',
+    '多段独立源码或输入查询优先用 read-batch --requests-file 合并为一次调用（总 --max-chars 默认 24000，每项独立保留 next_cursor/next_page_token）；可复用 write_contract.revision 或刚返回的 revision，状态不明时再 result-read。',
+  ] : []),
   '读全当前冻结 rubric 后复用已读规则；仅为具体未决问题或缺失分页补读。写入失败按该命令 --help 和返回的精确字段诊断修复当前载荷；先 result-read 核对 revision，失败不当成功，也不改 kind、删合同或重做正确记录来绕过校验。图表诊断按当前冻结要求逐项核实，不凭 result-write 成功跳过自检。',
   ...(action.stage === 'targeted_closure' ? [
     'Closure 按 correction_records 中的真实 finding 与目标 record_id 逐项闭环；先核实该反例、保存对应替换记录与实际证据，再处理下一项。新增具体反证必须处理，但不能仅因仍可检查就从头重跑整个已验收单元。局部修正保存后仍需完成引用、汇总及冻结规则要求的全局自检；不以缩小阅读范围豁免任何审查义务。compact 后先查当前结果与已保存修正，复用 scratch 中已有实测证据；每完成一项即保存真实进度，避免再次把全部修正留到最后。',
@@ -148,7 +152,7 @@ export function sourceInvestigationInstructions(opened) {
   ]
 }
 
-export function workerContinuationPrompt({ action, opened, cwd, dataRoot, runId, taskId, python, scratchDirectory, sameAction }) {
+export function workerContinuationPrompt({ action, opened, cwd, dataRoot, runId, taskId, python, scratchDirectory, sameAction, contextHint = '' }) {
   const binding = ['--data-root', dataRoot, '--run-id', runId, '--action-id', action.action_id, '--task-id', taskId]
   const operation = sameAction ? 'result-read' : 'task-open'
   const quote = value => `'${String(value).replaceAll("'", "''")}'`
@@ -166,6 +170,7 @@ export function workerContinuationPrompt({ action, opened, cwd, dataRoot, runId,
       : '先 task-open 获取当前任务的精简视图、阶段合同及冻结输入版本；按当前任务工作，不能沿用上一 action 的写入身份或 completion。',
     `PowerShell 直接执行 ${operation}：${command}`,
     repair ? `本次修复诊断：${repair}` : '',
+    contextHint ? String(contextHint) : '',
     '复用会话中已完整读取的同一冻结版本 rubric、源码和规则；只补缺失或未读分页，不从头重读。若上下文已压缩导致合同缺失，再按需补读 CLI 合同：' + cliContract(cwd),
     ...sourceInvestigationInstructions(opened),
     ...testToolReferenceInstructions(opened, action),
@@ -177,14 +182,22 @@ export function workerContinuationPrompt({ action, opened, cwd, dataRoot, runId,
   ].filter(Boolean).join('\n')
 }
 
-// Only the new bounded Planning task-open projection can be delivered here.
+// Bounded initial task-open projection for planning-io-v1 and analysis-io-v1.
 // The initial host read is current; continuation must not reuse its revision.
-function initialPlanningSnapshot(action, opened) {
-  if (action.stage !== 'unit_planning' || !opened?.planning_startup
-    || !opened?.write_contract?.capabilities?.includes('planning-startup-v1')) return null
-  const snapshot = JSON.stringify({ format_version: opened.format_version, binding: opened.binding,
-    task: opened.task, write_contract: opened.write_contract, planning_startup: opened.planning_startup })
-  return snapshot.length <= 32000 ? snapshot : null
+function initialTaskSnapshot(action, opened) {
+  if (action.stage === 'unit_planning' && opened?.planning_startup
+    && opened?.write_contract?.capabilities?.includes('planning-startup-v1')) {
+    const snapshot = JSON.stringify({ format_version: opened.format_version, binding: opened.binding,
+      task: opened.task, write_contract: opened.write_contract, planning_startup: opened.planning_startup })
+    return snapshot.length <= 32000 ? snapshot : null
+  }
+  if (action.stage === 'unit_analysis' && opened?.analysis_startup
+    && opened?.write_contract?.capabilities?.includes('analysis-startup-v1')) {
+    const snapshot = JSON.stringify({ format_version: opened.format_version, binding: opened.binding,
+      task: opened.task, write_contract: opened.write_contract, analysis_startup: opened.analysis_startup })
+    return snapshot.length <= 36000 ? snapshot : null
+  }
+  return null
 }
 
 export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, python, scratchDirectory }) {
@@ -192,10 +205,10 @@ export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, pyt
   const quote = value => `'${String(value).replaceAll("'", "''")}'`
   const taskOpen = `& ${[python || 'python', '-m', 'pangea_agent.cli.main', '--output', 'readable', 'task-open', ...binding].map(quote).join(' ')}`
   const repairText = repairSummary(action)
-  const planningSnapshot = initialPlanningSnapshot(action, opened)
+  const initialSnapshot = initialTaskSnapshot(action, opened)
   return [
     // Naming the handshake reply here makes some models answer with exactly that reply.
-    planningSnapshot
+    initialSnapshot
       ? '身份绑定已完成，现在执行下面的正式任务：读取 CLI 合同，消费宿主已读取的当前 task-open 回包，然后完成当前 action 的实际工作和结果写入。你是 Desktop 派发的 PANGEA worker，只执行当前 action，不派发子 Agent、不推进 Graph。'
       : '身份绑定已完成，现在执行下面的正式任务：读取 CLI 合同并调用 task-open，然后完成当前 action 的实际工作和结果写入。你是 Desktop 派发的 PANGEA worker，只执行当前 action，不派发子 Agent、不推进 Graph。',
     `先读取客户端无关 CLI 合同：${cliContract(cwd)}`,
@@ -207,15 +220,17 @@ export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, pyt
     '使用现有 Python CLI 操作冻结输入与当前结果；不寻找插件或 MCP 配置。工具/命令失败时报告准确错误，不搜索安装目录或凭据。',
     '当前身份由 Desktop ACP 宿主绑定；执行器中可见的 pangea_* 插件工具属于另一套会话调度，不使用它们。插件报未绑定时停止重试，改用上述 Python CLI；所有 PANGEA 读写只走此 CLI。CLI 自身的绑定错误原样报告，由宿主恢复，不能自行 dispatch、bind、settle 或推进 Graph。',
     action.validation_error || action.pending_repair ? `原会话修复同一结果，保留有效正文。错误摘要：${repairText}。先 result-read 获取当前 revision 和诊断，不重复读取已掌握的输入。` : '',
-    planningSnapshot
+    initialSnapshot
       ? '宿主已对当前绑定调用 task-open，以下是当前回包；无需重复 task-open 或为取得同一 revision 再 result-read。写入同时遵循本提示与 CLI 合同，不直接读取 task_path，也不用 --prepare-source。'
       : '先调用 task-open 获取当前绑定任务的精简视图和冻结合同；写入同时遵循本提示与 CLI 合同。不要直接读取 task_path 全文，也不要使用 --prepare-source。',
-    planningSnapshot ? `当前 task-open 回包：${planningSnapshot}` : `PowerShell 直接执行 task-open：${taskOpen}`,
+    initialSnapshot ? `当前 task-open 回包：${initialSnapshot}` : `PowerShell 直接执行 task-open：${taskOpen}`,
     '常规 CLI 调用直接使用预置入口；不要为绑定参数、解码输出、JSON 转义另写包装脚本。--output readable 是放在子命令之前的全局参数，供直接阅读；程序解析使用 --output json。CLI 已展开正文并保留完整分页元数据。执行完 CLI 保留其退出码；失败时报告原错误并结束当前工具调用。',
     '结构化写入可先用文件工具在临时目录保存 UTF-8 JSON，再用 plan-write --unit-file 路径或 result-write/result-repair --records-file 路径传入。其他 JSON 参数使用对应的 *-file 选项；不能与同名内联 JSON 参数混用。语义内容由你完成，CLI 只负责读写。',
     action.stage === 'unit_planning'
       ? 'Planning 先核对 target/focus、冻结规划规则和目录导航；优先复用 planning_startup 已交付页。task.deferred_fields 仅在定位需要时用 input-read --input-id ID 取对应字段，inputs 和工具参考不是逐项阅读任务。'
-      : 'task.deferred_fields 中的字段用 input-read --input-id ID 分页读取；任务规则、目标、当前单元归属与 inputs 若被延后，先读取这些字段，再读冻结 rubric 与必要附件。',
+      : initialSnapshot
+        ? 'Analysis 优先消费 analysis_startup 已交付页，仅沿 pending_inputs 补读缺失页；task.deferred_fields 仅在需要时用 input-read --input-id ID 取对应字段。'
+        : 'task.deferred_fields 中的字段用 input-read --input-id ID 分页读取；任务规则、目标、当前单元归属与 inputs 若被延后，先读取这些字段，再读冻结 rubric 与必要附件。',
     action.stage === 'unit_planning'
       ? 'Planning 只读取本任务冻结的规划 rubric 与 analysis_scene；已交付部分复用，仅补必要规则的缺页。资料、Coverage 和方法论目录只在分配需要时查询，不读取 Analysis 交付规则，不为交接展开详细分析。'
       : '按 task.rubric_paths 与 task.inputs 的对应关系逐一读取当前任务列出的全部冻结 rubric，使用 inputs 中的 input_id，不把文件路径当 input_id。共同规则与场景规则都适用，不能只读场景规则；有 next_cursor 时继续到规则末尾，再开展分析或复核。续接时复用当前会话已完整读取的同一冻结版本。',
@@ -722,7 +737,13 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       }
       const sameAction = bindings[taskId]?.last_prompt_action_id === action.action_id
       const promptKind = readyPending ? 'initial' : sameAction ? 'continuation' : 'action_transition'
-      const prompt = (readyPending ? workerPrompt : workerContinuationPrompt)({ action, opened, cwd, dataRoot, runId, taskId, python, scratchDirectory, sameAction })
+      const diagUsage = worker.readDiagnostics?.()?.contextUsage
+      const contextHint = !readyPending && action.stage === 'unit_analysis'
+        && Number.isFinite(diagUsage?.used) && Number.isFinite(diagUsage?.size) && diagUsage.size > 0
+        && (diagUsage.used / diagUsage.size) >= 0.72
+        ? `上下文窗口占用已达 ${Math.round((diagUsage.used / diagUsage.size) * 100)}%，请优先将已核实的流程、用例或依据通过 result-write 增量落盘，再继续剩余源码核查，避免触发上下文截断。`
+        : ''
+      const prompt = (readyPending ? workerPrompt : workerContinuationPrompt)({ action, opened, cwd, dataRoot, runId, taskId, python, scratchDirectory, sameAction, contextHint })
       await event({ stage: 'source_first_prompt_ready', action_id: action.action_id,
         prompt_kind: promptKind, prompt_chars: prompt.length, prompt_bytes: Buffer.byteLength(prompt, 'utf8') })
       const runMonitored = async () => {

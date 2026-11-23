@@ -198,6 +198,34 @@ export function checkCmakeSyntax(text, filePath = 'CMakeLists.txt') {
   if (depth > 0) throw serviceError(`CMake 语法错误（${filePath}:${openLine}）：命令调用左括号未闭合（剩余 ${depth} 层）`)
 }
 
+async function readSafeRepoFile(root, name) {
+  if (typeof name !== 'string' || !name || /[\\\x00-\x1f:]/.test(name) || path.posix.isAbsolute(name)
+    || name.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')) {
+    throw serviceError('修改文件路径必须在所选仓库内')
+  }
+  const file = path.resolve(root, name)
+  if (!inside(root, file)) throw serviceError('修改文件路径越出所选仓库')
+  let parent = path.dirname(file)
+  while (parent !== root) {
+    try {
+      if (!(await lstat(parent)).isDirectory() || !inside(root, await realpath(parent))) throw serviceError(`目录越界或不是普通目录：${name}`)
+      break
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+      parent = path.dirname(parent)
+    }
+  }
+  try {
+    if (!(await lstat(file)).isFile() || !inside(root, await realpath(file))) throw serviceError(`仅支持仓库内普通文件：${name}`)
+    const bytes = await readFile(file)
+    if (bytes.includes(0) || !Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes)) throw serviceError(`文件不是 UTF-8 文本：${name}`)
+    return bytes.toString('utf8')
+  } catch (error) {
+    if (error.code === 'ENOENT') return null
+    throw error
+  }
+}
+
 // The agent supplies the behavior and exact replacement. The host only checks
 // file boundaries and matching bytes; it never decides whether a fault is useful.
 export async function applyInjectionEdits(repositoryRoot, edits, { dryRun = false } = {}) {
@@ -205,22 +233,8 @@ export async function applyInjectionEdits(repositoryRoot, edits, { dryRun = fals
   const staged = new Map()
   for (const edit of edits) {
     const name = edit?.path
-    if (typeof name !== 'string' || !name || /[\\\x00-\x1f:]/.test(name) || path.posix.isAbsolute(name)
-      || name.split('/').some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')) throw serviceError('修改文件路径必须在所选仓库内')
-    const file = path.resolve(root, name)
-    if (!inside(root, file)) throw serviceError('修改文件路径越出所选仓库')
-    let parent = path.dirname(file)
-    while (parent !== root) {
-      try { if (!(await lstat(parent)).isDirectory() || !inside(root, await realpath(parent))) throw serviceError(`目录越界或不是普通目录：${name}`); break }
-      catch (error) { if (error.code !== 'ENOENT') throw error; parent = path.dirname(parent) }
-    }
     if (!staged.has(name)) {
-      try {
-        if (!(await lstat(file)).isFile() || !inside(root, await realpath(file))) throw serviceError(`仅支持仓库内普通文件：${name}`)
-        const bytes = await readFile(file)
-        if (bytes.includes(0) || !Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes)) throw serviceError(`文件不是 UTF-8 文本：${name}`)
-        staged.set(name, bytes.toString('utf8'))
-      } catch (error) { if (error.code !== 'ENOENT') throw error; staged.set(name, null) }
+      staged.set(name, await readSafeRepoFile(root, name))
     }
     const current = staged.get(name)
     if (edit.before === null) {
@@ -243,6 +257,133 @@ export async function applyInjectionEdits(repositoryRoot, edits, { dryRun = fals
   // Validate every replacement before touching any file in this repository.
   for (const [name, content] of staged) { const file = path.join(root, name); await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, content, 'utf8') }
   return [...staged.keys()]
+}
+
+async function cloneIsolatedCheckout(git, workDir, sourcePath, checkout, signal) {
+  await rm(checkout, { recursive: true, force: true })
+  await mkdir(path.dirname(checkout), { recursive: true })
+  try {
+    await git(workDir, ['clone', '--shared', '--no-checkout', '--', sourcePath, checkout], signal)
+    return
+  } catch (error) {
+    if (signal?.aborted) throw error
+    await rm(checkout, { recursive: true, force: true })
+    await mkdir(path.dirname(checkout), { recursive: true })
+  }
+  await git(workDir, ['clone', '--no-hardlinks', '--no-checkout', '--', sourcePath, checkout], signal)
+}
+
+function applyFileEditsToText(filePath, initialText, edits) {
+  let current = initialText
+  for (const edit of edits) {
+    if (edit.before === null) {
+      if (current !== null || typeof edit.after !== 'string') throw serviceError(`新文件已存在或内容无效：${filePath}`)
+      current = edit.after
+    } else {
+      if (typeof current !== 'string' || typeof edit.before !== 'string' || !edit.before || typeof edit.after !== 'string') throw serviceError(`替换缺少原文或新内容：${filePath}`)
+      const eol = current.includes('\r\n') ? '\r\n' : '\n'
+      const before = edit.before.replace(/\r?\n/g, eol), after = edit.after.replace(/\r?\n/g, eol)
+      const at = current.indexOf(before)
+      if (at < 0 || current.indexOf(before, at + 1) >= 0) throw serviceError(`原文未唯一匹配：${filePath}；请重新生成此修改`)
+      current = current.slice(0, at) + after + current.slice(at + before.length)
+    }
+  }
+  return current
+}
+
+function extractAddedLines(base, side) {
+  let bi = 0
+  const added = []
+  for (const line of side) {
+    if (bi < base.length && line === base[bi]) bi++
+    else added.push(line)
+  }
+  return bi === base.length ? added : null
+}
+
+// Resolve pure adjacent-line append conflicts in CMake lists (e.g. two tasks each
+// adding a new stub .c entry right before the same closing parenthesis). Uses
+// --diff3 output and only resolves when every base line is preserved in exact
+// order and every newly inserted line is a plain list entry (never a command call).
+function resolveCmakeAppendConflict(conflictText) {
+  const eol = conflictText.includes('\r\n') ? '\r\n' : '\n'
+  const lines = conflictText.split(/\r?\n/)
+  const out = []
+  let i = 0
+  while (i < lines.length) {
+    if (!lines[i].startsWith('<<<<<<<')) { out.push(lines[i++]); continue }
+    i++
+    const ours = [], base = [], theirs = []
+    let section = 'ours', sawBase = false, sawMid = false, sawEnd = false
+    while (i < lines.length) {
+      if (lines[i].startsWith('|||||||')) { section = 'base'; sawBase = true; i++; continue }
+      if (lines[i].startsWith('=======')) { section = 'theirs'; sawMid = true; i++; continue }
+      if (lines[i].startsWith('>>>>>>>')) { sawEnd = true; i++; break }
+      if (section === 'ours') ours.push(lines[i])
+      else if (section === 'base') base.push(lines[i])
+      else theirs.push(lines[i])
+      i++
+    }
+    if (!sawBase || !sawMid || !sawEnd || !ours.length || !theirs.length) return null
+    const oursAdded = extractAddedLines(base, ours)
+    const theirsAdded = extractAddedLines(base, theirs)
+    if (!oursAdded || !theirsAdded || !oursAdded.length || !theirsAdded.length) return null
+    const isPlainListItem = line => { const t = line.trim(); return t.length > 0 && !/[()#]/.test(t) }
+    if (!oursAdded.every(isPlainListItem) || !theirsAdded.every(isPlainListItem)) return null
+    const merged = [...ours]
+    for (const line of theirsAdded) {
+      if (!merged.includes(line)) {
+        const closingIdx = base.length ? merged.lastIndexOf(base[base.length - 1]) : -1
+        if (closingIdx >= 0) merged.splice(closingIdx, 0, line)
+        else merged.push(line)
+      }
+    }
+    out.push(...merged)
+  }
+  return out.join(eol)
+}
+
+async function mergeFileContent(git, checkout, tmpDir, filePath, { baseContent, oursContent, theirsContent }, signal) {
+  if (baseContent === null) {
+    if (oursContent === null) return theirsContent
+    if (oursContent === theirsContent) return oursContent
+    throw serviceError(`多任务新增同名文件且内容冲突：${filePath}`)
+  }
+  if (oursContent === baseContent) return theirsContent
+  if (theirsContent === baseContent) return oursContent
+  if (oursContent === theirsContent) return oursContent
+  await mkdir(tmpDir, { recursive: true })
+  const token = randomUUID()
+  const scratchFile = path.join(tmpDir, `${token}.merged`)
+  const baseFile = path.join(tmpDir, `${token}.base`)
+  const theirsFile = path.join(tmpDir, `${token}.theirs`)
+  try {
+    await writeFile(scratchFile, oursContent, 'utf8')
+    await writeFile(baseFile, baseContent, 'utf8')
+    await writeFile(theirsFile, theirsContent, 'utf8')
+    let cleanMerge = false
+    try {
+      await git(checkout, ['merge-file', '--diff3', '-L', 'current', '-L', 'base', '-L', 'incoming', scratchFile, baseFile, theirsFile], signal)
+      cleanMerge = true
+    } catch (error) {
+      if (signal?.aborted) throw error
+    }
+    const mergedText = await readFile(scratchFile, 'utf8')
+    if (cleanMerge && !mergedText.includes('<<<<<<<')) {
+      if (IS_CMAKE_FILE.test(filePath)) checkCmakeSyntax(mergedText, filePath)
+      return mergedText
+    }
+    if (IS_CMAKE_FILE.test(filePath) && mergedText.includes('<<<<<<<')) {
+      const resolved = resolveCmakeAppendConflict(mergedText)
+      if (resolved !== null) {
+        checkCmakeSyntax(resolved, filePath)
+        return resolved
+      }
+    }
+    throw serviceError(`多任务三方合并发生行级冲突：${filePath}；请调整所选任务组合或合并后重新生成`)
+  } finally {
+    await Promise.all([scratchFile, baseFile, theirsFile].map(f => rm(f, { force: true }).catch(() => {})))
+  }
 }
 
 // Replace every repeated value >= 80 chars with a pointer to its first occurrence.
@@ -639,14 +780,23 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
         }
       }
     }
-    const testFiles = fileNames.filter(name => TEST_FILE_NAME.test(name) || (TEST_DIR_NAME.test(path.posix.basename(relDir)) && /\.(?:c|cc|cpp|cxx)$/i.test(name)))
+    if (!inTestDir && buildTargets.length < 24) {
+      for (const pyMeta of ['pyproject.toml', 'setup.py', 'pytest.ini', 'conftest.py']) {
+        if (fileNames.includes(pyMeta)) {
+          addBuildTarget({ file: relDir === '.' ? pyMeta : `${relDir}/${pyMeta}`, line: 1, kind: 'python_project', target: pyMeta })
+        }
+      }
+    }
+    const testFiles = fileNames.filter(name => TEST_FILE_NAME.test(name) || (TEST_DIR_NAME.test(path.posix.basename(relDir)) && /\.(?:c|cc|cpp|cxx|py|sh)$/i.test(name)))
     if (testFiles.length && testDirectories.length < 10) {
       const sampleRel = relDir === '.' ? testFiles[0] : `${relDir}/${testFiles[0]}`
       const sampleText = await readBoundedText(root, sampleRel, 65536)
       const isGtest = Boolean(sampleText && /\bgtest\b|TEST(?:_F|_P)?\s*\(/.test(sampleText))
+      const isPytest = sampleRel.endsWith('.py') && Boolean(sampleText && /\bpytest\b|def\s+test_/.test(sampleText))
+      const isShell = /\.(?:sh|bash)$/i.test(sampleRel)
       testDirectories.push({
         directory: relDir,
-        framework: isGtest ? 'gtest' : 'native',
+        framework: isGtest ? 'gtest' : isPytest ? 'pytest' : isShell ? 'shell' : 'native',
         sample_files: testFiles.slice(0, 8),
       })
       if (!sampleTestSnippet && sampleText) {
@@ -770,6 +920,7 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
     '不要修改或推送源码仓库，不运行构建或安装命令。唯一交付是下述 JSON 文件；宿主负责精确写入、提交和推送。',
     '源码副本是只读输入，包括拟新增文件的位置：禁止用 write/edit/apply_patch 或 shell 直接在 repositories 中创建或修改文件，也不要先写源文件再把它读回生成 edits。新增模块的完整源码放进 edits[].after 字符串，before=null；已有文件修改用 before/after 字符串描述。',
     '防单步超长输出截断与定界符越界：edits[].before 只截取当前文件中唯一匹配的最短 1~5 行原文，严禁整函数大段复制；修改 CMakeLists.txt、函数参数或初始化列表时，before 必须包含闭合定界符 `)`/`}` 并在定界符内部插入新项，严禁对以 `)`/`}` 结尾的行做行后追加（宿主会对修改的 CMake 文件执行确定性词法语法检查）；不要在思考或回复正文中预先默写整份源码或完整 JSON。可直接用 write 工具写入目标 JSON，或在输出文件的父目录写简短脚本生成目标 JSON。交付前确认输出文件存在、JSON 可解析且 edits 非空，然后立即结束；聊天里的代码块不能代替磁盘交付。',
+    '若目标源码为 Python（.py）或 Shell（.sh/.bash）脚本：运行期优先通过环境变量（如 os.environ.get("PANGEA_FI") 或 ${PANGEA_FI:-}）控制故障触发并默认关闭，delivery.artifact_verify 可使用 python3 -m py_compile <脚本> / bash -n <脚本> 或 grep -Fq "<marker>" <脚本> 校验。',
     '本任务不搭建模拟 HTTP/数据库/容器栈，不启动后台服务，不执行 profiles 中的部署或业务操作。自检限定为 JSON 合同、原文替换唯一性及源码语法；真实构建与端到端实测由宿主后续执行，不能把模拟结果写成实测结论。',
     '先完成调用路径与副作用判断，再生成实际可编译的修改。故障注入制造原因，保留原有错误处理和恢复逻辑，不直接篡改预期结果。',
     '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中，次数配置为零或负数时明确禁用。注意 getenv() 返回只读环境变量不会自行递减：凡在 points[].times 或自述中声明有限触发次数（如 times=1 / “命中后消耗一次”），必须在代码中使用静态/原子剩余计数器懒初始化并在命中时原子递减（fetch_sub / --）；若实现为常驻开关依赖外部 unset 恢复，则 times 与自述须如实写明持续生效，严禁自述“消耗一次”而实现只读不减。优先复用真实已有调测入口；没有时实现符合项目语言与构建方式的最小控制入口，并把必要源文件/构建接入一起纳入 edits。',
@@ -1556,8 +1707,7 @@ export class FaultInjectionService {
           record.notices.push(`${source.repo_id}：当前分析目录 HEAD 含有历史打桩提交 ${listed}。宿主不会代为回退分析目录，请确认当前基线是否为预期开发代码。`)
         }
         const checkout = path.join(directory, 'repositories', source.repo_id)
-        await mkdir(path.dirname(checkout), { recursive: true })
-        await this.git(directory, ['clone', '--no-hardlinks', '--no-checkout', '--', sourcePath, checkout], signal)
+        await cloneIsolatedCheckout(this.git, directory, sourcePath, checkout, signal)
         for (const setting of ['user.name', 'user.email']) {
           try { const value = await this.git(sourcePath, ['config', '--get', setting], signal); if (value) await this.git(checkout, ['config', setting, value], signal) }
           catch (error) { if (signal.aborted) throw error }
@@ -2105,9 +2255,7 @@ export class FaultInjectionService {
               repo.remote_url = remoteUrl
               repo.applied = []
               repo.failures = []
-              await rm(checkout, { recursive: true, force: true })
-              await mkdir(path.dirname(checkout), { recursive: true })
-              await this.git(buildDir, ['clone', '--no-hardlinks', '--no-checkout', '--', sourcePath, checkout], opSignal)
+              await cloneIsolatedCheckout(this.git, buildDir, sourcePath, checkout, opSignal)
               for (const setting of ['user.name', 'user.email']) {
                 try { const value = await this.git(sourcePath, ['config', '--get', setting], opSignal); if (value) await this.git(checkout, ['config', setting, value], opSignal) }
                 catch { if (opSignal.aborted) throw opSignal.reason }
@@ -2115,7 +2263,19 @@ export class FaultInjectionService {
               await this.git(checkout, ['remote', 'set-url', 'origin', remoteUrl], opSignal)
               await this.git(checkout, ['checkout', '--detach', baseCommit], opSignal)
               const touchedBy = new Map()
+              const baseSnapshots = new Map()
               const allFiles = new Set()
+              const mergeTmpDir = path.join(buildDir, '.merge-tmp')
+              const readRepoTextAt = async (commit, relPath, fallbackEol = '\n') => {
+                if (commit === baseCommit && baseSnapshots.has(relPath)) return baseSnapshots.get(relPath)
+                try {
+                  const raw = await this.git(checkout, ['show', `${commit}:${relPath}`], opSignal)
+                  return raw ? (raw.endsWith(fallbackEol) ? raw : raw + fallbackEol) : raw
+                } catch (err) {
+                  if (opSignal.aborted) throw err
+                  return null
+                }
+              }
               for (const entry of loadedTasks) {
                 const edits = entry.edits.filter(edit => edit.repo_id === repo.repo_id)
                 if (!edits.length) continue
@@ -2124,7 +2284,50 @@ export class FaultInjectionService {
                     const attributes = await this.git(checkout, ['check-attr', '-z', 'filter', '--', edit.path], opSignal)
                     if (attributes.split('\0')[2] === 'lfs') throw serviceError(`不支持修改 LFS 文件：${edit.path}`)
                   }
-                  const files = await applyInjectionEdits(checkout, edits)
+                  const root = await realpath(checkout)
+                  for (const edit of edits) {
+                    const norm = posixPath(edit?.path || '')
+                    if (!norm || baseSnapshots.has(norm) || touchedBy.has(norm)) continue
+                    const targetFile = path.resolve(root, norm)
+                    if (inside(root, targetFile)) {
+                      const snap = await readFile(targetFile, 'utf8').catch(err => (err.code === 'ENOENT' ? null : undefined))
+                      if (snap !== undefined) baseSnapshots.set(norm, snap)
+                    }
+                  }
+                  const hasOverlap = edits.some(edit => touchedBy.has(posixPath(edit?.path || '')))
+                  let files
+                  if (!hasOverlap) {
+                    files = await applyInjectionEdits(checkout, edits)
+                  } else {
+                    const taskBaseCommit = entry.record.repositories?.find(r => r.repo_id === repo.repo_id)?.base_commit || baseCommit
+                    const byFile = new Map()
+                    for (const edit of edits) {
+                      const norm = posixPath(edit?.path || '')
+                      if (!byFile.has(norm)) byFile.set(norm, [])
+                      byFile.get(norm).push(edit)
+                    }
+                    const mergedStage = new Map()
+                    for (const [norm, fileEdits] of byFile) {
+                      const oursContent = await readSafeRepoFile(root, norm)
+                      if (!touchedBy.has(norm)) {
+                        const direct = applyFileEditsToText(norm, oursContent, fileEdits)
+                        if (IS_CMAKE_FILE.test(norm)) checkCmakeSyntax(direct, norm)
+                        mergedStage.set(norm, direct)
+                      } else {
+                        const fallbackEol = typeof oursContent === 'string' && oursContent.includes('\r\n') ? '\r\n' : '\n'
+                        const baseContent = await readRepoTextAt(taskBaseCommit, norm, fallbackEol)
+                        const theirsContent = applyFileEditsToText(norm, baseContent, fileEdits)
+                        const merged = await mergeFileContent(this.git, checkout, mergeTmpDir, norm, { baseContent, oursContent, theirsContent }, opSignal)
+                        mergedStage.set(norm, merged)
+                      }
+                    }
+                    for (const [norm, content] of mergedStage) {
+                      const targetFile = path.join(root, norm)
+                      await mkdir(path.dirname(targetFile), { recursive: true })
+                      await writeFile(targetFile, content, 'utf8')
+                    }
+                    files = [...mergedStage.keys()]
+                  }
                   repo.applied.push({ task_id: entry.record.id, run_id: entry.record.run_id, name: entry.record.name || entry.record.id, files })
                   for (const file of files) {
                     const norm = posixPath(file)
@@ -2147,6 +2350,7 @@ export class FaultInjectionService {
                   })
                 }
               }
+              await rm(mergeTmpDir, { recursive: true, force: true }).catch(() => {})
               if (!repo.failures.length) {
                 if (allFiles.size) await this.git(checkout, ['add', '--', ...allFiles], opSignal)
                 repo.tree = (await this.git(checkout, ['write-tree'], opSignal)).trim()
@@ -2166,6 +2370,8 @@ export class FaultInjectionService {
           // Phase B: inside branchExclusive, fetch remote personal branch, synthesize commit-tree, and fast-forward push
           operation.status = 'pushing'
           build.status = 'pushing'
+          delete build.remote_diverged_repo
+          delete build.remote_diverged_commits
           await this.saveBuild(buildDir, build)
           await this.branchExclusive(build, async lockSignal => {
             const msgFile = path.join(buildDir, 'commit-message.txt')
@@ -2238,6 +2444,33 @@ export class FaultInjectionService {
                 continue
               }
               if (!repo.commit || repo.remote_head !== remoteHead || repo.committed_message !== desiredMessage) {
+                if (remoteHead !== repo.base_commit) {
+                  let rawDiverged = ''
+                  try { rawDiverged = await this.git(repo.checkout, ['log', '--format=%H\t%s', '-n', '20', `${repo.base_commit}..${remoteHead}`], lockSignal) }
+                  catch { lockSignal.throwIfAborted() }
+                  if (rawDiverged) {
+                    const knownSet = new Set((await this.collectRecordedInjectionCommits(dataRoot, repo.repo_id)).map(item => item.commit))
+                    const unknownCommits = rawDiverged.split(/\r?\n/).filter(Boolean).map(line => {
+                      const tab = line.indexOf('\t')
+                      return tab > 0 ? { commit: line.slice(0, tab).trim(), subject: line.slice(tab + 1).trim() } : { commit: line.trim(), subject: '' }
+                    }).filter(item => item.commit && !knownSet.has(item.commit))
+                    if (unknownCommits.length) {
+                      const summary = unknownCommits.slice(0, 5).map(item => `${item.commit.slice(0, 10)}${item.subject ? ` ${item.subject}` : ''}`).join('；')
+                      if (input.allow_overwrite_remote_diverged === true) {
+                        const notice = `${repo.repo_id}：已按用户显式确认覆盖远端分支 ${repo.remote_branch} 上的 ${unknownCommits.length} 个非 PANGEA 提交（${summary}）。`
+                        if (!build.notices.includes(notice)) build.notices.push(notice)
+                      } else {
+                        build.remote_diverged_repo = repo.repo_id
+                        build.remote_diverged_commits = unknownCommits.slice(0, 10)
+                        await this.saveBuild(buildDir, build)
+                        throw Object.assign(
+                          serviceError(`${repo.repo_id}：远端分支 ${repo.remote_branch} 存在 ${unknownCommits.length} 个未合入当前基线且非 PANGEA 打桩产生的提交（${summary}）。推送将把该分支树同步为当前基线与所选桩代码；请改用专用打桩构建分支，或显式确认覆盖后重试。`, 409),
+                          { code: 'REMOTE_BRANCH_DIVERGED', diverged_commits: unknownCommits.slice(0, 10) },
+                        )
+                      }
+                    }
+                  }
+                }
                 let baseIsAncestor = remoteHead === repo.base_commit
                 if (!baseIsAncestor) {
                   try { baseIsAncestor = await this.git(repo.checkout, ['merge-base', repo.base_commit, remoteHead], lockSignal) === repo.base_commit }

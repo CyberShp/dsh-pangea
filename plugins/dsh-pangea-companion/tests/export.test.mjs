@@ -244,3 +244,34 @@ test('ordinary case exports retain the existing evidence schema without parse co
   assert.deepEqual(rows[1].at(-1), { expected: '未改变' })
   exportedRows(run)
 })
+
+test('exports preserve candidate instrumentation points and linked operation notes in evidence and dedicated sheet/CSV', () => {
+  const details = sourceFirstProjection([{ action_id: 'analysis', stage: 'unit_analysis', task: { unit_id: 'u' }, records: [
+    { record_id: 'note-op', kind: 'note', body: { note_id: 'OP-1', title: '共用操作：建连与查询', content: '主机目录 /opt/test\n命令：nvme connect -t tcp -a <IP>', source_evidence: ['repo:tools/run.sh:10-25'] } },
+    { record_id: 'case-inst', kind: 'test_case', relates_to: ['note-op'], body: {
+      format_version: 'behavior-test-case-v1', case_id: 'TC-INST-1', title: '内存分配失败后清理连接',
+      test_level: 'developer_assisted', purpose: 'branch', execution_readiness: 'needs_instrumentation',
+      entry: '共用操作：建连与查询',
+      steps: [{ action: '启用内存分配失败桩后发起连接', expected: '连接失败且无残留设备' }],
+      external_observations: [], cleanup: ['关闭桩点'],
+      instrumentation: { points: [{ id: 'P-1', repo_id: 'repo', path: 'src/alloc.c', symbol: 'alloc_ctx', action: '返回 NULL', trigger: '首次建连', times: 1, observe: 'PANGEA_HIT_ALLOC' }] },
+    } },
+  ] }])
+  const run = { workflow_version: 'source-first-v1', run_id: 'r-inst', details }
+  const rows = exportedRows(run)
+  assert.match(rows[1][4], /关联操作说明（详见「共用操作说明」）：共用操作：建连与查询/)
+  const ev = caseEvidenceRows(run)
+  const instIdx = ev[0].indexOf('instrumentation_points')
+  const noteIdx = ev[0].indexOf('linked_operation_notes')
+  assert.ok(instIdx > 0 && noteIdx > 0)
+  assert.match(ev[1][instIdx], /P-1.*repo:src\/alloc\.c.*alloc_ctx.*PANGEA_HIT_ALLOC/)
+  assert.match(ev[1][noteIdx], /nvme connect -t tcp/)
+  const xlsx = buildTestCaseXlsx(run)
+  const sheet3 = xlsxRows(xlsx, 'sheet3.xml')
+  assert.equal(sheet3.length, 2)
+  assert.equal(sheet3[1][3], '共用操作：建连与查询')
+  assert.match(sheet3[1][4], /nvme connect -t tcp/)
+  const bundle = buildTestCaseCsvBundle(run)
+  const opCsv = csvRows(zipEntry(bundle, 'operation-notes.csv'))
+  assert.deepEqual(opCsv, sheet3)
+})

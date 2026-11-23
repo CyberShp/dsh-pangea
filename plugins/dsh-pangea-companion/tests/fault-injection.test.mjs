@@ -174,7 +174,7 @@ test('real Git + compiled C: generate from HEAD without touching personal branch
   })
 
   assert.equal(await injectionGit(repo.path, ['branch', '--show-current']), '')
-  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: task.id }] })
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: task.id }], allow_overwrite_remote_diverged: true })
   assert.equal(built.status, 'pushed', built.error)
   const wantedCommit = built.repositories[0].commit
   assert.equal(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), wantedCommit)
@@ -401,7 +401,7 @@ test('concurrent remote personal branch update fails fast-forward push without f
   assert.match(firstAttempt.error, /重新合成提交/)
   const colleagueHead = await injectionGit(remote, ['rev-parse', 'refs/heads/personal'])
 
-  const retried = await service.build(f.dataRoot, { build_id: firstAttempt.id })
+  const retried = await service.build(f.dataRoot, { build_id: firstAttempt.id, allow_overwrite_remote_diverged: true })
   assert.equal(retried.status, 'pushed', retried.error)
   assert.notEqual(retried.repositories[0].commit, firstAttempt.repositories[0].commit)
   assert.equal(await injectionGit(remote, ['merge-base', colleagueHead, retried.repositories[0].commit]), colleagueHead)
@@ -975,4 +975,110 @@ test('restore_baseline build clears injected changes on remote personal branch w
   assert.equal(again.repositories[0].push_result, 'unchanged')
   assert.equal(again.repositories[0].commit, restored.repositories[0].commit)
 })
+
+test('WP1.3: multi-task build three-way merges overlapping CMakeLists.txt appends and still blocks true semantic line conflicts', async t => {
+  const f = await fixture(t)
+  const source = f.repositories[0].source_path
+  const remote = f.repositories[0].remote_path
+  await writeFile(path.join(source, 'CMakeLists.txt'), 'add_library(core STATIC\n  main.c\n)\n')
+  await injectionGit(source, ['add', 'CMakeLists.txt'])
+  await injectionGit(source, ['commit', '-m', 'add cmake'])
+  await injectionGit(source, ['push', 'origin', 'HEAD:refs/heads/main', 'HEAD:refs/heads/personal'])
+  const head = await injectionGit(source, ['rev-parse', 'HEAD'])
+  f.repositories[0].git.commit = head
+  f.repositories[0].base_ref = head
+
+  const makeService = (editsFactory, pointId) => new FaultInjectionService({
+    generate: async ({ record }) => makeResult(record, editsFactory(), pointId),
+  })
+
+  const svcA = makeService(() => [
+    { repo_id: 'target', path: 'stub_a.c', before: null, after: 'const char *m_a = "PANGEA_FI";\n' },
+    { repo_id: 'target', path: 'CMakeLists.txt', before: 'add_library(core STATIC\n  main.c\n)\n', after: 'add_library(core STATIC\n  main.c\n  stub_a.c\n)\n' },
+  ], 'A')
+  const svcB = makeService(() => [
+    { repo_id: 'target', path: 'stub_b.c', before: null, after: 'const char *m_b = "PANGEA_FI";\n' },
+    { repo_id: 'target', path: 'CMakeLists.txt', before: 'add_library(core STATIC\n  main.c\n)\n', after: 'add_library(core STATIC\n  main.c\n  stub_b.c\n)\n' },
+  ], 'B')
+  t.after(() => { svcA.dispose(); svcB.dispose() })
+
+  const taskA = await svcA.start({ ...f, cwd: f.root, input: { ...f.input, case_keys: ['unit/CASE-A'] } })
+  await wait(svcA)
+  const taskB = await svcB.start({ ...f, cwd: f.root, input: { ...f.input, case_keys: ['unit/CASE-B'] } })
+  await wait(svcB)
+
+  const built = await svcA.build(f.dataRoot, {
+    items: [{ run_id: f.run.run_id, task_id: taskA.id }, { run_id: f.run.run_id, task_id: taskB.id }],
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(built.status, 'pushed', built.error)
+  const mergedCmake = await injectionGit(remote, ['show', `${built.repositories[0].commit}:CMakeLists.txt`])
+  assert.match(mergedCmake, /stub_a\.c/)
+  assert.match(mergedCmake, /stub_b\.c/)
+  assert.match(mergedCmake, /\)\s*$/)
+  assert.doesNotMatch(mergedCmake, /<<<<<<<|=======|>>>>>>>/)
+
+  // True semantic conflict on the same existing CMake line must be blocked cleanly
+  const svcConflict1 = makeService(() => [
+    { repo_id: 'target', path: 'CMakeLists.txt', before: 'add_library(core STATIC', after: 'add_library(core SHARED' },
+  ], 'C1')
+  const svcConflict2 = makeService(() => [
+    { repo_id: 'target', path: 'CMakeLists.txt', before: 'add_library(core STATIC', after: 'add_library(core OBJECT' },
+  ], 'C2')
+  t.after(() => { svcConflict1.dispose(); svcConflict2.dispose() })
+  const taskC1 = await svcConflict1.start({ ...f, cwd: f.root, input: { ...f.input, case_keys: ['unit/CASE-A'] } })
+  await wait(svcConflict1)
+  const taskC2 = await svcConflict2.start({ ...f, cwd: f.root, input: { ...f.input, case_keys: ['unit/CASE-B'] } })
+  await wait(svcConflict2)
+  const conflictBuild = await svcConflict1.build(f.dataRoot, {
+    items: [{ run_id: f.run.run_id, task_id: taskC1.id }, { run_id: f.run.run_id, task_id: taskC2.id }],
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(conflictBuild.status, 'failed')
+  assert.match(conflictBuild.error, /行级冲突.*CMakeLists\.txt/)
+})
+
+test('WP1.4: build blocks overwriting unknown manual commits on remote personal branch until explicitly confirmed', async t => {
+  const f = await fixture(t)
+  const remote = f.repositories[0].remote_path
+  // Push a manual developer commit directly onto remote personal branch
+  const tempClone = path.join(f.root, 'dev-clone')
+  await injectionGit(f.root, ['clone', '--branch', 'personal', remote, tempClone])
+  await injectionGit(tempClone, ['config', 'user.name', 'Dev'])
+  await injectionGit(tempClone, ['config', 'user.email', 'dev@local'])
+  await writeFile(path.join(tempClone, 'feature.txt'), 'unmerged feature work\n')
+  await injectionGit(tempClone, ['add', 'feature.txt'])
+  await injectionGit(tempClone, ['commit', '-m', 'feat: manual unmerged dev work'])
+  await injectionGit(tempClone, ['push', 'origin', 'HEAD:refs/heads/personal'])
+  const manualHead = await injectionGit(remote, ['rev-parse', 'refs/heads/personal'])
+
+  const service = new FaultInjectionService({
+    generate: async ({ record }) => generated(record),
+  })
+  t.after(() => service.dispose())
+  const task = await service.start({ ...f, cwd: f.root })
+  await wait(service)
+
+  const blocked = await service.build(f.dataRoot, {
+    items: [{ run_id: f.run.run_id, task_id: task.id }],
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(blocked.status, 'failed')
+  assert.match(blocked.error, /非 PANGEA 打桩产生的提交/)
+  assert.match(blocked.error, /feat: manual unmerged dev work/)
+  assert.equal(blocked.remote_diverged_commits?.length, 1)
+  assert.equal(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), manualHead, 'remote personal branch must not be overwritten before confirmation')
+
+  const confirmed = await service.build(f.dataRoot, {
+    build_id: blocked.id,
+    allow_overwrite_remote_diverged: true,
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(confirmed.status, 'pushed', confirmed.error)
+  assert.equal(confirmed.remote_diverged_commits, undefined)
+  assert.ok(confirmed.notices.some(n => n.includes('已按用户显式确认覆盖')))
+  assert.notEqual(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), manualHead)
+})
+
+
 

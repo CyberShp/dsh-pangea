@@ -59,8 +59,17 @@ async function scratchFingerprint(scratchDirectory) {
 function isAuthoringToolUpdate(update, scratchDirectory, outputPath) {
   const kind = typeof update?.kind === 'string' ? update.kind.trim() : ''
   if (AUTHORING_TOOL_KIND.test(kind)) return true
+  const outNorm = outputPath ? path.resolve(outputPath).replaceAll('\\', '/').toLowerCase() : ''
   const outName = outputPath ? path.basename(outputPath) : 'result.json'
-  const scratchNorm = scratchDirectory ? String(scratchDirectory).replaceAll('\\', '/') : ''
+  const scratchNorm = scratchDirectory ? path.resolve(scratchDirectory).replaceAll('\\', '/').toLowerCase() : ''
+  if (Array.isArray(update?.locations)) {
+    for (const loc of update.locations) {
+      if (typeof loc?.path !== 'string' || !loc.path.trim()) continue
+      const locNorm = path.resolve(loc.path).replaceAll('\\', '/').toLowerCase()
+      if (outNorm && locNorm === outNorm) return true
+      if (scratchNorm && scratchNorm !== '/' && (locNorm === scratchNorm || locNorm.startsWith(`${scratchNorm}/`))) return true
+    }
+  }
   const parts = []
   if (typeof update?.title === 'string') parts.push(update.title)
   if (typeof update?.rawInput === 'string') parts.push(update.rawInput)
@@ -72,8 +81,9 @@ function isAuthoringToolUpdate(update, scratchDirectory, outputPath) {
   }
   const blob = parts.join(' ').replaceAll('\\', '/')
   if (!blob) return false
+  const rawScratch = scratchDirectory ? String(scratchDirectory).replaceAll('\\', '/') : ''
   if (outName && blob.includes(outName) && /(?:write|Set-Content|Out-File|json\.dump|write_text|open\s*\(|>)/i.test(blob)) return true
-  if (scratchNorm && scratchNorm !== '/' && blob.includes(scratchNorm) && /(?:write|Set-Content|Out-File|json\.dump|write_text|open\s*\(|>|\.py\b|\.mjs\b)/i.test(blob)) return true
+  if (rawScratch && rawScratch !== '/' && blob.includes(rawScratch) && /(?:write|Set-Content|Out-File|json\.dump|write_text|open\s*\(|>|\.py\b|\.mjs\b)/i.test(blob)) return true
   return false
 }
 

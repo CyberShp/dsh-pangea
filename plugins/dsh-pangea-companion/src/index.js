@@ -35,6 +35,7 @@ import { FaultInjectionService } from './fault-injection.js'
 import { summarizeRunVerifications } from './fault-injection-summary.js'
 import { createInjectionGenerator } from './fault-injection-agent.js'
 import { updateAdmission } from './update-admission.js'
+import { buildDiagnosticBundle } from './diagnostic-bundle.js'
 
 export const name = 'dsh-pangea-companion'
 export const inject = ['tools', 'webServer', 'agents', 'apiProxy', 'subagents', 'jobs']
@@ -50,6 +51,7 @@ const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
 const LAUNCH_LOG_API_PATH = '/api/pangea-companion/launch-log'
 const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
 const ACP_SETTINGS_API_PATH = '/api/pangea-companion/acp-settings'
+const DIAGNOSTIC_BUNDLE_API_PATH = '/api/pangea-companion/diagnostic-bundle'
 const hostInstanceId = randomUUID()
 // Shared by requests for one store, never by task IDs from another workspace.
 const taskOperationStates = new WeakMap()
@@ -571,10 +573,34 @@ export async function caseReviewRouteHandler(req, res, { readRun = summarizeRun,
     if (run.run_id !== input.run_id) return json(res, 409, { status: 'error', code: 'run_mismatch', error: '读取的用例不属于请求 Run' })
     if (run.reader_health?.collection_status?.test_cases === 'unavailable') return json(res, 422, { status: 'error', code: 'cases_unreadable', error: '用例暂不可读取' })
     const store = new CaseReviewStore({ dataRoot, runId: input.run_id }), items = run.details?.test_cases ?? []
-    const projected = req.method === 'POST' ? await store.update(items, input) : await store.project(items)
+    const projected = req.method === 'POST'
+      ? (input.action === 'inherit_parent' ? await store.inheritFromParent(items, input.parent_run_id) : await store.update(items, input))
+      : await store.project(items)
     const injection = await summarizeRunVerifications(dataRoot, input.run_id)
     return json(res, 200, { ...projected, ...injection })
   } catch (reason) { return json(res, reason.statusCode ?? (reason.code === 'ENOENT' ? 404 : 500), { status: 'error', code: reason.code ?? 'review_failed', error: reason.message }) }
+}
+
+export async function diagnosticBundleRouteHandler(req, res, { readRun = summarizeRun, resolveRoot = discoverPangeaDataRoot } = {}) {
+  if (req.method !== 'GET') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+  if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
+  try {
+    const url = new URL(req.url ?? DIAGNOSTIC_BUNDLE_API_PATH, 'http://localhost')
+    const runId = url.searchParams.get('run_id') ?? ''
+    if (!/^[A-Za-z0-9._-]+$/.test(runId) || ['.', '..'].includes(runId)) return json(res, 400, { status: 'error', error: 'run_id is required' })
+    const dataRoot = await resolveRoot({ cwd: url.searchParams.get('cwd') || undefined, dataRoot: url.searchParams.get('data_root') || undefined })
+    let summary = null
+    try { summary = await readRun(dataRoot, runId, { includeDetails: false }) } catch {}
+    const bundle = await buildDiagnosticBundle({ dataRoot, runId, summary })
+    res.writeHead(200, {
+      'Content-Type': bundle.contentType,
+      'Content-Disposition': `attachment; filename="${bundle.filename}"`,
+      'Cache-Control': 'no-store',
+    })
+    res.end(bundle.buffer)
+  } catch (reason) {
+    return json(res, reason.statusCode ?? 500, { status: 'error', error: reason.message })
+  }
 }
 
 export async function exportRouteHandler(req, res, { readRun = summarizeRun, resolveRoot = discoverPangeaDataRoot } = {}) {
@@ -2123,6 +2149,7 @@ export function apply(ctx) {
   const disposeCaseReviewRoute = ctx.webServer.register({ kind: 'exact', path: CASE_REVIEW_API_PATH, handler: (req, res) => caseReviewRouteHandler(req, res) })
   const disposeFaultInjectionRoute = ctx.webServer.register({ kind: 'exact', path: FAULT_INJECTION_API_PATH, handler: (req, res) => faultInjectionRouteHandler(req, res, faultInjection, ctx) })
   const disposeExportRoute = ctx.webServer.register({ kind: 'exact', path: EXPORT_API_PATH, handler: exportRouteHandler })
+  const disposeDiagnosticBundleRoute = ctx.webServer.register({ kind: 'exact', path: DIAGNOSTIC_BUNDLE_API_PATH, handler: diagnosticBundleRouteHandler })
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })
   const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
   const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
@@ -2146,6 +2173,7 @@ export function apply(ctx) {
     disposeAcpSettingsRoute()
     disposeEnvironmentRoute()
     disposeLaunchLogRoute()
+    disposeDiagnosticBundleRoute()
     disposeSourceRoute()
     disposeExportRoute()
     disposeCaseReviewRoute()

@@ -106,6 +106,9 @@ export async function summarizeRunVerifications(dataRoot, runId) {
           verified: item.result !== 'not_run',
           result: item.result,
           hits: String(item.hits || ''),
+          notes: String(item.notes || ''),
+          build_package_id: String(item.build?.package_id || ''),
+          build_url: String(item.build?.url || ''),
           at: nextAt,
         }
       }

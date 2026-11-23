@@ -9,6 +9,23 @@ export const CASE_TYPE_LABELS = {
 
 export const REVIEW_LABELS = Object.freeze({ unreviewed: '未评审', adopted: '已采纳', excluded: '暂不采纳', needs_recheck: '需重新评审' })
 
+export const READINESS_FILTER_LABELS = Object.freeze({
+  ready: '具备执行条件',
+  needs_instrumentation: '待代码打桩',
+  unknown: '依据待核实',
+  needs_setup: '待补执行条件',
+  unclassified: '未标注',
+})
+
+export function caseReadinessState(item) {
+  const declared = item?.execution_readiness ?? item?.source_record?.body?.execution_readiness
+  if (declared === 'ready' || item?.readiness === 'ready') return { key: 'ready', label: '具备执行条件', tone: 'good' }
+  if (declared === 'needs_instrumentation') return { key: 'needs_instrumentation', label: '待代码打桩', tone: 'warn' }
+  if (declared === 'unknown') return { key: 'unknown', label: '依据待核实', tone: 'info' }
+  if (item?.readiness === 'needs_setup') return { key: 'needs_setup', label: '待补执行条件', tone: 'warn' }
+  return { key: 'unclassified', label: '未标注', tone: 'unreviewed' }
+}
+
 export function caseIdentity(item) {
   const id = item?.projection_id || item?.test_case_id
   return typeof id === 'string' && id.trim() ? id : null
@@ -45,10 +62,15 @@ export function filterTestCases(items = [], filters = {}, reviews = {}) {
   const query = String(filters.query ?? '').trim().toLocaleLowerCase()
   return items.filter(item => {
     const review = reviews[caseIdentity(item)]?.review_status ?? 'unreviewed'
+    const readiness = filters.readiness
+    const readinessMatch = !readiness
+      || (readiness === 'needs_instrumentation' || readiness === 'unknown'
+        ? caseReadinessState(item).key === readiness
+        : (['ready', 'needs_setup'].includes(item.readiness) ? item.readiness : 'unclassified') === readiness)
     return (!query || JSON.stringify(item).toLocaleLowerCase().includes(query))
       && (!filters.unit || item.unit_id === filters.unit)
       && (!filters.type || (item.case_type || item.test_level || 'unclassified') === filters.type)
-      && (!filters.readiness || (['ready', 'needs_setup'].includes(item.readiness) ? item.readiness : 'unclassified') === filters.readiness)
+      && readinessMatch
       && (!filters.review || review === filters.review)
   })
 }

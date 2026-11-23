@@ -806,7 +806,7 @@ export function createFaultInjectionBuild(React) {
       && !hasPatchFailures,
     )
 
-    const startBuild = async ({ retryId = null, restoreBaseline = false } = {}) => {
+    const startBuild = async ({ retryId = null, restoreBaseline = false, allowOverwriteRemoteDiverged = false } = {}) => {
       if (restoreBaseline) {
         const targets = restoreTargetRepos.map(r => `${r.repo_id}（${r.remote}/${r.remote_branch}）`).join('、')
         if (typeof window?.confirm === 'function' && !window.confirm(`确认将 ${targets} 恢复为分析目录当前干净基线（清空所有打桩改动）并推送到远端个人分支？\n该操作不会修改本地分析目录，也不使用强推。`)) {
@@ -824,8 +824,9 @@ export function createFaultInjectionBuild(React) {
         const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(subject) }
         const checked = resolveCommitMessage(cfg, subject, { allowDefaultSummary: commitDraft.summary === null })
         if (!checked.ok) throw new Error(checked.error)
+        const overwriteFlag = allowOverwriteRemoteDiverged ? { allow_overwrite_remote_diverged: true } : {}
         const payload = retryId
-          ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, pipeline_url: pipelineUrl }
+          ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, pipeline_url: pipelineUrl, ...overwriteFlag }
           : restoreBaseline
             ? {
                 action: 'build',
@@ -834,6 +835,7 @@ export function createFaultInjectionBuild(React) {
                 commit_config: cfg,
                 commit_message: checked.message,
                 pipeline_url: pipelineUrl,
+                ...overwriteFlag,
               }
             : {
                 action: 'build',
@@ -841,6 +843,7 @@ export function createFaultInjectionBuild(React) {
                 commit_config: cfg,
                 commit_message: checked.message,
                 pipeline_url: pipelineUrl,
+                ...overwriteFlag,
               }
         const value = await request(payload)
         latestBuild = value.build
@@ -1054,8 +1057,10 @@ export function createFaultInjectionBuild(React) {
             h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(activeBuild.status)}` }, BUILD_STATUS_LABELS[activeBuild.status] || activeBuild.status)),
           activeBuild.status === 'pushing' && activeBuild.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送仓库：${activeBuild.current_repository}`) : null,
           activeBuild.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
-            h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : '本次出包未完成。'),
-            h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error))) : null,
+            h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : activeBuild.remote_diverged_commits?.length ? '远端分支存在非 PANGEA 打桩提交，已拦截覆盖推送。' : '本次出包未完成。'),
+            h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error)),
+            activeBuild.remote_diverged_commits?.length && canRetryActiveBuild ? h('div', { style: { marginTop: 10 } },
+              h('button', { type: 'button', className: 'primary', disabled: working || buildRunning || !commitCheck.ok, onClick: () => startBuild({ retryId: activeBuild.id, allowOverwriteRemoteDiverged: true }) }, '确认覆盖远端非打桩提交并重新推送')) : null) : null,
           Array.isArray(activeBuild.notices) && activeBuild.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } },
             activeBuild.notices.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))) : null,
           (activeBuild.repositories || []).map(repo => h('div', { key: repo.repo_id, className: 'pangea-fi-repo-box', style: { fontSize: 13 } },

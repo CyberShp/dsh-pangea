@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { caseTitlePresentation, caseRecordParseNotice } from '../src/case-review-projection.js'
+import { caseTitlePresentation, caseRecordParseNotice, caseReadinessState, filterTestCases } from '../src/case-review-projection.js'
 
 test('ordinary titles retain authored text and identity exactly', () => {
   for (const title of ['TLS 握手失败后可以重试', '  保留原始空格\n与换行  ', '[TLS] 无效令牌被拒绝', '2026']) {
@@ -48,4 +48,18 @@ test('record parsing notices distinguish recovered content from unreadable sourc
   assert.match(caseRecordParseNotice({ record_parse: { status: 'recovered' } }).summary, /已恢复读取/)
   assert.match(caseRecordParseNotice({ record_parse: { status: 'recovered' } }).detail, /原始记录保持不变/)
   assert.match(caseRecordParseNotice({ record_parse: { status: 'invalid' } }).detail, /无法可靠读取/)
+})
+
+test('caseReadinessState and filterTestCases distinguish needs_instrumentation from unknown while preserving legacy needs_setup', () => {
+  const cases = [
+    { projection_id: 'u/1', title: '就绪', execution_readiness: 'ready', readiness: 'ready' },
+    { projection_id: 'u/2', title: '需打桩', execution_readiness: 'needs_instrumentation', readiness: 'needs_setup' },
+    { projection_id: 'u/3', title: '依据待核实', execution_readiness: 'unknown', readiness: 'needs_setup' },
+    { projection_id: 'u/4', title: '未标注', readiness: 'unclassified' },
+  ]
+  assert.deepEqual(cases.map(item => caseReadinessState(item).key), ['ready', 'needs_instrumentation', 'unknown', 'unclassified'])
+  assert.deepEqual(filterTestCases(cases, { readiness: 'needs_instrumentation' }).map(i => i.projection_id), ['u/2'])
+  assert.deepEqual(filterTestCases(cases, { readiness: 'unknown' }).map(i => i.projection_id), ['u/3'])
+  assert.deepEqual(filterTestCases(cases, { readiness: 'needs_setup' }).map(i => i.projection_id), ['u/2', 'u/3'])
+  assert.deepEqual(filterTestCases(cases, { readiness: 'ready' }).map(i => i.projection_id), ['u/1'])
 })

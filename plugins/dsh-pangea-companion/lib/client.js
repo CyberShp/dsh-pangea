@@ -704,6 +704,23 @@ window.__ModuleLoader__.load({
 
     const REVIEW_LABELS = Object.freeze({ unreviewed: '未评审', adopted: '已采纳', excluded: '暂不采纳', needs_recheck: '需重新评审' })
 
+    const READINESS_FILTER_LABELS = Object.freeze({
+      ready: '具备执行条件',
+      needs_instrumentation: '待代码打桩',
+      unknown: '依据待核实',
+      needs_setup: '待补执行条件',
+      unclassified: '未标注',
+    })
+
+    function caseReadinessState(item) {
+      const declared = item?.execution_readiness ?? item?.source_record?.body?.execution_readiness
+      if (declared === 'ready' || item?.readiness === 'ready') return { key: 'ready', label: '具备执行条件', tone: 'good' }
+      if (declared === 'needs_instrumentation') return { key: 'needs_instrumentation', label: '待代码打桩', tone: 'warn' }
+      if (declared === 'unknown') return { key: 'unknown', label: '依据待核实', tone: 'info' }
+      if (item?.readiness === 'needs_setup') return { key: 'needs_setup', label: '待补执行条件', tone: 'warn' }
+      return { key: 'unclassified', label: '未标注', tone: 'unreviewed' }
+    }
+
     function caseIdentity(item) {
       const id = item?.projection_id || item?.test_case_id
       return typeof id === 'string' && id.trim() ? id : null
@@ -740,10 +757,15 @@ window.__ModuleLoader__.load({
       const query = String(filters.query ?? '').trim().toLocaleLowerCase()
       return items.filter(item => {
         const review = reviews[caseIdentity(item)]?.review_status ?? 'unreviewed'
+        const readiness = filters.readiness
+        const readinessMatch = !readiness
+          || (readiness === 'needs_instrumentation' || readiness === 'unknown'
+            ? caseReadinessState(item).key === readiness
+            : (['ready', 'needs_setup'].includes(item.readiness) ? item.readiness : 'unclassified') === readiness)
         return (!query || JSON.stringify(item).toLocaleLowerCase().includes(query))
           && (!filters.unit || item.unit_id === filters.unit)
           && (!filters.type || (item.case_type || item.test_level || 'unclassified') === filters.type)
-          && (!filters.readiness || (['ready', 'needs_setup'].includes(item.readiness) ? item.readiness : 'unclassified') === filters.readiness)
+          && readinessMatch
           && (!filters.review || review === filters.review)
       })
     }
@@ -771,7 +793,7 @@ window.__ModuleLoader__.load({
         : item?.[legacy] ?? item?.[canonical]
     }
 
-    return { CASE_TYPE_LABELS, REVIEW_LABELS, caseIdentity, caseTitlePresentation, caseRecordParseNotice, filterTestCases, reviewProjection, caseField }
+    return { CASE_TYPE_LABELS, REVIEW_LABELS, READINESS_FILTER_LABELS, caseReadinessState, caseIdentity, caseTitlePresentation, caseRecordParseNotice, filterTestCases, reviewProjection, caseField }
     })()
 
     const __repositorySettingsView = (() => {
@@ -920,7 +942,7 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', className: 'btn', disabled: busy || !selected, onClick: () => setRefresh(value => value + 1) }, '刷新远端分支'),
               h('button', { type: 'button', className: 'btn', disabled: busy || !form.remote_branch || !branches || branches.local.some(item => item.name === form.remote_branch), onClick: createBranch }, '创建本地跟踪分支'),
               h('span', { role: 'status', style: { fontSize: 12, color: branchError ? '#b62836' : '#5e6773' } }, branchError || (branches?.live ? '已读取推送端的远端分支' : '远端分支为本地缓存，可刷新查询服务器'))),
-            h('p', { style: { margin: 0, fontSize: 12, color: '#5e6773' } }, '打桩只提交到这个已有分支；任务不会创建新分支。'),
+            h('p', { style: { margin: 0, fontSize: 12, color: '#5e6773' } }, '请使用专用打桩构建分支，勿填正在开发的特性分支；打桩推送会将该分支同步为当前基线与所选桩代码，任务不会自动新建分支。'),
             h('details', { className: 'pangea-repo-subdetails', open: needsGitLink || undefined },
               h('summary', null, '关联或更换打桩 Git 仓库'),
               h('p', { style: { margin: '6px 0 10px', fontSize: 12, color: '#5e6773' } }, '选择与分析源码对应的 Git 仓库。关联后保留原分析目录；打桩前展示源码差异。'),
@@ -2883,7 +2905,7 @@ window.__ModuleLoader__.load({
           && !hasPatchFailures,
         )
 
-        const startBuild = async ({ retryId = null, restoreBaseline = false } = {}) => {
+        const startBuild = async ({ retryId = null, restoreBaseline = false, allowOverwriteRemoteDiverged = false } = {}) => {
           if (restoreBaseline) {
             const targets = restoreTargetRepos.map(r => `${r.repo_id}（${r.remote}/${r.remote_branch}）`).join('、')
             if (typeof window?.confirm === 'function' && !window.confirm(`确认将 ${targets} 恢复为分析目录当前干净基线（清空所有打桩改动）并推送到远端个人分支？\n该操作不会修改本地分析目录，也不使用强推。`)) {
@@ -2901,8 +2923,9 @@ window.__ModuleLoader__.load({
             const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(subject) }
             const checked = resolveCommitMessage(cfg, subject, { allowDefaultSummary: commitDraft.summary === null })
             if (!checked.ok) throw new Error(checked.error)
+            const overwriteFlag = allowOverwriteRemoteDiverged ? { allow_overwrite_remote_diverged: true } : {}
             const payload = retryId
-              ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, pipeline_url: pipelineUrl }
+              ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, pipeline_url: pipelineUrl, ...overwriteFlag }
               : restoreBaseline
                 ? {
                     action: 'build',
@@ -2911,6 +2934,7 @@ window.__ModuleLoader__.load({
                     commit_config: cfg,
                     commit_message: checked.message,
                     pipeline_url: pipelineUrl,
+                    ...overwriteFlag,
                   }
                 : {
                     action: 'build',
@@ -2918,6 +2942,7 @@ window.__ModuleLoader__.load({
                     commit_config: cfg,
                     commit_message: checked.message,
                     pipeline_url: pipelineUrl,
+                    ...overwriteFlag,
                   }
             const value = await request(payload)
             latestBuild = value.build
@@ -3131,8 +3156,10 @@ window.__ModuleLoader__.load({
                 h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(activeBuild.status)}` }, BUILD_STATUS_LABELS[activeBuild.status] || activeBuild.status)),
               activeBuild.status === 'pushing' && activeBuild.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送仓库：${activeBuild.current_repository}`) : null,
               activeBuild.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
-                h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : '本次出包未完成。'),
-                h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error))) : null,
+                h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : activeBuild.remote_diverged_commits?.length ? '远端分支存在非 PANGEA 打桩提交，已拦截覆盖推送。' : '本次出包未完成。'),
+                h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error)),
+                activeBuild.remote_diverged_commits?.length && canRetryActiveBuild ? h('div', { style: { marginTop: 10 } },
+                  h('button', { type: 'button', className: 'primary', disabled: working || buildRunning || !commitCheck.ok, onClick: () => startBuild({ retryId: activeBuild.id, allowOverwriteRemoteDiverged: true }) }, '确认覆盖远端非打桩提交并重新推送')) : null) : null,
               Array.isArray(activeBuild.notices) && activeBuild.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } },
                 activeBuild.notices.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))) : null,
               (activeBuild.repositories || []).map(repo => h('div', { key: repo.repo_id, className: 'pangea-fi-repo-box', style: { fontSize: 13 } },
@@ -5986,7 +6013,7 @@ window.__ModuleLoader__.load({
     const { buildRunInsights } = __runInsights
     const { buildOverviewFindings, summaryText } = __overviewFindings
     const { taskDisplayName, taskRequestText } = __taskPresentation
-    const { caseIdentity, caseTitlePresentation, caseRecordParseNotice, filterTestCases, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
+    const { caseIdentity, caseTitlePresentation, caseRecordParseNotice, filterTestCases, caseReadinessState, READINESS_FILTER_LABELS, REVIEW_LABELS, CASE_TYPE_LABELS } = __caseReviewProjection
     const TestToolPicker = __testToolPicker.createTestToolPicker(React, __sourceScopePicker.createSourceScopePicker(React))
     const SourceScopePicker = __sourceScopePicker.createSourceScopePicker(React)
     const RepositorySettings = __repositorySettingsView.createRepositorySettings(React)
@@ -10833,6 +10860,32 @@ window.__ModuleLoader__.load({
           showActionNotice('离线图文报告已导出。')
         } catch (error) { showActionNotice(`报告导出失败：${error.message}`, true) }
       }
+      async function exportDiagnosticBundle() {
+        if (!current?.run_id || !snapshot?.data_root) return
+        try {
+          const query = new URLSearchParams({ cwd, data_root: snapshot.data_root, run_id: current.run_id })
+          const response = await fetch(`/api/pangea-companion/diagnostic-bundle?${query.toString()}`, { cache: 'no-store' })
+          if (!response.ok) {
+            let msg = `HTTP ${response.status}`
+            try { msg = (await response.json()).error ?? msg } catch {}
+            throw new Error(msg)
+          }
+          const blob = await response.blob()
+          const filename = response.headers?.get?.('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] ?? `pangea-diagnostic-${current.run_id}.zip`
+          downloadBlob(blob, filename)
+          showActionNotice('脱敏诊断包已导出（不含源码与凭据）。')
+        } catch (error) { showActionNotice(`诊断包导出失败：${error.message}`, true) }
+      }
+      async function inheritParentCaseReviews() {
+        const parentRunId = current?.incremental_summary?.parent_run_id || selectedTask?.origin?.parent_run_id || ''
+        if (!current?.run_id || !snapshot?.data_root || !parentRunId) return
+        try {
+          const next = await requestCaseReviews({ cwd, dataRoot: snapshot.data_root, runId: current.run_id, input: { action: 'inherit_parent', parent_run_id: parentRunId } })
+          setReviews(next)
+          setReviewError('')
+          showActionNotice(next.inherited_count ? `已从来源任务继承 ${next.inherited_count} 条未变更用例评审。` : '当前没有可继承的未变更用例评审。')
+        } catch (error) { showActionNotice(`继承来源评审失败：${error.message}`, true) }
+      }
       function caseParseCopyLines(item) {
         const notice = caseRecordParseNotice(item)
         return notice ? [`记录解析：${notice.detail}`, `解析说明：${sourceFirstRecordBody(item.record_parse)}`, `原始用例记录：\n${sourceFirstRecordBody(item.source_record?.body)}`] : []
@@ -11331,7 +11384,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'divider' }), h('strong', { className: 'small' }, '可以继续，也可以补全输入'), h('p', { className: 'create-side-note', style: { marginTop: 10 } }, coverageQueryResult?.asset?.status === 'available' ? '已生成可用资产，允许继续创建。缺失来源会保留为分析限制，不能视为完整覆盖结果。' : '当前没有可用覆盖率资产，请重新查询或补充文件。'), h('div', { style: { marginTop: 20 } }, button('补充覆盖率文件', () => go(2, 'coverage'), '', 'FileUp'))))
         if (step === 4) context = panel(h(React.Fragment, null,
           h('div', { className: 'create-side-title' }, '你将获得'), h('h3', { className: 'create-context-title' }, '可追溯的', h('br'), '分析与测试结论'),
-          ['按源码划分的分析单元', '模块流程与关键分支', scene[3], '复核结论与最终报告'].map(text => h('div', { key: text, className: 'create-check-item' }, runIcon('Check'), h('span', null, text))), h('div', { className: 'divider' }),
+          ['按源码划分的分析单元', '模块流程与关键分支', scene[3], MODEL_REVIEW_ENABLED ? '复核结论与最终报告' : '未审核直出报告与源码证据链'].map(text => h('div', { key: text, className: 'create-check-item' }, runIcon('Check'), h('span', null, text))), h('div', { className: 'divider' }),
           h('p', { className: 'create-side-note', style: { marginTop: 0 } }, '分析开始后可以随时查看阶段产物。最终结果数量由源码与分析过程决定。')))
         let content
         if (step === 1) content = panel(h(React.Fragment, null,
@@ -11414,7 +11467,10 @@ window.__ModuleLoader__.load({
       function renderCorrectionProgress(showActions = true) {
         return h(React.Fragment, null,
             current.partial_delivery ? h('div', { role: 'status', style: styles.notice }, '已结束返修并交付当前结果；部分修正未完成，未解决事项和未复核内容保留。') : null,
-            current.case_readiness ? h('div', { style: styles.itemMeta }, `具备执行条件 ${current.case_readiness.ready} · 待补执行条件 ${current.case_readiness.needs_setup} · 未标注 ${current.case_readiness.unclassified}`) : null,
+            current.case_readiness ? h('div', { style: styles.itemMeta },
+              Number.isInteger(current.case_readiness.needs_instrumentation) || Number.isInteger(current.case_readiness.unknown)
+                ? `具备执行条件 ${current.case_readiness.ready} · 待代码打桩 ${current.case_readiness.needs_instrumentation ?? 0} · 依据待核实 ${current.case_readiness.unknown ?? 0} · 未标注 ${current.case_readiness.unclassified}`
+                : `具备执行条件 ${current.case_readiness.ready} · 待补执行条件 ${current.case_readiness.needs_setup} · 未标注 ${current.case_readiness.unclassified}`) : null,
             current.execution_progress?.length ? h('section', { 'aria-label': '实际执行进度', className: 'pangea-correction-progress', style: styles.card },
               h('h3', null, '实际执行进度'),
               current.execution_progress.filter(item => !item.review_skipped).filter(item => item.stage === 'targeted_closure' || ['dispatched', 'paused'].includes(item.status)).map(item => {
@@ -12628,6 +12684,7 @@ window.__ModuleLoader__.load({
                 outline.map(([id, label], index) => h('button', { key: id, type: 'button', className: 'b03-report-outline-link', style: { ...styles.backButton, minHeight: 0, padding: '14px 0', border: 0, borderBottom: index < outline.length - 1 ? '1px solid #e5e7e4' : 0, borderRadius: 0, background: 'transparent', color: '#25292e', fontSize: 14 }, onClick: () => scrollTo(id) }, label))),
               h('section', { className: 'b03-overview-card' }, h('h3', null, '交付文件'),
                 h('button', { type: 'button', className: 'b03-task-run', onClick: () => { void exportOfflineReport() } }, '导出离线图文报告（ZIP）'),
+                h('button', { type: 'button', className: 'b03-task-run', style: { marginTop: 6 }, onClick: () => { void exportDiagnosticBundle() } }, '导出脱敏诊断包（ZIP）'),
                 current.artifacts?.report_html ? h('div', { className: 'b03-unlinked-row b03-report-file' }, reportGlyph(), h('div', null, h('strong', { className: 'small' }, 'report.html'), h('div', { className: 'b03-task-subtitle' }, partial ? '当前交付版' : '完整阅读版')), h('button', { type: 'button', className: 'b03-task-open', onClick: () => openSidebarFile(current.artifacts.report_html, 'PANGEA report.html') }, '打开')) : null,
                 current.artifacts?.report_md ? h('div', { className: 'b03-unlinked-row b03-report-file' }, reportGlyph(), h('div', null, h('strong', { className: 'small' }, 'report.md'), h('div', { className: 'b03-task-subtitle' }, 'Markdown 原文')), h('button', { type: 'button', className: 'b03-task-open', onClick: () => openSidebarFile(current.artifacts.report_md, 'PANGEA report.md') }, '打开')) : null,
                 h('div', { className: 'b03-report-divider' }),
@@ -12825,11 +12882,14 @@ window.__ModuleLoader__.load({
         const selectedVisible = selectableIds.filter(id => selectedCaseIds.includes(id))
         const allSelected = selectableIds.length > 0 && selectedVisible.length === selectableIds.length
         const unitCount = new Set(testCases.map(item => item.unit_id).filter(hasText)).size
+        const needsInstrumentationCount = testCases.filter(item => caseReadinessState(item).key === 'needs_instrumentation').length
         const coverageAvailable = current?.scenario === 'coverage-analysis' || current?.coverage_match || current?.coverage_summary?.valid_gaps != null
         const formatRisk = item => (item.linked_risk_ids ?? []).map(id => riskById.get(id)?.display_id || id)
         return h('section', { className: 'pangea-case-workspace', 'aria-label': '测试用例工作区' },
-          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '测试用例'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '用例'} · ${unitCount} 个分析单元${designCounts.variants ? ` · ${designCounts.variants} 项参数组合` : ''}${reviews?.injection_counts?.verified > 0 ? ` · 打桩实测 ${reviews.injection_counts.passed}/${reviews.injection_counts.verified} 通过` : ''}`)),
+          h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '测试用例'), h('p', null, `${designCounts.cases} 条${designCounts.has_legacy_groups ? '用例记录（含旧用例组）' : '用例'} · ${unitCount} 个分析单元${designCounts.variants ? ` · ${designCounts.variants} 项参数组合` : ''}${needsInstrumentationCount ? ` · 待打桩 ${needsInstrumentationCount} 条` : ''}${reviews?.injection_counts?.verified > 0 ? ` · 打桩实测 ${reviews.injection_counts.passed}/${reviews.injection_counts.verified} 通过` : ''}`)),
             h('div', { className: 'b05-head-actions' }, coverageAvailable ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => navigate({ type: 'coverage-cases' }) }, '覆盖补测视图') : null,
+              (current?.incremental_summary?.parent_run_id || selectedTask?.origin?.parent_run_id) ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void inheritParentCaseReviews() } }, '继承来源评审') : null,
+              needsInstrumentationCount ? h('button', { type: 'button', className: 'b03-task-action', 'aria-pressed': caseFilters.readiness === 'needs_instrumentation', onClick: () => setCaseFilters(value => ({ ...value, readiness: value.readiness === 'needs_instrumentation' ? '' : 'needs_instrumentation' })) }, caseFilters.readiness === 'needs_instrumentation' ? '显示全部条件' : `仅看待打桩（${needsInstrumentationCount}）`) : null,
               h('button', { type: 'button', className: 'b03-task-action', onClick: () => openFaultInjection(selectedCaseIds) }, selectedCaseIds.length ? `代码打桩（已选 ${selectedCaseIds.length}）` : '打开代码打桩'),
               h('button', { type: 'button', className: 'b03-task-action primary', disabled: !current?.run_id, onClick: () => { setCaseExportFormat('xlsx'); setCaseExportError(''); setCaseExportScope(reviews?.counts?.adopted ? 'adopted' : 'all'); setCaseExportOpen(true) } }, reviews?.counts?.adopted ? `导出已采纳 ${reviews.counts.adopted} 条` : '导出用例'))),
           reviewError ? h('p', { role: 'alert', className: 'pangea-review-error' }, `评审记录：${reviewError}`) : null,
@@ -12843,6 +12903,7 @@ window.__ModuleLoader__.load({
                 ...[
                   ['unit', '分析单元', [...new Set(testCases.map(item => item.unit_id).filter(Boolean))].map(id => [id, unitById.get(id)?.title || id])],
                   ['type', '用例类型', [...new Set(testCases.map(item => item.case_type || item.test_level || 'unclassified'))].map(value => [value, CASE_TYPE_LABELS[value] || value])],
+                  ['readiness', '执行条件', Object.entries(READINESS_FILTER_LABELS)],
                   ['review', '评审状态', Object.entries(REVIEW_LABELS)],
                 ].map(([key, label, options]) => h('label', { key }, label, h('select', { 'aria-label': label, value: caseFilters[key], onChange: event => setCaseFilters(value => ({ ...value, [key]: event.target.value })) }, h('option', { value: '' }, `全部${label}`), options.map(([value, name]) => h('option', { key: value, value }, name))))),
                 h('button', { type: 'button', className: 'btn ghost', onClick: () => { setCaseQuery(''); setCaseFilters({ unit: '', type: '', readiness: '', review: '' }) } }, '重置')))),
@@ -12850,7 +12911,7 @@ window.__ModuleLoader__.load({
             h('thead', null, h('tr', null,
               h('th', null, h('input', { type: 'checkbox', 'aria-label': '选择当前列表', checked: allSelected, disabled: selectableIds.length === 0, onChange: () => setSelectedCaseIds(previous => allSelected ? previous.filter(id => !selectableIds.includes(id)) : [...new Set([...previous, ...selectableIds])]) })),
               ...['编号', '用例名称', '类型', '关联风险', '准备事项', ''].map(label => h('th', { key: label }, label)))),
-            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const idKey = caseIdentity(item); const selectable = Boolean(idKey) && testCases.filter(other => caseIdentity(other) === idKey).length === 1; const linked = formatRisk(item); const reviewStatus = idKey && reviewByKey[idKey]?.review_status || 'unreviewed'; const injectionBadge = injectionBadgeOf(idKey && reviews?.injection_by_case?.[idKey]); return h('tr', { key: `${key}:${index}` },
+            h('tbody', null, pageItems.map((item, index) => { const key = caseKeyByItem.get(item); const idKey = caseIdentity(item); const selectable = Boolean(idKey) && testCases.filter(other => caseIdentity(other) === idKey).length === 1; const linked = formatRisk(item); const reviewStatus = idKey && reviewByKey[idKey]?.review_status || 'unreviewed'; const injectionBadge = injectionBadgeOf(idKey && reviews?.injection_by_case?.[idKey]); const readinessState = caseReadinessState(item); const instPoints = (item.instrumentation ?? item.source_record?.body?.instrumentation)?.points; const instCount = Array.isArray(instPoints) ? instPoints.length : 0; return h('tr', { key: `${key}:${index}` },
               h('td', null, h('input', { type: 'checkbox', checked: selectable && selectedCaseIds.includes(idKey), disabled: !selectable, 'aria-label': selectable ? `选择 ${item.display_id || item.test_case_id}` : '用例尚未编号，不能选择', onChange: () => toggleCase(idKey) })),
               h('td', { className: 'b05-mono' }, h('div', null, item.display_id || item.test_case_id || '待编号'),
                 reviews && selectable && reviewStatus !== 'unreviewed' ? h('em', { className: 'pangea-review-pill', 'data-status': reviewStatus, style: { fontStyle: 'normal', marginTop: 4 } }, REVIEW_LABELS[reviewStatus]) : null,
@@ -12864,7 +12925,9 @@ window.__ModuleLoader__.load({
                       h('dt', null, '预期'), h('dd', null, variant.expected == null || variant.expected === '' ? '预期未提供' : renderReadableBody(variant.expected, false, true)))))) : null),
               h('td', null, CASE_TYPE_LABELS[item.case_type] || text(item.case_type, '未标注')),
               h('td', null, linked.length ? linked.map(id => h('span', { key: id, className: 'b05-risk-chip' }, id)) : '—'),
-              h('td', { className: 'pangea-case-preparation' }, h('span', { className: 'pangea-preview-title' }, casePreparationText(item) || '—')),
+              h('td', { className: 'pangea-case-preparation' },
+                readinessState.key !== 'ready' && readinessState.key !== 'unclassified' ? h('em', { className: 'pangea-review-pill', 'data-status': readinessState.tone, style: { fontStyle: 'normal', marginBottom: 4, display: 'inline-block' } }, readinessState.key === 'needs_instrumentation' && instCount ? `${readinessState.label} · ${instCount} 桩点` : readinessState.label) : null,
+                h('span', { className: 'pangea-preview-title' }, casePreparationText(item) || '—')),
               h('td', null, h('button', { type: 'button', className: 'b05-text-link', onClick: () => openCaseDetail(key) }, '查看 ›')))
             })))),
           filtered.length === 0 ? h('div', { className: 'b05-card', role: collectionWarning(health, 'test_cases') ? 'alert' : 'status' }, collectionEmpty('test_cases', '没有符合条件的测试用例。')) : null,
@@ -13157,6 +13220,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'pangea-detail-meta' }, h('code', null, item.display_id || item.test_case_id || '待编号'),
               h('span', { className: 'pangea-result-tag' }, CASE_TYPE_LABELS[item.case_type] || text(item.case_type, '类型未标注')),
               h('span', { className: 'pangea-result-tag' }, hasText(item.priority) ? `优先级 ${item.priority}` : '优先级未标注'),
+              (() => { const rs = caseReadinessState(item); return rs.key !== 'unclassified' ? h('span', { className: 'pangea-review-pill', 'data-status': rs.tone }, rs.label) : null })(),
               (() => { const badge = injectionBadgeOf(caseIdentity(item) && reviews?.injection_by_case?.[caseIdentity(item)]); return badge ? h('span', { className: 'pangea-review-pill', 'data-status': badge.tone }, badge.detail) : null })()),
             h('p', { className: 'pangea-case-goal' }, h('span', null, '验证目标'), text(item.verification_goal, '当前记录未单独声明，请核对用例原文。'))),
             h('div', { className: 'b05-head-actions' },
@@ -13184,6 +13248,43 @@ window.__ModuleLoader__.load({
                     h('td', null, text(step.action, '未提供操作')), h('td', null, text(step.expected, '未提供逐步预期，请核对整体预期及原文')))))))
                 : h('p', null, '原文未提供可识别的操作步骤，请核对分析原文。'),
                 item.expected_results?.length ? h('p', { className: 'b05-subtle' }, `整体预期：${item.expected_results.join('；')}`) : null),
+              (() => {
+                const inst = item.instrumentation ?? item.source_record?.body?.instrumentation
+                const points = Array.isArray(inst?.points) ? inst.points : []
+                if (!points.length && caseReadinessState(item).key !== 'needs_instrumentation') return null
+                return h('section', { className: 'b05-card pangea-case-instrumentation', 'aria-label': '候选打桩挂点' },
+                  h('div', { className: 'b05-section-head' },
+                    h('div', null, h('h3', null, points.length ? `候选打桩挂点 · ${points.length} 处` : '需要代码打桩'),
+                      h('p', { className: 'b05-subtle' }, points.length ? '以下挂点来自分析阶段定位（未修改源码），可直接带入代码打桩任务生成补丁。' : '分析阶段已标记该用例需通过代码打桩构造条件，具体挂点将在打桩生成阶段结合源码定位。')),
+                    h('button', { type: 'button', className: 'b03-task-action', onClick: () => openFaultInjection(caseIdentity(item) ? [caseIdentity(item)] : []) }, points.length ? '以此挂点发起打桩' : '发起代码打桩')),
+                  points.length ? points.map((point, index) => {
+                    const loc = [point?.repo_id, point?.path].filter(hasText).join(':')
+                    const fields = [['symbol', '目标符号'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中观测'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']]
+                      .filter(([k]) => point?.[k] != null && point[k] !== '' && !(Array.isArray(point[k]) && !point[k].length))
+                    return h('details', { key: point?.id || index, open: points.length <= 2, style: { marginTop: 8 } },
+                      h('summary', null, `${point?.id || `P-${index + 1}`}${point?.action ? ` · ${sourceFirstRecordBody(point.action)}` : ''}${loc ? `（${loc}）` : ''}`),
+                      h('dl', { className: 'pangea-reading-fields' }, ...fields.flatMap(([k, label]) => [
+                        h('dt', { key: `${k}-l` }, label),
+                        h('dd', { key: k, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[k]) ? point[k].map(sourceFirstRecordBody).join('、') : sourceFirstRecordBody(point[k])),
+                      ])))
+                  }) : null)
+              })(),
+              (() => {
+                const injInfo = caseIdentity(item) && reviews?.injection_by_case?.[caseIdentity(item)]
+                const badge = injectionBadgeOf(injInfo)
+                if (!injInfo || !badge) return null
+                return h('section', { className: 'b05-card pangea-case-injection-status', 'aria-label': '打桩实测记录' },
+                  h('div', { className: 'b05-section-head' },
+                    h('div', null, h('h3', null, '打桩构建与实测回填'),
+                      h('p', { className: 'b05-subtle' }, badge.detail)),
+                    h('button', { type: 'button', onClick: () => openFaultInjection(caseIdentity(item) ? [caseIdentity(item)] : []) }, '查看打桩任务')),
+                  h('dl', { className: 'pangea-reading-fields' },
+                    injInfo.branch ? [h('dt', { key: 'br-l' }, '推送分支'), h('dd', { key: 'br' }, injInfo.branch)] : null,
+                    injInfo.build_package_id ? [h('dt', { key: 'pkg-l' }, '构建包'), h('dd', { key: 'pkg' }, injInfo.build_package_id)] : null,
+                    injInfo.hits ? [h('dt', { key: 'hit-l' }, '命中观测'), h('dd', { key: 'hit' }, injInfo.hits)] : null,
+                    injInfo.notes ? [h('dt', { key: 'note-l' }, '实测说明'), h('dd', { key: 'note' }, injInfo.notes)] : null,
+                    injInfo.at ? [h('dt', { key: 'at-l' }, '更新时间'), h('dd', { key: 'at' }, injInfo.at)] : null))
+              })(),
               h('section', { className: 'pangea-case-drawer-links', 'aria-label': '用例依据与代码' },
                 h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'basis', scope: caseScreenKey }) }, '拟覆盖依据 ↗'),
                 h('button', { type: 'button', className: 'b05-text-link', disabled: !caseEvidenceOptions.length, onClick: () => setSourceDrawerOpen(true) }, `关联代码 · ${caseEvidenceOptions.length} 处 ↗`)),
@@ -13200,8 +13301,12 @@ window.__ModuleLoader__.load({
               null),
             h('aside', null,
               item.observability?.some(value => sourceFirstRecordBody(value).trim()) ? h('section', { className: 'b05-card' }, h('h3', null, '补充观测'), values(item.observability, '')) : null,
-              h('section', { className: 'b05-card' }, h('h3', null, '分析原文'), h('p', null, '参数、步骤与结论均保留原文追溯入口。'),
-                h('button', { type: 'button', className: 'b05-text-link', onClick: () => jump('report') }, '查看完整用例记录 ↗')))),
+              h('section', { className: 'b05-card' },
+                h('h3', null, '参考与追溯'),
+                h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' } },
+                  h('button', { type: 'button', className: 'b05-text-link', disabled: !caseEvidenceOptions.length, onClick: () => setSourceDrawerOpen(true) }, `关联源码（${caseEvidenceOptions.length} 处）↗`),
+                  h('button', { type: 'button', className: 'b05-text-link', onClick: () => setCaseDrawer({ type: 'basis', scope: caseScreenKey }) }, '拟覆盖与风险依据 ↗'),
+                  h('button', { type: 'button', className: 'b05-text-link', onClick: () => jump('report') }, '查看完整用例记录 ↗'))))),
           item.source_record ? h('details', { className: 'b05-raw-record' }, h('summary', null, '查看本轮原始用例记录'), renderRecordBody(item, true)) : null,
           renderCaseDrawer(item),
           renderB05SourceDrawer('case', item))

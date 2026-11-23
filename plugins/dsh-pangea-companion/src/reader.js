@@ -1088,7 +1088,11 @@ async function summarizeSourceFirstRun(dataRoot, runId, { includeDetails = false
       max_parallel: 3,
     },
     counts: Object.fromEntries(['risks', 'test_cases', 'evidence', 'business_flows'].map(key => [key, projection[key].length])),
-    case_readiness: Object.fromEntries(['ready', 'needs_setup', 'unclassified'].map(key => [key, projection.test_cases.filter(item => item.readiness === key).length])),
+    case_readiness: {
+      ...Object.fromEntries(['ready', 'needs_setup', 'unclassified'].map(key => [key, projection.test_cases.filter(item => item.readiness === key).length])),
+      needs_instrumentation: projection.test_cases.filter(item => (item.execution_readiness ?? item.source_record?.body?.execution_readiness) === 'needs_instrumentation').length,
+      unknown: projection.test_cases.filter(item => (item.execution_readiness ?? item.source_record?.body?.execution_readiness) === 'unknown').length,
+    },
     case_quality_summary: caseQualitySummary(projection.test_cases, analysisScene),
     execution_progress: actionView.artifacts.map(item => ({
       action_id: item.action_id, unit_id: item.task?.unit_id, stage: item.stage, status: item.status, review_skipped: item.review_skipped === true,

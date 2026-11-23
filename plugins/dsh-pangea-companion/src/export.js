@@ -26,6 +26,12 @@ function caseSteps(item) {
   if (overall) expected = [expected, hasExpected ? `整体预期：\n${overall}` : overall].filter(Boolean).join('\n\n')
   if (cell(item.entry)) actions = [`操作入口：${cell(item.entry)}`, actions].filter(Boolean).join('\n\n')
 
+  const linkedNotes = list(item.linked_notes).filter(note => note && typeof note === 'object')
+  if (linkedNotes.length) {
+    const noteRefs = linkedNotes.map(note => cell(note.title || note.display_id || note.projection_id)).filter(Boolean)
+    if (noteRefs.length) actions = [actions, `关联操作说明（详见「共用操作说明」）：${noteRefs.join('、')}`].filter(Boolean).join('\n\n')
+  }
+
   // Keep parameter combinations and their labels within the requested columns;
   // they remain part of the same case rather than extra rows.
   const variants = list(item.variants).map((value, index) => value && typeof value === 'object'
@@ -36,6 +42,70 @@ function caseSteps(item) {
     expected = [expected, `参数组合预期：\n${variants.map(value => `${value.label}. ${value.expected || '未提供预期'}`).join('\n')}`].filter(Boolean).join('\n\n')
   }
   return { actions, expected }
+}
+
+function formatInstrumentationPoints(item) {
+  const instrumentation = item?.instrumentation ?? item?.source_record?.body?.instrumentation
+  if (!instrumentation) return ''
+  const points = Array.isArray(instrumentation?.points) ? instrumentation.points : null
+  if (!points || !points.length) return cell(instrumentation)
+  return points.map((point, index) => {
+    if (!point || typeof point !== 'object') return cell(point)
+    const id = cell(point.id) || `P-${index + 1}`
+    const loc = [cell(point.repo_id), cell(point.path)].filter(Boolean).join(':')
+    const parts = [
+      loc ? `位置:${loc}` : '',
+      cell(point.symbol) ? `符号:${cell(point.symbol)}` : '',
+      cell(point.action) ? `动作:${cell(point.action)}` : '',
+      cell(point.trigger) ? `触发:${cell(point.trigger)}` : '',
+      cell(point.times) ? `次数:${cell(point.times)}` : '',
+      cell(point.enable) ? `启用:${cell(point.enable)}` : '',
+      cell(point.disable) ? `关闭:${cell(point.disable)}` : '',
+      cell(point.observe) ? `观测:${cell(point.observe)}` : '',
+      cell(point.cleanup) ? `恢复:${cell(point.cleanup)}` : '',
+    ].filter(Boolean)
+    return `${id}${parts.length ? ` (${parts.join('；')})` : ''}`
+  }).join('\n')
+}
+
+function formatLinkedOperationNotes(item) {
+  const linked = list(item?.linked_notes).filter(note => note && typeof note === 'object')
+  return linked.map(note => {
+    const title = cell(note.title || note.display_id || note.projection_id)
+    const body = note.source_record?.body
+    const content = typeof body === 'string' ? body : cell(body?.content ?? body)
+    return title && content ? `【${title}】\n${content}` : title || content
+  }).filter(Boolean).join('\n\n')
+}
+
+export function operationNoteRows(run) {
+  const seen = new Set()
+  const notes = []
+  for (const item of run?.details?.test_cases ?? []) {
+    for (const note of list(item?.linked_notes)) {
+      if (!note || typeof note !== 'object') continue
+      const key = note.projection_id || note.source_record?.record_id || note.display_id || note.title
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      notes.push(note)
+    }
+  }
+  return [
+    ['序号', '单元ID', '说明ID', '标题', '操作说明正文', '源码依据'],
+    ...notes.map((note, index) => {
+      const body = note.source_record?.body
+      const content = typeof body === 'string' ? body : (body?.content ?? body)
+      const evidence = body && typeof body === 'object' ? (body.source_evidence ?? note.source_evidence) : note.source_evidence
+      return [
+        index + 1,
+        note.unit_id ?? '',
+        note.display_id ?? note.source_record?.record_id ?? note.projection_id ?? '',
+        note.title ?? '',
+        content ?? '',
+        lines(evidence),
+      ]
+    }),
+  ]
 }
 
 function testCaseRows(run) {
@@ -70,16 +140,30 @@ export function caseEvidenceRows(run) {
   const items = run?.details?.test_cases ?? []
   // Preserve additional entry/oracle fields verbatim as the contract evolves.
   const extras = [...new Set(items.flatMap(item => Object.keys(item).filter(key => /entry|oracle/.test(key) && !fields.includes(key))))].sort()
+  const instrumentationFields = items.some(item => Boolean(formatInstrumentationPoints(item))) ? ['instrumentation_points'] : []
+  const operationNoteFields = items.some(item => Boolean(formatLinkedOperationNotes(item))) ? ['linked_operation_notes'] : []
   // A recovered reading must travel with its parse diagnostics and untouched
   // source envelope. Keep both in the appendix, outside the eight-column cases.
   const parseFields = items.some(item => item.record_parse != null) ? ['record_parse', 'source_record'] : []
-  const keys = [...fields, ...extras, ...parseFields]
-  return [['序号', '用例身份', '单元ID', '用例ID', ...keys], ...items.map((item, index) => [index + 1, caseIdentity(item), item.unit_id, item.display_id ?? item.test_case_id, ...keys.map(key => item[key])])]
+  const keys = [...fields, ...extras, ...instrumentationFields, ...operationNoteFields, ...parseFields]
+  const valueFor = (item, key) => key === 'instrumentation_points'
+    ? formatInstrumentationPoints(item)
+    : key === 'linked_operation_notes'
+      ? formatLinkedOperationNotes(item)
+      : item[key]
+  return [['序号', '用例身份', '单元ID', '用例ID', ...keys], ...items.map((item, index) => [index + 1, caseIdentity(item), item.unit_id, item.display_id ?? item.test_case_id, ...keys.map(key => valueFor(item, key))])]
 }
 
 export function buildTestCaseCsvBundle(run) {
   const evidence = `\uFEFF${caseEvidenceRows(run).map(row => row.map(csvCell).join(',')).join('\r\n')}\r\n`
-  return zipStore([['cases.csv', buildTestCaseCsv(run)], ['case-evidence.csv', evidence], ['manifest.json', JSON.stringify({ run_id: run.run_id, publication: run.publication, case_order: (run.details?.test_cases ?? []).map(caseIdentity) }, null, 2)]])
+  const noteRows = operationNoteRows(run)
+  const entries = [
+    ['cases.csv', buildTestCaseCsv(run)],
+    ['case-evidence.csv', evidence],
+    ...(noteRows.length > 1 ? [['operation-notes.csv', `\uFEFF${noteRows.map(row => row.map(csvCell).join(',')).join('\r\n')}\r\n`]] : []),
+    ['manifest.json', JSON.stringify({ run_id: run.run_id, publication: run.publication, case_order: (run.details?.test_cases ?? []).map(caseIdentity) }, null, 2)],
+  ]
+  return zipStore(entries)
 }
 
 function xml(value) {
@@ -167,16 +251,19 @@ export function zipStore(entries) {
 
 export function buildTestCaseXlsx(run) {
   const rows = testCaseRows(run)
+  const noteRows = operationNoteRows(run)
+  const hasNotes = noteRows.length > 1
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`+
-    `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="测试用例" sheetId="1" r:id="rId1"/><sheet name="执行条件与依据" sheetId="2" r:id="rId3"/></sheets></workbook>`
+    `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="测试用例" sheetId="1" r:id="rId1"/><sheet name="执行条件与依据" sheetId="2" r:id="rId3"/>${hasNotes ? '<sheet name="共用操作说明" sheetId="3" r:id="rId4"/>' : ''}</sheets></workbook>`
   const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs></styleSheet>`
   return zipStore([
-    ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
+    ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>${hasNotes ? '<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' : ''}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
     ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
     ['xl/workbook.xml', workbook],
-    ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>`],
+    ['xl/_rels/workbook.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>${hasNotes ? '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>' : ''}</Relationships>`],
     ['xl/worksheets/sheet1.xml', worksheetXml(rows)],
     ['xl/worksheets/sheet2.xml', worksheetXml(caseEvidenceRows(run))],
+    ...(hasNotes ? [['xl/worksheets/sheet3.xml', worksheetXml(noteRows)]] : []),
     ['xl/styles.xml', styles],
   ])
 }
