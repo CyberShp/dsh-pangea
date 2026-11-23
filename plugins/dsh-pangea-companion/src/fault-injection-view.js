@@ -1,8 +1,10 @@
 import { analysisExecutionState, loadAnalysisAgentModels } from './agent-model-selection.js'
 import {
-  DEFAULT_INTRANET_COMMIT_REGEX, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
-  buildVerificationShellScript, caseKeyOf, classifyInjectionCandidate,
-  defaultCommitSummary, duplicateCaseKeySet, extractRemoteHookRegex, normalizeCommitConfig,
+  ARTIFACT_KIND_LABELS, BUILD_VARIANT_LABELS, DEFAULT_INTRANET_COMMIT_REGEX, DELIVERY_MODE_LABELS,
+  MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
+  buildArtifactVerifyCommands, buildVerificationShellScript, caseKeyOf, classifyInjectionCandidate,
+  defaultCommitSummary, duplicateCaseKeySet, extractRemoteHookRegex, mergeReplaceFilesFromTasks,
+  normalizeBuildVariant, normalizeCommitConfig, normalizeDeliveryMode,
   parseVerificationLog, resolveCommitMessage,
 } from './fault-injection-candidates.js'
 import { createRepositorySettings, sourceLabel } from './repository-settings-view.js'
@@ -224,7 +226,14 @@ export function createFaultInjectionPanel(React) {
         if (!live) return
         setProviders(value.providers ?? [])
         const inheritedModel = value.defaults?.agent_model || ''
-        setSettings(previous => previous ?? { ...value.defaults, agent_model: inheritedModel, agent_model_inherited: Boolean(inheritedModel), instructions: '' })
+        setSettings(previous => previous ?? {
+          ...value.defaults,
+          agent_model: inheritedModel,
+          agent_model_inherited: Boolean(inheritedModel),
+          delivery_mode: 'product_package',
+          build_variant: 'debug',
+          instructions: '',
+        })
         setError('')
       }).catch(reason => { if (live) setError(reason.message) })
       return () => { live = false }
@@ -334,7 +343,18 @@ export function createFaultInjectionPanel(React) {
                 h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' } },
                   h('span', { role: modelState.status === 'error' ? 'alert' : 'status', style: { fontSize: 12, fontWeight: 400, color: modelState.status === 'error' ? '#b62836' : '#5e6773' } }, modelSelection.message),
                   h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, disabled: working || !settings.provider_id || modelState.status === 'loading', onClick: () => setModelRefresh(value => value + 1) }, '刷新模型'))),
-              field('任务名称', settings.name, value => setSettings({ ...settings, name: value }), { placeholder: '可选，便于区分多次打桩任务' })),
+              field('任务名称', settings.name, value => setSettings({ ...settings, name: value }), { placeholder: '可选，便于区分多次打桩任务' }),
+              h('label', { className: 'pangea-fi-field' }, h('span', null, '交付形态'),
+                h('select', { 'aria-label': '交付形态', value: normalizeDeliveryMode(settings.delivery_mode), disabled: working, onChange: event => setSettings({ ...settings, delivery_mode: event.target.value }) },
+                  h('option', { value: 'product_package' }, DELIVERY_MODE_LABELS.product_package),
+                  h('option', { value: 'unit_test' }, DELIVERY_MODE_LABELS.unit_test))),
+              normalizeDeliveryMode(settings.delivery_mode) === 'product_package'
+                ? h('label', { className: 'pangea-fi-field' }, h('span', null, '目标部署变体'),
+                    h('select', { 'aria-label': '目标部署变体', value: normalizeBuildVariant(settings.build_variant), disabled: working, onChange: event => setSettings({ ...settings, build_variant: event.target.value }) },
+                      h('option', { value: 'debug' }, BUILD_VARIANT_LABELS.debug),
+                      h('option', { value: 'hitest' }, BUILD_VARIANT_LABELS.hitest)),
+                    h('span', { style: { fontSize: 12, fontWeight: 400, color: '#5e6773' } }, '两种变体共用同一份业务桩源码补丁（不依赖测试宏）；部署核验与防顶包指引随所选变体切换。'))
+                : null),
             h('p', { style: { fontSize: 13 } }, h('strong', null, '当前代码基线：'), enabledRepos.map(repo => `${repo.repo_id} → ${sourceLabel(repo.source)}`).join('；')),
             h('details', { ref: repoDetailsRef, className: 'pangea-fi-technical', open: needsRepoSetup || repoSetupOpen || undefined },
               h('summary', null, '代码来源与高级设置'),
@@ -456,6 +476,64 @@ export function createFaultInjectionTaskDetail(React) {
               onOpenBuild ? h('button', { type: 'button', className: 'btn primary', disabled: working, onClick: () => onOpenBuild({ run_id: task.run_id, task_id: task.id }) }, '加入出包 / 推送个人分支') : null,
               task.result_saved ? h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry-with-reference') }, '参考上次结果重新生成') : null,
               h('button', { type: 'button', style: { marginLeft: 0 }, disabled: working, onClick: () => act('retry') }, '沿用本任务配置重新生成')))) : null,
+        task.result ? (() => {
+          const delivery = task.result?.delivery || null
+          const verifyInfo = buildArtifactVerifyCommands(task, task.build_variant)
+          const replaceFiles = verifyInfo.replace_files
+          const copyText = async (text, okMsg) => {
+            try { await navigator.clipboard.writeText(text); setNotice(okMsg) }
+            catch { setError('复制失败，请手动选中复制') }
+          }
+          return h('section', { className: 'pangea-fi-repo-box', style: { marginTop: 14, borderColor: '#cfe0ee', background: '#fbfdff' }, 'data-testid': 'fault-injection-replace-files' },
+            h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 8 } },
+              h('div', null,
+                h('strong', null, '应单独替换的文件与部署核验'),
+                h('p', { className: 'b05-subtle', style: { margin: '4px 0 0', fontSize: 12 } },
+                  `交付形态：${DELIVERY_MODE_LABELS[normalizeDeliveryMode(task.delivery_mode ?? delivery?.mode)]} · 当前变体：${verifyInfo.variant_label}`)),
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600 } },
+                  '目标部署变体',
+                  h('select', {
+                    'aria-label': '切换目标部署变体',
+                    value: verifyInfo.variant,
+                    disabled: working || busy(task),
+                    style: { minHeight: 30, padding: '3px 8px', fontSize: 12 },
+                    onChange: event => act('set-variant', { build_variant: event.target.value }),
+                  },
+                  h('option', { value: 'debug' }, BUILD_VARIANT_LABELS.debug),
+                  h('option', { value: 'hitest' }, BUILD_VARIANT_LABELS.hitest))),
+                replaceFiles.length ? h('button', {
+                  type: 'button',
+                  style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 },
+                  onClick: () => copyText(replaceFiles.map(item => item.artifact).join('\n'), '已复制应替换文件清单'),
+                }, '复制文件清单') : null)),
+            h('div', { role: 'status', className: 'pangea-fi-banner info', style: { margin: '8px 0' } }, h('span', null, verifyInfo.variant_hint)),
+            delivery?.build_requirement ? h('p', { style: { fontSize: 13, margin: '8px 0' } }, h('strong', null, '构建前提：'), delivery.build_requirement) : null,
+            replaceFiles.length
+              ? h('table', { className: 'pangea-fi-table', 'aria-label': '应单独替换的文件清单', style: { marginTop: 8 } },
+                  h('thead', null, h('tr', null, ...['应替换文件 / 产物', '类型', '对应修改源码', '构建依据', '替换后动作'].map(label => h('th', { key: label }, label)))),
+                  h('tbody', null, replaceFiles.map((item, idx) => h('tr', { key: `${item.artifact}:${idx}` },
+                    h('td', null,
+                      h('code', { style: { fontWeight: 600 } }, item.artifact),
+                      h('div', { style: { marginTop: 4 } }, h('button', {
+                        type: 'button',
+                        style: { minHeight: 24, padding: '2px 8px', fontSize: 11 },
+                        onClick: () => copyText(item.artifact, `已复制 ${item.artifact}`),
+                      }, '复制'))),
+                    h('td', null, ARTIFACT_KIND_LABELS[item.kind] || item.kind),
+                    h('td', null, item.source_files.map((src, sIdx) => h('div', { key: sIdx }, h('code', null, src)))),
+                    h('td', null, item.build_evidence || '—'),
+                    h('td', null, item.post_replace_action || '—')))))
+              : h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '此历史任务未包含结构化替换文件清单，请参考下方“待合成补丁差异”或重新生成。'),
+            verifyInfo.markers.length ? h('div', { style: { marginTop: 10 } },
+              h('p', { style: { fontSize: 12, margin: '0 0 6px' } },
+                h('strong', null, '桩特征标识（已核对存在于补丁源码）：'),
+                verifyInfo.markers.map((marker, idx) => h('code', { key: idx, style: { marginRight: 8 } }, marker))),
+              h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, onClick: () => copyText(verifyInfo.pre_replace_cmd, '已复制替换前验库命令') }, '复制：替换前验库命令（防 F1 未编入）'),
+                verifyInfo.safe_relink_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.safe_relink_cmd, '已复制 PANGEA 安全重链代理命令') }, '复制：PANGEA 安全重链代理命令（自动绕过 F3/F4）') : null,
+                h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.post_deploy_cmd, '已复制部署后验二进制命令') }, '复制：重链部署后验最终产物命令（防 F4 顶包）'))) : null)
+        })() : null,
         !includable && !busy(task) && task.schema_version === 1 ? h('div', { role: 'status', className: 'pangea-fi-banner warn' }, '此历史任务缺少可复用的结构化修改记录，请按当前最新代码重新生成。') : null,
         canVerify ? h('details', { key: `verification:${task.id}`, style: { marginTop: 12 } },
           h('summary', null, '构建包与验证记录'),
@@ -880,6 +958,30 @@ export function createFaultInjectionBuild(React) {
             repositories: context.repositories || [],
             onSaved: async () => { await loadContext({ preserveSelection: true }) },
           })),
+
+        selectedTasks.length ? (() => {
+          const merged = mergeReplaceFilesFromTasks(selectedTasks)
+          if (!merged.replace_files.length && !merged.marker_strings.length) return null
+          const verifyInfo = buildArtifactVerifyCommands({ replace_files: merged.replace_files, marker_strings: merged.marker_strings, build_variant: selectedTasks[0]?.build_variant })
+          const copyText = async (text, okMsg) => {
+            try { await navigator.clipboard.writeText(text); setNotice(okMsg) }
+            catch { setError('复制失败，请手动选中复制') }
+          }
+          return h('section', { className: 'pangea-fi-repo-box', style: { marginTop: 12, borderColor: '#cfe0ee', background: '#fbfdff' }, 'data-testid': 'fault-injection-build-replace-files' },
+            h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 8 } },
+              h('strong', null, `本次出包汇总：应单独替换的文件（${merged.replace_files.length} 个产物）`),
+              h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                merged.replace_files.length ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, onClick: () => copyText(merged.replace_files.map(item => item.artifact).join('\n'), '已复制本次出包应替换文件清单') }, '复制文件清单') : null,
+                verifyInfo.pre_replace_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.pre_replace_cmd, '已复制汇总验库命令') }, '复制验库命令') : null)),
+            merged.replace_files.length ? h('table', { className: 'pangea-fi-table', 'aria-label': '本次出包应单独替换文件清单' },
+              h('thead', null, h('tr', null, ...['应替换文件 / 产物', '类型', '来源任务', '对应修改源码', '替换后动作'].map(label => h('th', { key: label }, label)))),
+              h('tbody', null, merged.replace_files.map((item, idx) => h('tr', { key: `${item.artifact}:${idx}` },
+                h('td', null, h('code', { style: { fontWeight: 600 } }, item.artifact)),
+                h('td', null, ARTIFACT_KIND_LABELS[item.kind] || item.kind),
+                h('td', null, (item.task_names || []).join('、') || '—'),
+                h('td', null, item.source_files.map((src, sIdx) => h('div', { key: sIdx }, h('code', null, src)))),
+                h('td', null, item.post_replace_action || '—'))))) : null)
+        })() : null,
 
         h('h4', null, '3. 提交门禁信息与构建流水线'),
         h('div', { className: 'pangea-fi-repo-box' },

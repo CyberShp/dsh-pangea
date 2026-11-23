@@ -11,8 +11,9 @@ import { caseContentHash } from './case-review-store.js'
 import { withGitLongPaths, disabledHooksPath } from './repositories/git-environment.js'
 import { protectedBranchReason } from './repositories/branch-policy.js'
 import {
-  DEFAULT_INTRANET_COMMIT_REGEX, DEFAULT_REGEX_TIMEOUT_MS, extractRemoteHookRegex,
-  normalizeCommitConfig, resolveCommitMessage, setBacktrackingMatcherRunner, validateRawCommitMessage,
+  DEFAULT_INTRANET_COMMIT_REGEX, DEFAULT_REGEX_TIMEOUT_MS, extractMarkerStrings, extractRemoteHookRegex,
+  normalizeBuildVariant, normalizeCommitConfig, normalizeDeliveryMode, normalizeReplaceFiles,
+  resolveCommitMessage, setBacktrackingMatcherRunner, validateRawCommitMessage,
 } from './fault-injection-candidates.js'
 import { runInNewContext } from 'node:vm'
 
@@ -102,9 +103,104 @@ export function workspaceChanges(baseline = [], current = []) {
 }
 const describeChanges = changes => changes.slice(0, 8).map(item => `${item.change === 'added' ? '新增' : item.change === 'reverted' ? '还原' : item.change === 'deleted' ? '删除' : '修改'} ${JSON.stringify(item.path)}`).join('；') + (changes.length > 8 ? `；另有 ${changes.length - 8} 项` : '')
 
+const IS_CMAKE_FILE = /(?:^|\/)CMakeLists\.txt$|\.cmake$/i
+
+// Deterministic lexical check for CMake files: verifies balanced parentheses,
+// quoted/bracketed arguments, and the top-level invariant that every command
+// invocation has the form `identifier(...)` with no trailing tokens outside `)`.
+export function checkCmakeSyntax(text, filePath = 'CMakeLists.txt') {
+  const src = String(text ?? '')
+  let i = 0, line = 1, depth = 0, openLine = 0
+  const len = src.length
+  const skipBracket = (startIdx) => {
+    if (src[startIdx] !== '[') return -1
+    let eq = 0
+    let j = startIdx + 1
+    while (j < len && src[j] === '=') { eq++; j++ }
+    if (src[j] !== '[') return -1
+    const closeToken = `]${'='.repeat(eq)}]`
+    let pos = j + 1
+    while (pos < len) {
+      if (src.startsWith(closeToken, pos)) return pos + closeToken.length
+      if (src[pos] === '\n') line++
+      pos++
+    }
+    return -2 // unclosed bracket
+  }
+  while (i < len) {
+    const ch = src[i]
+    if (ch === '\n') { line++; i++; continue }
+    if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\uFEFF') { i++; continue }
+    if (ch === '#') {
+      if (src[i + 1] === '[') {
+        const startLine = line
+        const next = skipBracket(i + 1)
+        if (next === -2) throw serviceError(`CMake 语法错误（${filePath}:${startLine}）：块注释 #[=[ 未闭合`)
+        if (next > 0) { i = next; continue }
+      }
+      while (i < len && src[i] !== '\n') i++
+      continue
+    }
+    if (depth === 0) {
+      const cmdLine = line
+      if (!/[A-Za-z_]/.test(ch)) {
+        const snippet = src.slice(i, i + 24).split(/\r?\n/)[0]
+        throw serviceError(`CMake 语法错误（${filePath}:${cmdLine}）：命令调用外存在非法字符「${snippet}」，请确认新增内容是否误落在闭括号之外`)
+      }
+      let end = i + 1
+      while (end < len && /[A-Za-z0-9_]/.test(src[end])) end++
+      const token = src.slice(i, end)
+      let look = end
+      while (look < len && (src[look] === ' ' || src[look] === '\t')) look++
+      if (src[look] !== '(') {
+        throw serviceError(`CMake 语法错误（${filePath}:${cmdLine}）：闭括号外存在裸标记「${token}」（缺少紧随的 "("），请将新增参数放入对应命令的括号内部`)
+      }
+      depth = 1
+      openLine = cmdLine
+      i = look + 1
+      continue
+    }
+    if (ch === '(') { depth++; i++; continue }
+    if (ch === ')') { depth--; i++; continue }
+    if (ch === '"') {
+      const quoteLine = line
+      i++
+      let closed = false
+      while (i < len) {
+        if (src[i] === '\\' && i + 1 < len) {
+          if (src[i + 1] === '\n') line++
+          i += 2
+          continue
+        }
+        if (src[i] === '\n') line++
+        if (src[i] === '"') { closed = true; i++; break }
+        i++
+      }
+      if (!closed) throw serviceError(`CMake 语法错误（${filePath}:${quoteLine}）：双引号字符串未闭合`)
+      continue
+    }
+    if (ch === '[') {
+      const prev = i > 0 ? src[i - 1] : ''
+      if (!prev || /[\s(]/.test(prev)) {
+        const bracketLine = line
+        const next = skipBracket(i)
+        if (next === -2) throw serviceError(`CMake 语法错误（${filePath}:${bracketLine}）：括号参数 [=[ 未闭合`)
+        if (next > 0) { i = next; continue }
+      }
+    }
+    if (ch === '\\' && i + 1 < len) {
+      if (src[i + 1] === '\n') line++
+      i += 2
+      continue
+    }
+    i++
+  }
+  if (depth > 0) throw serviceError(`CMake 语法错误（${filePath}:${openLine}）：命令调用左括号未闭合（剩余 ${depth} 层）`)
+}
+
 // The agent supplies the behavior and exact replacement. The host only checks
 // file boundaries and matching bytes; it never decides whether a fault is useful.
-export async function applyInjectionEdits(repositoryRoot, edits) {
+export async function applyInjectionEdits(repositoryRoot, edits, { dryRun = false } = {}) {
   const root = await realpath(repositoryRoot)
   const staged = new Map()
   for (const edit of edits) {
@@ -140,6 +236,10 @@ export async function applyInjectionEdits(repositoryRoot, edits) {
       staged.set(name, current.slice(0, at) + after + current.slice(at + before.length))
     }
   }
+  for (const [name, content] of staged) {
+    if (IS_CMAKE_FILE.test(name)) checkCmakeSyntax(content, name)
+  }
+  if (dryRun) return [...staged.keys()]
   // Validate every replacement before touching any file in this repository.
   for (const [name, content] of staged) { const file = path.join(root, name); await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, content, 'utf8') }
   return [...staged.keys()]
@@ -445,10 +545,19 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
       conditionalMacros.push({ location: loc, code: line.trim().slice(0, 180) })
     }
   }
-  // Discover nearby test subtrees along the ancestor chain without full-repo traversal.
+  // Discover nearby build rules and test subtrees along the ancestor chain without full-repo traversal.
   const queue = [...candidateDirs]
   const visitedDirs = new Set()
   const nearbyTestTexts = []
+  const buildTargets = []
+  const seenTargets = new Set()
+  const addBuildTarget = item => {
+    if (buildTargets.length >= 24) return
+    const key = `${item.file}:${item.target}:${item.kind}`
+    if (seenTargets.has(key)) return
+    seenTargets.add(key)
+    buildTargets.push(item)
+  }
   while (queue.length && visitedDirs.size < 60) {
     const relDir = queue.shift()
     if (visitedDirs.has(relDir)) continue
@@ -458,6 +567,7 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
     let entries = []
     try { entries = await readdir(fullDir, { withFileTypes: true }) } catch { continue }
     const fileNames = entries.filter(e => e.isFile()).map(e => e.name).sort()
+    const inTestDir = relDir.split('/').some(part => TEST_DIR_NAME.test(part))
     if (fileNames.includes('CMakeLists.txt') && cmakeRules.length < 16) {
       const cmakeRel = relDir === '.' ? 'CMakeLists.txt' : `${relDir}/CMakeLists.txt`
       const cmakeText = await readBoundedText(root, cmakeRel)
@@ -467,7 +577,40 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
         const hasAux = /\baux_source_directory\s*\(/i.test(cmakeText)
         const hasTarget = /\badd_(?:executable|library)\s*\(/i.test(cmakeText)
         const defs = new Set()
-        for (const match of cmakeText.matchAll(FAULT_DEF_TOKEN)) defs.add(match[1])
+        const conditionalDefs = new Set()
+        const cmakeLines = cmakeText.split(/\r?\n/)
+        let ifDepth = 0
+        const outputNames = new Map()
+        for (let idx = 0; idx < cmakeLines.length; idx++) {
+          const rawLine = cmakeLines[idx]
+          const trimmed = rawLine.trim()
+          if (!trimmed || trimmed.startsWith('#')) continue
+          if (/^\s*if\s*\(/i.test(rawLine)) ifDepth++
+          else if (/^\s*endif\s*\(/i.test(rawLine)) ifDepth = Math.max(0, ifDepth - 1)
+          for (const match of rawLine.matchAll(FAULT_DEF_TOKEN)) {
+            defs.add(match[1])
+            if (inTestDir || ifDepth > 0 || rawLine.includes('$<')) conditionalDefs.add(match[1])
+          }
+          const libMatch = rawLine.match(/\badd_library\s*\(\s*([A-Za-z0-9_.-]+)(?:\s+(STATIC|SHARED|MODULE|OBJECT|INTERFACE))?/i)
+          if (libMatch && !inTestDir) {
+            const mode = (libMatch[2] || '').toUpperCase()
+            addBuildTarget({
+              file: cmakeRel,
+              line: idx + 1,
+              kind: mode === 'SHARED' ? 'shared_lib' : mode === 'OBJECT' ? 'object_lib' : mode === 'MODULE' ? 'shared_lib' : 'static_lib',
+              target: libMatch[1],
+            })
+          }
+          const exeMatch = rawLine.match(/\badd_executable\s*\(\s*([A-Za-z0-9_.-]+)/i)
+          if (exeMatch && !inTestDir) {
+            addBuildTarget({ file: cmakeRel, line: idx + 1, kind: 'executable', target: exeMatch[1] })
+          }
+          const outMatch = rawLine.match(/\bset_target_properties\s*\(\s*([A-Za-z0-9_.-]+)[\s\S]*?\bOUTPUT_NAME\s+"?([A-Za-z0-9_.-]+)"?/i)
+          if (outMatch) outputNames.set(outMatch[1], outMatch[2])
+        }
+        for (const item of buildTargets) {
+          if (item.file === cmakeRel && outputNames.has(item.target)) item.output_name = outputNames.get(item.target)
+        }
         cmakeRules.push({
           path: cmakeRel,
           directory: relDir,
@@ -475,7 +618,25 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
           ...(hasGlob ? { configure_depends: configureDepends } : {}),
           ctest_or_gtest: /\b(?:enable_testing|add_test|gtest_discover_tests|GTest|gtest)\b/i.test(cmakeText),
           ...(defs.size ? { fault_definitions: [...defs] } : {}),
+          ...(conditionalDefs.size ? { conditional_fault_definitions: [...conditionalDefs] } : {}),
         })
+      }
+    }
+    if (!inTestDir && buildTargets.length < 24) {
+      for (const mkName of ['Makefile', 'Kbuild', 'GNUmakefile']) {
+        if (!fileNames.includes(mkName)) continue
+        const mkRel = relDir === '.' ? mkName : `${relDir}/${mkName}`
+        const mkText = await readBoundedText(root, mkRel, 65536)
+        if (!mkText) continue
+        const mkLines = mkText.split(/\r?\n/)
+        for (let idx = 0; idx < mkLines.length && buildTargets.length < 24; idx++) {
+          const line = mkLines[idx]
+          if (!line || /^\s*#/.test(line)) continue
+          const koMatch = line.match(/^\s*obj-[my]\s*[:+]?=\s*([A-Za-z0-9_.-]+)\.o\b/)
+          if (koMatch) addBuildTarget({ file: mkRel, line: idx + 1, kind: 'kernel_module', target: `${koMatch[1]}.ko` })
+          const libMatch = line.match(/\b(lib[A-Za-z0-9_.-]+\.(?:a|so(?:\.\d+)*))\b/)
+          if (libMatch) addBuildTarget({ file: mkRel, line: idx + 1, kind: libMatch[1].endsWith('.a') ? 'static_lib' : 'shared_lib', target: libMatch[1] })
+        }
       }
     }
     const testFiles = fileNames.filter(name => TEST_FILE_NAME.test(name) || (TEST_DIR_NAME.test(path.posix.basename(relDir)) && /\.(?:c|cc|cpp|cxx)$/i.test(name)))
@@ -527,23 +688,31 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
     }
   }
   const allFaultDefs = new Map()
+  const conditionalFaultSet = new Set()
   for (const rule of cmakeRules) {
     for (const macro of rule.fault_definitions ?? []) {
       if (!allFaultDefs.has(macro)) allFaultDefs.set(macro, [])
       allFaultDefs.get(macro).push(rule.path)
     }
+    for (const macro of rule.conditional_fault_definitions ?? []) conditionalFaultSet.add(macro)
   }
   const faultMacros = [...allFaultDefs.entries()].map(([name, definedIn]) => {
     const token = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
     const usageCount = moduleSourceTexts.filter(item => token.test(item.text)).length
-    return { name, defined_in: definedIn, module_usage_count: usageCount }
+    return {
+      name,
+      defined_in: definedIn,
+      module_usage_count: usageCount,
+      conditional_or_test: conditionalFaultSet.has(name),
+    }
   })
-  if (!moduleFiles.length && !conditionalMacros.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length && !targetSnippets.length && !existingSymbolTests.length) return null
+  if (!moduleFiles.length && !conditionalMacros.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length && !targetSnippets.length && !existingSymbolTests.length && !buildTargets.length) return null
   return {
     ...(targetPaths.length ? { target_files: targetPaths.slice(0, 8) } : {}),
     ...(targetSnippets.length ? { target_snippets: targetSnippets } : {}),
     ...(moduleFiles.length ? { module_files: moduleFiles } : {}),
     ...(conditionalMacros.length ? { conditional_macros: conditionalMacros } : {}),
+    ...(buildTargets.length ? { build_targets: buildTargets } : {}),
     ...(testDirectories.length ? { test_directories: testDirectories } : {}),
     ...(sampleTestSnippet ? { sample_test_snippet: sampleTestSnippet } : {}),
     ...(existingSymbolTests.length ? { existing_symbol_tests: existingSymbolTests } : {}),
@@ -562,6 +731,8 @@ export function compactGenerationInput(record, analysisSource) {
   } : null
   return dedupeRepeatedValues({
     task_id: record.id, run_id: record.run_id, case_keys: record.case_keys,
+    delivery_mode: normalizeDeliveryMode(record.delivery_mode),
+    build_variant: normalizeBuildVariant(record.build_variant),
     instructions: record.instructions || '',
     analysis_source: analysisSource,
     ...(record.analysis_context ? { analysis_context: record.analysis_context } : {}),
@@ -581,6 +752,11 @@ const INLINE_INPUT_MAX_CHARS = 40000
 export function injectionPrompt({ record, inputPath, outputPath, compactInput = '', referencePath = null, referenceError = '' }) {
   const posixInput = posixPath(inputPath), posixOutput = posixPath(outputPath), posixRef = referencePath ? posixPath(referencePath) : null
   const inlined = typeof compactInput === 'string' && compactInput.length > 0 && compactInput.length <= INLINE_INPUT_MAX_CHARS
+  const deliveryMode = normalizeDeliveryMode(record?.delivery_mode)
+  const buildVariant = normalizeBuildVariant(record?.build_variant)
+  const modeGuidance = deliveryMode === 'unit_test'
+    ? '当前交付形态为 unit_test（仓内单元测试 / GTest）：若 repositories[].harness 给出了 C/C++ 单元测试环境（test_directories 含 gtest/native 或 cmake_rules/fault_macros）：① 若 fault_macros 显示某测试编译宏（如 -D*_SIMU_FAULT）的 module_usage_count=0，说明当前模块无现成注入消费点，直接在目标函数对应的 #ifdef <测试宏> 保护下植入默认关闭的最小控制桩，不要全仓搜寻既有框架；② 按 Option A 在 test_directories 配套新增（before=null）或补充 gtest 用例文件，在同一测试目标内依次覆盖“桩默认关闭正常路径 → 启用桩命中目标超时/错误分支 → 复位后恢复正常”，同进程测试优先通过受控开关函数/原子计数或环境变量触发，阻塞等待必须有界且时长直接复用源码超时宏或兼容 harness.conditional_macros 中的 ASAN/非 ASAN 阈值（严禁写死小于 ASAN 超时阈值的短常数）；③ 若对应 cmake_rules 为 file_glob，无需修改构建文件，若 configure_depends=false 则在 steps 中先执行 cmake 重新生成以纳入新测试文件，运行 gtest 时指定 --gtest_filter 并校验实际执行用例数 >= 1（防止匹配 0 条用例时仍返回 0）。'
+    : `当前交付形态为 product_package（个人分支出产品大包 → 提取产物单独替换到目标环境，目标部署变体：${buildVariant === 'hitest' ? 'hitest 精准' : '正常 debug'}）：① 严禁把业务桩代码包在产品构建默认未定义的条件/测试编译宏（如 harness.fault_macros 中 conditional_or_test=true 的宏、*_SIMU_FAULT、LLT/UT 专属开关）内，避免产品配置出包时桩被编译期整体剔除；桩代码必须无条件参与目标组件常规编译（保证同一份源码在正常 debug 与 hitest 精准构建下均可编入产物），并在运行期通过环境变量或已有调测开关默认关闭（零副作用）；② 不要无故修改单元测试目录（test/ut/llt）或单测 CMakeLists.txt（除非所选用例本身明确是仓内单测或用户补充说明显式要求）；若业务组件 CMakeLists.txt 将正常 debug 与 hitest 拆分为多个 target 且本次新增源文件/构建定义，须同步接入两侧 target；③ 结合 repositories[].harness.build_targets 与构建脚本，在 delivery.replace_files 中逐项列明“应从大包提取并单独替换的文件名（如 libxxx.a / libxxx.so / xxx.ko / 脚本路径）”及其对应的修改源码与替换后动作（如是否需要重链宿主进程）；若仓内仅见 OBJECT target 且最终外层打包归属在仓外，如实写明已证实的 target 名称并标注需核对外层打包归属，严禁编造库名。`
   return [
     '你正在执行独立的 PANGEA 用例打桩代码生成任务。不要创建分析 Run，也不要调用 Graph bind/settle/work-finish。',
     inlined
@@ -588,15 +764,15 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
       : `先读取任务输入 JSON：${posixInput}。其中 cases 是已选用例，analysis_context 是关联风险/覆盖率缺口/流程证据，repositories 含本次独立源码副本、固定提交及宿主预扫描的 harness 事实。输入中 {"$same_as": "<路径>"} 表示该处内容与所指路径（$ 为输入根）的值完全相同，已去重以缩短输入。`,
     '宿主已确认的事实，无需再用工具探测：源码副本是宿主刚检出的干净固定提交（不必运行 git status/log 确认）；宿主写入 edits 时按每个文件现有的 CRLF/LF 风格换行，before/after 用 \\n 即可，不必检查换行符；Git、构建与推送均由宿主完成。',
     ...(posixRef ? [`参考结果：${posixRef} 是本任务上一次生成的完整结果 JSON。优先复用其中仍然成立的桩点设计、profiles 与 edits，只针对当前源码重新定位 before 原文并修正失效或被指出的问题；不要从零重新调查。与当前源码冲突时以源码为准。${referenceError ? `上一次未完成的原因：${referenceError}` : ''}`] : []),
-    '探索步数预算严格受限（<= 10 次只读工具调用）：repositories[].harness.target_snippets 已预附带目标源码区间的带行号原文，sample_test_snippet 与 existing_symbol_tests 已预附带同目录测试头部样板及目标函数既有测试调用定位；若预切片上下文已足够唯一定位 edits[].before 与测试签名，无需重复 read 同一文件，仅按需补读缺失头文件或调用点后旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
-    '若 repositories[].harness 给出了 C/C++ 单元测试环境（test_directories 含 gtest/native 或 cmake_rules/fault_macros）：① 若 fault_macros 显示某测试编译宏（如 -D*_SIMU_FAULT）的 module_usage_count=0，说明当前模块无现成注入消费点，直接在目标函数对应的 #ifdef <测试宏> 保护下植入默认关闭的最小控制桩，不要全仓搜寻既有框架；② 按 Option A 在 test_directories 配套新增（before=null）或补充 gtest 用例文件，在同一测试目标内依次覆盖“桩默认关闭正常路径 → 启用桩命中目标超时/错误分支 → 复位后恢复正常”，同进程测试优先通过受控开关函数/原子计数或环境变量触发，阻塞等待必须有界且时长直接复用源码超时宏或兼容 harness.conditional_macros 中的 ASAN/非 ASAN 阈值（严禁写死小于 ASAN 超时阈值的短常数）；③ 若对应 cmake_rules 为 file_glob，无需修改构建文件，若 configure_depends=false 则在 steps 中先执行 cmake 重新生成以纳入新测试文件，运行 gtest 时指定 --gtest_filter 并校验实际执行用例数 >= 1（防止匹配 0 条用例时仍返回 0）。',
+    '探索步数预算严格受限（<= 10 次只读工具调用）：repositories[].harness.target_snippets 已预附带目标源码区间的带行号原文，build_targets 已预附带组件构建目标线索，sample_test_snippet 与 existing_symbol_tests 已预附带同目录测试头部样板及目标函数既有测试调用定位；若预切片上下文已足够唯一定位 edits[].before 与构建归属，无需重复 read 同一文件，仅按需补读缺失头文件或调用点后旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
+    modeGuidance,
     '只在这些仓库内调查需要的实现与既有调测入口。核对所选用例引用的 analysis_source 冻结片段与本次源码副本，分析基线与本次基线不同则重新定位；只比较相关位置，差异对注入方案的影响写入 summary，不重做全仓分析。',
     '不要修改或推送源码仓库，不运行构建或安装命令。唯一交付是下述 JSON 文件；宿主负责精确写入、提交和推送。',
     '源码副本是只读输入，包括拟新增文件的位置：禁止用 write/edit/apply_patch 或 shell 直接在 repositories 中创建或修改文件，也不要先写源文件再把它读回生成 edits。新增模块的完整源码放进 edits[].after 字符串，before=null；已有文件修改用 before/after 字符串描述。',
-    '防单步超长输出截断：edits[].before 只截取当前文件中唯一匹配的最短 1~5 行原文，严禁整函数大段复制；不要在思考或回复正文中预先默写整份源码或完整 JSON。可直接用 write 工具写入目标 JSON，或在输出文件的父目录写简短脚本生成目标 JSON。交付前确认输出文件存在、JSON 可解析且 edits 非空，然后立即结束；聊天里的代码块不能代替磁盘交付。',
+    '防单步超长输出截断与定界符越界：edits[].before 只截取当前文件中唯一匹配的最短 1~5 行原文，严禁整函数大段复制；修改 CMakeLists.txt、函数参数或初始化列表时，before 必须包含闭合定界符 `)`/`}` 并在定界符内部插入新项，严禁对以 `)`/`}` 结尾的行做行后追加（宿主会对修改的 CMake 文件执行确定性词法语法检查）；不要在思考或回复正文中预先默写整份源码或完整 JSON。可直接用 write 工具写入目标 JSON，或在输出文件的父目录写简短脚本生成目标 JSON。交付前确认输出文件存在、JSON 可解析且 edits 非空，然后立即结束；聊天里的代码块不能代替磁盘交付。',
     '本任务不搭建模拟 HTTP/数据库/容器栈，不启动后台服务，不执行 profiles 中的部署或业务操作。自检限定为 JSON 合同、原文替换唯一性及源码语法；真实构建与端到端实测由宿主后续执行，不能把模拟结果写成实测结论。',
     '先完成调用路径与副作用判断，再生成实际可编译的修改。故障注入制造原因，保留原有错误处理和恢复逻辑，不直接篡改预期结果。',
-    '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中，次数配置为零或负数时明确禁用。优先复用真实已有调测入口；没有时实现符合项目语言与构建方式的最小控制入口，并把必要源文件/构建接入一起纳入 edits。',
+    '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中，次数配置为零或负数时明确禁用。注意 getenv() 返回只读环境变量不会自行递减：凡在 points[].times 或自述中声明有限触发次数（如 times=1 / “命中后消耗一次”），必须在代码中使用静态/原子剩余计数器懒初始化并在命中时原子递减（fetch_sub / --）；若实现为常驻开关依赖外部 unset 恢复，则 times 与自述须如实写明持续生效，严禁自述“消耗一次”而实现只读不减。优先复用真实已有调测入口；没有时实现符合项目语言与构建方式的最小控制入口，并把必要源文件/构建接入一起纳入 edits。',
     '逐用例说明按真实执行顺序组织：关闭全部桩验证正常基线 → 启用目标桩执行并检查实际命中及故障后状态 → 关闭桩或耗尽次数后验证恢复（若开关仅启动时读取则写明重启顺序与需重建状态；分轮/组合桩写明触发顺序，基线准备不得提前消耗一次性桩）。同一分支上已有兼容桩点须复用；不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
     '逐步核对观测断言：不得断言目录只剩业务文件；时间戳考虑实际精度并结合内容/计数验证恢复；区分命令退出码与业务返回值。',
     '安全合同 v2（包括参考旧结果和复用结果）：每个 points 元素增加 trigger_scope:{current_input:string,excluded_inputs:[string]}，明确真实调用链上当前请求/当前操作的来源与匹配表达式。禁止用完整 SQL 参数、序列化历史、日志或持久化上下文的全文匹配代替当前输入；历史里含标记而当前输入不含时不得命中、不得消耗次数。不能可靠隔离当前输入时停止该方案，不能扩大命中范围。',
@@ -607,7 +783,8 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
     '恢复备份必须验证完整性：用明确存在标记、严格类型与严格解码（Python base64.b64decode(..., validate=True)），必要时核对原字节哈希。备份缺失或解码损坏不能跳过检查后打印成功，也不能把非法编码宽松解码成空字节并覆盖现状；无法证明原状态时清理与独立核验均须非零。每项资源恢复使用独立异常边界，读取/解码/写入控制备份失败仍须继续撤销本轮认证资源与清理业务数据，最后汇总失败。',
     '空文件（零字节/空 base64 字符串）是合法的原始快照，必须与字段不存在、备份损坏分开判定，不能用字符串 truthiness 判断备份是否存在。覆盖正常存在、原本不存在、原本为空三种恢复基线。登录等资源分配调用前持久化本轮唯一所有权标识；获得凭据后立即落盘，先于任何后续身份探测或断言。后续探测失败或调用结果未知时，也要能按本轮唯一标识回收并核验；不能把“尚未登记 token”当作“未创建会话”而报告成功。',
     '核对运行时库的真实数据形状：数据库驱动默认 tuple 行不能直接 dict(row)，需显式字典行工厂或按列名转换；不能仅凭语法检查推断运行成功。控制开关与次数必须严格校验类型，字符串 false 等非布尔值不能因 truthy 被当作启用；异常或不完整控制数据默认禁用。',
-    'JSON 结构：{summary:string, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,trigger_scope:{current_input:string,excluded_inputs:[string]},times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],safety:{setup:[string],negative_steps:[string],negative_point_ids:[id],cleanup:[string],cleanup_verify:[string]},steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
+    '交付契约 v3：顶层必须包含 delivery:{mode:"product_package"|"unit_test", build_requirement:string, replace_files:[{artifact:string, kind:"static_lib"|"shared_lib"|"kernel_module"|"executable"|"script"|"other", source_files:[string], build_evidence:string, post_replace_action:string}], marker_strings:[string], artifact_verify:[string]}。其中 marker_strings 为编入目标产物的唯一字面量（如控制环境变量名或命中日志标识），必须逐字出现在 edits[].after 中；replace_files 必须覆盖本次修改的全部业务源码文件。',
+    'JSON 结构：{summary:string, delivery:{mode,build_requirement,replace_files:[{artifact,kind,source_files:[string],build_evidence,post_replace_action}],marker_strings:[string],artifact_verify:[string]}, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,trigger_scope:{current_input:string,excluded_inputs:[string]},times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],safety:{setup:[string],negative_steps:[string],negative_point_ids:[id],cleanup:[string],cleanup_verify:[string]},steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
     'case_key 必须逐字使用输入的 case_key。points/profiles 是业务说明；edits 才是实际修改。before 为当前文件中唯一出现的原文，after 为替换内容；新增文件 before=null。path 为仓库相对路径。不要包含 .git 文件，不删除文件。',
     'profiles 必须与输入 case_keys 一一对应：总数相同、case_key 集合相同且每个 case_key 只出现一次；同一用例的多轮场景合并在同一个 profile.steps 中，steps 数组每个元素都必须是非空的可执行命令或 # 注释行（禁止放入空字符串 "" 或纯空白元素，分节请用 # 注释），给出能直接执行的启用、关闭及命中检查方法，变量先定义后使用，不用伪命令或“同上”。',
     '宿主会将同一 profile.steps 按顺序原样拼入头部带 set -euo pipefail 的单个 bash 脚本执行，并需兼容 macOS 默认 bash 3.2（UTF-8/C.UTF-8）：禁止 declare -A、mapfile/readarray、|&、${var,,} 等 Bash 4+ 语法；变量紧邻中文或非 ASCII 标点时必须写作 ${VAR}；严禁把缺少末尾换行的数据交给 read（如 curl 应用 code=$(curl -sS -o "$body_file" -w \'%{http_code}\' ...) 分离响应体与状态码，或用 read -r var || [[ -n "$var" ]]）；pipefail 下“无匹配”断言用 ! grep -q；内嵌 Python 用 True/False/None，SQL 聚合遵守 GROUP BY，关键断言失败须非零退出。',
@@ -630,7 +807,59 @@ export function normalizeInjectionResult(value) {
   if (Array.isArray(value.limitations)) {
     value.limitations = value.limitations.filter(item => typeof item !== 'string' || item.trim().length > 0)
   }
+  if (value.delivery && typeof value.delivery === 'object') {
+    if (Array.isArray(value.delivery.marker_strings)) {
+      value.delivery.marker_strings = [...new Set(value.delivery.marker_strings.map(item => typeof item === 'string' ? item.trim() : item).filter(item => typeof item !== 'string' || item.length > 0))]
+    }
+    if (Array.isArray(value.delivery.artifact_verify)) {
+      value.delivery.artifact_verify = value.delivery.artifact_verify.filter(item => typeof item !== 'string' || item.trim().length > 0)
+    }
+  }
   return value
+}
+
+const isBusinessSourceEdit = (editPath) => {
+  const norm = posixPath(editPath || '')
+  if (!norm || IS_CMAKE_FILE.test(norm) || /(?:^|\/)(?:Makefile|Kbuild|GNUmakefile)$/i.test(norm)) return false
+  if (norm.split('/').some(part => TEST_DIR_NAME.test(part)) || TEST_FILE_NAME.test(path.posix.basename(norm))) return false
+  return true
+}
+
+const sourceFileCovered = (edit, replaceFiles, allowBasename = false) => {
+  const normPath = posixPath(edit.path || '')
+  const repoPrefixed = `${edit.repo_id}:${normPath}`
+  const slashPrefixed = `${edit.repo_id}/${normPath}`
+  const base = path.posix.basename(normPath)
+  for (const item of replaceFiles) {
+    for (const ref of item.source_files || []) {
+      const clean = posixPath(String(ref || '').trim()).replace(/^\.\/+/, '')
+      if (!clean) continue
+      if (clean === normPath || clean === repoPrefixed || clean === slashPrefixed || (allowBasename && clean === base)) return true
+    }
+  }
+  return false
+}
+
+export function collectConsistencyNotices(value) {
+  const notices = []
+  if (!value || typeof value !== 'object') return notices
+  const points = Array.isArray(value.points) ? value.points : []
+  const edits = Array.isArray(value.edits) ? value.edits : []
+  const declaresFiniteTimes = points.some(point => {
+    const t = point?.times
+    if (typeof t === 'number' && Number.isFinite(t) && t > 0) return true
+    if (typeof t === 'string' && /(?:^\s*[1-9]\d*\s*(?:次)?\s*$|消耗\s*(?:1|一|\d+)\s*次|单次|一次)/.test(t)) return true
+    const desc = `${point?.trigger ?? ''} ${point?.action ?? ''}`
+    return /消耗\s*(?:1|一|\d+)\s*次|命中后递减/.test(desc)
+  })
+  if (declaresFiniteTimes && edits.length) {
+    const afterBlob = edits.map(e => typeof e?.after === 'string' ? e.after : '').join('\n')
+    const hasDecrementOrStateWrite = /(?:--|\-=|fetch_sub|__sync_sub_and_fetch|__atomic_sub_fetch|atomic_dec|atomic_sub|compare_exchange|setenv|unsetenv|-\s*1\b|hits\s*>=|count\s*>=|remaining\s*<=)/i.test(afterBlob)
+    if (!hasDecrementOrStateWrite) {
+      notices.push('一致性提醒：桩点声明了有限触发次数（如单次/消耗一次），但补丁源码中未检测到明显的计数递减或状态更新语句，请核对差异确认未出现“只读 getenv 不递减”的无限触发。')
+    }
+  }
+  return notices
 }
 
 export function checkInjectionResult(value, record) {
@@ -674,6 +903,44 @@ export function checkInjectionResult(value, record) {
   if (value.edits.some(edit => !edit || !repoIds.has(edit.repo_id))) throw serviceError('代码修改引用了未选择的仓库')
   for (const edit of value.edits) {
     if (typeof edit.before === 'string' && edit.before === edit.after) throw serviceError(`代码修改前后内容相同：${edit.path}`)
+  }
+  if (record.generation_contract_version >= 3) {
+    const delivery = value.delivery
+    if (!delivery || typeof delivery !== 'object' || Array.isArray(delivery)) {
+      throw serviceError('生成结果缺少 delivery 交付信息（构建前提、应单独替换文件清单与桩特征标识）')
+    }
+    if (typeof delivery.build_requirement !== 'string' || !delivery.build_requirement.trim()) {
+      throw serviceError('delivery.build_requirement 不能为空，请声明构建配置前提')
+    }
+    const markers = Array.isArray(delivery.marker_strings)
+      ? delivery.marker_strings.filter(item => typeof item === 'string' && item.trim().length >= 4).map(item => item.trim())
+      : []
+    if (!markers.length) {
+      throw serviceError('delivery.marker_strings 必须包含至少一个长度 >= 4 的桩特征字面量（如控制环境变量名或命中日志标识）')
+    }
+    const allAfter = value.edits.map(edit => typeof edit.after === 'string' ? edit.after : '').join('\n')
+    const missingMarker = markers.find(marker => !allAfter.includes(marker))
+    if (missingMarker) {
+      throw serviceError(`delivery.marker_strings 中的标识「${missingMarker}」未出现在任何 edits[].after 补丁代码中，请核对`)
+    }
+    const replaceFiles = normalizeReplaceFiles(delivery.replace_files)
+    if (!replaceFiles.length || replaceFiles.some(item => !item.source_files.length)) {
+      throw serviceError('delivery.replace_files 不能为空，且每项必须声明 artifact 产物名及对应的 source_files 源码列表')
+    }
+    if (normalizeDeliveryMode(record.delivery_mode) === 'product_package') {
+      const businessEdits = value.edits.filter(edit => isBusinessSourceEdit(edit.path))
+      const basenameCounts = new Map()
+      for (const edit of businessEdits) {
+        const base = path.posix.basename(posixPath(edit.path || ''))
+        basenameCounts.set(base, (basenameCounts.get(base) ?? 0) + 1)
+      }
+      const uncovered = businessEdits
+        .filter(edit => !sourceFileCovered(edit, replaceFiles, basenameCounts.get(path.posix.basename(posixPath(edit.path || ''))) === 1))
+        .map(edit => posixPath(edit.path))
+      if (uncovered.length) {
+        throw serviceError(`delivery.replace_files 遗漏了已修改业务源码的替换产物归属：${[...new Set(uncovered)].join('、')}`)
+      }
+    }
   }
   const editedByRepo = new Map()
   for (const edit of value.edits) {
@@ -719,9 +986,15 @@ function taskSummary(task, { latestBuild = null, latestPushedBuild = null } = {}
   const repoIds = (task.repositories || []).length
     ? task.repositories.map(repo => repo.repo_id)
     : (task.source_repositories || []).map(repo => repo.repo_id)
+  const replaceFiles = normalizeReplaceFiles(task.result?.delivery?.replace_files)
+  const markerStrings = extractMarkerStrings(task)
   return {
     id: task.id, run_id: task.run_id, name: task.name || task.cases?.[0]?.title || '', status: task.status, failure_phase: task.failure_phase, error: task.error,
     created_at: task.created_at, updated_at: task.updated_at, schema_version: task.schema_version,
+    delivery_mode: normalizeDeliveryMode(task.delivery_mode),
+    build_variant: normalizeBuildVariant(task.build_variant),
+    replace_files: replaceFiles,
+    marker_strings: markerStrings,
     case_count: task.case_keys?.length ?? 0, point_count: task.result?.points?.length ?? 0,
     repo_ids: repoIds,
     result_saved: Boolean(task.result_saved),
@@ -1199,9 +1472,20 @@ export class FaultInjectionService {
       catch (error) { throw serviceError(error.message) }
     }
     if (!providerId || !model) throw serviceError('请选择打桩执行器和模型')
+    let contractVersion = 3
+    if (reused) {
+      try {
+        const reusedTask = JSON.parse(await readFile(path.join(await this.directory(dataRoot, run.run_id, reused.task_id), 'task.json'), 'utf8'))
+        if (Number.isInteger(reusedTask?.generation_contract_version) && reusedTask.generation_contract_version < 3) {
+          contractVersion = reusedTask.generation_contract_version
+        }
+      } catch {}
+    }
     const taskId = randomUUID(), directory = await this.directory(dataRoot, run.run_id, taskId)
-    const record = { schema_version: 3, generation_contract_version: 2, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
+    const record = { schema_version: 3, generation_contract_version: contractVersion, id: taskId, run_id: run.run_id, status: 'preparing', created_at: new Date().toISOString(),
       name: String(input.name || selected[0].title || '打桩任务').slice(0, 100), pipeline_url: defaults.pipeline_url || '',
+      delivery_mode: normalizeDeliveryMode(input.delivery_mode),
+      build_variant: normalizeBuildVariant(input.build_variant),
       branch: [...new Set(selectedRepositories.map(repo => repo.personal_branch).filter(Boolean))].join('、'),
       case_keys: keys, cases: selected,
       analysis_context: run.analysis_context ?? extractAnalysisContext(run, selected), repositories: [], source_repositories: selectedRepositories,
@@ -1219,6 +1503,18 @@ export class FaultInjectionService {
       .finally(() => this.active.delete(key))
     await published
     return record
+  }
+  async setBuildVariant(dataRoot, runId, taskId, buildVariant) {
+    const normalized = normalizeBuildVariant(buildVariant)
+    return this.exclusive(dataRoot, runId, taskId, async () => {
+      const record = await this.read(dataRoot, runId, taskId)
+      record.build_variant = normalized
+      const persisted = { ...record }
+      delete persisted.latest_build
+      delete persisted.latest_pushed_build
+      await this.save(await this.directory(dataRoot, runId, taskId), persisted)
+      return { ...persisted, latest_build: record.latest_build, latest_pushed_build: record.latest_pushed_build }
+    })
   }
   async prepareAndGenerate({ dataRoot, directory, record, cwd, signal }) {
     for (const source of record.source_repositories) {
@@ -1313,14 +1609,57 @@ export class FaultInjectionService {
         referencePath = path.join(scratchDirectory, 'reference-result.json')
         await writeFile(referencePath, await readFile(record.reference_from.file))
       }
+      const validateOutput = async candidate => {
+        const clone = structuredClone(candidate)
+        normalizeInjectionResult(clone)
+        checkInjectionResult(clone, record)
+        for (const repo of record.repositories) {
+          await this.cleanGeneratorCheckout(directory, record, repo, signal)
+          const edits = clone.edits.filter(edit => edit.repo_id === repo.repo_id)
+          if (!edits.length) continue
+          for (const edit of edits) {
+            const attributes = await this.git(repo.path, ['check-attr', '-z', 'filter', '--', edit.path], signal)
+            if (attributes.split('\0')[2] === 'lfs') throw serviceError(`本轮打桩不支持修改 LFS 文件：${edit.path}`)
+          }
+          await applyInjectionEdits(repo.path, edits, { dryRun: true })
+        }
+      }
       const result = await this.generate({ record, cwd, scratchDirectory, inputPath, outputPath, signal,
         prompt: injectionPrompt({ record, inputPath, outputPath, compactInput, referencePath, referenceError: record.reference_from?.error }) + `\n用户补充说明：${record.instructions || '无'}`,
+        validateOutput,
         onStarted: async session => { record.agent_session = session; await this.save(directory, record) },
         onTelemetry: async telemetry => { record.telemetry = telemetry; await this.save(directory, record) } })
       signal.throwIfAborted()
       generated = result ?? JSON.parse(await readFile(outputPath, 'utf8'))
     }
     await this.applyAndStageResult({ directory, scratchDirectory, record, generated, signal, isRevalidate: false })
+  }
+  async cleanGeneratorCheckout(directory, record, repo, signal) {
+    // The delivery is the result file. Changes the generator made to its source
+    // copy are never mixed in: they are recorded, discarded, and the result is
+    // applied to the clean checkout. A result that relied on them no longer
+    // matches the original text and is rejected by exact-match apply.
+    const changes = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal))
+    const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
+    if (!changes.length && head === repo.base_commit) return
+    const mergedChanges = [...(Array.isArray(repo.workspace_changes) ? repo.workspace_changes : []), ...changes]
+    const seenChangeKeys = new Set()
+    repo.workspace_changes = mergedChanges.filter(item => {
+      const key = `${item.change}:${item.path}`
+      if (seenChangeKeys.has(key)) return false
+      seenChangeKeys.add(key)
+      return true
+    }).slice(0, 50)
+    await this.git(repo.path, ['checkout', '-q', '--force', '--detach', repo.base_commit], signal)
+    await this.git(repo.path, ['reset', '-q', '--hard', repo.base_commit], signal)
+    await this.git(repo.path, ['clean', '-q', '-f', '-f', '-d'], signal)
+    const remaining = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal)).filter(item => item.change !== 'reverted')
+    if (remaining.length || await this.git(repo.path, ['rev-parse', 'HEAD'], signal) !== repo.base_commit) {
+      throw serviceError(`${repo.repo_id}：生成期间源码副本被改动且无法恢复（${describeChanges(remaining)}）。生成结果已保存，可“直接复用上次生成结果”在新的干净副本上应用`)
+    }
+    const notice = `${repo.repo_id}：执行器在生成期间改动了源码副本（${changes.length ? describeChanges(changes) : 'HEAD 被移动'}）。这些改动已丢弃，未混入提交；下面的差异只来自结果文件中登记的修改。`
+    if (!record.notices.includes(notice)) record.notices.push(notice)
+    await this.save(directory, record)
   }
   async applyAndStageResult({ directory, scratchDirectory, record, generated, signal, isRevalidate = false }) {
     normalizeInjectionResult(generated)
@@ -1332,6 +1671,9 @@ export class FaultInjectionService {
     record.result_sha256 = savedFile ? hash(await readFile(savedFile)) : null
     await this.save(directory, record)
     checkInjectionResult(generated, record)
+    for (const notice of collectConsistencyNotices(generated)) {
+      if (!record.notices.includes(notice)) record.notices.push(notice)
+    }
     record.result = { ...generated }; delete record.result.edits
     await this.save(directory, record)
     for (const repo of record.repositories) {
@@ -1344,24 +1686,7 @@ export class FaultInjectionService {
         await this.git(repo.path, ['clean', '-q', '-f', '-f', '-d'], signal)
         repo.diff = null; repo.diff_sha256 = null; repo.files = []
       } else {
-        // The delivery is the result file. Changes the generator made to its source
-        // copy are never mixed in: they are recorded, discarded, and the result is
-        // applied to the clean checkout. A result that relied on them no longer
-        // matches the original text and is rejected by the exact-match apply below.
-        const changes = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal))
-        const head = await this.git(repo.path, ['rev-parse', 'HEAD'], signal)
-        if (changes.length || head !== repo.base_commit) {
-          repo.workspace_changes = changes.slice(0, 50)
-          await this.git(repo.path, ['checkout', '-q', '--force', '--detach', repo.base_commit], signal)
-          await this.git(repo.path, ['reset', '-q', '--hard', repo.base_commit], signal)
-          await this.git(repo.path, ['clean', '-q', '-f', '-f', '-d'], signal)
-          const remaining = workspaceChanges(repo.workspace_baseline, await workspaceSnapshot(this.git, repo.path, signal)).filter(item => item.change !== 'reverted')
-          if (remaining.length || await this.git(repo.path, ['rev-parse', 'HEAD'], signal) !== repo.base_commit) {
-            throw serviceError(`${repo.repo_id}：生成期间源码副本被改动且无法恢复（${describeChanges(remaining)}）。生成结果已保存，可“直接复用上次生成结果”在新的干净副本上应用`)
-          }
-          record.notices.push(`${repo.repo_id}：执行器在生成期间改动了源码副本（${changes.length ? describeChanges(changes) : 'HEAD 被移动'}）。这些改动已丢弃，未混入提交；下面的差异只来自结果文件中登记的修改。`)
-          await this.save(directory, record)
-        }
+        await this.cleanGeneratorCheckout(directory, record, repo, signal)
       }
       const edits = generated.edits.filter(edit => edit.repo_id === repo.repo_id)
       if (!edits.length) continue
@@ -2000,6 +2325,7 @@ export class FaultInjectionService {
       run: { run_id: runId, analysis_context: previous.analysis_context ?? null, source_snapshot: { repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })) }, details: { test_cases: previous.cases } },
       input: { case_keys: previous.case_keys, repositories: previous.source_repositories.map(repo => ({ repo_id: repo.repo_id })),
         baseline_acknowledged: previous.baseline_acknowledged, provider_id: previous.provider_id, agent_model: previous.agent_model, instructions: previous.instructions,
+        delivery_mode: previous.delivery_mode, build_variant: previous.build_variant,
         pipeline_url: previous.pipeline_url, name: previous.name,
         ...(mode === 'reuse' ? { reuse_task_id: taskId } : mode === 'reference' ? { reference_task_id: taskId, reference_error: previous.error || '' } : {}) } }, { requireReceipt: false })
   }

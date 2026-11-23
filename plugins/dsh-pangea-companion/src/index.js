@@ -540,7 +540,8 @@ export async function faultInjectionRouteHandler(req, res, service, runtime, { r
       else {
         updateAdmission(runtime)?.assertOpen()
         if (input.action === 'configure') return json(res, 200, { status: 'ok', ...await service.configurePipeline(dataRoot, input.run_id, input.task_id, input.pipeline_url) })
-        if (input.action === 'revalidate') task = await service.revalidate(dataRoot, input.run_id, input.task_id)
+        if (input.action === 'set-variant') task = await service.setBuildVariant(dataRoot, input.run_id, input.task_id, input.build_variant)
+        else if (input.action === 'revalidate') task = await service.revalidate(dataRoot, input.run_id, input.task_id)
         else if (input.action === 'retry') task = await service.retry(dataRoot, input.run_id, input.task_id, input.cwd)
         else if (input.action === 'reuse-result') task = await service.retry(dataRoot, input.run_id, input.task_id, input.cwd, { mode: 'reuse' })
         else if (input.action === 'retry-with-reference') task = await service.retry(dataRoot, input.run_id, input.task_id, input.cwd, { mode: 'reference' })

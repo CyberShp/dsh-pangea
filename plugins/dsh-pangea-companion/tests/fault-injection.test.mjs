@@ -88,8 +88,24 @@ async function fixture(t, { multi = false } = {}) {
 }
 
 function makeResult(record, edits, pointId = 'A') {
+  const sourceFiles = [...new Set(edits.map(edit => edit?.path).filter(Boolean))]
+  const firstAfter = edits.map(edit => edit?.after || '').join('\n')
+  const marker = firstAfter.includes('PANGEA_FI') ? 'PANGEA_FI' : firstAfter.includes('hit:') ? 'hit:' : (firstAfter.trim().slice(0, 12) || 'PANGEA_FI')
   return {
     summary: '按用例控制故障',
+    delivery: {
+      mode: record?.delivery_mode || 'product_package',
+      build_requirement: '标准产品配置即可编入，运行期默认关闭',
+      replace_files: [{
+        artifact: 'libtarget.a',
+        kind: 'static_lib',
+        source_files: sourceFiles.length ? sourceFiles : ['main.c'],
+        build_evidence: 'CMakeLists.txt:1',
+        post_replace_action: '替换静态库后重链宿主进程',
+      }],
+      marker_strings: [marker],
+      artifact_verify: [`grep -aFq "${marker}" libtarget.a`],
+    },
     points: [{ id: pointId, trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'main.c', trigger: '队列创建', times: 1, action: '申请失败', enable: `PANGEA_FI=${pointId}`, disable: '清空 PANGEA_FI', observe: `hit:${pointId}` }],
     profiles: record.case_keys.map(case_key => ({ case_key, point_ids: [pointId], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: [pointId], cleanup: [':'], cleanup_verify: [':'] }, steps: ['开启目标桩', '执行业务', '检查命中并撤销'] })),
     edits,
@@ -651,7 +667,7 @@ test('two tasks share one personal branch setting and never share writable check
 })
 
 test('unmatched edits fail only the injection task; original case and source stay available', async t => {
-  const f = await fixture(t), service = new FaultInjectionService({ generate: async ({ record }) => ({ ...generated(record), edits: [{ repo_id: 'target', path: 'main.c', before: 'not present', after: 'oops' }] }) })
+  const f = await fixture(t), service = new FaultInjectionService({ generate: async ({ record }) => ({ ...generated(record), edits: [{ repo_id: 'target', path: 'main.c', before: 'not present', after: '/* PANGEA_FI */ oops' }] }) })
   t.after(() => service.dispose())
   const task = await service.start(f); await wait(service)
   const failed = await service.read(f.dataRoot, f.run.run_id, task.id)
@@ -881,7 +897,7 @@ test('new task rejects missing safety contract before touching checkout and reta
   let checkoutBefore
   const service = new FaultInjectionService({ generate: async ({ record }) => {
     checkoutBefore = await readFile(path.join(record.repositories[0].path, 'main.c'))
-    assert.equal(record.generation_contract_version, 2)
+    assert.equal(record.generation_contract_version, 3)
     const result = generated(record)
     delete result.profiles[0].safety.cleanup
     return result

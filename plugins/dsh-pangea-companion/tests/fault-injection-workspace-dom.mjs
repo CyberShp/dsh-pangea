@@ -53,6 +53,13 @@ const service = new FaultInjectionService({ validateModel: options => requireAge
   const pointId = isRun2 ? 'B_PT' : 'A'
   const payload = {
     summary: isRun2 ? '乙任务测试夹具' : '工程测试夹具',
+    delivery: {
+      mode: 'product_package',
+      build_requirement: '标准产品配置即可编入',
+      replace_files: [{ artifact: isRun2 ? 'libother.a' : 'libtarget.a', kind: 'static_lib', source_files: [filePath], build_evidence: 'CMakeLists.txt:1', post_replace_action: '替换静态库并重链' }],
+      marker_strings: [isRun2 ? 'return -10;' : 'return -1;'],
+      artifact_verify: [`grep -aFq "${isRun2 ? 'return -10;' : 'return -1;'}" ${isRun2 ? 'libother.a' : 'libtarget.a'}`],
+    },
     points: [{ id: pointId, trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: filePath, action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: `hit:${pointId}` }],
     profiles: record.case_keys.map(case_key => ({ case_key, point_ids: [pointId], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: [pointId], cleanup: [':'], cleanup_verify: [':'] }, steps: [`开启 ${pointId}`, '', '执行业务', `关闭 ${pointId} 并恢复`] })),
     edits: [{

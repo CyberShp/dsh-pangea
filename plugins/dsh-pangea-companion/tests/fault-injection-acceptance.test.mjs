@@ -6,11 +6,11 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { Readable } from 'node:stream'
-import { FaultInjectionService, injectionGit, workspaceChanges, dedupeRepeatedValues, compactGenerationInput, checkInjectionResult } from '../src/fault-injection.js'
+import { FaultInjectionService, injectionGit, workspaceChanges, dedupeRepeatedValues, compactGenerationInput, checkInjectionResult, checkCmakeSyntax } from '../src/fault-injection.js'
 import { createInjectionGenerator } from '../src/fault-injection-agent.js'
 import {
   DEFAULT_INTRANET_COMMIT_REGEX, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
-  buildVerificationShellScript, extractRemoteHookRegex, normalizeCommitConfig,
+  buildArtifactVerifyCommands, buildVerificationShellScript, extractRemoteHookRegex, mergeReplaceFilesFromTasks, normalizeCommitConfig,
   resolveCommitMessage, validateRawCommitMessage,
 } from '../src/fault-injection-candidates.js'
 import { faultInjectionRouteHandler } from '../src/index.js'
@@ -63,9 +63,20 @@ async function fixture(t, { branch = 'main', personalBranch = 'personal', lfs = 
   const input = { case_keys: ['unit/CASE-HANG'], repositories, provider_id: 'pangea-opencode', agent_model: 'fixture' }
   return { root, dataRoot, source, remote, repositories, run, input }
 }
-const generated = record => ({ summary: '初始化第 9 步挂起', points: [{ id: 'INIT_HANG', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'init.c', action: '阻塞初始化', trigger: '控制文件存在', times: 1 }],
+const generated = record => ({
+  summary: '初始化第 9 步挂起',
+  delivery: {
+    mode: record?.delivery_mode || 'product_package',
+    build_requirement: '标准产品配置即可编入，运行期通过控制变量启用',
+    replace_files: [{ artifact: 'libinit.a', kind: 'static_lib', source_files: ['init.c'], build_evidence: 'CMakeLists.txt:1', post_replace_action: '替换静态库后重链' }],
+    marker_strings: ['INIT_HANG'],
+    artifact_verify: ['grep -aFq "INIT_HANG" libinit.a'],
+  },
+  points: [{ id: 'INIT_HANG', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'init.c', action: '阻塞初始化', trigger: '控制文件存在', times: 1 }],
   profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['INIT_HANG'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['INIT_HANG'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['touch /tmp/pangea_init_hang', 'reload', 'check timeout log'] })),
-  edits: [{ repo_id: 'target', path: 'init.c', before: original, after: instrumented }], limitations: [] })
+  edits: [{ repo_id: 'target', path: 'init.c', before: original, after: instrumented }],
+  limitations: [],
+})
 const wait = service => Promise.all([...service.active.values()].map(operation => operation.done))
 const untracked = async checkout => (await injectionGit(checkout, ['status', '--porcelain', '--untracked-files=all'])).split('\n').filter(Boolean)
 
@@ -374,6 +385,13 @@ test('C/C++ driver repo: host pre-scans harness facts, deduplicates 80+ char sou
       capturedInput = JSON.parse(await readFile(inputPath, 'utf8'))
       return {
         summary: '在 XXX_SIMU_FAULT 宏下植入挂起开关并新增 gtest 覆盖超时分支',
+        delivery: {
+          mode: 'unit_test',
+          build_requirement: '单元测试目标 mod_ut 默认定义 XXX_SIMU_FAULT',
+          replace_files: [{ artifact: 'mod_ut', kind: 'executable', source_files: [drvPath], build_evidence: 'test/CMakeLists.txt:2', post_replace_action: '重新编译运行 mod_ut' }],
+          marker_strings: ['g_drv_simu_hang'],
+          artifact_verify: ['grep -aFq "g_drv_simu_hang" build/test/mod_ut'],
+        },
         points: [{ id: 'DRV_WAIT_HANG', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: drvPath, action: '挂起就绪位', trigger: 'drv_simu_hang_count > 0', times: 1, observe: '[FI_HIT:DRV_WAIT_HANG]' }],
         profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['DRV_WAIT_HANG'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['DRV_WAIT_HANG'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['cmake -B build && cmake --build build --target mod_ut', './build/test/mod_ut --gtest_filter=DrvTimeout.HangTimeout'] }],
         edits: [
@@ -394,7 +412,7 @@ test('C/C++ driver repo: host pre-scans harness facts, deduplicates 80+ char sou
       }
     },
   })
-  const task = await service.start(f); await wait(service)
+  const task = await service.start({ ...f, input: { ...f.input, delivery_mode: 'unit_test' } }); await wait(service)
   const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
   assert.equal(ready.status, 'ready', ready.error)
   assert.match(capturedPrompt, /<task_input_json>[\s\S]*<\/task_input_json>/)
@@ -408,7 +426,7 @@ test('C/C++ driver repo: host pre-scans harness facts, deduplicates 80+ char sou
   assert.ok(harness)
   assert.ok(harness.conditional_macros.some(item => item.location === `${drvPath}:1` && item.code.includes('__XXX_ASAN__')))
   assert.ok(harness.conditional_macros.some(item => item.code.includes('DRV_INIT_WAIT_LOOPS 1500')))
-  assert.deepEqual(harness.fault_macros, [{ name: 'XXX_SIMU_FAULT', defined_in: ['test/CMakeLists.txt'], module_usage_count: 0 }])
+  assert.deepEqual(harness.fault_macros, [{ name: 'XXX_SIMU_FAULT', defined_in: ['test/CMakeLists.txt'], module_usage_count: 0, conditional_or_test: true }])
   assert.equal(harness.cmake_rules[0].source_collection, 'file_glob')
   assert.equal(harness.cmake_rules[0].configure_depends, false)
   assert.equal(harness.test_directories.find(item => item.directory === 'test')?.framework, 'gtest')
@@ -666,6 +684,13 @@ test('real compiled C acceptance: multi-case batch shares one fault stub, compil
   const service = new FaultInjectionService({
     generate: async () => ({
       summary: '在 drv_init_step 植入环境变量控制的单点故障桩，同时覆盖超时与恢复两条用例',
+      delivery: {
+        mode: 'product_package',
+        build_requirement: '标准产品配置即可编入',
+        replace_files: [{ artifact: 'drv_bin', kind: 'executable', source_files: ['init.c'], build_evidence: 'Makefile:1', post_replace_action: '替换可执行文件' }],
+        marker_strings: ['DRV_FAULT', '[FI_HIT:DRV_TIMEOUT_STUB]'],
+        artifact_verify: ['grep -aFq "DRV_FAULT" drv_bin'],
+      },
       points: [{ id: 'DRV_TIMEOUT_STUB', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'init.c', action: '强制返回 -1', enable: 'DRV_FAULT=1', disable: 'unset DRV_FAULT', observe: '[FI_HIT:DRV_TIMEOUT_STUB]' }],
       profiles: [
         { case_key: 'unit/CASE-TIMEOUT', point_ids: ['DRV_TIMEOUT_STUB'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['DRV_TIMEOUT_STUB'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['cc init.c -o drv_bin', '', 'DRV_FAULT=1 ./drv_bin 0 || true'] },
@@ -745,6 +770,13 @@ test('existing_symbol_tests locates target C function calls in UT files and igno
       capturedInput = JSON.parse(await readFile(inputPath, 'utf8'))
       return {
         summary: '补充超时桩',
+        delivery: {
+          mode: 'product_package',
+          build_requirement: '标准产品配置即可编入',
+          replace_files: [{ artifact: 'libdrv_wait.a', kind: 'static_lib', source_files: [drvPath], build_evidence: 'CMakeLists.txt:1', post_replace_action: '替换静态库并重链' }],
+          marker_strings: ['return -1;'],
+          artifact_verify: ['grep -aFq "return -1;" libdrv_wait.a'],
+        },
         points: [{ id: 'WAIT_TIMEOUT', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: drvPath, action: '返回 -1' }],
         profiles: [{ case_key: 'unit/CASE-HANG', point_ids: ['WAIT_TIMEOUT'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['WAIT_TIMEOUT'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['echo ok'] }],
         edits: [{ repo_id: 'target', path: drvPath, before: '  return helper_noop();', after: '  return -1;' }],
@@ -992,8 +1024,13 @@ test('P0 field-test #5 regression: legacy implicit default upgrade, Chinese hook
   const service = new FaultInjectionService({
     generate: async ({ record }) => {
       modelCalls += 1
+      const base = generated(record)
       return {
-        ...generated(record),
+        ...base,
+        delivery: {
+          ...base.delivery,
+          replace_files: [{ ...base.delivery.replace_files[0], source_files: ['init.c', 'stub_guard.h'] }],
+        },
         summary: '这是一个非常长的模型自动生成打桩修改摘要说明用于确认默认说明截断不会触发远端Java正则超时',
         edits: [
           { repo_id: 'target', path: 'init.c', before: original, after: instrumented },
@@ -1067,6 +1104,412 @@ test('P0 field-test #5 regression: legacy implicit default upgrade, Chinese hook
   assert.equal(await injectionGit(f.remote, ['show', 'refs/heads/personal:stub_guard.h']), '#define PANGEA_STUB_GUARD 1')
   assert.equal(await injectionGit(f.source, ['rev-parse', 'HEAD']), baseHead)
 })
+
+test('F2 CMake lexical syntax gate rejects trailing tokens outside ) and allows valid comments, quotes, and generator expressions', () => {
+  const validCmake = [
+    '# [=[ block comment with ) and stray tokens ]=]',
+    'add_library(nvmf_tcp STATIC',
+    '  src/tcp_main.c',
+    '  src/tcp_stub.c # inline ) comment',
+    ')',
+    'target_compile_definitions(nvmf_tcp PRIVATE',
+    '  $<$<BOOL:${ENABLE_UT}>:NVMF_SIMU_FAULT>',
+    '  "QUOTED_WITH_PAREN_)"',
+    ')',
+    '',
+  ].join('\n')
+  assert.doesNotThrow(() => checkCmakeSyntax(validCmake, 'CMakeLists.txt'))
+
+  // Reproduce F2: appending a token after the closing ')'
+  const brokenF2 = [
+    'add_library(nvmf_tcp STATIC',
+    '  src/tcp_main.c',
+    ') src/tcp_stub.c',
+    '',
+  ].join('\n')
+  assert.throws(() => checkCmakeSyntax(brokenF2, 'sub/CMakeLists.txt'), /CMake 语法错误（sub\/CMakeLists\.txt:3）：闭括号外存在裸标记「src」/)
+
+  const unclosedParen = 'add_library(nvmf_tcp STATIC\n  src/tcp_main.c\n'
+  assert.throws(() => checkCmakeSyntax(unclosedParen, 'CMakeLists.txt'), /左括号未闭合/)
+  assert.doesNotThrow(() => checkCmakeSyntax('\uFEFFadd_library(nvmf_tcp STATIC src/tcp_main.c)\n', 'CMakeLists.txt'))
+})
+
+test('F1/F4/F5 product_package mode: scans build_targets, blocks missing replace_files/markers, emits non-blocking F5 notice, and catches missing markers in pre-run verify script', async t => {
+  const f = await fixture(t)
+  await mkdir(path.join(f.source, 'src'), { recursive: true })
+  await writeFile(path.join(f.source, 'CMakeLists.txt'), [
+    'add_library(nvmf_tcp STATIC src/tcp.c)',
+    'target_compile_definitions(nvmf_tcp PRIVATE $<$<BOOL:${BUILD_LLT}>:NVMF_SIMU_FAULT>)',
+    '',
+  ].join('\n'))
+  await writeFile(path.join(f.source, 'src/tcp.c'), 'int tcp_send(void) { return 0; }\n')
+  await injectionGit(f.source, ['add', '.'])
+  await injectionGit(f.source, ['commit', '-m', 'add nvmf_tcp static lib'])
+  await injectionGit(f.source, ['push', 'origin', 'main'])
+  const head = await injectionGit(f.source, ['rev-parse', 'HEAD'])
+  f.repositories[0].git.commit = head
+  f.repositories[0].base_ref = head
+  f.run.details = {
+    test_cases: [{
+      projection_id: 'unit/CASE-TCP',
+      test_case_id: 'unit/CASE-TCP',
+      title: 'TCP 发送失败注入',
+      execution_readiness: 'needs_instrumentation',
+      source_evidence: ['target:src/tcp.c:1-1'],
+    }],
+  }
+  f.input = { ...f.input, case_keys: ['unit/CASE-TCP'], delivery_mode: 'product_package', build_variant: 'debug' }
+
+  let capturedPrompt = '', capturedInput = null
+  const service = new FaultInjectionService({
+    generate: async ({ inputPath, prompt }) => {
+      capturedPrompt = prompt
+      capturedInput = JSON.parse(await readFile(inputPath, 'utf8'))
+      return {
+        summary: '在 tcp_send 植入默认关闭的环境变量桩（无测试宏门控），命中后消耗一次',
+        delivery: {
+          mode: 'product_package',
+          build_requirement: '标准产品配置（正常 debug 或 hitest 精准）均可编入，无需开启全局测试宏',
+          replace_files: [{
+            artifact: 'libnvmf_tcp.a',
+            kind: 'static_lib',
+            source_files: ['src/tcp.c'],
+            build_evidence: 'CMakeLists.txt:1',
+            post_replace_action: '替换组件静态库后重链宿主进程',
+          }],
+          marker_strings: ['NVMF_TCP_INJECT_FAIL', '[FI_HIT:TCP_SEND_FAIL]'],
+          artifact_verify: ['grep -aFq "NVMF_TCP_INJECT_FAIL" libnvmf_tcp.a'],
+        },
+        points: [{
+          id: 'TCP_SEND_FAIL',
+          trigger_scope: { current_input: 'tcp_send call', excluded_inputs: ['other modules'] },
+          repo_id: 'target',
+          path: 'src/tcp.c',
+          action: '返回 -5',
+          trigger: 'NVMF_TCP_INJECT_FAIL=1',
+          times: 1,
+          observe: '[FI_HIT:TCP_SEND_FAIL]',
+        }],
+        profiles: [{
+          case_key: 'unit/CASE-TCP',
+          point_ids: ['TCP_SEND_FAIL'],
+          safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['TCP_SEND_FAIL'], cleanup: [':'], cleanup_verify: [':'] },
+          steps: ['echo "[FI_HIT:TCP_SEND_FAIL]"'],
+        }],
+        // Deliberately read getenv() without decrementing counter to exercise non-blocking F5 notice
+        edits: [{
+          repo_id: 'target',
+          path: 'src/tcp.c',
+          before: 'int tcp_send(void) { return 0; }',
+          after: '#include <stdlib.h>\n#include <stdio.h>\nint tcp_send(void) {\n  const char *v = getenv("NVMF_TCP_INJECT_FAIL");\n  if (v && atoi(v) > 0) { puts("[FI_HIT:TCP_SEND_FAIL]"); return -5; }\n  return 0;\n}',
+        }],
+        limitations: [],
+      }
+    },
+  })
+  t.after(() => service.dispose())
+  const task = await service.start(f)
+  await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.equal(ready.delivery_mode, 'product_package')
+  assert.equal(ready.build_variant, 'debug')
+
+  // F1: product_package prompt forbids conditional test macros and does NOT inject Option A GTest instructions
+  assert.match(capturedPrompt, /严禁把业务桩代码包在产品构建默认未定义的条件\/测试编译宏/)
+  assert.doesNotMatch(capturedPrompt, /按 Option A/)
+  const harness = capturedInput.repositories[0].harness
+  assert.ok(harness.build_targets.some(t => t.target === 'nvmf_tcp' && t.kind === 'static_lib'))
+  assert.ok(harness.fault_macros.some(m => m.name === 'NVMF_SIMU_FAULT' && m.conditional_or_test === true))
+
+  // F5: non-blocking consistency warning emitted when finite times lacks decrement logic
+  assert.ok(ready.notices.some(n => n.includes('一致性提醒') && n.includes('不递减')), JSON.stringify(ready.notices))
+
+  // F1/F4: pre-run artifact marker gate in verification shell script catches baseline/overwritten binary and passes instrumented binary
+  const scriptPath = path.join(f.root, 'verify-artifact-gate.sh')
+  await writeFile(scriptPath, buildVerificationShellScript(ready), 'utf8')
+  const baselineBin = path.join(f.root, 'libnvmf_tcp_baseline.a')
+  const patchedBin = path.join(f.root, 'libnvmf_tcp_patched.a')
+  await writeFile(baselineBin, 'baseline archive without stub symbols\n')
+  await writeFile(patchedBin, 'archive with NVMF_TCP_INJECT_FAIL and [FI_HIT:TCP_SEND_FAIL]\n')
+
+  await assert.rejects(
+    exec('bash', [scriptPath], { env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: baselineBin } }),
+    err => err.code === 2 && /missing stub marker "NVMF_TCP_INJECT_FAIL"/.test(err.stderr),
+  )
+  const okRun = await exec('bash', [scriptPath], { env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: patchedBin } })
+  assert.match(okRun.stdout, /\[PANGEA_ARTIFACT_CHECK\] OK:/)
+
+  // Aggregated replace_files merge deduplicates across multiple tasks
+  const merged = mergeReplaceFilesFromTasks([
+    { name: '任务1', replace_files: ready.result.delivery.replace_files, marker_strings: ready.result.delivery.marker_strings },
+    { name: '任务2', replace_files: [{ artifact: 'libnvmf_tcp.a', kind: 'static_lib', source_files: ['src/tcp_rx.c'], build_evidence: 'CMakeLists.txt:1', post_replace_action: '替换组件静态库后重链宿主进程' }], marker_strings: ['EXTRA_MARKER'] },
+  ])
+  assert.equal(merged.replace_files.length, 1)
+  assert.deepEqual(merged.replace_files[0].source_files, ['src/tcp.c', 'src/tcp_rx.c'])
+  assert.deepEqual(merged.replace_files[0].task_names, ['任务1', '任务2'])
+  assert.deepEqual(merged.marker_strings, ['NVMF_TCP_INJECT_FAIL', '[FI_HIT:TCP_SEND_FAIL]', 'EXTRA_MARKER'])
+})
+
+test('multi-artifact verification, duplicate basename source_files disambiguation, and validateOutput dirty-checkout reset', async t => {
+  const f = await fixture(t)
+  // 1) Duplicate basename across two business directories must require explicit relative paths in replace_files[].source_files
+  const dupRecord = {
+    generation_contract_version: 3,
+    delivery_mode: 'product_package',
+    case_keys: ['unit/A'],
+    repositories: [{ repo_id: 'target' }],
+  }
+  const dupBasePayload = {
+    points: [
+      { id: 'P_A', trigger_scope: { current_input: 'a', excluded_inputs: ['b'] }, repo_id: 'target', path: 'mod_a/init.c' },
+      { id: 'P_B', trigger_scope: { current_input: 'b', excluded_inputs: ['a'] }, repo_id: 'target', path: 'mod_b/init.c' },
+    ],
+    profiles: [{
+      case_key: 'unit/A',
+      point_ids: ['P_A', 'P_B'],
+      safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['P_A', 'P_B'], cleanup: [':'], cleanup_verify: [':'] },
+      steps: ['echo ok'],
+    }],
+    edits: [
+      { repo_id: 'target', path: 'mod_a/init.c', before: 'return 0;', after: '/* MARKER_MOD_A */ return -1;' },
+      { repo_id: 'target', path: 'mod_b/init.c', before: 'return 0;', after: '/* MARKER_MOD_B */ return -2;' },
+    ],
+  }
+  assert.throws(() => checkInjectionResult({
+    ...dupBasePayload,
+    delivery: {
+      mode: 'product_package',
+      build_requirement: '标准配置',
+      replace_files: [{ artifact: 'libmod_a.a', kind: 'static_lib', source_files: ['init.c'] }],
+      marker_strings: ['MARKER_MOD_A', 'MARKER_MOD_B'],
+    },
+  }, dupRecord), /遗漏了已修改业务源码的替换产物归属/)
+
+  const validMultiDelivery = {
+    mode: 'product_package',
+    build_requirement: '标准配置',
+    replace_files: [
+      { artifact: 'libmod_a.a', kind: 'static_lib', source_files: ['mod_a/init.c'] },
+      { artifact: 'libmod_b.a', kind: 'static_lib', source_files: ['mod_b/init.c'] },
+    ],
+    marker_strings: ['MARKER_MOD_A', 'MARKER_MOD_B'],
+  }
+  assert.doesNotThrow(() => checkInjectionResult({ ...dupBasePayload, delivery: validMultiDelivery }, dupRecord))
+
+  // 2) Multi-artifact verify commands & script enforce two-way set check on components and all-marker check on final host binary
+  const artifactDir = path.join(f.root, 'multi-artifacts')
+  await mkdir(artifactDir, { recursive: true })
+  const libA = path.join(artifactDir, 'libmod_a.a')
+  const libB = path.join(artifactDir, 'libmod_b.a')
+  const libBBaseline = path.join(artifactDir, 'libmod_b_baseline.a')
+  const hostOk = path.join(artifactDir, 'host_ok')
+  const hostPartial = path.join(artifactDir, 'host_partial')
+  await writeFile(libA, 'archive A with MARKER_MOD_A\n')
+  await writeFile(libB, 'archive B with MARKER_MOD_B\n')
+  await writeFile(libBBaseline, 'baseline archive B with zero markers\n')
+  await writeFile(hostOk, 'linked host with MARKER_MOD_A and MARKER_MOD_B\n')
+  await writeFile(hostPartial, 'linked host with only MARKER_MOD_A\n')
+
+  const cmds = buildArtifactVerifyCommands({ build_variant: 'debug', result: { delivery: validMultiDelivery } })
+  const preOk = await exec('bash', ['-c', cmds.pre_replace_cmd], { cwd: artifactDir })
+  assert.match(preOk.stdout, /OK: MARKER_MOD_A/)
+  assert.match(preOk.stdout, /OK: MARKER_MOD_B/)
+
+  // Even if libmod_a.a happened to contain both markers, an uninstrumented libmod_b.a must fail NO_STUB_IN_ARTIFACT
+  await writeFile(libA, 'archive A with MARKER_MOD_A and MARKER_MOD_B\n')
+  await writeFile(libB, 'baseline archive B without any marker\n')
+  await assert.rejects(
+    exec('bash', ['-c', cmds.pre_replace_cmd], { cwd: artifactDir }),
+    err => err.code === 2 && /NO_STUB_IN_ARTIFACT: libmod_b\.a/.test(err.stderr),
+  )
+  await writeFile(libA, 'archive A with MARKER_MOD_A\n')
+  await writeFile(libB, 'archive B with MARKER_MOD_B\n')
+
+  const multiScriptPath = path.join(artifactDir, 'verify-multi.sh')
+  await writeFile(multiScriptPath, buildVerificationShellScript({
+    id: 'task-multi',
+    generation_contract_version: 3,
+    delivery_mode: 'product_package',
+    build_variant: 'debug',
+    result: { ...dupBasePayload, delivery: validMultiDelivery },
+  }), 'utf8')
+  const scriptCompOk = await exec('bash', [multiScriptPath], {
+    env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: `${libA} ${libB}`, PANGEA_VERIFY_FINAL_BINARY: hostOk },
+  })
+  assert.match(scriptCompOk.stdout, /\[PANGEA_ARTIFACT_CHECK\] OK:/)
+  await assert.rejects(
+    exec('bash', [multiScriptPath], { env: { ...process.env, PANGEA_VERIFY_ARTIFACTS: `${libA} ${libBBaseline}` } }),
+    err => err.code === 2 && /missing stub marker "MARKER_MOD_B"/.test(err.stderr),
+  )
+  await assert.rejects(
+    exec('bash', [multiScriptPath], { env: { ...process.env, PANGEA_VERIFY_FINAL_BINARY: hostPartial } }),
+    err => err.code === 2 && /missing stub marker "MARKER_MOD_B"/.test(err.stderr),
+  )
+
+  // 3) validateOutput resets generator-dirtied checkout to base_commit before dryRun so clean base_commit edits pass without false repair
+  let repairTurns = 0
+  const dirtyService = new FaultInjectionService({
+    generate: async ({ record, validateOutput, outputPath }) => {
+      const checkout = record.repositories[0].path
+      await writeFile(path.join(checkout, 'init.c'), '/* generator scratch mutation */\n' + original)
+      const candidate = generated({ case_keys: f.input.case_keys })
+      await writeFile(outputPath, JSON.stringify(candidate, null, 2))
+      try {
+        await validateOutput(candidate)
+      } catch (err) {
+        repairTurns += 1
+        throw err
+      }
+      return candidate
+    },
+  })
+  t.after(() => dirtyService.dispose())
+  const dirtyTask = await dirtyService.start(f)
+  await wait(dirtyService)
+  const dirtyReady = await dirtyService.read(f.dataRoot, f.run.run_id, dirtyTask.id)
+  assert.equal(dirtyReady.status, 'ready', dirtyReady.error)
+  assert.equal(repairTurns, 0)
+  assert.equal(dirtyReady.notices.filter(n => n.includes('改动了源码副本')).length, 1)
+})
+
+test('F3 + F4 real gcc/ld reproduction: PANGEA safe-relink defeats DSO missing from command line, swallowed ld exit codes, and prebaked hitest tail overwrite without modifying environment relink script', async t => {
+  const work = await mkdtemp(path.join(os.tmpdir(), 'pangea-f3-f4-relink-'))
+  t.after(() => rm(work, { recursive: true, force: true }))
+  const libDir = path.join(work, 'lib64')
+  const runDir = path.join(work, 'run')
+  await mkdir(libDir, { recursive: true })
+  await mkdir(runDir, { recursive: true })
+
+  // 1) Platform hook runtime DSO (libhook_rt.so) providing __platform_test_hook()
+  await writeFile(path.join(work, 'hook_rt.c'), 'int __platform_test_hook(void) { return 42; }\n')
+  await exec('cc', ['-shared', '-fPIC', path.join(work, 'hook_rt.c'), '-o', path.join(libDir, 'libhook_rt.so')])
+
+  // 2) Middleware DSO (libmid.so) whose DT_NEEDED points to libhook_rt.so (like the 38 DSOs in 3.3)
+  await writeFile(path.join(work, 'mid.c'), 'extern int __platform_test_hook(void); int mid_call(void) { return __platform_test_hook(); }\n')
+  await exec('cc', ['-shared', '-fPIC', path.join(work, 'mid.c'), `-L${libDir}`, '-lhook_rt', `-Wl,-rpath,${libDir}`, '-o', path.join(libDir, 'libmid.so')])
+
+  // 3) Precompiled host archive (libhost_core.a) referencing mid_call() + __platform_test_hook() AND calling instrumented tcp_send()
+  await writeFile(path.join(work, 'host_main.c'), [
+    '#include <stdio.h>',
+    'extern int __platform_test_hook(void);',
+    'extern int mid_call(void);',
+    'extern int tcp_send(void);',
+    'int main(void) {',
+    '  int h = __platform_test_hook() + (mid_call() - 42);',
+    '  int rc = tcp_send();',
+    '  printf("hook=%d rc=%d\\n", h, rc);',
+    '  return rc == 0 ? 0 : 3;',
+    '}',
+    '',
+  ].join('\n'))
+  await exec('cc', ['-c', path.join(work, 'host_main.c'), '-o', path.join(work, 'host_main.o')])
+  await exec('ar', ['rcs', path.join(work, 'libhost_core.a'), path.join(work, 'host_main.o')])
+
+  // 4) Instrumented component static library (libnvmf_tcp.a) produced from personal branch
+  await writeFile(path.join(work, 'tcp_patched.c'), [
+    '#include <stdlib.h>',
+    '#include <stdio.h>',
+    'int tcp_send(void) {',
+    '  const char *v = getenv("NVMF_TCP_FAULT_ENV");',
+    '  if (v && v[0] == \'1\') { puts("[FI_HIT:TCP_STUB]"); return -5; }',
+    '  return 0;',
+    '}',
+    '',
+  ].join('\n'))
+  await exec('cc', ['-c', path.join(work, 'tcp_patched.c'), '-o', path.join(work, 'tcp_patched.o')])
+  const compLib = path.join(work, 'libnvmf_tcp.a')
+  await exec('ar', ['rcs', compLib, path.join(work, 'tcp_patched.o')])
+
+  // 5) Pre-baked hitest binary sitting in runDir (uninstrumented!) + broken environment relink script (F3 + swallowed rc + F4 tail cp)
+  const prebakedHitest = path.join(runDir, 'host_daemon_hitest_M')
+  const otherHitest = path.join(runDir, 'other_proc_hitest')
+  const finalHost = path.join(runDir, 'host_daemon')
+  await writeFile(prebakedHitest, '#!/usr/bin/env bash\necho "OLD_PREBAKED_HITEST_WITHOUT_STUB"\n')
+  await writeFile(otherHitest, 'prebaked sidecar\n')
+  await chmod(prebakedHitest, 0o755)
+
+  const relinkScript = path.join(work, 'env_relink.sh')
+  const relinkScriptContent = [
+    '#!/usr/bin/env bash',
+    '# Deliberately broken corporate relink script reproducing 3.3 (F3 + swallowed rc) and 3.4 (F4):',
+    '# Lists -lmid (which has DT_NEEDED libhook_rt.so) and -Llib64, but omits -lhook_rt!',
+    `gcc "${path.join(work, 'libhost_core.a')}" "${compLib}" -L"${libDir}" -Wl,-rpath,"${libDir}" -lmid -o "${path.join(work, 'host_daemon.new')}"`,
+    'echo "link_rc=$?"',
+    `if [ -f "${prebakedHitest}" ]; then`,
+    `  cp -f "${prebakedHitest}" "${finalHost}"`,
+    `elif [ -f "${otherHitest}" ]; then`,
+    `  cp -f "${otherHitest}" "${finalHost}"`,
+    'else',
+    `  mv -f "${path.join(work, 'host_daemon.new')}" "${finalHost}"`,
+    'fi',
+    '',
+  ].join('\n')
+  await writeFile(relinkScript, relinkScriptContent)
+  await chmod(relinkScript, 0o755)
+  const originalRelinkBytes = await readFile(relinkScript, 'utf8')
+
+  // Prove raw env_relink.sh reproduces exact F3 + F4 failure: exits 0, swallows DSO error, and overwrites finalHost with prebakedHitest!
+  const rawRun = await exec('bash', [relinkScript])
+  assert.match(rawRun.stdout, /link_rc=[1-9]/)
+  assert.match(rawRun.stderr, /DSO missing from command line/)
+  assert.match(await readFile(finalHost, 'utf8'), /OLD_PREBAKED_HITEST_WITHOUT_STUB/)
+
+  // Now generate PANGEA verification script and run PANGEA_SAFE_RELINK WITHOUT touching env_relink.sh!
+  const verifyScript = path.join(work, 'pangea-verify.sh')
+  await writeFile(verifyScript, buildVerificationShellScript({
+    id: 'task-f3-f4',
+    generation_contract_version: 3,
+    delivery_mode: 'product_package',
+    build_variant: 'debug',
+    cases: [{ case_key: 'unit/TCP', title: 'TCP fault' }],
+    result: {
+      delivery: {
+        mode: 'product_package',
+        build_requirement: '标准配置',
+        replace_files: [{ artifact: 'libnvmf_tcp.a', kind: 'static_lib', source_files: ['src/tcp.c'] }],
+        marker_strings: ['NVMF_TCP_FAULT_ENV', '[FI_HIT:TCP_STUB]'],
+      },
+      points: [{ id: 'P1', repo_id: 'target', path: 'src/tcp.c', observe: '[FI_HIT:TCP_STUB]' }],
+      profiles: [{
+        case_key: 'unit/TCP',
+        point_ids: ['P1'],
+        safety: { setup: [':'], negative_steps: [`"${finalHost}"`], negative_point_ids: ['P1'], cleanup: [':'], cleanup_verify: [':'] },
+        steps: [`NVMF_TCP_FAULT_ENV=1 "${finalHost}" || true`],
+      }],
+    },
+  }), 'utf8')
+
+  const safeRun = await exec('bash', [verifyScript], {
+    env: {
+      ...process.env,
+      PANGEA_VERIFY_ARTIFACTS: compLib,
+      PANGEA_RELINK_CMD: `bash "${relinkScript}"`,
+      PANGEA_VERIFY_FINAL_BINARY: finalHost,
+    },
+  })
+  assert.match(safeRun.stdout, /\[PANGEA_SAFE_RELINK\] OK:/)
+  assert.match(safeRun.stdout, /hook=42 rc=-5/)
+  assert.match(safeRun.stdout, /\[FI_HIT:TCP_STUB\]/)
+  // Corporate relink script untouched, and prebaked sidecar binaries restored to runDir!
+  assert.equal(await readFile(relinkScript, 'utf8'), originalRelinkBytes)
+  assert.match(await readFile(prebakedHitest, 'utf8'), /OLD_PREBAKED_HITEST_WITHOUT_STUB/)
+  assert.equal(await readFile(otherHitest, 'utf8'), 'prebaked sidecar\n')
+
+  // Also prove swallowed genuine linker failure is caught (when input .a is missing/corrupt even though relink script ignores $?)
+  const brokenCmdScript = path.join(work, 'swallowed_fail_relink.sh')
+  await writeFile(brokenCmdScript, `#!/usr/bin/env bash\ngcc /nonexistent_input.o -o "${finalHost}.bad"\necho "ignored_rc=$?"\nexit 0\n`)
+  await chmod(brokenCmdScript, 0o755)
+  await assert.rejects(
+    exec('bash', [verifyScript], {
+      env: { ...process.env, PANGEA_RELINK_ONLY: '1', PANGEA_RELINK_CMD: `bash "${brokenCmdScript}"`, PANGEA_VERIFY_FINAL_BINARY: finalHost },
+    }),
+    err => err.code === 2 && /\[PANGEA_SAFE_RELINK\] FAILED: relink_rc=0 linker_errors=\[.*gcc:1/.test(err.stderr),
+  )
+})
+
+
+
 
 
 

@@ -36,7 +36,18 @@ test('fault injection HTTP acceptance', async t => {
     })
     if (record.instructions === 'fail') throw new Error('fixture generation failed')
     const current = await readFile(path.join(record.repositories[0].path, 'target.c'), 'utf8')
-    return { points: [{ id: 'A', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c' }], profiles: [{ case_key: 'unit/A', point_ids: ['A'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['A'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['测试夹具'] }], edits: [{ repo_id: 'target', path: 'target.c', before: current, after: current.replace('return 0;', 'return -1;') + `/* ${record.id} */\n` }] }
+    return {
+      delivery: {
+        mode: record.delivery_mode || 'product_package',
+        build_requirement: '标准产品配置即可编入',
+        replace_files: [{ artifact: 'libtarget.a', kind: 'static_lib', source_files: ['target.c'], build_evidence: 'CMakeLists.txt:1', post_replace_action: '替换静态库并重链' }],
+        marker_strings: ['return -1;'],
+        artifact_verify: ['grep -aFq "return -1;" libtarget.a'],
+      },
+      points: [{ id: 'A', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c' }],
+      profiles: [{ case_key: 'unit/A', point_ids: ['A'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['A'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['测试夹具'] }],
+      edits: [{ repo_id: 'target', path: 'target.c', before: current, after: current.replace('return 0;', 'return -1;') + `/* ${record.id} */\n` }],
+    }
   }
   let service = new FaultInjectionService({ generate: generator }), failReadRun = false
   const server = createServer((req, res) => void faultInjectionRouteHandler(req, res, service, {}, { resolveRoot: async () => dataRoot, readRun: async () => { if (failReadRun) throw new Error('Run unreadable'); return run } }))
@@ -226,6 +237,17 @@ test('fault injection HTTP acceptance', async t => {
     const r = await generate('fail'), failed = await terminal(r.body.task.id)
     assert.equal(failed.status, 'failed'); assert.match(failed.error, /fixture generation failed/)
     assert.equal((await post({ action: 'build', items: [{ run_id: run.run_id, task_id: failed.id }] })).status, 400)
+  })
+  await t.test('POST set-variant switches debug/hitest without re-running model and build-context exposes replace_files', async () => {
+    const switched = await post({ action: 'set-variant', task_id: task.id, build_variant: 'hitest' })
+    assert.equal(switched.status, 200)
+    assert.equal(switched.body.task.build_variant, 'hitest')
+    const ctx = await request({ view: 'build-context' })
+    assert.equal(ctx.status, 200)
+    const listed = ctx.body.tasks.find(item => item.id === task.id)
+    assert.equal(listed.build_variant, 'hitest')
+    assert.equal(listed.replace_files[0].artifact, 'libtarget.a')
+    assert.deepEqual(listed.marker_strings, ['return -1;'])
   })
   await t.test('invalid selections/actions/records/methods/origins return explicit HTTP errors', async () => {
     assert.equal((await post({ action: 'generate', case_keys: ['missing'] })).status, 400)

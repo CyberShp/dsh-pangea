@@ -10,10 +10,13 @@ export const INJECTION_BUDGET_DEFAULTS = Object.freeze({
   softDurationMs: 10 * 60 * 1000,
   wrapUpDurationMs: 6 * 60 * 1000,
   progressLeaseMs: 3 * 60 * 1000,
+  stallDurationMs: 4 * 60 * 1000,
   hardDurationMs: 25 * 60 * 1000,
   cancelGraceMs: 15000,
   idleWaitMs: 5000,
   pollMs: 250,
+  maxSessionResumes: 1,
+  maxRepairTurns: 1,
 })
 
 const AUTHORING_TOOL_KIND = /^(?:edit|write|patch|create|apply_patch|delete|move)$/i
@@ -74,12 +77,33 @@ function isAuthoringToolUpdate(update, scratchDirectory, outputPath) {
   return false
 }
 
+async function fileFingerprint(filePath) {
+  if (!filePath) return ''
+  try {
+    const st = await stat(filePath)
+    return `${st.size}:${Math.trunc(st.mtimeMs)}`
+  } catch { return '' }
+}
+
 export function injectionWrapUpPrompt(outputPath, record) {
   const posixOutput = String(outputPath).replaceAll('\\', '/')
   return [
     '已达到探索步数/耗时预算上限：立即停止目录浏览、grep、构建脚本考古和额外文件读取。',
     `现在直接基于已读取的源码与任务输入构造并写入 ${posixOutput}（任务 ID：${record.id}）。`,
+    ...(record?.generation_contract_version >= 3
+      ? ['顶层须包含 delivery（build_requirement、覆盖全部修改业务源码的 replace_files，以及逐字出现在 edits[].after 中的 marker_strings）。']
+      : []),
     'edits[].before 只截取能唯一匹配的 1~5 行最短原文；steps 数组禁止包含空字符串 ""；未核实的构建或环境细节如实写入 limitations，不要空转重试。写完立即结束回合。',
+  ].join('\n')
+}
+
+export function injectionRepairPrompt(outputPath, record, validationError) {
+  const posixOutput = String(outputPath).replaceAll('\\', '/')
+  return [
+    `宿主对 ${posixOutput} 执行确定性合同/语法预检未通过（任务 ID：${record.id}）：`,
+    String(validationError || '未知校验错误'),
+    `请保留 ${posixOutput} 中其余有效的 points、profiles、delivery 与 edits，仅针对上述精确错误修正并覆写 ${posixOutput}。`,
+    '修改 CMakeLists.txt 或列表类代码时，before 必须包含闭合定界符 `)`/`}` 并在内部插入，禁止追加到闭括号外；delivery.marker_strings 须逐字出现在 edits[].after 中。修正后立即结束回合。',
   ].join('\n')
 }
 
@@ -90,7 +114,7 @@ export function createInjectionGenerator(runtime, {
   createSession = createDshSession,
   budget: defaultBudget = {},
 } = {}) {
-  return async ({ record, cwd, scratchDirectory, outputPath, prompt, signal, onStarted, onTelemetry, budget: callBudget = {} }) => {
+  return async ({ record, cwd, scratchDirectory, outputPath, prompt, signal, onStarted, onTelemetry, validateOutput, budget: callBudget = {} }) => {
     const explicitSoftTools = callBudget.softToolCalls !== undefined || defaultBudget.softToolCalls !== undefined
     const baseLimits = { ...INJECTION_BUDGET_DEFAULTS, ...defaultBudget, ...callBudget }
     const extraCases = Math.min(Math.max(0, (Array.isArray(record?.case_keys) ? record.case_keys.length : 1) - 1), 6)
@@ -131,15 +155,33 @@ export function createInjectionGenerator(runtime, {
       context_window_tokens: null,
       budget_wrapup_triggered: false,
       budget_wrapup_reason: null,
+      stall_detected: false,
+      session_resumes: 0,
+      repair_turns: 0,
       salvaged_disk_result: false,
       stop_reason: null,
     }
     const markProgress = () => { lastProgressMs = Date.now() }
+    let lastDiagProgress = { chunks: 0, activity: 0, calls: 0 }
+    const observeDiagnosticProgress = d => {
+      if (!d || typeof d !== 'object') return
+      const chunks = Number.isInteger(d.messageChunks) ? d.messageChunks : 0
+      const activity = Number.isFinite(d.lastActivityAt) ? d.lastActivityAt : 0
+      const calls = Number.isInteger(d.toolCalls) ? d.toolCalls : 0
+      if (chunks > lastDiagProgress.chunks || activity > lastDiagProgress.activity || calls > lastDiagProgress.calls) {
+        lastDiagProgress = {
+          chunks: Math.max(lastDiagProgress.chunks, chunks),
+          activity: Math.max(lastDiagProgress.activity, activity),
+          calls: Math.max(lastDiagProgress.calls, calls),
+        }
+        markProgress()
+      }
+    }
     const syncDiagnostics = d => {
       if (!d || typeof d !== 'object') return
       if (Number.isInteger(d.toolCalls) && d.toolCalls > telemetry.tool_calls) telemetry.tool_calls = d.toolCalls
       if (Number.isInteger(d.toolFailures) && d.toolFailures > telemetry.tool_failures) telemetry.tool_failures = d.toolFailures
-      if (Number.isInteger(d.messageChunks) && d.messageChunks > 0) markProgress()
+      observeDiagnosticProgress(d)
       if (d.contextUsage && Number.isFinite(d.contextUsage.used)) {
         const used = d.contextUsage.used
         if (lastContextUsed !== null && lastContextUsed - used > 10000) telemetry.compactions += 1
@@ -196,14 +238,16 @@ export function createInjectionGenerator(runtime, {
         if (Number.isFinite(update.size)) telemetry.context_window_tokens = update.size
       }
     }
-    async function hasActiveTools() {
-      try { return hasUnconfirmedAcpTools((await worker?.readDiagnostics?.()) ?? {}) } catch { return false }
-    }
     let worker, pollTimer, wrapWatchTimer, hardTimer, wrapUpRequested = null
+    async function hasActiveTools(targetWorker = worker) {
+      try { return hasUnconfirmedAcpTools((await targetWorker?.readDiagnostics?.()) ?? {}) } catch { return false }
+    }
     try {
       const initialScratchState = await scratchFingerprint(scratchDirectory)
       let lastScratchState = initialScratchState
-      worker = await runtimeService(runtime, 'subagents').start(record.provider_id, {
+      let lastOutputState = await fileFingerprint(outputPath)
+      const subagents = runtimeService(runtime, 'subagents')
+      worker = await subagents.start(record.provider_id, {
         parent, signal, label: `用例打桩 · ${record.id.slice(0, 8)}`, scratchDirectory,
         pangeaCliWorker: true, agentOptions: { model }, prompt: [{ type: 'text', text: prompt }],
         onSessionEvent, onDiagnostic: syncDiagnostics,
@@ -217,6 +261,67 @@ export function createInjectionGenerator(runtime, {
         }, limits.hardDurationMs)
       })
       hardDeadline.catch(() => {})
+
+      const runWatchedContinue = async (targetWorker, promptText, timeoutLabel, { ignoreExistingOutput = false } = {}) => {
+        const wrapStartedMs = Date.now()
+        markProgress()
+        let wrapDeadlineMs = wrapStartedMs + limits.wrapUpDurationMs
+        let lastLeaseProgressMs = lastProgressMs
+        let lastDiagChunks = null
+        let baselineOutputState = ignoreExistingOutput ? await fileFingerprint(outputPath) : ''
+        const wrapWatch = new Promise((_, reject) => {
+          wrapWatchTimer = setInterval(async () => {
+            try {
+              if (signal.aborted || hardExpired) return
+              const currentScratch = await scratchFingerprint(scratchDirectory)
+              if (currentScratch !== lastScratchState) {
+                lastScratchState = currentScratch
+                markProgress()
+              }
+              const currentOutput = await fileFingerprint(outputPath)
+              if (currentOutput !== lastOutputState) {
+                lastOutputState = currentOutput
+                markProgress()
+              }
+              let diag = null
+              try {
+                diag = await targetWorker.readDiagnostics?.()
+                observeDiagnosticProgress(diag)
+                if (Number.isInteger(diag?.messageChunks)) {
+                  if (lastDiagChunks !== null && diag.messageChunks > lastDiagChunks) markProgress()
+                  lastDiagChunks = diag.messageChunks
+                }
+              } catch {}
+              if (lastProgressMs > lastLeaseProgressMs) {
+                lastLeaseProgressMs = lastProgressMs
+                wrapDeadlineMs = Math.max(wrapDeadlineMs, lastProgressMs + limits.progressLeaseMs)
+              }
+              const idleMs = Date.now() - lastProgressMs
+              if (!diag?.processExited && idleMs < limits.stallDurationMs) {
+                if (Date.now() < wrapDeadlineMs) return
+                if (activeAuthoringIds.size > 0) return
+              }
+              if (!ignoreExistingOutput && await readValidOutputJson(outputPath)) return
+              if (ignoreExistingOutput && currentOutput && currentOutput !== baselineOutputState && await readValidOutputJson(outputPath)) return
+              clearInterval(wrapWatchTimer); wrapWatchTimer = null
+              reject(new Error(`${timeoutLabel}（${Math.round((Date.now() - wrapStartedMs) / 1000)}s 内无有效写出完成），未写出结果文件`))
+              try { await targetWorker.cancelTurn?.() } catch {}
+              if (diag?.processExited || idleMs >= limits.stallDurationMs) {
+                try { await targetWorker.stopExecution?.() } catch {}
+              }
+            } catch {}
+          }, Math.max(20, Math.min(limits.pollMs, 200)))
+        })
+        wrapWatch.catch(() => {})
+        const continueTurn = Promise.resolve().then(() => targetWorker.continuePrompt([{ type: 'text', text: promptText }]))
+        continueTurn.catch(() => {})
+        return await Promise.race([
+          continueTurn,
+          wrapWatch,
+          hardDeadline,
+        ]).finally(() => { clearInterval(wrapWatchTimer); wrapWatchTimer = null })
+      }
+
       let budgetInterruptResolve
       const budgetInterrupt = new Promise(resolve => { budgetInterruptResolve = resolve })
       pollTimer = setInterval(async () => {
@@ -226,6 +331,23 @@ export function createInjectionGenerator(runtime, {
           if (currentScratch !== lastScratchState) {
             lastScratchState = currentScratch
             markProgress()
+          }
+          const currentOutput = await fileFingerprint(outputPath)
+          if (currentOutput !== lastOutputState) {
+            lastOutputState = currentOutput
+            markProgress()
+          }
+          let diag = null
+          try {
+            diag = await worker.readDiagnostics?.()
+            observeDiagnosticProgress(diag)
+          } catch {}
+          // F6: stream stall watchdog is NEVER exempted by authoring tool calls or scratch edits.
+          const idleMs = Date.now() - lastProgressMs
+          if (diag?.processExited === true || idleMs >= limits.stallDurationMs) {
+            wrapUpRequested = 'stall'
+            budgetInterruptResolve('stall')
+            return
           }
           const exploreCount = seenToolIds.size > 0 ? telemetry.explore_tool_calls : telemetry.tool_calls
           const overTools = exploreCount >= limits.softToolCalls
@@ -238,7 +360,7 @@ export function createInjectionGenerator(runtime, {
           if (currentScratch !== initialScratchState) return
           // On soft wall-clock expiry, if no exploration tool is running and chunks
           // are actively streaming, let the model finish writing its output.
-          if (!overTools && overTime && activeExploreIds.size === 0 && Date.now() - lastProgressMs < limits.progressLeaseMs) return
+          if (!overTools && overTime && activeExploreIds.size === 0 && idleMs < limits.progressLeaseMs) return
           wrapUpRequested = overTools ? 'tool_budget' : 'time_budget'
           budgetInterruptResolve(wrapUpRequested)
         } catch {}
@@ -255,8 +377,12 @@ export function createInjectionGenerator(runtime, {
       } else {
         telemetry.budget_wrapup_triggered = true
         telemetry.budget_wrapup_reason = firstRace.reason
+        if (firstRace.reason === 'stall') telemetry.stall_detected = true
         try { await onTelemetry?.({ ...telemetry, duration_ms: Date.now() - startedMs, turns: sawTurnStart ? telemetry.turns : 1, tool_kinds: { ...telemetry.tool_kinds } }) } catch {}
-        if (typeof worker.cancelTurn === 'function' && typeof worker.continuePrompt === 'function') {
+        const salvagedOnInterrupt = await readValidOutputJson(outputPath)
+        if (firstRace.reason === 'stall' && salvagedOnInterrupt && Array.isArray(salvagedOnInterrupt.edits) && salvagedOnInterrupt.edits.length > 0) {
+          outcome = { stopReason: 'completed' }
+        } else if (typeof worker.cancelTurn === 'function' && typeof worker.continuePrompt === 'function') {
           let graceTimer
           const cancelled = await Promise.race([
             Promise.resolve().then(() => worker.cancelTurn()),
@@ -271,76 +397,109 @@ export function createInjectionGenerator(runtime, {
               await new Promise(resolve => setTimeout(resolve, 50))
             }
             if (!(await hasActiveTools())) {
-              const wrapStartedMs = Date.now()
-              markProgress()
-              let wrapDeadlineMs = wrapStartedMs + limits.wrapUpDurationMs
-              let lastLeaseProgressMs = lastProgressMs
-              let lastDiagChunks = null
-              const wrapWatch = new Promise((_, reject) => {
-                wrapWatchTimer = setInterval(async () => {
-                  try {
-                    if (signal.aborted || hardExpired) return
-                    const currentScratch = await scratchFingerprint(scratchDirectory)
-                    if (currentScratch !== lastScratchState) {
-                      lastScratchState = currentScratch
-                      markProgress()
-                    }
-                    try {
-                      const diag = await worker.readDiagnostics?.()
-                      if (Number.isInteger(diag?.messageChunks)) {
-                        if (lastDiagChunks !== null && diag.messageChunks > lastDiagChunks) markProgress()
-                        lastDiagChunks = diag.messageChunks
-                      }
-                    } catch {}
-                    if (lastProgressMs > lastLeaseProgressMs) {
-                      lastLeaseProgressMs = lastProgressMs
-                      wrapDeadlineMs = Math.max(wrapDeadlineMs, lastProgressMs + limits.progressLeaseMs)
-                    }
-                    if (Date.now() < wrapDeadlineMs) return
-                    if (activeAuthoringIds.size > 0) return
-                    if (await readValidOutputJson(outputPath)) return
-                    clearInterval(wrapWatchTimer); wrapWatchTimer = null
-                    reject(new Error(`探索预算收口超时（${Math.round((Date.now() - wrapStartedMs) / 1000)}s 内无有效写出完成），未写出结果文件`))
-                    try { await worker.cancelTurn?.() } catch {}
-                  } catch {}
-                }, Math.max(20, Math.min(limits.pollMs, 200)))
-              })
-              wrapWatch.catch(() => {})
-              const continueTurn = Promise.resolve().then(() => worker.continuePrompt([{ type: 'text', text: injectionWrapUpPrompt(outputPath, record) }]))
-              continueTurn.catch(() => {})
-              outcome = await Promise.race([
-                continueTurn,
-                wrapWatch,
-                hardDeadline,
-              ]).finally(() => { clearInterval(wrapWatchTimer); wrapWatchTimer = null })
+              outcome = await runWatchedContinue(
+                worker,
+                injectionWrapUpPrompt(outputPath, record),
+                firstRace.reason === 'stall' ? '流静默恢复收口超时' : '探索预算收口超时',
+              )
+            } else if (firstRace.reason === 'stall') {
+              outcome = null
             } else {
               throw new Error(`达到探索预算（${firstRace.reason}）后工具未及时静止，已停止以防上下文失控；任务 ID：${record.id}`)
             }
+          } else if (firstRace.reason === 'stall') {
+            outcome = null
           } else {
             throw new Error(`达到探索预算（${firstRace.reason}）且原回合未能确认取消，已停止；任务 ID：${record.id}`)
           }
+          // F6: if stream stalled and cancel/quiesce failed, stop stuck process and attempt at most 1 loadSession resume.
+          if (firstRace.reason === 'stall' && outcome === null) {
+            let staleDiag = {}
+            try { staleDiag = (await worker.readDiagnostics?.()) ?? {} } catch {}
+            const staleWorker = worker
+            const staleTaskId = String(staleWorker.id)
+            const staleRemoteSessionId = staleWorker.remoteSessionId
+            try { await staleWorker.stopExecution?.() } catch {}
+            try { await staleWorker.dispose?.() } catch {}
+            worker = null
+            if (staleDiag?.canLoadSession === true && staleRemoteSessionId && telemetry.session_resumes < limits.maxSessionResumes) {
+              telemetry.session_resumes += 1
+              activeAuthoringIds.clear()
+              activeExploreIds.clear()
+              lastDiagProgress = { chunks: 0, activity: 0, calls: 0 }
+              worker = await subagents.start(record.provider_id, {
+                parent, signal, label: `用例打桩恢复 · ${record.id.slice(0, 8)}`, scratchDirectory,
+                pangeaCliWorker: true, agentOptions: { model },
+                resume: { taskId: staleTaskId, remoteSessionId: staleRemoteSessionId },
+                onSessionEvent, onDiagnostic: syncDiagnostics,
+              })
+              if (typeof worker.continuePrompt === 'function') {
+                outcome = await runWatchedContinue(worker, injectionWrapUpPrompt(outputPath, record), '原会话恢复收口超时')
+              } else {
+                outcome = await Promise.race([worker.result, hardDeadline])
+              }
+            } else {
+              const diagText = staleDiag?.errorSummary || (staleDiag?.processExited ? `执行器进程已退出（exitCode=${staleDiag.exitCode ?? 'unknown'}）` : '')
+              throw new Error(`执行器工具流静默中断超过 ${Math.round(limits.stallDurationMs / 1000)}s 且无法恢复原会话，已快速终止（不再等待总时长上限）；任务 ID：${record.id}${diagText ? `；${diagText}` : ''}`)
+            }
+          }
+        } else if (firstRace.reason === 'stall') {
+          let staleDiag = {}
+          try { staleDiag = (await worker.readDiagnostics?.()) ?? {} } catch {}
+          const diagText = staleDiag?.errorSummary || (staleDiag?.processExited ? `执行器进程已退出（exitCode=${staleDiag.exitCode ?? 'unknown'}）` : '')
+          throw new Error(`执行器工具流静默中断超过 ${Math.round(limits.stallDurationMs / 1000)}s，已快速终止；任务 ID：${record.id}${diagText ? `；${diagText}` : ''}`)
         } else {
           outcome = await Promise.race([worker.result, hardDeadline])
         }
       }
       telemetry.stop_reason = outcome?.stopReason ?? null
       signal.throwIfAborted()
+      let parsed
       if (outcome.stopReason !== 'completed') {
         const salvaged = await readValidOutputJson(outputPath)
         if (salvaged && Array.isArray(salvaged.edits) && salvaged.edits.length > 0) {
           telemetry.salvaged_disk_result = true
-          return salvaged
+          parsed = salvaged
+        } else {
+          throw new Error(await executionDiagnostic(worker, outcome) || `打桩生成结束：${outcome.stopReason}`)
         }
-        throw new Error(await executionDiagnostic(worker, outcome) || `打桩生成结束：${outcome.stopReason}`)
-      }
-      try { return JSON.parse(await readFile(outputPath, 'utf8')) }
-      catch (error) {
-        if (['ENOENT', 'ENOTDIR'].includes(error.code)) {
-          const diagnostic = await executionDiagnostic(worker, outcome)
-          throw new Error(`打桩执行器已结束，但未交付结果文件。请查看执行器会话后重新生成。任务 ID：${record.id}；执行器会话：${worker.remoteSessionId || worker.id || '未提供'}${diagnostic ? `；${diagnostic}` : ''}`)
+      } else {
+        try { parsed = JSON.parse(await readFile(outputPath, 'utf8')) }
+        catch (error) {
+          if (['ENOENT', 'ENOTDIR'].includes(error.code)) {
+            const diagnostic = await executionDiagnostic(worker, outcome)
+            throw new Error(`打桩执行器已结束，但未交付结果文件。请查看执行器会话后重新生成。任务 ID：${record.id}；执行器会话：${worker.remoteSessionId || worker.id || '未提供'}${diagnostic ? `；${diagnostic}` : ''}`)
+          }
+          throw new Error(`打桩生成结果不可读取：${error.message}`)
         }
-        throw new Error(`打桩生成结果不可读取：${error.message}`)
       }
+      // F2: run deterministic host validation before disposing worker; allow at most 1 same-session repair turn.
+      if (typeof validateOutput === 'function' && !signal.aborted && !hardExpired) {
+        try {
+          await validateOutput(parsed)
+        } catch (validationError) {
+          if (telemetry.repair_turns < limits.maxRepairTurns
+            && typeof worker?.continuePrompt === 'function'
+            && !(await hasActiveTools())) {
+            telemetry.repair_turns += 1
+            try { await onTelemetry?.({ ...telemetry, duration_ms: Date.now() - startedMs, tool_kinds: { ...telemetry.tool_kinds } }) } catch {}
+            try {
+              await runWatchedContinue(
+                worker,
+                injectionRepairPrompt(outputPath, record, validationError?.message || String(validationError)),
+                '同会话确定性修复超时',
+                { ignoreExistingOutput: true },
+              )
+              const repaired = await readValidOutputJson(outputPath)
+              if (repaired) parsed = repaired
+            } catch {
+              const repaired = await readValidOutputJson(outputPath)
+              if (repaired) parsed = repaired
+            }
+          }
+        }
+      }
+      return parsed
     } catch (error) {
       if (!signal.aborted) {
         const salvaged = await readValidOutputJson(outputPath)

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import { createInjectionGenerator } from '../src/fault-injection-agent.js'
+import { createInjectionGenerator, injectionWrapUpPrompt } from '../src/fault-injection-agent.js'
 
 test('code generation uses the selected external model, isolated scratch and saved session identity', async t => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-agent-')); t.after(() => rm(directory, { recursive: true, force: true }))
@@ -315,3 +315,231 @@ test('multi-case batch dynamically expands default softToolCalls and non-user-ab
   assert.equal(telemetry.soft_tool_budget, 30)
 })
 
+test('F6 stall watchdog: authoring-phase stream stall triggers stopExecution and single loadSession resume without hitting hardDurationMs', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-stall-resume-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(path.join(directory, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(directory, '.agents', 'pangea', 'dsh.md'), 'fixture')
+  const scratch = path.join(directory, 'generation')
+  await mkdir(scratch, { recursive: true })
+  const outputPath = path.join(scratch, 'result.json')
+  let startCalls = 0, stopped = 0, resumeReq = null
+  const generate = createInjectionGenerator({
+    agents: { get: () => ({ id: 'parent' }) },
+    subagents: {
+      start: async (_provider, req) => {
+        startCalls += 1
+        if (startCalls === 1) {
+          // Simulate model entering authoring phase (which previously exempted pollTimer) and then hanging silently
+          req.onSessionEvent({ type: 'turn_start' })
+          req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'a1', kind: 'edit', status: 'in_progress' } })
+          return {
+            id: 'worker-stuck',
+            remoteSessionId: 'remote-stuck-1',
+            result: new Promise(() => {}),
+            readDiagnostics: () => ({ activeToolCount: 1, canLoadSession: true, processExited: false }),
+            cancelTurn: async () => ({ confirmed: false }),
+            continuePrompt: async () => ({ stopReason: 'error' }),
+            stopExecution: async () => { stopped += 1; return { confirmed: true, processTreeStopped: true } },
+            dispose: async () => {},
+          }
+        }
+        resumeReq = req
+        return {
+          id: 'worker-stuck',
+          remoteSessionId: 'remote-stuck-1',
+          result: Promise.resolve({ stopReason: 'completed' }),
+          readDiagnostics: () => ({ activeToolCount: 0, canLoadSession: true }),
+          continuePrompt: async () => {
+            await writeFile(outputPath, JSON.stringify({ summary: 'resumed ok', edits: [{ repo_id: 'r', path: 'a.c', before: '0', after: '1' }] }))
+            return { stopReason: 'completed' }
+          },
+          dispose: async () => {},
+        }
+      },
+    },
+  }, {
+    resolveModel: async () => 'model',
+    createSession: async () => 'parent',
+    budget: { stallDurationMs: 70, cancelGraceMs: 40, hardDurationMs: 5000, pollMs: 15 },
+  })
+  let telemetry = null
+  const result = await generate({
+    record: { id: 'task-stall-resume', provider_id: 'configured', case_keys: ['unit/A'] },
+    cwd: directory,
+    scratchDirectory: scratch,
+    outputPath,
+    prompt: 'generate',
+    signal: new AbortController().signal,
+    onStarted: async () => {},
+    onTelemetry: value => { telemetry = value },
+  })
+  assert.equal(result.summary, 'resumed ok')
+  assert.equal(startCalls, 2)
+  assert.equal(stopped, 1)
+  assert.deepEqual(resumeReq.resume, { taskId: 'worker-stuck', remoteSessionId: 'remote-stuck-1' })
+  assert.equal(telemetry.stall_detected, true)
+  assert.equal(telemetry.session_resumes, 1)
+})
+
+test('F6 stall watchdog: unrecoverable stream stall fails fast well before hardDurationMs', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-stall-fastfail-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(path.join(directory, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(directory, '.agents', 'pangea', 'dsh.md'), 'fixture')
+  const scratch = path.join(directory, 'generation')
+  await mkdir(scratch, { recursive: true })
+  const outputPath = path.join(scratch, 'result.json')
+  const started = Date.now()
+  const generate = createInjectionGenerator({
+    agents: { get: () => ({ id: 'parent' }) },
+    subagents: {
+      start: async (_provider, req) => {
+        req.onSessionEvent({ type: 'turn_start' })
+        req.onSessionEvent({ type: 'session_update', update: { sessionUpdate: 'tool_call', toolCallId: 'a1', kind: 'edit', status: 'in_progress' } })
+        return {
+          id: 'worker-dead',
+          remoteSessionId: 'remote-dead',
+          result: new Promise(() => {}),
+          readDiagnostics: () => ({ activeToolCount: 1, canLoadSession: false, errorSummary: 'stream closed prematurely' }),
+          cancelTurn: async () => ({ confirmed: false }),
+          continuePrompt: async () => ({ stopReason: 'error' }),
+          stopExecution: async () => ({ confirmed: true, processTreeStopped: true }),
+          dispose: async () => {},
+        }
+      },
+    },
+  }, {
+    resolveModel: async () => 'model',
+    createSession: async () => 'parent',
+    budget: { stallDurationMs: 60, cancelGraceMs: 30, hardDurationMs: 10000, pollMs: 15 },
+  })
+  await assert.rejects(generate({
+    record: { id: 'task-fastfail', provider_id: 'configured', case_keys: ['unit/A'] },
+    cwd: directory,
+    scratchDirectory: scratch,
+    outputPath,
+    prompt: 'generate',
+    signal: new AbortController().signal,
+    onStarted: async () => {},
+  }), /工具流静默中断.*stream closed prematurely/)
+  assert.ok(Date.now() - started < 2000, 'must fail fast instead of waiting for hardDurationMs')
+})
+
+test('F2 same-session repair: deterministic validation failure triggers at most one continuePrompt repair before disposing worker', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-repair-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(path.join(directory, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(directory, '.agents', 'pangea', 'dsh.md'), 'fixture')
+  const scratch = path.join(directory, 'generation')
+  await mkdir(scratch, { recursive: true })
+  const outputPath = path.join(scratch, 'result.json')
+  let repairPrompts = []
+  const generate = createInjectionGenerator({
+    agents: { get: () => ({ id: 'parent' }) },
+    subagents: {
+      start: async () => {
+        await writeFile(outputPath, JSON.stringify({ summary: 'broken', edits: [{ repo_id: 'r', path: 'CMakeLists.txt', before: ')', after: ') stray_token' }] }))
+        return {
+          id: 'worker-repair',
+          remoteSessionId: 'remote-repair',
+          result: Promise.resolve({ stopReason: 'completed' }),
+          readDiagnostics: () => ({ activeToolCount: 0 }),
+          continuePrompt: async parts => {
+            repairPrompts.push(parts[0].text)
+            await writeFile(outputPath, JSON.stringify({ summary: 'repaired', edits: [{ repo_id: 'r', path: 'CMakeLists.txt', before: ')', after: '  good_file.c\n)' }] }))
+            return { stopReason: 'completed' }
+          },
+          dispose: async () => {},
+        }
+      },
+    },
+  }, {
+    resolveModel: async () => 'model',
+    createSession: async () => 'parent',
+    budget: { pollMs: 15 },
+  })
+  let telemetry = null
+  const result = await generate({
+    record: { id: 'task-repair', provider_id: 'configured', case_keys: ['unit/A'] },
+    cwd: directory,
+    scratchDirectory: scratch,
+    outputPath,
+    prompt: 'generate',
+    signal: new AbortController().signal,
+    onStarted: async () => {},
+    onTelemetry: value => { telemetry = value },
+    validateOutput: candidate => {
+      if (candidate.summary === 'broken') throw new Error('CMake 语法错误（CMakeLists.txt:3）：闭括号外存在裸标记「stray_token」')
+    },
+  })
+  assert.equal(result.summary, 'repaired')
+  assert.equal(repairPrompts.length, 1)
+  assert.match(repairPrompts[0], /CMake 语法错误.*stray_token/)
+  assert.equal(telemetry.repair_turns, 1)
+})
+
+test('v3 wrap-up prompt includes delivery contract and runWatchedContinue aborts hung authoring stream at stallDurationMs', async t => {
+  assert.match(injectionWrapUpPrompt('/tmp/result.json', { id: 't3', generation_contract_version: 3 }), /顶层须包含 delivery/)
+  assert.doesNotMatch(injectionWrapUpPrompt('/tmp/result.json', { id: 't2', generation_contract_version: 2 }), /顶层须包含 delivery/)
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'fi-continue-stall-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  await mkdir(path.join(directory, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(directory, '.agents', 'pangea', 'dsh.md'), 'fixture')
+  const scratch = path.join(directory, 'generation')
+  await mkdir(scratch, { recursive: true })
+  const outputPath = path.join(scratch, 'result.json')
+  let stopped = 0
+  let activeToolCount = 0
+  let telemetry = null
+  const started = Date.now()
+  const generate = createInjectionGenerator({
+    agents: { get: () => ({ id: 'parent' }) },
+    subagents: {
+      start: async (_provider, req) => {
+        await writeFile(outputPath, JSON.stringify({ summary: 'broken', edits: [] }))
+        return {
+          id: 'worker-continue-hung',
+          remoteSessionId: 'remote-continue-hung',
+          result: Promise.resolve({ stopReason: 'completed' }),
+          readDiagnostics: () => ({ activeToolCount }),
+          cancelTurn: async () => ({ confirmed: false }),
+          stopExecution: async () => { stopped += 1; return { confirmed: true } },
+          continuePrompt: async () => {
+            // Simulate an authoring tool ('write') left in_progress forever when stream dies mid-repair
+            activeToolCount = 1
+            req.onSessionEvent({
+              type: 'session_update',
+              update: { sessionUpdate: 'tool_call', toolCallId: 'write-hung', kind: 'write', status: 'in_progress' },
+            })
+            return new Promise(() => {})
+          },
+          dispose: async () => {},
+        }
+      },
+    },
+  }, {
+    resolveModel: async () => 'model',
+    createSession: async () => 'parent',
+    budget: { wrapUpDurationMs: 30, stallDurationMs: 80, hardDurationMs: 10000, pollMs: 20 },
+  })
+  const returned = await generate({
+    record: { id: 'task-continue-hung', provider_id: 'configured', case_keys: ['unit/A'], generation_contract_version: 3 },
+    cwd: directory,
+    scratchDirectory: scratch,
+    outputPath,
+    prompt: 'generate',
+    signal: new AbortController().signal,
+    onStarted: async () => {},
+    onTelemetry: value => { telemetry = value },
+    validateOutput: candidate => {
+      if (candidate.summary === 'broken') throw new Error('broken initial output')
+    },
+  })
+  const elapsedMs = Date.now() - started
+  assert.equal(returned.summary, 'broken')
+  assert.equal(telemetry.repair_turns, 1)
+  assert.ok(elapsedMs >= 70 && elapsedMs < 2000, `expected breakout near stallDurationMs (~80ms), got ${elapsedMs}ms`)
+  assert.equal(stopped, 1, 'must invoke stopExecution when continue turn stalls')
+})

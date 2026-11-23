@@ -59,11 +59,142 @@ export function classifyInjectionCandidate(item, duplicateKeys = new Set()) {
   return { key, selectable: true, tier: 'on_demand', label: '可按需打桩', reason: '按需结合源码定位桩点' }
 }
 
+export const DELIVERY_MODES = Object.freeze(['product_package', 'unit_test'])
+export const BUILD_VARIANTS = Object.freeze(['debug', 'hitest'])
+
+export const DELIVERY_MODE_LABELS = Object.freeze({
+  product_package: '产品包 / 目标环境替换',
+  unit_test: '仓内单元测试（GTest）',
+})
+
+export const BUILD_VARIANT_LABELS = Object.freeze({
+  debug: '正常 debug',
+  hitest: 'hitest 精准',
+})
+
+export const ARTIFACT_KIND_LABELS = Object.freeze({
+  static_lib: '静态库',
+  shared_lib: '动态库',
+  kernel_module: '内核模块',
+  executable: '可执行文件',
+  script: '脚本 / 配置',
+  other: '其他产物',
+})
+
+export function normalizeDeliveryMode(value) {
+  return value === 'unit_test' ? 'unit_test' : 'product_package'
+}
+
+export function normalizeBuildVariant(value) {
+  return value === 'hitest' ? 'hitest' : 'debug'
+}
+
+export function normalizeReplaceFiles(items = []) {
+  if (!Array.isArray(items)) return []
+  const result = []
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue
+    const artifact = typeof item.artifact === 'string' ? item.artifact.trim() : ''
+    if (!artifact) continue
+    const kind = typeof item.kind === 'string' && Object.hasOwn(ARTIFACT_KIND_LABELS, item.kind.trim())
+      ? item.kind.trim()
+      : 'other'
+    const sourceFiles = Array.isArray(item.source_files)
+      ? [...new Set(item.source_files.map(file => typeof file === 'string' ? file.trim().replaceAll('\\', '/') : '').filter(Boolean))]
+      : []
+    result.push({
+      artifact,
+      kind,
+      source_files: sourceFiles,
+      build_evidence: typeof item.build_evidence === 'string' ? item.build_evidence.trim() : '',
+      post_replace_action: typeof item.post_replace_action === 'string' ? item.post_replace_action.trim() : '',
+    })
+  }
+  return result
+}
+
+export function extractMarkerStrings(taskOrDelivery) {
+  const delivery = taskOrDelivery?.result?.delivery ?? taskOrDelivery?.delivery ?? taskOrDelivery
+  const explicit = Array.isArray(delivery?.marker_strings)
+    ? delivery.marker_strings.map(item => typeof item === 'string' ? item.trim() : '').filter(Boolean)
+    : []
+  if (explicit.length) return [...new Set(explicit)]
+  const points = Array.isArray(taskOrDelivery?.result?.points) ? taskOrDelivery.result.points : []
+  return [...new Set(points.map(point => typeof point?.observe === 'string' ? point.observe.trim() : '').filter(item => item.length >= 4))]
+}
+
+export function mergeReplaceFilesFromTasks(tasks = []) {
+  const byArtifact = new Map()
+  const markers = new Set()
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    const taskName = task?.name || task?.id || ''
+    const replaceFiles = normalizeReplaceFiles(task?.replace_files ?? task?.result?.delivery?.replace_files)
+    for (const item of replaceFiles) {
+      const existing = byArtifact.get(item.artifact)
+      if (!existing) {
+        byArtifact.set(item.artifact, {
+          ...item,
+          task_names: taskName ? [taskName] : [],
+        })
+      } else {
+        existing.source_files = [...new Set([...existing.source_files, ...item.source_files])]
+        if (item.build_evidence && !existing.build_evidence.includes(item.build_evidence)) {
+          existing.build_evidence = existing.build_evidence ? `${existing.build_evidence}；${item.build_evidence}` : item.build_evidence
+        }
+        if (item.post_replace_action && !existing.post_replace_action.includes(item.post_replace_action)) {
+          existing.post_replace_action = existing.post_replace_action ? `${existing.post_replace_action}；${item.post_replace_action}` : item.post_replace_action
+        }
+        if (taskName && !existing.task_names.includes(taskName)) existing.task_names.push(taskName)
+      }
+    }
+    for (const marker of Array.isArray(task?.marker_strings) ? task.marker_strings : extractMarkerStrings(task)) {
+      if (typeof marker === 'string' && marker.trim()) markers.add(marker.trim())
+    }
+  }
+  return { replace_files: [...byArtifact.values()], marker_strings: [...markers] }
+}
+
+const shellSingleQuote = text => `'${String(text ?? '').replace(/'/g, "'\\''")}'`
+
+export function buildArtifactVerifyCommands(taskOrDelivery, variant = null) {
+  const effectiveVariant = normalizeBuildVariant(variant ?? taskOrDelivery?.build_variant)
+  const markers = extractMarkerStrings(taskOrDelivery)
+  const replaceFiles = normalizeReplaceFiles(
+    taskOrDelivery?.replace_files ?? taskOrDelivery?.result?.delivery?.replace_files,
+  )
+  const quotedMarkers = markers.map(shellSingleQuote).join(' ')
+  const quotedArtifacts = (replaceFiles.length ? replaceFiles.map(item => item.artifact) : ['<目标静态库或模块路径>'])
+    .map(shellSingleQuote)
+    .join(' ')
+  const preReplaceCmd = markers.length
+    ? `set -- ${quotedArtifacts}; for f in "$@"; do [ -f "$f" ] || { echo "NOT_FOUND: $f" >&2; exit 2; }; done; for m in ${quotedMarkers}; do found=0; for f in "$@"; do grep -aFq -- "$m" "$f" && found=1 && break; done; [ "$found" -eq 1 ] && echo "OK: $m" || { echo "MISSING: $m" >&2; exit 2; }; done; for f in "$@"; do hit=0; for m in ${quotedMarkers}; do grep -aFq -- "$m" "$f" && hit=1 && break; done; [ "$hit" -eq 1 ] || { echo "NO_STUB_IN_ARTIFACT: $f" >&2; exit 2; }; done`
+    : ''
+  const postDeployCmd = markers.length
+    ? `target="<最终部署并运行的宿主二进制或模块路径>"; [ -f "$target" ] || { echo "NOT_FOUND: $target" >&2; exit 2; }; for m in ${quotedMarkers}; do grep -aFq -- "$m" "$target" && echo "OK: $m" || { echo "MISSING: $m" >&2; exit 2; }; done`
+    : ''
+  const safeRelinkCmd = markers.length
+    ? `PANGEA_RELINK_ONLY=1 PANGEA_VERIFY_ARTIFACTS=${shellSingleQuote(replaceFiles.length ? replaceFiles.map(item => item.artifact).join(' ') : '<目标静态库路径>')} PANGEA_RELINK_CMD='<环境重链脚本命令>' PANGEA_VERIFY_FINAL_BINARY='<运行目录/宿主进程二进制>' bash pangea-verify.sh`
+    : ''
+  const variantHint = effectiveVariant === 'hitest'
+    ? '当前目标变体为「hitest 精准」：若大包已含完整精准变体宿主二进制，优先直接替换运行目录内的预置精准变体与宿主二进制；若仅替换 .a 后盒内重链，请直接使用下方「PANGEA 安全重链代理命令」（无需修改环境重链脚本即可自动注入传递库解析并隔离旧预置变体覆盖）。'
+    : '当前目标变体为「正常 debug」：若需在盒内执行重链脚本，请直接使用下方「PANGEA 安全重链代理命令」（无需修改环境重链脚本即可捕获被吞掉的 ld 错误码、补齐传递钩子库解析并拦截预置精准变体尾部覆盖）。'
+  return {
+    variant: effectiveVariant,
+    variant_label: BUILD_VARIANT_LABELS[effectiveVariant],
+    variant_hint: variantHint,
+    markers,
+    replace_files: replaceFiles,
+    pre_replace_cmd: preReplaceCmd,
+    post_deploy_cmd: postDeployCmd,
+    safe_relink_cmd: safeRelinkCmd,
+  }
+}
+
 function shellQuoteComment(text) {
   return String(text ?? '').replace(/\r?\n/g, ' ').trim()
 }
 
-export function buildVerificationShellScript(task) {
+export function buildVerificationShellScript(task, { buildVariant = null } = {}) {
   const profiles = Array.isArray(task?.result?.profiles) ? task.result.profiles : []
   const points = Array.isArray(task?.result?.points) ? task.result.points : []
   const pointById = new Map(points.map(point => [point.id, point]))
@@ -74,13 +205,24 @@ export function buildVerificationShellScript(task) {
       : (task?.repositories || []).filter(repo => repo.commit)
   const commits = commitItems.map(repo => `${repo.repo_id}@${String(repo.commit).slice(0, 12)}`).join(', ')
   const branchLabel = task?.latest_build?.branch || task?.branch || '未记录'
+  const deliveryMode = normalizeDeliveryMode(task?.delivery_mode ?? task?.result?.delivery?.mode)
+  const effectiveVariant = normalizeBuildVariant(buildVariant ?? task?.build_variant)
+  const delivery = task?.result?.delivery
+  const replaceFiles = normalizeReplaceFiles(delivery?.replace_files)
+  const markerStrings = extractMarkerStrings(task)
   const lines = [
     '#!/usr/bin/env bash',
     '# PANGEA 故障注入可执行验证脚本',
     `# 任务名称: ${shellQuoteComment(task?.name || task?.id || '打桩任务')}`,
     `# 任务 ID : ${shellQuoteComment(task?.id || '')}`,
+    `# 交付形态: ${DELIVERY_MODE_LABELS[deliveryMode]} | 目标变体: ${BUILD_VARIANT_LABELS[effectiveVariant]}`,
     `# 个人分支: ${shellQuoteComment(branchLabel)}${commits ? ` (${commits})` : ''}`,
     '# 用法示例: bash pangea-verify.sh 2>&1 | tee pangea-verify.log',
+    ...(markerStrings.length ? [
+      '# 前置组件库核验: PANGEA_VERIFY_ARTIFACTS="/path/to/libA.a /path/to/libB.a" bash pangea-verify.sh',
+      '# 前置宿主二进制核验: PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
+      '# 零侵入安全重链(防F3/F4): PANGEA_RELINK_ONLY=1 PANGEA_RELINK_CMD="/path/to/relink.sh" PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
+    ] : []),
     '# macOS 默认 bash 3.2 在 C.UTF-8 下会把紧邻中文标点的未加花括号 $VAR 误判进变量名；仅将当前 shell 内部 LC_CTYPE 设为 C，子进程仍保留 UTF-8 LANG',
     'if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then',
     '  if [ -n "${LC_ALL:-}" ]; then export LANG="${LC_ALL}"',
@@ -94,6 +236,142 @@ export function buildVerificationShellScript(task) {
     'set -euo pipefail',
     '',
   ]
+  if (replaceFiles.length || delivery?.build_requirement) {
+    lines.push('# --- 交付前提与应单独替换文件 ---')
+    if (delivery?.build_requirement) lines.push(`# 构建前提: ${shellQuoteComment(delivery.build_requirement)}`)
+    for (const item of replaceFiles) {
+      lines.push(`# 替换产物: ${shellQuoteComment(item.artifact)} (${ARTIFACT_KIND_LABELS[item.kind] || item.kind}) <- ${shellQuoteComment(item.source_files.join(', '))}${item.post_replace_action ? ` | ${shellQuoteComment(item.post_replace_action)}` : ''}`)
+    }
+    lines.push('')
+  }
+  if (markerStrings.length) {
+    const quotedMarkers = markerStrings.map(shellSingleQuote).join(' ')
+    lines.push(
+      '__pangea_check_artifact_set() {',
+      '  local __f __m __hit __found',
+      '  for __f in "$@"; do',
+      '    if [ ! -f "$__f" ]; then',
+      '      printf \'[PANGEA_ARTIFACT_CHECK] FAILED: artifact not found: %s\\n\' "$__f" >&2',
+      '      exit 2',
+      '    fi',
+      '  done',
+      `  for __m in ${quotedMarkers}; do`,
+      '    __found=0',
+      '    for __f in "$@"; do',
+      '      if grep -aFq -- "$__m" "$__f"; then __found=1; break; fi',
+      '    done',
+      '    if [ "$__found" -ne 1 ]; then',
+      '      printf \'[PANGEA_ARTIFACT_CHECK] FAILED: missing stub marker "%s" across [%s] (check build config / hitest overwrite)\\n\' "$__m" "$*" >&2',
+      '      exit 2',
+      '    fi',
+      '  done',
+      '  for __f in "$@"; do',
+      '    __hit=0',
+      `    for __m in ${quotedMarkers}; do`,
+      '      if grep -aFq -- "$__m" "$__f"; then __hit=1; break; fi',
+      '    done',
+      '    if [ "$__hit" -ne 1 ]; then',
+      '      printf \'[PANGEA_ARTIFACT_CHECK] FAILED: no stub marker found in %s (check build config / hitest overwrite)\\n\' "$__f" >&2',
+      '      exit 2',
+      '    fi',
+      '  done',
+      '  printf \'[PANGEA_ARTIFACT_CHECK] OK: %s\\n\' "$*"',
+      '}',
+      '__pangea_safe_relink() {',
+      '  local __relink_cmd="$1" __final="$2" __rundir __qdir __shim __rcfile __pat __cand __qf __tool __real __relink_rc=0 __ld_err=""',
+      '  if [ -z "$__final" ]; then',
+      '    printf \'[PANGEA_SAFE_RELINK] FAILED: PANGEA_VERIFY_FINAL_BINARY is required when PANGEA_RELINK_CMD is set\\n\' >&2',
+      '    exit 2',
+      '  fi',
+      '  __rundir="$(dirname "$__final")"',
+      '  __qdir="$__rundir/.pangea_quarantine_$$"',
+      '  __shim="$(mktemp -d "${TMPDIR:-/tmp}/pangea-ld-shim.XXXXXX")"',
+      '  __rcfile="$__shim/ld.rc"',
+      '  __pangea_restore_relink_env() {',
+      '    if [ -d "$__qdir" ]; then',
+      '      for __qf in "$__qdir"/*; do',
+      '        [ -e "$__qf" ] || continue',
+      '        if [ "$__rundir/$(basename "$__qf")" != "$__final" ]; then',
+      '          mv -f -- "$__qf" "$__rundir/$(basename "$__qf")"',
+      '        fi',
+      '      done',
+      '      rm -rf -- "$__qdir"',
+      '    fi',
+      '    [ -n "${__shim:-}" ] && rm -rf -- "$__shim"',
+      '  }',
+      '  trap \'__pangea_restore_relink_env\' EXIT INT TERM',
+      '  mkdir -p -- "$__qdir"',
+      '  # F4 guard: temporarily quarantine pre-baked hitest/variant binaries in run_dir so unmodified relink script reaches else: mv new_bin -> final',
+      '  set -f',
+      '  # shellcheck disable=SC2086',
+      '  set -- ${PANGEA_PREBAKED_GLOB:-*hitest* *精准*}',
+      '  set +f',
+      '  for __pat in "$@"; do',
+      '    for __cand in "$__rundir"/$__pat; do',
+      '      [ -f "$__cand" ] || continue',
+      '      [ "$__cand" = "$__final" ] && continue',
+      '      mv -f -- "$__cand" "$__qdir/$(basename "$__cand")"',
+      '      printf \'[PANGEA_SAFE_RELINK] quarantined prebaked binary during relink: %s\\n\' "$__cand"',
+      '    done',
+      '  done',
+      '  # F3 + swallowed-rc guard: transparent compiler/linker shim adding --copy-dt-needed-entries and recording non-zero linker exit codes',
+      '  for __tool in gcc g++ cc c++ ld; do',
+      '    __real="$(PATH="$PATH" command -v "$__tool" 2>/dev/null || true)"',
+      '    [ -n "$__real" ] || continue',
+      '    if [ "$__tool" = "ld" ]; then',
+      '      cat > "$__shim/$__tool" <<EOF',
+      '#!/usr/bin/env bash',
+      '"$__real" --copy-dt-needed-entries --no-as-needed "\\$@"',
+      '__rc=\\$?',
+      '[ "\\$__rc" -ne 0 ] && printf "%s:%s\\\\n" "$__tool" "\\$__rc" >> "$__rcfile"',
+      'exit "\\$__rc"',
+      'EOF',
+      '    else',
+      '      cat > "$__shim/$__tool" <<EOF',
+      '#!/usr/bin/env bash',
+      '__link=1',
+      'for __a in "\\$@"; do',
+      '  case "\\$__a" in -c|-E|-S|-v|--version|-M|-MM) __link=0; break ;; esac',
+      'done',
+      'if [ "\\$__link" -eq 1 ]; then',
+      '  "$__real" -Wl,--copy-dt-needed-entries,--no-as-needed "\\$@"',
+      'else',
+      '  "$__real" "\\$@"',
+      'fi',
+      '__rc=\\$?',
+      '[ "\\$__rc" -ne 0 ] && printf "%s:%s\\\\n" "$__tool" "\\$__rc" >> "$__rcfile"',
+      'exit "\\$__rc"',
+      'EOF',
+      '    fi',
+      '    chmod +x "$__shim/$__tool"',
+      '  done',
+      '  set +e',
+      '  PATH="$__shim:$PATH" LDFLAGS="${LDFLAGS:-} -Wl,--copy-dt-needed-entries,--no-as-needed" bash -c "$__relink_cmd"',
+      '  __relink_rc=$?',
+      '  set -e',
+      '  [ -s "$__rcfile" ] && __ld_err="$(tr \'\\n\' \' \' < "$__rcfile")"',
+      '  __pangea_restore_relink_env',
+      '  trap - EXIT INT TERM',
+      '  if [ "$__relink_rc" -ne 0 ] || [ -n "$__ld_err" ]; then',
+      '    printf \'[PANGEA_SAFE_RELINK] FAILED: relink_rc=%d linker_errors=[%s]\\n\' "$__relink_rc" "$__ld_err" >&2',
+      '    exit 2',
+      '  fi',
+      '  __pangea_check_artifact_set "$__final"',
+      '  printf \'[PANGEA_SAFE_RELINK] OK: relinked and verified %s\\n\' "$__final"',
+      '}',
+      'if [ -n "${PANGEA_VERIFY_ARTIFACTS:-}" ]; then',
+      '  # shellcheck disable=SC2086',
+      '  __pangea_check_artifact_set $PANGEA_VERIFY_ARTIFACTS',
+      'fi',
+      'if [ -n "${PANGEA_RELINK_CMD:-}" ]; then',
+      '  __pangea_safe_relink "$PANGEA_RELINK_CMD" "${PANGEA_VERIFY_FINAL_BINARY:-}"',
+      '  if [ "${PANGEA_RELINK_ONLY:-0}" = "1" ]; then exit 0; fi',
+      'elif [ -n "${PANGEA_VERIFY_FINAL_BINARY:-}" ]; then',
+      '  __pangea_check_artifact_set "$PANGEA_VERIFY_FINAL_BINARY"',
+      'fi',
+      '',
+    )
+  }
   if (points.length) {
     lines.push('# --- 桩点清单 ---')
     for (const point of points) {

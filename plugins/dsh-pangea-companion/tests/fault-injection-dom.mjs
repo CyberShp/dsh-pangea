@@ -43,8 +43,19 @@ const service = new FaultInjectionService({ validateModel: options => requireAge
     else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
   })
   return injectionGit(cwd, args, signal)
-}, generate: async ({ record }) => ({ summary: '工程测试夹具', points: [{ id: 'A', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
-  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['A'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['开启 A', '执行业务', '关闭 A 并恢复'] })), edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }] }) })
+}, generate: async ({ record }) => ({
+  summary: '工程测试夹具',
+  delivery: {
+    mode: record.delivery_mode || 'product_package',
+    build_requirement: '标准产品配置即可编入，运行期默认关闭',
+    replace_files: [{ artifact: 'libtarget.a', kind: 'static_lib', source_files: ['target.c'], build_evidence: 'CMakeLists.txt:1', post_replace_action: '替换静态库并重链宿主进程' }],
+    marker_strings: ['return -1;'],
+    artifact_verify: ['grep -aFq "return -1;" libtarget.a'],
+  },
+  points: [{ id: 'A', trigger_scope: { current_input: 'fixture operation argument', excluded_inputs: ['previous operations'] }, repo_id: 'target', path: 'target.c', action: '模拟故障', enable: 'fixture enable', disable: 'fixture disable', observe: 'hit:A' }],
+  profiles: record.case_keys.map(case_key => ({ case_key, point_ids: ['A'], safety: { setup: [':'], negative_steps: [':'], negative_point_ids: ['A'], cleanup: [':'], cleanup_verify: [':'] }, steps: ['开启 A', '执行业务', '关闭 A 并恢复'] })),
+  edits: [{ repo_id: 'target', path: 'target.c', before: 'return 0;', after: 'return -1;' }],
+}) })
 const calls = []
 let runReadable = true
 globalThis.fetch = async (url, options = {}) => {
@@ -107,13 +118,25 @@ const change = async (label, value) => {
 try {
   await render(); await click('打开打桩工作区')
   await until(() => enabled('生成打桩修改（2 条用例）'))
+  assert.equal(container.querySelector('[aria-label="交付形态"]').value, 'product_package')
+  assert.equal(container.querySelector('[aria-label="目标部署变体"]').value, 'debug')
   await click('生成打桩修改（2 条用例）')
   await until(() => enabled('加入出包 / 推送个人分支'))
+  const replaceSection = container.querySelector('[data-testid="fault-injection-replace-files"]')
+  assert.ok(replaceSection, 'dedicated replace-files section must be visible on task detail')
+  assert.match(replaceSection.textContent, /应单独替换的文件与部署核验/)
+  assert.match(replaceSection.textContent, /libtarget\.a/)
+  assert.match(replaceSection.textContent, /正常 debug/)
+  await change('切换目标部署变体', 'hitest')
+  await until(() => container.querySelector('[data-testid="fault-injection-replace-files"]')?.textContent.includes('当前变体：hitest 精准'))
   assert.match(container.textContent, /逐用例执行说明/)
   assert.equal(calls[0].cwd, root)
   assert.deepEqual(calls[0].case_keys, ['unit/A', 'unit/B'])
   await click('加入出包 / 推送个人分支')
   await until(() => button('合成并推送到个人分支（1 个任务）'))
+  const buildReplaceSection = container.querySelector('[data-testid="fault-injection-build-replace-files"]')
+  assert.ok(buildReplaceSection, 'build page must show aggregated replace-files list')
+  assert.match(buildReplaceSection.textContent, /libtarget\.a/)
   assert.equal(button('合成并推送到个人分支（1 个任务）').disabled, true)
   await change('问题单号', 'DTS2026111111059')
   await change('修改人', 'h00600350')
