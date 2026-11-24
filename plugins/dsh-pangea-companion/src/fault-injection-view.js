@@ -71,10 +71,13 @@ const PANEL_CSS = `
         .pangea-fi-filters label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
         .pangea-fi-filters label > select { margin-top: 0; width: auto; font-weight: 400; }
         .pangea-fi-table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; overflow: hidden; }
-        .pangea-fi-table th, .pangea-fi-table td { padding: 10px 12px; border-bottom: 1px solid var(--pangea-line, #e2e6ec); text-align: left; vertical-align: top; font-size: 13px; }
+        .pangea-fi-table th, .pangea-fi-table td { padding: 10px 12px; border-bottom: 1px solid var(--pangea-line, #e2e6ec); text-align: left; vertical-align: top; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+        .pangea-fi-table td { white-space: pre-wrap; }
         .pangea-fi-table th { color: var(--pangea-muted, #5e6773); font-weight: 600; background: var(--pangea-subtle, #f8f9fb); }
         .pangea-fi-table td button.link-btn { min-height: 0; padding: 0; border: 0; background: transparent; color: var(--pangea-red, #b62836); font-weight: 600; text-align: left; }
         .pangea-fi-table small { display: block; margin-top: 4px; color: var(--pangea-muted, #5e6773); }
+        .pangea-fi-inline-list { margin: 4px 0 0; padding-left: 18px; line-height: 1.65; }
+        .pangea-fi-inline-list li { margin: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
         .pangea-fi-picker { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(0, 1.85fr); gap: 20px; margin: 16px 0; align-items: start; }
         .pangea-fi-case-list { max-height: 62vh; overflow: auto; border: 1px solid var(--pangea-line, #e2e6ec); border-radius: 10px; padding: 8px; background: #fff; }
         .pangea-fi-case-row { display: flex; align-items: flex-start; gap: 8px; padding: 4px; border-bottom: 1px solid #f1f3f6; }
@@ -157,15 +160,24 @@ function viewHelpers(h, { working, openPoints }) {
   const field = (label, value, change, options = {}) => h('label', { className: 'pangea-fi-field' }, h('span', null, label),
     h(options.multiline ? 'textarea' : 'input', { 'aria-label': label, value: readable(value), onChange: event => change(event.target.value),
       disabled: working, ...(options.multiline ? { rows: 3 } : { type: 'text' }), placeholder: options.placeholder }))
+  const renderValueList = value => {
+    if (Array.isArray(value)) {
+      const items = value.map(readable).filter(Boolean)
+      if (!items.length) return ''
+      if (items.length === 1) return items[0]
+      return h('ul', { className: 'pangea-fi-inline-list' }, items.map((item, idx) => h('li', { key: idx }, item)))
+    }
+    return readable(value)
+  }
   const renderSteps = steps => h('ol', { className: 'pangea-fi-steps pangea-fi-scroll' }, (Array.isArray(steps) ? steps : [steps]).filter(step => step != null).map((step, at) => h('li', { key: at }, readable(step))))
   const renderPoints = points => Array.isArray(points) && points.length ? points.map((point, index) => h('details', { key: point.id || index, open: openPoints, className: 'pangea-fi-point' },
     h('summary', null, `${readable(point.id)} · ${readable(point.action) || '桩点说明'}`),
     point.repo_id || point.path ? h('p', { className: 'b05-subtle' }, [readable(point.repo_id), readable(point.path)].filter(Boolean).join(':')) : null,
     point.trigger_scope ? h('dl', { className: 'pangea-reading-fields' },
-      h('dt', null, '当前输入来源'), h('dd', null, readable(point.trigger_scope.current_input)),
-      h('dt', null, '排除的历史与非目标输入'), h('dd', null, (point.trigger_scope.excluded_inputs || []).map(readable).join('、'))) : null,
-    h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, Array.isArray(point[key]) ? point[key].map(readable).join('、') : readable(point[key]))])))) : h('p', { className: 'b05-subtle' }, '该用例按需打桩，具体注入点将在源码生成阶段定位。')
-  return { field, renderSteps, renderPoints }
+      h('dt', null, '当前输入来源'), h('dd', { style: { whiteSpace: 'pre-wrap' } }, readable(point.trigger_scope.current_input)),
+      h('dt', null, '排除的历史与非目标输入'), h('dd', { style: { whiteSpace: 'pre-wrap' } }, renderValueList(point.trigger_scope.excluded_inputs || []))) : null,
+    h('dl', { className: 'pangea-reading-fields' }, ...[['symbol', '代码位置'], ['action', '注入动作'], ['trigger', '触发条件'], ['times', '触发次数'], ['enable', '启用方式'], ['disable', '关闭方式'], ['observe', '命中检查'], ['cleanup', '恢复操作'], ['depends_on', '依赖桩点'], ['exclusive_with', '互斥桩点']].flatMap(([key, label]) => point[key] == null || (Array.isArray(point[key]) && !point[key].length) ? [] : [h('dt', { key: `${key}-label` }, label), h('dd', { key, style: { whiteSpace: 'pre-wrap' } }, renderValueList(point[key]))])))) : h('p', { className: 'b05-subtle' }, '该用例按需打桩，具体注入点将在源码生成阶段定位。')
+  return { field, renderSteps, renderPoints, renderValueList }
 }
 
 export function createFaultInjectionPanel(React) {
@@ -244,17 +256,17 @@ export function createFaultInjectionPanel(React) {
       catch (reason) { setError(reason.message) }
       finally { setWorking(false) }
     }
-    const { field, renderPoints } = viewHelpers(h, { working, openPoints: standalone })
+    const { field, renderPoints, renderValueList } = viewHelpers(h, { working, openPoints: standalone })
     const renderCaseSummaryFields = item => {
       const rows = [
         ['用例编号', item.display_id || item.test_case_id || '未标注'],
         ['验证目标', item.verification_goal || item.summary],
         ['用例类型', item.case_type || item.test_level],
-        ['观察点', Array.isArray(item.observability) ? item.observability.join('；') : item.observability],
-        ['清理动作', Array.isArray(item.cleanup) ? item.cleanup.join('；') : item.cleanup],
-      ].filter(([, value]) => value != null && String(value).trim() !== '')
+        ['观察点', item.observability],
+        ['清理动作', item.cleanup],
+      ].filter(([, value]) => Array.isArray(value) ? value.some(v => String(v ?? '').trim() !== '') : value != null && String(value).trim() !== '')
       return h('dl', { className: 'pangea-reading-fields', style: { marginTop: 8 } },
-        ...rows.flatMap(([label, value]) => [h('dt', { key: `${label}-dt` }, label), h('dd', { key: `${label}-dd` }, readable(value))]))
+        ...rows.flatMap(([label, value]) => [h('dt', { key: `${label}-dt` }, label), h('dd', { key: `${label}-dd`, style: { whiteSpace: 'pre-wrap' } }, renderValueList(value))]))
     }
     const enabledRepos = (settings?.repositories || []).filter(repo => repo.enabled !== false)
     const blockingErrors = enabledRepos.map(repo => repoBlockingReason(repo, { requirePersonalBranch: false })).filter(Boolean)
@@ -355,7 +367,10 @@ export function createFaultInjectionPanel(React) {
                       h('option', { value: 'hitest' }, BUILD_VARIANT_LABELS.hitest)),
                     h('span', { style: { fontSize: 12, fontWeight: 400, color: '#5e6773' } }, '两种变体共用同一份业务桩源码补丁（不依赖测试宏）；部署核验与防顶包指引随所选变体切换。'))
                 : null),
-            h('p', { style: { fontSize: 13 } }, h('strong', null, '当前代码基线：'), enabledRepos.map(repo => `${repo.repo_id} → ${sourceLabel(repo.source)}`).join('；')),
+            h('div', { style: { fontSize: 13, margin: '8px 0' } }, h('strong', null, '当前代码基线：'),
+              enabledRepos.length <= 1
+                ? (enabledRepos[0] ? `${enabledRepos[0].repo_id} → ${sourceLabel(enabledRepos[0].source)}` : '未选择仓库')
+                : h('ul', { className: 'pangea-fi-inline-list' }, enabledRepos.map(repo => h('li', { key: repo.repo_id }, `${repo.repo_id} → ${sourceLabel(repo.source)}`)))),
             h('details', { ref: repoDetailsRef, className: 'pangea-fi-technical', open: needsRepoSetup || repoSetupOpen || undefined },
               h('summary', null, '代码来源与高级设置'),
               h(RepositorySettings, { cwd, dataRoot, defaultOpen: needsRepoSetup || repoSetupOpen, repositories: settings.repositories || [], onSaved: async () => { const value = await request(); setSettings(previous => ({ ...previous, repositories: value.defaults.repositories, pipeline_url: value.defaults.pipeline_url })) } }),
@@ -507,8 +522,8 @@ export function createFaultInjectionTaskDetail(React) {
                   style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 },
                   onClick: () => copyText(replaceFiles.map(item => item.artifact).join('\n'), '已复制受影响产物清单'),
                 }, '复制文件清单') : null)),
-            h('div', { role: 'status', className: 'pangea-fi-banner info', style: { margin: '8px 0' } }, h('span', null, verifyInfo.variant_hint)),
-            delivery?.build_requirement ? h('p', { style: { fontSize: 13, margin: '8px 0' } }, h('strong', null, '构建前提：'), delivery.build_requirement) : null,
+            h('div', { role: 'status', className: 'pangea-fi-banner info', style: { margin: '8px 0' } }, h('span', { style: { whiteSpace: 'pre-wrap', lineHeight: 1.6 } }, verifyInfo.variant_hint)),
+            delivery?.build_requirement ? h('p', { style: { fontSize: 13, margin: '8px 0', whiteSpace: 'pre-wrap', lineHeight: 1.6 } }, h('strong', null, '构建前提：'), delivery.build_requirement) : null,
             replaceFiles.length
               ? h('table', { className: 'pangea-fi-table', 'aria-label': '应单独替换的文件清单', style: { marginTop: 8 } },
                   h('thead', null, h('tr', null, ...['受影响产物 / 应替换文件', '类型', '对应修改源码', '构建依据', '打包或替换说明'].map(label => h('th', { key: label }, label)))),
@@ -1074,9 +1089,12 @@ export function createFaultInjectionBuild(React) {
             h('p', { style: { fontSize: 12, color: '#5e6773', margin: '4px 0' } },
               '合成基线：', h('code', null, repo.base_commit || '待读取'),
               repo.commit ? h(React.Fragment, null, ' · 个人分支提交：', h('code', null, repo.commit)) : null),
-            repo.applied?.length ? h('p', { style: { fontSize: 12, margin: '4px 0' } },
-              `已合成补丁（${repo.applied.length}）：`,
-              repo.applied.map(item => `${item.name}（${(item.files || []).join(', ')}）`).join('；')) : null,
+            repo.applied?.length ? h('div', { style: { fontSize: 12, margin: '4px 0' } },
+              h('span', null, `已合成补丁（${repo.applied.length}）：`),
+              repo.applied.length > 1
+                ? h('ul', { className: 'pangea-fi-inline-list', style: { marginTop: 4 } },
+                    repo.applied.map((item, idx) => h('li', { key: `${item.name}:${idx}` }, `${item.name}（${(item.files || []).join(', ')}）`)))
+                : h('span', null, `${repo.applied[0].name}（${(repo.applied[0].files || []).join(', ')}）`)) : null,
             (repo.failures || []).map((failure, idx) => h('div', { key: `${failure.task_id}:${idx}`, className: 'pangea-fi-banner danger', style: { margin: '8px 0 0' } },
               h('div', null,
                 h('strong', null, `任务「${failure.name}」失配：`),

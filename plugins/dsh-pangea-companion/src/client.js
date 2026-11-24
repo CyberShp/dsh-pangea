@@ -274,7 +274,11 @@ window.__ModuleLoader__.load({
                     info.finished ? '本次已结束' : action.resume_action === 'settle' || action.resume_action === 'settle_action' ? '接收已完成提交' : action.resume_action === 'continue_agent' ? '续接原执行' : ['settled', 'accepted'].includes(action.status) ? '保留，等待后续阶段' : action.resume_action ? '按检查点继续' : '无需继续',
                   ].map((value, index) => h('td', { key: index, style: { padding: '10px', borderBottom: '1px solid #f0f1ef', minWidth: index ? 110 : 150, maxWidth: 360, overflowWrap: 'anywhere', verticalAlign: 'top' } }, value)))
                 }))))) : null,
-          info.diagnostics.length ? h('p', { role: 'status', style: { ...muted, marginBottom: 0 } }, '部分进展资料不可读取：', info.diagnostics.map(item => typeof item === 'string' ? item : item.message ?? item.code ?? '读取诊断').join('；')) : null))
+          info.diagnostics.length ? h('div', { role: 'status', style: { ...muted, marginBottom: 0 } },
+            h('strong', null, '部分进展资料不可读取：'),
+            info.diagnostics.length === 1
+              ? h('span', null, typeof info.diagnostics[0] === 'string' ? info.diagnostics[0] : info.diagnostics[0].message ?? info.diagnostics[0].code ?? '读取诊断')
+              : h('ul', { style: { margin: '4px 0 0', paddingLeft: 18 } }, info.diagnostics.map((item, idx) => h('li', { key: idx }, typeof item === 'string' ? item : item.message ?? item.code ?? '读取诊断')))) : null))
     }
 
     function taskCanStop(task) {
@@ -826,7 +830,10 @@ window.__ModuleLoader__.load({
         !task && current ? h('p', { id: 'run-task-unavailable', className: 'small muted' }, '此历史运行未关联任务，内容来自已保存的运行记录。') : null,
         notices,
         analysisExecutorBlockedReason(task) ? h('p', { role: 'status', className: 'small muted' }, analysisExecutorBlockedReason(task)) : null,
-        ['warning', 'error'].includes(current?.reader_health?.status) ? h('div', { className: 'notice warn', role: 'alert' }, node('div', '', h('strong', null, '部分运行资料暂不可读取'), h('p', null, (current.reader_health.issues ?? []).join('；') || '请检查运行资料。不可读取的产物不计为零。')), button('重试读取', retry)) : null,
+        ['warning', 'error'].includes(current?.reader_health?.status) ? h('div', { className: 'notice warn', role: 'alert' }, node('div', '', h('strong', null, '部分运行资料暂不可读取'),
+          (current.reader_health.issues ?? []).length > 1
+            ? h('ul', { style: { margin: '4px 0 0', paddingLeft: 18 } }, current.reader_health.issues.map((issue, idx) => h('li', { key: idx }, issue)))
+            : h('p', null, current.reader_health.issues?.[0] || '请检查运行资料。不可读取的产物不计为零。')), button('重试读取', retry)) : null,
         legacy && (current.validation?.status === 'failed' || current.workflow?.unresolved?.length) ? h('div', { role: 'alert', className: 'notice warn' }, '当前运行有校验失败或未解决事项，请展开运行信息查看完整原因。') : null,
         h(StopProgress, { task: current?.external_execution?.status === 'stopping' ? { ...task, stop_confirmed_at: null, stop_operation: current.stop_operation ?? task?.stop_operation } : task, onRefresh: retry, onRetry: !error ? () => setConfirmStop(true) : undefined }),
         actionError ? h('div', { role: 'alert', className: 'notice danger' }, actionError) : null,
@@ -4914,15 +4921,24 @@ window.__ModuleLoader__.load({
           showActionNotice('请先选择至少一条已编号用例。', true)
           return
         }
+        const formatField = (label, value) => {
+          if (Array.isArray(value)) {
+            const items = value.map(item => text(item, '').trim()).filter(Boolean)
+            if (!items.length) return `${label}：未记录`
+            if (items.length === 1) return `${label}：${items[0]}`
+            return `${label}：\n${items.map(item => `- ${item}`).join('\n')}`
+          }
+          return `${label}：${text(value, '未记录')}`
+        }
         const content = selected.map(item => [
           `${item.display_id ?? item.test_case_id} · ${text(item.title, '未命名用例')}`,
-          `前置条件：${Array.isArray(item.preconditions) ? item.preconditions.join('；') : text(item.preconditions, '未记录')}`,
+          formatField('前置条件', item.preconditions),
           ...(Array.isArray(item.step_pairs) && item.step_pairs.length
             ? item.step_pairs.map((step, index) => `${index + 1}. ${step.action || '未提供操作'} → ${step.expected || '未提供逐步预期'}`)
-            : [`步骤：${Array.isArray(item.steps) ? item.steps.join('；') : text(item.steps, '未记录')}`]),
-          `整体预期：${Array.isArray(item.expected_results) ? item.expected_results.join('；') : text(item.expected_results, '未记录')}`,
-          `观察点：${Array.isArray(item.observability) ? item.observability.join('；') : text(item.observability, '未记录')}`,
-          `清理：${Array.isArray(item.cleanup) ? item.cleanup.join('；') : text(item.cleanup, '未记录')}`,
+            : [formatField('步骤', item.steps)]),
+          formatField('整体预期', item.expected_results),
+          formatField('观察点', item.observability),
+          formatField('清理', item.cleanup),
           ...caseVariantLines(item),
           ...caseParseCopyLines(item),
         ].join('\n')).join('\n\n')
@@ -5867,7 +5883,10 @@ window.__ModuleLoader__.load({
           flow.description ? h('p', { className: 'b04-flow-description' }, flow.description) : null,
           flow.entry ? h('dl', { className: 'pangea-flow-facts' }, h('dt', null, '入口'), h('dd', null, flow.entry)) : null,
           linkedItems(flow),
-          flow.projection_warnings?.length ? h('div', { role: 'status', style: styles.notice }, flow.projection_warnings.join('；')) : null,
+          flow.projection_warnings?.length ? h('div', { role: 'status', style: styles.notice },
+            flow.projection_warnings.length > 1
+              ? h('ul', { style: { margin: 0, paddingLeft: 18 } }, flow.projection_warnings.map((warn, idx) => h('li', { key: idx }, warn)))
+              : flow.projection_warnings[0]) : null,
           flow.structure_errors?.length ? h('section', { 'aria-label': '流程结构问题', style: { ...styles.notice, background: '#fff8e1' } },
             h('strong', null, `结构问题 ${flow.structure_errors.length} 项（已跳过无法绘制的部分）`),
             h('ul', { style: { margin: '6px 0 0', paddingLeft: 18 } }, flow.structure_errors.map((error, index) => h('li', { key: index }, error)))) : null,
@@ -5875,18 +5894,25 @@ window.__ModuleLoader__.load({
             h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', font: '12px/1.6 Consolas,monospace', background: '#fafcf8', border: '1px solid #e2e7e0', borderRadius: 8, padding: 12 } }, flow.raw_text || '（空）')) : null,
           h('div', { className: 'pangea-flow-section-head' }, h('h3', null, '节点与流转'),
             h('span', null, '节点按记录顺序陈列，不代表执行先后；执行关系以入口、条件和去向为准。')),
-          steps.length ? h('div', { className: 'b04-flow-sequence' }, steps.map((item, index) => h('div', { key: item.step_id || index, id: `${cardId(flow)}-step-${encodeURIComponent(item.step_id)}`, className: 'b04-flow-step pangea-flow-node', 'aria-current': reader.step === item.step_id ? 'step' : undefined },
+          steps.length ? h('div', { className: 'b04-flow-sequence' }, steps.map((item, index) => {
+            const incoming = transitions.filter(edge => edge.to_step_id === item.step_id)
+            return h('div', { key: item.step_id || index, id: `${cardId(flow)}-step-${encodeURIComponent(item.step_id)}`, className: 'b04-flow-step pangea-flow-node', 'aria-current': reader.step === item.step_id ? 'step' : undefined },
             h('div', { className: 'pangea-flow-node-head' }, h('h4', null, item.title || item.step_id || `步骤 ${index + 1}`),
               h('span', { className: 'pangea-flow-node-meta' }, h('code', null, `节点 ${item.step_id}`), item.node_kind ? h('span', null, FLOW_KIND_LABELS[item.node_kind] || item.node_kind) : null),
               h('div', { className: 'b04-flow-ref pangea-flow-node-source' }, sourceButton(item, evidenceLocation(item)?.split(/[\\/]/).at(-1) || '查看源码', `业务流程 · ${flow.title || flow.display_id} · ${item.step_id}`))),
             h('dl', { className: 'pangea-flow-node-fields' },
               h('dt', null, '处理'), h('dd', null, item.processing || item.external_action || item.state_change || item.external_observation || '原记录未提供步骤说明。'),
-              h('dt', null, '入口'), h('dd', null, transitions.filter(edge => edge.to_step_id === item.step_id).map(edge => `${nodeLabel(edge.from_step_id)}${edge.condition ? `（${edge.condition}）` : ''}`).join('；') || (item.node_kind === 'entry' ? '流程入口' : '未记录入口连线')),
+              h('dt', null, '入口'), h('dd', null, incoming.length > 1
+                ? h('ul', { className: 'pangea-flow-transitions', 'aria-label': `节点 ${item.step_id} 的入口` }, incoming.map((edge, edgeIndex) => h('li', { key: edgeIndex }, `${nodeLabel(edge.from_step_id)}${edge.condition ? `（${edge.condition}）` : ''}`)))
+                : incoming.length === 1
+                  ? `${nodeLabel(incoming[0].from_step_id)}${incoming[0].condition ? `（${incoming[0].condition}）` : ''}`
+                  : (item.node_kind === 'entry' ? '流程入口' : '未记录入口连线')),
               h('dt', null, '去向'), h('dd', null, outgoing(item.step_id).length ? h('ul', { className: 'pangea-flow-transitions', 'aria-label': `节点 ${item.step_id} 的去向` }, outgoing(item.step_id).map((edge, edgeIndex) => h('li', { key: edgeIndex },
                 h('div', { className: 'pangea-flow-transition-head' }, h('span', null, `${edge.condition || (outgoing(item.step_id).length > 1 || ['decision', 'condition'].includes(item.node_kind) ? '分支条件未明确' : '后续')} → ${edge.to_step_id ? nodeLabel(edge.to_step_id) : edge.terminal_result || '去向未记录'}`),
                   edge.branch_id ? h('button', { type: 'button', className: 'b04-link', 'aria-label': `打开分支 ${edge.branch_id}`, onClick: () => openBranch(edge.branch_id) }, '查看详情') : null),
                 edge.processing ? h('p', null, edge.processing) : null)))
-                : item.node_kind === 'exit' ? '结束当前流程。' : '未记录后续连线，不推断下一步。'))))) :
+                : item.node_kind === 'exit' ? '结束当前流程。' : '未记录后续连线，不推断下一步。')))
+          })) :
             h('section', { className: 'b04-flow-sequence', 'aria-label': '主干步骤说明' },
               h('p', null, flow.paths?.length ? '原文提供业务路径，但尚无可解析节点，暂不能据此绘制流程图。' : '尚无可解析的主干步骤，分析可能仍在发布中。'),
               flow.text ? renderReadableBody(flow.text, true) : null),
@@ -6674,9 +6700,13 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'b03-report-notice-main' }, runIcon('CircleAlert'),
                   h('div', null,
                     h('strong', null, unresolvedItems.length ? `${unresolvedItems.length} 项修正未完成` : '部分交付'),
-                    h('p', null, unresolvedItems.length
-                      ? `${unresolvedItems.map(item => item.text).join('；')}；下方结果按当前已保存版本交付。`
-                      : '报告保留未解决事项与未完成修正；下方结果按当前已保存版本交付。')))) : null,
+                    unresolvedItems.length > 1
+                      ? h(React.Fragment, null,
+                          h('ul', { style: { margin: '4px 0', paddingLeft: 18 } }, unresolvedItems.map((item, idx) => h('li', { key: item.id || idx }, item.text))),
+                          h('p', { style: { margin: '4px 0 0' } }, '下方结果按当前已保存版本交付。'))
+                      : h('p', null, unresolvedItems.length
+                          ? `${unresolvedItems[0].text}；下方结果按当前已保存版本交付。`
+                          : '报告保留未解决事项与未完成修正；下方结果按当前已保存版本交付。')))) : null,
               h('div', { className: 'b03-overview-summary b03-report-stats' },
                 h('div', null, h('span', null, '业务流程'), h('strong', null, displayCount('business_flows', businessFlows.length))),
                 h('div', null, h('span', null, '风险记录'), h('strong', null, riskEnabled ? displayCount('risks', risks.length) : '不适用')),
@@ -7103,7 +7133,10 @@ window.__ModuleLoader__.load({
               return h('div', { key: run.executor_run_id, style: { ...styles.card, marginBottom: 7 } },
                 h('div', { style: styles.row }, h('div', { style: styles.itemTitle }, run.executor_run_id), h('span', { style: styles.badge }, run.result_status ?? run.phase)),
                 h('div', { style: styles.itemMeta }, `${run.selected_test_case_ids.length} 条用例 · ${environmentName}`),
-                run.unresolved?.length ? h('div', { style: { ...styles.error, marginTop: 6 } }, run.unresolved.join('；')) : null,
+                run.unresolved?.length ? h('div', { style: { ...styles.error, marginTop: 6 } },
+                  run.unresolved.length > 1
+                    ? h('ul', { style: { margin: 0, paddingLeft: 18 } }, run.unresolved.map((item, idx) => h('li', { key: idx }, item)))
+                    : run.unresolved[0]) : null,
                 h('div', { style: styles.chips }, run.artifacts?.plan ? chip('查看执行计划', () => openSidebarFile(run.artifacts.plan, 'PANGEA executable plan')) : null, run.artifacts?.result ? chip('查看执行结果', () => openSidebarFile(run.artifacts.result, 'PANGEA execution result')) : null))
             })) : h('div', { style: { ...styles.empty, marginTop: 8 } }, '当前分析还没有执行记录。')))
       }
@@ -7265,7 +7298,11 @@ window.__ModuleLoader__.load({
                   h('tbody', null, pairs.map((step, index) => h('tr', { key: index }, h('td', { className: 'b05-mono' }, String(index + 1).padStart(2, '0')),
                     h('td', null, text(step.action, '未提供操作')), h('td', null, text(step.expected, '未提供逐步预期，请核对整体预期及原文')))))))
                 : h('p', null, '原文未提供可识别的操作步骤，请核对分析原文。'),
-                item.expected_results?.length ? h('p', { className: 'b05-subtle' }, `整体预期：${item.expected_results.join('；')}`) : null),
+                item.expected_results?.length ? (item.expected_results.length > 1
+                  ? h('div', { className: 'b05-subtle', style: { marginTop: 10 } },
+                      h('div', null, '整体预期：'),
+                      h('ul', { style: { margin: '4px 0 0', paddingLeft: 18 } }, item.expected_results.map((entry, idx) => h('li', { key: idx }, entry))))
+                  : h('p', { className: 'b05-subtle' }, `整体预期：${item.expected_results[0]}`)) : null),
               (() => {
                 const inst = item.instrumentation ?? item.source_record?.body?.instrumentation
                 const points = Array.isArray(inst?.points) ? inst.points : []
@@ -7348,8 +7385,13 @@ window.__ModuleLoader__.load({
       }
 
       async function copySingleCase(item) {
+        const formatField = (label, values, empty = '未记录') => {
+          const items = (Array.isArray(values) ? values : []).map(v => sourceFirstRecordBody(v).trim()).filter(Boolean)
+          if (!items.length) return `${label}：${empty}`
+          return items.length === 1 ? `${label}：${items[0]}` : `${label}：\n${items.map(entry => `- ${entry}`).join('\n')}`
+        }
         const pairs = Array.isArray(item.step_pairs) && item.step_pairs.length ? item.step_pairs.map((step, index) => `${index + 1}. ${step.action || '未提供操作'} → ${step.expected || '未提供逐步预期'}`) : (Array.isArray(item.steps) ? item.steps : []).map((step, index) => `${index + 1}. ${step}`)
-        const content = [`${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`, `验证目标：${text(item.verification_goal, '未记录')}`, `前置条件：${(item.preconditions ?? []).join('；') || '未记录'}`, ...pairs, `整体预期：${(item.expected_results ?? []).join('；') || '未记录'}`, ...(item.observability?.some(value => sourceFirstRecordBody(value).trim()) ? [`补充观测：${item.observability.join('；')}`] : []), ...(item.summary != null ? [`补测依据：\n${sourceFirstRecordBody(item.summary)}`] : []), ...(item.source_evidence?.length ? [`源码依据：\n${sourceFirstRecordBody(item.source_evidence)}`] : []), `清理：${(item.cleanup ?? []).join('；') || '未记录'}`, ...caseVariantLines(item), ...caseParseCopyLines(item)].join('\n')
+        const content = [`${item.display_id || item.test_case_id || '待编号'} · ${text(item.title, '未命名用例')}`, `验证目标：${text(item.verification_goal, '未记录')}`, formatField('前置条件', item.preconditions), ...pairs, formatField('整体预期', item.expected_results), ...(item.observability?.some(value => sourceFirstRecordBody(value).trim()) ? [formatField('补充观测', item.observability)] : []), ...(item.summary != null ? [`补测依据：\n${sourceFirstRecordBody(item.summary)}`] : []), ...(item.source_evidence?.length ? [`源码依据：\n${sourceFirstRecordBody(item.source_evidence)}`] : []), formatField('清理', item.cleanup), ...caseVariantLines(item), ...caseParseCopyLines(item)].join('\n')
         try { await globalThis.navigator.clipboard.writeText(content); showActionNotice('已复制完整测试用例。') }
         catch (reason) { showActionNotice(`复制失败：${reason instanceof Error ? reason.message : String(reason)}`, true) }
       }

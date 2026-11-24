@@ -163,10 +163,10 @@ export function mergeReplaceFilesFromTasks(tasks = []) {
       } else {
         existing.source_files = [...new Set([...existing.source_files, ...item.source_files])]
         if (item.build_evidence && !existing.build_evidence.includes(item.build_evidence)) {
-          existing.build_evidence = existing.build_evidence ? `${existing.build_evidence}；${item.build_evidence}` : item.build_evidence
+          existing.build_evidence = existing.build_evidence ? `${existing.build_evidence}\n${item.build_evidence}` : item.build_evidence
         }
         if (item.post_replace_action && !existing.post_replace_action.includes(item.post_replace_action)) {
-          existing.post_replace_action = existing.post_replace_action ? `${existing.post_replace_action}；${item.post_replace_action}` : item.post_replace_action
+          existing.post_replace_action = existing.post_replace_action ? `${existing.post_replace_action}\n${item.post_replace_action}` : item.post_replace_action
         }
         if (taskName && !existing.task_names.includes(taskName)) existing.task_names.push(taskName)
       }
@@ -203,8 +203,18 @@ export function buildArtifactVerifyCommands(taskOrDelivery, variant = null) {
     ? `PANGEA_RELINK_ONLY=1 PANGEA_VERIFY_ARTIFACTS=${shellSingleQuote(replaceFiles.length ? replaceFiles.map(item => item.artifact).join(' ') : '<目标静态库路径>')} PANGEA_RELINK_CMD='<环境重链脚本命令>' PANGEA_VERIFY_FINAL_BINARY='<运行目录/宿主进程二进制>' bash pangea-verify.sh`
     : ''
   const variantHint = effectiveVariant === 'hitest'
-    ? '当前目标变体为「hitest 精准」：平台节点重启会从部署包镜像恢复全部运行时文件（L2，并非从精准变体物化覆盖），持久化验证必须走大包出包，并依次完成「① 验组件库 → ② 验大包内宿主二进制同源带桩 → ③ 真机部署后验 /proc/<pid>/exe」。仅在不重启节点的临时快验时才使用盒内安全重链（L4 须先确认重链脚本按硬件型号实际选中的链接清单）。'
-    : '当前目标变体为「正常 debug」：平台节点重启会从部署包镜像恢复全部运行时文件（L2，手工替换与盒内重链在节点重启后全部还原），持久化验证必须走大包出包，并依次完成「① 验组件库 → ② 验大包内宿主二进制同源带桩 → ③ 真机部署后验 /proc/<pid>/exe」。仅在不重启节点的临时快验时才使用盒内安全重链（L4 须先确认重链脚本按硬件型号实际选中的链接清单）。'
+    ? [
+        '当前目标变体为「hitest 精准」：',
+        '• 持久化走大包：平台节点重启会从部署包镜像恢复全部运行时文件（L2，并非从精准变体物化覆盖）。',
+        '• 三级标记核验：依次完成「① 验组件库 → ② 验大包内宿主二进制同源带桩 → ③ 真机部署后验 /proc/<pid>/exe」。',
+        '• 临时盒内重链（可选）：仅在不重启节点的快验时使用，需先确认重链脚本按硬件型号实际选中的链接清单（L4）。',
+      ].join('\n')
+    : [
+        '当前目标变体为「正常 debug」：',
+        '• 持久化走大包：平台节点重启会从部署包镜像恢复全部运行时文件（L2，手工替换与盒内重链重启后还原）。',
+        '• 三级标记核验：依次完成「① 验组件库 → ② 验大包内宿主二进制同源带桩 → ③ 真机部署后验 /proc/<pid>/exe」。',
+        '• 临时盒内重链（可选）：仅在不重启节点的快验时使用，需先确认重链脚本按硬件型号实际选中的链接清单（L4）。',
+      ].join('\n')
   return {
     variant: effectiveVariant,
     variant_label: BUILD_VARIANT_LABELS[effectiveVariant],
