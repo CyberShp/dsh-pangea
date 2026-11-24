@@ -482,6 +482,10 @@ const TEST_DIR_NAME = /^(?:tests?|ut|llt|unittests?|unit_tests?)$/i
 const TEST_FILE_NAME = /(?:^|_|-)(?:test|tests|ut|llt)\.(?:c|cc|cpp|cxx)$|test.*\.(?:cc|cpp|cxx)$/i
 const MACRO_LINE = /^\s*#\s*(?:if|ifdef|ifndef|elif|define)\b.*\b\w*(?:SIMU|FAULT|INJECT|MOCK|STUB|ASAN|SANITIZE|TIMEOUT)\w*/i
 const FAULT_DEF_TOKEN = /(?:(?:^|[\s"'(])-D|(?<![-\w]))([A-Za-z_][A-Za-z0-9_]*(?:SIMU|FAULT|INJECT|MOCK|STUB)[A-Za-z0-9_]*)\b/g
+const DIAG_DIR_NAME = /^(?:diag(?:nose|nostics?)?|dbg|debug|cli|cmds?|dfx|maint|pgd)$/i
+const DIAG_FILE_NAME = /(?:^|[_-])(?:diag(?:nose)?|dbg|debug|cli|cmd|dfx|pgd)(?:[_.-]|\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)$)/i
+const DIAG_HOOK_LINE = /^\s*(?!\/\/|\/\*|\*|#\s*include\b).*\b(?:\w*(?:diagnose|diag_cmd|dbg_cmd|debug_cmd|pgd_cmd)\w*\s*(?:\(|\[|=)|(?:DIAG|DBG|CLI|PGD)_[A-Z0-9_]*(?:CMD|REG)[A-Z0-9_]*\s*\(|\w*(?:reg|register)_[A-Za-z0-9_]*(?:diag|dbg|cmd|cli|pgd)\w*\s*\()/i
+const INLINE_REPO_LOC = /(?<![A-Za-z0-9_./-])(?:[A-Za-z0-9_.-]+:)?[A-Za-z0-9_./-]+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx)(?::\d+(?:-\d+)?)?/g
 
 function parseRepoLocationSpec(raw, repoId) {
   if (typeof raw !== 'string') return null
@@ -538,7 +542,14 @@ export function collectTargetEvidenceSpecs(repoId, cases = [], analysisContext =
     for (const ev of Array.isArray(item?.evidence) ? item.evidence : []) add(ev?.location)
     const points = item?.instrumentation?.points ?? body?.instrumentation?.points ?? []
     for (const pt of Array.isArray(points) ? points : []) {
-      if (!pt?.repo_id || pt.repo_id === repoId) { add(pt?.path); addSym(pt?.symbol) }
+      if (!pt?.repo_id || pt.repo_id === repoId) {
+        add(pt?.path)
+        addSym(pt?.symbol)
+        for (const hint of [pt?.enable, pt?.trigger, pt?.disable]) {
+          if (typeof hint !== 'string') continue
+          for (const m of hint.matchAll(INLINE_REPO_LOC)) add(m[0])
+        }
+      }
     }
   }
   for (const risk of analysisContext?.risks ?? []) {
@@ -591,20 +602,29 @@ async function readBoundedText(root, relPath, maxBytes = 262144) {
 
 export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPaths = [], rangesByPath = new Map(), hintSymbols = []) {
   const root = await realpath(repositoryRoot)
-  const moduleFiles = [], conditionalMacros = [], cmakeRules = [], testDirectories = [], targetSnippets = [], existingSymbolTests = []
+  const moduleFiles = [], conditionalMacros = [], diagnoseHooks = [], diagnoseSnippets = [], cmakeRules = [], testDirectories = [], targetSnippets = [], existingSymbolTests = []
   let sampleTestSnippet = null
   const targetSymbols = new Set((Array.isArray(hintSymbols) ? hintSymbols : []).map(extractCleanSymbol).filter(Boolean))
-  const seenMacroLocs = new Set(), candidateDirs = new Set(['.']), moduleDirs = new Set()
+  const seenMacroLocs = new Set(), seenDiagLocs = new Set(), candidateDirs = new Set(['.']), moduleDirs = new Set(), diagParentDirs = new Set()
   for (const rel of targetPaths.slice(0, 8)) {
     let dir = path.posix.dirname(rel)
     if (dir && dir !== '.') moduleDirs.add(dir)
+    let hops = 0
     while (dir && dir !== '.') {
       candidateDirs.add(dir)
+      if (hops < 3) diagParentDirs.add(dir)
+      hops += 1
       const parent = path.posix.dirname(dir)
       dir = parent === dir ? '.' : parent
     }
+    if (hops <= 2) diagParentDirs.add('.')
   }
-  const moduleSourceTexts = []
+  const moduleSourceTexts = [], diagExtraTexts = [], loadedRels = new Set()
+  const pushText = (list, rel, text) => {
+    if (!text || loadedRels.has(rel)) return
+    loadedRels.add(rel)
+    list.push({ rel, text })
+  }
   for (const dir of [...moduleDirs].slice(0, 4)) {
     const fullDir = path.resolve(root, dir)
     if (!inside(root, fullDir)) continue
@@ -620,27 +640,53 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
         if (inside(root, incFull)) {
           const incEntries = await readdir(incFull, { withFileTypes: true })
           for (const entry of incEntries.filter(e => e.isFile() && SOURCE_EXT.test(e.name)).slice(0, 10)) {
-            const text = await readBoundedText(root, `${incRel}/${entry.name}`)
-            if (text) moduleSourceTexts.push({ rel: `${incRel}/${entry.name}`, text })
+            const rel = `${incRel}/${entry.name}`
+            pushText(moduleSourceTexts, rel, await readBoundedText(root, rel))
           }
         }
       } catch {}
     }
     for (const name of files.slice(0, 16)) {
       const rel = `${dir}/${name}`
-      const text = await readBoundedText(root, rel)
-      if (text) moduleSourceTexts.push({ rel, text })
+      pushText(moduleSourceTexts, rel, await readBoundedText(root, rel))
     }
   }
   for (const rel of targetPaths.slice(0, 8)) {
-    if (!moduleSourceTexts.some(item => item.rel === rel)) {
+    if (!loadedRels.has(rel)) {
       const text = await readBoundedText(root, rel)
-      if (text) moduleSourceTexts.unshift({ rel, text })
+      if (text) { loadedRels.add(rel); moduleSourceTexts.unshift({ rel, text }) }
+    }
+  }
+  // Probe module-ancestor and sibling diag/dbg/cli/dfx/pgd directories so diagnose command shells
+  // living outside target `src/` (e.g. `mod/dbg/`, `mod/diagnose/`, `mod/cli/`) are fed directly.
+  const seenDiagSubdirs = new Set()
+  for (const pDir of [...diagParentDirs].slice(0, 6)) {
+    const fullPDir = pDir === '.' ? root : path.resolve(root, pDir)
+    if (pDir !== '.' && !inside(root, fullPDir)) continue
+    let entries = []
+    try { entries = await readdir(fullPDir, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries.filter(e => e.isFile() && SOURCE_EXT.test(e.name) && DIAG_FILE_NAME.test(e.name)).slice(0, 8)) {
+      const rel = pDir === '.' ? entry.name : `${pDir}/${entry.name}`
+      pushText(diagExtraTexts, rel, await readBoundedText(root, rel))
+    }
+    for (const sub of entries.filter(e => e.isDirectory() && !e.name.startsWith('.') && DIAG_DIR_NAME.test(e.name))) {
+      if (seenDiagSubdirs.size >= 6) break
+      const subRel = pDir === '.' ? sub.name : `${pDir}/${sub.name}`
+      if (seenDiagSubdirs.has(subRel)) continue
+      seenDiagSubdirs.add(subRel)
+      const fullSub = path.resolve(root, subRel)
+      if (!inside(root, fullSub)) continue
+      let subEntries = []
+      try { subEntries = await readdir(fullSub, { withFileTypes: true }) } catch { continue }
+      for (const f of subEntries.filter(e => e.isFile() && SOURCE_EXT.test(e.name)).map(e => e.name).sort().slice(0, 10)) {
+        const rel = `${subRel}/${f}`
+        pushText(diagExtraTexts, rel, await readBoundedText(root, rel))
+      }
     }
   }
   let snippetLinesBudget = 140
   for (const rel of targetPaths.slice(0, 4)) {
-    const found = moduleSourceTexts.find(item => item.rel === rel)
+    const found = moduleSourceTexts.find(item => item.rel === rel) || diagExtraTexts.find(item => item.rel === rel)
     if (!found?.text) continue
     const lines = found.text.split(/\r?\n/)
     const rawRanges = rangesByPath instanceof Map ? rangesByPath.get(rel) : null
@@ -666,11 +712,22 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
       snippetLinesBudget -= (end - start + 1)
     }
   }
+  const diagLinesByRel = new Map()
   for (const { rel, text } of moduleSourceTexts) {
     const lines = text.split(/\r?\n/)
     let blockRemaining = 0
-    for (let index = 0; index < lines.length && conditionalMacros.length < 32; index++) {
+    for (let index = 0; index < lines.length; index++) {
       const line = lines[index]
+      if (diagnoseHooks.length < 16 && DIAG_HOOK_LINE.test(line)) {
+        const dLoc = `${rel}:${index + 1}`
+        if (!seenDiagLocs.has(dLoc)) {
+          seenDiagLocs.add(dLoc)
+          diagnoseHooks.push({ location: dLoc, code: line.trim().slice(0, 180) })
+          if (!diagLinesByRel.has(rel)) diagLinesByRel.set(rel, { lines, hits: [] })
+          diagLinesByRel.get(rel).hits.push([index + 1, index + 1])
+        }
+      }
+      if (conditionalMacros.length >= 32) continue
       const matched = MACRO_LINE.test(line)
       const isDirective = /^\s*#\s*(?:define|else|elif|endif)\b/.test(line)
       if (!matched && !(blockRemaining > 0 && isDirective)) {
@@ -684,6 +741,34 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
       if (seenMacroLocs.has(loc)) continue
       seenMacroLocs.add(loc)
       conditionalMacros.push({ location: loc, code: line.trim().slice(0, 180) })
+    }
+  }
+  for (const { rel, text } of diagExtraTexts) {
+    if (diagnoseHooks.length >= 16) break
+    const lines = text.split(/\r?\n/)
+    for (let index = 0; index < lines.length && diagnoseHooks.length < 16; index++) {
+      const line = lines[index]
+      if (!DIAG_HOOK_LINE.test(line)) continue
+      const dLoc = `${rel}:${index + 1}`
+      if (seenDiagLocs.has(dLoc)) continue
+      seenDiagLocs.add(dLoc)
+      diagnoseHooks.push({ location: dLoc, code: line.trim().slice(0, 180) })
+      if (!diagLinesByRel.has(rel)) diagLinesByRel.set(rel, { lines, hits: [] })
+      diagLinesByRel.get(rel).hits.push([index + 1, index + 1])
+    }
+  }
+  // Slice ~20-line windows around matched diagnose/pgd registrations so the model sees callback
+  // signatures, command table structs, and registration macros without extra read tool calls.
+  let diagBudget = 66
+  for (const [rel, { lines, hits }] of diagLinesByRel) {
+    if (diagBudget <= 0 || diagnoseSnippets.length >= 3) break
+    const windows = mergeLineWindows(hits, lines.length, 14, 8)
+    for (const [start, rawEnd] of windows) {
+      if (diagBudget <= 0 || diagnoseSnippets.length >= 3) break
+      const end = Math.min(rawEnd, start + diagBudget - 1, start + 25)
+      const numbered = lines.slice(start - 1, end).map((line, idx) => `${start + idx}: ${line.slice(0, 220)}`).join('\n')
+      diagnoseSnippets.push({ path: rel, start_line: start, end_line: end, total_lines: lines.length, content: numbered })
+      diagBudget -= (end - start + 1)
     }
   }
   // Discover nearby build rules and test subtrees along the ancestor chain without full-repo traversal.
@@ -856,12 +941,14 @@ export async function inspectRepositoryHarness(repositoryRoot, repoId, targetPat
       conditional_or_test: conditionalFaultSet.has(name),
     }
   })
-  if (!moduleFiles.length && !conditionalMacros.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length && !targetSnippets.length && !existingSymbolTests.length && !buildTargets.length) return null
+  if (!moduleFiles.length && !conditionalMacros.length && !diagnoseHooks.length && !diagnoseSnippets.length && !cmakeRules.length && !testDirectories.length && !faultMacros.length && !targetSnippets.length && !existingSymbolTests.length && !buildTargets.length) return null
   return {
     ...(targetPaths.length ? { target_files: targetPaths.slice(0, 8) } : {}),
     ...(targetSnippets.length ? { target_snippets: targetSnippets } : {}),
     ...(moduleFiles.length ? { module_files: moduleFiles } : {}),
     ...(conditionalMacros.length ? { conditional_macros: conditionalMacros } : {}),
+    ...(diagnoseHooks.length ? { diagnose_hooks: diagnoseHooks } : {}),
+    ...(diagnoseSnippets.length ? { diagnose_snippets: diagnoseSnippets } : {}),
     ...(buildTargets.length ? { build_targets: buildTargets } : {}),
     ...(testDirectories.length ? { test_directories: testDirectories } : {}),
     ...(sampleTestSnippet ? { sample_test_snippet: sampleTestSnippet } : {}),
@@ -906,7 +993,7 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
   const buildVariant = normalizeBuildVariant(record?.build_variant)
   const modeGuidance = deliveryMode === 'unit_test'
     ? '当前交付形态为 unit_test（仓内单元测试 / GTest）：若 repositories[].harness 给出了 C/C++ 单元测试环境（test_directories 含 gtest/native 或 cmake_rules/fault_macros）：① 若 fault_macros 显示某测试编译宏（如 -D*_SIMU_FAULT）的 module_usage_count=0，说明当前模块无现成注入消费点，直接在目标函数对应的 #ifdef <测试宏> 保护下植入默认关闭的最小控制桩，不要全仓搜寻既有框架；② 按 Option A 在 test_directories 配套新增（before=null）或补充 gtest 用例文件，在同一测试目标内依次覆盖“桩默认关闭正常路径 → 启用桩命中目标超时/错误分支 → 复位后恢复正常”，同进程测试优先通过受控开关函数/原子计数或环境变量触发，阻塞等待必须有界且时长直接复用源码超时宏或兼容 harness.conditional_macros 中的 ASAN/非 ASAN 阈值（严禁写死小于 ASAN 超时阈值的短常数）；③ 若对应 cmake_rules 为 file_glob，无需修改构建文件，若 configure_depends=false 则在 steps 中先执行 cmake 重新生成以纳入新测试文件，运行 gtest 时指定 --gtest_filter 并校验实际执行用例数 >= 1（防止匹配 0 条用例时仍返回 0）。'
-    : `当前交付形态为 product_package（个人分支出产品大包 → 提取产物单独替换到目标环境，目标部署变体：${buildVariant === 'hitest' ? 'hitest 精准' : '正常 debug'}）：① 严禁把业务桩代码包在产品构建默认未定义的条件/测试编译宏（如 harness.fault_macros 中 conditional_or_test=true 的宏、*_SIMU_FAULT、LLT/UT 专属开关）内，避免产品配置出包时桩被编译期整体剔除；桩代码必须无条件参与目标组件常规编译（保证同一份源码在正常 debug 与 hitest 精准构建下均可编入产物），并在运行期通过环境变量或已有调测开关默认关闭（零副作用）；② 不要无故修改单元测试目录（test/ut/llt）或单测 CMakeLists.txt（除非所选用例本身明确是仓内单测或用户补充说明显式要求）；若业务组件 CMakeLists.txt 将正常 debug 与 hitest 拆分为多个 target 且本次新增源文件/构建定义，须同步接入两侧 target；③ 结合 repositories[].harness.build_targets 与构建脚本，在 delivery.replace_files 中逐项列明“应从大包提取并单独替换的文件名（如 libxxx.a / libxxx.so / xxx.ko / 脚本路径）”及其对应的修改源码与替换后动作（如是否需要重链宿主进程）；若仓内仅见 OBJECT target 且最终外层打包归属在仓外，如实写明已证实的 target 名称并标注需核对外层打包归属，严禁编造库名。`
+    : `当前交付形态为 product_package（个人分支出产品大包同源构建并部署验证，目标部署变体：${buildVariant === 'hitest' ? 'hitest 精准' : '正常 debug'}）：① 严禁把业务桩代码包在产品构建默认未定义的条件/测试编译宏（如 harness.fault_macros 中 conditional_or_test=true 的宏、*_SIMU_FAULT、LLT/UT 专属开关）内，避免产品配置出包时桩被编译期整体剔除；桩代码必须无条件参与目标组件常规编译（保证同一份源码在正常 debug 与 hitest 精准构建下均可编入组件库与宿主二进制），且运行期必须默认关闭（零副作用），严禁写死参数导致每次进程启动必然触发故障；② 按触发时机选择门控形态（平台实测约束 L1：平台 init 守护拉起 C/C++ 宿主进程时不传递环境变量，除非用户明确说明目标进程可注入环境，否则严禁以 getenv() 作为唯一触发通道）：若桩点位于【稳态运行期路径】（连接/IO/管理命令/周期任务），优先直接复用 repositories[].harness.diagnose_snippets / diagnose_hooks 中预提取的模块诊断命令回调函数签名与注册宏壳子（如 diagnose/pgd），在进程内参数化控制开关、步骤号、时长与剩余次数（命中原子递减至 0 自动恢复，无需重启进程）；若桩点位于【进程启动/模块初始化路径】（不重启走不到初始化，重启进程又会使纯内存开关归零），采用“一次性自毁控制文件（如 /dev/shm/<唯一桩标记> 或 /tmp/<唯一桩标记>，桩读到参数后立即 unlink/remove 删除文件再注入故障）”门控（模块有 diagnose/pgd 注册入口时可同时提供子命令写入/清理该文件，也可由测试命令直接写入），实现“默认无文件正常初始化 → 写文件后单次重拉宿主进程命中故障并自毁文件 → 再次重拉自动恢复正常”；③ 遵守平台持久化与守护拉起约束（L2）：平台节点重启会从部署包镜像恢复运行时文件（手工替换/盒上重链在节点重启后还原，持久化走大包）；宿主进程必须由平台守护拉起（脱离守护手工直接执行宿主二进制会因缺少运行时库路径即刻失败，严禁在 steps/cleanup 中直接运行宿主二进制）；初始化路径需要重拉宿主进程时，先落盘单次自毁控制文件，再通过平台服务重启命令或单次终止当前宿主进程由平台守护自动重拉（约秒级拉起新进程，核验新 PID 与命中日志，禁止无界循环强杀）；④ 不要无故修改单元测试目录（test/ut/llt）或单测 CMakeLists.txt；若业务组件 CMakeLists.txt 将正常 debug 与 hitest 拆分为多个 target 且新增源文件/定义，须同步接入两侧 target；结合 repositories[].harness.build_targets，在 delivery.replace_files 中逐项列明修改源码归属的组件库/模块产物名（用于构建后核验组件库与大包宿主二进制同源带桩，以及可选临时单文件快验），严禁编造库名。`
   return [
     '你正在执行独立的 PANGEA 用例打桩代码生成任务。不要创建分析 Run，也不要调用 Graph bind/settle/work-finish。',
     inlined
@@ -914,7 +1001,7 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
       : `先读取任务输入 JSON：${posixInput}。其中 cases 是已选用例，analysis_context 是关联风险/覆盖率缺口/流程证据，repositories 含本次独立源码副本、固定提交及宿主预扫描的 harness 事实。输入中 {"$same_as": "<路径>"} 表示该处内容与所指路径（$ 为输入根）的值完全相同，已去重以缩短输入。`,
     '宿主已确认的事实，无需再用工具探测：源码副本是宿主刚检出的干净固定提交（不必运行 git status/log 确认）；宿主写入 edits 时按每个文件现有的 CRLF/LF 风格换行，before/after 用 \\n 即可，不必检查换行符；Git、构建与推送均由宿主完成。',
     ...(posixRef ? [`参考结果：${posixRef} 是本任务上一次生成的完整结果 JSON。优先复用其中仍然成立的桩点设计、profiles 与 edits，只针对当前源码重新定位 before 原文并修正失效或被指出的问题；不要从零重新调查。与当前源码冲突时以源码为准。${referenceError ? `上一次未完成的原因：${referenceError}` : ''}`] : []),
-    '探索步数预算严格受限（<= 10 次只读工具调用）：repositories[].harness.target_snippets 已预附带目标源码区间的带行号原文，build_targets 已预附带组件构建目标线索，sample_test_snippet 与 existing_symbol_tests 已预附带同目录测试头部样板及目标函数既有测试调用定位；若预切片上下文已足够唯一定位 edits[].before 与构建归属，无需重复 read 同一文件，仅按需补读缺失头文件或调用点后旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
+    '探索步数预算严格受限（<= 10 次只读工具调用）：repositories[].harness.target_snippets 已预附带目标源码区间的带行号原文，diagnose_snippets 与 diagnose_hooks 已自动扫描同模块及邻近 diag/dbg/cli/dfx/pgd 目录并附带完整回调函数签名与注册宏样板，build_targets 已预附带组件构建目标线索，sample_test_snippet 与 existing_symbol_tests 已预附带同目录测试头部样板及目标函数既有测试调用定位；若预切片上下文已足够唯一定位 edits[].before 与构建归属，无需重复 read 同一文件，仅按需补读缺失头文件或调用点后旋即构造并落盘输出 JSON；禁止用 bash 执行 ls/find 遍历目录，禁止研究全仓构建脚本。',
     modeGuidance,
     '只在这些仓库内调查需要的实现与既有调测入口。核对所选用例引用的 analysis_source 冻结片段与本次源码副本，分析基线与本次基线不同则重新定位；只比较相关位置，差异对注入方案的影响写入 summary，不重做全仓分析。',
     '不要修改或推送源码仓库，不运行构建或安装命令。唯一交付是下述 JSON 文件；宿主负责精确写入、提交和推送。',
@@ -923,8 +1010,8 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
     '若目标源码为 Python（.py）或 Shell（.sh/.bash）脚本：运行期优先通过环境变量（如 os.environ.get("PANGEA_FI") 或 ${PANGEA_FI:-}）控制故障触发并默认关闭，delivery.artifact_verify 可使用 python3 -m py_compile <脚本> / bash -n <脚本> 或 grep -Fq "<marker>" <脚本> 校验。',
     '本任务不搭建模拟 HTTP/数据库/容器栈，不启动后台服务，不执行 profiles 中的部署或业务操作。自检限定为 JSON 合同、原文替换唯一性及源码语法；真实构建与端到端实测由宿主后续执行，不能把模拟结果写成实测结论。',
     '先完成调用路径与副作用判断，再生成实际可编译的修改。故障注入制造原因，保留原有错误处理和恢复逻辑，不直接篡改预期结果。',
-    '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中，次数配置为零或负数时明确禁用。注意 getenv() 返回只读环境变量不会自行递减：凡在 points[].times 或自述中声明有限触发次数（如 times=1 / “命中后消耗一次”），必须在代码中使用静态/原子剩余计数器懒初始化并在命中时原子递减（fetch_sub / --）；若实现为常驻开关依赖外部 unset 恢复，则 times 与自述须如实写明持续生效，严禁自述“消耗一次”而实现只读不减。优先复用真实已有调测入口；没有时实现符合项目语言与构建方式的最小控制入口，并把必要源文件/构建接入一起纳入 edits。',
-    '逐用例说明按真实执行顺序组织：关闭全部桩验证正常基线 → 启用目标桩执行并检查实际命中及故障后状态 → 关闭桩或耗尽次数后验证恢复（若开关仅启动时读取则写明重启顺序与需重建状态；分轮/组合桩写明触发顺序，基线准备不得提前消耗一次性桩）。同一分支上已有兼容桩点须复用；不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
+    '同包多个桩默认关闭，具有独立启停方式。限定目标对象/调用阶段/次数，记录实际命中，次数配置为零或负数时明确禁用。凡在 points[].times 或自述中声明有限触发次数（如 times=1 / “命中后消耗一次”），内存态开关必须在命中时原子递减（fetch_sub / --），文件门控必须在命中时立即 unlink/remove 消费或改写剩余次数（注意 getenv() 返回只读环境变量不会自行递减）；若实现为常驻开关依赖外部手动关闭，则 times 与自述须如实写明持续生效，严禁自述“消耗一次”而实现只读不减。优先复用真实已有 diagnose/调测入口；没有时实现符合项目语言与平台约束的最小受控入口，并把必要源文件/构建接入一起纳入 edits。',
+    '逐用例说明按真实执行顺序组织：关闭全部桩验证正常基线 → 启用目标桩执行并检查实际命中及故障后状态 → 关闭桩或耗尽次数后验证恢复（若开关仅启动时读取则写明写入单次自毁控制文件与单次重拉顺序；分轮/组合桩写明触发顺序，基线准备不得提前消耗一次性桩）。同一分支上已有兼容桩点须复用；不能落地的部分写入 limitations，不能编造命令或宣称已编译/实测。',
     '逐步核对观测断言：不得断言目录只剩业务文件；时间戳考虑实际精度并结合内容/计数验证恢复；区分命令退出码与业务返回值。',
     '安全合同 v2（包括参考旧结果和复用结果）：每个 points 元素增加 trigger_scope:{current_input:string,excluded_inputs:[string]}，明确真实调用链上当前请求/当前操作的来源与匹配表达式。禁止用完整 SQL 参数、序列化历史、日志或持久化上下文的全文匹配代替当前输入；历史里含标记而当前输入不含时不得命中、不得消耗次数。不能可靠隔离当前输入时停止该方案，不能扩大命中范围。',
     '每个 profile 增加 safety:{setup:[string],negative_steps:[string],negative_point_ids:[id],cleanup:[string],cleanup_verify:[string]}。这些数组均须非空、可执行，negative_point_ids 覆盖本 profile 全部桩点。setup 先保存原控制状态（包括文件原本不存在及原始字节）和本轮独占资源标识；negative_steps 在全新未消耗的次数预算下验证非目标历史/上下文不触发、计数不变，然后 steps 验证目标确实命中、重试和撤桩恢复。不要通过先耗尽次数制造负向通过。',
@@ -934,7 +1021,7 @@ export function injectionPrompt({ record, inputPath, outputPath, compactInput = 
     '恢复备份必须验证完整性：用明确存在标记、严格类型与严格解码（Python base64.b64decode(..., validate=True)），必要时核对原字节哈希。备份缺失或解码损坏不能跳过检查后打印成功，也不能把非法编码宽松解码成空字节并覆盖现状；无法证明原状态时清理与独立核验均须非零。每项资源恢复使用独立异常边界，读取/解码/写入控制备份失败仍须继续撤销本轮认证资源与清理业务数据，最后汇总失败。',
     '空文件（零字节/空 base64 字符串）是合法的原始快照，必须与字段不存在、备份损坏分开判定，不能用字符串 truthiness 判断备份是否存在。覆盖正常存在、原本不存在、原本为空三种恢复基线。登录等资源分配调用前持久化本轮唯一所有权标识；获得凭据后立即落盘，先于任何后续身份探测或断言。后续探测失败或调用结果未知时，也要能按本轮唯一标识回收并核验；不能把“尚未登记 token”当作“未创建会话”而报告成功。',
     '核对运行时库的真实数据形状：数据库驱动默认 tuple 行不能直接 dict(row)，需显式字典行工厂或按列名转换；不能仅凭语法检查推断运行成功。控制开关与次数必须严格校验类型，字符串 false 等非布尔值不能因 truthy 被当作启用；异常或不完整控制数据默认禁用。',
-    '交付契约 v3：顶层必须包含 delivery:{mode:"product_package"|"unit_test", build_requirement:string, replace_files:[{artifact:string, kind:"static_lib"|"shared_lib"|"kernel_module"|"executable"|"script"|"other", source_files:[string], build_evidence:string, post_replace_action:string}], marker_strings:[string], artifact_verify:[string]}。其中 marker_strings 为编入目标产物的唯一字面量（如控制环境变量名或命中日志标识），必须逐字出现在 edits[].after 中；replace_files 必须覆盖本次修改的全部业务源码文件。',
+    '交付契约 v3：顶层必须包含 delivery:{mode:"product_package"|"unit_test", build_requirement:string, replace_files:[{artifact:string, kind:"static_lib"|"shared_lib"|"kernel_module"|"executable"|"script"|"other", source_files:[string], build_evidence:string, post_replace_action:string}], marker_strings:[string], artifact_verify:[string]}。其中 marker_strings 为编入目标产物的唯一字面量（如命中日志标识、diagnose 子命令名或控制文件名），必须逐字出现在 edits[].after 中；replace_files 必须覆盖本次修改的全部业务源码文件。',
     'JSON 结构：{summary:string, delivery:{mode,build_requirement,replace_files:[{artifact,kind,source_files:[string],build_evidence,post_replace_action}],marker_strings:[string],artifact_verify:[string]}, points:[{id,case_keys:[string],repo_id,path,symbol,action,trigger,trigger_scope:{current_input:string,excluded_inputs:[string]},times,enable,disable,observe,cleanup,depends_on:[id],exclusive_with:[id]}], profiles:[{case_key,point_ids:[id],safety:{setup:[string],negative_steps:[string],negative_point_ids:[id],cleanup:[string],cleanup_verify:[string]},steps:[string]}], edits:[{repo_id,path,before:string|null,after:string}], limitations:[string]}。',
     'case_key 必须逐字使用输入的 case_key。points/profiles 是业务说明；edits 才是实际修改。before 为当前文件中唯一出现的原文，after 为替换内容；新增文件 before=null。path 为仓库相对路径。不要包含 .git 文件，不删除文件。',
     'profiles 必须与输入 case_keys 一一对应：总数相同、case_key 集合相同且每个 case_key 只出现一次；同一用例的多轮场景合并在同一个 profile.steps 中，steps 数组每个元素都必须是非空的可执行命令或 # 注释行（禁止放入空字符串 "" 或纯空白元素，分节请用 # 注释），给出能直接执行的启用、关闭及命中检查方法，变量先定义后使用，不用伪命令或“同上”。',
@@ -991,7 +1078,7 @@ const sourceFileCovered = (edit, replaceFiles, allowBasename = false) => {
   return false
 }
 
-export function collectConsistencyNotices(value) {
+export function collectConsistencyNotices(value, record = null) {
   const notices = []
   if (!value || typeof value !== 'object') return notices
   const points = Array.isArray(value.points) ? value.points : []
@@ -1005,9 +1092,28 @@ export function collectConsistencyNotices(value) {
   })
   if (declaresFiniteTimes && edits.length) {
     const afterBlob = edits.map(e => typeof e?.after === 'string' ? e.after : '').join('\n')
-    const hasDecrementOrStateWrite = /(?:--|\-=|fetch_sub|__sync_sub_and_fetch|__atomic_sub_fetch|atomic_dec|atomic_sub|compare_exchange|setenv|unsetenv|-\s*1\b|hits\s*>=|count\s*>=|remaining\s*<=)/i.test(afterBlob)
+    const hasDecrementOrStateWrite = /(?:--|\-=|fetch_sub|__sync_sub_and_fetch|__atomic_sub_fetch|atomic_dec|atomic_sub|compare_exchange|setenv|unsetenv|unlink\s*\(|remove\s*\(|-\s*1\b|hits\s*>=|count\s*>=|remaining\s*<=)/i.test(afterBlob)
     if (!hasDecrementOrStateWrite) {
-      notices.push('一致性提醒：桩点声明了有限触发次数（如单次/消耗一次），但补丁源码中未检测到明显的计数递减或状态更新语句，请核对差异确认未出现“只读 getenv 不递减”的无限触发。')
+      notices.push('一致性提醒：桩点声明了有限触发次数（如单次/消耗一次），但补丁源码中未检测到明显的计数递减、状态更新或控制文件 unlink 删除语句，请核对差异确认未出现“只读 getenv 不递减”的无限触发。')
+    }
+  }
+  const deliveryMode = normalizeDeliveryMode(record?.delivery_mode ?? value?.delivery?.mode)
+  if (deliveryMode === 'product_package') {
+    const cBusinessEdits = edits.filter(e => isBusinessSourceEdit(e?.path) && SOURCE_EXT.test(e?.path || ''))
+    if (cBusinessEdits.length) {
+      const cAfterBlob = cBusinessEdits.map(e => typeof e?.after === 'string' ? e.after : '').join('\n')
+      const newlyAddedGetenv = cBusinessEdits.some(e => /\bgetenv\s*\(/.test(e?.after || '') && !/\bgetenv\s*\(/.test(e?.before || ''))
+      const hasDiagOrFileGate = /\b(?:diagnose\w*|diag_\w*|dbg_cmd\w*|debug_cmd\w*|pgd_cmd\w*|reg_cmd\w*|cli_\w*|fopen|open|access|stat|lstat|unlink|remove)\s*\(/i.test(cAfterBlob)
+        || /(?:DIAG|DBG|CLI|PGD)_[A-Z0-9_]*(?:CMD|REG)/i.test(cAfterBlob)
+      if (newlyAddedGetenv && !hasDiagOrFileGate) {
+        notices.push('平台限制提醒（L1）：当前产品包 C/C++ 补丁仅新增了 getenv() 环境变量门控；若目标宿主进程由平台 init 守护拉起（无法传递环境变量），桩将无法触发。建议稳态运行期路径改用模块 diagnose/pgd 命令触发，初始化路径改用“读到即 unlink 删除”的单次控制文件门控。')
+      }
+      const declaresHardcoded = points.some(p => /(?:写死|常量化|无条件触发|每次(?:进程)?启动必|拆除环境变量)/.test(`${p?.trigger ?? ''} ${p?.enable ?? ''}`))
+      const lacksConditionalBranch = !/\b(?:if|switch)\s*\(|\?/.test(cAfterBlob)
+        && points.some(p => /^(?:无|写死|常量化|编译写死|启动即触发|none|n\/a)$/i.test(String(p?.enable ?? '').trim()))
+      if (declaresHardcoded || lacksConditionalBranch) {
+        notices.push('平台限制提醒（L2）：检测到触发参数写死或缺少运行期门控；大包部署后每次宿主进程启动均会触发故障（模块持续停留失败态，无法同包验证恢复），恢复需重出干净基线包，不适合常态化驻留。')
+      }
     }
   }
   return notices
@@ -1821,7 +1927,7 @@ export class FaultInjectionService {
     record.result_sha256 = savedFile ? hash(await readFile(savedFile)) : null
     await this.save(directory, record)
     checkInjectionResult(generated, record)
-    for (const notice of collectConsistencyNotices(generated)) {
+    for (const notice of collectConsistencyNotices(generated, record)) {
       if (!record.notices.includes(notice)) record.notices.push(notice)
     }
     record.result = { ...generated }; delete record.result.edits

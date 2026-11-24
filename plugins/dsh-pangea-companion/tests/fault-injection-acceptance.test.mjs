@@ -3,10 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, lstat, chmod } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { Readable } from 'node:stream'
-import { FaultInjectionService, injectionGit, workspaceChanges, dedupeRepeatedValues, compactGenerationInput, checkInjectionResult, checkCmakeSyntax } from '../src/fault-injection.js'
+import { FaultInjectionService, injectionGit, workspaceChanges, dedupeRepeatedValues, compactGenerationInput, checkInjectionResult, checkCmakeSyntax, collectConsistencyNotices } from '../src/fault-injection.js'
 import { createInjectionGenerator } from '../src/fault-injection-agent.js'
 import {
   DEFAULT_INTRANET_COMMIT_REGEX, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE,
@@ -1510,6 +1510,270 @@ test('F3 + F4 real gcc/ld reproduction: PANGEA safe-relink defeats DSO missing f
     err => err.code === 2 && /\[PANGEA_SAFE_RELINK\] FAILED: relink_rc=0 linker_errors=\[.*gcc:1/.test(err.stderr),
   )
 })
+
+test('L1/L2 platform acceptance: scans sibling mod/dbg for 20-line diagnose_snippets, resolves inline points[].enable paths, compiles one-shot unlink init stub under stripped daemon env, and verifies 3-stage markers including live /proc/<pid>/exe', async t => {
+  const f = await fixture(t)
+  await mkdir(path.join(f.source, 'mod/src'), { recursive: true })
+  await mkdir(path.join(f.source, 'mod/dbg'), { recursive: true })
+  await mkdir(path.join(f.source, 'common'), { recursive: true })
+  await writeFile(path.join(f.source, 'CMakeLists.txt'), 'add_library(dtoe_init STATIC mod/src/mod_init.c mod/dbg/mod_dbg.c)\n')
+  const origModInit = [
+    '#include <stdio.h>',
+    'int mod_run_init(void) {',
+    '  int step1_cost = 12;',
+    '  int step2_done = 1;',
+    '  if (!step2_done) {',
+    '    printf("init_query_timeout\\n");',
+    '    printf("stage1 cost=%dms, stage2 not finish\\n", step1_cost);',
+    '    return -1;',
+    '  }',
+    '  printf("mod_init_ok\\n");',
+    '  return 0;',
+    '}',
+    '',
+  ].join('\n')
+  const modDbg = [
+    '#include <stdio.h>',
+    'struct dtoe_dbg_ctx { int step; int times; };',
+    'static int dtoe_inject_conn_fault(int argc, char **argv) {',
+    '  (void)argc; (void)argv;',
+    '  return 0;',
+    '}',
+    '#define DBG_CMD_REG(mod, cmd, fn) void reg_##cmd(void) { (void)(fn); }',
+    'DBG_CMD_REG("dtoe", "inject_conn_fault", dtoe_inject_conn_fault)',
+    '',
+  ].join('\n')
+  const commonPgd = [
+    'int pgd_extra_entry(int mode) { return mode; }',
+    '#define PGD_CMD_REG(name, fn) void pgd_reg_##name(void) { (void)(fn); }',
+    'PGD_CMD_REG(extra, pgd_extra_entry)',
+    '',
+  ].join('\n')
+  await writeFile(path.join(f.source, 'mod/src/mod_init.c'), origModInit)
+  await writeFile(path.join(f.source, 'mod/dbg/mod_dbg.c'), modDbg)
+  await writeFile(path.join(f.source, 'common/pgd_helper.c'), commonPgd)
+  await injectionGit(f.source, ['add', '.'])
+  await injectionGit(f.source, ['commit', '-m', 'add dtoe_init in mod/src and diagnose shell in sibling mod/dbg'])
+  await injectionGit(f.source, ['push', 'origin', 'main', 'HEAD:refs/heads/personal'])
+  const head = await injectionGit(f.source, ['rev-parse', 'HEAD'])
+  f.repositories[0].git.commit = head
+  f.repositories[0].base_ref = head
+  f.run.details = {
+    test_cases: [{
+      projection_id: 'unit-0001/rec-000014',
+      test_case_id: 'unit-0001/rec-000014',
+      title: '初始化查询超时处置与各阶段耗时报告',
+      execution_readiness: 'needs_instrumentation',
+      source_evidence: ['target:mod/src/mod_init.c:2-12'],
+      instrumentation: {
+        points: [{
+          id: 'INIT_QUERY_TIMEOUT',
+          repo_id: 'target',
+          path: 'mod/src/mod_init.c',
+          symbol: 'mod_run_init',
+          enable: '可参考 target:common/pgd_helper.c:3 注册辅助子命令或写入单次控制文件',
+        }],
+      },
+    }],
+  }
+  f.input = { ...f.input, case_keys: ['unit-0001/rec-000014'], delivery_mode: 'product_package', build_variant: 'debug' }
+
+  const armFile = path.join(f.root, 'dtoe_init_arm.once')
+  const patchedModInit = [
+    '#include <stdio.h>',
+    '#include <unistd.h>',
+    'int mod_run_init(void) {',
+    '  int step1_cost = 12;',
+    '  int step2_done = 1;',
+    `  if (access(${JSON.stringify(armFile)}, F_OK) == 0) {`,
+    `    unlink(${JSON.stringify(armFile)});`,
+    '    printf("[FI_HIT:INIT_QUERY_TIMEOUT] step=2\\n");',
+    '    step2_done = 0;',
+    '  }',
+    '  if (!step2_done) {',
+    '    printf("init_query_timeout\\n");',
+    '    printf("stage1 cost=%dms, stage2 not finish\\n", step1_cost);',
+    '    return -1;',
+    '  }',
+    '  printf("mod_init_ok\\n");',
+    '  return 0;',
+    '}',
+    '',
+  ].join('\n')
+
+  let capturedPrompt = '', capturedInput = null
+  const service = new FaultInjectionService({
+    generate: async ({ inputPath, prompt }) => {
+      capturedPrompt = prompt
+      capturedInput = JSON.parse(await readFile(inputPath, 'utf8'))
+      return {
+        summary: '初始化路径采用读到即 unlink 自毁的单次控制文件门控，兼容 L1 无环境变量守护拉起与同包重拉恢复',
+        delivery: {
+          mode: 'product_package',
+          build_requirement: '常规产品大包同源构建组件静态库与宿主二进制',
+          replace_files: [{
+            artifact: 'libdtoe_init.a',
+            kind: 'static_lib',
+            source_files: ['mod/src/mod_init.c'],
+            build_evidence: 'CMakeLists.txt:1',
+            post_replace_action: '走大包同源链接宿主二进制（节点重启从部署包镜像恢复）',
+          }],
+          marker_strings: ['[FI_HIT:INIT_QUERY_TIMEOUT]'],
+          artifact_verify: ['grep -aFq "[FI_HIT:INIT_QUERY_TIMEOUT]" libdtoe_init.a'],
+        },
+        points: [{
+          id: 'INIT_QUERY_TIMEOUT',
+          trigger_scope: { current_input: 'mod_run_init step=2 startup arm file', excluded_inputs: ['subsequent restarts after unlink'] },
+          repo_id: 'target',
+          path: 'mod/src/mod_init.c',
+          symbol: 'mod_run_init',
+          action: '置 step2_done=0 触发查询超时与阶段耗时报告',
+          trigger: `单次控制文件 ${armFile} 存在时命中并立即 unlink`,
+          times: 1,
+          enable: `printf 'step=2\\n' > "${armFile}"`,
+          disable: `rm -f "${armFile}"`,
+          observe: '[FI_HIT:INIT_QUERY_TIMEOUT]',
+        }],
+        profiles: [{
+          case_key: 'unit-0001/rec-000014',
+          point_ids: ['INIT_QUERY_TIMEOUT'],
+          safety: {
+            setup: [`rm -f "${armFile}"`],
+            negative_steps: [`test ! -e "${armFile}"`],
+            negative_point_ids: ['INIT_QUERY_TIMEOUT'],
+            cleanup: [`rm -f "${armFile}"`],
+            cleanup_verify: [`test ! -e "${armFile}"`],
+          },
+          steps: [`printf 'step=2\\n' > "${armFile}"`],
+        }],
+        edits: [{
+          repo_id: 'target',
+          path: 'mod/src/mod_init.c',
+          before: '  int step2_done = 1;',
+          after: [
+            '  int step2_done = 1;',
+            `  if (access(${JSON.stringify(armFile)}, F_OK) == 0) {`,
+            `    unlink(${JSON.stringify(armFile)});`,
+            '    printf("[FI_HIT:INIT_QUERY_TIMEOUT] step=2\\n");',
+            '    step2_done = 0;',
+            '  }',
+          ].join('\n'),
+        }],
+        limitations: [],
+      }
+    },
+  })
+  t.after(() => service.dispose())
+  const task = await service.start(f)
+  await wait(service)
+  const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.deepEqual(ready.notices, [])
+
+  // Verify harness automatically probed sibling mod/dbg/ AND inline points[].enable path, slicing multi-line callback signature + macro
+  const harness = capturedInput.repositories[0].harness
+  assert.ok(Array.isArray(harness.diagnose_hooks) && harness.diagnose_hooks.length >= 2, JSON.stringify(harness))
+  assert.ok(harness.diagnose_hooks.some(h => h.location.startsWith('mod/dbg/mod_dbg.c:') && h.code.includes('DBG_CMD_REG')))
+  assert.ok(harness.diagnose_hooks.some(h => h.location.startsWith('common/pgd_helper.c:') && h.code.includes('PGD_CMD_REG')))
+  assert.ok(Array.isArray(harness.diagnose_snippets) && harness.diagnose_snippets.length >= 1, JSON.stringify(harness))
+  const dbgSnippet = harness.diagnose_snippets.find(s => s.path === 'mod/dbg/mod_dbg.c')
+  assert.ok(dbgSnippet, 'must slice multi-line snippet from sibling mod/dbg/mod_dbg.c')
+  assert.match(dbgSnippet.content, /static int dtoe_inject_conn_fault\(int argc, char \*\*argv\)/)
+  assert.match(dbgSnippet.content, /DBG_CMD_REG\("dtoe", "inject_conn_fault", dtoe_inject_conn_fault\)/)
+
+  // Verify updated prompt encodes runtime diagnose_snippets vs startup one-shot unlink file, without debunked L3 controller-reset myth
+  assert.match(capturedPrompt, /diagnose_snippets/)
+  assert.match(capturedPrompt, /一次性自毁控制文件/)
+  assert.match(capturedPrompt, /严禁写死参数导致每次进程启动必然触发故障/)
+  assert.doesNotMatch(capturedPrompt, /触发整节点保护性重启/)
+
+  // Verify non-blocking consistency notices catch L1 getenv-only and L2 hardcoded patches
+  const getenvNotices = collectConsistencyNotices({
+    delivery: { mode: 'product_package' },
+    points: [{ id: 'P1', times: 1, trigger: 'ENV=1', enable: 'export ENV=1' }],
+    edits: [{ repo_id: 'target', path: 'mod/src/mod_init.c', before: 'int x = 0;', after: 'int x = getenv("ENV") ? 1 : 0; x--;' }],
+  }, { delivery_mode: 'product_package' })
+  assert.ok(getenvNotices.some(n => n.includes('平台限制提醒（L1）')))
+
+  const hardcodedNotices = collectConsistencyNotices({
+    delivery: { mode: 'product_package' },
+    points: [{ id: 'P2', times: 1, trigger: '触发参数写死，每次进程启动必触发', enable: '写死' }],
+    edits: [{ repo_id: 'target', path: 'mod/src/mod_init.c', before: 'int step2_done = 1;', after: 'int step2_done = 0;' }],
+  }, { delivery_mode: 'product_package' })
+  assert.ok(hardcodedNotices.some(n => n.includes('平台限制提醒（L2）')))
+  assert.ok(!hardcodedNotices.some(n => n.includes('节点保护性重启')))
+
+  // Real C compilation + 3-stage artifact/host-binary/live-proc verification + L1 stripped-env runtime loop
+  const buildOut = path.join(f.root, 'pkg-build')
+  await mkdir(buildOut, { recursive: true })
+  await writeFile(path.join(buildOut, 'mod_init_patched.c'), patchedModInit)
+  await writeFile(path.join(buildOut, 'mod_init_unpatched.c'), origModInit)
+  await writeFile(path.join(buildOut, 'daemon_main.c'), [
+    '#include <unistd.h>',
+    'extern int mod_run_init(void);',
+    'int main(int argc, char **argv) {',
+    '  if (argc > 1 && argv[1][0] == \'h\') { sleep(5); return 0; }',
+    '  return mod_run_init() == 0 ? 0 : 4;',
+    '}',
+    '',
+  ].join('\n'))
+  await exec('cc', ['-c', path.join(buildOut, 'mod_init_patched.c'), '-o', path.join(buildOut, 'mod_patched.o')])
+  await exec('cc', ['-c', path.join(buildOut, 'mod_init_unpatched.c'), '-o', path.join(buildOut, 'mod_unpatched.o')])
+  const libPatched = path.join(buildOut, 'libdtoe_init.a')
+  const hostStale = path.join(buildOut, 'host_daemon_stale')
+  const hostCoLinked = path.join(buildOut, 'host_daemon')
+  await exec('ar', ['rcs', libPatched, path.join(buildOut, 'mod_patched.o')])
+  // Simulate previous mismatch ("库带桩、二进制不带桩") vs fixed co-linked package binary
+  await exec('cc', [path.join(buildOut, 'daemon_main.c'), path.join(buildOut, 'mod_unpatched.o'), '-o', hostStale])
+  await exec('cc', [path.join(buildOut, 'daemon_main.c'), libPatched, '-o', hostCoLinked])
+
+  const verifyScriptPath = path.join(buildOut, 'pangea-verify.sh')
+  await writeFile(verifyScriptPath, buildVerificationShellScript(ready), 'utf8')
+  const verifyCmds = buildArtifactVerifyCommands(ready)
+  assert.match(verifyCmds.variant_hint, /从部署包镜像恢复/)
+  assert.doesNotMatch(verifyCmds.variant_hint, /节点保护性重启/)
+  assert.match(verifyCmds.proc_exe_cmd, /\/proc\/\$pid\/exe/)
+
+  // Gate ① passes libdtoe_init.a, Gate ② rejects stale unlinked host binary and passes co-linked host binary
+  await assert.rejects(
+    exec('bash', [verifyScriptPath], { cwd: buildOut, env: { ...process.env, PANGEA_VERIFY_ONLY: '1', PANGEA_VERIFY_ARTIFACTS: libPatched, PANGEA_VERIFY_FINAL_BINARY: hostStale } }),
+    err => err.code === 2 && /missing stub marker "\[FI_HIT:INIT_QUERY_TIMEOUT\]"/.test(err.stderr),
+  )
+  const gate12Ok = await exec('bash', [verifyScriptPath], {
+    cwd: buildOut,
+    env: { ...process.env, PANGEA_VERIFY_ONLY: '1', PANGEA_VERIFY_ARTIFACTS: libPatched, PANGEA_VERIFY_FINAL_BINARY: hostCoLinked },
+  })
+  assert.match(gate12Ok.stdout, /\[PANGEA_ARTIFACT_CHECK\] OK:/)
+
+  // Gate ③ verifies live /proc/<pid>/exe on Linux
+  if (process.platform === 'linux') {
+    const liveDaemon = spawn(hostCoLinked, ['hold'], { env: {}, stdio: 'ignore' })
+    t.after(() => { try { liveDaemon.kill('SIGKILL') } catch {} })
+    const gate3Ok = await exec('bash', [verifyScriptPath], {
+      cwd: buildOut,
+      env: { ...process.env, PANGEA_VERIFY_ONLY: '1', PANGEA_VERIFY_PROC_PID: String(liveDaemon.pid) },
+    })
+    assert.match(gate3Ok.stdout, new RegExp(`\\[PANGEA_ARTIFACT_CHECK\\] OK: /proc/${liveDaemon.pid}/exe`))
+    liveDaemon.kill('SIGTERM')
+  }
+
+  // Execute full 3-stage behavioral acceptance under completely empty env (env: {}, proving L1 immunity):
+  // 1) Default closed baseline
+  const baseRun = await exec(hostCoLinked, [], { env: {} })
+  assert.equal(baseRun.stdout.trim(), 'mod_init_ok')
+  // 2) Arm one-shot file -> single daemon relaunch hits step=2 timeout, unlinks file, prints stage report
+  await writeFile(armFile, 'step=2\n', 'utf8')
+  await assert.rejects(
+    exec(hostCoLinked, [], { env: {} }),
+    err => err.code === 4
+      && /\[FI_HIT:INIT_QUERY_TIMEOUT\] step=2\ninit_query_timeout\nstage1 cost=12ms, stage2 not finish/.test(err.stdout),
+  )
+  await assert.rejects(lstat(armFile), { code: 'ENOENT' }, 'arm file must self-delete immediately on hit')
+  // 3) Next daemon relaunch automatically recovers normal initialization without rebuilding package
+  const recoveredRun = await exec(hostCoLinked, [], { env: {} })
+  assert.equal(recoveredRun.stdout.trim(), 'mod_init_ok')
+})
+
 
 
 

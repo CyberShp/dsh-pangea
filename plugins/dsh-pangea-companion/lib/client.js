@@ -1212,14 +1212,17 @@ window.__ModuleLoader__.load({
         ? `set -- ${quotedArtifacts}; for f in "$@"; do [ -f "$f" ] || { echo "NOT_FOUND: $f" >&2; exit 2; }; done; for m in ${quotedMarkers}; do found=0; for f in "$@"; do grep -aFq -- "$m" "$f" && found=1 && break; done; [ "$found" -eq 1 ] && echo "OK: $m" || { echo "MISSING: $m" >&2; exit 2; }; done; for f in "$@"; do hit=0; for m in ${quotedMarkers}; do grep -aFq -- "$m" "$f" && hit=1 && break; done; [ "$hit" -eq 1 ] || { echo "NO_STUB_IN_ARTIFACT: $f" >&2; exit 2; }; done`
         : ''
       const postDeployCmd = markers.length
-        ? `target="<最终部署并运行的宿主二进制或模块路径>"; [ -f "$target" ] || { echo "NOT_FOUND: $target" >&2; exit 2; }; for m in ${quotedMarkers}; do grep -aFq -- "$m" "$target" && echo "OK: $m" || { echo "MISSING: $m" >&2; exit 2; }; done`
+        ? `target="<大包内或部署目录宿主二进制路径>"; [ -f "$target" ] || { echo "NOT_FOUND: $target" >&2; exit 2; }; for m in ${quotedMarkers}; do grep -aFq -- "$m" "$target" && echo "OK: $m" || { echo "MISSING: $m" >&2; exit 2; }; done`
+        : ''
+      const procExeCmd = markers.length
+        ? `pid="<宿主进程PID>"; [ -f "/proc/$pid/exe" ] || { echo "PROC_NOT_FOUND: /proc/$pid/exe" >&2; exit 2; }; for m in ${quotedMarkers}; do grep -aFq -- "$m" "/proc/$pid/exe" && echo "OK(/proc/$pid/exe): $m" || { echo "MISSING(/proc/$pid/exe): $m" >&2; exit 2; }; done`
         : ''
       const safeRelinkCmd = markers.length
         ? `PANGEA_RELINK_ONLY=1 PANGEA_VERIFY_ARTIFACTS=${shellSingleQuote(replaceFiles.length ? replaceFiles.map(item => item.artifact).join(' ') : '<目标静态库路径>')} PANGEA_RELINK_CMD='<环境重链脚本命令>' PANGEA_VERIFY_FINAL_BINARY='<运行目录/宿主进程二进制>' bash pangea-verify.sh`
         : ''
       const variantHint = effectiveVariant === 'hitest'
-        ? '当前目标变体为「hitest 精准」：若大包已含完整精准变体宿主二进制，优先直接替换运行目录内的预置精准变体与宿主二进制；若仅替换 .a 后盒内重链，请直接使用下方「PANGEA 安全重链代理命令」（无需修改环境重链脚本即可自动注入传递库解析并隔离旧预置变体覆盖）。'
-        : '当前目标变体为「正常 debug」：若需在盒内执行重链脚本，请直接使用下方「PANGEA 安全重链代理命令」（无需修改环境重链脚本即可捕获被吞掉的 ld 错误码、补齐传递钩子库解析并拦截预置精准变体尾部覆盖）。'
+        ? '当前目标变体为「hitest 精准」：平台节点重启会从部署包镜像恢复全部运行时文件（L2，并非从精准变体物化覆盖），持久化验证必须走大包出包，并依次完成「① 验组件库 → ② 验大包内宿主二进制同源带桩 → ③ 真机部署后验 /proc/<pid>/exe」。仅在不重启节点的临时快验时才使用盒内安全重链（L4 须先确认重链脚本按硬件型号实际选中的链接清单）。'
+        : '当前目标变体为「正常 debug」：平台节点重启会从部署包镜像恢复全部运行时文件（L2，手工替换与盒内重链在节点重启后全部还原），持久化验证必须走大包出包，并依次完成「① 验组件库 → ② 验大包内宿主二进制同源带桩 → ③ 真机部署后验 /proc/<pid>/exe」。仅在不重启节点的临时快验时才使用盒内安全重链（L4 须先确认重链脚本按硬件型号实际选中的链接清单）。'
       return {
         variant: effectiveVariant,
         variant_label: BUILD_VARIANT_LABELS[effectiveVariant],
@@ -1228,6 +1231,7 @@ window.__ModuleLoader__.load({
         replace_files: replaceFiles,
         pre_replace_cmd: preReplaceCmd,
         post_deploy_cmd: postDeployCmd,
+        proc_exe_cmd: procExeCmd,
         safe_relink_cmd: safeRelinkCmd,
       }
     }
@@ -1261,9 +1265,10 @@ window.__ModuleLoader__.load({
         `# 个人分支: ${shellQuoteComment(branchLabel)}${commits ? ` (${commits})` : ''}`,
         '# 用法示例: bash pangea-verify.sh 2>&1 | tee pangea-verify.log',
         ...(markerStrings.length ? [
-          '# 前置组件库核验: PANGEA_VERIFY_ARTIFACTS="/path/to/libA.a /path/to/libB.a" bash pangea-verify.sh',
-          '# 前置宿主二进制核验: PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
-          '# 零侵入安全重链(防F3/F4): PANGEA_RELINK_ONLY=1 PANGEA_RELINK_CMD="/path/to/relink.sh" PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
+          '# ① 构建后验组件库: PANGEA_VERIFY_ARTIFACTS="/path/to/libA.a /path/to/libB.a" bash pangea-verify.sh',
+          '# ② 构建后验大包内宿主二进制(防库与二进制失配): PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
+          '# ③ 部署后验真机运行进程: PANGEA_VERIFY_ONLY=1 PANGEA_VERIFY_PROC_PID="<宿主PID>" bash pangea-verify.sh',
+          '# 可选临时盒内安全重链(重启后还原): PANGEA_RELINK_ONLY=1 PANGEA_RELINK_CMD="/path/to/relink.sh" PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
         ] : []),
         '# macOS 默认 bash 3.2 在 C.UTF-8 下会把紧邻中文标点的未加花括号 $VAR 误判进变量名；仅将当前 shell 内部 LC_CTYPE 设为 C，子进程仍保留 UTF-8 LANG',
         'if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then',
@@ -1411,6 +1416,11 @@ window.__ModuleLoader__.load({
           'elif [ -n "${PANGEA_VERIFY_FINAL_BINARY:-}" ]; then',
           '  __pangea_check_artifact_set "$PANGEA_VERIFY_FINAL_BINARY"',
           'fi',
+          'if [ -n "${PANGEA_VERIFY_PROC_PID:-}" ]; then',
+          '  __pangea_proc_exe="${PANGEA_PROC_ROOT:-/proc}/${PANGEA_VERIFY_PROC_PID}/exe"',
+          '  __pangea_check_artifact_set "$__pangea_proc_exe"',
+          'fi',
+          'if [ "${PANGEA_VERIFY_ONLY:-0}" = "1" ]; then exit 0; fi',
           '',
         )
       }
@@ -2490,7 +2500,7 @@ window.__ModuleLoader__.load({
                     repo.comparison?.error ? h('p', { role: 'alert', style: { color: '#b62836', fontSize: 12 } }, repo.comparison.error) : null,
                     h('p', { style: { fontSize: 12, color: '#5e6773' } }, `Git 仓库：${repo.source_path}；远端：${repo.remote}；个人分支：${repo.personal_branch || '未配置（可在合成出包前配置）'}`)))),
                 h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, '在独立副本中基于当前分析目录 HEAD 生成打桩补丁；生成过程不触碰分析目录与本地分支，门禁提交信息与推送统一在“合成出包”完成。'),
-                field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true, placeholder: '可选：补充触发边界、日志开关或构建宏约束…' }),
+                field('补充说明', settings.instructions, value => setSettings({ ...settings, instructions: value }), { multiline: true, placeholder: '可选：补充模块 diagnose/pgd 命令参数、单次触发控制文件路径（如 /dev/shm/...）或构建约束…' }),
                 h('footer', { className: 'pangea-fi-footer' },
                   standalone ? h('button', { type: 'button', disabled: working, onClick: () => setStep(2) }, '上一步') : h('span', null),
                   h('button', { type: 'button', className: 'btn primary', disabled: working || !modelSelection.ready || !selectedKeys.length || !enabledRepos.length || blockingErrors.length > 0,
@@ -2610,7 +2620,7 @@ window.__ModuleLoader__.load({
               return h('section', { className: 'pangea-fi-repo-box', style: { marginTop: 14, borderColor: '#cfe0ee', background: '#fbfdff' }, 'data-testid': 'fault-injection-replace-files' },
                 h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 8 } },
                   h('div', null,
-                    h('strong', null, '应单独替换的文件与部署核验'),
+                    h('strong', null, '产物归属、应单独替换的文件与部署核验'),
                     h('p', { className: 'b05-subtle', style: { margin: '4px 0 0', fontSize: 12 } },
                       `交付形态：${DELIVERY_MODE_LABELS[normalizeDeliveryMode(task.delivery_mode ?? delivery?.mode)]} · 当前变体：${verifyInfo.variant_label}`)),
                   h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
@@ -2628,13 +2638,13 @@ window.__ModuleLoader__.load({
                     replaceFiles.length ? h('button', {
                       type: 'button',
                       style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 },
-                      onClick: () => copyText(replaceFiles.map(item => item.artifact).join('\n'), '已复制应替换文件清单'),
+                      onClick: () => copyText(replaceFiles.map(item => item.artifact).join('\n'), '已复制受影响产物清单'),
                     }, '复制文件清单') : null)),
                 h('div', { role: 'status', className: 'pangea-fi-banner info', style: { margin: '8px 0' } }, h('span', null, verifyInfo.variant_hint)),
                 delivery?.build_requirement ? h('p', { style: { fontSize: 13, margin: '8px 0' } }, h('strong', null, '构建前提：'), delivery.build_requirement) : null,
                 replaceFiles.length
                   ? h('table', { className: 'pangea-fi-table', 'aria-label': '应单独替换的文件清单', style: { marginTop: 8 } },
-                      h('thead', null, h('tr', null, ...['应替换文件 / 产物', '类型', '对应修改源码', '构建依据', '替换后动作'].map(label => h('th', { key: label }, label)))),
+                      h('thead', null, h('tr', null, ...['受影响产物 / 应替换文件', '类型', '对应修改源码', '构建依据', '打包或替换说明'].map(label => h('th', { key: label }, label)))),
                       h('tbody', null, replaceFiles.map((item, idx) => h('tr', { key: `${item.artifact}:${idx}` },
                         h('td', null,
                           h('code', { style: { fontWeight: 600 } }, item.artifact),
@@ -2653,9 +2663,10 @@ window.__ModuleLoader__.load({
                     h('strong', null, '桩特征标识（已核对存在于补丁源码）：'),
                     verifyInfo.markers.map((marker, idx) => h('code', { key: idx, style: { marginRight: 8 } }, marker))),
                   h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
-                    h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, onClick: () => copyText(verifyInfo.pre_replace_cmd, '已复制替换前验库命令') }, '复制：替换前验库命令（防 F1 未编入）'),
-                    verifyInfo.safe_relink_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.safe_relink_cmd, '已复制 PANGEA 安全重链代理命令') }, '复制：PANGEA 安全重链代理命令（自动绕过 F3/F4）') : null,
-                    h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.post_deploy_cmd, '已复制部署后验二进制命令') }, '复制：重链部署后验最终产物命令（防 F4 顶包）'))) : null)
+                    h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, onClick: () => copyText(verifyInfo.pre_replace_cmd, '已复制构建后验组件库命令') }, '复制：① 构建后验组件库命令（防漏编）'),
+                    h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.post_deploy_cmd, '已复制大包内验宿主二进制命令') }, '复制：② 构建后验大包宿主二进制命令（防同源失配）'),
+                    verifyInfo.proc_exe_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.proc_exe_cmd, '已复制真机运行进程核验命令') }, '复制：③ 部署后验真机 /proc/<pid>/exe 命令') : null,
+                    verifyInfo.safe_relink_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.safe_relink_cmd, '已复制盒上临时安全重链代理命令') }, '复制：盒上临时安全重链命令（可选 · 重启还原）') : null)) : null)
             })() : null,
             !includable && !busy(task) && task.schema_version === 1 ? h('div', { role: 'status', className: 'pangea-fi-banner warn' }, '此历史任务缺少可复用的结构化修改记录，请按当前最新代码重新生成。') : null,
             canVerify ? h('details', { key: `verification:${task.id}`, style: { marginTop: 12 } },
@@ -3095,12 +3106,14 @@ window.__ModuleLoader__.load({
               }
               return h('section', { className: 'pangea-fi-repo-box', style: { marginTop: 12, borderColor: '#cfe0ee', background: '#fbfdff' }, 'data-testid': 'fault-injection-build-replace-files' },
                 h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 8 } },
-                  h('strong', null, `本次出包汇总：应单独替换的文件（${merged.replace_files.length} 个产物）`),
+                  h('strong', null, `本次出包汇总：受影响产物与标记验收门（${merged.replace_files.length} 个产物）`),
                   h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
-                    merged.replace_files.length ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, onClick: () => copyText(merged.replace_files.map(item => item.artifact).join('\n'), '已复制本次出包应替换文件清单') }, '复制文件清单') : null,
-                    verifyInfo.pre_replace_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.pre_replace_cmd, '已复制汇总验库命令') }, '复制验库命令') : null)),
+                    merged.replace_files.length ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12 }, onClick: () => copyText(merged.replace_files.map(item => item.artifact).join('\n'), '已复制本次出包产物清单') }, '复制文件清单') : null,
+                    verifyInfo.pre_replace_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.pre_replace_cmd, '已复制汇总验库命令') }, '复制：① 验组件库命令') : null,
+                    verifyInfo.post_deploy_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.post_deploy_cmd, '已复制汇总验大包宿主二进制命令') }, '复制：② 验大包宿主二进制命令') : null,
+                    verifyInfo.proc_exe_cmd ? h('button', { type: 'button', style: { minHeight: 30, padding: '3px 10px', fontSize: 12, marginLeft: 0 }, onClick: () => copyText(verifyInfo.proc_exe_cmd, '已复制真机 /proc/<pid>/exe 核验命令') }, '复制：③ 验真机进程命令') : null)),
                 merged.replace_files.length ? h('table', { className: 'pangea-fi-table', 'aria-label': '本次出包应单独替换文件清单' },
-                  h('thead', null, h('tr', null, ...['应替换文件 / 产物', '类型', '来源任务', '对应修改源码', '替换后动作'].map(label => h('th', { key: label }, label)))),
+                  h('thead', null, h('tr', null, ...['受影响产物 / 应替换文件', '类型', '来源任务', '对应修改源码', '打包或替换说明'].map(label => h('th', { key: label }, label)))),
                   h('tbody', null, merged.replace_files.map((item, idx) => h('tr', { key: `${item.artifact}:${idx}` },
                     h('td', null, h('code', { style: { fontWeight: 600 } }, item.artifact)),
                     h('td', null, ARTIFACT_KIND_LABELS[item.kind] || item.kind),

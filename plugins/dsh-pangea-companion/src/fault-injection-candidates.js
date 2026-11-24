@@ -194,14 +194,17 @@ export function buildArtifactVerifyCommands(taskOrDelivery, variant = null) {
     ? `set -- ${quotedArtifacts}; for f in "$@"; do [ -f "$f" ] || { echo "NOT_FOUND: $f" >&2; exit 2; }; done; for m in ${quotedMarkers}; do found=0; for f in "$@"; do grep -aFq -- "$m" "$f" && found=1 && break; done; [ "$found" -eq 1 ] && echo "OK: $m" || { echo "MISSING: $m" >&2; exit 2; }; done; for f in "$@"; do hit=0; for m in ${quotedMarkers}; do grep -aFq -- "$m" "$f" && hit=1 && break; done; [ "$hit" -eq 1 ] || { echo "NO_STUB_IN_ARTIFACT: $f" >&2; exit 2; }; done`
     : ''
   const postDeployCmd = markers.length
-    ? `target="<最终部署并运行的宿主二进制或模块路径>"; [ -f "$target" ] || { echo "NOT_FOUND: $target" >&2; exit 2; }; for m in ${quotedMarkers}; do grep -aFq -- "$m" "$target" && echo "OK: $m" || { echo "MISSING: $m" >&2; exit 2; }; done`
+    ? `target="<大包内或部署目录宿主二进制路径>"; [ -f "$target" ] || { echo "NOT_FOUND: $target" >&2; exit 2; }; for m in ${quotedMarkers}; do grep -aFq -- "$m" "$target" && echo "OK: $m" || { echo "MISSING: $m" >&2; exit 2; }; done`
+    : ''
+  const procExeCmd = markers.length
+    ? `pid="<宿主进程PID>"; [ -f "/proc/$pid/exe" ] || { echo "PROC_NOT_FOUND: /proc/$pid/exe" >&2; exit 2; }; for m in ${quotedMarkers}; do grep -aFq -- "$m" "/proc/$pid/exe" && echo "OK(/proc/$pid/exe): $m" || { echo "MISSING(/proc/$pid/exe): $m" >&2; exit 2; }; done`
     : ''
   const safeRelinkCmd = markers.length
     ? `PANGEA_RELINK_ONLY=1 PANGEA_VERIFY_ARTIFACTS=${shellSingleQuote(replaceFiles.length ? replaceFiles.map(item => item.artifact).join(' ') : '<目标静态库路径>')} PANGEA_RELINK_CMD='<环境重链脚本命令>' PANGEA_VERIFY_FINAL_BINARY='<运行目录/宿主进程二进制>' bash pangea-verify.sh`
     : ''
   const variantHint = effectiveVariant === 'hitest'
-    ? '当前目标变体为「hitest 精准」：若大包已含完整精准变体宿主二进制，优先直接替换运行目录内的预置精准变体与宿主二进制；若仅替换 .a 后盒内重链，请直接使用下方「PANGEA 安全重链代理命令」（无需修改环境重链脚本即可自动注入传递库解析并隔离旧预置变体覆盖）。'
-    : '当前目标变体为「正常 debug」：若需在盒内执行重链脚本，请直接使用下方「PANGEA 安全重链代理命令」（无需修改环境重链脚本即可捕获被吞掉的 ld 错误码、补齐传递钩子库解析并拦截预置精准变体尾部覆盖）。'
+    ? '当前目标变体为「hitest 精准」：平台节点重启会从部署包镜像恢复全部运行时文件（L2，并非从精准变体物化覆盖），持久化验证必须走大包出包，并依次完成「① 验组件库 → ② 验大包内宿主二进制同源带桩 → ③ 真机部署后验 /proc/<pid>/exe」。仅在不重启节点的临时快验时才使用盒内安全重链（L4 须先确认重链脚本按硬件型号实际选中的链接清单）。'
+    : '当前目标变体为「正常 debug」：平台节点重启会从部署包镜像恢复全部运行时文件（L2，手工替换与盒内重链在节点重启后全部还原），持久化验证必须走大包出包，并依次完成「① 验组件库 → ② 验大包内宿主二进制同源带桩 → ③ 真机部署后验 /proc/<pid>/exe」。仅在不重启节点的临时快验时才使用盒内安全重链（L4 须先确认重链脚本按硬件型号实际选中的链接清单）。'
   return {
     variant: effectiveVariant,
     variant_label: BUILD_VARIANT_LABELS[effectiveVariant],
@@ -210,6 +213,7 @@ export function buildArtifactVerifyCommands(taskOrDelivery, variant = null) {
     replace_files: replaceFiles,
     pre_replace_cmd: preReplaceCmd,
     post_deploy_cmd: postDeployCmd,
+    proc_exe_cmd: procExeCmd,
     safe_relink_cmd: safeRelinkCmd,
   }
 }
@@ -243,9 +247,10 @@ export function buildVerificationShellScript(task, { buildVariant = null } = {})
     `# 个人分支: ${shellQuoteComment(branchLabel)}${commits ? ` (${commits})` : ''}`,
     '# 用法示例: bash pangea-verify.sh 2>&1 | tee pangea-verify.log',
     ...(markerStrings.length ? [
-      '# 前置组件库核验: PANGEA_VERIFY_ARTIFACTS="/path/to/libA.a /path/to/libB.a" bash pangea-verify.sh',
-      '# 前置宿主二进制核验: PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
-      '# 零侵入安全重链(防F3/F4): PANGEA_RELINK_ONLY=1 PANGEA_RELINK_CMD="/path/to/relink.sh" PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
+      '# ① 构建后验组件库: PANGEA_VERIFY_ARTIFACTS="/path/to/libA.a /path/to/libB.a" bash pangea-verify.sh',
+      '# ② 构建后验大包内宿主二进制(防库与二进制失配): PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
+      '# ③ 部署后验真机运行进程: PANGEA_VERIFY_ONLY=1 PANGEA_VERIFY_PROC_PID="<宿主PID>" bash pangea-verify.sh',
+      '# 可选临时盒内安全重链(重启后还原): PANGEA_RELINK_ONLY=1 PANGEA_RELINK_CMD="/path/to/relink.sh" PANGEA_VERIFY_FINAL_BINARY="/path/to/host_bin" bash pangea-verify.sh',
     ] : []),
     '# macOS 默认 bash 3.2 在 C.UTF-8 下会把紧邻中文标点的未加花括号 $VAR 误判进变量名；仅将当前 shell 内部 LC_CTYPE 设为 C，子进程仍保留 UTF-8 LANG',
     'if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then',
@@ -393,6 +398,11 @@ export function buildVerificationShellScript(task, { buildVariant = null } = {})
       'elif [ -n "${PANGEA_VERIFY_FINAL_BINARY:-}" ]; then',
       '  __pangea_check_artifact_set "$PANGEA_VERIFY_FINAL_BINARY"',
       'fi',
+      'if [ -n "${PANGEA_VERIFY_PROC_PID:-}" ]; then',
+      '  __pangea_proc_exe="${PANGEA_PROC_ROOT:-/proc}/${PANGEA_VERIFY_PROC_PID}/exe"',
+      '  __pangea_check_artifact_set "$__pangea_proc_exe"',
+      'fi',
+      'if [ "${PANGEA_VERIFY_ONLY:-0}" = "1" ]; then exit 0; fi',
       '',
     )
   }
