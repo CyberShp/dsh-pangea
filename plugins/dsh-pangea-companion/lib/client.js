@@ -1048,6 +1048,16 @@ window.__ModuleLoader__.load({
       }
       const instrumentation = item?.instrumentation || item?.source_record?.body?.instrumentation
       const points = instrumentation?.points
+      const verificationStatus = item?.verification_status || item?.source_record?.body?.verification_status
+      if (verificationStatus === 'needs_runtime_verification') {
+        return {
+          key,
+          selectable: true,
+          tier: 'explicit',
+          label: Array.isArray(points) && points.length ? `待动态实锤 · ${points.length} 桩点` : '待动态实锤风险',
+          reason: item?.runtime_uncertainty || (Array.isArray(points) && points.length ? `风险分析已锁定 ${points.length} 个运行时验证桩点` : '风险分析标记需运行时故障注入/拉窗实锤'),
+        }
+      }
       if (instrumentation || item?.execution_readiness === 'needs_instrumentation') {
         return {
           key,
@@ -1075,6 +1085,20 @@ window.__ModuleLoader__.load({
         return { key, selectable: true, tier: 'recommended', label: '建议打桩', reason: '灰盒/开发辅助用例，可按需生成桩点' }
       }
       return { key, selectable: true, tier: 'on_demand', label: '可按需打桩', reason: '按需结合源码定位桩点' }
+    }
+
+    function extractRiskInjectionCandidates(risks = []) {
+      return (Array.isArray(risks) ? risks : [])
+        .filter(risk => (risk?.verification_status || risk?.source_record?.body?.verification_status) === 'needs_runtime_verification')
+        .map(risk => {
+          const key = risk.projection_id || risk.risk_id || risk.display_id || ''
+          return {
+            ...risk,
+            projection_id: key,
+            execution_readiness: 'needs_instrumentation',
+            classification: classifyInjectionCandidate({ ...risk, projection_id: key }),
+          }
+        })
     }
 
     const DELIVERY_MODES = Object.freeze(['product_package', 'unit_test'])
@@ -2094,7 +2118,7 @@ window.__ModuleLoader__.load({
 
 
 
-    return { caseKeyOf, duplicateCaseKeySet, classifyInjectionCandidate, DELIVERY_MODES, BUILD_VARIANTS, DELIVERY_MODE_LABELS, BUILD_VARIANT_LABELS, ARTIFACT_KIND_LABELS, normalizeDeliveryMode, normalizeBuildVariant, normalizeReplaceFiles, extractMarkerStrings, mergeReplaceFilesFromTasks, buildArtifactVerifyCommands, buildVerificationShellScript, parseVerificationLog, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE, DEFAULT_INTRANET_COMMIT_REGEX, normalizeRegexPattern, extractRemoteHookRegex, DEFAULT_REGEX_TIMEOUT_MS, setBacktrackingMatcherRunner, defaultCommitSummary, normalizeCommitConfig, validateRawCommitMessage, resolveCommitMessage }
+    return { caseKeyOf, duplicateCaseKeySet, classifyInjectionCandidate, extractRiskInjectionCandidates, DELIVERY_MODES, BUILD_VARIANTS, DELIVERY_MODE_LABELS, BUILD_VARIANT_LABELS, ARTIFACT_KIND_LABELS, normalizeDeliveryMode, normalizeBuildVariant, normalizeReplaceFiles, extractMarkerStrings, mergeReplaceFilesFromTasks, buildArtifactVerifyCommands, buildVerificationShellScript, parseVerificationLog, MULTILINE_GATE_COMMIT_TEMPLATE, SINGLELINE_GATE_COMMIT_TEMPLATE, DEFAULT_INTRANET_COMMIT_REGEX, normalizeRegexPattern, extractRemoteHookRegex, DEFAULT_REGEX_TIMEOUT_MS, setBacktrackingMatcherRunner, defaultCommitSummary, normalizeCommitConfig, validateRawCommitMessage, resolveCommitMessage }
     })()
 
     const __faultInjectionView = (() => {

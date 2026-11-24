@@ -86,12 +86,18 @@ const planningRecordInstructions = (action, opened) => action.stage === 'unit_pl
     '多个已确定单元可用 plan-write-batch --expected-revision N --units-file <单元对象数组文件> --request-id <本批稳定ID> 一次保存，不等全部规划完成。回包 units 含各项 unit_id/plan_record_id/operation；引用返回的真实ID。相同载荷重试使用同一 request-id，修改载荷用新ID；replayed=true 时 revision 是原保存版本，current_revision 才是当前结果版本，后续新写入与 work-finish 使用 current_revision，不沿用旧 receipt 的 revision。批次失败保留此前成功内容，不用循环脚本模拟批量。',
     'plan-candidates --page-token <next_page_token> --max-chars N 仅在具体边界问题需要时展开未分配候选；不主动遍历，也不为清空候选而新增工作。首次查询省略 page-token。',
   ] : []),
+  ...(opened?.task?.record_contracts?.blueprint === 'risk-blueprint-v1' ? [
+    'risk-method-v2 Stage 1 提示：请先消费 risk_topology_summary 与 dts_context；仅当 dts_context.requested_dts_ids 包含用户提供的具体 DTS 单号且当前会话已配置 DTS-mcp / codehub-mcp 时，按单号调用 DTS-mcp 读单获取 MR 链接，再持 MR 链接调用 codehub-mcp 读取 Diff 提取故障代码特征并交接（绝不按模块盲搜；未装 MCP 或无单号时直接消费冻结 dts_context）。输出一条 kind=note、format_version=risk-blueprint-v1 的全局三轨底图，并按 error_rollback / concurrency_timing / resource_lifecycle 三轨派发 unit_plan（携带 risk_track 字段）。',
+  ] : []),
 ] : []
 
 // Submission guidance, not a second schema or a semantic acceptance gate. Keep
 // this on initial, compacted, repaired and cross-action closure prompts alike.
 const analysisRecordInstructions = (action, opened) => ['unit_analysis', 'targeted_closure'].includes(action.stage) ? [
   'Analysis/closure 交付说明：当前 task 的冻结 rubric 与 record_contracts 是本次分析的规则来源。旧任务未返回 write_contract 或未声明 record_contracts，不表示合同丢失；仍须完整执行冻结 rubric，不追补安装目录中的新版合同。框架模型、result_store、Graph 和 report 渲染源码不是补充写入合同，不为猜格式或完成条件去搜索这些实现。',
+  ...(opened?.task?.record_contracts?.risk === 'behavior-risk-v3' ? [
+    'risk-method-v2 Stage 2 提示：本任务启用确定性写入强校验——behavior-check-v2 与 behavior-risk-v3 必须满足必填结构、source_evidence 真实行号与 evidence_quotes 逐字匹配；verification_status=needs_runtime_verification 时必须提供非空 runtime_uncertainty 与 instrumentation.points（供下游打桩台直接消费）。请优先对标 dts_context 中的故障拓扑与 already_fixed_check 免疫判据，严防将已修复老单误报为新风险。',
+  ] : []),
   '若当前冻结生成 rubric 含 FIRST-CASE-DELIVERY，每条 test_case 首次 result-write 前由本 worker 在当前 action 完成逐例语义组织，写好一条即保存，不等 Reviewer；未提供该段的旧 Run 沿用原合同，不追补历史记录。续接/压缩/修复先恢复缺失的 analysis_settings、target/focus、单元 purpose/归属及工具参考：task-open 后沿 deferred_fields 的 input_id 用 input-read 分页读取，复用已读冻结依据。',
   '普通记录的 --records-file 是 UTF-8 JSON 数组，每项外壳仅为 {"kind":"当前冻结规则要求的记录类型","body":由你撰写的正文}，可带 evidence/relates_to/supersedes。note/summary/evidence 的 body 可为中文 Markdown；test_case/flow/risk/check 的 body 按本任务冻结样例和声明的合同填写，不包第二层 body，不写 binding/revision/completion 整个结果外壳，不自行生成 record_id。此说明不允许用 note 替代必须交付的结构化记录。',
   '先 result-read --view compact 获取当前 revision；完成一组有依据的分析即 result-write --expected-revision N --records-file <scratch内文件> 增量保存，携带全部 binding 参数，下一次 N 使用成功返回的 revision。不要把已核实内容留到全部探索结束才一次性提交。保存成功不等于语义完整，继续完成冻结规则要求的全部流程、用例、证据及自检。',

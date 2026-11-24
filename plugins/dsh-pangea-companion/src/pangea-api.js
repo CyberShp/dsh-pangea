@@ -295,3 +295,33 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
 export function supportsSourceFirst(capabilities) {
   return capabilities?.workflow_versions?.includes(SOURCE_FIRST_VERSION) || capabilities?.source_first?.version === SOURCE_FIRST_VERSION
 }
+
+export async function listDtsPatterns(cwd, { dataRoot, track, status, query, cursor, limit } = {}, runner = runPangea) {
+  const args = ['dts-patterns', 'list']
+  if (dataRoot) args.push('--data-root', String(dataRoot))
+  if (track) args.push('--track', String(track))
+  if (status) args.push('--status', String(status))
+  if (query) args.push('--query', String(query))
+  if (Number.isInteger(cursor)) args.push('--cursor', String(cursor))
+  if (Number.isInteger(limit)) args.push('--limit', String(limit))
+  return runSourceFirstCommand(cwd, args, runner)
+}
+
+export async function getDtsPattern(cwd, { dataRoot, patternId }, runner = runPangea) {
+  const args = ['dts-patterns', 'get', '--pattern-id', String(patternId)]
+  if (dataRoot) args.push('--data-root', String(dataRoot))
+  return runSourceFirstCommand(cwd, args, runner)
+}
+
+export async function ingestDtsFile(cwd, { dataRoot, filePath, sourceKind }, runner = runPangea) {
+  const args = ['dts-patterns', 'ingest', '--path', String(filePath)]
+  if (dataRoot) args.push('--data-root', String(dataRoot))
+  if (sourceKind) args.push('--source-kind', String(sourceKind))
+  return runSourceFirstCommand(cwd, args, runner)
+}
+
+export async function setDtsPatternStatus(cwd, { dataRoot, patternId, status }, runner = runPangea) {
+  const args = ['dts-patterns', 'set-status', '--pattern-id', String(patternId), '--status', String(status)]
+  if (dataRoot) args.push('--data-root', String(dataRoot))
+  return runSourceFirstCommand(cwd, args, runner)
+}

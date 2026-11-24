@@ -161,6 +161,13 @@ export function sourceFirstProjection(artifacts) {
     if (kind === 'check') result.checks.push(row)
     else if (kind === 'risk') {
       result.risks.push({ ...row, risk_id: row.projection_id, severity: plain(row.severity) || undefined,
+        track: plain(row.track) || undefined,
+        verification_status: plain(row.verification_status) || undefined,
+        entity_ref: plain(row.entity_ref) || undefined,
+        matched_dts_pattern_ids: strings(row.matched_dts_pattern_ids),
+        interleaving_or_path: strings(row.interleaving_or_path),
+        runtime_uncertainty: plain(row.runtime_uncertainty) || undefined,
+        instrumentation: row.instrumentation && typeof row.instrumentation === 'object' ? row.instrumentation : undefined,
         narrative: plain(row.narrative ?? row.description), impact: plain(row.impact), expectation: plain(row.expectation ?? row.correct_expectation), current_behavior: plain(row.current_behavior),
         dfx: strings(row.dfx), trigger: plain(row.trigger), system_result: plain(row.system_result ?? row.result ?? row.behavior),
         external_observation: plain(row.external_observation ?? row.observed ?? row.user_impact), exclusion_condition: plain(row.exclusion_condition),
