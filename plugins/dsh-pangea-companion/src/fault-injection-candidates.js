@@ -423,11 +423,12 @@ export function buildVerificationShellScript(task, { buildVariant = null } = {})
     }
     lines.push('')
   }
+  const quote = text => "'" + String(text).replace(/'/g, "'\\''") + "'"
   for (const profile of profiles) {
     const caseInfo = (task?.cases || []).find(item => item.case_key === profile.case_key)
     const title = shellQuoteComment(caseInfo?.title || profile.case_key)
     const pointIds = Array.isArray(profile.point_ids) ? profile.point_ids : []
-    lines.push(`echo "[PANGEA_CASE_BEGIN] case=${profile.case_key} points=${pointIds.join(',')}"`)
+    lines.push(`echo ${quote(`[PANGEA_CASE_BEGIN] case=${profile.case_key} points=${pointIds.join(',')}`)}`)
     lines.push(`# 用例: ${title}`)
     for (const pid of pointIds) {
       const pt = pointById.get(pid)
@@ -438,7 +439,6 @@ export function buildVerificationShellScript(task, { buildVariant = null } = {})
     const safety = profile.safety
     if (task?.generation_contract_version >= 2 && !safety) throw new Error('缺少安全验证合同，请重新生成')
     if (safety) {
-      const quote = text => "'" + String(text).replace(/'/g, "'\\''") + "'"
       lines.push(
         `trap 'kill -TERM "$__pangea_case_pid" 2>/dev/null || true; wait "$__pangea_case_pid" || true; exit 130' INT`,
         `trap 'kill -TERM "$__pangea_case_pid" 2>/dev/null || true; wait "$__pangea_case_pid" || true; exit 143' TERM`,
@@ -473,7 +473,7 @@ export function buildVerificationShellScript(task, { buildVariant = null } = {})
       if (text.trim()) lines.push(text)
     }
     if (safety) lines.push(') &', '__pangea_case_pid=$!', 'wait "$__pangea_case_pid"', 'trap - INT TERM')
-    else lines.push(`echo "[PANGEA_CASE_END] case=${profile.case_key} status=0"`)
+    else lines.push(`echo ${quote(`[PANGEA_CASE_END] case=${profile.case_key} status=0`)}`)
     lines.push('')
   }
   return lines.join('\n')
@@ -591,14 +591,32 @@ export function parseVerificationLog(logText, task) {
     }
     const incompleteSafety = task.generation_contract_version >= 2
       && (begunCases.has(caseKey) || structured || observedPairs.length > 0) && (!endedCases.has(caseKey) || !cleanupCases.has(caseKey))
-    if (failedCases.has(caseKey) || incompleteSafety) result = 'failed'
+    const isInfraError = failedCases.has(caseKey) || incompleteSafety
+    if (isInfraError) result = 'failed'
     if (!result && !hits) continue
+    const finalResult = result || 'passed'
+    const executionStatus = isInfraError
+      ? 'infra_error'
+      : finalResult === 'not_run'
+        ? 'not_run'
+        : 'completed'
+    const riskVerdict = isInfraError
+      ? 'unknown'
+      : finalResult === 'not_triggered'
+        ? 'not_triggered'
+        : finalResult === 'not_run'
+          ? 'blocked'
+          : finalResult === 'failed'
+            ? 'confirmed'
+            : 'excluded'
     const excerptLines = [zeroTestLine, structured?.line, ...matchedLines].filter(Boolean)
     entries.push({
       case_key: caseKey,
-      result: result || 'passed',
+      result: finalResult,
+      execution_status: executionStatus,
+      risk_verdict: riskVerdict,
       hits: hits || (expectedPointIds.length ? expectedPointIds.map(pid => `${pid}=0`).join(', ') : ''),
-      notes: failedCases.has(caseKey) || incompleteSafety
+      notes: isInfraError
         ? '执行退出码非零、清理失败或缺少完整退出清理记录；不能判为通过'
         : hasZeroTests
         ? `检测到 0 条测试实际执行（未触发桩点）：\n${zeroTestLine}`

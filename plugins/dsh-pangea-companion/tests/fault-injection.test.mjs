@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
@@ -974,6 +974,18 @@ test('restore_baseline build clears injected changes on remote personal branch w
   assert.equal(again.status, 'pushed', again.error)
   assert.equal(again.repositories[0].push_result, 'unchanged')
   assert.equal(again.repositories[0].commit, restored.repositories[0].commit)
+
+  // F1: Building a fault-injection task AFTER restore_baseline must NOT trigger false REMOTE_BRANCH_DIVERGED
+  const rebuiltAfterRestore = await service.build(f.dataRoot, {
+    items: [{ run_id: f.run.run_id, task_id: task.id }],
+    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
+  })
+  assert.equal(rebuiltAfterRestore.status, 'pushed', rebuiltAfterRestore.error)
+  assert.equal(rebuiltAfterRestore.error_code, undefined)
+
+  // F7: Branch locks must live under dataRoot/.pangea/locks, never inside user repo .git
+  const gitEntries = await readdir(path.join(source, '.git'))
+  assert.ok(!gitEntries.some(name => name.startsWith('pangea-injection-') && name.endsWith('.lock')))
 })
 
 test('WP1.3: multi-task build three-way merges overlapping CMakeLists.txt appends and still blocks true semantic line conflicts', async t => {

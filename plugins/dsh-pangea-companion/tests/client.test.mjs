@@ -870,7 +870,7 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   assert.match(source, /snapshotPollInterval\(value\)/)
   assert.match(source, /同步失败，继续显示上次结果/)
   assert.match(source, /finally \{[\s\S]*sequence === workbenchRequestRef\.current\.sequence\) setWorkbenchLoading\(false\)/)
-  assert.match(source, /\['injection', 'home', 'tasks', 'create', 'repository-import', 'report', 'run-record'\]\.includes\(screen\.type\).*header/)
+  assert.match(source, /\['injection', 'home', 'tasks', 'create', 'environment', 'repository-import', 'report', 'run-record'\]\.includes\(screen\.type\).*header/)
   assert.doesNotMatch(source, /\$\{selectedTask\.title\} · \$\{selectedTask\.task_id\}/)
   // Product forms omit implementation IDs; raw review records may now label them.
   assert.doesNotMatch(source, /field\('任务编号'/)
@@ -913,12 +913,13 @@ test('PANGEA client registers the workbench and task-oriented product pages', as
   })
   assert.equal(pages.length, 5)
   assert.deepEqual(pages.map(page => page.id), ['workbench', 'analysis', 'injection', 'execution', 'agent-runtime'])
-  assert.deepEqual(pages.map(page => page.title()), ['工作台', 'PANGEA 分析', '代码打桩', '环境配置', 'Agent Runtime'])
+  assert.deepEqual(pages.map(page => page.title()), ['工作台', 'PANGEA 分析', '代码打桩', '真机核验', 'Agent Runtime'])
   assert.deepEqual(pages.map(page => page.order), [0, 10, 15, 20, 30])
   assert.equal(pages[2].available(null, { cwd: '/workspace' }), true)
   assert.equal(pages[2].available(null, {}), false)
   assert.equal(pages[4].available(), false)
-  assert.equal(pages[3].available(), false)
+  assert.equal(pages[3].available(null, { cwd: '/workspace' }), true)
+  assert.equal(pages[3].available(null, {}), false)
 })
 
 test('shows a health alert only for an actual reader warning', async () => {

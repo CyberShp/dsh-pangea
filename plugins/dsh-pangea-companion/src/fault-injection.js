@@ -1397,11 +1397,11 @@ export class FaultInjectionService {
     }
     return { builds, latestAny, latestPushed }
   }
-  async collectRecordedInjectionCommits(dataRoot, repoId) {
+  async collectRecordedInjectionCommits(dataRoot, repoId, { includeRestore = false, limit = 64 } = {}) {
     const root = await realpath(dataRoot)
     const seen = new Map()
     const addCommit = (commit, source_type, source_id) => {
-      if (typeof commit === 'string' && /^[0-9a-f]{7,64}$/i.test(commit) && !seen.has(commit) && seen.size < 64) {
+      if (typeof commit === 'string' && /^[0-9a-f]{7,64}$/i.test(commit) && !seen.has(commit) && seen.size < limit) {
         seen.set(commit, { commit, source_type, source_id })
       }
     }
@@ -1411,9 +1411,11 @@ export class FaultInjectionService {
         if (!entry.isDirectory() || !id(entry.name)) continue
         try {
           const build = JSON.parse(await readFile(path.join(buildsDir, entry.name, 'build.json'), 'utf8'))
-          if (build?.restore_baseline) continue
+          if (build?.restore_baseline && !includeRestore) continue
           for (const repo of build?.repositories || []) {
-            if (repo?.repo_id === repoId && repo.commit && repo.push_result !== 'unchanged') addCommit(repo.commit, 'build', entry.name)
+            if (repo?.repo_id === repoId && repo.commit && repo.push_result !== 'unchanged') {
+              addCommit(repo.commit, build?.restore_baseline ? 'restore_baseline' : 'build', entry.name)
+            }
           }
         } catch {}
       }
@@ -2004,11 +2006,14 @@ export class FaultInjectionService {
     try { return await work } finally { this.queues.delete(key) }
   }
   async branchExclusive(record, callback, signal, dataRoot) {
+    const locksDir = path.join(await realpath(dataRoot), '.pangea', 'locks')
+    await mkdir(locksDir, { recursive: true })
     const keys = []
     for (const repo of record.repositories) {
       const common = await this.git(repo.source_path, ['rev-parse', '--git-common-dir'])
+      const commonReal = await realpath(path.resolve(repo.source_path, common))
       const branchLockName = repo.remote_branch || repo.personal_branch || repo.branch
-      keys.push(path.join(await realpath(path.resolve(repo.source_path, common)), `pangea-injection-${hash(branchLockName).slice(0, 24)}.lock`))
+      keys.push(path.join(locksDir, `branch-${hash(`${commonReal}\0${branchLockName}`).slice(0, 32)}.lock`))
     }
     const releases = []
     try {
@@ -2031,18 +2036,25 @@ export class FaultInjectionService {
         try { handle = await open(key, 'wx') }
         catch (error) {
           if (error.code !== 'EEXIST') throw error
-          let owner
+          let owner = null
           try { owner = JSON.parse(await readFile(key, 'utf8')) } catch {}
           let dead = false
           if (Number.isInteger(owner?.pid) && owner.pid > 0) {
             try { process.kill(owner.pid, 0) } catch (reason) { dead = reason.code === 'ESRCH' }
+          } else {
+            try {
+              const info = await lstat(key)
+              if (Date.now() - info.mtimeMs > 10_000) dead = true
+            } catch (statError) {
+              if (statError.code === 'ENOENT') dead = true
+            }
           }
-          if (!dead) throw serviceError('同一分支正在被另一出包操作使用，请稍后重试', 409)
-          await unlink(key)
+          if (!dead) throw serviceError(`同一分支正在被另一出包操作使用，请稍后重试（锁文件：${key}）`, 409)
+          await unlink(key).catch(unlinkError => { if (unlinkError.code !== 'ENOENT') throw unlinkError })
           handle = await open(key, 'wx')
         }
-        releases.push(async () => { await handle.close(); await unlink(key) })
-        await handle.writeFile(JSON.stringify({ pid: process.pid, build: record.id }))
+        releases.push(async () => { await handle.close(); await unlink(key).catch(() => {}) })
+        await handle.writeFile(JSON.stringify({ pid: process.pid, build: record.id, created_at: Date.now() }))
       }
       const ids = [...new Set(record.repositories.map(repo => repo.repo_id))].sort()
       const guarded = (index, inheritedSignal) => index === ids.length ? callback(inheritedSignal) : repositoryOperation(dataRoot, ids[index], operationSignal => guarded(index + 1, operationSignal), { signal: inheritedSignal })
@@ -2553,10 +2565,10 @@ export class FaultInjectionService {
               if (!repo.commit || repo.remote_head !== remoteHead || repo.committed_message !== desiredMessage) {
                 if (remoteHead !== repo.base_commit) {
                   let rawDiverged = ''
-                  try { rawDiverged = await this.git(repo.checkout, ['log', '--format=%H\t%s', '-n', '20', `${repo.base_commit}..${remoteHead}`], lockSignal) }
+                  try { rawDiverged = await this.git(repo.checkout, ['log', '--format=%H\t%s', `${repo.base_commit}..${remoteHead}`], lockSignal) }
                   catch { lockSignal.throwIfAborted() }
                   if (rawDiverged) {
-                    const knownSet = new Set((await this.collectRecordedInjectionCommits(dataRoot, repo.repo_id)).map(item => item.commit))
+                    const knownSet = new Set((await this.collectRecordedInjectionCommits(dataRoot, repo.repo_id, { includeRestore: true, limit: Infinity })).map(item => item.commit))
                     const unknownCommits = rawDiverged.split(/\r?\n/).filter(Boolean).map(line => {
                       const tab = line.indexOf('\t')
                       return tab > 0 ? { commit: line.slice(0, tab).trim(), subject: line.slice(tab + 1).trim() } : { commit: line.trim(), subject: '' }
@@ -2698,8 +2710,22 @@ export class FaultInjectionService {
       if (input.verification) {
         const value = input.verification
         if (!record.case_keys.includes(value.case_key) || !['not_run', 'passed', 'failed', 'not_triggered'].includes(value.result)) throw serviceError('验证用例或结果无效')
-        record.verification.push({ case_key: value.case_key, result: value.result, notes: String(value.notes || ''),
-          hits: String(value.hits || ''), build: structuredClone(record.build), at: new Date().toISOString() })
+        const executionStatus = ['completed', 'infra_error', 'not_run'].includes(value.execution_status)
+          ? value.execution_status
+          : (value.result === 'not_run' ? 'not_run' : 'completed')
+        const riskVerdict = ['confirmed', 'excluded', 'not_triggered', 'blocked', 'unknown'].includes(value.risk_verdict)
+          ? value.risk_verdict
+          : (value.result === 'failed' ? 'confirmed' : value.result === 'passed' ? 'excluded' : value.result === 'not_triggered' ? 'not_triggered' : 'blocked')
+        record.verification.push({
+          case_key: value.case_key,
+          result: value.result,
+          execution_status: executionStatus,
+          risk_verdict: riskVerdict,
+          notes: String(value.notes || ''),
+          hits: String(value.hits || ''),
+          build: structuredClone(record.build),
+          at: new Date().toISOString(),
+        })
       }
       const persisted = { ...record }
       delete persisted.latest_build

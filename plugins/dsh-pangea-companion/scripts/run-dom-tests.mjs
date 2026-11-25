@@ -8,6 +8,7 @@ const suites = [
   'tests/fault-injection-dom.mjs',
   'tests/fault-injection-workspace-dom.mjs',
   'tests/repository-settings-dom.mjs',
+  'tests/live-verification-dom.mjs',
 ]
 
 let hasHappyDom = false

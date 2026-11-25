@@ -38,6 +38,7 @@ window.__ModuleLoader__.load({
     const FaultInjectionTaskDetail = __faultInjectionView.createFaultInjectionTaskDetail(React)
     const FaultInjectionHome = __faultInjectionView.createFaultInjectionHome(React)
     const FaultInjectionBuild = __faultInjectionView.createFaultInjectionBuild(React)
+    const LiveVerificationWorkspace = __liveVerificationView.createLiveVerificationWorkspace(React)
     const { classifyRiskGrounding, summarizeIncrementalInputs } = __riskIncrementalInsights
     function sourceFirstRecordBody(body) {
       if (body == null) return ''
@@ -4025,6 +4026,7 @@ window.__ModuleLoader__.load({
       const [injectionBuild, setInjectionBuild] = React.useState(null)
       const [injectionReload, setInjectionReload] = React.useState(0)
       const [injectionDraft, setInjectionDraft] = React.useState(() => ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
+      const [liveVerificationDraft, setLiveVerificationDraft] = React.useState(() => ctx?.pangea?.getLiveVerificationDraft?.() ?? { requestId: 0, targets: [] })
       const [riskGroundingFilter, setRiskGroundingFilter] = React.useState('all')
       const handledInjectionDraftRequest = React.useRef(0)
       React.useEffect(() => {
@@ -4032,6 +4034,12 @@ window.__ModuleLoader__.load({
         const sync = () => setInjectionDraft(ctx?.pangea?.getInjectionDraft?.() ?? { requestId: 0, caseKeys: [] })
         sync()
         return ctx?.pangea?.subscribeInjectionDraft?.(sync)
+      }, [ctx?.pangea, pageMode])
+      React.useEffect(() => {
+        if (pageMode !== 'execution') return undefined
+        const sync = () => setLiveVerificationDraft(ctx?.pangea?.getLiveVerificationDraft?.() ?? { requestId: 0, targets: [] })
+        sync()
+        return ctx?.pangea?.subscribeLiveVerificationDraft?.(sync)
       }, [ctx?.pangea, pageMode])
       React.useEffect(() => {
         if (pageMode !== 'injection' || !injectionDraft?.requestId || injectionDraft.requestId === handledInjectionDraftRequest.current) return
@@ -7106,6 +7114,7 @@ window.__ModuleLoader__.load({
           const task = available.find(item => item.run_id === runId)
           return task ? taskDisplayName(task, allRuns.find(run => run.run_id === runId)) : `Run ${runId}（分析任务已删除或不在当前工作区）`
         }
+        const openLiveVerification = patch => ctx?.pangea?.requestLiveVerification?.(scope, patch)
         const matchedTasks = available.filter(task => [taskDisplayName(task), task.repository, task.target, task.run_id].filter(Boolean).join(' ').toLowerCase().includes(taskQuery.trim().toLowerCase()))
         return h('section', { className: 'pangea-injection-page', 'aria-label': '代码打桩工作区' },
           pageHeader({ title: '代码打桩', subtitle: '基于当前代码生成独立打桩补丁，按需勾选多个打桩任务合成并推送到个人测试分支。', ui: ctx.pangea?.ui, actions: renderRefreshButton() }),
@@ -7118,13 +7127,14 @@ window.__ModuleLoader__.load({
             analysisLabel,
             onOpenTask: openTask,
             onOpenPipeline: openPipeline,
+            onOpenLiveVerification: openLiveVerification,
             onBack: home,
           })
           : injectionTask ? h(React.Fragment, null,
             h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 } },
               h('span', { style: { fontSize: 13, color: '#6b7280' } }, `分析任务：${analysisLabel(injectionTask.run_id)}`),
               h('button', { type: 'button', className: 'b03-task-action', onClick: home }, '返回打桩任务列表')),
-            h(FaultInjectionTaskDetail, { key: `${cwd}:${dataRoot}:${injectionTask.run_id}:${injectionTask.task_id}:${injectionReload}`, runId: injectionTask.run_id, taskId: injectionTask.task_id, dataRoot, cwd, onSwitch: openTask, onOpenBuild: openBuild }))
+            h(FaultInjectionTaskDetail, { key: `${cwd}:${dataRoot}:${injectionTask.run_id}:${injectionTask.task_id}:${injectionReload}`, runId: injectionTask.run_id, taskId: injectionTask.task_id, dataRoot, cwd, onSwitch: openTask, onOpenBuild: openBuild, onOpenLiveVerification: openLiveVerification }))
           : injectionRun ? (current?.run_id !== injectionRun ? h('div', { className: 'b05-card', style: { padding: 24 } }, h('p', { role: error ? 'alert' : 'status', style: { margin: '0 0 12px' } }, error || '正在读取所选分析任务的用例…'), h('div', { style: { display: 'flex', gap: 10 } }, error ? h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void load({ foreground: true }) } }, '重试读取用例') : null, h('button', { type: 'button', className: 'b03-task-action', onClick: back }, '返回选择任务')))
           : h(FaultInjectionPanel, { key: `${cwd}:${current.data_root ?? snapshot?.data_root}:${injectionRun}`, standalone: true, onBack: () => { back(); setInjectionPicking(true) }, runId: injectionRun, dataRoot: current.data_root ?? snapshot?.data_root, cwd, cases: testCases,
             initialCaseKeys: injectionDraft?.runId === injectionRun ? injectionDraft.caseKeys : [],
@@ -7543,7 +7553,13 @@ window.__ModuleLoader__.load({
       else if (screen.type === 'case') body = renderCaseDetail()
       else if (screen.type === 'coverage-cases') body = renderCoverageCases()
       else if (screen.type === 'execution') body = renderExecutionResults()
-      else if (screen.type === 'environment') body = renderEnvironmentPage()
+      else if (screen.type === 'environment') body = h(LiveVerificationWorkspace, {
+        cwd,
+        dataRoot: snapshot?.data_root || workbench?.data_root || '',
+        draft: liveVerificationDraft,
+        defaultProviderId: createForm.provider_id || 'nga',
+        defaultAgentModel: createForm.agent_model || '',
+      })
       else if (screen.type === 'flows') body = renderFlows()
       else if (screen.type === 'coverage') body = renderCases()
       else if (screen.type === 'evidence') body = renderEvidence()
@@ -7572,7 +7588,7 @@ window.__ModuleLoader__.load({
       const flowScreen = screen.type === 'flows' && pageMode === 'analysis' && (selectedTask || current)
       const resultScreen = ['risks', 'risk', 'cases', 'case', 'coverage-cases'].includes(screen.type) && pageMode === 'analysis' && (selectedTask || current)
       const rootClassName = `pangea-companion${screen.type === 'home' ? ' b06-home-screen' : ''}${screen.type === 'tasks' || screen.type === 'injection' ? ' b03-task-screen' : ''}${screen.type === 'overview' || flowScreen || resultScreen ? ' b03-overview-screen' : ''}${flowScreen ? ' b04-flow-screen' : ''}${resultScreen ? ' b05-result-screen' : ''}`
-      const rootStyle = screen.type === 'home' || screen.type === 'tasks' || screen.type === 'injection' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
+      const rootStyle = screen.type === 'home' || screen.type === 'tasks' || screen.type === 'injection' || screen.type === 'environment' || flowScreen || resultScreen ? { ...styles.root, height: 'auto', minHeight: '100%', overflow: 'visible', background: '#f7f7f5', color: '#25292e', fontFamily: 'var(--pangea-font, "Segoe UI", "Microsoft YaHei UI", sans-serif)', fontSynthesis: 'none', WebkitFontSmoothing: 'auto', textRendering: 'auto' } : styles.root
       const flowTargetLabel = taskDisplayName(selectedTask, current)
       const resultScopeLabel = [selectedTask?.repository || current?.repository || '当前仓库',
         selectedTask?.source_scope?.join('、')].filter(Boolean).join(' / ')
@@ -7582,13 +7598,13 @@ window.__ModuleLoader__.load({
       const resultHeader = resultScreen ? h(React.Fragment, null,
         pageHeader({ title: taskDisplayName(selectedTask, current), task: selectedTask, current, contextLabel: ['cases', 'coverage-cases'].includes(screen.type) ? '测试用例' : screen.type === 'case' ? '用例详情' : screenTitle, ui: ctx.pangea?.ui, onBack: ['risk', 'case', 'coverage-cases'].includes(screen.type) ? goBack : () => jump('tasks'), backLabel: screen.type === 'case' ? '返回用例' : screen.type === 'risk' ? '返回风险' : '返回任务列表', actions: derivationButton(screen.type === 'case' ? caseById.get(screen.id) : screen.type === 'risk' ? riskById.get(screen.id) : undefined) }), navigation) : null
       if (screen.type === 'workflow') return h('div', { ref: panelRootRef, className: 'pangea-companion', style: styles.root }, h('style', null, panelCss), monitorPersistenceNotice, renderSourceFirstWorkflow())
-      return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : pageMode === 'injection' ? 'PANGEA 代码打桩' : 'PANGEA 执行环境' },
+      return h('div', { ref: panelRootRef, className: rootClassName, style: rootStyle, role: 'region', 'aria-label': pageMode === 'home' ? 'PANGEA 测试工作台' : pageMode === 'analysis' ? 'PANGEA 分析' : pageMode === 'injection' ? 'PANGEA 代码打桩' : 'PANGEA 真机核验' },
         h('style', null, panelCss),
         taskActionDialog ? h(TaskLifecycleDialog, { state: { ...taskActionDialog, task: taskItems.find(task => task.task_id === taskActionDialog.task.task_id && task.attempt_id === taskActionDialog.task.attempt_id) ?? taskActionDialog.task }, onRefresh: () => { void loadWorkbench({ background: true }) },
           onClose: () => { if (!taskActionDialog.busy) setTaskActionDialog(null) }, onConfirm: () => { void confirmTaskAction() } }) : null,
         derivation ? h(RunDerivationDialog, { state: derivation, onChange: draft => setDerivation(value => value && ({ ...value, draft })),
           onClose: closeDerivation, onSubmit: input => { void submitDerivation(input) }, onRetry: () => { void openDerivation(null, derivation) } }) : null,
-        ['injection', 'home', 'tasks', 'create', 'repository-import', 'report', 'run-record'].includes(screen.type) || (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? null : header,
+        ['injection', 'home', 'tasks', 'create', 'environment', 'repository-import', 'report', 'run-record'].includes(screen.type) || (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? null : header,
         h('div', { className: 'pangea-content', style: screen.type === 'home' || screen.type === 'injection' ? { padding: '24px 31px 30px', maxWidth: 'none', margin: 0 }
             : screen.type === 'tasks' ? { padding: '25px 31px 27px', maxWidth: 'none', margin: 0 }
               : (screen.type === 'overview' && selectedTask) || flowScreen || resultScreen ? { padding: '24px 31px 27px', maxWidth: 'none', margin: 0 }
@@ -7616,8 +7632,8 @@ window.__ModuleLoader__.load({
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'injection', pageMode: 'injection', panelCache }),
       }), 'dsh-pangea-companion: injection page')
       ctx.effect(() => pangea.registerPage({
-        id: 'execution', title: () => '环境配置', icon, order: 20,
-        available: () => false,
+        id: 'execution', title: () => '真机核验', icon, order: 20,
+        available: (_ctx, scope) => Boolean(scope?.cwd),
         component: props => h(PangeaPanel, { ...props, ctx, initialScreen: 'environment', pageMode: 'execution', panelCache }),
       }), 'dsh-pangea-companion: execution page')
       ctx.effect(() => pangea.registerPage({

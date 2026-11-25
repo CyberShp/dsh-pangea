@@ -77,6 +77,16 @@ test('buildVerificationShellScript and parseVerificationLog support structured m
   assert.match(script, /\[PANGEA_CASE_END\] case=unit\/A status=0/)
   assert.doesNotMatch(script, /\[PANGEA_VERIFY\].*result=passed/, 'generated script must never self-certify hits=1')
 
+  const quotedScript = buildVerificationShellScript({
+    ...task,
+    result: {
+      ...task.result,
+      profiles: [{ case_key: 'unit/$(id)', point_ids: ['FI_TIMEOUT'], steps: ['true'] }],
+    },
+  })
+  assert.match(quotedScript, /echo '\[PANGEA_CASE_BEGIN\] case=unit\/\$\(id\) points=FI_TIMEOUT'/)
+  assert.match(quotedScript, /echo '\[PANGEA_CASE_END\] case=unit\/\$\(id\) status=0'/)
+
   const fromStructured = parseVerificationLog([
     '[PANGEA_CASE_BEGIN] case=unit/A points=FI_TIMEOUT',
     '[PANGEA_VERIFY] case=unit/A result=passed hits=FI_TIMEOUT=3',
@@ -126,7 +136,18 @@ test('buildVerificationShellScript and parseVerificationLog support structured m
   assert.equal(fromRawSyslog.matchedCount, 1)
   assert.equal(fromRawSyslog.entries[0].case_key, 'unit/A')
   assert.equal(fromRawSyslog.entries[0].result, 'failed')
+  assert.equal(fromRawSyslog.entries[0].execution_status, 'completed')
+  assert.equal(fromRawSyslog.entries[0].risk_verdict, 'confirmed')
   assert.equal(fromRawSyslog.entries[0].hits, 'FI_TIMEOUT=2')
+
+  const infraFailure = parseVerificationLog([
+    '[PANGEA_CASE_BEGIN] case=unit/A points=FI_TIMEOUT',
+    '[PANGEA_CLEANUP] case=unit/A cleanup=1 verify=0',
+    '[PANGEA_CASE_END] case=unit/A status=125',
+  ].join('\n'), task)
+  assert.equal(infraFailure.entries[0].result, 'failed')
+  assert.equal(infraFailure.entries[0].execution_status, 'infra_error')
+  assert.equal(infraFailure.entries[0].risk_verdict, 'unknown')
 })
 
 test('summarizeRunVerifications projects read-only overlay onto case-reviews without altering Run hash or bytes', async t => {

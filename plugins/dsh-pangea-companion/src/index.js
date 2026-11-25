@@ -9,7 +9,7 @@ import { inspectSourceFirstChildren, interruptSourceFirstChildren } from './repo
 import { processPresence, readAcpBindings } from './acp-recovery.js'
 import { randomUUID } from 'node:crypto'
 import { listViews, viewArtifact } from './architecture-views.js'
-import { companionSnapshot, discoverPangeaDataRoot, summarizeRun } from './reader.js'
+import { companionSnapshot, discoverPangeaDataRoot, listRuns, summarizeRun } from './reader.js'
 import { parseEvidenceLocation, readEvidenceSnippet, readSavedSupplementalSources } from './source.js'
 import { buildTestCaseCsv, buildTestCaseXlsx, buildTestCaseCsvBundle } from './export.js'
 import { buildOfflineReport, reportSnapshotHash } from './offline-report.js'
@@ -24,8 +24,8 @@ import { createLaunchLogStore } from './launch-log.js'
 import { createAcpSettingsStore } from './acp-settings.js'
 import { discoverAgentModels, requireAgentModel, requireExternalAnalysisProvider } from './agent-models.js'
 import { EnvironmentStore } from './execution/environment.js'
-import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
+import { LiveVerificationService, createLiveVerificationRunner } from './live-verification.js'
 import { createRun, ingestDtsFile, listDtsPatterns, runSourceFirstCommand, runPangea, setDtsPatternStatus, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { inspectSource, configureRepository } from './repositories/git-source.js'
@@ -46,7 +46,7 @@ const EXPORT_API_PATH = '/api/pangea-companion/export'
 const CASE_REVIEW_API_PATH = '/api/pangea-companion/case-reviews'
 const FAULT_INJECTION_API_PATH = '/api/pangea-companion/fault-injection'
 const ENVIRONMENT_API_PATH = '/api/pangea-companion/environments'
-const EXECUTION_API_PATH = '/api/pangea-companion/executions'
+const LIVE_VERIFICATION_API_PATH = '/api/pangea-companion/live-verification'
 const WORKBENCH_API_PATH = '/api/pangea-companion/workbench'
 const LAUNCH_LOG_API_PATH = '/api/pangea-companion/launch-log'
 const REPOSITORY_API_PATH = '/api/pangea-companion/repositories'
@@ -382,19 +382,25 @@ async function launchLogRouteHandler(req, res, launchLogs) {
   }
 }
 
-async function environmentRouteHandler(req, res, store, ssh) {
+export async function environmentRouteHandler(req, res, store, ssh, liveVerification = null) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   try {
-    if (req.method === 'GET') return json(res, 200, { status: 'ok', environments: await store.list() })
+    if (req.method === 'GET') {
+      return json(res, 200, { status: 'ok', environments: await store.list(), locks: liveVerification?.getLocks?.() ?? {} })
+    }
     if (req.method === 'POST') {
       const input = await requestJson(req)
       if (input?.action === 'test') return json(res, 200, { status: 'ok', result: await ssh.test(input.endpoint) })
+      const lock = input?.id ? liveVerification?.getEnvironmentLock?.(String(input.id).trim()) : null
+      if (lock) return json(res, 409, { status: 'error', error: `该环境正被真机核验任务「${lock.verify_id}」占用，请等待完成或停止后再修改` })
       return json(res, 200, { status: 'ok', environment: await store.save(input) })
     }
     if (req.method === 'DELETE') {
       const url = new URL(req.url ?? ENVIRONMENT_API_PATH, 'http://localhost')
       const id = url.searchParams.get('id')
       if (!id) return json(res, 400, { status: 'error', error: 'id-is-required' })
+      const lock = liveVerification?.getEnvironmentLock?.(id)
+      if (lock) return json(res, 409, { status: 'error', error: `该环境正被真机核验任务「${lock.verify_id}」占用，请等待完成或停止后再删除` })
       return json(res, 200, { status: 'ok', removed: await store.remove(id) })
     }
     return json(res, 405, { status: 'error', error: 'method-not-allowed' })
@@ -403,21 +409,305 @@ async function environmentRouteHandler(req, res, store, ssh) {
   }
 }
 
-async function executionRouteHandler(req, res, store, api) {
-  if (req.method !== 'POST') return json(res, 405, { status: 'error', error: 'method-not-allowed' })
+async function readFrozenToolReferenceFiles(dataRoot, runId) {
+  if (!dataRoot || !runId || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId)) return []
+  try {
+    const sourceRoot = path.resolve(dataRoot, 'runs', runId, 'inputs', 'source')
+    const manifestPath = path.join(dataRoot, 'runs', runId, 'inputs', 'source-manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    const contextFiles = Array.isArray(manifest?.scope_expansion?.context_files) ? manifest.scope_expansion.context_files : []
+    const files = []
+    const seen = new Set()
+    for (const item of contextFiles) {
+      if (item?.reason !== 'test_tool_reference') continue
+      const repoId = typeof item?.repo_id === 'string' ? item.repo_id.trim() : ''
+      const rel = typeof item?.path === 'string' ? item.path.trim().replaceAll('\\', '/') : ''
+      if (!repoId || !rel || /[\\/:\x00-\x1f]/.test(repoId) || repoId === '.' || repoId === '..') continue
+      const resolved = path.resolve(sourceRoot, repoId, rel)
+      const relative = path.relative(sourceRoot, resolved)
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue
+      const dedupeKey = `${repoId}\0${rel}`
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+      files.push({
+        repo_id: repoId,
+        relative_path: rel,
+        frozen_path: resolved,
+      })
+      if (files.length >= 40) return files
+    }
+    return files
+  } catch {
+    return []
+  }
+}
+
+function compactAnalysisRisks(risks = [], limit = 16) {
+  const seen = new Set()
+  const out = []
+  for (const r of risks) {
+    const id = r?.risk_id || r?.projection_id || ''
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    const body = r?.source_record?.body && typeof r.source_record.body === 'object' ? r.source_record.body : {}
+    out.push({
+      risk_id: id,
+      ...(r.display_id ? { display_id: r.display_id } : {}),
+      title: r.title || id,
+      ...(r.severity ? { severity: r.severity } : {}),
+      ...(r.trigger || body.trigger ? { trigger: r.trigger || body.trigger } : {}),
+      ...(r.system_result || body.system_result ? { system_result: r.system_result || body.system_result } : {}),
+      ...(r.external_observation || body.external_observation ? { external_observation: r.external_observation || body.external_observation } : {}),
+      ...(r.exclusion_condition || body.exclusion_condition ? { exclusion_condition: r.exclusion_condition || body.exclusion_condition } : {}),
+      ...(Array.isArray(r.source_evidence) && r.source_evidence.length ? { source_evidence: r.source_evidence.slice(0, 10) } : {}),
+    })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+function hydrateTargetFromItem(item, { sourceFiTaskId = null, sourceRunId = null } = {}) {
+  const body = item?.source_record?.body && typeof item.source_record.body === 'object' ? item.source_record.body : {}
+  const targetKey = String(item?.target_key || item?.case_key || item?.risk_id || item?.projection_id || item?.test_case_id || item?.key || '').trim()
+  const kind = item?.kind === 'risk' || Boolean(item?.risk_id && !item?.case_key && !item?.test_case_id) ? 'risk' : 'case'
+  const expectedResults = item?.expected_results || body?.expected_results || item?.expected || body?.expected || undefined
+  return {
+    target_key: targetKey,
+    ...(item?.display_id ? { display_id: String(item.display_id).trim() } : {}),
+    title: String(item?.title || targetKey).trim(),
+    kind,
+    severity: item?.severity || '',
+    trigger: item?.trigger || body?.trigger || '',
+    interleaving_or_path: Array.isArray(item?.interleaving_or_path) ? item.interleaving_or_path : (Array.isArray(body?.interleaving_or_path) ? body.interleaving_or_path : undefined),
+    system_result: item?.system_result || body?.system_result || '',
+    runtime_uncertainty: item?.runtime_uncertainty || body?.runtime_uncertainty || '',
+    external_observation: item?.external_observation || body?.external_observation || '',
+    exclusion_condition: item?.exclusion_condition || body?.exclusion_condition || '',
+    entry: item?.entry || body?.entry || '',
+    preconditions: item?.preconditions || body?.preconditions || undefined,
+    steps: item?.step_pairs?.length ? item.step_pairs : (item?.steps || body?.steps || undefined),
+    ...(expectedResults ? { expected_results: expectedResults } : {}),
+    observability: item?.observability || item?.external_observations || body?.external_observations || undefined,
+    cleanup: item?.cleanup || body?.cleanup || undefined,
+    source_evidence: Array.isArray(item?.source_evidence) ? item.source_evidence : undefined,
+    ...(sourceFiTaskId ? { source_fi_task_id: sourceFiTaskId } : {}),
+    ...(sourceRunId ? { source_run_id: sourceRunId } : {}),
+  }
+}
+
+export async function liveVerificationRouteHandler(req, res, service, faultInjection, runtime, { resolveRoot = discoverPangeaDataRoot, readRun = summarizeRun, readRuns = listRuns, readSnapshot = null } = {}) {
   if (!sameOriginBrowserRequest(req)) return json(res, 403, { status: 'error', error: 'same-origin-browser-request-required' })
   try {
-    const input = await requestJson(req)
-    if (typeof input.analysis_run_id !== 'string' || input.analysis_run_id === '') throw new Error('analysis_run_id is required')
-    if (!Array.isArray(input.test_case_ids) || input.test_case_ids.length === 0 || input.test_case_ids.some(value => typeof value !== 'string' || value === '')) {
-      throw new Error('test_case_ids must be a non-empty string array')
+    if (req.method === 'GET') {
+      const url = new URL(req.url ?? LIVE_VERIFICATION_API_PATH, 'http://localhost')
+      const cwd = url.searchParams.get('cwd') ?? undefined
+      const dataRootParam = url.searchParams.get('data_root') ?? undefined
+      const dataRoot = await resolveRoot({ cwd, dataRoot: dataRootParam })
+      const view = url.searchParams.get('view')
+      if (view === 'run-candidates') {
+        const runId = url.searchParams.get('run_id')
+        if (!runId) {
+          const rawRuns = readSnapshot
+            ? (await readSnapshot({ cwd, dataRoot, limit: 30 }).catch(() => ({ runs: [] })))?.runs
+            : await readRuns(dataRoot, { limit: 30 }).catch(() => [])
+          const runs = (Array.isArray(rawRuns) ? rawRuns : []).map(r => ({
+            run_id: r.run_id,
+            title: r.target || r.repository || r.run_id,
+            repository: r.repository || '',
+            scenario: r.scenario || '',
+            status: r.lifecycle_status || r.status || '',
+            risk_count: r.counts?.risks ?? 0,
+            case_count: r.counts?.test_cases ?? 0,
+          }))
+          return json(res, 200, { status: 'ok', runs })
+        }
+        const run = await readRun(dataRoot, runId, { includeDetails: true })
+        const rawRisks = Array.isArray(run?.details?.risks) ? run.details.risks : []
+        const risks = rawRisks.map(r => ({
+          target_key: r.risk_id || r.projection_id || r.display_id || '',
+          ...(r.display_id ? { display_id: r.display_id } : {}),
+          title: r.title || r.risk_id || '',
+          kind: 'risk',
+          severity: r.severity || '',
+          verification_status: r.verification_status || r.source_record?.body?.verification_status || '',
+          trigger: r.trigger || r.reproduction || '',
+          external_observation: r.external_observation || r.observation || '',
+          exclusion_condition: r.exclusion_condition || r.source_record?.body?.exclusion_condition || '',
+        })).filter(r => r.target_key).sort((a, b) => (b.verification_status === 'needs_runtime_verification' ? 1 : 0) - (a.verification_status === 'needs_runtime_verification' ? 1 : 0))
+        const rawCases = Array.isArray(run?.details?.test_cases) ? run.details.test_cases : []
+        const testCases = rawCases.map(c => ({
+          target_key: c.projection_id || c.test_case_id || c.case_id || '',
+          ...(c.display_id ? { display_id: c.display_id } : {}),
+          title: c.title || c.test_case_id || '',
+          kind: 'case',
+          execution_readiness: c.execution_readiness || '',
+        })).filter(c => c.target_key)
+        return json(res, 200, { status: 'ok', run_id: runId, risks, test_cases: testCases })
+      }
+      const verifyId = url.searchParams.get('verify_id')
+      if (verifyId) {
+        const detail = await service.get(dataRoot, verifyId)
+        return json(res, 200, { status: 'ok', ...detail, locks: service.getLocks() })
+      }
+      const tasks = await service.list(dataRoot)
+      return json(res, 200, { status: 'ok', tasks, locks: service.getLocks() })
     }
-    if (typeof input.environment_id !== 'string' || input.environment_id === '') throw new Error('environment_id is required')
-    if (typeof input.data_root !== 'string' || input.data_root === '') throw new Error('data_root is required')
-    const environment = await store.get(input.environment_id)
-    if (!environment) throw new Error(`environment not found: ${input.environment_id}`)
-    const launched = await launchExecution(api, input, environment)
-    return json(res, 200, { status: 'ok', ...launched })
+    if (req.method === 'POST') {
+      try { updateAdmission(runtime)?.assertOpen() } catch (error) { return json(res, 409, { status: 'error', error: error.message }) }
+      const input = await requestJson(req)
+      const dataRoot = await resolveRoot({ cwd: input.cwd, dataRoot: input.data_root })
+      const action = input.action
+      if (action === 'start') {
+        const referenceWarnings = []
+        let enriched = { ...input, dataRoot }
+        if (input.mode !== 'direct_risk' && faultInjection) {
+          if (input.fault_injection_build_id && !input.fault_injection_task_id) {
+            const build = await faultInjection.readBuild(dataRoot, input.fault_injection_build_id)
+            const items = Array.isArray(build?.items) ? build.items : []
+            if (!items.length) throw Object.assign(new Error('所选合成出包不包含任何打桩任务'), { statusCode: 400 })
+            const mergedMarkers = new Set(Array.isArray(input.marker_strings) ? input.marker_strings : [])
+            const mergedPoints = []
+            const mergedProfiles = []
+            const mergedReplace = []
+            const mergedTargets = []
+            const mergedRisks = []
+            let firstRunId = input.run_id || ''
+            for (const item of items) {
+              if (!firstRunId && item.run_id) firstRunId = item.run_id
+              const fiTask = await faultInjection.read(dataRoot, item.run_id, item.task_id)
+              for (const m of (fiTask.result?.delivery?.marker_strings ?? fiTask.marker_strings ?? [])) mergedMarkers.add(m)
+              if (Array.isArray(fiTask.result?.points)) {
+                mergedPoints.push(...fiTask.result.points)
+                for (const p of fiTask.result.points) {
+                  for (const m of (Array.isArray(p?.marker_strings) ? p.marker_strings : [])) mergedMarkers.add(m)
+                }
+              }
+              if (Array.isArray(fiTask.result?.profiles)) mergedProfiles.push(...fiTask.result.profiles)
+              if (Array.isArray(fiTask.result?.delivery?.replace_files)) mergedReplace.push(...fiTask.result.delivery.replace_files)
+              const taskRisks = Array.isArray(fiTask.analysis_context?.risks) ? fiTask.analysis_context.risks : []
+              mergedRisks.push(...taskRisks)
+              for (const c of (fiTask.cases || [])) {
+                mergedTargets.push(hydrateTargetFromItem(c, { sourceFiTaskId: fiTask.id, sourceRunId: item.run_id || fiTask.run_id }))
+              }
+            }
+            const compactRisks = compactAnalysisRisks(mergedRisks)
+            enriched = {
+              ...enriched,
+              run_id: firstRunId,
+              marker_strings: [...mergedMarkers],
+              points: input.points?.length ? input.points : mergedPoints,
+              profiles: input.profiles?.length ? input.profiles : mergedProfiles,
+              replace_files: input.replace_files?.length ? input.replace_files : mergedReplace,
+              targets: input.targets?.length ? input.targets : mergedTargets,
+              analysis_context: compactRisks.length ? { risks: compactRisks } : null,
+            }
+          } else if (input.run_id && input.fault_injection_task_id) {
+            const fiTask = await faultInjection.read(dataRoot, input.run_id, input.fault_injection_task_id)
+            const points = Array.isArray(fiTask.result?.points) ? fiTask.result.points : []
+            const markerSet = new Set(fiTask.result?.delivery?.marker_strings ?? fiTask.marker_strings ?? [])
+            for (const p of points) {
+              for (const m of (Array.isArray(p?.marker_strings) ? p.marker_strings : [])) markerSet.add(m)
+            }
+            let taskRisks = Array.isArray(fiTask.analysis_context?.risks) ? fiTask.analysis_context.risks : []
+            let rawCases = Array.isArray(fiTask.cases) && fiTask.cases.length
+              ? fiTask.cases
+              : (Array.isArray(fiTask.case_keys) ? fiTask.case_keys.map(k => ({ key: k, kind: 'case' })) : [])
+            if (!taskRisks.length && input.run_id) {
+              try {
+                const run = await readRun(dataRoot, input.run_id, { includeDetails: true })
+                const runRisks = Array.isArray(run?.details?.risks) ? run.details.risks : []
+                const runCases = Array.isArray(run?.details?.test_cases) ? run.details.test_cases : []
+                taskRisks = runRisks
+                rawCases = rawCases.map(c => {
+                  const k = c.key || c.target_key || c.id || ''
+                  const r = runRisks.find(item => [item.risk_id, item.projection_id, item.display_id].includes(k))
+                  if (r) return { ...r, ...c, key: k, kind: 'risk' }
+                  const tc = runCases.find(item => [item.projection_id, item.test_case_id, item.case_id].includes(k))
+                  if (tc) return { ...tc, ...c, key: k, kind: 'case' }
+                  return c
+                })
+              } catch (readError) {
+                referenceWarnings.push(`未能读取关联分析 Run（${input.run_id}）补充上下文：${readError instanceof Error ? readError.message : String(readError)}`)
+              }
+            }
+            const compactRisks = compactAnalysisRisks(taskRisks)
+            enriched = {
+              ...enriched,
+              marker_strings: input.marker_strings?.length ? input.marker_strings : [...markerSet],
+              points: input.points?.length ? input.points : points,
+              profiles: input.profiles?.length ? input.profiles : (fiTask.result?.profiles ?? []),
+              replace_files: input.replace_files?.length ? input.replace_files : (fiTask.result?.delivery?.replace_files ?? []),
+              targets: input.targets?.length ? input.targets : rawCases.map(c => hydrateTargetFromItem(c, { sourceFiTaskId: fiTask.id, sourceRunId: input.run_id })),
+              analysis_context: input.analysis_context ?? fiTask.analysis_context ?? (compactRisks.length ? { risks: compactRisks } : null),
+            }
+          }
+        } else if (input.mode === 'direct_risk' && input.run_id && Array.isArray(input.targets) && input.targets.length) {
+          let run = null
+          try {
+            run = await readRun(dataRoot, input.run_id, { includeDetails: true })
+          } catch (readError) {
+            referenceWarnings.push(`未能读取关联分析 Run（${input.run_id}），本次核验仅携带目标编号：${readError instanceof Error ? readError.message : String(readError)}`)
+          }
+          if (run) {
+            const risks = Array.isArray(run?.details?.risks) ? run.details.risks : []
+            const cases = Array.isArray(run?.details?.test_cases) ? run.details.test_cases : []
+            const linkedRiskIds = new Set()
+            enriched.targets = input.targets.map(t => {
+              const key = String(t.target_key || '').trim()
+              const exactRisk = risks.find(r => r.risk_id === key || r.projection_id === key)
+              if (exactRisk) {
+                linkedRiskIds.add(exactRisk.risk_id)
+                return hydrateTargetFromItem({ ...exactRisk, kind: 'risk', target_key: exactRisk.risk_id || key }, { sourceRunId: input.run_id })
+              }
+              const exactCase = cases.find(c => c.projection_id === key || c.test_case_id === key || c.case_id === key)
+              if (exactCase) {
+                for (const rid of (exactCase.linked_risk_ids || exactCase.risk_refs || [])) linkedRiskIds.add(rid)
+                return hydrateTargetFromItem({ ...exactCase, kind: 'case', target_key: exactCase.projection_id || exactCase.test_case_id || key }, { sourceRunId: input.run_id })
+              }
+              const byDisplayRisk = risks.filter(r => r.display_id === key)
+              const byDisplayCase = cases.filter(c => c.display_id === key)
+              const totalDisplay = byDisplayRisk.length + byDisplayCase.length
+              if (totalDisplay > 1) {
+                throw Object.assign(new Error(`编号「${key}」在多个分析单元中重复，请从候选列表勾选具体目标`), { statusCode: 400 })
+              }
+              if (byDisplayRisk.length === 1) {
+                const foundRisk = byDisplayRisk[0]
+                linkedRiskIds.add(foundRisk.risk_id)
+                return hydrateTargetFromItem({ ...foundRisk, kind: 'risk', target_key: foundRisk.risk_id || key, display_id: key }, { sourceRunId: input.run_id })
+              }
+              if (byDisplayCase.length === 1) {
+                const foundCase = byDisplayCase[0]
+                for (const rid of (foundCase.linked_risk_ids || foundCase.risk_refs || [])) linkedRiskIds.add(rid)
+                return hydrateTargetFromItem({ ...foundCase, kind: 'case', target_key: foundCase.projection_id || foundCase.test_case_id || key, display_id: key }, { sourceRunId: input.run_id })
+              }
+              return t
+            })
+            const relevantRisks = compactAnalysisRisks(risks.filter(r => linkedRiskIds.has(r.risk_id)))
+            if (relevantRisks.length) enriched.analysis_context = { risks: relevantRisks }
+          }
+        }
+        enriched.reference_warnings = referenceWarnings
+        enriched.tool_reference_files = enriched.run_id ? await readFrozenToolReferenceFiles(dataRoot, enriched.run_id) : []
+        const task = await service.start(enriched)
+        return json(res, 202, { status: 'ok', task, locks: service.getLocks() })
+      }
+      if (action === 'cancel') {
+        const task = await service.cancel({ dataRoot, verifyId: input.verify_id })
+        return json(res, 200, { status: 'ok', task, locks: service.getLocks() })
+      }
+      if (action === 'confirm') {
+        const task = await service.confirm({
+          dataRoot,
+          verifyId: input.verify_id,
+          verdicts: input.verdicts,
+          sync_to_fault_injection: input.sync_to_fault_injection === true,
+          faultInjectionService: faultInjection,
+        })
+        return json(res, 200, { status: 'ok', task, locks: service.getLocks() })
+      }
+      return json(res, 400, { status: 'error', error: `unknown live-verification action: ${action}` })
+    }
+    return json(res, 405, { status: 'error', error: 'method-not-allowed' })
   } catch (error) {
     return json(res, error.statusCode ?? 400, { status: 'error', error: error instanceof Error ? error.message : String(error) })
   }
@@ -2071,8 +2361,15 @@ export function apply(ctx) {
   const environments = new EnvironmentStore()
   const ssh = new PangeaSshRuntime(environments)
   const faultInjection = new FaultInjectionService({ generate: createInjectionGenerator(ctx), validateModel: options => requireAgentModel(ctx, options) })
+  const liveVerification = new LiveVerificationService({
+    environments,
+    ssh,
+    runWorker: createLiveVerificationRunner(ctx),
+    validateModel: options => requireAgentModel(ctx, options),
+  })
   registerUpdateParticipant(ctx, 'repository-operations', repositoryOperationsBusy, stopRepositoryOperations)
   registerUpdateParticipant(ctx, 'fault-injection', () => faultInjection.busy(), () => faultInjection.dispose())
+  registerUpdateParticipant(ctx, 'live-verification', () => liveVerification.busy(), () => liveVerification.dispose())
   registerUpdateParticipant(ctx, 'companion', () => companionUpdateBusy({
     operations: taskOperationState(tasks), launchLocks, sourceFirstBusy: sourceFirstAcpUpdateBusy,
     ssh,
@@ -2086,6 +2383,7 @@ export function apply(ctx) {
     const results = await Promise.allSettled(pending.map(task => requestTaskStop({
       api: ctx.apiProxy, tasks, task, launchLocks, launchLogs, runtime: ctx, runner: runPangea,
     })))
+    await liveVerification.dispose()
     await ssh.dispose()
     const failures = results.filter(result => result.status === 'rejected' || !result.value.stop_confirmed)
     if (failures.length) throw new Error(`部分分析任务停止尚未确认：${failures.map(result =>
@@ -2132,52 +2430,6 @@ export function apply(ctx) {
       return companionSnapshot({ cwd: workspaceCwd(exec), dataRoot: args.data_root, runId: args.run_id })
     },
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => renderStatus(value) },
-  }), ctx.tools.register({
-    name: 'pangea_environment_get',
-    description: '读取 PANGEA 用例执行环境，返回环境名称、主机与阵列连接信息，以及供 SSH 工具使用的内部目标。',
-    parameters: { type: 'object', additionalProperties: false, required: ['environment_id'], properties: { environment_id: { type: 'string' } } },
-    async execute(args) {
-      const environment = await environments.get(args.environment_id)
-      if (!environment) throw new Error(`environment not found: ${args.environment_id}`)
-      return environment
-    },
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_ssh_exec',
-    description: '在环境返回的主机或阵列 SSH 目标上执行一条非交互命令。',
-    parameters: { type: 'object', additionalProperties: false, required: ['alias', 'command'], properties: { alias: { type: 'string' }, command: { type: 'string' }, timeout_ms: { type: 'integer' } } },
-    execute: args => ssh.exec(args.alias, args.command, args.timeout_ms),
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_ssh_start',
-    description: '在远程 SSH alias 上启动持续运行的后台命令，返回供 read/stop 使用的 job_id。',
-    parameters: { type: 'object', additionalProperties: false, required: ['alias', 'command'], properties: { alias: { type: 'string' }, command: { type: 'string' } } },
-    execute: args => ssh.start(args.alias, args.command),
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_ssh_read',
-    description: '读取 PANGEA 后台 SSH 任务的当前输出和完成状态，可短暂等待任务结束。',
-    parameters: { type: 'object', additionalProperties: false, required: ['job_id'], properties: { job_id: { type: 'string' }, wait_ms: { type: 'integer' } } },
-    execute: args => ssh.read(args.job_id, args.wait_ms),
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_ssh_stop',
-    description: '停止 PANGEA 后台 SSH 任务并返回最后输出；用于用例清理。',
-    parameters: { type: 'object', additionalProperties: false, required: ['job_id'], properties: { job_id: { type: 'string' } } },
-    execute: args => ssh.stop(args.job_id),
-    output: toolOutput(),
-  }), ctx.tools.register({
-    name: 'pangea_ssh_interactive',
-    description: '在阵列 SSH PTY 中保持同一交互会话，按 send 后 expect 正则的顺序执行 diagnose/attach/dtoe 等命令。',
-    parameters: {
-      type: 'object', additionalProperties: false, required: ['alias', 'exchanges'],
-      properties: {
-        alias: { type: 'string' },
-        exchanges: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['send', 'expect'], properties: { send: { type: 'string' }, expect: { type: 'string' }, timeout_seconds: { type: 'integer' } } } },
-      },
-    },
-    execute: args => ssh.interactive(args.alias, args.exchanges),
-    output: toolOutput(),
   }), ...sourceFirstTools(ctx)]
 
   const disposeStateRoute = ctx.webServer.register({ kind: 'exact', path: API_PATH, handler: (req, res) => stateRouteHandler(req, res, monitor, tasks, ctx, launchLogs) })
@@ -2187,8 +2439,8 @@ export function apply(ctx) {
   const disposeExportRoute = ctx.webServer.register({ kind: 'exact', path: EXPORT_API_PATH, handler: exportRouteHandler })
   const disposeDiagnosticBundleRoute = ctx.webServer.register({ kind: 'exact', path: DIAGNOSTIC_BUNDLE_API_PATH, handler: diagnosticBundleRouteHandler })
   const disposeLaunchLogRoute = ctx.webServer.register({ kind: 'exact', path: LAUNCH_LOG_API_PATH, handler: (req, res) => launchLogRouteHandler(req, res, launchLogs) })
-  const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh) })
-  const disposeExecutionRoute = ctx.webServer.register({ kind: 'exact', path: EXECUTION_API_PATH, handler: (req, res) => executionRouteHandler(req, res, environments, ctx.apiProxy) })
+  const disposeEnvironmentRoute = ctx.webServer.register({ kind: 'exact', path: ENVIRONMENT_API_PATH, handler: (req, res) => environmentRouteHandler(req, res, environments, ssh, liveVerification) })
+  const disposeLiveVerificationRoute = ctx.webServer.register({ kind: 'exact', path: LIVE_VERIFICATION_API_PATH, handler: (req, res) => liveVerificationRouteHandler(req, res, liveVerification, faultInjection, ctx) })
   const disposeAcpSettingsRoute = ctx.webServer.register({ kind: 'exact', path: ACP_SETTINGS_API_PATH, handler: (req, res) => acpSettingsRouteHandler(req, res, acpSettings, ctx) })
   const jobs = ctx.jobs ?? ctx.get?.('jobs')
   const disposeJobController = jobs?.attachController?.('pangea-companion')
@@ -2205,7 +2457,7 @@ export function apply(ctx) {
     disposeRepositoryRoute()
     disposeArchitectureRoute()
     disposeWorkbenchRoute()
-    disposeExecutionRoute()
+    disposeLiveVerificationRoute()
     disposeAcpSettingsRoute()
     disposeEnvironmentRoute()
     disposeLaunchLogRoute()
@@ -2214,6 +2466,7 @@ export function apply(ctx) {
     disposeExportRoute()
     disposeCaseReviewRoute()
     disposeFaultInjectionRoute()
+    await liveVerification.dispose()
     await faultInjection.dispose()
     disposeStateRoute()
     disposeJobDone?.()
@@ -2222,7 +2475,7 @@ export function apply(ctx) {
     await ssh.dispose()
     await tasks.flush()
     await disposeMonitor()
-  }, 'dsh-pangea-companion: state, launch diagnostics, repositories, executor environments, SSH tools, and execution launch')
+  }, 'dsh-pangea-companion: state, launch diagnostics, repositories, environments, and live verification')
 }
 
 export { companionSnapshot } from './reader.js'
@@ -2233,6 +2486,7 @@ export { createLaunchLogStore, LaunchLogStore } from './launch-log.js'
 export { AcpSettingsStore, createAcpSettingsStore } from './acp-settings.js'
 export { EnvironmentStore } from './execution/environment.js'
 export { PangeaSshRuntime } from './execution/ssh.js'
+export { LiveVerificationService } from './live-verification.js'
 export { createRun, resumeRun, runAdapter, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
 export { launchAnalysisSession, normalizeRunInput, resumeAnalysisRun, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 export { importRepository, normalizeRepositoryId, repositoryStatus } from './repositories/import.js'

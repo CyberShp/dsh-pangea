@@ -21,6 +21,7 @@ const SHARED = [
   ['__agentModelSelection', 'src/agent-model-selection.js'],
   ['__faultInjectionCandidates', 'src/fault-injection-candidates.js'],
   ['__faultInjectionView', 'src/fault-injection-view.js'],
+  ['__liveVerificationView', 'src/live-verification-view.js'],
   ['__riskIncrementalInsights', 'src/risk-and-incremental-insights.js'],
   ['__reviewPresentation', 'src/review-presentation.js'],
   ['__runInsights', 'src/run-insights.js'],

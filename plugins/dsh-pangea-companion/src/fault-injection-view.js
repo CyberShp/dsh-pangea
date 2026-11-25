@@ -394,7 +394,7 @@ export function createFaultInjectionPanel(React) {
 
 export function createFaultInjectionTaskDetail(React) {
   const h = React.createElement
-  return function FaultInjectionTaskDetail({ runId, taskId, dataRoot, cwd, onSwitch, onOpenBuild }) {
+  return function FaultInjectionTaskDetail({ runId, taskId, dataRoot, cwd, onSwitch, onOpenBuild, onOpenLiveVerification }) {
     const [task, setTask] = React.useState(null)
     const [profileKey, setProfileKey] = React.useState('')
     const drafts = React.useRef({})
@@ -467,6 +467,7 @@ export function createFaultInjectionTaskDetail(React) {
               branchText ? h(React.Fragment, null, ' · 个人分支 ', h('code', null, branchText)) : null)),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
             h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(task.status)}` }, task.status === 'failed' && task.failure_phase === 'preparing' ? '准备源码失败' : INJECTION_STATUS_LABELS[task.status] || task.status),
+            includable && onOpenLiveVerification ? h('button', { type: 'button', className: 'primary', disabled: working, onClick: () => onOpenLiveVerification({ mode: 'fault_injection', runId, faultInjectionTaskId: task.id, name: `核验 · ${task.name || task.id}` }) }, '烧包后去真机核验') : null,
             busy(task) ? h('button', { type: 'button', className: 'btn', disabled: working, onClick: () => act('cancel') }, '停止本次操作') : null)),
         task.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
           h('p', { style: { margin: 0, fontWeight: 600 } }, task.failure_phase === 'preparing' ? '准备源码失败，尚未开始生成打桩修改。' : '本次操作未完成。'),
@@ -586,14 +587,20 @@ export function createFaultInjectionTaskDetail(React) {
               const key = event.target.value
               setVerification(drafts.current[`${taskId}:${key}`] ?? { result: 'not_run', hits: '', notes: '', ...task.verification.filter(item => item.case_key === key).at(-1), case_key: key })
             } }, task.cases.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(item.title))))),
-            h('label', { className: 'pangea-fi-field' }, h('span', null, '实际结果'), h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => setVerification({ ...verification, result: event.target.value }) }, [['not_run', '未执行'], ['passed', '通过'], ['failed', '失败'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
+            h('label', { className: 'pangea-fi-field' }, h('span', null, '实际结果'), h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => setVerification({ ...verification, result: event.target.value }) }, [['not_run', '未执行'], ['passed', '通过（风险未复现）'], ['failed', '失败（风险复现/异常）'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
             field('桩点实际命中', verification.hits, value => setVerification({ ...verification, hits: value }))),
           field('验证现象与记录', verification.notes, value => setVerification({ ...verification, notes: value }), { multiline: true }),
           h('button', { type: 'button', className: 'btn primary', disabled: working || busy(task), onClick: () => act('verify', { build, verification }) }, '保存构建与验证记录'),
-          task.verification.length ? h('ul', { className: 'pangea-fi-records pangea-fi-scroll', 'aria-label': '验证历史' }, [...task.verification].reverse().map((value, index) => h('li', { key: index }, `${value.at} · ${readable(task.cases.find(item => item.case_key === value.case_key)?.title || value.case_key)} · ${({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result]} · ${value.hits}`,
-            value.notes ? h('details', null, h('summary', null, '查看验证记录'), h('pre', null, value.notes)) : null,
-            h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, `验证包：${value.build?.package_id || '未填写'}；提交：${(value.build?.commits || []).map(repo => `${repo.repo_id} ${String(repo.commit || '').slice(0, 12)}`).join('、')}`),
-            value.build?.url ? h('a', { href: value.build.url, target: '_blank', rel: 'noreferrer' }, '查看本次构建') : null))) : null) : null,
+          task.verification.length ? h('ul', { className: 'pangea-fi-records pangea-fi-scroll', 'aria-label': '验证历史' }, [...task.verification].reverse().map((value, index) => {
+            const legacyLabel = ({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result] || value.result
+            const dimLabel = value.execution_status === 'infra_error'
+              ? '执行/清理异常'
+              : ({ confirmed: '风险实锤', excluded: '实测排除', not_triggered: '桩未命中', blocked: '环境阻断', unknown: '结论待定' })[value.risk_verdict] || ''
+            return h('li', { key: index }, `${value.at} · ${readable(task.cases.find(item => item.case_key === value.case_key)?.title || value.case_key)} · ${legacyLabel} · ${value.hits}${dimLabel ? ` · ${dimLabel}` : ''}`,
+              value.notes ? h('details', null, h('summary', null, '查看验证记录'), h('pre', null, value.notes)) : null,
+              h('p', { className: 'b05-subtle', style: { fontSize: 12 } }, `验证包：${value.build?.package_id || '未填写'}；提交：${(value.build?.commits || []).map(repo => `${repo.repo_id} ${String(repo.commit || '').slice(0, 12)}`).join('、')}`),
+              value.build?.url ? h('a', { href: value.build.url, target: '_blank', rel: 'noreferrer' }, '查看本次构建') : null)
+          })) : null) : null,
         task.result?.summary ? h('details', null, h('summary', null, '修改摘要与用例'), h('div', { className: 'pangea-fi-scroll' }, h('p', { style: { whiteSpace: 'pre-wrap' } }, readable(task.result.summary)), h('p', { style: { fontSize: 12, color: '#5e6773' } }, task.cases.map(item => readable(item.title)).join('、')))) : null,
         task.result?.points?.length ? h('details', null, h('summary', null, `桩点说明（${task.result.points.length}）`), h('div', { className: 'pangea-fi-scroll' }, renderPoints(task.result.points))) : null,
         profiles.length ? h('details', { key: `profiles:${task.id}` }, h('summary', null, `逐用例执行说明（${profiles.length}）`),
@@ -703,7 +710,7 @@ export function createFaultInjectionHome(React) {
 export function createFaultInjectionBuild(React) {
   const h = React.createElement
   const RepositorySettings = createRepositorySettings(React)
-  return function FaultInjectionBuild({ dataRoot, cwd, reload = 0, initialItems = null, analysisLabel = id => id, onOpenTask, onOpenPipeline, onBack }) {
+  return function FaultInjectionBuild({ dataRoot, cwd, reload = 0, initialItems = null, analysisLabel = id => id, onOpenTask, onOpenPipeline, onOpenLiveVerification, onBack }) {
     const [context, setContext] = React.useState(null)
     const [selectedKeys, setSelectedKeys] = React.useState([])
     const [activeBuild, setActiveBuild] = React.useState(null)
@@ -826,6 +833,15 @@ export function createFaultInjectionBuild(React) {
       if (restoreBaseline) {
         const targets = restoreTargetRepos.map(r => `${r.repo_id}（${r.remote}/${r.remote_branch}）`).join('、')
         if (typeof window?.confirm === 'function' && !window.confirm(`确认将 ${targets} 恢复为分析目录当前干净基线（清空所有打桩改动）并推送到远端个人分支？\n该操作不会修改本地分析目录，也不使用强推。`)) {
+          return
+        }
+      }
+      if (allowOverwriteRemoteDiverged) {
+        const diverged = Array.isArray(activeBuild?.remote_diverged_commits) ? activeBuild.remote_diverged_commits : []
+        const listText = diverged.slice(0, 5).map(c => `- ${String(c.commit || '').slice(0, 10)}${c.subject ? ` ${c.subject}` : ''}`).join('\n')
+        const extra = diverged.length > 5 ? `\n…等共 ${diverged.length} 个提交` : ''
+        const confirmMsg = `确认覆盖远端分支上的非 PANGEA 提交并重新推送？\n本次推送将把远端分支树同步为当前基线与所选桩代码，以下提交的内容将在远端分支被回退：\n${listText || '（远端存在未合入的非 PANGEA 提交）'}${extra}`
+        if (typeof window?.confirm === 'function' && !window.confirm(confirmMsg)) {
           return
         }
       }
@@ -1131,7 +1147,18 @@ export function createFaultInjectionBuild(React) {
                 try { await navigator.clipboard.writeText(branches); setNotice(`已复制个人分支：${branches}`) }
                 catch { setError('复制失败，请手动复制上方个人分支名称') }
               },
-            }, '复制个人分支')) : null) : null,
+            }, '复制个人分支'),
+            onOpenLiveVerification && !activeBuild.restore_baseline && activeBuild.items?.[0] ? h('button', {
+              type: 'button',
+              style: { marginLeft: 0 },
+              onClick: () => onOpenLiveVerification({
+                mode: 'fault_injection',
+                runId: activeBuild.items[0].run_id,
+                faultInjectionTaskId: activeBuild.items[0].task_id,
+                faultInjectionBuildId: activeBuild.id,
+                name: `核验 · ${activeBuild.items[0].name || activeBuild.id}`,
+              }),
+            }, '烧包后去真机核验') : null) : null) : null,
 
         (context.builds || []).length > 1 ? h('details', { style: { marginTop: 14 } },
           h('summary', null, `历史出包记录（${context.builds.length}）`),
