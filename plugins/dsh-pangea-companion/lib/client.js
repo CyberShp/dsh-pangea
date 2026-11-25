@@ -8391,7 +8391,12 @@ window.__ModuleLoader__.load({
       return initialScreen
     }
 
+    function parseMultilineTokens(text) {
+      return [...new Set(String(text ?? '').split(/[\r\n,，;；\s]+/).map(value => value.trim()).filter(Boolean))]
+    }
     function buildAnalysisRequest(form) {
+      const dtsIds = form.scenario === 'risk-analysis' ? parseMultilineTokens(form.dts_ids_text) : []
+      const mrUrls = form.scenario === 'risk-analysis' ? String(form.dts_mr_urls_text ?? '').split(/[\r\n]+/).map(value => value.trim()).filter(Boolean) : []
       return {
         request_version: '2.0',
         ...(form.source_task_id ? { source_task_id: form.source_task_id } : {}),
@@ -8404,6 +8409,7 @@ window.__ModuleLoader__.load({
         asset_ids: Array.isArray(form.asset_ids) ? form.asset_ids : [],
         scenario: form.scenario || 'branch-analysis',
         ...(form.objective ? { objective: form.objective } : {}),
+        ...(dtsIds.length || mrUrls.length ? { dts_context: { ...(dtsIds.length ? { dts_ids: dtsIds } : {}), ...(mrUrls.length ? { mr_urls: mrUrls } : {}) } } : {}),
         ...(form.analysis_profile ? { analysis_profile: form.analysis_profile, asset_revisions: form.asset_revisions ?? {} } : {}),
         ...(form.analysis_profile !== 'behavior-test-v2' && form.scenario === 'coverage-analysis' ? { coverage_input: form.coverage_kind === 'file'
           ? { kind: 'file', path: form.coverage_path }
@@ -8415,6 +8421,94 @@ window.__ModuleLoader__.load({
         agent_model: form.provider_id ? form.agent_model || null : null,
         ...(form.agent_catalog_id ? { agent_catalog_id: form.agent_catalog_id } : {}),
       }
+    }
+    const DTS_TRACK_LABELS = { error_rollback: '异常回滚', concurrency_timing: '时序并发', resource_lifecycle: '资源生命周期' }
+    function DtsFeedbackSection({ cwd, dataRoot, dtsIdsText, mrUrlsText, onChangeDtsIds, onChangeMrUrls, disabled, renderIcon, onNotice }) {
+      const [filePath, setFilePath] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [expanded, setExpanded] = React.useState(false)
+      const [catalog, setCatalog] = React.useState(null)
+      const [loadError, setLoadError] = React.useState('')
+      const loadPatterns = async () => {
+        if (!cwd) return
+        setBusy(true)
+        setLoadError('')
+        try {
+          const response = await requestWorkbenchAction({ cwd, action: 'dts-patterns-list', payload: { data_root: dataRoot } })
+          setCatalog(response)
+        } catch (err) {
+          setLoadError(err instanceof Error ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      }
+      const handleIngest = async () => {
+        if (!cwd || !filePath.trim()) return
+        setBusy(true)
+        setLoadError('')
+        try {
+          const response = await requestWorkbenchAction({ cwd, action: 'dts-patterns-ingest', payload: { data_root: dataRoot, path: filePath.trim() } })
+          setCatalog(response)
+          setExpanded(true)
+          const importedCount = (response.ingest?.imported?.length ?? 0) + (response.ingest?.updated?.length ?? 0)
+          const filteredCount = response.ingest?.filtered_out?.length ?? 0
+          setFilePath('')
+          onNotice?.(`已导入 ${importedCount} 条 DTS 故障拓扑卡（自动滤除 ${filteredCount} 条非三轨杂单）`)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          setLoadError(msg)
+          onNotice?.(`DTS 导入失败：${msg}`, true)
+        } finally {
+          setBusy(false)
+        }
+      }
+      const togglePattern = async item => {
+        if (!cwd) return
+        const nextStatus = item.status === 'enabled' ? 'disabled' : 'enabled'
+        setBusy(true)
+        try {
+          await requestWorkbenchAction({ cwd, action: 'dts-patterns-set-status', payload: { data_root: dataRoot, pattern_id: item.pattern_id, status: nextStatus } })
+          setCatalog(prev => prev ? { ...prev, items: (prev.items ?? []).map(p => p.pattern_id === item.pattern_id ? { ...p, status: nextStatus } : p) } : prev)
+        } catch (err) {
+          onNotice?.(`更新拓扑卡状态失败：${err instanceof Error ? err.message : String(err)}`, true)
+        } finally {
+          setBusy(false)
+        }
+      }
+      const toggleExpand = () => {
+        const next = !expanded
+        setExpanded(next)
+        if (next && !catalog && !busy) void loadPatterns()
+      }
+      const items = catalog?.items ?? []
+      return h('section', { className: 'callout', style: { marginTop: 20 } },
+        h('div', { className: 'row between' },
+          h('div', null,
+            h('strong', { className: 'small' }, renderIcon('ShieldAlert'), ' DTS 真实案例反哺', h('span', { className: 'pangea-opt-tag' }, '可选')),
+            h('p', { className: 'create-copy', style: { margin: '6px 0 0' } }, '填写具体 DTS 单号或关联 MR 链接：本地会话已装 DTS-mcp + codehub-mcp 时自动读单取 MR Diff 提取故障特征；未装 MCP 时可直接导入离线 DTS 文件。')),
+          h('button', { type: 'button', className: 'btn ghost', disabled: disabled || busy, onClick: toggleExpand }, renderIcon('Library'), expanded ? '收起拓扑库' : `管理 DTS 拓扑库${catalog ? `（${catalog.total ?? items.length}）` : ''}`)),
+        h('div', { className: 'form-grid', style: { marginTop: 14 } },
+          h('label', { className: 'field' },
+            h('span', null, 'DTS 单号（DTS-mcp 读单）'),
+            h('textarea', { 'aria-label': 'DTS 单号', className: 'mono', rows: 2, value: dtsIdsText ?? '', disabled, placeholder: '例如：DTS20260001\n多个单号用换行或逗号分隔', onChange: event => onChangeDtsIds(event.target.value) }),
+            h('span', { className: 'hint' }, '分析阶段仅读取此处指定的单号，绝不盲搜。')),
+          h('label', { className: 'field' },
+            h('span', null, '关联 MR 链接（codehub-mcp 读 Diff）', h('span', { className: 'pangea-opt-tag' }, '可选')),
+            h('textarea', { 'aria-label': '关联 MR 链接', className: 'mono', rows: 2, value: mrUrlsText ?? '', disabled, placeholder: '已有 MR 链接可直接粘贴（每行一条）', onChange: event => onChangeMrUrls(event.target.value) }),
+            h('span', { className: 'hint' }, '未填时由 DTS-mcp 从 DTS 单据内自动提取。'))),
+        h('div', { className: 'row', style: { marginTop: 12, gap: 8 } },
+          h('input', { 'aria-label': '离线 DTS 文件路径', placeholder: '无 MCP 时：输入离线 DTS 文件路径（.xlsx / .csv / .json / .md / .txt）', style: { flex: 1, fontSize: 12, height: 34 }, value: filePath, disabled: disabled || busy, onChange: event => setFilePath(event.target.value) }),
+          window.dshDesktopDirectoryPicker?.pick ? h('button', { type: 'button', className: 'btn ghost', disabled: disabled || busy, onClick: async () => { try { const picked = await window.dshDesktopDirectoryPicker.pick({ purpose: 'asset' }); if (picked) setFilePath(picked) } catch (err) { onNotice?.(err.message, true) } } }, renderIcon('FolderOpen'), '选文件') : null,
+          h('button', { type: 'button', className: 'btn', disabled: disabled || busy || !filePath.trim(), onClick: () => { void handleIngest() } }, renderIcon('FileUp'), busy ? '导入中…' : '导入并启用')),
+        loadError ? h('p', { className: 'small', style: { color: '#b42318', marginTop: 8 } }, loadError) : null,
+        expanded ? h('div', { style: { marginTop: 14 } },
+          items.length ? h('div', { className: 'stack', style: { gap: 8 } }, items.map(item => h('div', { key: item.pattern_id, className: 'create-asset' },
+            h('div', { className: 'create-asset-main' },
+              h('strong', null, item.title),
+              h('small', null, `${item.dts_id || item.pattern_id} · ${DTS_TRACK_LABELS[item.track] ?? item.track}${item.has_diff_evidence ? ' · 含代码 Diff' : ' · 纯文本'}`)),
+            h('span', { className: `badge ${item.status === 'enabled' ? 'good' : 'neutral'}` }, item.status === 'enabled' ? '已启用' : '已禁用'),
+            h('button', { type: 'button', className: 'btn ghost', disabled: disabled || busy, onClick: () => { void togglePattern(item) } }, item.status === 'enabled' ? '禁用' : '启用'))))
+            : h('p', { className: 'small muted', style: { margin: 0 } }, '本地尚无已沉淀的 DTS 故障拓扑卡，可在上方导入离线 DTS 文件或直接填写 DTS 单号运行。')) : null)
     }
     function riskApplicable(run) {
       return run?.analysis_profile === 'behavior-test-v2' ? run.analysis_scene?.presentation?.risks === true : run?.scenario !== 'coverage-analysis'
@@ -9284,7 +9378,7 @@ window.__ModuleLoader__.load({
       const [launching, setLaunching] = React.useState(false)
       const [environmentForm, setEnvironmentForm] = React.useState(emptyEnvironmentForm)
       const [environmentTests, setEnvironmentTests] = React.useState({ host: { state: 'idle' }, array: { state: 'idle' } })
-      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', objective: '', source_scope_text: '', asset_ids: [], scenario: 'branch-analysis', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
+      const [createForm, setCreateForm] = React.useState({ repository: '', target: '', objective: '', source_scope_text: '', asset_ids: [], scenario: 'branch-analysis', dts_ids_text: '', dts_mr_urls_text: '', coverage_kind: 'query', coverage_path: '', coverage_product: '', coverage_version: '', coverage_b_version: '', coverage_module: '', mode: 'depth', provider_id: '', model_route_key: '', agent_model: '' })
       React.useEffect(() => {
         if (!cwd || screen.type !== 'create') return
         try {
@@ -11409,7 +11503,7 @@ window.__ModuleLoader__.load({
         const view = screen.createView ?? 'inputs'
         const scenes = {
           'branch-analysis': ['分支分析', 'GitBranch', '分析业务条件、配置组合、状态与操作顺序。', '业务行为清单、独立用例与参数组合及未决缺口'],
-          'risk-analysis': ['风险分析', 'ShieldAlert', '聚焦有依据的失效风险及验证用例。', '有源码依据的失效风险、触发条件与验证用例'],
+          'risk-analysis': ['风险分析', 'ShieldAlert', '聚焦异常回滚、时序并发、资源生命周期三大深水区，支持 DTS 真实案例反哺。', '三轨深潜风险、两级实证梯度、DTS 变种排查与打桩配方'],
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
@@ -11496,6 +11590,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '让分析理解更多上下文'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '选择与目标相关的需求、设计或已有测试资料。')), button('选择资产', () => openAssets(), '', 'Plus')),
           step2Pending.length ? h('div', { style: { marginTop: 14 } }, stepGuide(step2Pending, '输入资料已就绪，可继续下一步')) : null,
           h(TestToolPicker, { cwd, dataRoot: workbench?.data_root, repositories, sources: createForm.test_tool_sources || [], preview: createForm.test_tool_preview, onChange: sources => setCreateForm(form => ({ ...form, test_tool_sources: sources, test_tool_preview: null })), onPreview: preview => update('test_tool_preview', preview), renderIcon: runIcon }),
+          createForm.scenario === 'risk-analysis' ? h(DtsFeedbackSection, { cwd, dataRoot: workbench?.data_root, dtsIdsText: createForm.dts_ids_text, mrUrlsText: createForm.dts_mr_urls_text, onChangeDtsIds: value => update('dts_ids_text', value), onChangeMrUrls: value => update('dts_mr_urls_text', value), disabled: creatingRun, renderIcon: runIcon, onNotice: showActionNotice }) : null,
           h('div', { className: 'row between', style: { margin: '24px 0 12px' } }, h('strong', { className: 'small' }, `已选资料 ${selectedAssets.length}`), h('span', { className: 'small muted' }, '版本将在创建时绑定')),
           pendingAssetDetails.length ? notice('正在读取资产资料', `正在按资产 ID 读取 ${pendingAssetDetails.length} 份资料的名称与输入版本。`, 'blue') : null,
           failedAssetDetails.length ? notice('资产详情读取失败', '无法确认所选资料的名称与输入版本，请重试后再继续。', 'warn', button('重试读取', retryAssetDetails, '', 'RefreshCw')) : null,
@@ -11544,6 +11639,7 @@ window.__ModuleLoader__.load({
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
             row('任务名称', draftName, `${createForm.repository} · ${scene[0]}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), h('details', { className: 'pangea-create-request' }, h('summary', null, '完整需求'), renderReadableBody(createForm.target)), row('源码范围', sourceScope.join('\n'), validScopePreview ? `命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
             row('测试工具代码（仅参考）', (createForm.test_tool_sources || []).map(source => `${source.repo_id}: ${source.paths.join('、')}`).join('\n') || '未选择', createForm.test_tool_preview ? `已确认 ${createForm.test_tool_preview.matched_file_count} 个参考文件；不作为被测对象` : '可选，不影响原有分析', 2),
+            createForm.scenario === 'risk-analysis' ? row('DTS 案例反哺', parseMultilineTokens(createForm.dts_ids_text).join('、') || '未指定单号（自动复用已启用拓扑库）', String(createForm.dts_mr_urls_text ?? '').trim() ? `已附加 MR 链接：\n${createForm.dts_mr_urls_text.trim()}` : '有 DTS-mcp + codehub-mcp 时自动按单号读单取 MR Diff；无 MCP 时降级使用本地拓扑库', 2) : null,
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint', className: 'notice warn' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }

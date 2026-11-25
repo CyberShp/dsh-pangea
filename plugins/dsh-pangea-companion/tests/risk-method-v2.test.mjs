@@ -120,3 +120,39 @@ test('pangea-api DTS pattern wrappers build expected CLI arguments', async t => 
   assert.deepEqual(calls[1], ['dts-patterns', 'ingest', '--path', '/tmp/dts.csv', '--data-root', '/data', '--source-kind', 'offline_file_with_git'])
   assert.deepEqual(calls[2], ['dts-patterns', 'set-status', '--pattern-id', 'DTS-1', '--status', 'disabled', '--data-root', '/data'])
 })
+
+test('workbench normalizeRunInput forwards dts_context dts_ids and mr_urls for risk-analysis', async () => {
+  const { normalizeRunInput } = await import('../src/workbench-api.js')
+  const capabilities = {
+    workflow_versions: ['source-first-v1'],
+    repositories: ['demo-repo'],
+    source_first: {
+      version: 'source-first-v1',
+      contract_fields: ['analysis_settings', 'analysis_profile', 'asset_revisions', 'source_investigation_policy'],
+      analysis_options_by_profile: {
+        'behavior-test-v2': {
+          scenarios: ['risk-analysis'],
+          modes: ['depth'],
+          objectives: ['product-behavior'],
+        },
+      },
+    },
+  }
+  const normalized = normalizeRunInput({
+    repository: 'demo-repo',
+    target: '风险分析测试',
+    scenario: 'risk-analysis',
+    mode: 'depth',
+    objective: 'product-behavior',
+    analysis_profile: 'behavior-test-v2',
+    source_scope: ['src/sess'],
+    dts_context: {
+      dts_ids: ['DTS20260001', 'DTS20260002'],
+      mr_urls: ['https://codehub.example/org/repo/merge_requests/42'],
+    },
+  }, capabilities)
+  assert.deepEqual(normalized.dts_context, {
+    dts_ids: ['DTS20260001', 'DTS20260002'],
+    mr_urls: ['https://codehub.example/org/repo/merge_requests/42'],
+  })
+})

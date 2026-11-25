@@ -248,7 +248,12 @@ async function createSourceFirstRun(cwd, input, runner = runPangea) {
     runtime_provenance: runProvenance(root),
     ...(input.analysis_profile ? { analysis_profile: input.analysis_profile } : {}),
     ...(input.asset_revisions ? { asset_revisions: input.asset_revisions } : {}),
-    analysis_settings: { scenario: input.scenario ?? 'module-analysis', mode: input.mode ?? 'depth', ...(input.objective ? { objective: input.objective } : {}) },
+    analysis_settings: {
+      scenario: input.scenario ?? 'module-analysis',
+      mode: input.mode ?? 'depth',
+      ...(input.objective ? { objective: input.objective } : {}),
+      ...(input.dts_context && typeof input.dts_context === 'object' ? { dts_context: input.dts_context } : {}),
+    },
     data_root: dataRoot,
     repository: input.repository,
     target: input.target,

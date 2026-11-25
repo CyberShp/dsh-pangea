@@ -87,7 +87,7 @@ const planningRecordInstructions = (action, opened) => action.stage === 'unit_pl
     'plan-candidates --page-token <next_page_token> --max-chars N 仅在具体边界问题需要时展开未分配候选；不主动遍历，也不为清空候选而新增工作。首次查询省略 page-token。',
   ] : []),
   ...(opened?.task?.record_contracts?.blueprint === 'risk-blueprint-v1' ? [
-    'risk-method-v2 Stage 1 提示：请先消费 risk_topology_summary 与 dts_context；仅当 dts_context.requested_dts_ids 包含用户提供的具体 DTS 单号且当前会话已配置 DTS-mcp / codehub-mcp 时，按单号调用 DTS-mcp 读单获取 MR 链接，再持 MR 链接调用 codehub-mcp 读取 Diff 提取故障代码特征并交接（绝不按模块盲搜；未装 MCP 或无单号时直接消费冻结 dts_context）。输出一条 kind=note、format_version=risk-blueprint-v1 的全局三轨底图，并按 error_rollback / concurrency_timing / resource_lifecycle 三轨派发 unit_plan（携带 risk_track 字段）。',
+    'risk-method-v2 Stage 1 提示：请先消费 risk_topology_summary 与 dts_context；仅当 dts_context.requested_dts_ids 或 requested_mr_urls 非空且当前会话已配置 DTS-mcp / codehub-mcp 时，按单号调用 DTS-mcp 读单获取 MR 链接，再持 MR 链接（含用户直填的 requested_mr_urls）调用 codehub-mcp 读取 Diff 提取故障代码特征并交接（绝不按模块盲搜；未装 MCP 或未指定时直接消费冻结 dts_context）。输出一条 kind=note、format_version=risk-blueprint-v1 的全局三轨底图，并按 error_rollback / concurrency_timing / resource_lifecycle 三轨派发 unit_plan（携带 risk_track 字段）。',
   ] : []),
 ] : []
 

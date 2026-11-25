@@ -26,7 +26,7 @@ import { discoverAgentModels, requireAgentModel, requireExternalAnalysisProvider
 import { EnvironmentStore } from './execution/environment.js'
 import { launchExecution } from './execution/launch.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
-import { createRun, runSourceFirstCommand, runPangea, workspaceRoot } from './pangea-api.js'
+import { createRun, ingestDtsFile, listDtsPatterns, runSourceFirstCommand, runPangea, setDtsPatternStatus, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { inspectSource, configureRepository } from './repositories/git-source.js'
 import { importRepository, invalidateRepositoryStatusCache, reimportRepository, repositoryStatus } from './repositories/import.js'
@@ -1387,6 +1387,39 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
         throw new Error('独立生图已移除：流程图、时序图和函数与变量图使用分析 Agent 随流程记录提供的结构化内容，历史图仅供查看。')
       }
       throw new Error('Unknown architecture action')
+    }
+    if (body.action === 'dts-patterns-list') {
+      const root = workspaceRoot(cwd)
+      const dataRoot = dataRootFor(root, actionDataRoot)
+      const result = await listDtsPatterns(root, {
+        dataRoot,
+        track: typeof body.track === 'string' && body.track ? body.track : undefined,
+        status: typeof body.status === 'string' && body.status ? body.status : undefined,
+        query: typeof body.query === 'string' && body.query ? body.query : undefined,
+      }, runner)
+      return json(res, 200, { status: 'ok', ...result })
+    }
+    if (body.action === 'dts-patterns-ingest') {
+      const root = workspaceRoot(cwd)
+      const dataRoot = dataRootFor(root, actionDataRoot)
+      const filePath = typeof body.path === 'string' ? body.path.trim() : ''
+      if (!filePath) throw new Error('请填写 DTS 离线文件完整路径')
+      const result = await ingestDtsFile(root, {
+        dataRoot,
+        filePath,
+        sourceKind: typeof body.source_kind === 'string' && body.source_kind ? body.source_kind : undefined,
+      }, runner)
+      const listed = await listDtsPatterns(root, { dataRoot }, runner)
+      return json(res, 200, { status: 'ok', ingest: result, ...listed })
+    }
+    if (body.action === 'dts-patterns-set-status') {
+      const root = workspaceRoot(cwd)
+      const dataRoot = dataRootFor(root, actionDataRoot)
+      const patternId = typeof body.pattern_id === 'string' ? body.pattern_id.trim() : ''
+      const status = body.status === 'disabled' ? 'disabled' : 'enabled'
+      if (!patternId) throw new Error('pattern_id is required')
+      const updated = await setDtsPatternStatus(root, { dataRoot, patternId, status }, runner)
+      return json(res, 200, { status: 'ok', pattern: updated })
     }
     if (body.action === 'task-create') {
       const root = workspaceRoot(cwd)

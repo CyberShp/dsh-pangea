@@ -243,6 +243,12 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   if (Array.isArray(capabilities?.repositories) && !capabilities.repositories.includes(repository)) {
     throw new Error(`repository is not registered: ${repository}`)
   }
+  const rawDts = value?.dts_context && typeof value.dts_context === 'object' && !Array.isArray(value.dts_context) ? value.dts_context : null
+  const dtsIds = rawDts ? stringList(rawDts.dts_ids) : []
+  const mrUrls = rawDts ? stringList(rawDts.mr_urls) : []
+  const dtsContext = dtsIds.length || mrUrls.length
+    ? { ...(dtsIds.length ? { dts_ids: dtsIds } : {}), ...(mrUrls.length ? { mr_urls: mrUrls } : {}) }
+    : null
   return {
     ...(!semantic ? { request_version: '2.0' } : {}),
     ...(semantic ? { workflow_version: 'source-first-v1', focus: stringList(value?.focus), context_scope: stringList(value?.context_scope), test_case_examples: stringList(value?.test_case_examples), effective_context_budget: value?.effective_context_budget } : {}),
@@ -253,6 +259,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
     scenario,
     mode,
     ...(objective != null ? { objective } : {}),
+    ...(dtsContext ? { dts_context: dtsContext } : {}),
     source_scope: sourceScope,
     ...(Object.hasOwn(value ?? {}, 'source_investigation_policy') ? { source_investigation_policy: value.source_investigation_policy ?? null } : {}),
     ...(Array.isArray(value?.test_tool_sources) && value.test_tool_sources.length ? { test_tool_sources: structuredClone(value.test_tool_sources), expected_test_tool_revision: value.expected_test_tool_revision } : {}),
@@ -399,7 +406,10 @@ async function homeRun(dataRoot, runId) {
         namingWarning = `任务命名元数据不可读取：${error instanceof Error ? error.message : String(error)}`
       }
       const settings = contract?.analysis_settings && typeof contract.analysis_settings === 'object' && !Array.isArray(contract.analysis_settings)
-        ? Object.fromEntries(['scenario', 'mode', 'objective'].filter(key => typeof contract.analysis_settings[key] === 'string' && contract.analysis_settings[key].trim()).map(key => [key, contract.analysis_settings[key]]))
+        ? {
+          ...Object.fromEntries(['scenario', 'mode', 'objective'].filter(key => typeof contract.analysis_settings[key] === 'string' && contract.analysis_settings[key].trim()).map(key => [key, contract.analysis_settings[key]])),
+          ...(contract.analysis_settings.dts_context && typeof contract.analysis_settings.dts_context === 'object' ? { dts_context: contract.analysis_settings.dts_context } : {}),
+        }
         : null
       summary = {
         run_id: runId, workflow_version: progress.workflow_version,
