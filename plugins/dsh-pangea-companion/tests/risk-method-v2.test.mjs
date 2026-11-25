@@ -99,13 +99,19 @@ test('risk-method-v2 projection preserves two-tier verification, DTS matches, an
   assert.equal(candidates[0].classification.tier, 'explicit')
 })
 
-test('pangea-api DTS pattern wrappers build expected CLI arguments', async () => {
+test('pangea-api DTS pattern wrappers build expected CLI arguments', async t => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const path = await import('node:path')
+  const pangeaCwd = await mkdtemp(path.join(tmpdir(), 'pangea-risk-v2-'))
+  t.after(() => rm(pangeaCwd, { recursive: true, force: true }))
+  await mkdir(path.join(pangeaCwd, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(pangeaCwd, '.agents', 'pangea', 'dsh.md'), '# marker\n', 'utf8')
   const calls = []
   const runner = async ({ args }) => {
     calls.push(args)
     return { ok: true, result: { items: [] } }
   }
-  const pangeaCwd = '/home/antigravity/CyberShp/pangea-agent'
   await listDtsPatterns(pangeaCwd, { dataRoot: '/data', track: 'concurrency_timing', status: 'enabled' }, runner)
   await ingestDtsFile(pangeaCwd, { dataRoot: '/data', filePath: '/tmp/dts.csv', sourceKind: 'offline_file_with_git' }, runner)
   await setDtsPatternStatus(pangeaCwd, { dataRoot: '/data', patternId: 'DTS-1', status: 'disabled' }, runner)

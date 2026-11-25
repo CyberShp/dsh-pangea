@@ -1766,7 +1766,7 @@ test('L1/L2 platform acceptance: scans sibling mod/dbg for 20-line diagnose_snip
   await assert.rejects(
     exec(hostCoLinked, [], { env: {} }),
     err => err.code === 4
-      && /\[FI_HIT:INIT_QUERY_TIMEOUT\] step=2\ninit_query_timeout\nstage1 cost=12ms, stage2 not finish/.test(err.stdout),
+      && /\[FI_HIT:INIT_QUERY_TIMEOUT\] step=2\ninit_query_timeout\nstage1 cost=12ms, stage2 not finish/.test(String(err.stdout || '').replace(/\r\n/g, '\n')),
   )
   await assert.rejects(lstat(armFile), { code: 'ENOENT' }, 'arm file must self-delete immediately on hit')
   // 3) Next daemon relaunch automatically recovers normal initialization without rebuilding package
