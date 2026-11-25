@@ -2990,8 +2990,7 @@ test('risk method UI shows external observations, literal quotes, ledger and emp
       assert.match(rendered, /Declared trigger/)
       assert.doesNotMatch(rendered, /本次分析没有形成风险记录/)
     } else {
-      assert.match(rendered, /检查账本/)
-      assert.match(rendered, /Declared object/)
+      assert.doesNotMatch(rendered, /检查账本/)
     }
   }
 })

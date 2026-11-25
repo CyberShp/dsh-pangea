@@ -3250,13 +3250,22 @@ window.__ModuleLoader__.load({
                   disabled: working || !savedPipelineUrl || pipelineDirty,
                   onClick: async () => {
                     try {
-                      if (!onOpenPipeline) throw new Error('当前会话的 DSH 浏览器不可用')
+                      if (!onOpenPipeline) throw new Error('当前环境无法调用系统浏览器打开链接')
                       await onOpenPipeline(savedPipelineUrl)
                     } catch (reason) {
                       setError(reason.message)
                     }
                   },
-                }, '在 DSH 浏览器打开构建流水线'),
+                }, '在系统浏览器打开构建流水线'),
+                h('button', {
+                  type: 'button',
+                  style: { marginLeft: 0 },
+                  disabled: working || !savedPipelineUrl || pipelineDirty,
+                  onClick: async () => {
+                    try { await navigator.clipboard.writeText(savedPipelineUrl); setNotice('已复制构建流水线链接') }
+                    catch { setError('复制失败，请手动复制上方构建流水线 URL') }
+                  },
+                }, '复制流水线链接'),
                 h('button', {
                   type: 'button',
                   style: { marginLeft: 0 },
@@ -12811,14 +12820,7 @@ window.__ModuleLoader__.load({
         const metric = (label, value, note) => h('div', { className: 'b05-metric' }, h('small', null, label), h('strong', null, value), h('span', null, note))
         const isComplete = current?.lifecycle_status === 'complete' || current?.status === 'completed'
         const riskReadError = collectionWarning(health, 'risks')
-        const ledger = current?.analysis_scene?.presentation?.check_ledger === true ? h('section', { className: 'b05-card' },
-          h('h3', null, '检查账本'), h('p', null, '实际检查对象及作者结论；待确认项和排除理由见完整报告。'),
-          h('div', { style: { overflowX: 'auto' } }, h('table', { className: 'pangea-reader-table' },
-            h('thead', null, h('tr', null, ['单元', '镜头', '对象', '结论', '位置'].map(label => h('th', { key: label }, label)))),
-            h('tbody', null, (details.checks ?? []).map(check => h('tr', { key: check.projection_id },
-              [check.unit_id, check.lens, check.object, check.conclusion, (Array.isArray(check.sites) ? check.sites : []).join('、')].map((value, i) => h('td', { key: i }, text(value, '未提供'))))))))) : null
         if (!risks.length && !riskQuery && riskSeverity === '全部') return h(React.Fragment, null,
-          ledger,
           h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '独立风险记录'), h('p', null, riskReadError ? '当前风险资料读取异常，需要恢复读取后确认结果。' : isComplete ? '本次分析已完成，可结合业务流程与单元总结核对实现细节。' : '分析进行中，独立风险记录尚未发布。')), h('span', { style: styles.badge }, riskReadError ? '暂不可读取' : '0 条记录')),
           h('div', { className: 'b05-card', style: { textAlign: 'center', padding: '42px 28px 30px' } },
             h('div', { className: 'b04-progress-icon', style: { margin: '0 auto 20px' } }, runIcon('ScanSearch')),
@@ -12839,7 +12841,6 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', className: 'b03-task-action', onClick: () => jump('cases') }, '测试用例')),
             h('section', { className: 'b05-card' }, h('h3', null, '如何阅读这个结果'), h('p', null, '建议结合业务流程路径与关键边界用例完成回归验证。'), h('p', null, '调用方入参、构建宏与目标运行环境可结合源码上下文进一步核对。'))))
         return h(React.Fragment, null,
-          ledger,
           h('div', { className: 'b05-section-head' }, h('div', null, h('h2', null, '需要关注的实现风险'), h('p', null, '从触发条件到代码依据，再到验证路径。')), h('span', { style: styles.badge }, `${risks.length} 条独立风险记录`)),
           h('div', { className: 'b05-metrics' }, metric('高风险', counts.High, '优先验证触发条件'), metric('中风险', counts.Medium, '核对业务影响'),
             metric('关联测试用例', linkedCases.size, `对应 ${risks.length} 条风险`), metric('有直接源码依据', `${risks.filter(risk => risk.evidence?.length).length} / ${risks.length}`, '位置可追溯')),
@@ -13050,7 +13051,10 @@ window.__ModuleLoader__.load({
           setInjectionTask(null)
           setInjectionBuild({ initialItems: item && item.run_id && item.task_id ? [{ run_id: item.run_id, task_id: item.task_id }] : null })
         }
-        const openPipeline = url => { if (!ctx.pangea?.openTool?.(scope, 'browser', { path: url, title: '构建流水线' })) throw new Error('当前会话的 DSH 浏览器不可用') }
+        const openPipeline = url => {
+          if (typeof globalThis.open !== 'function') throw new Error('当前环境无法调用系统浏览器打开链接')
+          globalThis.open(url, '_blank', 'noopener,noreferrer')
+        }
         const analysisLabel = runId => {
           const task = available.find(item => item.run_id === runId)
           return task ? taskDisplayName(task, allRuns.find(run => run.run_id === runId)) : `Run ${runId}（分析任务已删除或不在当前工作区）`

@@ -105,11 +105,11 @@ const { runInThisContext } = await import('node:vm')
 runInThisContext(await readFile(new URL('../lib/client.js', import.meta.url), 'utf8'))
 let injectionDraft = { requestId: 0, caseKeys: [] }
 const injectionListeners = new Set()
+globalThis.open = (url, target) => { assert.equal(target, '_blank'); openedPipelines.push(url); return null }
 const pages = [], ctx = { effect: fn => fn(), pangea: {
   registerPage: page => pages.push(page),
   getInjectionDraft: () => injectionDraft,
   subscribeInjectionDraft: fn => { injectionListeners.add(fn); return () => injectionListeners.delete(fn) },
-  openTool: (_scope, kind, { path: url }) => { assert.equal(kind, 'browser'); openedPipelines.push(url); return true },
 } }
 client.apply(ctx)
 const registration = pages.find(page => page.id === 'injection')
@@ -254,9 +254,9 @@ try {
   await until(() => enabled('重试本次出包'))
   assert.match(container.querySelector('[aria-label="提交信息预览"]').textContent, /【问题单号\/AR\/STORY\/CR】：AR20261118000001\n【修改人】：h00111111\n【审核人】：z00222222\n【修改说明】：合成打桩：/)
   await click('重试本次出包')
-  await until(() => enabled('在 DSH 浏览器打开构建流水线'))
+  await until(() => enabled('在系统浏览器打开构建流水线'))
   assert.equal(modelCalls, callsBeforeRevalidate)
-  await click('在 DSH 浏览器打开构建流水线')
+  await click('在系统浏览器打开构建流水线')
   assert.deepEqual(openedPipelines, ['https://ci.example.test/pipeline'])
   assert.match(await injectionGit(remote, ['log', '-1', '--format=%B', 'refs/heads/personal']), /【问题单号\/AR\/STORY\/CR】：AR20261118000001/)
   assert.match(await injectionGit(remote, ['show', 'refs/heads/personal:target.c']), /return -1;/)

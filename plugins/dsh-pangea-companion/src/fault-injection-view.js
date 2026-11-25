@@ -1107,13 +1107,22 @@ export function createFaultInjectionBuild(React) {
               disabled: working || !savedPipelineUrl || pipelineDirty,
               onClick: async () => {
                 try {
-                  if (!onOpenPipeline) throw new Error('当前会话的 DSH 浏览器不可用')
+                  if (!onOpenPipeline) throw new Error('当前环境无法调用系统浏览器打开链接')
                   await onOpenPipeline(savedPipelineUrl)
                 } catch (reason) {
                   setError(reason.message)
                 }
               },
-            }, '在 DSH 浏览器打开构建流水线'),
+            }, '在系统浏览器打开构建流水线'),
+            h('button', {
+              type: 'button',
+              style: { marginLeft: 0 },
+              disabled: working || !savedPipelineUrl || pipelineDirty,
+              onClick: async () => {
+                try { await navigator.clipboard.writeText(savedPipelineUrl); setNotice('已复制构建流水线链接') }
+                catch { setError('复制失败，请手动复制上方构建流水线 URL') }
+              },
+            }, '复制流水线链接'),
             h('button', {
               type: 'button',
               style: { marginLeft: 0 },
