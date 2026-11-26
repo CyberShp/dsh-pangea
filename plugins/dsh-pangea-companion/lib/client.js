@@ -673,8 +673,9 @@ window.__ModuleLoader__.load({
       for (const risk of list(risks)) {
         const id = risk.projection_id ?? risk.risk_id
         if (!id) continue
+        const narrative = risk.narrative === '' ? undefined : risk.narrative
         add({ id: `risk:${id}`, title: risk.title ?? risk.risk_id, fallbackTitle: '待验证风险',
-          summary: risk.narrative ?? risk.trigger ?? risk.residual_effect ?? '', kind: 'risk', validationState: '待验证',
+          summary: narrative ?? (risk.system_result || undefined) ?? (risk.trigger || undefined) ?? (risk.residual_effect || undefined) ?? '', kind: 'risk', validationState: '待验证',
           sourceRecord: risk.source_record ?? risk, sourceRefs: [id], caseRefs: list(risk.linked_test_case_ids) })
       }
       for (const note of list(notes)) {
@@ -4230,10 +4231,14 @@ window.__ModuleLoader__.load({
       }
       const reachability = String(risk?.upstream_semantics?.reachability ?? '').trim()
       const hasExplicitReachability = Boolean(reachability) && !PLACEHOLDER_REACHABILITY.test(reachability)
+      const falsification = risk?.upstream_falsification
+      const hasExplicitFalsification = Boolean(falsification && typeof falsification === 'object'
+        && ['no_counterevidence', 'counterevidence_found'].includes(falsification.outcome)
+        && String(falsification.reason ?? '').trim() !== '')
       const hasExclusion = Boolean(String(risk?.exclusion_condition ?? '').trim())
       const linkedCaseCount = Array.isArray(risk?.linked_test_case_ids) ? risk.linked_test_case_ids.length : 0
       const hasTrigger = Boolean(String(risk?.trigger ?? '').trim())
-      if (hasTrigger && (hasExplicitReachability || hasExclusion || linkedCaseCount > 0)) {
+      if (hasTrigger && (hasExplicitReachability || hasExplicitFalsification || hasExclusion || linkedCaseCount > 0)) {
         return {
           tier: 'anchored',
           label: '依据齐备',
@@ -4241,9 +4246,11 @@ window.__ModuleLoader__.load({
           warnings: [],
           reason: hasExplicitReachability
             ? `入口可达性已记录：${reachability.slice(0, 32)}`
-            : linkedCaseCount > 0
-              ? `源码坐标与触发条件完备，已关联 ${linkedCaseCount} 条验证用例`
-              : '源码坐标、触发条件与排除边界已记录',
+            : hasExplicitFalsification
+              ? `上游 Caller 反证已记录：${String(falsification.reason).trim().slice(0, 32)}`
+              : linkedCaseCount > 0
+                ? `源码坐标与触发条件完备，已关联 ${linkedCaseCount} 条验证用例`
+                : '源码坐标、触发条件与排除边界已记录',
         }
       }
       return {
@@ -8343,6 +8350,7 @@ window.__ModuleLoader__.load({
       for (const risk of risks ?? []) counts[riskSeverityLevel(risk)] += 1
       return counts
     }
+    const DTS_TRACK_LABELS = { error_rollback: '异常回滚', concurrency_timing: '时序并发', resource_lifecycle: '资源生命周期' }
     function filterRisks(risks, severity, queryValue) {
       const query = String(queryValue ?? '').trim().toLowerCase()
       return (risks ?? []).filter(risk => {
@@ -8350,8 +8358,11 @@ window.__ModuleLoader__.load({
         if (!['全部', 'Ungraded'].includes(severity) && riskSeverityLevel(risk) !== severity) return false
         return !query || [
           risk.display_id, risk.risk_id, risk.title, risk.narrative, risk.trigger, risk.system_result,
-          risk.residual_effect, risk.apparent_normality, risk.external_observation,
-          risk.blackbox_proof, ...(risk.dfx ?? []),
+          risk.impact, risk.residual_effect, risk.apparent_normality, risk.external_observation,
+          risk.exclusion_condition, risk.runtime_uncertainty, risk.track, DTS_TRACK_LABELS[risk.track],
+          risk.entity_ref, risk.blackbox_proof, ...(risk.interleaving_or_path ?? []),
+          ...(risk.matched_dts_pattern_ids ?? []), ...(risk.dfx ?? []),
+          ...(risk.evidence ?? []).map(item => item?.location),
         ].join(' ').toLowerCase().includes(query)
       })
     }
@@ -8360,6 +8371,17 @@ window.__ModuleLoader__.load({
       'Blackbox-ready': '黑盒可执行', 'Graybox-ready': '灰盒可执行', 'Developer-confirm': '需开发确认',
       'Test-ready': '已有测试覆盖', Unreachable: '受支持入口不可达', Uncovered: '尚未覆盖',
     }
+    const RISK_VERIFICATION = {
+      static_proven: '静态铁证', needs_runtime_verification: '待动态实锤',
+      verified_by_code: '源码已证实', verified: '已验证', rejected: '已排除',
+    }
+    const FALSIFICATION_OUTCOME = {
+      no_counterevidence: '未发现阻断反证', counterevidence_found: '发现上游拦截条件', unresolved: '待确认',
+    }
+    const riskVerificationLabel = (risk, fallback = '尚无验证结论') =>
+      (risk?.verification_status && (RISK_VERIFICATION[risk.verification_status] ?? risk.verification_status))
+      || (risk?.translation_status && (TRANSLATION[risk.translation_status] ?? risk.translation_status))
+      || fallback
     const isUnreachableRisk = risk => risk?.translation_status === 'Unreachable'
     const isUncoveredRisk = risk => !isUnreachableRisk(risk) && (risk?.linked_test_case_ids?.length ?? 0) === 0
     const RISK_STATUS = {
@@ -9216,15 +9238,19 @@ window.__ModuleLoader__.load({
           }
         } else {
           discussionLine(lines, '严重度', SEVERITY[item?.severity] ?? item?.severity)
+          discussionLine(lines, '分析轨道', DTS_TRACK_LABELS[item?.track] ?? item?.track)
+          discussionLine(lines, '实证层级', RISK_VERIFICATION[item?.verification_status] ?? item?.verification_status)
           discussionLine(lines, '风险说明', item?.narrative)
           discussionLine(lines, '触发条件', item?.trigger)
+          discussionList(lines, '交错/副作用路径', item?.interleaving_or_path)
           discussionLine(lines, '代码失效', item?.system_result)
-          discussionLine(lines, '残留状态', item?.residual_effect)
+          discussionLine(lines, '残留状态', item?.residual_effect ?? item?.impact)
           discussionLine(lines, '表面正常现象', item?.apparent_normality)
           discussionLine(lines, '对外暴露', item?.external_observation)
+          discussionLine(lines, '待动态实锤不确定点', item?.runtime_uncertainty)
           discussionLine(lines, '黑盒证明', item?.blackbox_proof)
           discussionLine(lines, '排除条件', item?.exclusion_condition)
-          discussionLine(lines, '上游语义结论', item?.upstream_semantics?.conclusion)
+          discussionLine(lines, '上游语义结论', item?.upstream_semantics?.conclusion ?? item?.upstream_falsification?.reason)
           discussionList(lines, '直接证据', (item?.evidence ?? []).map(evidenceLine))
           discussionList(lines, '关联测试用例', (item?.linked_test_case_ids ?? []).map(id => {
             const linked = caseById.get(id)
@@ -9345,7 +9371,6 @@ window.__ModuleLoader__.load({
         ...(form.agent_catalog_id ? { agent_catalog_id: form.agent_catalog_id } : {}),
       }
     }
-    const DTS_TRACK_LABELS = { error_rollback: '异常回滚', concurrency_timing: '时序并发', resource_lifecycle: '资源生命周期' }
     function DtsFeedbackSection({ cwd, dataRoot, dtsIdsText, mrUrlsText, onChangeDtsIds, onChangeMrUrls, disabled, renderIcon, onNotice }) {
       const [filePath, setFilePath] = React.useState('')
       const [busy, setBusy] = React.useState(false)
@@ -13083,8 +13108,8 @@ window.__ModuleLoader__.load({
             h('section', { className: 'b04-flow-side' }, h('h3', null, '关联风险'),
               (branch.linked_risk_ids ?? []).length ? branch.linked_risk_ids.map(id => { const item = riskById.get(id); return h('div', { key: id },
                 h('strong', null, item?.title || item?.summary || item?.display_id || id),
-                h('p', null, item?.verification_status === 'verified' ? '已验证' : item?.verification_status === 'rejected' ? '已排除' : '尚无验证结论'),
-                item?.description || item?.reason ? h('p', null, item.description || item.reason) : null,
+                h('p', null, riskVerificationLabel(item)),
+                item?.description || item?.reason || item?.system_result ? h('p', null, item.description || item.reason || item.system_result) : null,
                 h('button', { type: 'button', className: 'b04-link', onClick: () => navigate({ type: 'risk', id }) }, `查看 ${item?.display_id || id} 风险详情 ↗`)) }) : h('p', null, '当前分支未关联风险记录。')),
             h('section', { className: 'b04-flow-side' }, h('h3', null, '关联测试用例'),
               (branch.linked_test_case_ids ?? []).length ? branch.linked_test_case_ids.map(id => { const item = caseById.get(id); return h('div', { key: id },
@@ -13758,7 +13783,7 @@ window.__ModuleLoader__.load({
           return typeof body === 'string' ? body : text(body?.summary, text(body?.text, text(body?.content, '')))
         }
         const reportFindings = [
-          ...risks.map((risk, index) => ({ key: riskKeyByItem.get(risk) ?? index, body: risk.narrative || risk.trigger || risk.residual_effect })),
+          ...risks.map((risk, index) => ({ key: riskKeyByItem.get(risk) ?? index, body: risk.narrative || risk.system_result || risk.trigger || risk.residual_effect })),
           ...findingNotes.map((item, index) => ({ key: item.source_record?.record_id ?? item.record_id ?? `note-${index}`, body: findingNoteText(item) })),
         ].filter(item => hasText(item.body))
         const sourceFileCount = current.source_snapshot?.file_count
@@ -13901,7 +13926,8 @@ window.__ModuleLoader__.load({
                     h('p', null, text(risk.trigger, '触发条件尚未记录。')),
                     h('div', { className: 'b05-risk-meta' }, h('span', null, SEVERITY[riskSeverityLevel(risk)] ? `${SEVERITY[riskSeverityLevel(risk)]}风险` : '未分级'),
                       h('span', { className: 'pangea-review-pill', 'data-status': grounding.tone, title: grounding.reason }, grounding.label),
-                      h('span', null, risk.translation_status ? TRANSLATION[risk.translation_status] ?? risk.translation_status : '验证状态未提供'),
+                      h('span', null, riskVerificationLabel(risk, '验证状态未提供')),
+                      risk.track ? h('span', null, DTS_TRACK_LABELS[risk.track] ?? risk.track) : null,
                       h('small', null, risk.evidence?.[0]?.location ? displayEvidenceLocation(risk.evidence[0].location) : '源码位置未提供'))),
                   h('div', null, h('strong', null, `${risk.linked_test_case_ids?.length ?? 0} 条关联用例`), h('small', null, (risk.linked_test_case_ids ?? []).map(id => caseById.get(id)?.display_id || id).join(' / ') || '暂无')),
                   h('div', null, h('strong', null, `${risk.evidence?.length ?? 0} 条源码依据`), h('small', null, risk.evidence?.[0]?.observation || '查看来源位置')),
@@ -13914,13 +13940,20 @@ window.__ModuleLoader__.load({
       function renderRiskDetail() {
         const risk = riskById.get(screen.id)
         if (!risk) return h('div', { className: 'b05-card', role: 'alert' }, '未找到该条风险记录，可能当前任务已刷新或切换。')
-        const semantics = risk.upstream_semantics
+        const semantics = risk.upstream_semantics && typeof risk.upstream_semantics === 'object' ? risk.upstream_semantics : null
+        const falsification = risk.upstream_falsification && typeof risk.upstream_falsification === 'object' ? risk.upstream_falsification : null
         const preview = sourcePreview.key === previewKey ? sourcePreview : { status: 'loading' }
         const snippet = preview.status === 'ready' ? preview.value : null
         const label = risk.display_id || risk.risk_id || '未编号风险'
         const linked = (risk.linked_test_case_ids ?? []).map(id => [id, caseById.get(id)])
         const grounding = classifyRiskGrounding(risk)
         const recordWarnings = Array.isArray(risk.record_warnings) ? risk.record_warnings : []
+        const rawProseBody = typeof risk.source_record?.body === 'string' && hasText(risk.source_record.body) ? risk.source_record.body : ''
+        const leadConclusion = hasText(risk.narrative) ? risk.narrative : hasText(risk.system_result) ? risk.system_result : rawProseBody
+        const legacyImpact = risk.impact || risk.residual_effect
+        const pathSteps = Array.isArray(risk.interleaving_or_path) ? risk.interleaving_or_path.filter(hasText) : []
+        const probePoints = Array.isArray(risk.instrumentation?.points) ? risk.instrumentation.points.filter(pt => pt && typeof pt === 'object') : []
+        const matchedDts = Array.isArray(risk.matched_dts_pattern_ids) ? risk.matched_dts_pattern_ids.filter(hasText) : []
         return h(React.Fragment, null,
           h('div', { className: 'b05-section-head pangea-detail-head' },
             h('div', null,
@@ -13928,8 +13961,9 @@ window.__ModuleLoader__.load({
               h('div', { className: 'pangea-detail-meta' }, h('code', null, label),
                 h('span', { className: 'pangea-result-tag', 'data-tone': ['High', 'Critical'].includes(riskSeverityLevel(risk)) ? 'danger' : 'warn' }, SEVERITY[riskSeverityLevel(risk)] ? `${SEVERITY[riskSeverityLevel(risk)]}风险` : '未分级'),
                 h('span', { className: 'pangea-review-pill', 'data-status': grounding.tone, title: grounding.reason }, grounding.label),
-                h('span', { className: 'pangea-result-tag' }, risk.translation_status ? TRANSLATION[risk.translation_status] ?? risk.translation_status : '尚无验证结论'),
-                h('span', null, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence ?? '未提供'}`))),
+                h('span', { className: 'pangea-result-tag', 'data-tone': risk.verification_status === 'needs_runtime_verification' ? 'warn' : undefined }, riskVerificationLabel(risk, '尚无验证结论')),
+                risk.track ? h('span', { className: 'pangea-result-tag' }, DTS_TRACK_LABELS[risk.track] ?? risk.track) : null,
+                hasText(risk.confidence) ? h('span', null, `置信度 ${CONFIDENCE[risk.confidence] ?? risk.confidence}`) : null)),
             h('button', { type: 'button', className: 'b03-task-action', onClick: () => { void addToConversation('risk', risk, 'review', snippet || undefined) } }, '与 AI 讨论')),
           recordWarnings.length ? h('div', { className: 'notice warn', role: 'status', 'aria-label': '记录与源码核对提示', style: { marginBottom: 14, padding: '12px 15px', borderRadius: 8, background: '#fbf4e6', border: '1px solid #eedab3', color: '#7a4d0e', fontSize: 13, lineHeight: 1.6 } },
             h('strong', null, `记录与源码核对提示（${recordWarnings.length}）`),
@@ -13937,19 +13971,30 @@ window.__ModuleLoader__.load({
           h('dl', { className: 'pangea-record-facts' },
             h('div', null, h('dt', null, '分析单元'), h('dd', null, risk.unit_id || '未归入单元')),
             h('div', null, h('dt', null, '记录入口'), h('dd', null, risk.entry || risk.source_record?.record_id || '分析记录')),
+            hasText(risk.entity_ref) ? h('div', null, h('dt', null, '底图实体'), h('dd', null, risk.entity_ref)) : null,
+            matchedDts.length ? h('div', null, h('dt', null, '对标 DTS'), h('dd', null, matchedDts.join('、'))) : null,
             h('div', null, h('dt', null, '等级来源'), h('dd', null, risk.severity_source === 'sfmea' ? 'SFMEA' : risk.severity_source === 'workbench_projection' ? '工作台投影' : '分析记录'))),
           h('div', { className: 'b05-detail-grid' },
             h('section', { className: 'b05-card pangea-reading-card' }, h('h3', null, '结论与影响'),
-              renderReadableBody(text(risk.narrative, '风险说明未提供，请核对分析原文。')),
-              h('h4', null, '可能影响'), renderReadableBody(text(risk.impact || risk.residual_effect, '具体影响未提供。')),
-              h('h4', null, '预期行为'), renderReadableBody(text(risk.expectation, '预期行为尚未记录。')),
+              renderReadableBody(text(leadConclusion, '风险说明未提供，请核对分析原文。')),
+              hasText(risk.narrative) && hasText(risk.system_result) && risk.system_result !== risk.narrative
+                ? h(React.Fragment, null, h('h4', null, '系统结果'), renderReadableBody(risk.system_result)) : null,
+              hasText(legacyImpact) ? h(React.Fragment, null, h('h4', null, '可能影响'), renderReadableBody(legacyImpact)) : null,
+              hasText(risk.external_observation) ? h(React.Fragment, null, h('h4', null, '外部观测'), renderReadableBody(risk.external_observation)) : null,
+              !hasText(legacyImpact) && !hasText(risk.external_observation) && !rawProseBody
+                ? h(React.Fragment, null, h('h4', null, '外部观测'), renderReadableBody('外部观测未提供。')) : null,
+              hasText(risk.expectation) ? h(React.Fragment, null, h('h4', null, '预期行为'), renderReadableBody(risk.expectation)) : null,
+              hasText(risk.runtime_uncertainty) ? h(React.Fragment, null, h('h4', null, '待动态实锤不确定点'), renderReadableBody(risk.runtime_uncertainty)) : null,
+              probePoints.length ? h(React.Fragment, null, h('h4', null, `运行时验证桩点（${probePoints.length}）`),
+                h('ul', { style: { margin: '6px 0 0', paddingLeft: 18, fontSize: 13, lineHeight: 1.65 } }, probePoints.map((pt, idx) => h('li', { key: pt.id || idx, style: { marginBottom: 4 } },
+                  `${pt.id ? `[${pt.id}] ` : ''}${[pt.path, pt.symbol].filter(Boolean).join(' · ')}${pt.action ? `：${pt.action}` : ''}${pt.observe ? `（观测：${pt.observe}）` : ''}`)))) : null,
               hasText(risk.blackbox_proof) ? h('div', null, h('h4', null, '黑盒证明'), renderReadableBody(risk.blackbox_proof)) : null,
               h('div', { className: 'b05-source-context' }, '验证建议：结合上游调用方入参限制与目标运行环境确认实际触发条件。')),
             h('section', { className: 'b05-card pangea-reading-card' }, h('h3', null, '触发条件'),
               renderReadableBody(text(risk.trigger, '触发条件未提供。')),
-              hasText(risk.system_result) ? h('div', null, h('h4', null, '系统结果'), renderReadableBody(risk.system_result)) : null,
-              hasText(risk.external_observation) ? h('div', null, h('h4', null, '外部观测'), h('p', null, risk.external_observation)) : null,
-              h('h4', null, '排除条件'), h('p', null, text(risk.exclusion_condition, '尚未给出足以排除该风险的证据。')),
+              pathSteps.length ? h(React.Fragment, null, h('h4', null, '交错 / 副作用路径'),
+                h('ol', { style: { margin: '6px 0 0', paddingLeft: 20, fontSize: 13.5, lineHeight: 1.7 } }, pathSteps.map((step, idx) => h('li', { key: idx, style: { marginBottom: 4 } }, step)))) : null,
+              h('h4', null, '排除条件'), renderReadableBody(text(risk.exclusion_condition, '尚未给出足以排除该风险的证据。')),
               (risk.linked_flow_ids ?? []).length ? h('button', { type: 'button', className: 'b04-link', onClick: () => jump('flows') }, '查看相关业务路径 ↗') : null),
             h('section', { className: 'b05-card pangea-risk-evidence' }, h('div', { className: 'pangea-section-heading' }, h('h3', null, '直接源码依据'), h('span', { className: 'pangea-section-count' }, `${riskEvidenceOptions.length} 处`)),
               riskEvidenceOptions.length > 1 ? h('div', { className: 'b05-filters', role: 'group', 'aria-label': '选择风险证据源码' }, riskEvidenceOptions.map((evidenceItem, index) => h('button', {
@@ -13966,12 +14011,20 @@ window.__ModuleLoader__.load({
             h('section', { className: 'b05-card' }, h('h3', null, `关联测试用例 · ${linked.length}`),
               linked.length ? linked.map(([id, testCase]) => h('button', { key: id, type: 'button', className: 'b03-task-action', style: { display: 'block', width: '100%', textAlign: 'left', marginTop: 10 }, onClick: () => navigate({ type: 'case', id }) },
                 `${testCase?.display_id || id} · ${testCase?.title || '测试用例'}`)) : h('p', null, '暂无关联测试用例。')),
-            h('section', { className: 'b05-card' }, h('h3', null, '上游语义核对'),
-              h('dl', { className: 'pangea-reading-fields' },
-                h('dt', null, '入口可达性'), h('dd', null, semantics?.reachability || '待核对'),
-                h('dt', null, '调用方限制'), h('dd', null, semantics?.caller_constraints || '未提供'),
-                h('dt', null, '规格/文档行为'), h('dd', null, semantics?.documented_behavior || '未提供'),
-                h('dt', null, '已有测试'), h('dd', null, semantics?.existing_tests || '未提供')))),
+            h('section', { className: 'b05-card' }, h('h3', null, falsification ? '上游 Caller 反证' : '上游语义核对'),
+              falsification ? h('dl', { className: 'pangea-reading-fields' },
+                h('dt', null, '反证结论'), h('dd', null, FALSIFICATION_OUTCOME[falsification.outcome] ?? falsification.outcome ?? '待核对'),
+                h('dt', null, '追溯深度'), h('dd', null, Number.isInteger(falsification.depth) ? `${falsification.depth} 层调用链` : '未记录'),
+                hasText(falsification.initial_severity) ? h(React.Fragment, null, h('dt', null, '反证前等级'), h('dd', null, SEVERITY[falsification.initial_severity] ?? falsification.initial_severity)) : null,
+                h('dt', null, '核查说明'), h('dd', null, text(falsification.reason, '未提供')),
+                Array.isArray(falsification.source_evidence) && falsification.source_evidence.length
+                  ? h(React.Fragment, null, h('dt', null, '上游证据'), h('dd', null, falsification.source_evidence.map(displayEvidenceLocation).join('、'))) : null)
+                : semantics ? h('dl', { className: 'pangea-reading-fields' },
+                  h('dt', null, '入口可达性'), h('dd', null, semantics.reachability || '待核对'),
+                  h('dt', null, '调用方限制'), h('dd', null, semantics.caller_constraints || '未提供'),
+                  h('dt', null, '规格/文档行为'), h('dd', null, semantics.documented_behavior || '未提供'),
+                  h('dt', null, '已有测试'), h('dd', null, semantics.existing_tests || '未提供'))
+                : h('p', null, '当前记录未附独立上游 Caller 反证记录，请结合触发条件与排除条件核对调用链。'))),
           renderRecordBody(risk, true),
           renderB05SourceDrawer('risk', risk))
       }

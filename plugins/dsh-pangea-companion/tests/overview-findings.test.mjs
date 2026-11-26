@@ -77,3 +77,24 @@ test('record counts reflect unique explicit IDs and never claim verified or reso
   assert.ok(rows.every(row => row.validationState === '待处理'))
   assert.doesNotMatch(JSON.stringify(rows.map(row => [row.titlePreview, row.summaryPreview])), /已验证|已解决|通过/)
 })
+
+test('projected behavior-risk-v3 records with empty narrative use system_result instead of blank summary', async () => {
+  const { sourceFirstProjection } = await import('../src/source-first-projection.js')
+  const details = sourceFirstProjection([{
+    action_id: 'run:analysis:u1', stage: 'unit_analysis', status: 'accepted', task: { unit_id: 'u1' },
+    records: [{
+      record_id: 'r1', kind: 'risk', created_revision: 1,
+      body: {
+        format_version: 'behavior-risk-v3', risk_id: 'R-001', track: 'concurrency_timing',
+        verification_status: 'static_proven', severity: 'High', title: '并发释放后使用',
+        trigger: '超时与回调并发', interleaving_or_path: ['Timer free', 'Callback deref'],
+        system_result: '解引用已释放内存导致崩溃', external_observation: 'ASAN 报错',
+        exclusion_condition: '同步排空回调', source_evidence: ['repo:a.c:10'],
+        evidence_quotes: [{ ref: 'repo:a.c:10', snippet: 'free(ctx);' }],
+      },
+    }],
+  }])
+  const [row] = buildOverviewFindings({ risks: details.risks })
+  assert.equal(row.summary, '解引用已释放内存导致崩溃')
+  assert.equal(row.summaryPreview, '解引用已释放内存导致崩溃')
+})

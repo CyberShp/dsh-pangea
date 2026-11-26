@@ -78,8 +78,9 @@ export function buildOverviewFindings({ current = {}, risks = [], notes = [] } =
   for (const risk of list(risks)) {
     const id = risk.projection_id ?? risk.risk_id
     if (!id) continue
+    const narrative = risk.narrative === '' ? undefined : risk.narrative
     add({ id: `risk:${id}`, title: risk.title ?? risk.risk_id, fallbackTitle: '待验证风险',
-      summary: risk.narrative ?? risk.trigger ?? risk.residual_effect ?? '', kind: 'risk', validationState: '待验证',
+      summary: narrative ?? (risk.system_result || undefined) ?? (risk.trigger || undefined) ?? (risk.residual_effect || undefined) ?? '', kind: 'risk', validationState: '待验证',
       sourceRecord: risk.source_record ?? risk, sourceRefs: [id], caseRefs: list(risk.linked_test_case_ids) })
   }
   for (const note of list(notes)) {

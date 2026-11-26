@@ -17,10 +17,14 @@ export function classifyRiskGrounding(risk) {
   }
   const reachability = String(risk?.upstream_semantics?.reachability ?? '').trim()
   const hasExplicitReachability = Boolean(reachability) && !PLACEHOLDER_REACHABILITY.test(reachability)
+  const falsification = risk?.upstream_falsification
+  const hasExplicitFalsification = Boolean(falsification && typeof falsification === 'object'
+    && ['no_counterevidence', 'counterevidence_found'].includes(falsification.outcome)
+    && String(falsification.reason ?? '').trim() !== '')
   const hasExclusion = Boolean(String(risk?.exclusion_condition ?? '').trim())
   const linkedCaseCount = Array.isArray(risk?.linked_test_case_ids) ? risk.linked_test_case_ids.length : 0
   const hasTrigger = Boolean(String(risk?.trigger ?? '').trim())
-  if (hasTrigger && (hasExplicitReachability || hasExclusion || linkedCaseCount > 0)) {
+  if (hasTrigger && (hasExplicitReachability || hasExplicitFalsification || hasExclusion || linkedCaseCount > 0)) {
     return {
       tier: 'anchored',
       label: '依据齐备',
@@ -28,9 +32,11 @@ export function classifyRiskGrounding(risk) {
       warnings: [],
       reason: hasExplicitReachability
         ? `入口可达性已记录：${reachability.slice(0, 32)}`
-        : linkedCaseCount > 0
-          ? `源码坐标与触发条件完备，已关联 ${linkedCaseCount} 条验证用例`
-          : '源码坐标、触发条件与排除边界已记录',
+        : hasExplicitFalsification
+          ? `上游 Caller 反证已记录：${String(falsification.reason).trim().slice(0, 32)}`
+          : linkedCaseCount > 0
+            ? `源码坐标与触发条件完备，已关联 ${linkedCaseCount} 条验证用例`
+            : '源码坐标、触发条件与排除边界已记录',
     }
   }
   return {

@@ -1459,7 +1459,7 @@ test('risk and test case pages use result-focused copy and only show recorded me
   assert.doesNotMatch(source, /置信度.*\?\? '—'/)
   assert.doesNotMatch(source, /TRANSLATION\[risk\.translation_status\].*未标注/)
   assert.doesNotMatch(source, /RISK_STATUS\[risk\.status\].*未标注/)
-  assert.match(source, /text\(risk\.narrative, '风险说明未提供，请核对分析原文。'\)/)
+  assert.match(source, /text\(leadConclusion, '风险说明未提供，请核对分析原文。'\)/)
   assert.match(source, /hasText\(risk\.blackbox_proof\)/)
 })
 
@@ -2314,6 +2314,63 @@ for (const body of [{ description: '真实风险说明', trigger: '边界输入'
     assert.equal(nextScreen.id, 'a/c')
   })
 }
+
+test('risk detail card renders behavior-risk-v3 empirical fields without legacy missing-field placeholders', async () => {
+  const { sourceFirstProjection } = await import('../src/source-first-projection.js')
+  const details = sourceFirstProjection([{
+    action_id: 'run:analysis:conc', task_id: 'job-conc', task: { unit_id: 'U-CONC', risk_track: 'concurrency_timing', record_contracts: { risk: 'behavior-risk-v3' } },
+    stage: 'unit_analysis', status: 'accepted', revision: 1, result_path: '/data/runs/run/conc.json',
+    records: [{
+      record_id: 'rec-001', kind: 'risk', created_revision: 1,
+      body: {
+        format_version: 'behavior-risk-v3', risk_id: 'R-CONC-001', track: 'concurrency_timing',
+        verification_status: 'needs_runtime_verification', severity: 'High', entity_ref: 'CTX-001',
+        matched_dts_pattern_ids: ['DTS20260001'],
+        title: '超时清理与晚到回调并发释放后使用',
+        trigger: '会话处于 AUTH_PENDING 时超时并同时回包',
+        interleaving_or_path: ['Timer 线程释放 sess->auth_ctx', '接收线程回调解引用 sess->auth_ctx'],
+        system_result: '回调解引用已释放内存导致进程崩溃',
+        runtime_uncertainty: '底层传输库 disconnect 是否同步排空在途回调在冻结范围外',
+        external_observation: '注入 50ms 延迟并发回包后 ASAN 捕获 heap-use-after-free',
+        exclusion_condition: '底层 disconnect 同步等待全部回调退出后才返回',
+        upstream_falsification: {
+          format_version: 'high-risk-caller-falsifier-v1', initial_severity: 'High', depth: 1,
+          outcome: 'no_counterevidence', reason: '上层 sess_close 未持回调排空锁即触发清理',
+          source_evidence: ['repo:src/sess_mgr.c:44-52'],
+        },
+        source_evidence: ['repo:src/sess.c:138-149'],
+        evidence_quotes: [{ ref: 'repo:src/sess.c:138-149', snippet: 'free(sess->auth_ctx);' }],
+        instrumentation: {
+          points: [{ id: 'INJ-001', kind: 'race_window_delay', repo_id: 'repo', path: 'src/sess.c', symbol: 'session_TimerCb', action: '释放后注入 50ms 延迟', observe: 'ASAN 捕获 UAF' }],
+        },
+      },
+    }],
+  }])
+  const task = { task_id: 'task', run_id: 'run', data_root: '/data', status: 'complete' }
+  const current = { run_id: 'run', data_root: '/data', workflow_version: 'source-first-v1', lifecycle_status: 'complete', terminal: true, details }
+  const states = { 0: { current, data_root: '/data' }, 1: { tasks: { items: [task] } }, 4: 'run', 5: 'task', 16: { type: 'risk', id: 'U-CONC/rec-001' } }
+  let index = 0
+  const client = await loadClientExports({ ...fakeReact(), useState(initial) { const key = index++; if (key === 91 && initial === null) initial = scopePreviewFixture(states); return [Object.hasOwn(states, key) ? states[key] : initial, () => {}] } })
+  const pages = [], ctx = { pangea: { registerPage(p) { pages.push(p) } }, effect(fn) { return fn() } }
+  client.apply(ctx)
+  const panel = pages.find(p => p.id === 'analysis').component({ ctx, scope: { cwd: '/workspace' }, visible: true })
+  const rendered = JSON.stringify(descendants(panel.type(panel.props)))
+  for (const expected of [
+    '回调解引用已释放内存导致进程崩溃',
+    '注入 50ms 延迟并发回包后 ASAN 捕获 heap-use-after-free',
+    '底层传输库 disconnect 是否同步排空在途回调在冻结范围外',
+    '[INJ-001] src/sess.c · session_TimerCb：释放后注入 50ms 延迟（观测：ASAN 捕获 UAF）',
+    'Timer 线程释放 sess->auth_ctx',
+    '接收线程回调解引用 sess->auth_ctx',
+    '待动态实锤', '时序并发', 'CTX-001', 'DTS20260001',
+    '上游 Caller 反证', '未发现阻断反证', '1 层调用链', '上层 sess_close 未持回调排空锁即触发清理',
+  ]) {
+    assert.ok(rendered.includes(expected), `missing expected risk detail text: ${expected}`)
+  }
+  for (const forbidden of ['风险说明未提供', '具体影响未提供', '预期行为尚未记录', '置信度 未提供', '尚无验证结论']) {
+    assert.ok(!rendered.includes(forbidden), `unexpected legacy placeholder: ${forbidden}`)
+  }
+})
 
 test('source-first create form disables unsupported analysis options', async () => {
   const form = { repository: 'repo', target: 'sample', source_scope_text: 'sample.c', asset_ids: [], scenario: 'module-analysis', mode: 'depth', provider_id: 'pangea-opencode' }
