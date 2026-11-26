@@ -644,7 +644,7 @@ test('Full route hydration from FaultInjectionService + frozen run context + too
   assert.match(capturedInput.environment.stimulus_playbook, /adm lun show/)
   assert.equal(capturedInput.tool_reference_files.length, 1)
   assert.equal(capturedInput.tool_reference_files[0].relative_path, 'tools/cli_adm.c')
-  assert.match(capturedInput.tool_reference_files[0].frozen_path, /tools\/cli_adm\.c$/)
+  assert.match(capturedInput.tool_reference_files[0].frozen_path, /tools[\\/]cli_adm\.c$/)
 
   // 4. Confirm with sync_to_fault_injection: true and verify real FaultInjectionService record updated
   const confirmRes = await fetch(`${base}/api/pangea-companion/live-verification`, {
