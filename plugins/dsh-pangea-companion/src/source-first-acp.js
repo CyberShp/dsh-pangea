@@ -87,7 +87,7 @@ const planningRecordInstructions = (action, opened) => action.stage === 'unit_pl
     'plan-candidates --page-token <next_page_token> --max-chars N 仅在具体边界问题需要时展开未分配候选；不主动遍历，也不为清空候选而新增工作。首次查询省略 page-token。',
   ] : []),
   ...(opened?.task?.record_contracts?.blueprint === 'risk-blueprint-v1' ? [
-    'risk-method-v2 Stage 1 提示：请先消费 risk_topology_summary 与 dts_context；仅当 dts_context.requested_dts_ids 或 requested_mr_urls 非空且当前会话已配置 DTS-mcp / codehub-mcp 时，按单号调用 DTS-mcp 读单获取 MR 链接，再持 MR 链接（含用户直填的 requested_mr_urls）调用 codehub-mcp 读取 Diff 提取故障代码特征并交接（绝不按模块盲搜；未装 MCP 或未指定时直接消费冻结 dts_context）。输出一条 kind=note、format_version=risk-blueprint-v1 的全局三轨底图，并按 error_rollback / concurrency_timing / resource_lifecycle 三轨派发 unit_plan（携带 risk_track 字段）。',
+    'risk-method-v2 Stage 1 提示：请先消费 risk_topology_summary、dts_context 与 asset_candidates；当 dts_context.requested_dts_ids 或 requested_mr_urls 非空且当前会话暴露 DTS-mcp / codehub-mcp 时，按单号读单获取 MR 链接，再持 MR 链接（含用户直填的 requested_mr_urls）读取真实 Diff 提取【故障前骨架、修复保护、已修复免疫判据、同源变种猎杀线索】并保存为 relates_to=[] 的全局 kind=note（绝不按模块盲搜；若未挂载相关接口则消费已冻结 dts_context 并如实写明 unresolved 缺口，严禁静默吞掉）。输出一条 kind=note、format_version=risk-blueprint-v1 的全局四轨底图（含 memory_hazard_zones），并按 error_rollback / concurrency_timing / resource_lifecycle / memory_corruption 四轨派发 unit_plan（携带 risk_track 字段，不同轨道允许共享同一 owned_files）。',
   ] : []),
 ] : []
 
@@ -96,7 +96,7 @@ const planningRecordInstructions = (action, opened) => action.stage === 'unit_pl
 const analysisRecordInstructions = (action, opened) => ['unit_analysis', 'targeted_closure'].includes(action.stage) ? [
   'Analysis/closure 交付说明：当前 task 的冻结 rubric 与 record_contracts 是本次分析的规则来源。旧任务未返回 write_contract 或未声明 record_contracts，不表示合同丢失；仍须完整执行冻结 rubric，不追补安装目录中的新版合同。框架模型、result_store、Graph 和 report 渲染源码不是补充写入合同，不为猜格式或完成条件去搜索这些实现。',
   ...(opened?.task?.record_contracts?.risk === 'behavior-risk-v3' ? [
-    'risk-method-v2 Stage 2 提示：本任务启用确定性写入强校验——behavior-check-v2 与 behavior-risk-v3 必须满足必填结构、source_evidence 真实行号与 evidence_quotes 逐字匹配；verification_status=needs_runtime_verification 时必须提供非空 runtime_uncertainty 与 instrumentation.points（供下游打桩台直接消费）。请优先对标 dts_context 中的故障拓扑与 already_fixed_check 免疫判据，严防将已修复老单误报为新风险。',
+    'risk-method-v2 Stage 2 提示：本任务启用确定性写入强校验——behavior-check-v2 与 behavior-risk-v3 必须满足必填结构、source_evidence 真实行号与 evidence_quotes 逐字匹配；verification_status=needs_runtime_verification 时必须提供非空 runtime_uncertainty 与 instrumentation.points（供下游打桩台直接消费）。请消费本单元 risk_track、track_topology、risk_blueprint、planning_handoff（全局 DTS/MR 特征 note）、dts_context 与已选 asset_items，严格执行 already_fixed_check 老单免疫不重报，横向深挖同模块未修复的兄弟路径与跨流悬空踩内存变种。',
   ] : []),
   '若当前冻结生成 rubric 含 FIRST-CASE-DELIVERY，每条 test_case 首次 result-write 前由本 worker 在当前 action 完成逐例语义组织，写好一条即保存，不等 Reviewer；未提供该段的旧 Run 沿用原合同，不追补历史记录。续接/压缩/修复先恢复缺失的 analysis_settings、target/focus、单元 purpose/归属及工具参考：task-open 后沿 deferred_fields 的 input_id 用 input-read 分页读取，复用已读冻结依据。',
   '普通记录的 --records-file 是 UTF-8 JSON 数组，每项外壳仅为 {"kind":"当前冻结规则要求的记录类型","body":由你撰写的正文}，可带 evidence/relates_to/supersedes。note/summary/evidence 的 body 可为中文 Markdown；test_case/flow/risk/check 的 body 按本任务冻结样例和声明的合同填写，不包第二层 body，不写 binding/revision/completion 整个结果外壳，不自行生成 record_id。此说明不允许用 note 替代必须交付的结构化记录。',
@@ -223,7 +223,9 @@ export function workerPrompt({ action, opened, cwd, dataRoot, runId, taskId, pyt
     `每次 CLI 调用的绑定参数（JSON 数组，逐项原样传入）：${JSON.stringify(binding)}`,
     `当前角色：${action.role}；阶段：${action.stage}；task_path：${action.task_path}`,
     '本次审核暂不执行，不调用 Reviewer、独立盲审、对照审核或审核触发的 closure；旧冻结规则只沿用生成内容与格式，不改变冻结文件，也不伪造审核通过。',
-    '使用现有 Python CLI 操作冻结输入与当前结果；不寻找插件或 MCP 配置。工具/命令失败时报告准确错误，不搜索安装目录或凭据。',
+    action.stage === 'unit_planning' && opened?.task?.record_contracts?.blueprint === 'risk-blueprint-v1'
+      ? '使用现有 Python CLI 操作 PANGEA 冻结输入与当前结果（不使用 pangea_* 插件工具）；当 dts_context 指定了单号或 MR 链接时，允许调用当前环境已配置的 DTS-mcp / codehub-mcp 按单号读单与读取 MR Diff。工具/命令失败时报告准确错误，不搜索安装目录或凭据。'
+      : '使用现有 Python CLI 操作冻结输入与当前结果；不寻找插件或 MCP 配置。工具/命令失败时报告准确错误，不搜索安装目录或凭据。',
     '当前身份由 Desktop ACP 宿主绑定；执行器中可见的 pangea_* 插件工具属于另一套会话调度，不使用它们。插件报未绑定时停止重试，改用上述 Python CLI；所有 PANGEA 读写只走此 CLI。CLI 自身的绑定错误原样报告，由宿主恢复，不能自行 dispatch、bind、settle 或推进 Graph。',
     action.validation_error || action.pending_repair ? `原会话修复同一结果，保留有效正文。错误摘要：${repairText}。先 result-read 获取当前 revision 和诊断，不重复读取已掌握的输入。` : '',
     initialSnapshot
@@ -1016,7 +1018,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         if (next.run_id !== runId) throw new Error('Graph 返回了其他 Run 的 action')
         const candidates = (next.actions ?? []).filter(action => !action.review_skipped && !active.has(action.action_id) && !paused.has(action.action_id))
         for (const action of candidates) {
-          if (failure || active.size >= 3) break
+          if (failure || active.size >= 4) break
           const independent = ['unit_analysis', 'targeted_closure'].includes(action.stage)
           if (active.size && (!independent || [...active.values()].some(item => !item.independent))) continue
           const promise = runAction(action).then(value => ({ id: action.action_id, value }), error => ({ id: action.action_id, error }))

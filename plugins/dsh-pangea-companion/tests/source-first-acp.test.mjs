@@ -889,11 +889,11 @@ for (const hasPromptMarker of [false, true]) test(`a persisted worker ${hasPromp
 })
 
 
-test('three analysis workers overlap, refill a free slot, and settle out of order without concurrent state writes', async () => {
+test('four analysis workers overlap, refill a free slot, and settle out of order without concurrent state writes', async () => {
   const controller = new AbortController()
   let writes = 0, active = 0, peak = 0, created = 0
   const done = new Set(), started = [], releases = new Map()
-  const actions = Array.from({ length: 5 }, (_, i) => ({ action_id: `parallel:${i}`, role: 'analysis', stage: 'unit_analysis', action: 'dispatch_agent' }))
+  const actions = Array.from({ length: 6 }, (_, i) => ({ action_id: `parallel:${i}`, role: 'analysis', stage: 'unit_analysis', action: 'dispatch_agent' }))
   // Assert ordering and overlap after observable progress, not a 200 ms disk-I/O budget.
   const until = async predicate => {
     const deadline = Date.now() + 10000
@@ -909,7 +909,7 @@ test('three analysis workers overlap, refill a free slot, and settle out of orde
       await new Promise(resolve => setTimeout(resolve, 1))
       writes--
       if (args[0] === 'task-open') return { task: {} }
-      if (args[1] === 'next') return { run_id: 'parallel', lifecycle_status: done.size === 5 ? 'complete' : 'running', actions: actions.filter(a => !done.has(a.action_id)) }
+      if (args[1] === 'next') return { run_id: 'parallel', lifecycle_status: done.size === 6 ? 'complete' : 'running', actions: actions.filter(a => !done.has(a.action_id)) }
       if (args[1] === 'settle') done.add(args[args.indexOf('--action-id') + 1])
       return {}
     }, subagents: { start: async () => {
@@ -923,16 +923,16 @@ test('three analysis workers overlap, refill a free slot, and settle out of orde
       } }
     } } })
   try {
-    await until(() => started.length === 3)
-    assert.equal(peak, 3)
-    releases.get('parallel:1')()
     await until(() => started.length === 4)
-    assert.ok(done.has('parallel:1')); assert.ok(!done.has('parallel:0'))
-    releases.get('parallel:3')()
+    assert.equal(peak, 4)
+    releases.get('parallel:1')()
     await until(() => started.length === 5)
+    assert.ok(done.has('parallel:1')); assert.ok(!done.has('parallel:0'))
+    releases.get('parallel:4')()
+    await until(() => started.length === 6)
     for (const release of releases.values()) release()
     assert.equal((await run.result).stopReason, 'completed')
-    assert.equal(done.size, 5); assert.equal(peak, 3)
+    assert.equal(done.size, 6); assert.equal(peak, 4)
   } finally { controller.abort(); for (const release of releases.values()) release(); await run.result.catch(() => {}); await run.dispose() }
 })
 
@@ -943,7 +943,7 @@ test('a failed unit stops new dispatch while other running units keep their comp
   let created = 0
   const settled = [], disposed = []
   const releases = []
-  const actions = Array.from({ length: 4 }, (_, i) => ({ action_id: `failure:${i}`, role: 'analysis', stage: 'unit_analysis', action: 'dispatch_agent' }))
+  const actions = Array.from({ length: 5 }, (_, i) => ({ action_id: `failure:${i}`, role: 'analysis', stage: 'unit_analysis', action: 'dispatch_agent' }))
   const watchdog = fixtureWatchdog(controller, 'failed-unit barrier', () => { for (const release of releases) release() })
   let run
   try {
@@ -957,16 +957,16 @@ test('a failed unit stops new dispatch while other running units keep their comp
         const number = created++, id = `worker-${number}`
         return { id, remoteSessionId: `remote-${number}`, result: Promise.resolve({ stopReason: 'completed' }), dispose: async () => disposed.push(id),
           continuePrompt: async () => {
-            await new Promise(resolve => { releases.push(resolve); if (releases.length === 3) for (const release of releases) release() })
+            await new Promise(resolve => { releases.push(resolve); if (releases.length === 4) for (const release of releases) release() })
             if (number === 0) throw new Error('unit transport failed')
             await new Promise(resolve => setTimeout(resolve, 10))
             return { stopReason: 'completed' }
           } }
       } } })
     await assert.rejects(Promise.race([run.result, watchdog.promise]), /unit transport failed/)
-    assert.equal(created, 3)
-    assert.deepEqual(settled.sort(), ['failure:1', 'failure:2'])
-    assert.equal(disposed.length, 3)
+    assert.equal(created, 4)
+    assert.deepEqual(settled.sort(), ['failure:1', 'failure:2', 'failure:3'])
+    assert.equal(disposed.length, 4)
   } finally {
     for (const release of releases) release()
     controller.abort()

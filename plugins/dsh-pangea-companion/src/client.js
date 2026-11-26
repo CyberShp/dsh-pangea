@@ -55,7 +55,7 @@ window.__ModuleLoader__.load({
       ['path', { d: 'M7 12h10' }],
     ]
     function runIcon(name) {
-      return h('svg', { className: 'lucide', width: 17, height: 17, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.65, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, runIcons[name].map(([tag, props], key) => h(tag, { ...props, key })))
+      return h('svg', { className: 'lucide', width: 17, height: 17, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.65, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, (runIcons[name] ?? runIcons.CircleAlert).map(([tag, props], key) => h(tag, { ...props, key })))
     }
     function workflowEvents(current, launchEvents = []) {
       const stages = { unit_planning: 'planning', source_first_plan: 'planning', unit_analysis: 'analyzing', independent_review: 'reviewing', comparison_review: 'reviewing', targeted_closure: 'closing' }
@@ -1363,7 +1363,7 @@ window.__ModuleLoader__.load({
       for (const risk of risks ?? []) counts[riskSeverityLevel(risk)] += 1
       return counts
     }
-    const DTS_TRACK_LABELS = { error_rollback: '异常回滚', concurrency_timing: '时序并发', resource_lifecycle: '资源生命周期' }
+    const DTS_TRACK_LABELS = { error_rollback: '异常回滚', concurrency_timing: '时序并发', resource_lifecycle: '资源生命周期', memory_corruption: '踩内存与悬空访问' }
     function filterRisks(risks, severity, queryValue) {
       const query = String(queryValue ?? '').trim().toLowerCase()
       return (risks ?? []).filter(risk => {
@@ -2414,7 +2414,7 @@ window.__ModuleLoader__.load({
           const importedCount = (response.ingest?.imported?.length ?? 0) + (response.ingest?.updated?.length ?? 0)
           const filteredCount = response.ingest?.filtered_out?.length ?? 0
           setFilePath('')
-          onNotice?.(`已导入 ${importedCount} 条 DTS 故障拓扑卡（自动滤除 ${filteredCount} 条非三轨杂单）`)
+          onNotice?.(`已导入 ${importedCount} 条 DTS 故障拓扑卡（自动滤除 ${filteredCount} 条非四轨杂单）`)
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           setLoadError(msg)
@@ -2442,7 +2442,7 @@ window.__ModuleLoader__.load({
         if (next && !catalog && !busy) void loadPatterns()
       }
       const items = catalog?.items ?? []
-      const trackIcon = track => track === 'concurrency_timing' ? 'Cpu' : track === 'resource_lifecycle' ? 'Database' : 'AlertTriangle'
+      const trackIcon = track => track === 'concurrency_timing' ? 'Cpu' : track === 'resource_lifecycle' ? 'Files' : track === 'memory_corruption' ? 'ShieldAlert' : 'CircleAlert'
       return h('section', { className: 'callout', style: { marginTop: 22, padding: '18px 20px' } },
         h('div', { className: 'row between', style: { alignItems: 'flex-start', gap: 12 } },
           h('div', { style: { minWidth: 0, flex: 1 } },
@@ -2450,7 +2450,7 @@ window.__ModuleLoader__.load({
               renderIcon('ShieldAlert'),
               h('strong', { className: 'small', style: { fontSize: 13 } }, 'DTS 真实案例反哺'),
               h('span', { className: 'pangea-opt-tag' }, '可选')),
-            h('p', { className: 'create-copy', style: { margin: '6px 0 0', lineHeight: 1.6 } }, '本地会话已装 DTS-mcp + codehub-mcp 时，填具体单号自动读单取 MR Diff 提取故障特征；未装 MCP 时可直接导入离线 DTS 文件。')),
+            h('p', { className: 'create-copy', style: { margin: '6px 0 0', lineHeight: 1.6 } }, '已配 DTS-mcp + codehub-mcp 时填单号与 MR 链接自动提取故障代码特征；亦支持直填本地仓修复 Commit 号或导入离线补丁/表格。')),
           h('button', { type: 'button', className: 'btn ghost', style: { flexShrink: 0, whiteSpace: 'nowrap' }, disabled: disabled || busy, onClick: toggleExpand }, renderIcon('Library'), expanded ? '收起拓扑库' : `DTS 拓扑库${catalog ? `（${catalog.total ?? items.length}）` : ''}`)),
         h('div', { className: 'form-grid', style: { marginTop: 16, gap: 14 } },
           h('label', { className: 'field' },
@@ -2459,12 +2459,12 @@ window.__ModuleLoader__.load({
             h('span', { className: 'hint' }, '仅读取此处指定的单号，绝不盲搜。')),
           h('label', { className: 'field' },
             h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } }, '关联 MR 链接', h('span', { className: 'pangea-opt-tag' }, '可选')),
-            h('textarea', { 'aria-label': '关联 MR 链接', className: 'mono', rows: 2, style: { minHeight: 62, resize: 'vertical' }, value: mrUrlsText ?? '', disabled, placeholder: '已有 codehub MR 链接可直接粘贴（每行一条）', onChange: event => onChangeMrUrls(event.target.value) }),
-            h('span', { className: 'hint' }, '未填时由 DTS-mcp 从单据自动提取。'))),
+            h('textarea', { 'aria-label': '关联 MR 链接', className: 'mono', rows: 2, style: { minHeight: 62, resize: 'vertical' }, value: mrUrlsText ?? '', disabled, placeholder: '粘贴 codehub MR 链接、修复 Commit 号或本地 .patch 路径（每行一条）', onChange: event => onChangeMrUrls(event.target.value) }),
+            h('span', { className: 'hint' }, '未填时由 DTS-mcp 从单据提取；含本地 Commit 号时自动提取真实代码 Diff。'))),
         h('div', { className: 'divider', style: { margin: '16px 0 14px' } }),
         h('div', { className: 'row between', style: { marginBottom: 8 } },
           h('span', { className: 'small', style: { fontWeight: 600 } }, '离线 DTS 文件导入'),
-          h('span', { className: 'small muted' }, '支持 .xlsx / .csv / .json / .md / .txt，自动滤除文案杂单')),
+          h('span', { className: 'small muted' }, '支持 .xlsx / .csv / .json / .md / .txt / .diff / .patch，自动滤除文案杂单')),
         h('div', { className: 'row', style: { gap: 8, alignItems: 'center', flexWrap: 'nowrap' } },
           h('input', { 'aria-label': '离线 DTS 文件路径', placeholder: '输入或选择离线 DTS 导出文件完整路径', style: { flex: 1, minWidth: 0, height: 38, padding: '0 12px', fontSize: 12, borderRadius: 6, border: '1px solid #dbe0dd', background: '#fff', boxSizing: 'border-box' }, value: filePath, disabled: disabled || busy, onChange: event => setFilePath(event.target.value) }),
           window.dshDesktopDirectoryPicker?.pick ? h('button', { type: 'button', className: 'btn ghost', style: { flexShrink: 0, whiteSpace: 'nowrap', height: 38 }, disabled: disabled || busy, onClick: async () => { try { const picked = await window.dshDesktopDirectoryPicker.pick({ purpose: 'asset' }); if (picked) setFilePath(picked) } catch (err) { onNotice?.(err.message, true) } } }, renderIcon('FolderOpen'), '选文件') : null,
@@ -5480,7 +5480,7 @@ window.__ModuleLoader__.load({
         const view = screen.createView ?? 'inputs'
         const scenes = {
           'branch-analysis': ['分支分析', 'GitBranch', '分析业务条件、配置组合、状态与操作顺序。', '业务行为清单、独立用例与参数组合及未决缺口'],
-          'risk-analysis': ['风险分析', 'ShieldAlert', '聚焦异常回滚、时序并发、资源生命周期三大深水区，支持 DTS 真实案例反哺。', '三轨深潜风险、两级实证梯度、DTS 变种排查与打桩配方'],
+          'risk-analysis': ['风险分析', 'ShieldAlert', '聚焦异常回滚、时序并发、资源生命周期、踩内存与悬空访问四大深水区，支持 DTS 真实案例反哺。', '四轨深潜风险、两级实证梯度、DTS 变种排查与打桩配方'],
           'coverage-analysis': ['覆盖率分析', 'ChartNoAxesCombined', '依据真实覆盖数据定位缺口并设计补测。', '覆盖缺口、源码匹配依据与补充测试用例'],
         }
         const scene = scenes[createForm.scenario] ?? [createForm.scenario, 'ScanSearch', '', '']
@@ -5616,7 +5616,7 @@ window.__ModuleLoader__.load({
           content = panel(h(React.Fragment, null, h('div', { className: 'row between' }, h('div', null, h('h2', { className: 'create-heading' }, '准备开始分析'), h('p', { className: 'create-copy', style: { marginBottom: 0 } }, '确认范围与输入，创建后可在运行过程中持续查看结果。')), badge(canSubmit ? '创建条件已满足' : '创建条件待完成', canSubmit ? 'good' : 'warn')), h('div', { className: 'divider' }),
             row('任务名称', draftName, `${createForm.repository} · ${scene[0]}${createForm.objective ? ` · ${createForm.objective === 'product-behavior' ? '产品行为' : '接口契约'}` : ''}`, 1), h('details', { className: 'pangea-create-request' }, h('summary', null, '完整需求'), renderReadableBody(createForm.target)), row('源码范围', sourceScope.join('\n'), validScopePreview ? `命中 ${validScopePreview.matched_file_count} 个源码文件` : '请先预览命中文件', 1),
             row('测试工具代码（仅参考）', (createForm.test_tool_sources || []).map(source => `${source.repo_id}: ${source.paths.join('、')}`).join('\n') || '未选择', createForm.test_tool_preview ? `已确认 ${createForm.test_tool_preview.matched_file_count} 个参考文件；不作为被测对象` : '可选，不影响原有分析', 2),
-            createForm.scenario === 'risk-analysis' ? row('DTS 案例反哺', parseMultilineTokens(createForm.dts_ids_text).join('、') || '未指定单号（自动复用已启用拓扑库）', String(createForm.dts_mr_urls_text ?? '').trim() ? `已附加 MR 链接：\n${createForm.dts_mr_urls_text.trim()}` : '有 DTS-mcp + codehub-mcp 时自动按单号读单取 MR Diff；无 MCP 时降级使用本地拓扑库', 2) : null,
+            createForm.scenario === 'risk-analysis' ? row('DTS 案例反哺', parseMultilineTokens(createForm.dts_ids_text).join('、') || '未指定单号（自动复用已启用拓扑库与已选历史缺陷资产）', String(createForm.dts_mr_urls_text ?? '').trim() ? `已附加 MR 链接 / Commit：\n${createForm.dts_mr_urls_text.trim()}` : '已配 DTS-mcp + codehub-mcp 时自动按单号读单取 MR Diff；亦可复用本地拓扑库', 2) : null,
             row('分析资料', `${selectedAssets.length} 份资产`, selectedAssets.map(item => `${item.title} r${item.revision ?? '待读取'}`).join('\n'), 2), row('执行设置', selectedProviderLabel, executionReady ? `${execution.model}${createForm.agent_model ? '' : '（Agent 默认，已确认）'}` : execution.message, 3),
             h('div', { className: 'callout', style: { marginTop: 18 } }, h('div', { className: 'row' }, runIcon('Files'), h('span', { className: 'small' }, '创建时冻结源码与所选资产版本，并启动本次分析。'))), submitBlockReason && h('p', { role: 'status', id: 'pangea-create-hint', className: 'notice warn' }, submitBlockReason), footer(() => go(3), () => { void submitNewRun() }, creatingRun ? '正在创建任务…' : '创建并开始分析', !canSubmit)))
         }

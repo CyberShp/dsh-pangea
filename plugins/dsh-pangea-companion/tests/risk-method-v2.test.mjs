@@ -156,3 +156,86 @@ test('workbench normalizeRunInput forwards dts_context dts_ids and mr_urls for r
     mr_urls: ['https://codehub.example/org/repo/merge_requests/42'],
   })
 })
+
+test('memory_corruption 4th track projects cleanly and Stage 1 risk-blueprint-v1 workerPrompt unblocks DTS-mcp / codehub-mcp', async () => {
+  const { workerPrompt } = await import('../src/source-first-acp.js')
+
+  const projected = sourceFirstProjection([
+    {
+      action_id: 'run-v2:analysis:U-MEM',
+      task_id: 'task-mem',
+      stage: 'unit_analysis',
+      status: 'accepted',
+      revision: 1,
+      result_path: '/tmp/mem.json',
+      task: {
+        unit_id: 'U-MEM',
+        risk_track: 'memory_corruption',
+        record_contracts: { risk: 'behavior-risk-v3', check: 'behavior-check-v2' },
+      },
+      records: [
+        {
+          record_id: 'rec-mem-1',
+          kind: 'risk',
+          created_revision: 1,
+          body: {
+            format_version: 'behavior-risk-v3',
+            risk_id: 'R-MEM-001',
+            track: 'memory_corruption',
+            verification_status: 'needs_runtime_verification',
+            severity: 'Critical',
+            entity_ref: 'MEM-SLOT-01',
+            matched_dts_pattern_ids: ['DTS20260616'],
+            title: '跨线程释放后重分配槽位导致异步回调踩内存',
+            trigger: '销毁线程释放 slot 后工作线程晚到回调 memcpy',
+            interleaving_or_path: ['T1 pool_free(c->slot)', 'T2 memcpy(c->slot->payload, buf, len)'],
+            system_result: '踩坏重分配后的邻居会话内存',
+            runtime_uncertainty: '底层调度器是否隐式排空回调待动态验证',
+            external_observation: '毒化填充或 ASAN 捕获写入',
+            exclusion_condition: '销毁前同步排空回调并置空指针',
+            source_evidence: ['repo:src/chan_b.c:1-7'],
+            evidence_quotes: [{ ref: 'repo:src/chan_b.c:1-7', snippet: 'memcpy(c->slot->payload, buf, len);' }],
+            instrumentation: {
+              points: [
+                {
+                  id: 'INJ-MEM-01',
+                  kind: 'memory_poison_or_bound_probe',
+                  repo_id: 'repo',
+                  path: 'src/chan_b.c',
+                  symbol: 'chan_b_teardown',
+                  action: '释放前毒化 slot 并注入 50ms 窗口延迟',
+                  observe: 'ASAN heap-use-after-free',
+                },
+              ],
+            },
+          },
+        },
+      ],
+    },
+  ])
+
+  assert.equal(projected.risks.length, 1)
+  assert.equal(projected.risks[0].track, 'memory_corruption')
+  const candidates = extractRiskInjectionCandidates(projected.risks)
+  assert.equal(candidates.length, 1)
+  assert.equal(candidates[0].instrumentation.points[0].kind, 'memory_poison_or_bound_probe')
+
+  const stage1Prompt = workerPrompt({
+    action: { action_id: 'run-v2:planning', role: 'planning', stage: 'unit_planning', task_path: '/tmp/plan.json' },
+    opened: {
+      task: {
+        scenario: 'risk-analysis',
+        record_contracts: { blueprint: 'risk-blueprint-v1', risk: 'behavior-risk-v3', check: 'behavior-check-v2' },
+      },
+    },
+    cwd: '/work',
+    dataRoot: '/data',
+    runId: 'run-v2',
+    taskId: 'planner-1',
+    python: 'python',
+  })
+  assert.match(stage1Prompt, /DTS-mcp \/ codehub-mcp/)
+  assert.match(stage1Prompt, /memory_corruption/)
+  assert.doesNotMatch(stage1Prompt, /不寻找插件或 MCP 配置/)
+})
+
