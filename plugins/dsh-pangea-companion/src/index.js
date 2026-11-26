@@ -550,7 +550,13 @@ export async function liveVerificationRouteHandler(req, res, service, faultInjec
         return json(res, 200, { status: 'ok', ...detail, locks: service.getLocks() })
       }
       const tasks = await service.list(dataRoot)
-      return json(res, 200, { status: 'ok', tasks, locks: service.getLocks() })
+      const providers = acpProviderOptions().map(provider => ({
+        id: provider.id,
+        label: provider.label,
+        available: provider.available,
+        registered: Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id)),
+      }))
+      return json(res, 200, { status: 'ok', tasks, locks: service.getLocks(), providers })
     }
     if (req.method === 'POST') {
       try { updateAdmission(runtime)?.assertOpen() } catch (error) { return json(res, 409, { status: 'error', error: error.message }) }

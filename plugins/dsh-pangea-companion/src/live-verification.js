@@ -438,8 +438,10 @@ export class LiveVerificationService {
     }).filter(item => item.target_key)
     if (!normalizedTargets.length) throw serviceError('核验目标缺少有效的 target_key')
     if (!this.runWorker) throw serviceError('当前运行时未配置核验执行器', 503)
+    let resolvedModel = agentModel
     if (this.validateModel) {
-      await this.validateModel({ providerId, model: agentModel, cwd })
+      const validated = await this.validateModel({ providerId, model: agentModel, cwd })
+      if (typeof validated === 'string' && validated.trim()) resolvedModel = validated.trim()
     }
 
     const verifyId = `lv-${new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)}-${randomUUID().slice(0, 6)}`
@@ -484,7 +486,7 @@ export class LiveVerificationService {
           array_ip: environment.array?.ip || '',
         },
         provider_id: providerId,
-        agent_model: agentModel,
+        agent_model: resolvedModel,
         target_process: effectiveProcess,
         target_pid: String(targetPid || '').trim(),
         target_binary: String(targetBinary || '').trim(),

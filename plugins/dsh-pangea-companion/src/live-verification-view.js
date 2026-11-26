@@ -113,6 +113,12 @@ function envToForm(env) {
   }
 }
 
+const DEFAULT_ACP_PROVIDERS = [
+  { id: 'pangea-nga', label: 'NGA' },
+  { id: 'pangea-codeagent', label: 'CodeAgent' },
+  { id: 'pangea-opencode', label: 'OpenCode' },
+]
+
 export function createLiveVerificationWorkspace(React) {
   const h = React.createElement
 
@@ -121,8 +127,8 @@ export function createLiveVerificationWorkspace(React) {
     dataRoot = '',
     draft = null,
     onConsumeDraft = null,
-    availableProviders = [{ id: 'nga', label: 'NGA' }, { id: 'codeagent', label: 'CodeAgent' }, { id: 'opencode', label: 'OpenCode' }],
-    defaultProviderId = 'nga',
+    availableProviders = null,
+    defaultProviderId = '',
     defaultAgentModel = '',
   }) {
     const [tab, setTab] = React.useState('tasks') // 'tasks' | 'environments'
@@ -133,6 +139,7 @@ export function createLiveVerificationWorkspace(React) {
     const [envDrawerOpen, setEnvDrawerOpen] = React.useState(false)
     const [tasks, setTasks] = React.useState([])
     const [locks, setLocks] = React.useState({})
+    const [providers, setProviders] = React.useState(() => (Array.isArray(availableProviders) && availableProviders.length ? availableProviders : []))
     const [environments, setEnvironments] = React.useState([])
     const [fiTasks, setFiTasks] = React.useState([])
     const [fiBuilds, setFiBuilds] = React.useState([])
@@ -151,9 +158,10 @@ export function createLiveVerificationWorkspace(React) {
       run_id: '', fault_injection_task_id: '', fault_injection_build_id: '',
       target_process: '', target_pid: '', target_binary: '',
       direct_target_key: '', direct_target_title: '', instructions: '',
-      provider_id: defaultProviderId || 'nga', agent_model: defaultAgentModel || '',
+      provider_id: defaultProviderId || '', agent_model: defaultAgentModel || '',
     })
-    const [modelCatalog, setModelCatalog] = React.useState({ status: 'idle', models: [], error: '' })
+    const [modelState, setModelState] = React.useState({ status: 'idle' })
+    const [modelRefresh, setModelRefresh] = React.useState(0)
     const [busy, setBusy] = React.useState(false)
     const [error, setError] = React.useState('')
     const [notice, setNotice] = React.useState('')
@@ -175,6 +183,11 @@ export function createLiveVerificationWorkspace(React) {
         ])
         setTasks(Array.isArray(lvRes.tasks) ? lvRes.tasks : [])
         setLocks(lvRes.locks || envRes.locks || {})
+        if (Array.isArray(lvRes.providers) && lvRes.providers.length) {
+          setProviders(lvRes.providers)
+        } else {
+          setProviders(prev => prev.length ? prev : (Array.isArray(availableProviders) && availableProviders.length ? availableProviders : DEFAULT_ACP_PROVIDERS))
+        }
         setEnvironments(Array.isArray(envRes.environments) ? envRes.environments : [])
         setFiTasks((Array.isArray(fiRes.tasks) ? fiRes.tasks : []).filter(t => ['ready', 'pushed'].includes(t.status)))
         setFiBuilds((Array.isArray(fiRes.builds) ? fiRes.builds : []).filter(b => ['ready', 'pushed'].includes(b.status)))
@@ -182,7 +195,7 @@ export function createLiveVerificationWorkspace(React) {
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : String(reason))
       }
-    }, [querySuffix])
+    }, [availableProviders, querySuffix])
 
     const loadDetail = React.useCallback(async verifyId => {
       if (!verifyId) return
@@ -261,21 +274,49 @@ export function createLiveVerificationWorkspace(React) {
       return () => clearInterval(timer)
     }, [tab, subView, activeTask?.id, activeTask?.status, loadDetail])
 
+    const normalizedProviders = React.useMemo(
+      () => providers.map(p => ({ ...p, registered: p.registered !== false && p.available !== false })),
+      [providers],
+    )
+
     React.useEffect(() => {
-      if (tab !== 'tasks' || subView !== 'create' || !createForm.provider_id) return undefined
+      if (!normalizedProviders.length) return
+      const usable = normalizedProviders.filter(p => p.registered)
+      setCreateForm(prev => {
+        if (prev.provider_id && usable.some(p => p.id === prev.provider_id)) return prev
+        let remembered = ''
+        try { remembered = window.localStorage?.getItem('pangea.acp-provider.v1') ?? '' } catch { /* storage unavailable */ }
+        const preferred = [defaultProviderId, remembered, usable[0]?.id].find(id => id && usable.some(p => p.id === id)) || ''
+        if (preferred === prev.provider_id) return prev
+        return { ...prev, provider_id: preferred, agent_model: preferred === defaultProviderId ? (defaultAgentModel || '') : '' }
+      })
+    }, [normalizedProviders, defaultProviderId, defaultAgentModel])
+
+    const providerRegistered = normalizedProviders.some(p => p.id === createForm.provider_id && p.registered)
+
+    React.useEffect(() => {
+      if (tab !== 'tasks' || subView !== 'create' || !createForm.provider_id || !providerRegistered) {
+        setModelState({ status: 'idle' })
+        return undefined
+      }
       return loadAnalysisAgentModels({
         providerId: createForm.provider_id,
         cwd,
-        onState: next => {
-          const models = Array.isArray(next?.catalog?.models) ? next.catalog.models : []
-          setModelCatalog({ status: next?.status || 'idle', models, error: next?.error || '' })
-          const defaultModel = next?.catalog?.current_model || models[0]?.id || ''
-          if (next?.status === 'ready' && defaultModel) {
-            setCreateForm(prev => prev.agent_model ? prev : { ...prev, agent_model: defaultModel })
-          }
-        },
+        onState: setModelState,
       })
-    }, [tab, subView, createForm.provider_id, cwd])
+    }, [tab, subView, createForm.provider_id, providerRegistered, cwd, modelRefresh])
+
+    const modelCatalog = modelState.provider_id === createForm.provider_id && modelState.cwd === cwd && modelState.status === 'ready' ? modelState.catalog : null
+    const catalogModels = Array.isArray(modelCatalog?.models) ? modelCatalog.models : []
+    const effectiveAgentModel = createForm.agent_model && modelCatalog && !catalogModels.some(m => m.id === createForm.agent_model)
+      ? ''
+      : createForm.agent_model
+    const modelSelection = analysisExecutionState(
+      { provider_id: createForm.provider_id, agent_model: effectiveAgentModel },
+      normalizedProviders,
+      modelState,
+      cwd,
+    )
 
     const buildEndpointPayload = (ep, kind) => {
       if (!ep.ip.trim()) return null
@@ -368,6 +409,7 @@ export function createLiveVerificationWorkspace(React) {
       setBusy(true); setError(''); setNotice('')
       try {
         if (!createForm.environment_id) throw new Error('请选择目标真机环境')
+        if (!modelSelection.ready) throw new Error(modelSelection.message || '请先确认可用的执行 Agent 与模型')
         let payload = {
           action: 'start',
           cwd,
@@ -376,7 +418,7 @@ export function createLiveVerificationWorkspace(React) {
           mode: createForm.mode,
           environment_id: createForm.environment_id,
           provider_id: createForm.provider_id,
-          agent_model: createForm.agent_model,
+          agent_model: modelSelection.model,
           target_process: createForm.target_process.trim(),
           target_pid: createForm.target_pid.trim(),
           target_binary: createForm.target_binary.trim(),
@@ -609,13 +651,42 @@ export function createLiveVerificationWorkspace(React) {
               h('option', { value: '' }, environments.length ? '请选择环境…' : '暂无环境，请先去「环境管理」新增'),
               environments.map(env => h('option', { key: env.id, value: env.id }, `${env.name} (${[env.host?.ip ? `Host:${env.host.ip}` : '', env.array?.ip ? `Array:${env.array.ip}` : ''].filter(Boolean).join(' / ')})`)))),
           h('label', { className: 'pangea-lv-field' }, h('span', null, '核验执行 Agent（外部 ACP）'),
-            h('select', { value: createForm.provider_id, onChange: e => setCreateForm(prev => ({ ...prev, provider_id: e.target.value, agent_model: '' })) },
-              availableProviders.map(p => h('option', { key: p.id, value: p.id }, p.label || p.id)))),
-          h('label', { className: 'pangea-lv-field' }, h('span', null, '执行模型'),
-            h('select', { value: createForm.agent_model, onChange: e => setCreateForm(prev => ({ ...prev, agent_model: e.target.value })) },
-              modelCatalog.models.length
-                ? modelCatalog.models.map(m => h('option', { key: m.id, value: m.id }, m.label || m.id))
-                : h('option', { value: createForm.agent_model }, createForm.agent_model || (modelCatalog.status === 'loading' ? '读取模型中…' : '默认模型'))))),
+            h('select', {
+              'aria-label': '核验执行 Agent',
+              value: createForm.provider_id,
+              disabled: busy || !normalizedProviders.length,
+              onChange: e => setCreateForm(prev => ({ ...prev, provider_id: e.target.value, agent_model: '' })),
+            },
+              !createForm.provider_id ? h('option', { value: '', disabled: true }, normalizedProviders.length ? '请选择已加载的外部 Agent' : '正在读取外部 Agent…') : null,
+              normalizedProviders.map(p => h('option', { key: p.id, value: p.id, disabled: !p.registered }, p.registered ? (p.label || p.id) : `${p.label || p.id}（未就绪）`)))),
+          h('div', { className: 'pangea-lv-field' },
+            h('label', { style: { display: 'grid', gap: 4 } },
+              h('span', null, '执行模型'),
+              h('select', {
+                'aria-label': '执行模型',
+                value: effectiveAgentModel || '',
+                disabled: busy || !modelCatalog,
+                onChange: e => setCreateForm(prev => ({ ...prev, agent_model: e.target.value })),
+              },
+                h('option', {
+                  value: '',
+                  disabled: !(modelCatalog?.current_model && catalogModels.some(m => m.id === modelCatalog.current_model)),
+                }, modelCatalog?.current_model && catalogModels.some(m => m.id === modelCatalog.current_model)
+                  ? `使用 Agent 默认（${modelCatalog.current_model}）`
+                  : modelState.status === 'loading' ? '读取模型中…' : '请选择可用模型'),
+                catalogModels.map(m => h('option', { key: m.id, value: m.id }, m.label && m.label !== m.id ? `${m.label} · ${m.id}` : m.id)))),
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 2 } },
+              h('span', {
+                role: modelState.status === 'error' ? 'alert' : 'status',
+                style: { fontSize: 12, fontWeight: 400, color: modelState.status === 'error' ? '#9c2330' : '#5e6773' },
+              }, modelSelection.message),
+              h('button', {
+                type: 'button',
+                className: 'lv-btn',
+                style: { minHeight: 26, padding: '2px 9px', fontSize: 12, flexShrink: 0 },
+                disabled: busy || !createForm.provider_id || !providerRegistered || modelState.status === 'loading',
+                onClick: () => setModelRefresh(value => value + 1),
+              }, '刷新模型')))),
         lockedHolder ? h('div', { className: 'pangea-lv-banner warn' }, `当前所选环境正被任务 ${lockedHolder.verify_id} 占用，启动将被互斥锁拦截。`) : null,
         h('details', { style: { margin: '4px 0 10px', borderTop: '1px solid #eef0f3', paddingTop: 8 } },
           h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#5e6773' } }, '高级选项：Stage-0 进程/二进制覆写与现场核验说明（可选）'),
@@ -625,7 +696,7 @@ export function createLiveVerificationWorkspace(React) {
           h('label', { className: 'pangea-lv-field' }, h('span', null, '补充现场核验说明'),
             h('textarea', { value: createForm.instructions, placeholder: '例如：目标 LUN ID、测试端口、日志路径等现场约束…', onChange: e => setCreateForm(prev => ({ ...prev, instructions: e.target.value })) }))),
         h('div', { style: { display: 'flex', gap: 8 } },
-          h('button', { type: 'button', className: 'lv-btn primary', disabled: busy || Boolean(lockedHolder) || (modelCatalog.status === 'loading' && !createForm.agent_model), onClick: () => void handleStartVerification() }, '启动真机核验（先执行 Stage-0 验包）'),
+          h('button', { type: 'button', className: 'lv-btn primary', disabled: busy || Boolean(lockedHolder) || !modelSelection.ready, onClick: () => void handleStartVerification() }, '启动真机核验（先执行 Stage-0 验包）'),
           !environments.length ? h('button', { type: 'button', className: 'lv-btn', onClick: () => { setTab('environments'); openNewEnvDrawer() } }, '去新增环境') : null))
     }
 

@@ -7557,7 +7557,8 @@ window.__ModuleLoader__.load({
         cwd,
         dataRoot: snapshot?.data_root || workbench?.data_root || '',
         draft: liveVerificationDraft,
-        defaultProviderId: createForm.provider_id || 'nga',
+        availableProviders: workbench?.acp_providers?.length ? workbench.acp_providers : undefined,
+        defaultProviderId: createForm.provider_id || '',
         defaultAgentModel: createForm.agent_model || '',
       })
       else if (screen.type === 'flows') body = renderFlows()

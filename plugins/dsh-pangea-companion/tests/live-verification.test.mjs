@@ -13,6 +13,7 @@ import { EnvironmentStore } from '../src/execution/environment.js'
 import { PangeaSshRuntime, checkDangerousCommand } from '../src/execution/ssh.js'
 import { FaultInjectionService } from '../src/fault-injection.js'
 import { LiveVerificationService, buildPidLookupCommand, validateVerificationResult } from '../src/live-verification.js'
+import { requireAgentModel } from '../src/agent-models.js'
 import { environmentRouteHandler, liveVerificationRouteHandler } from '../src/index.js'
 
 const { Server } = ssh2
@@ -1052,6 +1053,93 @@ test('Batch D regressions: H2 reference_warnings, H3 display_id normalization & 
   assert.match(done2.reference_warnings[0], /run-missing/)
 })
 
+test('Live verification GET exposes real pangea-* ACP providers and start validates via requireAgentModel', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'live-verify-acp-'))
+  const dataRoot = path.join(root, 'pangea-data')
+  await mkdir(dataRoot, { recursive: true })
+  await mkdir(path.join(root, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(root, '.agents', 'pangea', 'dsh.md'), '# test workspace\n')
+  const arraySsh = await startMockSshServer({
+    onExec: (cmd, stream) => {
+      stream.write(cmd.includes('PANGEA_PREFLIGHT_OK') ? 'PANGEA_PREFLIGHT_OK\n' : 'ok\n')
+      stream.exit(0)
+      stream.end()
+    },
+  })
+  const envStore = new EnvironmentStore(path.join(root, 'environments.json'))
+  const ssh = new PangeaSshRuntime(envStore)
+  const runtime = {
+    subagents: {
+      getProvider: id => id === 'pangea-nga' ? {
+        discoverModels: async () => ({
+          current_model: 'nga-default',
+          models: [{ id: 'nga-default', label: 'NGA Default' }, { id: 'nga-fast', label: 'NGA Fast' }],
+        }),
+      } : undefined,
+    },
+  }
+  const service = new LiveVerificationService({
+    environments: envStore,
+    ssh,
+    validateModel: options => requireAgentModel(runtime, options),
+    runWorker: async () => ({
+      summary: 'ok',
+      items: [{ target_key: 'R-1', verdict: 'confirmed', evidence_command_ids: ['cmd-0001'], observed_behavior: 'ok', cleanup_verified: true }],
+    }),
+  })
+  const server = createServer((req, res) => {
+    void liveVerificationRouteHandler(req, res, service, null, runtime, { resolveRoot: async () => dataRoot })
+  })
+  t.after(async () => {
+    await service.dispose()
+    await ssh.dispose()
+    server.closeAllConnections?.()
+    await new Promise(resolve => server.close(resolve))
+    await new Promise(resolve => arraySsh.server.close(resolve))
+    await rm(root, { recursive: true, force: true })
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  const headers = { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }
 
+  const listRes = await fetch(`${base}/api/pangea-companion/live-verification`, { headers })
+  assert.equal(listRes.status, 200)
+  const listBody = await listRes.json()
+  assert.deepEqual(listBody.providers.map(p => ({ id: p.id, registered: p.registered })), [
+    { id: 'pangea-nga', registered: true },
+    { id: 'pangea-codeagent', registered: false },
+    { id: 'pangea-opencode', registered: false },
+  ])
 
+  const env = await envStore.save({
+    id: 'env-acp',
+    name: 'ACP 校验环境',
+    array: { ip: '127.0.0.1', port: arraySsh.port, username: 'tester', password: 'secret' },
+  })
 
+  // Short alias 'nga' must still be rejected by requireExternalAnalysisProvider
+  const badRes = await fetch(`${base}/api/pangea-companion/live-verification`, {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      action: 'start', cwd: root, mode: 'direct_risk', environment_id: env.id,
+      provider_id: 'nga', agent_model: '', targets: [{ target_key: 'R-1', kind: 'risk' }],
+    }),
+  })
+  assert.equal(badRes.status, 400)
+  assert.match((await badRes.json()).error, /未知的 ACP 执行 Agent：nga/)
+
+  // Real provider ID 'pangea-nga' with empty agent_model resolves and persists concrete default model
+  const okRes = await fetch(`${base}/api/pangea-companion/live-verification`, {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      action: 'start', cwd: root, mode: 'direct_risk', environment_id: env.id,
+      provider_id: 'pangea-nga', agent_model: '', targets: [{ target_key: 'R-1', kind: 'risk' }],
+    }),
+  })
+  assert.equal(okRes.status, 202)
+  const started = (await okRes.json()).task
+  assert.equal(started.provider_id, 'pangea-nga')
+  assert.equal(started.agent_model, 'nga-default')
+  const done = await waitTerminal(service, dataRoot, started.id)
+  assert.equal(done.status, 'completed', done.error)
+})
