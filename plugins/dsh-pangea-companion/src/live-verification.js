@@ -9,6 +9,7 @@ import { requireAgentModel } from './agent-models.js'
 import { workspaceRoot } from './pangea-api.js'
 import { endpointAlias } from './execution/environment.js'
 import { checkDangerousCommand } from './execution/ssh.js'
+import { buildKnowledgeContextForLiveVerification, recordLiveVerificationCardFeedback } from './pangea-verify-bridge.js'
 
 const CLI_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'live-verification-cli.mjs')
 const VERIFY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -175,16 +176,20 @@ export function validateVerificationResult(result, { targetKeys = [], validComma
     value: {
       summary: typeof result.summary === 'string' ? result.summary.trim() : '',
       items: normalizedItems,
+      ...(Array.isArray(result.card_feedback) && result.card_feedback.length ? { card_feedback: result.card_feedback } : {}),
     },
   }
 }
 
-export function buildVerificationPrompt({ record, inputPath, outputPath, cliPath, configPath, maxGatewayCalls = 30 }) {
+export function buildVerificationPrompt({ record, inputPath, outputPath, cliPath, configPath, maxGatewayCalls = 30, hasKnowledgePack = false }) {
   const cli = `node "${posixPath(cliPath)}"`
   const cfgFlag = `--config "${posixPath(configPath)}"`
   return [
     '你正在执行 PANGEA「真机风险动态核验」任务。所有远端真机 SSH 操作必须且只能通过宿主受控网关 CLI 执行，严禁尝试直接 ssh 或读取凭据文件。',
     `任务输入 JSON：${posixPath(inputPath)}（含待核验风险/用例完整步骤与双判据、打桩 points/profiles、环境业务拓扑与激励工具手册、冻结测试工具参考路径及 Stage-0 基线）。`,
+    ...(hasKnowledgePack ? [
+      '已挂载只读 Knowledge Pack（见 input.json.knowledge_catalog）：优先复用其中已转正（verified/human_attested）原子能力卡与白盒 code_cli_hints；严禁修改知识包文件，如遇卡片命令在当前固件版本失配，请在最终结果 JSON 的可选字段 card_feedback:[{card_id,command_id,error_summary}] 中记账。',
+    ] : []),
     `最终结果 JSON 写入路径：${posixPath(outputPath)}。`,
     '',
     '可用宿主受控 SSH 网关命令（单次任务总调用上限 ' + maxGatewayCalls + ' 次；每次执行都会返回唯一 command_id 供证据引用）：',
@@ -401,6 +406,7 @@ export class LiveVerificationService {
       analysis_context: analysisContext = null, tool_reference_files: toolReferenceFiles = [],
       reference_warnings: referenceWarnings = [],
       target_process: targetProcess = '', target_pid: targetPid = '', target_binary: targetBinary = '',
+      knowledge_pack_dir: knowledgePackDir = '',
       instructions = '', max_gateway_calls: maxGatewayCallsInput = null,
     } = input
     if (!dataRoot) throw serviceError('data_root 不能为空')
@@ -490,6 +496,7 @@ export class LiveVerificationService {
         target_process: effectiveProcess,
         target_pid: String(targetPid || '').trim(),
         target_binary: String(targetBinary || '').trim(),
+        knowledge_pack_dir: String(knowledgePackDir || process.env.PANGEA_VERIFY_KNOWLEDGE_PACK || '').trim(),
         marker_strings: markers,
         targets: normalizedTargets,
         instructions: String(instructions || '').trim(),
@@ -499,6 +506,7 @@ export class LiveVerificationService {
         worker_session: null,
         registered_cleanups: [],
         reference_warnings: Array.isArray(referenceWarnings) ? referenceWarnings.map(String).filter(Boolean) : [],
+        recorded_card_feedback: [],
         draft_verdicts: [],
         confirmed_verdicts: [],
         confirmed_at: null,
@@ -710,6 +718,15 @@ export class LiveVerificationService {
       await writeFile(gatewayConfigPath, `${JSON.stringify({ url: gatewayUrl, token })}\n`, { encoding: 'utf8', mode: 0o600 })
       try { await chmod(gatewayConfigPath, 0o600) } catch {}
 
+      const kpBridge = await buildKnowledgeContextForLiveVerification({
+        packDir: record.knowledge_pack_dir,
+        targets: record.targets,
+        environment,
+      })
+      if (kpBridge.warning) {
+        record.reference_warnings = [...(record.reference_warnings || []), kpBridge.warning]
+      }
+
       const inputPath = path.join(scratchDirectory, 'input.json')
       const outputPath = path.join(scratchDirectory, 'result.json')
       await writeFile(inputPath, `${JSON.stringify({
@@ -731,13 +748,22 @@ export class LiveVerificationService {
         targets: record.targets,
         ...(analysisContext ? { analysis_context: analysisContext } : {}),
         ...(Array.isArray(toolReferenceFiles) && toolReferenceFiles.length ? { tool_reference_files: toolReferenceFiles } : {}),
+        ...(kpBridge.context ? { knowledge_catalog: kpBridge.context } : {}),
         marker_strings: record.marker_strings,
         points,
         profiles,
         instructions: record.instructions,
       }, null, 2)}\n`, 'utf8')
 
-      const prompt = buildVerificationPrompt({ record, inputPath, outputPath, cliPath: CLI_PATH, configPath: gatewayConfigPath, maxGatewayCalls })
+      const prompt = buildVerificationPrompt({
+        record,
+        inputPath,
+        outputPath,
+        cliPath: CLI_PATH,
+        configPath: gatewayConfigPath,
+        maxGatewayCalls,
+        hasKnowledgePack: Boolean(kpBridge.context),
+      })
       const targetKeys = record.targets.map(t => t.target_key)
       const requireNonZeroHits = record.mode === 'fault_injection' && Array.isArray(points) && points.length > 0
       const verified = await this.runWorker({
@@ -760,6 +786,14 @@ export class LiveVerificationService {
       })
       const checked = validateVerificationResult(verified, { targetKeys, validCommandIds, requireNonZeroHits })
       if (!checked.ok) throw new Error(`核验结果校验失败：${checked.error}`)
+
+      if (kpBridge.packDir && Array.isArray(checked.value.card_feedback) && checked.value.card_feedback.length) {
+        record.recorded_card_feedback = await recordLiveVerificationCardFeedback({
+          packDir: kpBridge.packDir,
+          sessionId: record.id,
+          feedback: checked.value.card_feedback,
+        })
+      }
 
       record.summary = checked.value.summary
       record.draft_verdicts = checked.value.items

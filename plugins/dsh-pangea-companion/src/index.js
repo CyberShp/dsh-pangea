@@ -26,6 +26,7 @@ import { discoverAgentModels, requireAgentModel, requireExternalAnalysisProvider
 import { EnvironmentStore } from './execution/environment.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { LiveVerificationService, createLiveVerificationRunner } from './live-verification.js'
+import { getPangeaVerifyBridgeStatus } from './pangea-verify-bridge.js'
 import { createRun, ingestDtsFile, listDtsPatterns, runSourceFirstCommand, runPangea, setDtsPatternStatus, workspaceRoot } from './pangea-api.js'
 import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { inspectSource, configureRepository } from './repositories/git-source.js'
@@ -556,7 +557,8 @@ export async function liveVerificationRouteHandler(req, res, service, faultInjec
         available: provider.available,
         registered: Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id)),
       }))
-      return json(res, 200, { status: 'ok', tasks, locks: service.getLocks(), providers })
+      const verifyEngine = await getPangeaVerifyBridgeStatus()
+      return json(res, 200, { status: 'ok', tasks, locks: service.getLocks(), providers, verify_engine: verifyEngine })
     }
     if (req.method === 'POST') {
       try { updateAdmission(runtime)?.assertOpen() } catch (error) { return json(res, 409, { status: 'error', error: error.message }) }

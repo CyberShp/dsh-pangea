@@ -3475,6 +3475,7 @@ window.__ModuleLoader__.load({
         const [envDrawerOpen, setEnvDrawerOpen] = React.useState(false)
         const [tasks, setTasks] = React.useState([])
         const [locks, setLocks] = React.useState({})
+        const [verifyEngine, setVerifyEngine] = React.useState(null)
         const [providers, setProviders] = React.useState(() => (Array.isArray(availableProviders) && availableProviders.length ? availableProviders : []))
         const [environments, setEnvironments] = React.useState([])
         const [fiTasks, setFiTasks] = React.useState([])
@@ -3492,7 +3493,7 @@ window.__ModuleLoader__.load({
         const [createForm, setCreateForm] = React.useState({
           name: '', mode: 'fault_injection', environment_id: '', fault_injection_key: '',
           run_id: '', fault_injection_task_id: '', fault_injection_build_id: '',
-          target_process: '', target_pid: '', target_binary: '',
+          target_process: '', target_pid: '', target_binary: '', knowledge_pack_dir: '',
           direct_target_key: '', direct_target_title: '', instructions: '',
           provider_id: defaultProviderId || '', agent_model: defaultAgentModel || '',
         })
@@ -3519,6 +3520,12 @@ window.__ModuleLoader__.load({
             ])
             setTasks(Array.isArray(lvRes.tasks) ? lvRes.tasks : [])
             setLocks(lvRes.locks || envRes.locks || {})
+            if (lvRes.verify_engine) {
+              setVerifyEngine(lvRes.verify_engine)
+              if (lvRes.verify_engine.default_knowledge_pack_dir) {
+                setCreateForm(prev => prev.knowledge_pack_dir ? prev : ({ ...prev, knowledge_pack_dir: lvRes.verify_engine.default_knowledge_pack_dir }))
+              }
+            }
             if (Array.isArray(lvRes.providers) && lvRes.providers.length) {
               setProviders(lvRes.providers)
             } else {
@@ -3758,6 +3765,7 @@ window.__ModuleLoader__.load({
               target_process: createForm.target_process.trim(),
               target_pid: createForm.target_pid.trim(),
               target_binary: createForm.target_binary.trim(),
+              knowledge_pack_dir: createForm.knowledge_pack_dir.trim(),
               instructions: createForm.instructions.trim(),
             }
             if (createForm.mode === 'fault_injection') {
@@ -4025,10 +4033,17 @@ window.__ModuleLoader__.load({
                   }, '刷新模型')))),
             lockedHolder ? h('div', { className: 'pangea-lv-banner warn' }, `当前所选环境正被任务 ${lockedHolder.verify_id} 占用，启动将被互斥锁拦截。`) : null,
             h('details', { style: { margin: '4px 0 10px', borderTop: '1px solid #eef0f3', paddingTop: 8 } },
-              h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#5e6773' } }, '高级选项：Stage-0 进程/二进制覆写与现场核验说明（可选）'),
+              h('summary', { style: { cursor: 'pointer', fontSize: 12, fontWeight: 600, color: '#5e6773' } }, '高级选项：Knowledge Pack 知识包、Stage-0 进程/二进制覆写与现场说明（可选）'),
               h('div', { className: 'pangea-lv-grid', style: { marginTop: 8 } },
                 h('label', { className: 'pangea-lv-field' }, h('span', null, '目标守护进程名'), h('input', { value: createForm.target_process, placeholder: selectedEnv?.array?.default_process || '如 storage_daemon', onChange: e => setCreateForm(prev => ({ ...prev, target_process: e.target.value })) })),
                 h('label', { className: 'pangea-lv-field' }, h('span', null, '部署二进制绝对路径'), h('input', { value: createForm.target_binary, placeholder: '如 /opt/storage/bin/daemon', onChange: e => setCreateForm(prev => ({ ...prev, target_binary: e.target.value })) }))),
+              h('label', { className: 'pangea-lv-field' },
+                h('span', null, '内网 Knowledge Pack 知识包目录（可选 · 只读复用已转正能力卡与源码 CLI 索引）'),
+                h('input', { value: createForm.knowledge_pack_dir, placeholder: '如 /path/to/intranet-knowledge-pack（留空则不挂载）', onChange: e => setCreateForm(prev => ({ ...prev, knowledge_pack_dir: e.target.value })) })),
+              verifyEngine?.available
+                ? h('div', { className: 'pangea-lv-banner info', style: { fontSize: 12 } },
+                    `pangea-verify 独立引擎已桥接${verifyEngine.verified_card_count !== null ? `（默认知识包已转正 ${verifyEngine.verified_card_count} 张能力卡）` : ''}；聊天驯化 MCP 入口：${verifyEngine.mcp_command_hint}`)
+                : null,
               h('label', { className: 'pangea-lv-field' }, h('span', null, '补充现场核验说明'),
                 h('textarea', { value: createForm.instructions, placeholder: '例如：目标 LUN ID、测试端口、日志路径等现场约束…', onChange: e => setCreateForm(prev => ({ ...prev, instructions: e.target.value })) }))),
             h('div', { style: { display: 'flex', gap: 8 } },
