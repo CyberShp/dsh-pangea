@@ -192,3 +192,164 @@ test('Companion thin bridge injects read-only pangea-verify Knowledge Pack into 
     await rm(tempDir, { recursive: true, force: true })
   }
 })
+
+test('WP1/WP3/WP4: report-policy guards Knowledge Pack writes, unified gateway enforces probe_readonly + data_nics whitelist, and open-trainer creates pre-bound DSH session', async () => {
+  const {
+    clearProtectedKnowledgePackRoots,
+    knowledgePackMutationError,
+    registerProtectedKnowledgePackRoot,
+  } = await import('../src/report-policy.js')
+
+  const tempDir = await mkdtemp(path.join(tmpdir(), 'companion-wp4-'))
+  const sshSrv = await startMockSsh()
+  try {
+    const dataRoot = path.join(tempDir, 'pangea-data')
+    const customPack = path.join(tempDir, 'team-knowledge-pack')
+
+    // 1. WP1: DSH report-policy guard blocks direct write/edit/bash into Knowledge Pack, allows cli.mjs & git
+    clearProtectedKnowledgePackRoots()
+    registerProtectedKnowledgePackRoot(customPack)
+    assert.ok(knowledgePackMutationError({
+      name: 'write',
+      arguments: { file_path: path.join(customPack, 'cards', 'verified', 'fake.json') },
+    }), 'must block direct write into protected Knowledge Pack')
+    assert.ok(knowledgePackMutationError({
+      name: 'bash',
+      arguments: { command: `echo '{}' > "${customPack}/rogue.json"` },
+    }), 'must block shell redirect into protected Knowledge Pack')
+    assert.equal(knowledgePackMutationError({
+      name: 'bash',
+      arguments: { command: `node /app/pangea-verify/bin/cli.mjs kp-draft --pack "${customPack}" --card-file /tmp/c.json` },
+    }), undefined, 'must allow pangea-verify CLI')
+    assert.equal(knowledgePackMutationError({
+      name: 'bash',
+      arguments: { command: `git -C "${customPack}" status` },
+    }), undefined, 'must allow git commands')
+
+    // 2. WP3: Unified gateway enforces probe_readonly -> register-cleanup -> armed data_nics whitelist & mgmt_nics block
+    const envStore = new EnvironmentStore(path.join(tempDir, 'environments.json'), { platform: 'linux' })
+    const env = await envStore.save({
+      name: 'Dual-NIC Host',
+      host: {
+        ip: '127.0.0.1',
+        port: sshSrv.port,
+        username: 'root',
+        auth_kind: 'password',
+        password: 'pw',
+        protected: { mgmt_nics: ['eth0'] },
+        test_resources: { data_nics: ['ens2f0'] },
+      },
+    })
+    const sshRuntime = new PangeaSshRuntime(envStore)
+    const service = new LiveVerificationService({
+      environments: envStore,
+      ssh: sshRuntime,
+      runWorker: async ({ gatewayUrl, gatewayToken }) => {
+        const post = async (route, body) => {
+          const r = await fetch(`${gatewayUrl}${route}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${gatewayToken}` },
+            body: JSON.stringify(body),
+          })
+          return { status: r.status, body: await r.json() }
+        }
+        // Locked in PROBE_READONLY before register-cleanup
+        const beforeArm = await post('/exec', { target: 'host', command: 'ip link set ens2f0 down' })
+        assert.equal(beforeArm.status, 403)
+        assert.equal(beforeArm.body.code, 'PHASE_READONLY_LOCKED')
+
+        // Unlock ARMED
+        const reg = await post('/register-cleanup', { target: 'host', command: 'ip link set ens2f0 up', description: 'restore ens2f0' })
+        assert.equal(reg.status, 200)
+        assert.equal(reg.body.phase, 'armed')
+
+        // Protected mgmt NIC still blocked in ARMED
+        const mgmtBlocked = await post('/exec', { target: 'host', command: 'ip link set eth0 down' })
+        assert.equal(mgmtBlocked.status, 403)
+        assert.equal(mgmtBlocked.body.code, 'PROTECTED_MGMT_NIC')
+
+        // Whitelisted data NIC allowed in ARMED
+        const dataAllowed = await post('/exec', { target: 'host', command: 'ip link set ens2f0 down' })
+        assert.equal(dataAllowed.status, 200)
+
+        return {
+          summary: '统一网关验证通过',
+          items: [{
+            target_key: 'CASE-NIC-1',
+            verdict: 'excluded',
+            hits: '',
+            evidence_command_ids: [dataAllowed.body.command_id],
+            observed_behavior: 'ens2f0 闪断白名单放行，eth0 管理口拦截',
+            cleanup_verified: true,
+          }],
+        }
+      },
+    })
+
+    const started = await service.start({
+      dataRoot,
+      mode: 'direct_risk',
+      environment_id: env.id,
+      targets: [{ target_key: 'CASE-NIC-1', title: '网卡白名单', kind: 'case' }],
+    })
+    const active = [...service.active.values()][0]
+    if (active) await active.done
+    const done = await service.readRecord(dataRoot, started.id)
+    assert.equal(done.status, 'completed', done.error)
+    assert.equal(done.knowledge_pack_dir, path.join(dataRoot, 'knowledge-pack'))
+
+    // 3. WP4: save-settings & open-trainer routes
+    const invokeRoute = async (method, body, runtime = null) => {
+      let payload = null
+      let statusCode = 0
+      const req = {
+        method,
+        url: '/api/pangea-companion/live-verification',
+        headers: { host: 'localhost', origin: 'http://localhost' },
+        async *[Symbol.asyncIterator]() {
+          if (body !== undefined) yield Buffer.from(JSON.stringify(body), 'utf8')
+        },
+      }
+      const res = {
+        writeHead(code) { statusCode = code },
+        end(raw) { payload = JSON.parse(raw) },
+      }
+      await liveVerificationRouteHandler(req, res, service, null, runtime, { resolveRoot: async () => dataRoot })
+      return { statusCode, payload }
+    }
+
+    const savedSettings = await invokeRoute('POST', { action: 'save-settings', knowledge_pack_dir: customPack })
+    assert.equal(savedSettings.statusCode, 200)
+    assert.equal(savedSettings.payload.verify_settings.knowledge_pack_dir, customPack)
+    assert.equal(savedSettings.payload.verify_engine.pack_dir, customPack)
+
+    let createdTitle = ''
+    let queuedPrompt = ''
+    const mockRuntime = {
+      apiProxy: {
+        sessions: {
+          create: async () => ({ result: { ok: true, value: { sessionId: 'sess-trainer-01' } } }),
+          rename: async ({ payload }) => {
+            createdTitle = payload?.title || ''
+            return { result: { ok: true, value: {} } }
+          },
+          prompt: async ({ payload }) => {
+            queuedPrompt = payload?.content?.[0]?.text || ''
+            return { result: { ok: true, value: {} } }
+          },
+        },
+      },
+    }
+    const trainerRes = await invokeRoute('POST', { action: 'open-trainer', cwd: tempDir }, mockRuntime)
+    assert.equal(trainerRes.statusCode, 200, JSON.stringify(trainerRes.payload))
+    assert.equal(trainerRes.payload.session_id, 'sess-trainer-01')
+    assert.equal(trainerRes.payload.synced_environments, 1)
+    assert.equal(createdTitle, 'PANGEA 真机专家驯化')
+    assert.match(queuedPrompt, /live-test-expert\/SKILL\.md/)
+    assert.match(queuedPrompt, /Dual-NIC Host/)
+  } finally {
+    await sshSrv.close()
+    await rm(tempDir, { recursive: true, force: true })
+  }
+})
+

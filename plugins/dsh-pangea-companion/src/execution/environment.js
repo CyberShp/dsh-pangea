@@ -46,6 +46,8 @@ function redactEndpoint(endpoint) {
     ...(endpoint.default_workdir ? { default_workdir: endpoint.default_workdir } : {}),
     ...(endpoint.default_process ? { default_process: endpoint.default_process } : {}),
     ...(Array.isArray(endpoint.default_log_paths) && endpoint.default_log_paths.length ? { default_log_paths: endpoint.default_log_paths } : {}),
+    ...(endpoint.protected && typeof endpoint.protected === 'object' ? { protected: structuredClone(endpoint.protected) } : {}),
+    ...(endpoint.test_resources && typeof endpoint.test_resources === 'object' ? { test_resources: structuredClone(endpoint.test_resources) } : {}),
   }
 }
 
@@ -92,10 +94,29 @@ async function normalizeEndpointForStorage(value, field, { existing = null, keyD
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`${field}.port 必须在 1 到 65535 之间`)
 
   const authKind = value.auth_kind === 'key' ? 'key' : 'password'
+  const rawProtected = value.protected && typeof value.protected === 'object' && !Array.isArray(value.protected) ? value.protected : null
+  const rawTest = value.test_resources && typeof value.test_resources === 'object' && !Array.isArray(value.test_resources) ? value.test_resources : null
   const extra = {
     ...(field === 'host' && cleanText(value.default_workdir) ? { default_workdir: cleanText(value.default_workdir) } : {}),
     ...(field === 'array' && cleanText(value.default_process) ? { default_process: cleanText(value.default_process) } : {}),
     ...(field === 'array' && cleanStringList(value.default_log_paths).length ? { default_log_paths: cleanStringList(value.default_log_paths) } : {}),
+    ...(rawProtected ? {
+      protected: {
+        mgmt_ips: cleanStringList(rawProtected.mgmt_ips),
+        mgmt_nics: cleanStringList(rawProtected.mgmt_nics),
+        boot_disks: cleanStringList(rawProtected.boot_disks),
+      },
+    } : {}),
+    ...(rawTest ? {
+      test_resources: {
+        data_nics: cleanStringList(rawTest.data_nics),
+        data_ips: cleanStringList(rawTest.data_ips),
+        block_devices: cleanStringList(rawTest.block_devices),
+        processes: cleanStringList(rawTest.processes),
+        paths: cleanStringList(rawTest.paths),
+        allow_reboot: rawTest.allow_reboot === true,
+      },
+    } : {}),
   }
 
   if (authKind === 'key') {

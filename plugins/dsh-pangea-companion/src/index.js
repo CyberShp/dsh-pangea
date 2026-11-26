@@ -26,9 +26,16 @@ import { discoverAgentModels, requireAgentModel, requireExternalAnalysisProvider
 import { EnvironmentStore } from './execution/environment.js'
 import { PangeaSshRuntime } from './execution/ssh.js'
 import { LiveVerificationService, createLiveVerificationRunner } from './live-verification.js'
-import { getPangeaVerifyBridgeStatus } from './pangea-verify-bridge.js'
+import {
+  buildTrainerBootstrapPrompt,
+  getPangeaVerifyBridgeStatus,
+  readVerifySettings,
+  saveVerifySettings,
+  syncEnvironmentsToTopologyStore,
+  verifyTopologyStorePath,
+} from './pangea-verify-bridge.js'
 import { createRun, ingestDtsFile, listDtsPatterns, runSourceFirstCommand, runPangea, setDtsPatternStatus, workspaceRoot } from './pangea-api.js'
-import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
+import { acpProviderOption, acpProviderOptions, analysisDerivationOptions, createDshSession, createTaskConversation, dataRootFor, deriveAnalysisInput, homeSnapshot, launchAnalysisSession, queryCoverageAsset, importCoverageAsset, stopAnalysisRun, workbenchSnapshot } from './workbench-api.js'
 import { inspectSource, configureRepository } from './repositories/git-source.js'
 import { importRepository, invalidateRepositoryStatusCache, reimportRepository, repositoryStatus } from './repositories/import.js'
 import { scopeTree, validateScope, previewScope, confirmScope, previewTestTools, confirmTestTools } from './repositories/scope.js'
@@ -557,8 +564,9 @@ export async function liveVerificationRouteHandler(req, res, service, faultInjec
         available: provider.available,
         registered: Boolean(runtimeService(runtime, 'subagents')?.getProvider?.(provider.id)),
       }))
-      const verifyEngine = await getPangeaVerifyBridgeStatus()
-      return json(res, 200, { status: 'ok', tasks, locks: service.getLocks(), providers, verify_engine: verifyEngine })
+      const verifySettings = await readVerifySettings(dataRoot)
+      const verifyEngine = await getPangeaVerifyBridgeStatus({ dataRoot, packDir: verifySettings.knowledge_pack_dir })
+      return json(res, 200, { status: 'ok', tasks, locks: service.getLocks(), providers, verify_settings: verifySettings, verify_engine: verifyEngine })
     }
     if (req.method === 'POST') {
       try { updateAdmission(runtime)?.assertOpen() } catch (error) { return json(res, 409, { status: 'error', error: error.message }) }
@@ -712,6 +720,57 @@ export async function liveVerificationRouteHandler(req, res, service, faultInjec
           faultInjectionService: faultInjection,
         })
         return json(res, 200, { status: 'ok', task, locks: service.getLocks() })
+      }
+      if (action === 'save-settings') {
+        const verifySettings = await saveVerifySettings(dataRoot, {
+          knowledge_pack_dir: input.knowledge_pack_dir,
+        })
+        const verifyEngine = await getPangeaVerifyBridgeStatus({ dataRoot, packDir: verifySettings.knowledge_pack_dir })
+        return json(res, 200, { status: 'ok', verify_settings: verifySettings, verify_engine: verifyEngine })
+      }
+      if (action === 'open-trainer') {
+        const verifySettings = await readVerifySettings(dataRoot)
+        const packDir = String(input.knowledge_pack_dir || verifySettings.knowledge_pack_dir || '').trim()
+        const status = await getPangeaVerifyBridgeStatus({ dataRoot, packDir })
+        if (!status.available) {
+          return json(res, 503, { status: 'error', error: '当前环境尚未就绪 pangea-verify 引擎，无法开启专家驯化会话' })
+        }
+        const storePath = verifyTopologyStorePath(dataRoot)
+        const synced = await syncEnvironmentsToTopologyStore(service.environments, storePath)
+        const envs = (await service.environments?.list?.()) || []
+        const bootstrapPrompt = buildTrainerBootstrapPrompt({
+          cliPath: status.cli_path,
+          skillPath: status.skill_path,
+          packDir: status.pack_dir,
+          storePath: synced.store_path,
+          dataRoot,
+          environments: envs,
+        })
+        const api = runtimeService(runtime, 'apiProxy')
+        if (!api) {
+          return json(res, 503, { status: 'error', error: 'DSH 会话服务未就绪，无法拉起驯化对话窗口' })
+        }
+        const sessionCwd = typeof input.cwd === 'string' && input.cwd.trim()
+          ? path.resolve(input.cwd.trim())
+          : path.dirname(path.resolve(dataRoot))
+        const sessionId = await createDshSession(api, sessionCwd, 'PANGEA 真机专家驯化')
+        if (typeof api.sessions?.prompt === 'function') {
+          await api.sessions.prompt({
+            payload: {
+              sessionId,
+              mode: 'queue',
+              content: [{ type: 'text', text: bootstrapPrompt }],
+            },
+          })
+        }
+        return json(res, 200, {
+          status: 'ok',
+          session_id: sessionId,
+          synced_environments: synced.synced,
+          pack_dir: status.pack_dir,
+          store_path: synced.store_path,
+          bootstrap_prompt: bootstrapPrompt,
+        })
       }
       return json(res, 400, { status: 'error', error: `unknown live-verification action: ${action}` })
     }

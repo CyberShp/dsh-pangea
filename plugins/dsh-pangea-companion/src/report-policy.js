@@ -8,7 +8,71 @@ import { runAdapter, runPangea } from './pangea-api.js'
 const budgetedChildren = new Map()
 const quiescentRuns = new Set()
 const executionCapabilities = new Map()
+const protectedKnowledgePackRoots = new Set()
 const nativeRunKey = (dataRoot, runId) => JSON.stringify([resolve(dataRoot), runId])
+
+export function registerProtectedKnowledgePackRoot(dirPath) {
+  if (typeof dirPath !== 'string' || !dirPath.trim()) return
+  protectedKnowledgePackRoots.add(resolve(dirPath.trim()))
+}
+
+export function clearProtectedKnowledgePackRoots() {
+  protectedKnowledgePackRoots.clear()
+}
+
+function isPathInsideDir(target, dir) {
+  const rel = relative(dir, target)
+  return rel === '' || (!rel.startsWith('..') && !resolve(rel).startsWith(resolve(dir)) && !rel.startsWith('/') && !/^[A-Za-z]:/.test(rel))
+}
+
+function effectiveProtectedPackRoots(exec) {
+  const roots = new Set(protectedKnowledgePackRoots)
+  const cwd = workspaceCwd(exec)
+  if (cwd) {
+    const wsRoot = pangeaWorkspaceRoot(cwd)
+    if (wsRoot) roots.add(resolve(wsRoot, 'pangea-data', 'knowledge-pack'))
+  }
+  return [...roots]
+}
+
+export function knowledgePackMutationError(exec) {
+  const roots = effectiveProtectedPackRoots(exec)
+  if (roots.length === 0) return undefined
+  const cwd = workspaceCwd(exec) || process.cwd()
+
+  if (exec.name === 'write' || exec.name === 'edit') {
+    const rawTarget = targetPath(exec)
+    if (typeof rawTarget === 'string' && rawTarget.trim()) {
+      const absTarget = resolve(cwd, rawTarget.trim())
+      for (const packRoot of roots) {
+        if (isPathInsideDir(absTarget, packRoot)) {
+          return `禁止使用通用 ${exec.name} 工具直接改写受保护的 Knowledge Pack 目录（${packRoot}）；请改用 pangea-verify 的 kp-draft / kp-promote / kp-attest / kp-save-adapter / index-cli 正式命令以通过四道防呆闸门。`
+        }
+      }
+    }
+    return undefined
+  }
+
+  if (exec.name === 'bash') {
+    const command = String(exec.arguments?.command ?? '')
+    if (!command.trim()) return undefined
+    // Always allow invoking pangea-verify CLI or Git version-control commands
+    if (/\b(?:pangea-verify|cli\.mjs)\b/.test(command)) return undefined
+    if (/^\s*git\s+(?:-\w+\s+\S+\s+)*(?:status|diff|log|add|commit|push|pull|fetch|branch|checkout|switch|restore|rev-parse|init)\b/.test(command)) {
+      return undefined
+    }
+    const normalizedCmd = command.replaceAll('\\', '/')
+    const hasWriteOp = /(?:^|[^0-9<>])>>?\s*[^\s>&|;)]|\|\s*tee\b|(?:^|[;&|(\n]\s*)(?:rm|mv|cp|mkdir|rmdir|touch|truncate|sed\s+-i|python3?\s+-c|node\s+-e)\b/i.test(command)
+    if (!hasWriteOp) return undefined
+    for (const packRoot of roots) {
+      const posixPack = packRoot.replaceAll('\\', '/')
+      if (normalizedCmd.includes(posixPack) || (isPathInsideDir(resolve(cwd), packRoot))) {
+        return `禁止通过 shell 直接写入、删除或篡改受保护的 Knowledge Pack 目录（${packRoot}）；请改用 pangea-verify CLI 正式命令（kp-draft / kp-promote / kp-save-adapter / kp-lint）或标准 git 版本管理命令。`
+      }
+    }
+  }
+  return undefined
+}
 
 export function inspectSourceFirstChildren({ dataRoot, runId }) {
   const tracked = [...budgetedChildren.values()].some(entry => nativeRunKey(entry.dataRoot, entry.runId) === nativeRunKey(dataRoot, runId))
@@ -548,6 +612,8 @@ export function installPangeaLifecyclePolicy(ctx, adapter = runAdapter, executio
 
     const direct = rootDirectMutationError(exec)
     if (direct) return direct
+    const kpGuard = knowledgePackMutationError(exec)
+    if (kpGuard) return kpGuard
 
     const state = exec?.agent ? states.get(exec.agent.id) : undefined
     if (!state) return undefined

@@ -140,6 +140,8 @@ export function createLiveVerificationWorkspace(React) {
     const [tasks, setTasks] = React.useState([])
     const [locks, setLocks] = React.useState({})
     const [verifyEngine, setVerifyEngine] = React.useState(null)
+    const [packEditing, setPackEditing] = React.useState(false)
+    const [packDirInput, setPackDirInput] = React.useState('')
     const [providers, setProviders] = React.useState(() => (Array.isArray(availableProviders) && availableProviders.length ? availableProviders : []))
     const [environments, setEnvironments] = React.useState([])
     const [fiTasks, setFiTasks] = React.useState([])
@@ -186,8 +188,10 @@ export function createLiveVerificationWorkspace(React) {
         setLocks(lvRes.locks || envRes.locks || {})
         if (lvRes.verify_engine) {
           setVerifyEngine(lvRes.verify_engine)
-          if (lvRes.verify_engine.default_knowledge_pack_dir) {
-            setCreateForm(prev => prev.knowledge_pack_dir ? prev : ({ ...prev, knowledge_pack_dir: lvRes.verify_engine.default_knowledge_pack_dir }))
+          const packDir = lvRes.verify_engine.pack_dir || lvRes.verify_engine.default_knowledge_pack_dir || ''
+          setPackDirInput(prev => prev || packDir)
+          if (packDir) {
+            setCreateForm(prev => prev.knowledge_pack_dir ? prev : ({ ...prev, knowledge_pack_dir: packDir }))
           }
         }
         if (Array.isArray(lvRes.providers) && lvRes.providers.length) {
@@ -868,13 +872,87 @@ export function createLiveVerificationWorkspace(React) {
                 h('td', null, task.created_at ? new Date(task.created_at).toLocaleString() : ''))
             }))))
 
+    const handleSaveKnowledgePack = async () => {
+      setBusy(true); setError(''); setNotice('')
+      try {
+        const res = await apiRequest('/api/pangea-companion/live-verification', {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'save-settings',
+            cwd,
+            data_root: dataRoot || undefined,
+            knowledge_pack_dir: packDirInput.trim(),
+          }),
+        })
+        if (res.verify_engine) {
+          setVerifyEngine(res.verify_engine)
+          setPackDirInput(res.verify_engine.pack_dir || '')
+          setCreateForm(prev => ({ ...prev, knowledge_pack_dir: res.verify_engine.pack_dir || '' }))
+        }
+        setPackEditing(false)
+        setNotice('已更新专家知识包目录并纳入防乱写保护')
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      } finally { setBusy(false) }
+    }
+
+    const handleOpenTrainer = async () => {
+      setBusy(true); setError(''); setNotice('')
+      try {
+        const res = await apiRequest('/api/pangea-companion/live-verification', {
+          method: 'POST',
+          body: JSON.stringify({
+            action: 'open-trainer',
+            cwd,
+            data_root: dataRoot || undefined,
+          }),
+        })
+        setNotice(`已启动专家驯化对话（同步 ${res.synced_environments ?? 0} 个直连环境）`)
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('pangea:open-assistant', { detail: { sessionId: res.session_id } }))
+        }
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      } finally { setBusy(false) }
+    }
+
     return h('section', { className: 'pangea-lv', 'data-testid': 'live-verification-workspace' },
       h('style', null, LV_CSS),
       h('div', { className: 'pangea-lv-head' },
         h('h2', null, '真机核验'),
-        h('div', { className: 'pangea-lv-tabs', role: 'tablist' },
-          h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'tasks', onClick: () => setTab('tasks') }, `核验任务（${tasks.length}）`),
-          h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'environments', onClick: () => setTab('environments') }, `环境管理（${environments.length}）`))),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+          verifyEngine?.available
+            ? h('button', {
+                type: 'button',
+                className: 'lv-btn primary',
+                disabled: busy,
+                'data-testid': 'lv-open-trainer-btn',
+                onClick: () => void handleOpenTrainer(),
+              }, '驯化测试专家')
+            : null,
+          h('div', { className: 'pangea-lv-tabs', role: 'tablist' },
+            h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'tasks', onClick: () => setTab('tasks') }, `核验任务（${tasks.length}）`),
+            h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'environments', onClick: () => setTab('environments') }, `环境管理（${environments.length}）`)))),
+      verifyEngine?.available
+        ? h('div', { className: 'pangea-lv-strip', 'data-testid': 'lv-knowledge-strip', style: { justifyContent: 'space-between' } },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' } },
+              h('span', { className: 'pangea-lv-strip-item' }, h('strong', null, '专家知识包'), h('code', { style: { fontSize: 12 } }, verifyEngine.pack_dir || '默认工作区')),
+              h('span', { className: 'pangea-lv-pill good' }, `正式能力卡 ${verifyEngine.verified_card_count ?? 0}`),
+              verifyEngine.draft_count > 0 ? h('span', { className: 'pangea-lv-pill info' }, `草稿 ${verifyEngine.draft_count}`) : null,
+              verifyEngine.mismatch_count > 0 ? h('span', { className: 'pangea-lv-pill warn' }, `待修失配 ${verifyEngine.mismatch_count}`) : null,
+              verifyEngine.lint_ok === false ? h('span', { className: 'pangea-lv-pill danger' }, `目录告警 ${verifyEngine.lint_errors?.length ?? 1}`) : null),
+            packEditing
+              ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flex: '1 1 320px', maxWidth: 520 } },
+                  h('input', {
+                    'aria-label': '专家知识包目录',
+                    value: packDirInput,
+                    placeholder: '留空恢复默认 <pangea-data>/knowledge-pack',
+                    onChange: e => setPackDirInput(e.target.value),
+                  }),
+                  h('button', { type: 'button', className: 'lv-btn primary', disabled: busy, onClick: () => void handleSaveKnowledgePack() }, '保存'),
+                  h('button', { type: 'button', className: 'lv-btn', disabled: busy, onClick: () => setPackEditing(false) }, '取消'))
+              : h('button', { type: 'button', className: 'lv-btn', disabled: busy, onClick: () => { setPackDirInput(verifyEngine.pack_dir || ''); setPackEditing(true) } }, '切换知识包目录'))
+        : null,
       !envDrawerOpen && error ? h('div', { role: 'alert', className: 'pangea-lv-banner danger' }, error) : null,
       notice ? h('div', { role: 'status', className: 'pangea-lv-banner good' }, notice) : null,
       tab === 'environments'

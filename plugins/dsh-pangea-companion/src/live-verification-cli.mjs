@@ -54,7 +54,9 @@ async function main() {
   if (!command) throw new Error('usage: live-verification-cli.mjs <exec|bg-start|bg-read|bg-stop|interactive|register-cleanup> ...')
   let result
   const cfg = flags.config
-  if (command === 'exec') {
+  if (command === 'status') {
+    result = await callGateway('/status', {}, cfg)
+  } else if (command === 'exec') {
     result = await callGateway('/exec', {
       target: flags.target,
       command: await readCommand(flags),
@@ -72,12 +74,40 @@ async function main() {
   } else if (command === 'interactive') {
     const exchanges = JSON.parse(await readFile(flags['exchanges-file'], 'utf8'))
     result = await callGateway('/interactive', { target: flags.target, exchanges }, cfg)
-  } else if (command === 'register-cleanup') {
-    result = await callGateway('/register-cleanup', {
+  } else if (command === 'http') {
+    const jsonPayload = flags['json-file']
+      ? JSON.parse(await readFile(flags['json-file'], 'utf8'))
+      : (flags.json ? JSON.parse(flags.json) : undefined)
+    result = await callGateway('/http', {
       target: flags.target,
-      command: await readCommand(flags),
-      description: flags.desc || '',
+      method: flags.method || 'GET',
+      path: flags.path || '/',
+      ...(jsonPayload !== undefined ? { json: jsonPayload } : {}),
+      ...(flags.body !== undefined ? { body: flags.body } : {}),
+      ...(flags['timeout-ms'] ? { timeout_ms: Number(flags['timeout-ms']) } : {}),
     }, cfg)
+  } else if (command === 'register-cleanup') {
+    if (flags.kind === 'http') {
+      const jsonPayload = flags['json-file']
+        ? JSON.parse(await readFile(flags['json-file'], 'utf8'))
+        : (flags.json ? JSON.parse(flags.json) : undefined)
+      result = await callGateway('/register-cleanup', {
+        kind: 'http',
+        target: flags.target,
+        method: flags.method || 'DELETE',
+        path: flags.path,
+        ...(jsonPayload !== undefined ? { json: jsonPayload } : {}),
+        description: flags.desc || '',
+      }, cfg)
+    } else {
+      result = await callGateway('/register-cleanup', {
+        target: flags.target,
+        command: await readCommand(flags),
+        description: flags.desc || '',
+      }, cfg)
+    }
+  } else if (command === 'run-cleanups') {
+    result = await callGateway('/run-cleanups', {}, cfg)
   } else {
     throw new Error(`unknown command: ${command}`)
   }

@@ -9,7 +9,13 @@ import { requireAgentModel } from './agent-models.js'
 import { workspaceRoot } from './pangea-api.js'
 import { endpointAlias } from './execution/environment.js'
 import { checkDangerousCommand } from './execution/ssh.js'
-import { buildKnowledgeContextForLiveVerification, recordLiveVerificationCardFeedback } from './pangea-verify-bridge.js'
+import {
+  buildKnowledgeContextForLiveVerification,
+  environmentToVerifyTopology,
+  loadPangeaVerify,
+  readVerifySettings,
+  recordLiveVerificationCardFeedback,
+} from './pangea-verify-bridge.js'
 
 const CLI_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'live-verification-cli.mjs')
 const VERIFY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -474,6 +480,8 @@ export class LiveVerificationService {
       const effectiveMaxCalls = Number.isInteger(maxGatewayCallsInput) && maxGatewayCallsInput > 0
         ? maxGatewayCallsInput
         : (this.maxGatewayCalls ?? dynamicBudget)
+      const verifySettings = await readVerifySettings(dataRoot)
+      const effectiveKnowledgePackDir = String(knowledgePackDir || verifySettings.knowledge_pack_dir || '').trim()
       record = {
         schema_version: 1,
         id: verifyId,
@@ -496,7 +504,7 @@ export class LiveVerificationService {
         target_process: effectiveProcess,
         target_pid: String(targetPid || '').trim(),
         target_binary: String(targetBinary || '').trim(),
-        knowledge_pack_dir: String(knowledgePackDir || process.env.PANGEA_VERIFY_KNOWLEDGE_PACK || '').trim(),
+        knowledge_pack_dir: effectiveKnowledgePackDir,
         marker_strings: markers,
         targets: normalizedTargets,
         instructions: String(instructions || '').trim(),
@@ -536,10 +544,206 @@ export class LiveVerificationService {
   }
 
   async executeTask({ dataRoot, cwd, record, environment, resolvedHosts = {}, scratchDirectory, points, profiles, replaceFiles, analysisContext = null, toolReferenceFiles = [], maxGatewayCalls = 30, signal }) {
+    const tFile = transcriptFile(dataRoot, record.id)
+    const gatewayConfigPath = path.join(scratchDirectory, '.gateway.json')
+    const canUseUnifiedGateway = typeof this.ssh?.createSession === 'function'
+      && !environment.host?.legacy_alias
+      && !environment.array?.legacy_alias
+    const pvLoaded = canUseUnifiedGateway ? await loadPangeaVerify() : null
+    const usePvGateway = Boolean(pvLoaded?.mod?.startGatewaySession)
+
+    if (usePvGateway) {
+      const resolvedTopology = environmentToVerifyTopology(environment, resolvedHosts)
+      let pvSession = null
+      let lastCleanupCount = 0
+      try {
+        pvSession = await pvLoaded.mod.startGatewaySession({
+          sessionId: record.id,
+          resolvedTopology,
+          transcriptPath: tFile,
+          gatewayConfigPath,
+          maxCalls: maxGatewayCalls,
+          initialPhase: 'probe_readonly',
+          actorPhaseLabel: 'worker',
+          signal,
+          onStateChange: async ({ phase, callsUsed, registeredCleanups }) => {
+            record.gate_phase = phase
+            record.gateway_calls_used = callsUsed
+            record.registered_cleanups = registeredCleanups
+            if (registeredCleanups.length !== lastCleanupCount) {
+              lastCleanupCount = registeredCleanups.length
+              await this.saveRecord(dataRoot, record)
+            }
+          },
+        })
+
+        const preflight = await this.runPreflight({
+          record,
+          environment,
+          replaceFiles,
+          execLogged: (t, cmd, opts = {}) => pvSession.execInternalSsh(t, cmd, {
+            timeoutMs: opts.timeoutMs ?? 60_000,
+            enforceSafety: opts.guard === true,
+            safetyPhase: 'preflight',
+            phaseLabel: opts.phase || 'preflight',
+            execSignal: signal,
+          }),
+        })
+        record.preflight = preflight
+        if (!preflight.ok) {
+          record.status = 'blocked'
+          record.error = preflight.error || 'Stage-0 在位预检未通过'
+          record.draft_verdicts = record.targets.map(t => ({
+            target_key: t.target_key,
+            verdict: 'blocked',
+            hits: '',
+            evidence_command_ids: preflight.command_ids || [],
+            observed_behavior: preflight.error || 'Stage-0 预检未通过',
+            cleanup_verified: true,
+            notes: preflight.guidance || '',
+          }))
+          await this.saveRecord(dataRoot, record)
+          return
+        }
+        signal.throwIfAborted()
+
+        record.status = 'running'
+        record.gate_phase = pvSession.getPhase()
+        await this.saveRecord(dataRoot, record)
+
+        const kpBridge = await buildKnowledgeContextForLiveVerification({
+          dataRoot,
+          packDir: record.knowledge_pack_dir,
+          targets: record.targets,
+          environment,
+        })
+        if (kpBridge.warning) {
+          record.reference_warnings = [...(record.reference_warnings || []), kpBridge.warning]
+        }
+
+        const inputPath = path.join(scratchDirectory, 'input.json')
+        const outputPath = path.join(scratchDirectory, 'result.json')
+        await writeFile(inputPath, `${JSON.stringify({
+          verify_id: record.id,
+          mode: record.mode,
+          environment: {
+            name: environment.name,
+            ...(environment.service_topology ? { service_topology: environment.service_topology } : {}),
+            ...(environment.stimulus_playbook ? { stimulus_playbook: environment.stimulus_playbook } : {}),
+            has_host: Boolean(environment.host),
+            host_ip: environment.host?.ip || '',
+            host_default_workdir: environment.host?.default_workdir || '',
+            has_array: Boolean(environment.array),
+            array_ip: environment.array?.ip || '',
+            array_default_process: environment.array?.default_process || '',
+            array_default_log_paths: environment.array?.default_log_paths || [],
+          },
+          preflight: record.preflight,
+          targets: record.targets,
+          ...(analysisContext ? { analysis_context: analysisContext } : {}),
+          ...(Array.isArray(toolReferenceFiles) && toolReferenceFiles.length ? { tool_reference_files: toolReferenceFiles } : {}),
+          ...(kpBridge.context ? { knowledge_catalog: kpBridge.context } : {}),
+          marker_strings: record.marker_strings,
+          points,
+          profiles,
+          instructions: record.instructions,
+        }, null, 2)}\n`, 'utf8')
+
+        const prompt = buildVerificationPrompt({
+          record,
+          inputPath,
+          outputPath,
+          cliPath: CLI_PATH,
+          configPath: gatewayConfigPath,
+          maxGatewayCalls,
+          hasKnowledgePack: Boolean(kpBridge.context),
+        })
+        const targetKeys = record.targets.map(t => t.target_key)
+        const requireNonZeroHits = record.mode === 'fault_injection' && Array.isArray(points) && points.length > 0
+        const verified = await this.runWorker({
+          record,
+          cwd,
+          scratchDirectory,
+          inputPath,
+          outputPath,
+          prompt,
+          gatewayUrl: pvSession.gatewayUrl,
+          gatewayToken: pvSession.token,
+          gatewayConfigPath,
+          cliPath: CLI_PATH,
+          signal,
+          validateOutput: candidate => validateVerificationResult(candidate, { targetKeys, validCommandIds: pvSession.validCommandIds, requireNonZeroHits }),
+          onStarted: async sessionInfo => {
+            record.worker_session = sessionInfo
+            await this.saveRecord(dataRoot, record)
+          },
+        })
+        const checked = validateVerificationResult(verified, { targetKeys, validCommandIds: pvSession.validCommandIds, requireNonZeroHits })
+        if (!checked.ok) throw new Error(`核验结果校验失败：${checked.error}`)
+
+        if (kpBridge.packDir && Array.isArray(checked.value.card_feedback) && checked.value.card_feedback.length) {
+          record.recorded_card_feedback = await recordLiveVerificationCardFeedback({
+            dataRoot,
+            packDir: kpBridge.packDir,
+            sessionId: record.id,
+            feedback: checked.value.card_feedback,
+          })
+        }
+
+        record.summary = checked.value.summary
+        record.draft_verdicts = checked.value.items
+        record._pending_terminal_status = 'completed'
+      } catch (error) {
+        if (signal.aborted) {
+          record._pending_terminal_status = 'cancelled'
+          record.error = '用户已停止本次真机核验'
+        } else {
+          record._pending_terminal_status = 'failed'
+          record.error = error instanceof Error ? error.message : String(error)
+        }
+      } finally {
+        if (pvSession) {
+          if (record.preflight?.ok) {
+            const cleanupReport = await pvSession.runCleanups({ onlyPending: true })
+            let postCheck = null
+            if (record.preflight?.baseline?.process && environment.array) {
+              try {
+                const pidRes = await pvSession.execInternalSsh('array', buildPidLookupCommand(record.preflight.baseline.process), {
+                  timeoutMs: 15_000,
+                  enforceSafety: false,
+                  safetyPhase: 'post_check',
+                  phaseLabel: 'post_check',
+                  execSignal: null,
+                })
+                const afterPids = parsePidList(pidRes.stdout)
+                const afterPid = afterPids[0] || ''
+                const baselinePid = record.preflight.baseline.pid || ''
+                postCheck = {
+                  baseline_pid: baselinePid,
+                  after_pid: afterPid,
+                  after_pids: afterPids,
+                  pid_changed: Boolean(baselinePid && afterPids.length > 0 && !afterPids.includes(baselinePid)),
+                  process_alive: afterPids.length > 0,
+                  command_id: pidRes.command_id,
+                }
+              } catch {}
+            }
+            record.cleanup = { ...cleanupReport, post_check: postCheck }
+          }
+          await pvSession.close({ runCleanups: false })
+        }
+        if (record._pending_terminal_status) {
+          record.status = record._pending_terminal_status
+          delete record._pending_terminal_status
+          try { await this.saveRecord(dataRoot, record) } catch {}
+        }
+      }
+      return
+    }
+
     let seq = 0
     const validCommandIds = new Set()
     const registeredCleanups = []
-    const tFile = transcriptFile(dataRoot, record.id)
     const sshSessions = {}
     if (typeof this.ssh?.createSession === 'function') {
       if (resolvedHosts.host) sshSessions.host = this.ssh.createSession(resolvedHosts.host)
@@ -596,7 +800,6 @@ export class LiveVerificationService {
     }
 
     let gatewayServer = null
-    const gatewayConfigPath = path.join(scratchDirectory, '.gateway.json')
     try {
       // Stage 0: Host Pre-flight
       const preflight = await this.runPreflight({ record, environment, replaceFiles, execLogged: (t, cmd, opts) => execLogged(t, cmd, { ...opts, execSignal: signal }) })
