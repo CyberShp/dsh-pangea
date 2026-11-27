@@ -13,9 +13,31 @@ function canonical(value) {
   return value ?? null
 }
 const digest = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex')
+function normalizedLinkedNotes(item) {
+  if (!Array.isArray(item?.linked_notes) || !item.linked_notes.length) return []
+  return item.linked_notes
+    .filter(note => note && typeof note === 'object')
+    .map(note => {
+      const body = note.source_record?.body
+      const content = typeof body === 'string' ? body : (body?.content ?? body ?? null)
+      const evidence = body && typeof body === 'object' ? (body.source_evidence ?? note.source_evidence ?? null) : (note.source_evidence ?? null)
+      return {
+        unit_id: note.unit_id ?? null,
+        display_id: note.display_id ?? note.source_record?.record_id ?? note.projection_id ?? null,
+        title: note.title ?? null,
+        content,
+        source_evidence: evidence,
+      }
+    })
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+}
+
 export function caseContentHash(item) {
-  return digest({ ...Object.fromEntries(fields.map(key => [key, item[key] ?? null])),
-    source_record: Object.fromEntries(['record_id', 'kind', 'body', 'evidence', 'relates_to'].map(key => [key, item.source_record?.[key] ?? null])) })
+  return digest({
+    ...Object.fromEntries(fields.map(key => [key, item[key] ?? null])),
+    linked_notes: normalizedLinkedNotes(item),
+    source_record: Object.fromEntries(['record_id', 'kind', 'body', 'evidence', 'relates_to'].map(key => [key, item.source_record?.[key] ?? null])),
+  })
 }
 export function caseSet(items) {
   const hashes = Object.create(null), duplicates = new Set()

@@ -94,12 +94,25 @@ async function normalizeEndpointForStorage(value, field, { existing = null, keyD
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`${field}.port 必须在 1 到 65535 之间`)
 
   const authKind = value.auth_kind === 'key' ? 'key' : 'password'
-  const rawProtected = value.protected && typeof value.protected === 'object' && !Array.isArray(value.protected) ? value.protected : null
-  const rawTest = value.test_resources && typeof value.test_resources === 'object' && !Array.isArray(value.test_resources) ? value.test_resources : null
+  const rawProtected = value.protected === undefined
+    ? (existing?.protected && typeof existing.protected === 'object' ? existing.protected : null)
+    : (value.protected && typeof value.protected === 'object' && !Array.isArray(value.protected) ? value.protected : null)
+  const rawTest = value.test_resources === undefined
+    ? (existing?.test_resources && typeof existing.test_resources === 'object' ? existing.test_resources : null)
+    : (value.test_resources && typeof value.test_resources === 'object' && !Array.isArray(value.test_resources) ? value.test_resources : null)
+  const resolvedWorkdir = field === 'host'
+    ? (value.default_workdir === undefined ? cleanText(existing?.default_workdir) : cleanText(value.default_workdir))
+    : ''
+  const resolvedProcess = field === 'array'
+    ? (value.default_process === undefined ? cleanText(existing?.default_process) : cleanText(value.default_process))
+    : ''
+  const resolvedLogPaths = field === 'array'
+    ? (value.default_log_paths === undefined ? cleanStringList(existing?.default_log_paths) : cleanStringList(value.default_log_paths))
+    : []
   const extra = {
-    ...(field === 'host' && cleanText(value.default_workdir) ? { default_workdir: cleanText(value.default_workdir) } : {}),
-    ...(field === 'array' && cleanText(value.default_process) ? { default_process: cleanText(value.default_process) } : {}),
-    ...(field === 'array' && cleanStringList(value.default_log_paths).length ? { default_log_paths: cleanStringList(value.default_log_paths) } : {}),
+    ...(field === 'host' && resolvedWorkdir ? { default_workdir: resolvedWorkdir } : {}),
+    ...(field === 'array' && resolvedProcess ? { default_process: resolvedProcess } : {}),
+    ...(field === 'array' && resolvedLogPaths.length ? { default_log_paths: resolvedLogPaths } : {}),
     ...(rawProtected ? {
       protected: {
         mgmt_ips: cleanStringList(rawProtected.mgmt_ips),

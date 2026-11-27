@@ -113,20 +113,36 @@ function readBodyJson(req, limit = 1024 * 1024) {
   })
 }
 
-export function hasPositiveHitCount(hits) {
+const NON_HIT_METADATA_KEYS = new Set([
+  'retry', 'retries', 'attempt', 'attempts', 'duration', 'duration_ms', 'elapsed', 'elapsed_ms',
+  'timeout', 'timeout_ms', 'exit', 'exit_code', 'status', 'status_code', 'code', 'pid', 'port',
+  'ms', 'sec', 'secs', 'seconds', 'rc', 'errno',
+])
+
+export function hasPositiveHitCount(hits, { pointIds = [] } = {}) {
   const text = String(hits ?? '').trim()
   if (!text) return false
-  const matches = text.match(/(?:=|:\s*|hit[s]?\s*[:=]?\s*)(\d+)/gi)
-  if (matches && matches.length) {
-    return matches.some(m => {
-      const num = m.match(/(\d+)/)
-      return num && Number(num[1]) > 0
-    })
+  const allowedIds = new Set(
+    (Array.isArray(pointIds) ? pointIds : [])
+      .map(v => String(v || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  const kvRegex = /([A-Za-z0-9._-]+)\s*[:=]\s*(\d+)/g
+  let matchedAnyKv = false
+  let match
+  while ((match = kvRegex.exec(text)) !== null) {
+    matchedAnyKv = true
+    const key = match[1].toLowerCase()
+    const count = Number(match[2])
+    if (NON_HIT_METADATA_KEYS.has(key)) continue
+    if (allowedIds.size > 0 && !allowedIds.has(key) && key !== 'hit' && key !== 'hits') continue
+    if (count > 0) return true
   }
+  if (matchedAnyKv) return false
   return /^\d+$/.test(text) && Number(text) > 0
 }
 
-export function validateVerificationResult(result, { targetKeys = [], validCommandIds = new Set(), requireNonZeroHits = false } = {}) {
+export function validateVerificationResult(result, { targetKeys = [], validCommandIds = new Set(), requireNonZeroHits = false, pointIdsByTarget = null } = {}) {
   if (!result || typeof result !== 'object' || Array.isArray(result)) {
     return { ok: false, error: '结果 JSON 必须是对象' }
   }
@@ -150,7 +166,10 @@ export function validateVerificationResult(result, { targetKeys = [], validComma
       return { ok: false, error: `items[${targetKey}].verdict 无效（须为 ${LIVE_VERDICT_VALUES.join(' / ')}）` }
     }
     const hits = typeof item.hits === 'string' ? item.hits.trim() : ''
-    if (requireNonZeroHits && (verdict === 'confirmed' || verdict === 'excluded') && !hasPositiveHitCount(hits)) {
+    const targetPointIds = pointIdsByTarget instanceof Map
+      ? (pointIdsByTarget.get(targetKey) || [])
+      : (Array.isArray(pointIdsByTarget?.[targetKey]) ? pointIdsByTarget[targetKey] : [])
+    if (requireNonZeroHits && (verdict === 'confirmed' || verdict === 'excluded') && !hasPositiveHitCount(hits, { pointIds: targetPointIds })) {
       return { ok: false, error: `items[${targetKey}] 在打桩核验模式下未观测到非零桩命中（hits="${hits || '空'}"），不得判为 ${verdict}；请补充真实命中计数或改判 not_triggered` }
     }
     const evidenceIds = Array.isArray(item.evidence_command_ids)
@@ -441,13 +460,22 @@ export class LiveVerificationService {
         ...(item.cleanup ? { cleanup: item.cleanup } : {}),
         ...(Array.isArray(item.source_evidence) && item.source_evidence.length ? { source_evidence: item.source_evidence } : {}),
         ...(Array.isArray(item.tool_notes) && item.tool_notes.length ? { tool_notes: item.tool_notes } : {}),
+        ...(item.case_key ? { case_key: String(item.case_key).trim() } : {}),
         ...(item.source_fi_task_id ? { source_fi_task_id: item.source_fi_task_id } : {}),
         ...(item.source_run_id ? { source_run_id: item.source_run_id } : {}),
       }
       if (!normalized.target_key) return normalized
-      normalized.content_hash = createHash('sha256').update(JSON.stringify(normalized)).digest('hex').slice(0, 16)
       return normalized
     }).filter(item => item.target_key)
+    const keyCounts = new Map()
+    for (const t of normalizedTargets) keyCounts.set(t.target_key, (keyCounts.get(t.target_key) || 0) + 1)
+    for (const t of normalizedTargets) {
+      if ((keyCounts.get(t.target_key) || 0) > 1 && (t.source_run_id || t.source_fi_task_id)) {
+        t.case_key = t.case_key || t.target_key
+        t.target_key = `${t.source_run_id || 'run'}::${t.source_fi_task_id || 'task'}::${t.case_key}`
+      }
+      t.content_hash = createHash('sha256').update(JSON.stringify(t)).digest('hex').slice(0, 16)
+    }
     if (!normalizedTargets.length) throw serviceError('核验目标缺少有效的 target_key')
     if (!this.runWorker) throw serviceError('当前运行时未配置核验执行器', 503)
     let resolvedModel = agentModel
@@ -1213,9 +1241,24 @@ export class LiveVerificationService {
       }
     })
     if (!normalized.length) throw serviceError('请至少提供一条确认结论')
+    const preflightBlocked = record.status === 'blocked' || record.preflight?.ok === false
+    const requireNonZeroHits = record.mode === 'fault_injection'
+    for (const item of normalized) {
+      if (item.verdict === 'confirmed' || item.verdict === 'excluded') {
+        if (preflightBlocked) {
+          throw serviceError(`预检已阻断（${record.preflight?.error || 'Stage-0 未通过'}），不得将「${item.target_key}」确认或同步为实测 ${item.verdict}；请保留 blocked 阻断结论或修复环境后重测`, 400)
+        }
+        if (item.evidence_command_ids.length === 0) {
+          throw serviceError(`目标「${item.target_key}」缺少真实设备执行证据（evidence_command_ids 为空），不得确认为实测 ${item.verdict}`, 400)
+        }
+        if (requireNonZeroHits && !hasPositiveHitCount(item.hits)) {
+          throw serviceError(`目标「${item.target_key}」在打桩核验模式下未观测到非零桩命中（hits="${item.hits || '空'}"），不得确认为实测 ${item.verdict}`, 400)
+        }
+      }
+    }
     record.confirmed_verdicts = normalized
     record.confirmed_at = new Date().toISOString()
-    record.status = 'confirmed'
+    record.status = preflightBlocked ? 'blocked' : 'confirmed'
     const syncWarnings = []
     const syncedMap = record.synced_fi_verdicts && typeof record.synced_fi_verdicts === 'object' ? { ...record.synced_fi_verdicts } : {}
 
@@ -1226,6 +1269,7 @@ export class LiveVerificationService {
         const meta = targetMetaByKey.get(item.target_key)
         const fiTaskId = meta?.source_fi_task_id || record.fault_injection_task_id
         const targetRunId = meta?.source_run_id || record.run_id
+        const fiCaseKey = meta?.case_key || item.target_key
         if (!fiTaskId || !targetRunId) continue
         const mappedResult = item.verdict === 'not_triggered'
           ? 'not_triggered'
@@ -1236,13 +1280,14 @@ export class LiveVerificationService {
               : 'passed'
         const executionStatus = item.verdict === 'blocked' ? 'not_run' : 'completed'
         const noteText = `[真机核验 ${record.id} · ${LIVE_VERDICT_LABELS[item.verdict]}] ${item.observed_behavior || item.notes || ''}${binaryPath ? ` (二进制: ${binaryPath})` : ''}${item.evidence_command_ids.length ? ` (证据: ${item.evidence_command_ids.join(', ')})` : ''}`.trim()
-        const syncKey = `${targetRunId}\0${fiTaskId}\0${item.target_key}`
+        const syncKey = `${targetRunId}\0${fiTaskId}\0${fiCaseKey}`
         const fingerprint = JSON.stringify([mappedResult, item.verdict, item.hits, noteText])
         if (syncedMap[syncKey] === fingerprint) continue
         try {
           await faultInjectionService.recordVerification(dataRoot, targetRunId, fiTaskId, {
+            ...(record.fault_injection_build_id ? { build_id: record.fault_injection_build_id } : {}),
             verification: {
-              case_key: item.target_key,
+              case_key: fiCaseKey,
               result: mappedResult,
               execution_status: executionStatus,
               risk_verdict: item.verdict,
@@ -1252,7 +1297,7 @@ export class LiveVerificationService {
           })
           syncedMap[syncKey] = fingerprint
         } catch (syncError) {
-          syncWarnings.push(`回写打桩任务 ${fiTaskId} (${item.target_key}) 失败：${syncError instanceof Error ? syncError.message : String(syncError)}`)
+          syncWarnings.push(`回写打桩任务 ${fiTaskId} (${fiCaseKey}) 失败：${syncError instanceof Error ? syncError.message : String(syncError)}`)
         }
       }
     }

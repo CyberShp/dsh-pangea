@@ -426,7 +426,8 @@ export function createFaultInjectionTaskDetail(React) {
     }, [scope, running])
     React.useEffect(() => {
       if (!task) return
-      setBuild({ url: '', package_id: '', package_sha256: '', notes: '', ...task.build })
+      const defaultBuildId = task.build?.build_id || task.latest_pushed_build?.build_id || task.pushed_builds?.[0]?.build_id || ''
+      setBuild({ build_id: defaultBuildId, url: '', package_id: '', package_sha256: '', notes: '', ...task.build, ...(defaultBuildId && !task.build?.build_id ? { build_id: defaultBuildId } : {}) })
       setVerification({ result: 'not_run', hits: '', notes: '', ...task.verification?.filter(item => item.case_key === task.case_keys?.[0]).at(-1), case_key: task.case_keys?.[0] || '' })
     }, [task?.id])
     const act = async (action, extra = {}) => {
@@ -452,9 +453,13 @@ export function createFaultInjectionTaskDetail(React) {
     const passedCount = [...latestResults.values()].filter(result => result === 'passed').length
     const branchText = task.latest_build?.branch || task.branch || ''
     const includable = Boolean(task.result_saved && task.generation_complete !== false && ['ready', 'pushed'].includes(task.status))
-    const canVerify = Boolean(task.latest_pushed_build?.commits?.length) || (task.repositories || []).some(repo => repo.commit)
-    const activeCommits = task.latest_pushed_build?.commits?.length
-      ? task.latest_pushed_build.commits
+    const pushedBuilds = Array.isArray(task.pushed_builds) && task.pushed_builds.length
+      ? task.pushed_builds
+      : (task.latest_pushed_build ? [task.latest_pushed_build] : [])
+    const selectedPushedBuild = pushedBuilds.find(item => item.build_id === build.build_id) || pushedBuilds[0] || null
+    const canVerify = Boolean(pushedBuilds.length) || (task.repositories || []).some(repo => repo.commit)
+    const activeCommits = selectedPushedBuild?.commits?.length
+      ? selectedPushedBuild.commits
       : (task.repositories || []).filter(repo => repo.commit).map(repo => ({ repo_id: repo.repo_id, commit: repo.commit }))
     return h('section', { className: 'pangea-injection-panel is-standalone', 'data-testid': 'fault-injection-task' }, h('style', null, PANEL_CSS),
       ...banners,
@@ -558,6 +563,25 @@ export function createFaultInjectionTaskDetail(React) {
             '当前关联提交：',
             activeCommits.map(item => `${item.repo_id} ${String(item.commit || '').slice(0, 12)}`).join('、'),
             '。烧包测试后，在这里记录验证结果。'),
+          pushedBuilds.length > 1 ? h('label', { className: 'pangea-fi-field', style: { marginBottom: 8 } },
+            h('span', null, '验证对应构建'),
+            h('select', {
+              'aria-label': '验证对应构建',
+              value: selectedPushedBuild?.build_id || '',
+              disabled: working,
+              onChange: event => {
+                const nextId = event.target.value
+                const matched = pushedBuilds.find(item => item.build_id === nextId)
+                setBuild(prev => ({
+                  build_id: nextId,
+                  url: matched?.pipeline_url || '',
+                  package_id: prev.build_id === nextId ? prev.package_id : '',
+                  package_sha256: prev.build_id === nextId ? prev.package_sha256 : '',
+                  notes: prev.build_id === nextId ? prev.notes : '',
+                }))
+              },
+            }, pushedBuilds.map(item => h('option', { key: item.build_id, value: item.build_id },
+              `${item.build_id} (${(item.commits || []).map(c => `${c.repo_id} ${String(c.commit || '').slice(0, 8)}`).join(', ')})`)))) : null,
           h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),
           h('details', { style: { margin: '4px 0 12px' } },
             h('summary', null, '从执行日志自动填充'),
@@ -587,10 +611,21 @@ export function createFaultInjectionTaskDetail(React) {
               const key = event.target.value
               setVerification(drafts.current[`${taskId}:${key}`] ?? { result: 'not_run', hits: '', notes: '', ...task.verification.filter(item => item.case_key === key).at(-1), case_key: key })
             } }, task.cases.map(item => h('option', { key: item.case_key, value: item.case_key }, readable(item.title))))),
-            h('label', { className: 'pangea-fi-field' }, h('span', null, '实际结果'), h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => setVerification({ ...verification, result: event.target.value }) }, [['not_run', '未执行'], ['passed', '通过（风险未复现）'], ['failed', '失败（风险复现/异常）'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
+            h('label', { className: 'pangea-fi-field' }, h('span', null, '实际结果'), h('select', { 'aria-label': '实际结果', value: verification.result, onChange: event => {
+              const nextResult = event.target.value
+              const nextExecutionStatus = nextResult === 'not_run' ? 'not_run' : 'completed'
+              const nextRiskVerdict = nextResult === 'failed'
+                ? 'confirmed'
+                : nextResult === 'passed'
+                  ? 'excluded'
+                  : nextResult === 'not_triggered'
+                    ? 'not_triggered'
+                    : 'blocked'
+              setVerification({ ...verification, result: nextResult, execution_status: nextExecutionStatus, risk_verdict: nextRiskVerdict })
+            } }, [['not_run', '未执行'], ['passed', '通过（风险未复现）'], ['failed', '失败（风险复现/异常）'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
             field('桩点实际命中', verification.hits, value => setVerification({ ...verification, hits: value }))),
           field('验证现象与记录', verification.notes, value => setVerification({ ...verification, notes: value }), { multiline: true }),
-          h('button', { type: 'button', className: 'btn primary', disabled: working || busy(task), onClick: () => act('verify', { build, verification }) }, '保存构建与验证记录'),
+          h('button', { type: 'button', className: 'btn primary', disabled: working || busy(task), onClick: () => act('verify', { build_id: selectedPushedBuild?.build_id || build.build_id || undefined, build: { ...build, ...(selectedPushedBuild?.build_id ? { build_id: selectedPushedBuild.build_id } : {}) }, verification }) }, '保存构建与验证记录'),
           task.verification.length ? h('ul', { className: 'pangea-fi-records pangea-fi-scroll', 'aria-label': '验证历史' }, [...task.verification].reverse().map((value, index) => {
             const legacyLabel = ({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result] || value.result
             const dimLabel = value.execution_status === 'infra_error'
@@ -820,8 +855,15 @@ export function createFaultInjectionBuild(React) {
     const targetGateRegex = remoteHookRegex || DEFAULT_INTRANET_COMMIT_REGEX
     const showRemoteGateHelper = Boolean(activeBuild && (remoteHookRegex || /【问题单号/.test(activeBuild.error || '')) && (effectiveCommitConfig.mode !== 'template' || (remoteHookRegex && effectiveCommitConfig.pattern !== remoteHookRegex)))
 
-    const savedPipelineUrl = activeBuild?.pipeline_url ?? context.pipeline_url ?? ''
-    const pipelineDirty = pipelineUrl.trim() !== savedPipelineUrl
+    const selectedRepoPipelines = shownRepos
+      .map(repo => ({ repo_id: repo.repo_id, pipeline_url: String(repo.pipeline_url || '').trim() }))
+      .filter(entry => Boolean(entry.pipeline_url))
+    const selectedDefaultPipelineUrl = selectedRepoPipelines[0]?.pipeline_url || ''
+    const activeBuildPipelines = Array.isArray(activeBuild?.repository_pipelines) && activeBuild.repository_pipelines.length
+      ? activeBuild.repository_pipelines.filter(entry => entry?.pipeline_url)
+      : (activeBuild?.repositories || []).filter(repo => repo?.pipeline_url).map(repo => ({ repo_id: repo.repo_id, pipeline_url: repo.pipeline_url }))
+    const savedPipelineUrl = activeBuild?.pipeline_url || activeBuildPipelines[0]?.pipeline_url || selectedDefaultPipelineUrl || context.pipeline_url || ''
+    const pipelineDirty = Boolean(pipelineUrl.trim()) && pipelineUrl.trim() !== savedPipelineUrl && pipelineUrl.trim() !== (context.pipeline_url || '')
     const hasPatchFailures = Boolean(activeBuild?.repositories?.some(repo => repo.failures?.length > 0))
     const canRetryActiveBuild = Boolean(
       activeBuild
@@ -836,11 +878,14 @@ export function createFaultInjectionBuild(React) {
           return
         }
       }
+      const divergedRepo = activeBuild?.remote_diverged_repo || ''
+      const divergedHead = activeBuild?.remote_diverged_head || ''
       if (allowOverwriteRemoteDiverged) {
         const diverged = Array.isArray(activeBuild?.remote_diverged_commits) ? activeBuild.remote_diverged_commits : []
         const listText = diverged.slice(0, 5).map(c => `- ${String(c.commit || '').slice(0, 10)}${c.subject ? ` ${c.subject}` : ''}`).join('\n')
         const extra = diverged.length > 5 ? `\n…等共 ${diverged.length} 个提交` : ''
-        const confirmMsg = `确认覆盖远端分支上的非 PANGEA 提交并重新推送？\n本次推送将把远端分支树同步为当前基线与所选桩代码，以下提交的内容将在远端分支被回退：\n${listText || '（远端存在未合入的非 PANGEA 提交）'}${extra}`
+        const repoScope = divergedRepo ? `仓库 ${divergedRepo}${divergedHead ? `（HEAD ${divergedHead.slice(0, 10)}）` : ''}` : '当前远端分支'
+        const confirmMsg = `确认覆盖 ${repoScope} 上的非 PANGEA 提交并重新推送？\n本次仅授权覆盖上述仓库的该远端 HEAD，以下提交的内容将在该分支被回退：\n${listText || '（远端存在未合入的非 PANGEA 提交）'}${extra}`
         if (typeof window?.confirm === 'function' && !window.confirm(confirmMsg)) {
           return
         }
@@ -856,9 +901,14 @@ export function createFaultInjectionBuild(React) {
         const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(subject) }
         const checked = resolveCommitMessage(cfg, subject, { allowDefaultSummary: commitDraft.summary === null })
         if (!checked.ok) throw new Error(checked.error)
-        const overwriteFlag = allowOverwriteRemoteDiverged ? { allow_overwrite_remote_diverged: true } : {}
+        const overwriteFlag = allowOverwriteRemoteDiverged
+          ? (divergedRepo && divergedHead
+              ? { confirmed_remote_diverged: { [divergedRepo]: divergedHead } }
+              : { allow_overwrite_remote_diverged: true })
+          : {}
+        const effectiveBuildPipeline = pipelineDirty ? pipelineUrl.trim() : (selectedDefaultPipelineUrl || pipelineUrl.trim())
         const payload = retryId
-          ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, pipeline_url: pipelineUrl, ...overwriteFlag }
+          ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, ...(pipelineDirty ? { pipeline_url: pipelineUrl.trim() } : {}), ...overwriteFlag }
           : restoreBaseline
             ? {
                 action: 'build',
@@ -866,7 +916,7 @@ export function createFaultInjectionBuild(React) {
                 repo_ids: restoreTargetRepos.map(repo => repo.repo_id),
                 commit_config: cfg,
                 commit_message: checked.message,
-                pipeline_url: pipelineUrl,
+                ...(effectiveBuildPipeline ? { pipeline_url: effectiveBuildPipeline } : {}),
                 ...overwriteFlag,
               }
             : {
@@ -874,7 +924,7 @@ export function createFaultInjectionBuild(React) {
                 items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, result_sha256: task.result_sha256 })),
                 commit_config: cfg,
                 commit_message: checked.message,
-                pipeline_url: pipelineUrl,
+                ...(effectiveBuildPipeline ? { pipeline_url: effectiveBuildPipeline } : {}),
                 ...overwriteFlag,
               }
         const value = await request(payload)
@@ -1116,29 +1166,57 @@ export function createFaultInjectionBuild(React) {
                 h('strong', null, `任务「${failure.name}」失配：`),
                 h('span', null, failure.error)),
               onOpenTask ? h('button', { type: 'button', onClick: () => onOpenTask({ run_id: failure.run_id, id: failure.task_id }) }, '打开任务重新生成') : null)))),
-          activeBuild.status === 'pushed' ? h('div', { style: { marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 } },
-            h('button', {
-              type: 'button',
-              className: 'btn primary',
-              disabled: working || !savedPipelineUrl || pipelineDirty,
-              onClick: async () => {
-                try {
-                  if (!onOpenPipeline) throw new Error('当前环境无法调用系统浏览器打开链接')
-                  await onOpenPipeline(savedPipelineUrl)
-                } catch (reason) {
-                  setError(reason.message)
-                }
-              },
-            }, '在系统浏览器打开构建流水线'),
-            h('button', {
-              type: 'button',
-              style: { marginLeft: 0 },
-              disabled: working || !savedPipelineUrl || pipelineDirty,
-              onClick: async () => {
-                try { await navigator.clipboard.writeText(savedPipelineUrl); setNotice('已复制构建流水线链接') }
-                catch { setError('复制失败，请手动复制上方构建流水线 URL') }
-              },
-            }, '复制流水线链接'),
+          activeBuild.status === 'pushed' ? (() => {
+            const distinctPipelines = []
+            const seenUrls = new Set()
+            for (const entry of activeBuildPipelines) {
+              const url = String(entry?.pipeline_url || '').trim()
+              if (!url || seenUrls.has(url)) continue
+              seenUrls.add(url)
+              distinctPipelines.push({ repo_id: entry.repo_id, pipeline_url: url })
+            }
+            const multiPipelines = distinctPipelines.length > 1
+            return h('div', { style: { marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 } },
+              ...(multiPipelines
+                ? distinctPipelines.map(entry => h('button', {
+                    key: `open-pipeline:${entry.repo_id}`,
+                    type: 'button',
+                    className: 'btn primary',
+                    disabled: working,
+                    onClick: async () => {
+                      try {
+                        if (!onOpenPipeline) throw new Error('当前环境无法调用系统浏览器打开链接')
+                        await onOpenPipeline(entry.pipeline_url)
+                      } catch (reason) {
+                        setError(reason.message)
+                      }
+                    },
+                  }, `打开 ${entry.repo_id} 构建流水线`))
+                : [
+                    h('button', {
+                      key: 'open-pipeline-single',
+                      type: 'button',
+                      className: 'btn primary',
+                      disabled: working || !savedPipelineUrl || pipelineDirty,
+                      onClick: async () => {
+                        try {
+                          if (!onOpenPipeline) throw new Error('当前环境无法调用系统浏览器打开链接')
+                          await onOpenPipeline(savedPipelineUrl)
+                        } catch (reason) {
+                          setError(reason.message)
+                        }
+                      },
+                    }, '在系统浏览器打开构建流水线'),
+                  ]),
+              h('button', {
+                type: 'button',
+                style: { marginLeft: 0 },
+                disabled: working || !savedPipelineUrl || pipelineDirty,
+                onClick: async () => {
+                  try { await navigator.clipboard.writeText(savedPipelineUrl); setNotice('已复制构建流水线链接') }
+                  catch { setError('复制失败，请手动复制上方构建流水线 URL') }
+                },
+              }, '复制流水线链接'),
             h('button', {
               type: 'button',
               style: { marginLeft: 0 },
@@ -1158,7 +1236,8 @@ export function createFaultInjectionBuild(React) {
                 faultInjectionBuildId: activeBuild.id,
                 name: `核验 · ${activeBuild.items[0].name || activeBuild.id}`,
               }),
-            }, '烧包后去真机核验') : null) : null) : null,
+            }, '烧包后去真机核验') : null)
+          })() : null) : null,
 
         (context.builds || []).length > 1 ? h('details', { style: { marginTop: 14 } },
           h('summary', null, `历史出包记录（${context.builds.length}）`),

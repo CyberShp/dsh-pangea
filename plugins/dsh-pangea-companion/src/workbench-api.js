@@ -308,6 +308,12 @@ export function deriveAnalysisInput(parent, input, options) {
     asset_revisions: parent.asset_revisions,
     source_scope: parent.source_scope,
     source_investigation_policy: parent.source_investigation_policy ?? null,
+    ...(Array.isArray(parent.test_tool_sources) && parent.test_tool_sources.length
+      ? {
+          test_tool_sources: structuredClone(parent.test_tool_sources),
+          ...(parent.expected_test_tool_revision !== undefined ? { expected_test_tool_revision: parent.expected_test_tool_revision } : {}),
+        }
+      : {}),
     context_scope: parent.context_scope,
     asset_ids: parent.asset_ids,
     focus: parent.focus,

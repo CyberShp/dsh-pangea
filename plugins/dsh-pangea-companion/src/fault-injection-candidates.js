@@ -492,7 +492,35 @@ function countOccurrences(haystack, needle) {
 }
 
 const FAILURE_SIGNAL = /(?:FAIL(?:ED)?\b|AssertionError|Traceback|Segmentation fault|PANIC\b|ERROR:\s*assertion)/i
-const ZERO_TESTS_SIGNAL = /(?:\[\s*PASSED\s*\]\s*0 tests\b|0 tests from 0 test suites ran|No tests were found)/i
+const CTEST_SUMMARY_RE = /(\d+)\s+tests?\s+failed\s+out\s+of\s+(\d+)/gi
+const ZERO_FAILURE_LINE_RE = /(?:\b0\s+tests?\s+failed\b|\[\s*FAILED\s*\]\s*0\s+tests?\b|\b0\s+failed\b)/i
+const NONZERO_FAILURE_COUNT_RE = /(?:\b([1-9]\d*)\s+tests?\s+failed\b|\[\s*FAILED\s*\]\s*([1-9]\d*)\s+tests?\b)/i
+const ZERO_TESTS_SIGNAL = /(?:\[\s*PASSED\s*\]\s*0 tests\b|0 tests from 0 test suites ran|No tests were found|0 tests failed out of 0\b)/i
+
+function detectFailureSignal(scopedLines) {
+  let hasPositiveTestFailure = false
+  for (const line of scopedLines) {
+    if (NONZERO_FAILURE_COUNT_RE.test(line)) {
+      hasPositiveTestFailure = true
+      break
+    }
+    let ctestMatch
+    CTEST_SUMMARY_RE.lastIndex = 0
+    while ((ctestMatch = CTEST_SUMMARY_RE.exec(line)) !== null) {
+      if (Number(ctestMatch[1]) > 0) {
+        hasPositiveTestFailure = true
+        break
+      }
+    }
+    if (hasPositiveTestFailure) break
+    if (ZERO_FAILURE_LINE_RE.test(line)) continue
+    if (FAILURE_SIGNAL.test(line)) {
+      hasPositiveTestFailure = true
+      break
+    }
+  }
+  return hasPositiveTestFailure
+}
 
 function countPointHitsInLines(lines, points) {
   const bodyLines = lines.filter(line => !/^\[PANGEA_(?:CASE_BEGIN|CASE_END|VERIFY)\]/.test(line.trim()))
@@ -573,7 +601,7 @@ export function parseVerificationLog(logText, task) {
     const { counts: pointHitCounts, samples: matchedLines } = sectionLines
       ? countPointHitsInLines(sectionLines, points)
       : (globalHits ?? { counts: new Map(), samples: [] })
-    const hasFailureSignal = FAILURE_SIGNAL.test(scopedText)
+    const hasFailureSignal = detectFailureSignal(scopedLines)
     const hasZeroTests = ZERO_TESTS_SIGNAL.test(scopedText)
     const profile = profiles.find(item => item.case_key === caseKey)
     const expectedPointIds = Array.isArray(profile?.point_ids) && profile.point_ids.length

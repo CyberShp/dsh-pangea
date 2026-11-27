@@ -28,9 +28,11 @@ export async function inspectSourceFirstAcpRecovery({ dataRoot, runId }) {
   return inspectAcpBindings(await readAcpBindings(dataRoot, runId), { currentInstanceId: instanceId })
 }
 
-export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped, onProgress }) {
-  const state = liveRuns.get(JSON.stringify([path.resolve(dataRoot), runId]))
+export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped, onProgress, pendingStartTimeoutMs = 5000 }) {
+  const key = JSON.stringify([path.resolve(dataRoot), runId])
+  const state = liveRuns.get(key)
   if (!state) return false
+  state.stopRequested = true
   if (onStopped) state.onStopped = onStopped
   state.controller?.abort(new Error('用户结束当前执行'))
   const progress = async () => {
@@ -47,8 +49,24 @@ export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped, onProg
   const failed = results.find(result => result.status === 'rejected')
   if (failed) throw failed.reason
   await state.promise?.catch(() => {})
+  if (state.pendingStartTasks?.size || (state.pendingStarts?.() ?? 0) > 0) {
+    let timer
+    try {
+      await Promise.race([
+        Promise.allSettled([...(state.pendingStartTasks ?? [])]),
+        new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, pendingStartTimeoutMs)) }),
+      ])
+    } finally { clearTimeout(timer) }
+  }
   await progress()
-  liveRuns.delete(JSON.stringify([path.resolve(dataRoot), runId]))
+  const remainingPending = (state.pendingStarts?.() ?? 0) + (state.pendingStartTasks?.size ?? 0)
+  if (remainingPending > 0) {
+    throw Object.assign(
+      new Error(`仍有 ${state.pendingStarts?.() || state.pendingStartTasks?.size} 个启动中的 ACP Agent 正在收尾清理，暂未完全停止`),
+      { code: 'ACP_STOP_PENDING_STARTS', pending_starts: state.pendingStarts?.() || state.pendingStartTasks?.size },
+    )
+  }
+  liveRuns.delete(key)
   return true
 }
 
@@ -264,7 +282,9 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   state ??= { providerId, agentModel, workers: new Map(), actionContexts: new Map(), closed: new Set(), busy: false, terminal: false }
   state.blockedReconciliations ??= new Map()
   state.sessionRequestContexts ??= new Map()
+  state.pendingStartTasks ??= new Set()
   state.requestErrors ??= createAcpRequestErrors()
+  state.stopRequested = false
   liveRuns.set(key, state)
   state.busy = true
   state.failed = false
@@ -408,7 +428,19 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         timer = setTimeout(() => {
           const error = new Error('ACP 初始化或恢复会话超时，保留已有任务')
           controller.abort(error); reject(error)
-          Promise.resolve(attempt).then(async worker => { await disposed(worker); await serial(async () => { owner.pending_starts = owner.pending_starts.filter(id => id !== startId); await persist() }) }).catch(() => {})
+          const lateCleanup = Promise.resolve(attempt)
+            .then(async lateWorker => {
+              await disposed(lateWorker)
+              await serial(async () => { owner.pending_starts = owner.pending_starts.filter(id => id !== startId); await persist() })
+            })
+            .catch(() => {})
+            .finally(() => {
+              state.pendingStartTasks.delete(lateCleanup)
+              if (!state.busy && state.stopRequested && state.pendingStartTasks.size === 0 && !(state.pendingStarts?.() > 0)) {
+                liveRuns.delete(key)
+              }
+            })
+          state.pendingStartTasks.add(lateCleanup)
         }, ms)
       })])
       await remember(worker, request.scratchDirectory, { inflight: !request.resume, quiescent: Boolean(request.resume), blocked: false })
@@ -1074,6 +1106,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
       await sessionRecorder.flush()
       const failed = results.find(result => result.status === 'rejected')
       if (failed) throw failed.reason
+      if (state.pendingStartTasks?.size || (state.pendingStarts?.() ?? 0) > 0) return { retained: true }
       liveRuns.delete(key)
       return { retained: false }
     },

@@ -322,6 +322,7 @@ export class TaskStore {
     this.attemptIdFactory = attemptIdFactory ?? (() => `attempt-${randomUUID()}`)
     this.writeStore = writeStore
     this.store = emptyStore()
+    this.loadError = null
     this.saveQueue = Promise.resolve()
     this.pendingStopPublications = new Set()
     this.ready = this.load()
@@ -330,17 +331,36 @@ export class TaskStore {
   async load() {
     try {
       const parsed = JSON.parse(await readFile(this.storePath, 'utf8'))
-      if (parsed?.version !== STORE_VERSION || !parsed.tasks || typeof parsed.tasks !== 'object') return
+      if (parsed?.version !== STORE_VERSION || !parsed.tasks || typeof parsed.tasks !== 'object' || Array.isArray(parsed.tasks)) {
+        this.loadError = Object.assign(
+          new Error(`任务索引文件格式损坏，已阻止覆盖以保全原文件：${this.storePath}`),
+          { code: 'TASK_STORE_CORRUPTED', storePath: this.storePath },
+        )
+        console.warn('[dsh-pangea-companion] task history format invalid:', this.storePath)
+        return
+      }
       const tasks = {}
       for (const [taskId, value] of Object.entries(parsed.tasks)) tasks[taskId] = normalizeTask(taskId, value)
       this.store = { version: STORE_VERSION, tasks }
+      this.loadError = null
     } catch (error) {
-      if (error?.code !== 'ENOENT') console.warn('[dsh-pangea-companion] task history could not be loaded:', error)
+      if (error?.code !== 'ENOENT') {
+        this.loadError = Object.assign(
+          new Error(`任务索引文件损坏无法读取，已阻止覆盖以保全原文件（${this.storePath}）：${error.message}`),
+          { code: 'TASK_STORE_CORRUPTED', storePath: this.storePath, cause: error },
+        )
+        console.warn('[dsh-pangea-companion] task history could not be loaded:', error)
+      }
     }
+  }
+
+  assertWritable() {
+    if (this.loadError) throw this.loadError
   }
 
   async create({ workspace, dataRoot, input }) {
     await this.ready
+    this.assertWritable()
     const root = text(workspace)
     const repository = text(input?.repository)
     const target = text(input?.target)
@@ -938,6 +958,7 @@ export class TaskStore {
   }
 
   async persist() {
+    this.assertWritable()
     await this.writeStore(this.storePath, `${JSON.stringify(this.store, null, 2)}\n`)
   }
 

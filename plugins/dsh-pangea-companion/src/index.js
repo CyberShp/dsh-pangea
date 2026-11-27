@@ -481,6 +481,7 @@ function hydrateTargetFromItem(item, { sourceFiTaskId = null, sourceRunId = null
   const expectedResults = item?.expected_results || body?.expected_results || item?.expected || body?.expected || undefined
   return {
     target_key: targetKey,
+    case_key: String(item?.case_key || targetKey).trim(),
     ...(item?.display_id ? { display_id: String(item.display_id).trim() } : {}),
     title: String(item?.title || targetKey).trim(),
     kind,
@@ -649,6 +650,7 @@ export async function liveVerificationRouteHandler(req, res, service, faultInjec
             const compactRisks = compactAnalysisRisks(taskRisks)
             enriched = {
               ...enriched,
+              fault_injection_build_id: input.fault_injection_build_id || fiTask.latest_pushed_build?.build_id || '',
               marker_strings: input.marker_strings?.length ? input.marker_strings : [...markerSet],
               points: input.points?.length ? input.points : points,
               profiles: input.profiles?.length ? input.profiles : (fiTask.result?.profiles ?? []),

@@ -803,7 +803,9 @@ export function createLiveVerificationWorkspace(React) {
                       h('div', { className: 'pangea-lv-grid' },
                         h('label', { className: 'pangea-lv-field' }, h('span', null, '四态核验结论'),
                           h('select', { value: currentVerdict.verdict, onChange: e => setVerdictDrafts(prev => prev.map((v, i) => i === activeIdx ? { ...v, verdict: e.target.value } : v)) },
-                            Object.entries(LIVE_VERDICT_LABELS).map(([k, label]) => h('option', { key: k, value: k }, label)))),
+                            Object.entries(LIVE_VERDICT_LABELS)
+                              .filter(([k]) => !((activeTask.status === 'blocked' || activeTask.preflight?.ok === false) && (k === 'confirmed' || k === 'excluded')))
+                              .map(([k, label]) => h('option', { key: k, value: k }, label)))),
                         h('label', { className: 'pangea-lv-field' }, h('span', null, '桩点命中计数'),
                           h('input', { value: currentVerdict.hits || '', onChange: e => setVerdictDrafts(prev => prev.map((v, i) => i === activeIdx ? { ...v, hits: e.target.value } : v)) }))),
                       currentVerdict.evidence_command_ids?.length ? h('div', { style: { marginBottom: 8, fontSize: 12, color: '#5e6773' } },
@@ -813,8 +815,8 @@ export function createLiveVerificationWorkspace(React) {
                         h('textarea', { value: currentVerdict.observed_behavior || currentVerdict.notes || '', onChange: e => setVerdictDrafts(prev => prev.map((v, i) => i === activeIdx ? { ...v, observed_behavior: e.target.value } : v)) }))) : null),
                   h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginTop: 12, paddingTop: 10, borderTop: '1px solid #eef0f3' } },
                     (activeTask.fault_injection_task_id || activeTask.fault_injection_build_id) ? h('label', { style: { display: 'flex', alignItems: 'center', gap: 7, fontSize: 13 } },
-                      h('input', { type: 'checkbox', checked: syncToFi, onChange: e => setSyncToFi(e.target.checked) }),
-                      '同步写入一条实测记录到来源打桩任务的验证历史') : h('span'),
+                      h('input', { type: 'checkbox', checked: syncToFi && !(activeTask.status === 'blocked' || activeTask.preflight?.ok === false), disabled: activeTask.status === 'blocked' || activeTask.preflight?.ok === false, onChange: e => setSyncToFi(e.target.checked) }),
+                      (activeTask.status === 'blocked' || activeTask.preflight?.ok === false) ? '预检已阻断，不能同步为实测通过/排除' : '同步写入一条实测记录到来源打桩任务的验证历史') : h('span'),
                     h('button', { type: 'button', className: 'lv-btn primary', disabled: busy, onClick: () => void handleConfirmVerdicts() }, activeTask.status === 'confirmed' ? '更新归档结论' : '确认归档')))
           ) : detailTab === 'transcript' ? (
             h('div', { className: 'pangea-lv-scroll' },

@@ -187,15 +187,16 @@ export function environmentToVerifyTopology(environment, resolvedHosts = {}) {
     id: environment.id || 'env-bridged',
     name: environment.name || 'Bridged Environment',
     nodes,
-    vars: {},
+    vars: { _pangea_env_managed: '1' },
   }
 }
 
 export async function syncEnvironmentsToTopologyStore(environmentsStore, targetStorePath, { moduleRoot = '' } = {}) {
   const loaded = await loadPangeaVerify({ moduleRoot })
-  if (!loaded?.mod?.TopologyStore || !environmentsStore) return { synced: 0, store_path: targetStorePath }
+  if (!loaded?.mod?.TopologyStore || !environmentsStore) return { synced: 0, pruned: 0, store_path: targetStorePath }
   const targetStore = new loaded.mod.TopologyStore(targetStorePath)
   const listed = await environmentsStore.list()
+  const activeIds = new Set()
   let synced = 0
   for (const item of listed || []) {
     const resolved = await environmentsStore.getResolved?.(item.id)
@@ -225,10 +226,22 @@ export async function syncEnvironmentsToTopologyStore(environmentsStore, targetS
     if (!topo || Object.keys(topo.nodes || {}).length === 0) continue
     try {
       await targetStore.save(topo)
+      activeIds.add(topo.id)
       synced += 1
     } catch {}
   }
-  return { synced, store_path: targetStore.file }
+  let pruned = 0
+  try {
+    const existingTopos = await targetStore.list()
+    for (const existing of existingTopos || []) {
+      const isManaged = existing?.vars?._pangea_env_managed === '1'
+      if (isManaged && !activeIds.has(existing.id)) {
+        await targetStore.remove(existing.id)
+        pruned += 1
+      }
+    }
+  } catch {}
+  return { synced, pruned, store_path: targetStore.file }
 }
 
 export async function buildKnowledgeContextForLiveVerification({
@@ -348,22 +361,50 @@ export async function getPangeaVerifyBridgeStatus({ dataRoot = '', packDir = '',
   let mismatchCount = 0
   let lintOk = true
   let lintErrors = []
+  let catalogCorrupted = false
+  let statusError = ''
 
   if (available && effectivePackDir && loaded.mod.KnowledgePack) {
     try {
-      const pack = new loaded.mod.KnowledgePack(effectivePackDir)
-      const catalog = await pack.readCatalog({ includeDrafts: true })
-      const cards = Array.isArray(catalog?.cards) ? catalog.cards : []
-      verifiedCount = cards.filter(c => c.status === 'verified').length
-      attestedCount = cards.filter(c => c.status === 'human_attested').length
-      draftCount = cards.filter(c => c.status === 'draft').length
-      mismatchCount = cards.reduce((sum, c) => sum + (Number(c.mismatch_count) || 0), 0)
-      if (typeof pack.lint === 'function') {
-        const lint = await pack.lint()
-        lintOk = Boolean(lint.ok)
-        lintErrors = Array.isArray(lint.errors) ? lint.errors.slice(0, 10) : []
+      const catalogPath = path.join(effectivePackDir, 'catalog.json')
+      let catalogExists = false
+      try {
+        const rawCatalog = await readFile(catalogPath, 'utf8')
+        catalogExists = true
+        const parsed = JSON.parse(rawCatalog)
+        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.cards)) {
+          throw new Error('catalog.json 缺少合法的 cards 数组')
+        }
+      } catch (catalogErr) {
+        if (catalogErr?.code !== 'ENOENT') {
+          catalogCorrupted = true
+          lintOk = false
+          statusError = `知识包索引 catalog.json 损坏：${catalogErr instanceof Error ? catalogErr.message : String(catalogErr)}`
+          lintErrors = [statusError]
+        }
       }
-    } catch {}
+      if (!catalogCorrupted) {
+        const pack = new loaded.mod.KnowledgePack(effectivePackDir)
+        const catalog = await pack.readCatalog({ includeDrafts: true })
+        const cards = Array.isArray(catalog?.cards) ? catalog.cards : []
+        verifiedCount = cards.filter(c => c.status === 'verified').length
+        attestedCount = cards.filter(c => c.status === 'human_attested').length
+        draftCount = cards.filter(c => c.status === 'draft').length
+        mismatchCount = cards.reduce((sum, c) => sum + (Number(c.mismatch_count) || 0), 0)
+        if (typeof pack.lint === 'function') {
+          const lint = await pack.lint()
+          lintOk = Boolean(lint.ok)
+          lintErrors = Array.isArray(lint.errors) ? lint.errors.slice(0, 10) : []
+        }
+      } else if (catalogExists) {
+        verifiedCount = 0
+      }
+    } catch (err) {
+      catalogCorrupted = true
+      lintOk = false
+      statusError = `知识包状态检查失败（catalog.json）：${err instanceof Error ? err.message : String(err)}`
+      lintErrors = [statusError]
+    }
   }
 
   return {
@@ -374,13 +415,15 @@ export async function getPangeaVerifyBridgeStatus({ dataRoot = '', packDir = '',
     pack_dir: effectivePackDir,
     default_knowledge_pack_dir: effectivePackDir,
     custom_pack_dir: Boolean(settings.custom),
-    verified_card_count: available && effectivePackDir ? (verifiedCount + attestedCount) : null,
+    verified_card_count: available && effectivePackDir && !catalogCorrupted ? (verifiedCount + attestedCount) : null,
     verified_count: verifiedCount,
     attested_count: attestedCount,
     draft_count: draftCount,
     mismatch_count: mismatchCount,
     lint_ok: lintOk,
     lint_errors: lintErrors,
+    catalog_corrupted: catalogCorrupted,
+    ...(statusError ? { error: statusError } : {}),
     mcp_command_hint: available
       ? `node "${posixPath(cliPath)}" mcp --pack "${posixPath(effectivePackDir || '<knowledge-pack路径>')}" --data-root "${posixPath(dataRoot || '<运行时目录>')}"`
       : '',

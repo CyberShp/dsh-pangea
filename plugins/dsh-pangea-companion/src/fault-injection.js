@@ -1383,19 +1383,24 @@ export class FaultInjectionService {
     return builds.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
   }
   async taskBuildIndex(dataRoot) {
-    const latestAny = new Map(), latestPushed = new Map()
+    const latestAny = new Map(), latestPushed = new Map(), pushedBuilds = new Map()
     let builds = []
-    try { builds = await this.listBuilds(dataRoot) } catch { return { builds: [], latestAny, latestPushed } }
+    try { builds = await this.listBuilds(dataRoot) } catch { return { builds: [], latestAny, latestPushed, pushedBuilds } }
     for (const build of builds) {
       const summary = buildSummaryForTask(build)
       if (!summary) continue
       for (const item of Array.isArray(build.items) ? build.items : []) {
         const taskKey = `${item.run_id}\0${item.task_id}`
         if (!latestAny.has(taskKey)) latestAny.set(taskKey, summary)
-        if (build.status === 'pushed' && !latestPushed.has(taskKey)) latestPushed.set(taskKey, summary)
+        if (build.status === 'pushed') {
+          if (!latestPushed.has(taskKey)) latestPushed.set(taskKey, summary)
+          const list = pushedBuilds.get(taskKey) || []
+          list.push(summary)
+          pushedBuilds.set(taskKey, list)
+        }
       }
     }
-    return { builds, latestAny, latestPushed }
+    return { builds, latestAny, latestPushed, pushedBuilds }
   }
   async collectRecordedInjectionCommits(dataRoot, repoId, { includeRestore = false, limit = 64 } = {}) {
     const root = await realpath(dataRoot)
@@ -1486,6 +1491,7 @@ export class FaultInjectionService {
     const latestAny = index.latestAny.get(taskKey) || null
     record.latest_pushed_build = latestPushed
     record.latest_build = latestPushed || latestAny
+    record.pushed_builds = index.pushedBuilds?.get(taskKey) || []
     return record
   }
   async list(dataRoot, runId, { buildIndex = null } = {}) {
@@ -1771,8 +1777,9 @@ export class FaultInjectionService {
       const persisted = { ...record }
       delete persisted.latest_build
       delete persisted.latest_pushed_build
+      delete persisted.pushed_builds
       await this.save(await this.directory(dataRoot, runId, taskId), persisted)
-      return { ...persisted, latest_build: record.latest_build, latest_pushed_build: record.latest_pushed_build }
+      return { ...persisted, latest_build: record.latest_build, latest_pushed_build: record.latest_pushed_build, pushed_builds: record.pushed_builds }
     })
   }
   async prepareAndGenerate({ dataRoot, directory, record, cwd, signal }) {
@@ -2265,9 +2272,13 @@ export class FaultInjectionService {
         desiredMessage = checked.message
         nextCommitConfig = effectiveConfig
       }
+      const selectedRepoPipelines = targetRepoIds
+        .map(repoId => ({ repo_id: repoId, pipeline_url: repoConfigs.get(repoId)?.pipeline_url || '' }))
+        .filter(entry => Boolean(entry.pipeline_url))
+      const fallbackSelectedPipeline = selectedRepoPipelines[0]?.pipeline_url || ''
       const configuredPipeline = input.pipeline_url !== undefined
         ? validateHttpPipelineUrl(input.pipeline_url)
-        : (build?.pipeline_url ?? ([...repoConfigs.values()].find(cfg => cfg.pipeline_url !== null)?.pipeline_url || ''))
+        : (build?.pipeline_url ?? fallbackSelectedPipeline)
       if (input.pipeline_url !== undefined) {
         const buildsBase = await this.buildsRoot(dataRoot, { create: true })
         await writeTaskStoreFile(path.join(buildsBase, 'pipeline.json'), JSON.stringify({ pipeline_url: configuredPipeline }) + '\n')
@@ -2304,11 +2315,13 @@ export class FaultInjectionService {
               push_result: null,
               applied: [],
               failures: [],
+              ...(cfg.pipeline_url ? { pipeline_url: cfg.pipeline_url } : {}),
             }
           }),
           commit_message: desiredMessage,
           ...(nextCommitConfig ? { commit_config: nextCommitConfig } : {}),
           pipeline_url: configuredPipeline,
+          repository_pipelines: selectedRepoPipelines,
           notices: [],
           error: null,
         }
@@ -2316,6 +2329,7 @@ export class FaultInjectionService {
         build.commit_message = desiredMessage
         if (nextCommitConfig) build.commit_config = nextCommitConfig
         build.pipeline_url = configuredPipeline
+        build.repository_pipelines = selectedRepoPipelines
         build.error = null
         delete build.error_code
         build.status = 'composing'
@@ -2339,8 +2353,6 @@ export class FaultInjectionService {
               try { hasReusableTree = (await lstat(checkout)).isDirectory() } catch { hasReusableTree = false }
             }
             if (hasReusableTree) {
-              const cfg = repoConfigs.get(repo.repo_id)
-              repo.remote_url = await this.git(cfg.source_path, ['remote', 'get-url', '--push', cfg.remote], signal)
               continue
             }
             await repositoryOperation(dataRoot, repo.repo_id, async opSignal => {
@@ -2525,9 +2537,18 @@ export class FaultInjectionService {
                 }))
               }
               const remoteUrl = await this.git(repo.source_path, ['remote', 'get-url', '--push', configured.remote || 'origin'], lockSignal)
-              if (remoteUrl !== repo.remote_url) {
+              let checkoutRemoteUrl = ''
+              try { checkoutRemoteUrl = await this.git(repo.checkout, ['remote', 'get-url', '--push', 'origin'], lockSignal) }
+              catch { lockSignal.throwIfAborted() }
+              if (remoteUrl !== checkoutRemoteUrl || remoteUrl !== repo.remote_url) {
                 await this.git(repo.checkout, ['remote', 'set-url', 'origin', remoteUrl], lockSignal)
+                if (checkoutRemoteUrl && checkoutRemoteUrl !== remoteUrl) {
+                  repo.remote_head = null
+                  repo.commit = null
+                  repo.committed_message = null
+                }
                 repo.remote_url = remoteUrl
+                await this.saveBuild(buildDir, build)
               }
               try {
                 await this.git(repo.checkout, ['fetch', '--no-tags', 'origin', `refs/heads/${repo.remote_branch}`], lockSignal)
@@ -2565,8 +2586,15 @@ export class FaultInjectionService {
               if (!repo.commit || repo.remote_head !== remoteHead || repo.committed_message !== desiredMessage) {
                 if (remoteHead !== repo.base_commit) {
                   let rawDiverged = ''
-                  try { rawDiverged = await this.git(repo.checkout, ['log', '--format=%H\t%s', `${repo.base_commit}..${remoteHead}`], lockSignal) }
-                  catch { lockSignal.throwIfAborted() }
+                  try {
+                    rawDiverged = await this.git(repo.checkout, ['log', '--max-count=50', '--format=%H\t%s', `${repo.base_commit}..${remoteHead}`], lockSignal)
+                  } catch (logError) {
+                    lockSignal.throwIfAborted()
+                    throw Object.assign(
+                      serviceError(`${repo.repo_id}：无法读取远端分支 ${repo.remote_branch} 的分叉提交历史，已停止推送以避免覆盖人工提交（${cleanError(logError)}）`, 409),
+                      { code: 'REMOTE_HISTORY_UNREADABLE' },
+                    )
+                  }
                   if (rawDiverged) {
                     const knownSet = new Set((await this.collectRecordedInjectionCommits(dataRoot, repo.repo_id, { includeRestore: true, limit: Infinity })).map(item => item.commit))
                     const unknownCommits = rawDiverged.split(/\r?\n/).filter(Boolean).map(line => {
@@ -2575,16 +2603,31 @@ export class FaultInjectionService {
                     }).filter(item => item.commit && !knownSet.has(item.commit))
                     if (unknownCommits.length) {
                       const summary = unknownCommits.slice(0, 5).map(item => `${item.commit.slice(0, 10)}${item.subject ? ` ${item.subject}` : ''}`).join('；')
+                      const confirmedMap = {
+                        ...(build.confirmed_remote_diverged && typeof build.confirmed_remote_diverged === 'object' ? build.confirmed_remote_diverged : {}),
+                        ...(input.confirmed_remote_diverged && typeof input.confirmed_remote_diverged === 'object' ? input.confirmed_remote_diverged : {}),
+                      }
                       if (input.allow_overwrite_remote_diverged === true) {
-                        const notice = `${repo.repo_id}：已按用户显式确认覆盖远端分支 ${repo.remote_branch} 上的 ${unknownCommits.length} 个非 PANGEA 提交（${summary}）。`
+                        if (build.remote_diverged_repo && build.remote_diverged_head) {
+                          confirmedMap[build.remote_diverged_repo] = build.remote_diverged_head
+                        } else if (build.repositories.length === 1) {
+                          confirmedMap[repo.repo_id] = remoteHead
+                        }
+                      }
+                      const confirmedHead = typeof confirmedMap[repo.repo_id] === 'string' ? confirmedMap[repo.repo_id].trim() : ''
+                      if (confirmedHead && confirmedHead === remoteHead) {
+                        build.confirmed_remote_diverged = confirmedMap
+                        const notice = `${repo.repo_id}：已按用户显式确认覆盖远端分支 ${repo.remote_branch}（HEAD ${remoteHead.slice(0, 10)}）上的 ${unknownCommits.length} 个非 PANGEA 提交（${summary}）。`
                         if (!build.notices.includes(notice)) build.notices.push(notice)
                       } else {
+                        build.confirmed_remote_diverged = confirmedMap
                         build.remote_diverged_repo = repo.repo_id
+                        build.remote_diverged_head = remoteHead
                         build.remote_diverged_commits = unknownCommits.slice(0, 10)
                         await this.saveBuild(buildDir, build)
                         throw Object.assign(
-                          serviceError(`${repo.repo_id}：远端分支 ${repo.remote_branch} 存在 ${unknownCommits.length} 个未合入当前基线且非 PANGEA 打桩产生的提交（${summary}）。推送将把该分支树同步为当前基线与所选桩代码；请改用专用打桩构建分支，或显式确认覆盖后重试。`, 409),
-                          { code: 'REMOTE_BRANCH_DIVERGED', diverged_commits: unknownCommits.slice(0, 10) },
+                          serviceError(`${repo.repo_id}：远端分支 ${repo.remote_branch}（HEAD ${remoteHead.slice(0, 10)}）存在 ${unknownCommits.length} 个未合入当前基线且非 PANGEA 打桩产生的提交（${summary}）。推送将把该分支树同步为当前基线与所选桩代码；请改用专用打桩构建分支，或显式确认覆盖后重试。`, 409),
+                          { code: 'REMOTE_BRANCH_DIVERGED', diverged_repo: repo.repo_id, diverged_head: remoteHead, diverged_commits: unknownCommits.slice(0, 10) },
                         )
                       }
                     }
@@ -2630,6 +2673,9 @@ export class FaultInjectionService {
             }
           }, controller.signal, dataRoot)
           delete build.current_repository
+          delete build.remote_diverged_repo
+          delete build.remote_diverged_head
+          delete build.remote_diverged_commits
           build.status = 'pushed'
           build.error = null
           await this.saveBuild(buildDir, build)
@@ -2639,7 +2685,7 @@ export class FaultInjectionService {
         } catch (error) {
           delete build.current_repository
           build.status = controller.signal.aborted ? 'cancelled' : 'failed'
-          if (error.code === 'REMOTE_BRANCH_DIVERGED') build.error_code = error.code
+          if (error.code === 'REMOTE_BRANCH_DIVERGED' || error.code === 'REMOTE_HISTORY_UNREADABLE') build.error_code = error.code
           const rawErr = cleanError(error)
           const unconfirmed = build.repositories.some(repo => !repo.pushed && repo.push_result === 'unconfirmed')
           const nonFastForward = build.repositories.some(repo => !repo.pushed && repo.push_result === 'rejected') && /non-fast-forward|fetch first/i.test(rawErr)
@@ -2685,28 +2731,41 @@ export class FaultInjectionService {
   async recordVerification(dataRoot, runId, taskId, input) {
     return this.exclusive(dataRoot, runId, taskId, async () => {
       const record = await this.read(dataRoot, runId, taskId)
-      const pushedBuild = record.latest_pushed_build
+      const pushedBuilds = Array.isArray(record.pushed_builds) ? record.pushed_builds : (record.latest_pushed_build ? [record.latest_pushed_build] : [])
       const legacyCommits = (record.repositories || []).filter(repo => repo.commit).map(repo => ({ repo_id: repo.repo_id, commit: repo.commit }))
-      const commits = pushedBuild?.commits?.length ? pushedBuild.commits : legacyCommits
-      if (!commits.length) throw serviceError('请先将本打桩任务加入出包并推送到个人分支，再记录验证结果')
-      const buildId = pushedBuild?.build_id || record.build?.build_id || null
-      if (input.build || !record.build?.commits?.length || (buildId && record.build?.build_id !== buildId)) {
-        const {
-          url = record.build?.url || '',
-          package_id = record.build?.package_id || '',
-          package_sha256 = record.build?.package_sha256 || '',
-          notes = record.build?.notes || '',
-        } = input.build || {}
-        if (url && !/^https?:\/\//i.test(url)) throw serviceError('构建链接必须是 HTTP/HTTPS 地址')
-        record.build = {
-          ...(buildId ? { build_id: buildId } : {}),
-          url: String(url),
-          package_id: String(package_id),
-          package_sha256: String(package_sha256),
-          notes: String(notes),
-          commits,
+      const requestedBuildId = String(input?.build_id || input?.build?.build_id || '').trim() || null
+      let selectedBuild = null
+      if (requestedBuildId) {
+        selectedBuild = pushedBuilds.find(b => b.build_id === requestedBuildId) || null
+        if (!selectedBuild) {
+          throw serviceError(`指定的构建 ${requestedBuildId} 不存在或未包含本打桩任务的已推送记录`)
         }
+      } else if (pushedBuilds.length === 1) {
+        selectedBuild = pushedBuilds[0]
+      } else if (pushedBuilds.length > 1) {
+        throw serviceError(`本打桩任务存在 ${pushedBuilds.length} 个已推送构建（${pushedBuilds.slice(0, 3).map(b => b.build_id).join('、')}），请显式指定本次验证对应的构建 build_id，不能自动推定为最新构建`)
       }
+      const commits = selectedBuild?.commits?.length ? selectedBuild.commits : legacyCommits
+      if (!commits.length) throw serviceError('请先将本打桩任务加入出包并推送到个人分支，再记录验证结果')
+      const buildId = selectedBuild?.build_id || null
+      const sameBuild = Boolean(buildId ? record.build?.build_id === buildId : !record.build?.build_id)
+      const prevBuild = sameBuild ? record.build : null
+      const {
+        url = prevBuild?.url || selectedBuild?.pipeline_url || '',
+        package_id = prevBuild?.package_id || '',
+        package_sha256 = prevBuild?.package_sha256 || '',
+        notes = prevBuild?.notes || '',
+      } = input.build || {}
+      if (url && !/^https?:\/\//i.test(url)) throw serviceError('构建链接必须是 HTTP/HTTPS 地址')
+      const buildSnapshot = {
+        ...(buildId ? { build_id: buildId } : {}),
+        url: String(url),
+        package_id: String(package_id),
+        package_sha256: String(package_sha256),
+        notes: String(notes),
+        commits: structuredClone(commits),
+      }
+      record.build = buildSnapshot
       if (input.verification) {
         const value = input.verification
         if (!record.case_keys.includes(value.case_key) || !['not_run', 'passed', 'failed', 'not_triggered'].includes(value.result)) throw serviceError('验证用例或结果无效')
@@ -2716,6 +2775,15 @@ export class FaultInjectionService {
         const riskVerdict = ['confirmed', 'excluded', 'not_triggered', 'blocked', 'unknown'].includes(value.risk_verdict)
           ? value.risk_verdict
           : (value.result === 'failed' ? 'confirmed' : value.result === 'passed' ? 'excluded' : value.result === 'not_triggered' ? 'not_triggered' : 'blocked')
+        const validCombo = (
+          (value.result === 'passed' && executionStatus === 'completed' && riskVerdict === 'excluded')
+          || (value.result === 'failed' && ((executionStatus === 'completed' && riskVerdict === 'confirmed') || (executionStatus === 'infra_error' && ['unknown', 'blocked'].includes(riskVerdict))))
+          || (value.result === 'not_triggered' && executionStatus === 'completed' && riskVerdict === 'not_triggered')
+          || (value.result === 'not_run' && executionStatus === 'not_run' && ['blocked', 'unknown'].includes(riskVerdict))
+        )
+        if (!validCombo) {
+          throw serviceError(`验证结果与风险结论组合无效：result=${value.result}, execution_status=${executionStatus}, risk_verdict=${riskVerdict}`)
+        }
         record.verification.push({
           case_key: value.case_key,
           result: value.result,
@@ -2723,15 +2791,16 @@ export class FaultInjectionService {
           risk_verdict: riskVerdict,
           notes: String(value.notes || ''),
           hits: String(value.hits || ''),
-          build: structuredClone(record.build),
+          build: structuredClone(buildSnapshot),
           at: new Date().toISOString(),
         })
       }
       const persisted = { ...record }
       delete persisted.latest_build
       delete persisted.latest_pushed_build
+      delete persisted.pushed_builds
       await this.save(await this.directory(dataRoot, runId, taskId), persisted)
-      return { ...persisted, latest_build: record.latest_build, latest_pushed_build: record.latest_pushed_build }
+      return { ...persisted, latest_build: record.latest_build, latest_pushed_build: record.latest_pushed_build, pushed_builds: record.pushed_builds }
     })
   }
   async cancel(dataRoot, runId, taskId) {
