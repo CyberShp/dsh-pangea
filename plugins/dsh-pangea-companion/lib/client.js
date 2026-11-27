@@ -9469,14 +9469,30 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [expanded, setExpanded] = React.useState(false)
       const [catalog, setCatalog] = React.useState(null)
+      const [searchQuery, setSearchQuery] = React.useState('')
       const [loadError, setLoadError] = React.useState('')
-      const loadPatterns = async () => {
+      const loadPatterns = async ({ append = false, cursor = 0, query = searchQuery } = {}) => {
         if (!cwd) return
         setBusy(true)
         setLoadError('')
         try {
-          const response = await requestWorkbenchAction({ cwd, action: 'dts-patterns-list', payload: { data_root: dataRoot } })
-          setCatalog(response)
+          const trimmed = String(query ?? '').trim()
+          const response = await requestWorkbenchAction({
+            cwd,
+            action: 'dts-patterns-list',
+            payload: {
+              data_root: dataRoot,
+              cursor,
+              limit: 50,
+              ...(trimmed ? { query: trimmed } : {}),
+            },
+          })
+          setCatalog(prev => {
+            if (!append || !prev) return response
+            const seen = new Set((prev.items ?? []).map(item => item.pattern_id))
+            const merged = [...(prev.items ?? []), ...(response.items ?? []).filter(item => !seen.has(item.pattern_id))]
+            return { ...response, items: merged }
+          })
         } catch (err) {
           setLoadError(err instanceof Error ? err.message : String(err))
         } finally {
@@ -9489,6 +9505,7 @@ window.__ModuleLoader__.load({
         setLoadError('')
         try {
           const response = await requestWorkbenchAction({ cwd, action: 'dts-patterns-ingest', payload: { data_root: dataRoot, path: filePath.trim() } })
+          setSearchQuery('')
           setCatalog(response)
           setExpanded(true)
           const importedCount = (response.ingest?.imported?.length ?? 0) + (response.ingest?.updated?.length ?? 0)
@@ -9519,9 +9536,10 @@ window.__ModuleLoader__.load({
       const toggleExpand = () => {
         const next = !expanded
         setExpanded(next)
-        if (next && !catalog && !busy) void loadPatterns()
+        if (next && !catalog && !busy) void loadPatterns({ append: false, cursor: 0 })
       }
       const items = catalog?.items ?? []
+      const hasMore = Number.isInteger(catalog?.next_cursor)
       const trackIcon = track => track === 'concurrency_timing' ? 'Cpu' : track === 'resource_lifecycle' ? 'Files' : track === 'memory_corruption' ? 'ShieldAlert' : 'CircleAlert'
       return h('section', { className: 'callout', style: { marginTop: 22, padding: '18px 20px' } },
         h('div', { className: 'row between', style: { alignItems: 'flex-start', gap: 12 } },
@@ -9547,18 +9565,33 @@ window.__ModuleLoader__.load({
           h('span', { className: 'small muted' }, '支持 .xlsx / .csv / .json / .md / .txt / .diff / .patch，自动滤除文案杂单')),
         h('div', { className: 'row', style: { gap: 8, alignItems: 'center', flexWrap: 'nowrap' } },
           h('input', { 'aria-label': '离线 DTS 文件路径', placeholder: '输入或选择离线 DTS 导出文件完整路径', style: { flex: 1, minWidth: 0, height: 38, padding: '0 12px', fontSize: 12, borderRadius: 6, border: '1px solid #dbe0dd', background: '#fff', boxSizing: 'border-box' }, value: filePath, disabled: disabled || busy, onChange: event => setFilePath(event.target.value) }),
-          window.dshDesktopDirectoryPicker?.pick ? h('button', { type: 'button', className: 'btn ghost', style: { flexShrink: 0, whiteSpace: 'nowrap', height: 38 }, disabled: disabled || busy, onClick: async () => { try { const picked = await window.dshDesktopDirectoryPicker.pick({ purpose: 'asset' }); if (picked) setFilePath(picked) } catch (err) { onNotice?.(err.message, true) } } }, renderIcon('FolderOpen'), '选文件') : null,
+          window.dshDesktopDirectoryPicker?.pick ? h('button', { type: 'button', className: 'btn ghost', style: { flexShrink: 0, whiteSpace: 'nowrap', height: 38 }, disabled: disabled || busy, onClick: async () => { try { const picked = await window.dshDesktopDirectoryPicker.pick({ purpose: 'dts-file' }); if (picked) setFilePath(picked) } catch (err) { onNotice?.(err.message, true) } } }, renderIcon('FolderOpen'), '选文件') : null,
           h('button', { type: 'button', className: 'btn', style: { flexShrink: 0, whiteSpace: 'nowrap', height: 38 }, disabled: disabled || busy || !filePath.trim(), onClick: () => { void handleIngest() } }, renderIcon('FileUp'), busy ? '导入中…' : '导入并启用')),
         loadError ? h('p', { className: 'small', style: { color: '#b42318', margin: '10px 0 0' } }, loadError) : null,
         expanded ? h('div', { style: { marginTop: 14, paddingTop: 12, borderTop: '1px dashed #dbe0dd' } },
-          items.length ? h('div', { className: 'stack', style: { gap: 8 } }, items.map(item => h('div', { key: item.pattern_id, className: 'create-asset', style: { alignItems: 'center' } },
-            h('div', { className: 'create-asset-icon' }, renderIcon(trackIcon(item.track))),
-            h('div', { className: 'create-asset-main' },
-              h('strong', null, item.title),
-              h('small', null, `${item.dts_id || item.pattern_id} · ${DTS_TRACK_LABELS[item.track] ?? item.track}${item.has_diff_evidence ? ' · 含代码 Diff' : ' · 纯文本'}`)),
-            h('span', { className: `badge ${item.status === 'enabled' ? 'good' : 'neutral'}`, style: { flexShrink: 0 } }, item.status === 'enabled' ? '已启用' : '已禁用'),
-            h('button', { type: 'button', className: 'btn ghost', style: { flexShrink: 0, whiteSpace: 'nowrap' }, disabled: disabled || busy, onClick: () => { void togglePattern(item) } }, item.status === 'enabled' ? '禁用' : '启用'))))
-            : h('p', { className: 'small muted', style: { margin: 0 } }, '本地尚无已沉淀的 DTS 故障拓扑卡，可在上方导入离线文件或直接填写 DTS 单号运行。')) : null)
+          h('div', { className: 'row', style: { gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'nowrap' } },
+            h('input', {
+              'aria-label': '筛选 DTS 拓扑卡',
+              placeholder: '按单号、标题或模块筛选…',
+              style: { flex: 1, minWidth: 0, height: 34, padding: '0 10px', fontSize: 12, borderRadius: 6, border: '1px solid #dbe0dd', background: '#fff', boxSizing: 'border-box' },
+              value: searchQuery,
+              disabled: disabled || busy,
+              onChange: event => setSearchQuery(event.target.value),
+              onKeyDown: event => { if (event.key === 'Enter') { event.preventDefault(); void loadPatterns({ append: false, cursor: 0, query: searchQuery }) } },
+            }),
+            h('button', { type: 'button', className: 'btn ghost', style: { flexShrink: 0, whiteSpace: 'nowrap', height: 34 }, disabled: disabled || busy, onClick: () => { void loadPatterns({ append: false, cursor: 0, query: searchQuery }) } }, '筛选')),
+          items.length ? h('div', { className: 'stack', style: { gap: 8 } },
+            items.map(item => h('div', { key: item.pattern_id, className: 'create-asset', style: { alignItems: 'center' } },
+              h('div', { className: 'create-asset-icon' }, renderIcon(trackIcon(item.track))),
+              h('div', { className: 'create-asset-main' },
+                h('strong', null, item.title),
+                h('small', null, `${item.dts_id || item.pattern_id} · ${DTS_TRACK_LABELS[item.track] ?? item.track}${item.has_diff_evidence ? ' · 含代码 Diff' : ' · 纯文本'}`)),
+              h('span', { className: `badge ${item.status === 'enabled' ? 'good' : 'neutral'}`, style: { flexShrink: 0 } }, item.status === 'enabled' ? '已启用' : '已禁用'),
+              h('button', { type: 'button', className: 'btn ghost', style: { flexShrink: 0, whiteSpace: 'nowrap' }, disabled: disabled || busy, onClick: () => { void togglePattern(item) } }, item.status === 'enabled' ? '禁用' : '启用'))),
+            hasMore ? h('div', { className: 'row', style: { justifyContent: 'center', marginTop: 4 } },
+              h('button', { type: 'button', className: 'btn ghost', disabled: disabled || busy, onClick: () => { void loadPatterns({ append: true, cursor: catalog.next_cursor }) } },
+                busy ? '加载中…' : `加载更多（已显示 ${items.length} / ${catalog.total ?? items.length}）`)) : null)
+            : h('p', { className: 'small muted', style: { margin: 0 } }, searchQuery.trim() ? '未找到匹配的 DTS 故障拓扑卡。' : '本地尚无已沉淀的 DTS 故障拓扑卡，可在上方导入离线文件或直接填写 DTS 单号运行。')) : null)
     }
     function riskApplicable(run) {
       return run?.analysis_profile === 'behavior-test-v2' ? run.analysis_scene?.presentation?.risks === true : run?.scenario !== 'coverage-analysis'

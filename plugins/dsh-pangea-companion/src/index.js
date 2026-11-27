@@ -1748,11 +1748,15 @@ export async function workbenchRouteHandler(req, res, api, tasks, launchLocks, l
     if (body.action === 'dts-patterns-list') {
       const root = workspaceRoot(cwd)
       const dataRoot = dataRootFor(root, actionDataRoot)
+      const cursor = Number.isInteger(body.cursor) && body.cursor >= 0 ? body.cursor : undefined
+      const limit = Number.isInteger(body.limit) && body.limit >= 1 && body.limit <= 200 ? body.limit : undefined
       const result = await listDtsPatterns(root, {
         dataRoot,
         track: typeof body.track === 'string' && body.track ? body.track : undefined,
         status: typeof body.status === 'string' && body.status ? body.status : undefined,
         query: typeof body.query === 'string' && body.query ? body.query : undefined,
+        cursor,
+        limit,
       }, runner)
       return json(res, 200, { status: 'ok', ...result })
     }

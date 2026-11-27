@@ -306,4 +306,27 @@ test('TaskStore persists and reloads dts_context for risk-analysis and deriveAna
   }
 })
 
+test('#31/#32 DtsFeedbackSection uses dts-file picker purpose and cursor pagination forwards cursor/limit', async t => {
+  const { readFile, mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const path = await import('node:path')
+  const clientSrc = await readFile(new URL('../src/client.js', import.meta.url), 'utf8')
+  const indexSrc = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
+  assert.match(clientSrc, /pick\(\{\s*purpose:\s*'dts-file'\s*\}\)/)
+  assert.match(clientSrc, /加载更多/)
+  assert.match(indexSrc, /const cursor = Number\.isInteger\(body\.cursor\)/)
+  assert.match(indexSrc, /const limit = Number\.isInteger\(body\.limit\)/)
+
+  const pangeaCwd = await mkdtemp(path.join(tmpdir(), 'pangea-dts-page-'))
+  t.after(() => rm(pangeaCwd, { recursive: true, force: true }))
+  await mkdir(path.join(pangeaCwd, '.agents', 'pangea'), { recursive: true })
+  await writeFile(path.join(pangeaCwd, '.agents', 'pangea', 'dsh.md'), '# marker\n', 'utf8')
+  const calls = []
+  await listDtsPatterns(pangeaCwd, { dataRoot: '/data', cursor: 50, limit: 50, query: 'DTS-51' }, async ({ args }) => {
+    calls.push(args)
+    return { ok: true, result: { items: [], total: 53, next_cursor: null } }
+  })
+  assert.deepEqual(calls[0], ['dts-patterns', 'list', '--data-root', '/data', '--query', 'DTS-51', '--cursor', '50', '--limit', '50'])
+})
+
 
