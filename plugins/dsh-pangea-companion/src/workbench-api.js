@@ -243,7 +243,7 @@ function normalizeAnalysisInput(value, capabilities, allowEmptySourceScope) {
   if (Array.isArray(capabilities?.repositories) && !capabilities.repositories.includes(repository)) {
     throw new Error(`repository is not registered: ${repository}`)
   }
-  const rawDts = value?.dts_context && typeof value.dts_context === 'object' && !Array.isArray(value.dts_context) ? value.dts_context : null
+  const rawDts = scenario === 'risk-analysis' && value?.dts_context && typeof value.dts_context === 'object' && !Array.isArray(value.dts_context) ? value.dts_context : null
   const dtsIds = rawDts ? stringList(rawDts.dts_ids) : []
   const mrUrls = rawDts ? stringList(rawDts.mr_urls) : []
   const dtsContext = dtsIds.length || mrUrls.length
@@ -302,6 +302,7 @@ export function deriveAnalysisInput(parent, input, options) {
     target: typeof input?.target === 'string' && input.target.trim() ? input.target.trim() : `${parent.target} · ${suffix}`,
     scenario: parent.scenario,
     ...(parent.objective ? { objective: parent.objective } : {}),
+    ...(parent.dts_context ? { dts_context: structuredClone(parent.dts_context) } : {}),
     mode: parent.mode,
     analysis_profile: parent.analysis_profile,
     asset_revisions: parent.asset_revisions,

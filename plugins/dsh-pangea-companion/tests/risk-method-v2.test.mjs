@@ -236,6 +236,74 @@ test('memory_corruption 4th track projects cleanly and Stage 1 risk-blueprint-v1
   })
   assert.match(stage1Prompt, /DTS-mcp \/ codehub-mcp/)
   assert.match(stage1Prompt, /memory_corruption/)
+  assert.match(stage1Prompt, /显式点名认领/)
   assert.doesNotMatch(stage1Prompt, /不寻找插件或 MCP 配置/)
 })
+
+test('TaskStore persists and reloads dts_context for risk-analysis and deriveAnalysisInput preserves it', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const path = await import('node:path')
+  const { TaskStore } = await import('../src/task-store.js')
+  const { deriveAnalysisInput } = await import('../src/workbench-api.js')
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'pangea-dts-store-'))
+  try {
+    const storePath = path.join(dir, 'tasks-v1.json')
+    const store1 = new TaskStore({ storePath })
+    const created = await store1.create({
+      workspace: dir,
+      dataRoot: path.join(dir, 'pangea-data'),
+      input: {
+        repository: 'demo-repo',
+        target: '内存泄漏核查',
+        scenario: 'risk-analysis',
+        analysis_profile: 'behavior-test-v2',
+        objective: 'product-behavior',
+        source_scope: ['src/cfg.c'],
+        dts_context: {
+          dts_ids: ['DTS20260099', 'DTS20260099'],
+          mr_urls: ['https://codehub.example/org/repo/merge_requests/99'],
+        },
+      },
+    })
+    assert.deepEqual(created.dts_context, {
+      dts_ids: ['DTS20260099'],
+      mr_urls: ['https://codehub.example/org/repo/merge_requests/99'],
+    })
+
+    const store2 = new TaskStore({ storePath })
+    const reloaded = await store2.get(created.task_id)
+    assert.deepEqual(reloaded?.dts_context, {
+      dts_ids: ['DTS20260099'],
+      mr_urls: ['https://codehub.example/org/repo/merge_requests/99'],
+    })
+
+    const derived = deriveAnalysisInput(
+      { ...reloaded, run_id: 'run-parent-1', provider: 'pangea-codex', agent_model: 'gpt-5' },
+      { mode: 'supplement', selected_unit_ids: ['U1'], instruction: '补充核查 cfg 解析内存泄漏' },
+      { can_derive: true, parent_run_id: 'run-parent-1', units: [{ unit_id: 'U1' }], records: [] },
+    )
+    assert.deepEqual(derived.dts_context, {
+      dts_ids: ['DTS20260099'],
+      mr_urls: ['https://codehub.example/org/repo/merge_requests/99'],
+    })
+
+    const nonRisk = await store1.create({
+      workspace: dir,
+      dataRoot: path.join(dir, 'pangea-data'),
+      input: {
+        repository: 'demo-repo',
+        target: '分支分析',
+        scenario: 'branch-analysis',
+        source_scope: ['src/cfg.c'],
+        dts_context: { dts_ids: ['DTS-IGNORED'] },
+      },
+    })
+    assert.equal(nonRisk.dts_context, undefined)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 

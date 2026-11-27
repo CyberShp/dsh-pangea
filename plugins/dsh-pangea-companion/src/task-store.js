@@ -138,6 +138,17 @@ function normalizeAttempt(value) {
   }
 }
 
+function normalizeDtsContext(value, scenario) {
+  if (scenario !== 'risk-analysis' || !value || typeof value !== 'object' || Array.isArray(value)) return null
+  const dtsIds = strings(value.dts_ids)
+  const mrUrls = strings(value.mr_urls)
+  if (!dtsIds.length && !mrUrls.length) return null
+  return {
+    ...(dtsIds.length ? { dts_ids: dtsIds } : {}),
+    ...(mrUrls.length ? { mr_urls: mrUrls } : {}),
+  }
+}
+
 function normalizeTask(taskId, value) {
   const conversations = Array.isArray(value?.conversations)
     ? value.conversations.map(normalizeConversation).filter(Boolean)
@@ -162,6 +173,8 @@ function normalizeTask(taskId, value) {
     })
     if (legacyAttempt) attempts.push(legacyAttempt)
   }
+  const scenario = text(value?.scenario, 'module-analysis')
+  const dtsContext = normalizeDtsContext(value?.dts_context, scenario)
   return {
     task_id: taskId,
     request_version: value?.request_version === '2.0' ? '2.0' : null,
@@ -175,11 +188,12 @@ function normalizeTask(taskId, value) {
       ? structuredClone(value.incremental_request) : null,
     repository: text(value?.repository),
     target: text(value?.target),
-    scenario: text(value?.scenario, 'module-analysis'),
+    scenario,
     analysis_profile: text(value?.analysis_profile) || null,
     asset_revisions: value?.asset_revisions && typeof value.asset_revisions === 'object' ? value.asset_revisions : null,
     mode: value?.mode === 'speed' ? 'speed' : 'depth',
     ...(value?.objective ? { objective: value.objective } : {}),
+    ...(dtsContext ? { dts_context: dtsContext } : {}),
     source_scope: strings(value?.source_scope),
     source_investigation_policy: value?.source_investigation_policy ?? null,
     ...(Array.isArray(value?.test_tool_sources) && value.test_tool_sources.length ? { test_tool_sources: structuredClone(value.test_tool_sources), expected_test_tool_revision: value.expected_test_tool_revision } : {}),
@@ -354,6 +368,7 @@ export class TaskStore {
       asset_revisions: input?.asset_revisions,
       mode: input?.mode,
       objective: input?.objective,
+      dts_context: input?.dts_context,
       source_scope: input?.source_scope,
       source_investigation_policy: input?.source_investigation_policy ?? null,
       test_tool_sources: input?.test_tool_sources,
