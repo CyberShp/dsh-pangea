@@ -174,7 +174,7 @@ test('real Git + compiled C: generate from HEAD without touching personal branch
   })
 
   assert.equal(await injectionGit(repo.path, ['branch', '--show-current']), '')
-  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: task.id }], allow_overwrite_remote_diverged: true })
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: task.id }], confirmed_remote_diverged: { target: priorRemotePersonal } })
   assert.equal(built.status, 'pushed', built.error)
   const wantedCommit = built.repositories[0].commit
   assert.equal(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), wantedCommit)
@@ -401,7 +401,7 @@ test('concurrent remote personal branch update fails fast-forward push without f
   assert.match(firstAttempt.error, /重新合成提交/)
   const colleagueHead = await injectionGit(remote, ['rev-parse', 'refs/heads/personal'])
 
-  const retried = await service.build(f.dataRoot, { build_id: firstAttempt.id, allow_overwrite_remote_diverged: true })
+  const retried = await service.build(f.dataRoot, { build_id: firstAttempt.id, confirmed_remote_diverged: { target: colleagueHead } })
   assert.equal(retried.status, 'pushed', retried.error)
   assert.notEqual(retried.repositories[0].commit, firstAttempt.repositories[0].commit)
   assert.equal(await injectionGit(remote, ['merge-base', colleagueHead, retried.repositories[0].commit]), colleagueHead)

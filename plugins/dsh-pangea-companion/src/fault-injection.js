@@ -2105,7 +2105,15 @@ export class FaultInjectionService {
     }
     let buildPipeline = {}
     try { buildPipeline = JSON.parse(await readFile(path.join(await this.buildsRoot(dataRoot, { create: false }), 'pipeline.json'), 'utf8')) } catch {}
-    const projectPipeline = repositories.find(repo => repo.project_pipeline_configured)
+    const configuredRepoPipelines = repositories
+      .filter(repo => repo.project_pipeline_configured && repo.pipeline_url)
+      .map(repo => repo.pipeline_url)
+    const uniqueRepoPipelines = [...new Set(configuredRepoPipelines)]
+    const sharedRepoPipeline = repositories.length > 0
+      && configuredRepoPipelines.length === repositories.length
+      && uniqueRepoPipelines.length === 1
+      ? uniqueRepoPipelines[0]
+      : ''
     const latestPipeline = builds.find(b => b.pipeline_url)?.pipeline_url || ''
     const commit_config = await this.readCommitDefaults(dataRoot)
     return {
@@ -2114,7 +2122,7 @@ export class FaultInjectionService {
       default_items: defaultItems,
       pushed_items_by_repo_set: pushedItemsByRepoSet,
       commit_config,
-      pipeline_url: projectPipeline ? projectPipeline.pipeline_url : (buildPipeline.pipeline_url || latestPipeline || ''),
+      pipeline_url: sharedRepoPipeline || (repositories.length <= 1 ? (buildPipeline.pipeline_url || latestPipeline || '') : ''),
       repositories,
     }
   }
@@ -2501,7 +2509,10 @@ export class FaultInjectionService {
           // Phase B: inside branchExclusive, fetch remote personal branch, synthesize commit-tree, and fast-forward push
           operation.status = 'pushing'
           build.status = 'pushing'
+          const priorDivergedRepo = build.remote_diverged_repo || ''
+          const priorDivergedHead = build.remote_diverged_head || ''
           delete build.remote_diverged_repo
+          delete build.remote_diverged_head
           delete build.remote_diverged_commits
           await this.saveBuild(buildDir, build)
           await this.branchExclusive(build, async lockSignal => {
@@ -2536,13 +2547,43 @@ export class FaultInjectionService {
                   actionLabel: '再出包',
                 }))
               }
-              const remoteUrl = await this.git(repo.source_path, ['remote', 'get-url', '--push', configured.remote || 'origin'], lockSignal)
-              let checkoutRemoteUrl = ''
-              try { checkoutRemoteUrl = await this.git(repo.checkout, ['remote', 'get-url', '--push', 'origin'], lockSignal) }
-              catch { lockSignal.throwIfAborted() }
-              if (remoteUrl !== checkoutRemoteUrl || remoteUrl !== repo.remote_url) {
+              const sourceRemote = configured.remote || 'origin'
+              let sourcePushUrls = []
+              try {
+                sourcePushUrls = (await this.git(repo.source_path, ['remote', 'get-url', '--push', '--all', sourceRemote], lockSignal))
+                  .split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+              } catch {
+                lockSignal.throwIfAborted()
+                const single = (await this.git(repo.source_path, ['remote', 'get-url', '--push', sourceRemote], lockSignal)).trim()
+                if (single) sourcePushUrls = [single]
+              }
+              const uniqueSourcePushUrls = [...new Set(sourcePushUrls)]
+              if (uniqueSourcePushUrls.length !== 1) {
+                throw serviceError(`${repo.repo_id}：无法确认远端 ${sourceRemote} 的唯一推送地址（发现 ${uniqueSourcePushUrls.length} 个），已停止推送`)
+              }
+              const remoteUrl = uniqueSourcePushUrls[0]
+              const readCheckoutPushUrls = async () => {
+                try {
+                  return (await this.git(repo.checkout, ['remote', 'get-url', '--push', '--all', 'origin'], lockSignal))
+                    .split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+                } catch {
+                  lockSignal.throwIfAborted()
+                  try {
+                    const single = (await this.git(repo.checkout, ['remote', 'get-url', '--push', 'origin'], lockSignal)).trim()
+                    return single ? [single] : []
+                  } catch {
+                    lockSignal.throwIfAborted()
+                    return []
+                  }
+                }
+              }
+              const checkoutPushUrls = await readCheckoutPushUrls()
+              const checkoutMatches = checkoutPushUrls.length === 1 && checkoutPushUrls[0] === remoteUrl
+              if (!checkoutMatches || remoteUrl !== repo.remote_url) {
                 await this.git(repo.checkout, ['remote', 'set-url', 'origin', remoteUrl], lockSignal)
-                if (checkoutRemoteUrl && checkoutRemoteUrl !== remoteUrl) {
+                try { await this.git(repo.checkout, ['config', '--local', '--unset-all', 'remote.origin.pushurl'], lockSignal) }
+                catch { lockSignal.throwIfAborted() }
+                if (checkoutPushUrls.length && !checkoutMatches) {
                   repo.remote_head = null
                   repo.commit = null
                   repo.committed_message = null
@@ -2550,8 +2591,23 @@ export class FaultInjectionService {
                 repo.remote_url = remoteUrl
                 await this.saveBuild(buildDir, build)
               }
+              const effectivePushUrls = await readCheckoutPushUrls()
+              const originPushMatches = effectivePushUrls.length === 1 && effectivePushUrls[0] === remoteUrl
+              let originFetchMatches = originPushMatches
+              if (originFetchMatches) {
+                try {
+                  const fetchUrl = (await this.git(repo.checkout, ['remote', 'get-url', 'origin'], lockSignal)).trim()
+                  originFetchMatches = fetchUrl === remoteUrl
+                } catch {
+                  lockSignal.throwIfAborted()
+                  originFetchMatches = false
+                }
+              }
+              const gitFetchTarget = originFetchMatches ? 'origin' : remoteUrl
+              const gitPushTarget = originPushMatches ? 'origin' : remoteUrl
+              repo.effective_push_target = gitPushTarget
               try {
-                await this.git(repo.checkout, ['fetch', '--no-tags', 'origin', `refs/heads/${repo.remote_branch}`], lockSignal)
+                await this.git(repo.checkout, ['fetch', '--no-tags', gitFetchTarget, `refs/heads/${repo.remote_branch}`], lockSignal)
               } catch (fetchError) {
                 lockSignal.throwIfAborted()
                 if (/couldn't find remote ref|not found/i.test(String(fetchError?.message || ''))) {
@@ -2585,51 +2641,73 @@ export class FaultInjectionService {
               }
               if (!repo.commit || repo.remote_head !== remoteHead || repo.committed_message !== desiredMessage) {
                 if (remoteHead !== repo.base_commit) {
-                  let rawDiverged = ''
-                  try {
-                    rawDiverged = await this.git(repo.checkout, ['log', '--max-count=50', '--format=%H\t%s', `${repo.base_commit}..${remoteHead}`], lockSignal)
-                  } catch (logError) {
-                    lockSignal.throwIfAborted()
+                  const knownSet = new Set((await this.collectRecordedInjectionCommits(dataRoot, repo.repo_id, { includeRestore: true, limit: Infinity })).map(item => item.commit))
+                  const pageSize = 200
+                  const maxScanCommits = 2000
+                  const unknownCommits = []
+                  let scanned = 0
+                  let historyTruncated = false
+                  while (true) {
+                    let rawPage = ''
+                    try {
+                      rawPage = await this.git(
+                        repo.checkout,
+                        ['log', `--skip=${scanned}`, `--max-count=${pageSize}`, '--format=%H\t%s', `${repo.base_commit}..${remoteHead}`],
+                        lockSignal,
+                      )
+                    } catch (logError) {
+                      lockSignal.throwIfAborted()
+                      throw Object.assign(
+                        serviceError(`${repo.repo_id}：无法读取远端分支 ${repo.remote_branch} 的分叉提交历史，已停止推送以避免覆盖人工提交（${cleanError(logError)}）`, 409),
+                        { code: 'REMOTE_HISTORY_UNREADABLE' },
+                      )
+                    }
+                    const pageLines = rawPage ? rawPage.split(/\r?\n/).filter(Boolean) : []
+                    if (!pageLines.length) break
+                    for (const line of pageLines) {
+                      const tab = line.indexOf('\t')
+                      const entry = tab > 0
+                        ? { commit: line.slice(0, tab).trim(), subject: line.slice(tab + 1).trim() }
+                        : { commit: line.trim(), subject: '' }
+                      if (entry.commit && !knownSet.has(entry.commit)) unknownCommits.push(entry)
+                    }
+                    scanned += pageLines.length
+                    if (pageLines.length < pageSize) break
+                    if (scanned >= maxScanCommits) {
+                      historyTruncated = true
+                      break
+                    }
+                  }
+                  if (historyTruncated && unknownCommits.length === 0) {
                     throw Object.assign(
-                      serviceError(`${repo.repo_id}：无法读取远端分支 ${repo.remote_branch} 的分叉提交历史，已停止推送以避免覆盖人工提交（${cleanError(logError)}）`, 409),
+                      serviceError(`${repo.repo_id}：远端分支 ${repo.remote_branch} 分叉提交超过可核实上限（${maxScanCommits} 条），已停止推送以避免静默覆盖较早的人工提交`, 409),
                       { code: 'REMOTE_HISTORY_UNREADABLE' },
                     )
                   }
-                  if (rawDiverged) {
-                    const knownSet = new Set((await this.collectRecordedInjectionCommits(dataRoot, repo.repo_id, { includeRestore: true, limit: Infinity })).map(item => item.commit))
-                    const unknownCommits = rawDiverged.split(/\r?\n/).filter(Boolean).map(line => {
-                      const tab = line.indexOf('\t')
-                      return tab > 0 ? { commit: line.slice(0, tab).trim(), subject: line.slice(tab + 1).trim() } : { commit: line.trim(), subject: '' }
-                    }).filter(item => item.commit && !knownSet.has(item.commit))
-                    if (unknownCommits.length) {
-                      const summary = unknownCommits.slice(0, 5).map(item => `${item.commit.slice(0, 10)}${item.subject ? ` ${item.subject}` : ''}`).join('；')
-                      const confirmedMap = {
-                        ...(build.confirmed_remote_diverged && typeof build.confirmed_remote_diverged === 'object' ? build.confirmed_remote_diverged : {}),
-                        ...(input.confirmed_remote_diverged && typeof input.confirmed_remote_diverged === 'object' ? input.confirmed_remote_diverged : {}),
-                      }
-                      if (input.allow_overwrite_remote_diverged === true) {
-                        if (build.remote_diverged_repo && build.remote_diverged_head) {
-                          confirmedMap[build.remote_diverged_repo] = build.remote_diverged_head
-                        } else if (build.repositories.length === 1) {
-                          confirmedMap[repo.repo_id] = remoteHead
-                        }
-                      }
-                      const confirmedHead = typeof confirmedMap[repo.repo_id] === 'string' ? confirmedMap[repo.repo_id].trim() : ''
-                      if (confirmedHead && confirmedHead === remoteHead) {
-                        build.confirmed_remote_diverged = confirmedMap
-                        const notice = `${repo.repo_id}：已按用户显式确认覆盖远端分支 ${repo.remote_branch}（HEAD ${remoteHead.slice(0, 10)}）上的 ${unknownCommits.length} 个非 PANGEA 提交（${summary}）。`
-                        if (!build.notices.includes(notice)) build.notices.push(notice)
-                      } else {
-                        build.confirmed_remote_diverged = confirmedMap
-                        build.remote_diverged_repo = repo.repo_id
-                        build.remote_diverged_head = remoteHead
-                        build.remote_diverged_commits = unknownCommits.slice(0, 10)
-                        await this.saveBuild(buildDir, build)
-                        throw Object.assign(
-                          serviceError(`${repo.repo_id}：远端分支 ${repo.remote_branch}（HEAD ${remoteHead.slice(0, 10)}）存在 ${unknownCommits.length} 个未合入当前基线且非 PANGEA 打桩产生的提交（${summary}）。推送将把该分支树同步为当前基线与所选桩代码；请改用专用打桩构建分支，或显式确认覆盖后重试。`, 409),
-                          { code: 'REMOTE_BRANCH_DIVERGED', diverged_repo: repo.repo_id, diverged_head: remoteHead, diverged_commits: unknownCommits.slice(0, 10) },
-                        )
-                      }
+                  if (unknownCommits.length) {
+                    const summary = unknownCommits.slice(0, 5).map(item => `${item.commit.slice(0, 10)}${item.subject ? ` ${item.subject}` : ''}`).join('；')
+                    const confirmedMap = {
+                      ...(build.confirmed_remote_diverged && typeof build.confirmed_remote_diverged === 'object' ? build.confirmed_remote_diverged : {}),
+                      ...(input.confirmed_remote_diverged && typeof input.confirmed_remote_diverged === 'object' ? input.confirmed_remote_diverged : {}),
+                    }
+                    if (input.allow_overwrite_remote_diverged === true && priorDivergedRepo && priorDivergedHead) {
+                      confirmedMap[priorDivergedRepo] = priorDivergedHead
+                    }
+                    const confirmedHead = typeof confirmedMap[repo.repo_id] === 'string' ? confirmedMap[repo.repo_id].trim() : ''
+                    if (confirmedHead && confirmedHead === remoteHead) {
+                      build.confirmed_remote_diverged = confirmedMap
+                      const notice = `${repo.repo_id}：已按用户显式确认覆盖远端分支 ${repo.remote_branch}（HEAD ${remoteHead.slice(0, 10)}）上的 ${unknownCommits.length} 个非 PANGEA 提交（${summary}）。`
+                      if (!build.notices.includes(notice)) build.notices.push(notice)
+                    } else {
+                      build.confirmed_remote_diverged = confirmedMap
+                      build.remote_diverged_repo = repo.repo_id
+                      build.remote_diverged_head = remoteHead
+                      build.remote_diverged_commits = unknownCommits.slice(0, 10)
+                      await this.saveBuild(buildDir, build)
+                      throw Object.assign(
+                        serviceError(`${repo.repo_id}：远端分支 ${repo.remote_branch}（HEAD ${remoteHead.slice(0, 10)}）存在 ${unknownCommits.length} 个未合入当前基线且非 PANGEA 打桩产生的提交（${summary}）。推送将把该分支树同步为当前基线与所选桩代码；请改用专用打桩构建分支，或显式确认覆盖后重试。`, 409),
+                        { code: 'REMOTE_BRANCH_DIVERGED', diverged_repo: repo.repo_id, diverged_head: remoteHead, diverged_commits: unknownCommits.slice(0, 10) },
+                      )
                     }
                   }
                 }
@@ -2658,8 +2736,9 @@ export class FaultInjectionService {
               build.current_repository = repo.repo_id
               repo.push_result = 'unconfirmed'
               await this.saveBuild(buildDir, build)
+              const pushTarget = repo.effective_push_target || 'origin'
               try {
-                await this.git(repo.checkout, ['push', 'origin', `${repo.commit}:refs/heads/${repo.remote_branch}`], lockSignal)
+                await this.git(repo.checkout, ['push', pushTarget, `${repo.commit}:refs/heads/${repo.remote_branch}`], lockSignal)
               } catch (pushError) {
                 if (isRemotePushRejected(pushError) || /non-fast-forward|fetch first/i.test(String(pushError?.stderr || pushError?.message || ''))) {
                   repo.push_result = 'rejected'
@@ -2749,7 +2828,12 @@ export class FaultInjectionService {
       if (!commits.length) throw serviceError('请先将本打桩任务加入出包并推送到个人分支，再记录验证结果')
       const buildId = selectedBuild?.build_id || null
       const sameBuild = Boolean(buildId ? record.build?.build_id === buildId : !record.build?.build_id)
-      const prevBuild = sameBuild ? record.build : null
+      const recordedForBuild = buildId
+        ? (record.build_metadata?.[buildId]
+          || [...(record.verification || [])].reverse().find(entry => entry?.build?.build_id === buildId)?.build
+          || null)
+        : null
+      const prevBuild = sameBuild ? record.build : recordedForBuild
       const {
         url = prevBuild?.url || selectedBuild?.pipeline_url || '',
         package_id = prevBuild?.package_id || '',
@@ -2766,6 +2850,12 @@ export class FaultInjectionService {
         commits: structuredClone(commits),
       }
       record.build = buildSnapshot
+      if (buildId) {
+        record.build_metadata = {
+          ...(record.build_metadata && typeof record.build_metadata === 'object' ? record.build_metadata : {}),
+          [buildId]: structuredClone(buildSnapshot),
+        }
+      }
       if (input.verification) {
         const value = input.verification
         if (!record.case_keys.includes(value.case_key) || !['not_run', 'passed', 'failed', 'not_triggered'].includes(value.result)) throw serviceError('验证用例或结果无效')

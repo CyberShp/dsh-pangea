@@ -127,6 +127,119 @@ test('#36 stopSourceFirstAcpRun does not succeed or clear upgrade busy gate whil
   assert.equal(sourceFirstAcpUpdateBusy(), false)
 })
 
+test('#36 late-arriving worker whose first dispose fails stays retryable on subsequent stop calls and clears disk pending_starts', async t => {
+  const { acpBindingsPath } = await import('../src/acp-recovery.js')
+  const { inspectSourceFirstAcpRecovery } = await import('../src/source-first-acp.js')
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-audit36-retry-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const dataRoot = path.join(root, 'pangea-data')
+  const runId = 'run-audit36-retry'
+  await mkdir(path.join(dataRoot, 'runs', runId), { recursive: true })
+
+  let resolveStart = null
+  let disposeCalls = 0
+  const subagents = {
+    start: () => new Promise(resolve => {
+      resolveStart = () => resolve({
+        id: 'late-worker-retry-1',
+        remoteSessionId: 'remote-retry-1',
+        result: Promise.resolve({ stopReason: 'completed' }),
+        dispose: async () => {
+          disposeCalls += 1
+          if (disposeCalls === 1) throw new Error('transient dispose I/O failure')
+        },
+        readDiagnostics: () => ({}),
+      })
+    }),
+  }
+  const runner = async ({ args }) => {
+    const op = args[0] === 'adapter' ? args[1] : args[0]
+    if (op === 'next') {
+      return {
+        run_id: runId,
+        lifecycle_status: 'running',
+        actions: [{
+          action: 'dispatch_agent',
+          action_id: 'act-retry-1',
+          stage: 'unit_planning',
+          role: 'planner',
+          scratch_directory: path.join(root, 'scratch'),
+          result_path: path.join(root, 'result.json'),
+        }],
+      }
+    }
+    if (op === 'claim') {
+      return {
+        run_id: runId,
+        action_id: 'act-retry-1',
+        task_id: 'task-retry-1',
+        scratch_directory: path.join(root, 'scratch'),
+        result_path: path.join(root, 'result.json'),
+      }
+    }
+    if (op === 'task-open') {
+      return {
+        run_id: runId,
+        action_id: 'act-retry-1',
+        task_id: 'task-retry-1',
+        task: {
+          run_id: runId,
+          task_id: 'task-retry-1',
+          action_id: 'act-retry-1',
+          stage: 'unit_planning',
+          scratch_directory: path.join(root, 'scratch'),
+          result_path: path.join(root, 'result.json'),
+        },
+        write_contract: { revision: 0, capabilities: [] },
+      }
+    }
+    return { status: 'ok' }
+  }
+
+  const coordinator = createSourceFirstAcpRun({
+    subagents,
+    parent: { id: 'owner-retry-1' },
+    providerId: 'pangea-opencode',
+    agentModel: 'fixture',
+    cwd: root,
+    dataRoot,
+    runId,
+    runner,
+    signal: new AbortController().signal,
+    progressPolicy: { readyIdleMs: 40, readyWarnMs: 20 },
+  })
+  coordinator.result.catch(() => {})
+
+  await new Promise(r => setTimeout(r, 120))
+  assert.ok(resolveStart)
+  assert.equal(sourceFirstAcpUpdateBusy(), true)
+
+  // Late handle arrives during stop #1 and its first dispose() fails:
+  // stop #1 must surface the actual dispose failure (not swallow it) and keep the handle retryable
+  setTimeout(() => resolveStart(), 25)
+  await assert.rejects(
+    () => stopSourceFirstAcpRun({ dataRoot, runId, pendingStartTimeoutMs: 300 }),
+    /transient dispose I\/O failure/,
+  )
+  assert.equal(disposeCalls, 1)
+  assert.equal(sourceFirstAcpUpdateBusy(), true)
+  const bindingsPath = acpBindingsPath(dataRoot, runId)
+  const bindingsBefore = JSON.parse(await readFile(bindingsPath, 'utf8'))
+  assert.equal(bindingsBefore.owner.pending_starts.length, 1)
+  const recoveryBefore = await inspectSourceFirstAcpRecovery({ dataRoot, runId })
+  assert.equal(recoveryBefore.can_resume, false)
+
+  // Stop #2 retries dispose() on the exact same late handle, succeeds, clears disk pending_starts, and unlocks gates
+  const stopped = await stopSourceFirstAcpRun({ dataRoot, runId, pendingStartTimeoutMs: 200 })
+  assert.equal(stopped, true)
+  assert.equal(disposeCalls, 2)
+  assert.equal(sourceFirstAcpUpdateBusy(), false)
+  const bindingsAfter = JSON.parse(await readFile(bindingsPath, 'utf8'))
+  assert.equal(bindingsAfter.owner.pending_starts.length, 0)
+  const recoveryAfter = await inspectSourceFirstAcpRecovery({ dataRoot, runId })
+  assert.equal(recoveryAfter.can_resume, true)
+})
+
 test('#37 deriveAnalysisInput inherits test_tool_sources and expected_test_tool_revision for supplement', () => {
   const parent = {
     task_id: 'task-parent',
@@ -154,23 +267,31 @@ test('#37 deriveAnalysisInput inherits test_tool_sources and expected_test_tool_
   assert.equal(derived.expected_test_tool_revision, 'rev-123')
 })
 
-test('#38 editing linked operation notes changes caseContentHash and invalidates prior adoption', async t => {
+test('#38 editing or reordering linked operation notes invalidates prior adoption while preserving legacy no-notes hash', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pangea-audit38-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const store = new CaseReviewStore({ dataRoot: root, runId: 'run-audit38' })
 
+  const noteOpen = {
+    projection_id: 'unit-0001/note-000001',
+    unit_id: 'unit-0001',
+    display_id: 'NOTE-1',
+    title: '打开开关',
+    source_record: { record_id: 'note-000001', body: '下发 4K 读' },
+  }
+  const noteClose = {
+    projection_id: 'unit-0001/note-000002',
+    unit_id: 'unit-0001',
+    display_id: 'NOTE-2',
+    title: '关闭开关',
+    source_record: { record_id: 'note-000002', body: '关闭状态' },
+  }
   const baseCase = {
     projection_id: 'unit-0001/rec-000001',
     title: 'IO 读路径验证',
     steps: ['下发读请求'],
     expected_result: '返回成功',
-    linked_notes: [{
-      projection_id: 'unit-0001/note-000001',
-      unit_id: 'unit-0001',
-      display_id: 'NOTE-1',
-      title: '操作说明',
-      source_record: { record_id: 'note-000001', body: '下发 4K 读' },
-    }],
+    linked_notes: [noteOpen, noteClose],
   }
 
   const before = await store.project([baseCase])
@@ -190,6 +311,27 @@ test('#38 editing linked operation notes changes caseContentHash and invalidates
   const afterEdit = await store.project([editedCase])
   assert.notEqual(afterEdit.case_set_revision, adopted.case_set_revision)
   assert.notEqual(afterEdit.cases[0].review_status, 'adopted')
+
+  // Reordering linked notes must also change caseContentHash and case_set_revision
+  const reorderedCase = structuredClone(baseCase)
+  reorderedCase.linked_notes = [structuredClone(noteClose), structuredClone(noteOpen)]
+  assert.notEqual(caseContentHash(reorderedCase), caseContentHash(baseCase))
+  const afterReorder = await store.project([reorderedCase])
+  assert.notEqual(afterReorder.case_set_revision, adopted.case_set_revision)
+  assert.equal(afterReorder.cases[0].review_status, 'needs_recheck')
+
+  // Legacy upgrade compatibility: a case with no linked_notes (undefined vs []) matches pre-fix hash without linked_notes key
+  const noNotesUndefined = { projection_id: 'unit-0001/rec-000002', title: '无关联说明用例', steps: ['step1'], expected_result: 'ok' }
+  const noNotesEmpty = { ...noNotesUndefined, linked_notes: [] }
+  assert.equal(caseContentHash(noNotesEmpty), caseContentHash(noNotesUndefined))
+  const { createHash } = await import('node:crypto')
+  const legacyFields = ['title', 'case_type', 'test_level', 'verification_goal', 'entry', 'preconditions', 'step_pairs', 'steps', 'expected_result', 'expected_results', 'observability', 'external_observations', 'cleanup', 'variants', 'execution_readiness', 'readiness', 'readiness_reason', 'missing_execution_conditions', 'unit_id', 'linked_risk_ids', 'linked_flow_ids', 'coverage_refs', 'evidence']
+  const canonical = value => Array.isArray(value) ? value.map(canonical) : (value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : (value ?? null))
+  const legacyHash = createHash('sha256').update(JSON.stringify(canonical({
+    ...Object.fromEntries(legacyFields.map(k => [k, noNotesEmpty[k] ?? null])),
+    source_record: Object.fromEntries(['record_id', 'kind', 'body', 'evidence', 'relates_to'].map(k => [k, null])),
+  }))).digest('hex')
+  assert.equal(caseContentHash(noNotesEmpty), legacyHash)
 })
 
 test('#39 concurrent AcpSettingsStore.save calls all succeed and keep disk and process.env consistent', async t => {

@@ -17,7 +17,7 @@ const instanceId = randomUUID()
 const text = value => [{ type: 'text', text: value }]
 
 export function sourceFirstAcpUpdateBusy(states = liveRuns) {
-  return [...states.values()].some(state => state.busy || state.pendingStarts?.() || state.blockedReconciliations?.size
+  return [...states.values()].some(state => state.busy || state.pendingStarts?.() || state.lateWorkers?.size || state.blockedReconciliations?.size
     || [...state.workers.values()].some(worker => !state.closed.has(String(worker.id))
       && hasUnconfirmedAcpTools(worker.readDiagnostics?.())))
 }
@@ -49,6 +49,9 @@ export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped, onProg
   const failed = results.find(result => result.status === 'rejected')
   if (failed) throw failed.reason
   await state.promise?.catch(() => {})
+  const beforeLateAttempts = new Map(
+    [...(state.lateWorkers?.entries() ?? [])].map(([id, entry]) => [id, entry.attempts]),
+  )
   if (state.pendingStartTasks?.size || (state.pendingStarts?.() ?? 0) > 0) {
     let timer
     try {
@@ -58,12 +61,29 @@ export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped, onProg
       ])
     } finally { clearTimeout(timer) }
   }
+  const lateErrors = []
+  for (const [startId, entry] of [...(state.lateWorkers?.entries() ?? [])]) {
+    const prior = beforeLateAttempts.get(startId) ?? 0
+    if (entry.attempts > prior) {
+      if (entry.lastError) lateErrors.push(entry.lastError)
+      continue
+    }
+    try {
+      await entry.retry()
+    } catch (error) {
+      lateErrors.push(error)
+    } finally {
+      await progress()
+    }
+  }
+  if (lateErrors.length) throw lateErrors[0]
   await progress()
-  const remainingPending = (state.pendingStarts?.() ?? 0) + (state.pendingStartTasks?.size ?? 0)
+  const remainingPending = (state.pendingStarts?.() ?? 0) + (state.pendingStartTasks?.size ?? 0) + (state.lateWorkers?.size ?? 0)
   if (remainingPending > 0) {
+    const count = state.pendingStarts?.() || state.pendingStartTasks?.size || state.lateWorkers?.size
     throw Object.assign(
-      new Error(`仍有 ${state.pendingStarts?.() || state.pendingStartTasks?.size} 个启动中的 ACP Agent 正在收尾清理，暂未完全停止`),
-      { code: 'ACP_STOP_PENDING_STARTS', pending_starts: state.pendingStarts?.() || state.pendingStartTasks?.size },
+      new Error(`仍有 ${count} 个启动中的 ACP Agent 正在收尾清理，暂未完全停止`),
+      { code: 'ACP_STOP_PENDING_STARTS', pending_starts: count },
     )
   }
   liveRuns.delete(key)
@@ -283,6 +303,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
   state.blockedReconciliations ??= new Map()
   state.sessionRequestContexts ??= new Map()
   state.pendingStartTasks ??= new Set()
+  state.lateWorkers ??= new Map()
   state.requestErrors ??= createAcpRequestErrors()
   state.stopRequested = false
   liveRuns.set(key, state)
@@ -428,17 +449,45 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         timer = setTimeout(() => {
           const error = new Error('ACP 初始化或恢复会话超时，保留已有任务')
           controller.abort(error); reject(error)
+          const finalizeIfStopped = async () => {
+            if (!state.busy && state.stopRequested && state.pendingStartTasks.size === 0 && state.lateWorkers.size === 0
+              && !(state.pendingStarts?.() > 0) && [...state.workers.keys()].every(id => state.closed.has(String(id)))) {
+              liveRuns.delete(key)
+              const notify = state.onStopped
+              state.onStopped = undefined
+              await notify?.()
+            }
+          }
           const lateCleanup = Promise.resolve(attempt)
             .then(async lateWorker => {
-              await disposed(lateWorker)
-              await serial(async () => { owner.pending_starts = owner.pending_starts.filter(id => id !== startId); await persist() })
+              const entry = {
+                worker: lateWorker,
+                attempts: 0,
+                lastError: null,
+                retry: async () => {
+                  entry.attempts += 1
+                  try {
+                    await disposed(lateWorker)
+                    await serial(async () => {
+                      owner.pending_starts = owner.pending_starts.filter(id => id !== startId)
+                      await persist()
+                    })
+                    entry.lastError = null
+                    state.lateWorkers.delete(startId)
+                    await finalizeIfStopped()
+                  } catch (disposeError) {
+                    entry.lastError = disposeError
+                    throw disposeError
+                  }
+                },
+              }
+              state.lateWorkers.set(startId, entry)
+              await entry.retry()
             })
             .catch(() => {})
             .finally(() => {
               state.pendingStartTasks.delete(lateCleanup)
-              if (!state.busy && state.stopRequested && state.pendingStartTasks.size === 0 && !(state.pendingStarts?.() > 0)) {
-                liveRuns.delete(key)
-              }
+              void finalizeIfStopped().catch(() => {})
             })
           state.pendingStartTasks.add(lateCleanup)
         }, ms)

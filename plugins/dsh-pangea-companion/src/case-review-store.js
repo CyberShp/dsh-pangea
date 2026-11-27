@@ -29,13 +29,13 @@ function normalizedLinkedNotes(item) {
         source_evidence: evidence,
       }
     })
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
 }
 
 export function caseContentHash(item) {
+  const notes = normalizedLinkedNotes(item)
   return digest({
     ...Object.fromEntries(fields.map(key => [key, item[key] ?? null])),
-    linked_notes: normalizedLinkedNotes(item),
+    ...(notes.length ? { linked_notes: notes } : {}),
     source_record: Object.fromEntries(['record_id', 'kind', 'body', 'evidence', 'relates_to'].map(key => [key, item.source_record?.[key] ?? null])),
   })
 }

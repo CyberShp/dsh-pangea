@@ -727,10 +727,15 @@ for (const [mode, closure, fileCount = 1] of [['depth', false], ['speed', false]
             const opened = snapshotLine ? JSON.parse(snapshotLine.slice('当前 task-open 回包：'.length)) : await call('task-open')
             const { task } = opened
             if (snapshotLine) {
-              assert.equal(task.task_type, 'source_first_plan')
-              assert.equal(task.planning_io_policy, 'planning-io-v1')
-              assert.ok(JSON.stringify(opened).length <= 32000)
-              assert.ok(opened.planning_startup.pages.length > 0)
+              assert.ok(['source_first_plan', 'source_first_analysis'].includes(task.task_type), `unexpected snapshot task_type: ${task.task_type}`)
+              if (task.task_type === 'source_first_plan') {
+                assert.equal(task.planning_io_policy, 'planning-io-v1')
+                assert.ok(JSON.stringify(opened).length <= 32000)
+                assert.ok(opened.planning_startup.pages.length > 0)
+              } else {
+                assert.ok(JSON.stringify(opened).length <= 36000)
+                assert.ok(opened.analysis_startup.pages.length > 0)
+              }
               assert.doesNotMatch(prompt[0].text, /PowerShell 直接执行 task-open/)
             }
             assert.ok(prompt[0].text.length - (snapshotLine?.length ?? 0) < 7000)

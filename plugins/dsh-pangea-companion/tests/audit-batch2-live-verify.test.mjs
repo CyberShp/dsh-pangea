@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { hasPositiveHitCount, validateVerificationResult, LiveVerificationService } from '../src/live-verification.js'
 import { EnvironmentStore } from '../src/execution/environment.js'
-import { syncEnvironmentsToTopologyStore, getPangeaVerifyBridgeStatus } from '../src/pangea-verify-bridge.js'
+import { syncEnvironmentsToTopologyStore, getPangeaVerifyBridgeStatus, resolvePangeaVerifyRoot } from '../src/pangea-verify-bridge.js'
 
-const PANGEA_VERIFY_ROOT = path.resolve(import.meta.dirname, '../../../../pangea-verify')
+const PANGEA_VERIFY_ROOT = resolvePangeaVerifyRoot() || path.resolve(import.meta.dirname, '../../../../pangea-verify')
 
 test('#18 hasPositiveHitCount ignores retries/metadata keys and honors pointIds', () => {
   assert.equal(hasPositiveHitCount('hits=0; retries=1'), false)
@@ -171,7 +172,7 @@ test('#21 deleting an environment prunes its bridged topology while preserving s
   const envStore = new EnvironmentStore(path.join(root, 'environments.json'))
   const topoPath = path.join(root, 'topologies.json')
 
-  const { TopologyStore } = await import(path.join(PANGEA_VERIFY_ROOT, 'src', 'index.js'))
+  const { TopologyStore } = await import(pathToFileURL(path.join(PANGEA_VERIFY_ROOT, 'src', 'index.js')).href)
   const topoStore = new TopologyStore(topoPath)
   await topoStore.save({
     id: 'standalone-topo',

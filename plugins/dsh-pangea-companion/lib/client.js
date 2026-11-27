@@ -1516,29 +1516,25 @@ window.__ModuleLoader__.load({
     const NONZERO_FAILURE_COUNT_RE = /(?:\b([1-9]\d*)\s+tests?\s+failed\b|\[\s*FAILED\s*\]\s*([1-9]\d*)\s+tests?\b)/i
     const ZERO_TESTS_SIGNAL = /(?:\[\s*PASSED\s*\]\s*0 tests\b|0 tests from 0 test suites ran|No tests were found|0 tests failed out of 0\b)/i
 
-    function detectFailureSignal(scopedLines) {
-      let hasPositiveTestFailure = false
+    function hasExplicitTestFailureCount(scopedLines) {
       for (const line of scopedLines) {
-        if (NONZERO_FAILURE_COUNT_RE.test(line)) {
-          hasPositiveTestFailure = true
-          break
-        }
+        if (NONZERO_FAILURE_COUNT_RE.test(line)) return true
         let ctestMatch
         CTEST_SUMMARY_RE.lastIndex = 0
         while ((ctestMatch = CTEST_SUMMARY_RE.exec(line)) !== null) {
-          if (Number(ctestMatch[1]) > 0) {
-            hasPositiveTestFailure = true
-            break
-          }
-        }
-        if (hasPositiveTestFailure) break
-        if (ZERO_FAILURE_LINE_RE.test(line)) continue
-        if (FAILURE_SIGNAL.test(line)) {
-          hasPositiveTestFailure = true
-          break
+          if (Number(ctestMatch[1]) > 0) return true
         }
       }
-      return hasPositiveTestFailure
+      return false
+    }
+
+    function detectFailureSignal(scopedLines) {
+      if (hasExplicitTestFailureCount(scopedLines)) return true
+      for (const line of scopedLines) {
+        if (ZERO_FAILURE_LINE_RE.test(line)) continue
+        if (FAILURE_SIGNAL.test(line)) return true
+      }
+      return false
     }
 
     function countPointHitsInLines(lines, points) {
@@ -1575,7 +1571,10 @@ window.__ModuleLoader__.load({
       const sectionsByCase = new Map()
       const begunCases = new Set()
       const endedCases = new Set()
-      const failedCases = new Set(), cleanupCases = new Set()
+      const nonZeroExitCases = new Set()
+      const missingExitStatusCases = new Set()
+      const cleanupFailedCases = new Set()
+      const cleanupCases = new Set()
       const rawLines = raw.split(/\r?\n/)
       let activeCase = null
       for (const line of rawLines) {
@@ -1590,14 +1589,15 @@ window.__ModuleLoader__.load({
         if (endMatch) {
           endedCases.add(endMatch[1])
           const status = line.match(/\bstatus=(-?\d+)\b/)
-          if ((status && Number(status[1]) !== 0) || (!status && task.generation_contract_version >= 2)) failedCases.add(endMatch[1])
+          if (status && Number(status[1]) !== 0) nonZeroExitCases.add(endMatch[1])
+          else if (!status && task.generation_contract_version >= 2) missingExitStatusCases.add(endMatch[1])
           if (activeCase === endMatch[1]) activeCase = null
           continue
         }
         const cleanupMatch = line.match(/\[PANGEA_CLEANUP\]\s+case=(\S+)\s+cleanup=(-?\d+)\s+verify=(-?\d+)/)
         if (cleanupMatch) {
           cleanupCases.add(cleanupMatch[1])
-          if (Number(cleanupMatch[2]) !== 0 || Number(cleanupMatch[3]) !== 0) failedCases.add(cleanupMatch[1])
+          if (Number(cleanupMatch[2]) !== 0 || Number(cleanupMatch[3]) !== 0) cleanupFailedCases.add(cleanupMatch[1])
         }
         const verifyMatch = line.match(/\[PANGEA_VERIFY\]\s+case=(\S+)(?:\s+result=(passed|failed|not_triggered|not_run))?(?:\s+hits=(.+))?/)
         if (verifyMatch) {
@@ -1620,7 +1620,8 @@ window.__ModuleLoader__.load({
         const { counts: pointHitCounts, samples: matchedLines } = sectionLines
           ? countPointHitsInLines(sectionLines, points)
           : (globalHits ?? { counts: new Map(), samples: [] })
-        const hasFailureSignal = detectFailureSignal(scopedLines)
+        const hasExplicitFailureCount = hasExplicitTestFailureCount(scopedLines)
+        const hasFailureSignal = hasExplicitFailureCount || detectFailureSignal(scopedLines)
         const hasZeroTests = ZERO_TESTS_SIGNAL.test(scopedText)
         const profile = profiles.find(item => item.case_key === caseKey)
         const expectedPointIds = Array.isArray(profile?.point_ids) && profile.point_ids.length
@@ -1638,8 +1639,20 @@ window.__ModuleLoader__.load({
         }
         const incompleteSafety = task.generation_contract_version >= 2
           && (begunCases.has(caseKey) || structured || observedPairs.length > 0) && (!endedCases.has(caseKey) || !cleanupCases.has(caseKey))
-        const isInfraError = failedCases.has(caseKey) || incompleteSafety
-        if (isInfraError) result = 'failed'
+        const hasCompleteBoundedTestFailure = nonZeroExitCases.has(caseKey)
+          && begunCases.has(caseKey)
+          && endedCases.has(caseKey)
+          && !incompleteSafety
+          && !cleanupFailedCases.has(caseKey)
+          && !missingExitStatusCases.has(caseKey)
+          && !hasZeroTests
+          && observedPairs.length > 0
+          && hasExplicitFailureCount
+        const isInfraError = cleanupFailedCases.has(caseKey)
+          || missingExitStatusCases.has(caseKey)
+          || incompleteSafety
+          || (nonZeroExitCases.has(caseKey) && !hasCompleteBoundedTestFailure)
+        if (isInfraError || hasCompleteBoundedTestFailure) result = 'failed'
         if (!result && !hits) continue
         const finalResult = result || 'passed'
         const executionStatus = isInfraError
@@ -2616,7 +2629,10 @@ window.__ModuleLoader__.load({
         }, [scope, running])
         React.useEffect(() => {
           if (!task) return
-          const defaultBuildId = task.build?.build_id || task.latest_pushed_build?.build_id || task.pushed_builds?.[0]?.build_id || ''
+          const taskPushedBuilds = Array.isArray(task.pushed_builds) && task.pushed_builds.length
+            ? task.pushed_builds
+            : (task.latest_pushed_build ? [task.latest_pushed_build] : [])
+          const defaultBuildId = task.build?.build_id || (taskPushedBuilds.length === 1 ? taskPushedBuilds[0].build_id : '')
           setBuild({ build_id: defaultBuildId, url: '', package_id: '', package_sha256: '', notes: '', ...task.build, ...(defaultBuildId && !task.build?.build_id ? { build_id: defaultBuildId } : {}) })
           setVerification({ result: 'not_run', hits: '', notes: '', ...task.verification?.filter(item => item.case_key === task.case_keys?.[0]).at(-1), case_key: task.case_keys?.[0] || '' })
         }, [task?.id])
@@ -2646,11 +2662,15 @@ window.__ModuleLoader__.load({
         const pushedBuilds = Array.isArray(task.pushed_builds) && task.pushed_builds.length
           ? task.pushed_builds
           : (task.latest_pushed_build ? [task.latest_pushed_build] : [])
-        const selectedPushedBuild = pushedBuilds.find(item => item.build_id === build.build_id) || pushedBuilds[0] || null
+        const selectedPushedBuild = build.build_id
+          ? (pushedBuilds.find(item => item.build_id === build.build_id) || null)
+          : (pushedBuilds.length === 1 ? pushedBuilds[0] : null)
         const canVerify = Boolean(pushedBuilds.length) || (task.repositories || []).some(repo => repo.commit)
         const activeCommits = selectedPushedBuild?.commits?.length
           ? selectedPushedBuild.commits
-          : (task.repositories || []).filter(repo => repo.commit).map(repo => ({ repo_id: repo.repo_id, commit: repo.commit }))
+          : (Array.isArray(task.build?.commits) && task.build.commits.length
+              ? task.build.commits
+              : (task.repositories || []).filter(repo => repo.commit).map(repo => ({ repo_id: repo.repo_id, commit: repo.commit })))
         return h('section', { className: 'pangea-injection-panel is-standalone', 'data-testid': 'fault-injection-task' }, h('style', null, PANEL_CSS),
           ...banners,
           h('div', { className: 'pangea-fi-task-card' },
@@ -2762,16 +2782,25 @@ window.__ModuleLoader__.load({
                   onChange: event => {
                     const nextId = event.target.value
                     const matched = pushedBuilds.find(item => item.build_id === nextId)
+                    const savedMeta = nextId
+                      ? (task.build_metadata?.[nextId]
+                        || [...(task.verification || [])].reverse().find(entry => entry?.build?.build_id === nextId)?.build
+                        || null)
+                      : null
                     setBuild(prev => ({
                       build_id: nextId,
-                      url: matched?.pipeline_url || '',
-                      package_id: prev.build_id === nextId ? prev.package_id : '',
-                      package_sha256: prev.build_id === nextId ? prev.package_sha256 : '',
-                      notes: prev.build_id === nextId ? prev.notes : '',
+                      url: savedMeta?.url || (!prev.build_id ? prev.url : '') || matched?.pipeline_url || '',
+                      package_id: savedMeta?.package_id ?? (prev.build_id === nextId || !prev.build_id ? prev.package_id : ''),
+                      package_sha256: savedMeta?.package_sha256 ?? (prev.build_id === nextId || !prev.build_id ? prev.package_sha256 : ''),
+                      notes: savedMeta?.notes ?? (prev.build_id === nextId || !prev.build_id ? prev.notes : ''),
                     }))
                   },
-                }, pushedBuilds.map(item => h('option', { key: item.build_id, value: item.build_id },
-                  `${item.build_id} (${(item.commits || []).map(c => `${c.repo_id} ${String(c.commit || '').slice(0, 8)}`).join(', ')})`)))) : null,
+                }, [
+                  h('option', { key: '__select__', value: '' }, '请选择本次验证对应的构建…'),
+                  ...pushedBuilds.map(item => h('option', { key: item.build_id, value: item.build_id },
+                    `${item.build_id} (${(item.commits || []).map(c => `${c.repo_id} ${String(c.commit || '').slice(0, 8)}`).join(', ')})`)),
+                ]),
+                !selectedPushedBuild ? h('span', { role: 'status', style: { fontSize: 12, color: '#8c5a12', marginTop: 4 } }, '本任务存在多个已推送构建，请先明确选择本次验证对应的构建，再保存记录。') : null) : null,
               h('div', { style: grid }, field('构建链接', build.url, value => setBuild({ ...build, url: value })), field('个人包名称或版本', build.package_id, value => setBuild({ ...build, package_id: value })), field('包 SHA256（可选）', build.package_sha256, value => setBuild({ ...build, package_sha256: value }))),
               h('details', { style: { margin: '4px 0 12px' } },
                 h('summary', null, '从执行日志自动填充'),
@@ -2815,7 +2844,17 @@ window.__ModuleLoader__.load({
                 } }, [['not_run', '未执行'], ['passed', '通过（风险未复现）'], ['failed', '失败（风险复现/异常）'], ['not_triggered', '目标故障未触发']].map(([value, label]) => h('option', { key: value, value }, label)))),
                 field('桩点实际命中', verification.hits, value => setVerification({ ...verification, hits: value }))),
               field('验证现象与记录', verification.notes, value => setVerification({ ...verification, notes: value }), { multiline: true }),
-              h('button', { type: 'button', className: 'btn primary', disabled: working || busy(task), onClick: () => act('verify', { build_id: selectedPushedBuild?.build_id || build.build_id || undefined, build: { ...build, ...(selectedPushedBuild?.build_id ? { build_id: selectedPushedBuild.build_id } : {}) }, verification }) }, '保存构建与验证记录'),
+              h('button', { type: 'button', className: 'btn primary', disabled: working || busy(task), onClick: () => {
+                if (pushedBuilds.length > 1 && !selectedPushedBuild) {
+                  setError('本打桩任务存在多个已推送构建，请先在上方“验证对应构建”中选择本次验证对应的构建后再保存。')
+                  return
+                }
+                const explicitBuildId = selectedPushedBuild?.build_id || undefined
+                const buildPayload = { ...build }
+                if (explicitBuildId) buildPayload.build_id = explicitBuildId
+                else delete buildPayload.build_id
+                return act('verify', { build_id: explicitBuildId, build: buildPayload, verification })
+              } }, '保存构建与验证记录'),
               task.verification.length ? h('ul', { className: 'pangea-fi-records pangea-fi-scroll', 'aria-label': '验证历史' }, [...task.verification].reverse().map((value, index) => {
                 const legacyLabel = ({ passed: '通过', failed: '失败', not_triggered: '目标故障未触发', not_run: '未执行' })[value.result] || value.result
                 const dimLabel = value.execution_status === 'infra_error'
@@ -2941,6 +2980,7 @@ window.__ModuleLoader__.load({
         const [activeBuild, setActiveBuild] = React.useState(null)
         const [commitDraft, setCommitDraft] = React.useState(() => ({ ...normalizeCommitConfig({}), summary: null }))
         const [pipelineUrl, setPipelineUrl] = React.useState('')
+        const [pipelineEdited, setPipelineEdited] = React.useState(false)
         const [repoSetupOpen, setRepoSetupOpen] = React.useState(false)
         const [query, setQuery] = React.useState('')
         const [working, setWorking] = React.useState(false)
@@ -2963,12 +3003,12 @@ window.__ModuleLoader__.load({
               : []
             setSelectedKeys([...new Set([...baseDefault, ...requested])])
             setCommitDraft(buildCommitDraft(value.commit_config))
-            setPipelineUrl(value.pipeline_url || '')
+            setPipelineUrl('')
+            setPipelineEdited(false)
             const runningOrLatest = (value.builds || []).find(item => busy(item)) || (value.builds || [])[0] || null
             setActiveBuild(runningOrLatest)
           } else {
             setSelectedKeys(prev => prev.filter(key => includableKeys.has(key)))
-            setPipelineUrl(prev => prev || value.pipeline_url || '')
           }
           return value
         }, [dataRoot, cwd, initialSignature])
@@ -3049,11 +3089,17 @@ window.__ModuleLoader__.load({
           .map(repo => ({ repo_id: repo.repo_id, pipeline_url: String(repo.pipeline_url || '').trim() }))
           .filter(entry => Boolean(entry.pipeline_url))
         const selectedDefaultPipelineUrl = selectedRepoPipelines[0]?.pipeline_url || ''
+        const displayedPipelineUrl = pipelineEdited
+          ? pipelineUrl
+          : (selectedDefaultPipelineUrl || (touchedRepoIds.length ? '' : (context.pipeline_url || '')))
         const activeBuildPipelines = Array.isArray(activeBuild?.repository_pipelines) && activeBuild.repository_pipelines.length
           ? activeBuild.repository_pipelines.filter(entry => entry?.pipeline_url)
           : (activeBuild?.repositories || []).filter(repo => repo?.pipeline_url).map(repo => ({ repo_id: repo.repo_id, pipeline_url: repo.pipeline_url }))
-        const savedPipelineUrl = activeBuild?.pipeline_url || activeBuildPipelines[0]?.pipeline_url || selectedDefaultPipelineUrl || context.pipeline_url || ''
-        const pipelineDirty = Boolean(pipelineUrl.trim()) && pipelineUrl.trim() !== savedPipelineUrl && pipelineUrl.trim() !== (context.pipeline_url || '')
+        const activeBuildHasRepos = Array.isArray(activeBuild?.repositories) && activeBuild.repositories.length > 0
+        const savedPipelineUrl = activeBuild?.pipeline_url
+          || activeBuildPipelines[0]?.pipeline_url
+          || (activeBuildHasRepos ? '' : selectedDefaultPipelineUrl)
+        const pipelineDirty = pipelineEdited && Boolean(pipelineUrl.trim()) && pipelineUrl.trim() !== savedPipelineUrl
         const hasPatchFailures = Boolean(activeBuild?.repositories?.some(repo => repo.failures?.length > 0))
         const canRetryActiveBuild = Boolean(
           activeBuild
@@ -3070,11 +3116,11 @@ window.__ModuleLoader__.load({
           }
           const divergedRepo = activeBuild?.remote_diverged_repo || ''
           const divergedHead = activeBuild?.remote_diverged_head || ''
-          if (allowOverwriteRemoteDiverged) {
+          if (allowOverwriteRemoteDiverged && divergedRepo && divergedHead) {
             const diverged = Array.isArray(activeBuild?.remote_diverged_commits) ? activeBuild.remote_diverged_commits : []
             const listText = diverged.slice(0, 5).map(c => `- ${String(c.commit || '').slice(0, 10)}${c.subject ? ` ${c.subject}` : ''}`).join('\n')
             const extra = diverged.length > 5 ? `\n…等共 ${diverged.length} 个提交` : ''
-            const repoScope = divergedRepo ? `仓库 ${divergedRepo}${divergedHead ? `（HEAD ${divergedHead.slice(0, 10)}）` : ''}` : '当前远端分支'
+            const repoScope = `仓库 ${divergedRepo}（HEAD ${divergedHead.slice(0, 10)}）`
             const confirmMsg = `确认覆盖 ${repoScope} 上的非 PANGEA 提交并重新推送？\n本次仅授权覆盖上述仓库的该远端 HEAD，以下提交的内容将在该分支被回退：\n${listText || '（远端存在未合入的非 PANGEA 提交）'}${extra}`
             if (typeof window?.confirm === 'function' && !window.confirm(confirmMsg)) {
               return
@@ -3091,14 +3137,13 @@ window.__ModuleLoader__.load({
             const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(subject) }
             const checked = resolveCommitMessage(cfg, subject, { allowDefaultSummary: commitDraft.summary === null })
             if (!checked.ok) throw new Error(checked.error)
-            const overwriteFlag = allowOverwriteRemoteDiverged
-              ? (divergedRepo && divergedHead
-                  ? { confirmed_remote_diverged: { [divergedRepo]: divergedHead } }
-                  : { allow_overwrite_remote_diverged: true })
+            const overwriteFlag = allowOverwriteRemoteDiverged && divergedRepo && divergedHead
+              ? { confirmed_remote_diverged: { [divergedRepo]: divergedHead } }
               : {}
-            const effectiveBuildPipeline = pipelineDirty ? pipelineUrl.trim() : (selectedDefaultPipelineUrl || pipelineUrl.trim())
+            const explicitPipeline = pipelineEdited ? pipelineUrl.trim() : ''
+            const effectiveBuildPipeline = explicitPipeline || selectedDefaultPipelineUrl
             const payload = retryId
-              ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, ...(pipelineDirty ? { pipeline_url: pipelineUrl.trim() } : {}), ...overwriteFlag }
+              ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, ...(pipelineDirty ? { pipeline_url: explicitPipeline } : {}), ...overwriteFlag }
               : restoreBaseline
                 ? {
                     action: 'build',
@@ -3147,9 +3192,11 @@ window.__ModuleLoader__.load({
         const savePipeline = async () => {
           setWorking(true); setError(''); setNotice('')
           try {
-            const value = await request({ action: 'build-configure', ...(activeBuild?.id ? { build_id: activeBuild.id } : {}), pipeline_url: pipelineUrl })
+            const nextUrl = displayedPipelineUrl.trim()
+            const value = await request({ action: 'build-configure', ...(activeBuild?.id ? { build_id: activeBuild.id } : {}), pipeline_url: nextUrl })
             if (value.build) setActiveBuild(value.build)
-            setContext(prev => prev ? { ...prev, pipeline_url: value.pipeline_url } : prev)
+            setPipelineUrl(value.pipeline_url || '')
+            setPipelineEdited(false)
             setNotice('已保存流水线地址')
           } catch (reason) {
             setError(reason.message)
@@ -3297,7 +3344,7 @@ window.__ModuleLoader__.load({
                 h('pre', { 'aria-label': '提交信息预览', style: { whiteSpace: 'pre-wrap', margin: '6px 0', padding: '8px 10px', borderRadius: 6, background: '#f8f9fb', border: '1px solid #e2e6ec', fontSize: 12 } }, commitCheck.message || ''))
                 : field('提交信息', effectiveCommitConfig.custom_message, value => setCommitDraft(previous => ({ ...previous, custom_message: value })), { placeholder: '可选：留空使用默认合成打桩提交说明' }),
               !commitCheck.ok ? h('p', { role: 'alert', style: { fontSize: 12, color: '#9c2330', margin: '6px 0 0' } }, commitCheck.error) : null,
-              field('构建流水线 URL', pipelineUrl, setPipelineUrl, { placeholder: '例如 https://ci.example.internal/pipeline/...' }),
+              field('构建流水线 URL', displayedPipelineUrl, value => { setPipelineEdited(true); setPipelineUrl(value) }, { placeholder: '例如 https://ci.example.internal/pipeline/...' }),
               pipelineDirty && activeBuild?.status === 'pushed' ? h('div', { style: { marginBottom: 10 } },
                 h('p', { role: 'status', style: { fontSize: 12, color: '#8c5a12', margin: '0 0 6px' } }, '流水线地址已更改，请先点击“保存流水线地址”后再打开流水线。'),
                 h('button', { type: 'button', className: 'primary', disabled: working, onClick: savePipeline }, '保存流水线地址')) : null,
@@ -3366,7 +3413,11 @@ window.__ModuleLoader__.load({
                   distinctPipelines.push({ repo_id: entry.repo_id, pipeline_url: url })
                 }
                 const multiPipelines = distinctPipelines.length > 1
-                return h('div', { style: { marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                return h('div', { style: { marginTop: 12 } },
+                  !multiPipelines && !savedPipelineUrl
+                    ? h('p', { role: 'status', style: { fontSize: 12, color: '#8c5a12', margin: '0 0 8px' } }, '当前出包涉及的仓库尚未配置构建流水线地址，请先在仓库设置中配置，或在上方填写并保存后再打开流水线。')
+                    : null,
+                  h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
                   ...(multiPipelines
                     ? distinctPipelines.map(entry => h('button', {
                         key: `open-pipeline:${entry.repo_id}`,
@@ -3426,7 +3477,7 @@ window.__ModuleLoader__.load({
                     faultInjectionBuildId: activeBuild.id,
                     name: `核验 · ${activeBuild.items[0].name || activeBuild.id}`,
                   }),
-                }, '烧包后去真机核验') : null)
+                }, '烧包后去真机核验') : null))
               })() : null) : null,
 
             (context.builds || []).length > 1 ? h('details', { style: { marginTop: 14 } },

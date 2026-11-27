@@ -497,29 +497,25 @@ const ZERO_FAILURE_LINE_RE = /(?:\b0\s+tests?\s+failed\b|\[\s*FAILED\s*\]\s*0\s+
 const NONZERO_FAILURE_COUNT_RE = /(?:\b([1-9]\d*)\s+tests?\s+failed\b|\[\s*FAILED\s*\]\s*([1-9]\d*)\s+tests?\b)/i
 const ZERO_TESTS_SIGNAL = /(?:\[\s*PASSED\s*\]\s*0 tests\b|0 tests from 0 test suites ran|No tests were found|0 tests failed out of 0\b)/i
 
-function detectFailureSignal(scopedLines) {
-  let hasPositiveTestFailure = false
+function hasExplicitTestFailureCount(scopedLines) {
   for (const line of scopedLines) {
-    if (NONZERO_FAILURE_COUNT_RE.test(line)) {
-      hasPositiveTestFailure = true
-      break
-    }
+    if (NONZERO_FAILURE_COUNT_RE.test(line)) return true
     let ctestMatch
     CTEST_SUMMARY_RE.lastIndex = 0
     while ((ctestMatch = CTEST_SUMMARY_RE.exec(line)) !== null) {
-      if (Number(ctestMatch[1]) > 0) {
-        hasPositiveTestFailure = true
-        break
-      }
-    }
-    if (hasPositiveTestFailure) break
-    if (ZERO_FAILURE_LINE_RE.test(line)) continue
-    if (FAILURE_SIGNAL.test(line)) {
-      hasPositiveTestFailure = true
-      break
+      if (Number(ctestMatch[1]) > 0) return true
     }
   }
-  return hasPositiveTestFailure
+  return false
+}
+
+function detectFailureSignal(scopedLines) {
+  if (hasExplicitTestFailureCount(scopedLines)) return true
+  for (const line of scopedLines) {
+    if (ZERO_FAILURE_LINE_RE.test(line)) continue
+    if (FAILURE_SIGNAL.test(line)) return true
+  }
+  return false
 }
 
 function countPointHitsInLines(lines, points) {
@@ -556,7 +552,10 @@ export function parseVerificationLog(logText, task) {
   const sectionsByCase = new Map()
   const begunCases = new Set()
   const endedCases = new Set()
-  const failedCases = new Set(), cleanupCases = new Set()
+  const nonZeroExitCases = new Set()
+  const missingExitStatusCases = new Set()
+  const cleanupFailedCases = new Set()
+  const cleanupCases = new Set()
   const rawLines = raw.split(/\r?\n/)
   let activeCase = null
   for (const line of rawLines) {
@@ -571,14 +570,15 @@ export function parseVerificationLog(logText, task) {
     if (endMatch) {
       endedCases.add(endMatch[1])
       const status = line.match(/\bstatus=(-?\d+)\b/)
-      if ((status && Number(status[1]) !== 0) || (!status && task.generation_contract_version >= 2)) failedCases.add(endMatch[1])
+      if (status && Number(status[1]) !== 0) nonZeroExitCases.add(endMatch[1])
+      else if (!status && task.generation_contract_version >= 2) missingExitStatusCases.add(endMatch[1])
       if (activeCase === endMatch[1]) activeCase = null
       continue
     }
     const cleanupMatch = line.match(/\[PANGEA_CLEANUP\]\s+case=(\S+)\s+cleanup=(-?\d+)\s+verify=(-?\d+)/)
     if (cleanupMatch) {
       cleanupCases.add(cleanupMatch[1])
-      if (Number(cleanupMatch[2]) !== 0 || Number(cleanupMatch[3]) !== 0) failedCases.add(cleanupMatch[1])
+      if (Number(cleanupMatch[2]) !== 0 || Number(cleanupMatch[3]) !== 0) cleanupFailedCases.add(cleanupMatch[1])
     }
     const verifyMatch = line.match(/\[PANGEA_VERIFY\]\s+case=(\S+)(?:\s+result=(passed|failed|not_triggered|not_run))?(?:\s+hits=(.+))?/)
     if (verifyMatch) {
@@ -601,7 +601,8 @@ export function parseVerificationLog(logText, task) {
     const { counts: pointHitCounts, samples: matchedLines } = sectionLines
       ? countPointHitsInLines(sectionLines, points)
       : (globalHits ?? { counts: new Map(), samples: [] })
-    const hasFailureSignal = detectFailureSignal(scopedLines)
+    const hasExplicitFailureCount = hasExplicitTestFailureCount(scopedLines)
+    const hasFailureSignal = hasExplicitFailureCount || detectFailureSignal(scopedLines)
     const hasZeroTests = ZERO_TESTS_SIGNAL.test(scopedText)
     const profile = profiles.find(item => item.case_key === caseKey)
     const expectedPointIds = Array.isArray(profile?.point_ids) && profile.point_ids.length
@@ -619,8 +620,20 @@ export function parseVerificationLog(logText, task) {
     }
     const incompleteSafety = task.generation_contract_version >= 2
       && (begunCases.has(caseKey) || structured || observedPairs.length > 0) && (!endedCases.has(caseKey) || !cleanupCases.has(caseKey))
-    const isInfraError = failedCases.has(caseKey) || incompleteSafety
-    if (isInfraError) result = 'failed'
+    const hasCompleteBoundedTestFailure = nonZeroExitCases.has(caseKey)
+      && begunCases.has(caseKey)
+      && endedCases.has(caseKey)
+      && !incompleteSafety
+      && !cleanupFailedCases.has(caseKey)
+      && !missingExitStatusCases.has(caseKey)
+      && !hasZeroTests
+      && observedPairs.length > 0
+      && hasExplicitFailureCount
+    const isInfraError = cleanupFailedCases.has(caseKey)
+      || missingExitStatusCases.has(caseKey)
+      || incompleteSafety
+      || (nonZeroExitCases.has(caseKey) && !hasCompleteBoundedTestFailure)
+    if (isInfraError || hasCompleteBoundedTestFailure) result = 'failed'
     if (!result && !hits) continue
     const finalResult = result || 'passed'
     const executionStatus = isInfraError
