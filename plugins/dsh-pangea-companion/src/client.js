@@ -2390,8 +2390,9 @@ window.__ModuleLoader__.load({
       const [expanded, setExpanded] = React.useState(false)
       const [catalog, setCatalog] = React.useState(null)
       const [searchQuery, setSearchQuery] = React.useState('')
+      const [appliedQuery, setAppliedQuery] = React.useState('')
       const [loadError, setLoadError] = React.useState('')
-      const loadPatterns = async ({ append = false, cursor = 0, query = searchQuery } = {}) => {
+      const loadPatterns = async ({ append = false, cursor = 0, query = append ? appliedQuery : searchQuery } = {}) => {
         if (!cwd) return
         setBusy(true)
         setLoadError('')
@@ -2407,6 +2408,7 @@ window.__ModuleLoader__.load({
               ...(trimmed ? { query: trimmed } : {}),
             },
           })
+          if (!append) setAppliedQuery(trimmed)
           setCatalog(prev => {
             if (!append || !prev) return response
             const seen = new Set((prev.items ?? []).map(item => item.pattern_id))
@@ -2426,6 +2428,7 @@ window.__ModuleLoader__.load({
         try {
           const response = await requestWorkbenchAction({ cwd, action: 'dts-patterns-ingest', payload: { data_root: dataRoot, path: filePath.trim() } })
           setSearchQuery('')
+          setAppliedQuery('')
           setCatalog(response)
           setExpanded(true)
           const importedCount = (response.ingest?.imported?.length ?? 0) + (response.ingest?.updated?.length ?? 0)
@@ -2456,7 +2459,7 @@ window.__ModuleLoader__.load({
       const toggleExpand = () => {
         const next = !expanded
         setExpanded(next)
-        if (next && !catalog && !busy) void loadPatterns({ append: false, cursor: 0 })
+        if (next && !catalog && !busy) void loadPatterns({ append: false, cursor: 0, query: appliedQuery })
       }
       const items = catalog?.items ?? []
       const hasMore = Number.isInteger(catalog?.next_cursor)
@@ -2509,9 +2512,9 @@ window.__ModuleLoader__.load({
               h('span', { className: `badge ${item.status === 'enabled' ? 'good' : 'neutral'}`, style: { flexShrink: 0 } }, item.status === 'enabled' ? '已启用' : '已禁用'),
               h('button', { type: 'button', className: 'btn ghost', style: { flexShrink: 0, whiteSpace: 'nowrap' }, disabled: disabled || busy, onClick: () => { void togglePattern(item) } }, item.status === 'enabled' ? '禁用' : '启用'))),
             hasMore ? h('div', { className: 'row', style: { justifyContent: 'center', marginTop: 4 } },
-              h('button', { type: 'button', className: 'btn ghost', disabled: disabled || busy, onClick: () => { void loadPatterns({ append: true, cursor: catalog.next_cursor }) } },
+              h('button', { type: 'button', className: 'btn ghost', disabled: disabled || busy, onClick: () => { void loadPatterns({ append: true, cursor: catalog.next_cursor, query: appliedQuery }) } },
                 busy ? '加载中…' : `加载更多（已显示 ${items.length} / ${catalog.total ?? items.length}）`)) : null)
-            : h('p', { className: 'small muted', style: { margin: 0 } }, searchQuery.trim() ? '未找到匹配的 DTS 故障拓扑卡。' : '本地尚无已沉淀的 DTS 故障拓扑卡，可在上方导入离线文件或直接填写 DTS 单号运行。')) : null)
+            : h('p', { className: 'small muted', style: { margin: 0 } }, appliedQuery ? '未找到匹配的 DTS 故障拓扑卡。' : '本地尚无已沉淀的 DTS 故障拓扑卡，可在上方导入离线文件或直接填写 DTS 单号运行。')) : null)
     }
     function riskApplicable(run) {
       return run?.analysis_profile === 'behavior-test-v2' ? run.analysis_scene?.presentation?.risks === true : run?.scenario !== 'coverage-analysis'

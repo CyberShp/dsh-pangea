@@ -314,6 +314,7 @@ test('#31/#32 DtsFeedbackSection uses dts-file picker purpose and cursor paginat
   const indexSrc = await readFile(new URL('../src/index.js', import.meta.url), 'utf8')
   assert.match(clientSrc, /pick\(\{\s*purpose:\s*'dts-file'\s*\}\)/)
   assert.match(clientSrc, /加载更多/)
+  assert.match(clientSrc, /append:\s*true,\s*cursor:\s*catalog\.next_cursor,\s*query:\s*appliedQuery/)
   assert.match(indexSrc, /const cursor = Number\.isInteger\(body\.cursor\)/)
   assert.match(indexSrc, /const limit = Number\.isInteger\(body\.limit\)/)
 
