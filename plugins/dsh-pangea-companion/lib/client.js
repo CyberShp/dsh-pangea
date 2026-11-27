@@ -1454,10 +1454,9 @@ window.__ModuleLoader__.load({
           if (pt?.enable) lines.push(`# 启用 ${pid}: ${shellQuoteComment(pt.enable)}`)
           if (pt?.disable) lines.push(`# 关闭 ${pid}: ${shellQuoteComment(pt.disable)}`)
         }
-        // Old saved tasks retain their original export; v2 generation requires safety.
         const safety = profile.safety
-        if (task?.generation_contract_version >= 2 && !safety) throw new Error('缺少安全验证合同，请重新生成')
-        if (safety) {
+        const hasSafety = Boolean(safety && ['setup', 'negative_steps', 'cleanup', 'cleanup_verify'].every(k => Array.isArray(safety[k]) && safety[k].length > 0))
+        if (hasSafety) {
           lines.push(
             `trap 'kill -TERM "$__pangea_case_pid" 2>/dev/null || true; wait "$__pangea_case_pid" || true; exit 130' INT`,
             `trap 'kill -TERM "$__pangea_case_pid" 2>/dev/null || true; wait "$__pangea_case_pid" || true; exit 143' TERM`,
@@ -1491,7 +1490,7 @@ window.__ModuleLoader__.load({
           const text = String(step)
           if (text.trim()) lines.push(text)
         }
-        if (safety) lines.push(') &', '__pangea_case_pid=$!', 'wait "$__pangea_case_pid"', 'trap - INT TERM')
+        if (hasSafety) lines.push(') &', '__pangea_case_pid=$!', 'wait "$__pangea_case_pid"', 'trap - INT TERM')
         else lines.push(`echo ${quote(`[PANGEA_CASE_END] case=${profile.case_key} status=0`)}`)
         lines.push('')
       }
@@ -2363,11 +2362,6 @@ window.__ModuleLoader__.load({
       if (repo.source?.kind !== 'git') return `${repo.repo_id}：源码尚未关联 Git 仓库（${repo.source?.error || '普通目录'}）`
       if (requirePersonalBranch && !repo.personal_branch) return `${repo.repo_id}：尚未配置个人开发分支`
       if (repo.protected_branch_error) return `${repo.repo_id}：${repo.protected_branch_error}`
-      if (repo.head_equals_personal_branch) {
-        const target = repo.suggested_checkout_ref ? ` ${repo.suggested_checkout_ref}` : '开发分支或目标提交'
-        const command = repo.suggested_checkout_command ? `（可执行：${repo.suggested_checkout_command}）` : ''
-        return `${repo.repo_id}：分析目录当前检出的正是个人分支 ${repo.personal_branch}，请先切回${target}${command}`
-      }
       return ''
     }
 
@@ -2644,7 +2638,7 @@ window.__ModuleLoader__.load({
           const taskPushedBuilds = Array.isArray(task.pushed_builds) && task.pushed_builds.length
             ? task.pushed_builds
             : (task.latest_pushed_build ? [task.latest_pushed_build] : [])
-          const defaultBuildId = task.build?.build_id || (taskPushedBuilds.length === 1 ? taskPushedBuilds[0].build_id : '')
+          const defaultBuildId = task.build?.build_id || taskPushedBuilds[0]?.build_id || ''
           setBuild({ build_id: defaultBuildId, url: '', package_id: '', package_sha256: '', notes: '', ...task.build, ...(defaultBuildId && !task.build?.build_id ? { build_id: defaultBuildId } : {}) })
           setVerification({ result: 'not_run', hits: '', notes: '', ...task.verification?.filter(item => item.case_key === task.case_keys?.[0]).at(-1), case_key: task.case_keys?.[0] || '' })
         }, [task?.id])
@@ -2676,8 +2670,8 @@ window.__ModuleLoader__.load({
           : (task.latest_pushed_build ? [task.latest_pushed_build] : [])
         const selectedPushedBuild = build.build_id
           ? (pushedBuilds.find(item => item.build_id === build.build_id) || null)
-          : (pushedBuilds.length === 1 ? pushedBuilds[0] : null)
-        const canVerify = Boolean(pushedBuilds.length) || (task.repositories || []).some(repo => repo.commit)
+          : (pushedBuilds[0] || null)
+        const canVerify = Boolean(includable || pushedBuilds.length || (task.repositories || []).some(repo => repo.commit))
         const activeCommits = selectedPushedBuild?.commits?.length
           ? selectedPushedBuild.commits
           : (Array.isArray(task.build?.commits) && task.build.commits.length
@@ -3129,22 +3123,10 @@ window.__ModuleLoader__.load({
           && !hasPatchFailures,
         )
 
-        const startBuild = async ({ retryId = null, restoreBaseline = false, allowOverwriteRemoteDiverged = false } = {}) => {
+        const startBuild = async ({ retryId = null, restoreBaseline = false } = {}) => {
           if (restoreBaseline) {
             const targets = restoreTargetRepos.map(r => `${r.repo_id}（${r.remote}/${r.remote_branch}）`).join('、')
             if (typeof window?.confirm === 'function' && !window.confirm(`确认将 ${targets} 恢复为分析目录当前干净基线（清空所有打桩改动）并推送到远端个人分支？\n该操作不会修改本地分析目录，也不使用强推。`)) {
-              return
-            }
-          }
-          const divergedRepo = activeBuild?.remote_diverged_repo || ''
-          const divergedHead = activeBuild?.remote_diverged_head || ''
-          if (allowOverwriteRemoteDiverged && divergedRepo && divergedHead) {
-            const diverged = Array.isArray(activeBuild?.remote_diverged_commits) ? activeBuild.remote_diverged_commits : []
-            const listText = diverged.slice(0, 5).map(c => `- ${String(c.commit || '').slice(0, 10)}${c.subject ? ` ${c.subject}` : ''}`).join('\n')
-            const extra = diverged.length > 5 ? `\n…等共 ${diverged.length} 个提交` : ''
-            const repoScope = `仓库 ${divergedRepo}（HEAD ${divergedHead.slice(0, 10)}）`
-            const confirmMsg = `确认覆盖 ${repoScope} 上的非 PANGEA 提交并重新推送？\n本次仅授权覆盖上述仓库的该远端 HEAD，以下提交的内容将在该分支被回退：\n${listText || '（远端存在未合入的非 PANGEA 提交）'}${extra}`
-            if (typeof window?.confirm === 'function' && !window.confirm(confirmMsg)) {
               return
             }
           }
@@ -3159,13 +3141,10 @@ window.__ModuleLoader__.load({
             const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(subject) }
             const checked = resolveCommitMessage(cfg, subject, { allowDefaultSummary: commitDraft.summary === null })
             if (!checked.ok) throw new Error(checked.error)
-            const overwriteFlag = allowOverwriteRemoteDiverged && divergedRepo && divergedHead
-              ? { confirmed_remote_diverged: { [divergedRepo]: divergedHead } }
-              : {}
             const explicitPipeline = pipelineEdited ? pipelineUrl.trim() : ''
             const effectiveBuildPipeline = explicitPipeline || selectedDefaultPipelineUrl
             const payload = retryId
-              ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, ...(pipelineDirty ? { pipeline_url: explicitPipeline } : {}), ...overwriteFlag }
+              ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, ...(pipelineDirty ? { pipeline_url: explicitPipeline } : {}) }
               : restoreBaseline
                 ? {
                     action: 'build',
@@ -3174,15 +3153,13 @@ window.__ModuleLoader__.load({
                     commit_config: cfg,
                     commit_message: checked.message,
                     ...(effectiveBuildPipeline ? { pipeline_url: effectiveBuildPipeline } : {}),
-                    ...overwriteFlag,
                   }
                 : {
                     action: 'build',
-                    items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, result_sha256: task.result_sha256 })),
+                    items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id })),
                     commit_config: cfg,
                     commit_message: checked.message,
                     ...(effectiveBuildPipeline ? { pipeline_url: effectiveBuildPipeline } : {}),
-                    ...overwriteFlag,
                   }
             const value = await request(payload)
             latestBuild = value.build
@@ -3400,10 +3377,8 @@ window.__ModuleLoader__.load({
                 h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(activeBuild.status)}` }, BUILD_STATUS_LABELS[activeBuild.status] || activeBuild.status)),
               activeBuild.status === 'pushing' && activeBuild.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送仓库：${activeBuild.current_repository}`) : null,
               activeBuild.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
-                h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : activeBuild.remote_diverged_commits?.length ? '远端分支存在非 PANGEA 打桩提交，已拦截覆盖推送。' : '本次出包未完成。'),
-                h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error)),
-                activeBuild.remote_diverged_commits?.length && canRetryActiveBuild ? h('div', { style: { marginTop: 10 } },
-                  h('button', { type: 'button', className: 'primary', disabled: working || buildRunning || !commitCheck.ok, onClick: () => startBuild({ retryId: activeBuild.id, allowOverwriteRemoteDiverged: true }) }, '确认覆盖远端非打桩提交并重新推送')) : null) : null,
+                h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : '本次出包未完成。'),
+                h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error))) : null,
               Array.isArray(activeBuild.notices) && activeBuild.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } },
                 activeBuild.notices.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))) : null,
               (activeBuild.repositories || []).map(repo => h('div', { key: repo.repo_id, className: 'pangea-fi-repo-box', style: { fontSize: 13 } },
@@ -4262,6 +4237,8 @@ window.__ModuleLoader__.load({
                   h('button', { type: 'button', className: 'lv-btn', onClick: () => setSubView('list') }, '返回列表'))),
               activeTask.error ? h('div', { className: 'pangea-lv-banner danger' }, activeTask.error) : null,
               activeTask.preflight?.guidance && !activeTask.preflight.ok ? h('div', { className: 'pangea-lv-banner warn' }, activeTask.preflight.guidance) : null,
+              Array.isArray(activeTask.preflight?.warnings) && activeTask.preflight.warnings.length
+                ? h('div', { className: 'pangea-lv-banner warn' }, activeTask.preflight.warnings.join('；')) : null,
               Array.isArray(activeTask.sync_warnings) && activeTask.sync_warnings.length
                 ? h('div', { className: 'pangea-lv-banner warn' }, `回写来源打桩任务告警：${activeTask.sync_warnings.join('；')}`) : null,
               Array.isArray(activeTask.reference_warnings) && activeTask.reference_warnings.length
@@ -4278,7 +4255,8 @@ window.__ModuleLoader__.load({
             // Single-line compact health strip (Stage-0 + Cleanup)
             h('div', { className: 'pangea-lv-strip' },
               activeTask.preflight ? h('span', { className: 'pangea-lv-strip-item' },
-                h('span', { className: `pangea-lv-pill ${activeTask.preflight.ok ? 'good' : 'danger'}` }, `Stage-0 在位预检：${activeTask.preflight.ok ? '通过' : '阻断'}`),
+                h('span', { className: `pangea-lv-pill ${!activeTask.preflight.ok ? 'danger' : (activeTask.preflight.warnings?.length ? 'warn' : 'good')}` },
+                  `Stage-0 在位预检：${!activeTask.preflight.ok ? '阻断' : (activeTask.preflight.warnings?.length ? '通过（有提醒）' : '通过')}`),
                 activeTask.preflight.baseline?.binary_path ? h('span', { style: { color: '#5e6773', fontSize: 12 } }, `${activeTask.preflight.baseline.binary_path}${activeTask.preflight.baseline.pid ? ` (PID ${activeTask.preflight.baseline.pid})` : ''}`) : null) : null,
               activeTask.cleanup ? h('span', { className: 'pangea-lv-strip-item' },
                 h('span', { className: `pangea-lv-pill ${activeTask.cleanup.status === 'ok' ? 'good' : 'danger'}` }, `宿主兜底清理与进程对账：${activeTask.cleanup.status === 'ok' ? '正常' : '异常'}`),

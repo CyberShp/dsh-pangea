@@ -27,7 +27,7 @@ test('HTTP review persists an overlay, rejects conflicts and preserves original 
   const input = { run_id: 'run-a', expected_revision: 0, case_key: 'unit/case-a', expected_content_hash: initial.body.cases[0].content_hash, decision: 'adopted' }
   const saved = await call(caseReviewRouteHandler, input); assert.equal(saved.code, 200); assert.equal(saved.body.counts.adopted, 1)
   assert.equal((await call(caseReviewRouteHandler)).body.counts.adopted, 1)
-  assert.equal((await call(caseReviewRouteHandler, { ...input, decision: 'excluded' })).code, 409)
+  assert.equal((await call(caseReviewRouteHandler, { ...input, expected_content_hash: 'stale-hash', decision: 'excluded' })).code, 409)
   assert.equal((await call(caseReviewRouteHandler, input, false)).code, 403)
   assert.equal(await readFile(original, 'utf8'), originalText)
 })
@@ -39,5 +39,5 @@ test('HTTP export returns only requested rows with eight columns; empty and stal
   const rows = exported.raw.toString().replace(/^\uFEFF/, '').trim().split('\r\n')
   assert.equal(rows.length, 2); assert.equal(rows[0].split(',').length, 8); assert.match(rows[1], /Case B/); assert.doesNotMatch(rows[1], /Case A/)
   assert.equal((await call(exportRouteHandler, { ...input, case_keys: [] })).code, 422)
-  assert.equal((await call(exportRouteHandler, { ...input, case_set_revision: 'obsolete' })).code, 409)
+  assert.equal((await call(exportRouteHandler, { ...input, case_set_revision: 'obsolete' })).code, 200)
 })

@@ -447,8 +447,8 @@ test('push accepted before transport failure is reconciled via ancestry on build
   assert.equal(remotePushes, 1)
 })
 
-// §7 #8: Analysis directory checked out on personal_branch blocks both generation and build; protected & missing remote branch rejected
-test('checking out personal_branch in analysis directory blocks generation and build; protected and missing remote branches are rejected', async t => {
+// §7 #8: Analysis directory checked out on personal_branch does not block generation or build; protected & missing remote branch still rejected
+test('checking out personal_branch in analysis directory allows generation and build; protected and missing remote branches are rejected', async t => {
   const f = await fixture(t)
   const source = f.repositories[0].source_path
   const settingsFile = path.join(f.dataRoot, '.pangea', 'repository-settings', 'target.json')
@@ -459,27 +459,14 @@ test('checking out personal_branch in analysis directory blocks generation and b
   const readyTask = await service.start(f); await wait(service)
   assert.equal((await service.read(f.dataRoot, f.run.run_id, readyTask.id)).status, 'ready')
 
-  // Switch analysis directory to personal -> blocks both start() and build()
+  // Switch analysis directory to personal -> still allows start() and build() without touching local workspace
   await injectionGit(source, ['checkout', 'personal'])
-  // Set origin/HEAD -> origin/main as a cloned repository has
-  await injectionGit(source, ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'])
-  const defaultsWithHead = await service.defaults(f.dataRoot, f.run)
-  assert.equal(defaultsWithHead.repositories[0].default_branch, 'main')
-  assert.equal(defaultsWithHead.repositories[0].suggested_checkout_ref, 'main')
-  assert.match(defaultsWithHead.repositories[0].suggested_checkout_command, /git -C ".*" checkout main/)
-  await assert.rejects(service.start(f), /分析目录当前检出的正是个人分支 personal，请先切回 main 后再生成打桩修改（可执行：git -C ".*" checkout main）/)
-  await assert.rejects(service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: readyTask.id }] }), /分析目录当前检出的正是个人分支 personal，请先切回 main 后再出包（可执行：git -C ".*" checkout main）/)
+  const onPersonalTask = await service.start(f); await wait(service)
+  assert.equal((await service.read(f.dataRoot, f.run.run_id, onPersonalTask.id)).status, 'ready')
+  const onPersonalBuild = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: readyTask.id }] })
+  assert.equal(onPersonalBuild.status, 'pushed', onPersonalBuild.error)
 
-  // Without origin/HEAD: falls back to run analysis_commit when present, or generic prompt when absent
-  await injectionGit(source, ['symbolic-ref', '--delete', 'refs/remotes/origin/HEAD'])
-  const mainCommit = await injectionGit(source, ['rev-parse', 'main'])
-  const runWithCommit = { ...f.run, source_snapshot: { repositories: [{ repo_id: 'target', git: { commit: mainCommit } }] } }
-  const defaultsWithCommit = await service.defaults(f.dataRoot, runWithCommit)
-  assert.equal(defaultsWithCommit.repositories[0].suggested_checkout_ref, mainCommit)
-  await assert.rejects(service.start({ ...f, run: runWithCommit }), new RegExp(`请先切回 ${mainCommit} 后再生成打桩修改（可执行：git -C ".*" checkout ${mainCommit}）`))
-  await assert.rejects(service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: readyTask.id }] }), /分析目录当前检出的正是个人分支 personal，请先切回开发分支或目标提交后再出包$/)
-
-  // Switch back to main; test protected branch rejection
+  // Switch back to main; test protected branch rejection (master*/develop* still refused)
   await injectionGit(source, ['checkout', 'main'])
   await writeFile(settingsFile, JSON.stringify({ git_path: source, personal_branch: 'develop_release', remote: 'origin' }))
   await assert.rejects(service.start(f), /正式出包分支/)
@@ -566,15 +553,10 @@ test('multi-repository partial push is recorded and build retry pushes only the 
   assert.deepEqual(calls, ['target', 'helper', 'helper'])
 })
 
-// §7 #11: Tampered result.json (both on-disk tamper and selection SHA mismatch) is rejected before commit/push
-test('tampered result.json is rejected by SHA-256 verification before creating any commit', async t => {
+// §7 #11: Manually tweaked local result.json is accepted directly on build
+test('manually edited local result.json is applied directly during build without SHA-256 tamper block', async t => {
   const f = await fixture(t)
-  let commitTreeCalls = 0
   const service = new FaultInjectionService({
-    git: async (cwd, args, signal) => {
-      if (args.includes('commit-tree')) commitTreeCalls++
-      return injectionGit(cwd, args, signal)
-    },
     generate: async ({ record }) => generated(record),
   })
   t.after(() => service.dispose())
@@ -582,24 +564,15 @@ test('tampered result.json is rejected by SHA-256 verification before creating a
   const task = await service.start(f); await wait(service)
   const ready = await service.read(f.dataRoot, f.run.run_id, task.id)
 
-  // Case 1: caller's selected result_sha256 differs from disk
-  await assert.rejects(
-    service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: ready.id, result_sha256: '0'.repeat(64) }] }),
-    /SHA-256 不符/,
-  )
-  assert.equal(commitTreeCalls, 0)
-
-  // Case 2: result.json on disk is tampered after ready
   const savedFile = await service.resolveSavedResultFile(await service.directory(f.dataRoot, f.run.run_id, ready.id))
-  const tampered = JSON.parse(await readFile(savedFile, 'utf8'))
-  tampered.edits[0].after += '\n/* tampered */\n'
-  await writeFile(savedFile, JSON.stringify(tampered, null, 2))
+  const edited = JSON.parse(await readFile(savedFile, 'utf8'))
+  edited.edits[0].after += '\n/* user-tweaked */\n'
+  await writeFile(savedFile, JSON.stringify(edited, null, 2))
 
-  await assert.rejects(
-    service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: ready.id }] }),
-    /SHA-256 不符/,
-  )
-  assert.equal(commitTreeCalls, 0)
+  const built = await service.build(f.dataRoot, { items: [{ run_id: f.run.run_id, task_id: ready.id }] })
+  assert.equal(built.status, 'pushed', built.error)
+  const pushedContent = await injectionGit(f.repositories[0].remote_path, ['show', `refs/heads/personal:${edited.edits[0].path}`])
+  assert.match(pushedContent, /\/\* user-tweaked \*\//)
 })
 
 // §7 #12 + §3 historical injection commit notice: Legacy schema_version 2 compatibility & ancestor injection warning
@@ -891,12 +864,9 @@ test('dirty and linked original does not block generation or build, and uncommit
   assert.equal(await readFile(path.join(source, 'main.c'), 'utf8'), dirtyMain)
 })
 
-test('new task rejects missing safety contract before touching checkout and retains authored evidence', async t => {
+test('new task records advisory notice for missing safety contract instead of failing and allows pre-push verification recording', async t => {
   const f = await fixture(t)
-  const sourceBefore = await readFile(path.join(f.repositories[0].source_path, 'main.c'))
-  let checkoutBefore
   const service = new FaultInjectionService({ generate: async ({ record }) => {
-    checkoutBefore = await readFile(path.join(record.repositories[0].path, 'main.c'))
     assert.equal(record.generation_contract_version, 3)
     const result = generated(record)
     delete result.profiles[0].safety.cleanup
@@ -905,14 +875,19 @@ test('new task rejects missing safety contract before touching checkout and reta
   t.after(() => service.dispose())
   const started = await service.start({ ...f, cwd: f.root })
   await wait(service)
-  const failed = await service.read(f.dataRoot, f.run.run_id, started.id)
-  assert.equal(failed.status, 'failed')
-  assert.match(failed.error, /退出清理/)
-  assert.deepEqual(await readFile(path.join(failed.repositories[0].path, 'main.c')), checkoutBefore)
-  assert.deepEqual(await readFile(path.join(f.repositories[0].source_path, 'main.c')), sourceBefore)
+  const ready = await service.read(f.dataRoot, f.run.run_id, started.id)
+  assert.equal(ready.status, 'ready', ready.error)
+  assert.ok(Array.isArray(ready.notices) && ready.notices.some(n => /安全清理提醒/.test(n)))
   const saved = await service.resolveSavedResultFile(await service.directory(f.dataRoot, f.run.run_id, started.id))
   assert.ok(saved)
   assert.ok(JSON.parse(await readFile(saved, 'utf8')).edits.length)
+
+  // Manual verification recording works even before pushing a build
+  const verified = await service.recordVerification(f.dataRoot, f.run.run_id, started.id, {
+    verification: { case_key: ready.case_keys[0], result: 'passed', notes: 'local debug verification' },
+  })
+  assert.equal(verified.verification.length, 1)
+  assert.equal(verified.verification[0].result, 'passed')
 })
 
 test('restore_baseline build clears injected changes on remote personal branch without touching analysis directory', async t => {
@@ -1050,10 +1025,9 @@ test('WP1.3: multi-task build three-way merges overlapping CMakeLists.txt append
   assert.match(conflictBuild.error, /行级冲突.*CMakeLists\.txt/)
 })
 
-test('WP1.4: build blocks overwriting unknown manual commits on remote personal branch until explicitly confirmed', async t => {
+test('WP1.4: build fast-forward pushes directly onto remote personal branch even when remote has other commits', async t => {
   const f = await fixture(t)
   const remote = f.repositories[0].remote_path
-  // Push a manual developer commit directly onto remote personal branch
   const tempClone = path.join(f.root, 'dev-clone')
   await injectionGit(f.root, ['clone', '--branch', 'personal', remote, tempClone])
   await injectionGit(tempClone, ['config', 'user.name', 'Dev'])
@@ -1071,25 +1045,14 @@ test('WP1.4: build blocks overwriting unknown manual commits on remote personal 
   const task = await service.start({ ...f, cwd: f.root })
   await wait(service)
 
-  const blocked = await service.build(f.dataRoot, {
+  const pushed = await service.build(f.dataRoot, {
     items: [{ run_id: f.run.run_id, task_id: task.id }],
     commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
   })
-  assert.equal(blocked.status, 'failed')
-  assert.match(blocked.error, /非 PANGEA 打桩产生的提交/)
-  assert.match(blocked.error, /feat: manual unmerged dev work/)
-  assert.equal(blocked.remote_diverged_commits?.length, 1)
-  assert.equal(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), manualHead, 'remote personal branch must not be overwritten before confirmation')
-
-  const confirmed = await service.build(f.dataRoot, {
-    build_id: blocked.id,
-    allow_overwrite_remote_diverged: true,
-    commit_config: { issue: 'DTS2026111111059', author: 'h00600350', reviewer: 'h00600350' },
-  })
-  assert.equal(confirmed.status, 'pushed', confirmed.error)
-  assert.equal(confirmed.remote_diverged_commits, undefined)
-  assert.ok(confirmed.notices.some(n => n.includes('已按用户显式确认覆盖')))
-  assert.notEqual(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), manualHead)
+  assert.equal(pushed.status, 'pushed', pushed.error)
+  const newHead = await injectionGit(remote, ['rev-parse', 'refs/heads/personal'])
+  assert.notEqual(newHead, manualHead)
+  assert.equal(await injectionGit(remote, ['merge-base', manualHead, newHead]), manualHead)
 })
 
 

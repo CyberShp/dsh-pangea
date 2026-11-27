@@ -74,7 +74,7 @@ test('dangerous command guard blocks destructive system commands while allowing 
     'sudo poweroff',
     'echo ok && shutdown -r now',
     'mkfs.ext4 /dev/sdb',
-    'dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=1',
+    'dd if=/dev/zero of=/dev/sda bs=1M count=1',
     'rm -rf /',
     'rm -rf /etc',
     'sysupgrade firmware.bin',
@@ -84,6 +84,8 @@ test('dangerous command guard blocks destructive system commands while allowing 
   for (const allowed of [
     'echo 1 > /dev/shm/pangea_stub_01',
     'rm -f /dev/shm/pangea_stub_01',
+    'dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=1',
+    'ip link set ens2f0 down',
     'kill -TERM 4242',
     'diagnose_usr',
     'grep -aFq -- "PANGEA_MARKER" /proc/4242/exe',

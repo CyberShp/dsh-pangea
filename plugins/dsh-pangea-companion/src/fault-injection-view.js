@@ -148,11 +148,6 @@ function repoBlockingReason(repo, { requirePersonalBranch = false } = {}) {
   if (repo.source?.kind !== 'git') return `${repo.repo_id}：源码尚未关联 Git 仓库（${repo.source?.error || '普通目录'}）`
   if (requirePersonalBranch && !repo.personal_branch) return `${repo.repo_id}：尚未配置个人开发分支`
   if (repo.protected_branch_error) return `${repo.repo_id}：${repo.protected_branch_error}`
-  if (repo.head_equals_personal_branch) {
-    const target = repo.suggested_checkout_ref ? ` ${repo.suggested_checkout_ref}` : '开发分支或目标提交'
-    const command = repo.suggested_checkout_command ? `（可执行：${repo.suggested_checkout_command}）` : ''
-    return `${repo.repo_id}：分析目录当前检出的正是个人分支 ${repo.personal_branch}，请先切回${target}${command}`
-  }
   return ''
 }
 
@@ -429,7 +424,7 @@ export function createFaultInjectionTaskDetail(React) {
       const taskPushedBuilds = Array.isArray(task.pushed_builds) && task.pushed_builds.length
         ? task.pushed_builds
         : (task.latest_pushed_build ? [task.latest_pushed_build] : [])
-      const defaultBuildId = task.build?.build_id || (taskPushedBuilds.length === 1 ? taskPushedBuilds[0].build_id : '')
+      const defaultBuildId = task.build?.build_id || taskPushedBuilds[0]?.build_id || ''
       setBuild({ build_id: defaultBuildId, url: '', package_id: '', package_sha256: '', notes: '', ...task.build, ...(defaultBuildId && !task.build?.build_id ? { build_id: defaultBuildId } : {}) })
       setVerification({ result: 'not_run', hits: '', notes: '', ...task.verification?.filter(item => item.case_key === task.case_keys?.[0]).at(-1), case_key: task.case_keys?.[0] || '' })
     }, [task?.id])
@@ -461,8 +456,8 @@ export function createFaultInjectionTaskDetail(React) {
       : (task.latest_pushed_build ? [task.latest_pushed_build] : [])
     const selectedPushedBuild = build.build_id
       ? (pushedBuilds.find(item => item.build_id === build.build_id) || null)
-      : (pushedBuilds.length === 1 ? pushedBuilds[0] : null)
-    const canVerify = Boolean(pushedBuilds.length) || (task.repositories || []).some(repo => repo.commit)
+      : (pushedBuilds[0] || null)
+    const canVerify = Boolean(includable || pushedBuilds.length || (task.repositories || []).some(repo => repo.commit))
     const activeCommits = selectedPushedBuild?.commits?.length
       ? selectedPushedBuild.commits
       : (Array.isArray(task.build?.commits) && task.build.commits.length
@@ -914,22 +909,10 @@ export function createFaultInjectionBuild(React) {
       && !hasPatchFailures,
     )
 
-    const startBuild = async ({ retryId = null, restoreBaseline = false, allowOverwriteRemoteDiverged = false } = {}) => {
+    const startBuild = async ({ retryId = null, restoreBaseline = false } = {}) => {
       if (restoreBaseline) {
         const targets = restoreTargetRepos.map(r => `${r.repo_id}（${r.remote}/${r.remote_branch}）`).join('、')
         if (typeof window?.confirm === 'function' && !window.confirm(`确认将 ${targets} 恢复为分析目录当前干净基线（清空所有打桩改动）并推送到远端个人分支？\n该操作不会修改本地分析目录，也不使用强推。`)) {
-          return
-        }
-      }
-      const divergedRepo = activeBuild?.remote_diverged_repo || ''
-      const divergedHead = activeBuild?.remote_diverged_head || ''
-      if (allowOverwriteRemoteDiverged && divergedRepo && divergedHead) {
-        const diverged = Array.isArray(activeBuild?.remote_diverged_commits) ? activeBuild.remote_diverged_commits : []
-        const listText = diverged.slice(0, 5).map(c => `- ${String(c.commit || '').slice(0, 10)}${c.subject ? ` ${c.subject}` : ''}`).join('\n')
-        const extra = diverged.length > 5 ? `\n…等共 ${diverged.length} 个提交` : ''
-        const repoScope = `仓库 ${divergedRepo}（HEAD ${divergedHead.slice(0, 10)}）`
-        const confirmMsg = `确认覆盖 ${repoScope} 上的非 PANGEA 提交并重新推送？\n本次仅授权覆盖上述仓库的该远端 HEAD，以下提交的内容将在该分支被回退：\n${listText || '（远端存在未合入的非 PANGEA 提交）'}${extra}`
-        if (typeof window?.confirm === 'function' && !window.confirm(confirmMsg)) {
           return
         }
       }
@@ -944,13 +927,10 @@ export function createFaultInjectionBuild(React) {
         const cfg = { ...commitDraft, summary: commitDraft.summary ?? defaultCommitSummary(subject) }
         const checked = resolveCommitMessage(cfg, subject, { allowDefaultSummary: commitDraft.summary === null })
         if (!checked.ok) throw new Error(checked.error)
-        const overwriteFlag = allowOverwriteRemoteDiverged && divergedRepo && divergedHead
-          ? { confirmed_remote_diverged: { [divergedRepo]: divergedHead } }
-          : {}
         const explicitPipeline = pipelineEdited ? pipelineUrl.trim() : ''
         const effectiveBuildPipeline = explicitPipeline || selectedDefaultPipelineUrl
         const payload = retryId
-          ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, ...(pipelineDirty ? { pipeline_url: explicitPipeline } : {}), ...overwriteFlag }
+          ? { action: 'build', build_id: retryId, commit_config: cfg, commit_message: checked.message, ...(pipelineDirty ? { pipeline_url: explicitPipeline } : {}) }
           : restoreBaseline
             ? {
                 action: 'build',
@@ -959,15 +939,13 @@ export function createFaultInjectionBuild(React) {
                 commit_config: cfg,
                 commit_message: checked.message,
                 ...(effectiveBuildPipeline ? { pipeline_url: effectiveBuildPipeline } : {}),
-                ...overwriteFlag,
               }
             : {
                 action: 'build',
-                items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id, result_sha256: task.result_sha256 })),
+                items: selectedTasks.map(task => ({ run_id: task.run_id, task_id: task.id })),
                 commit_config: cfg,
                 commit_message: checked.message,
                 ...(effectiveBuildPipeline ? { pipeline_url: effectiveBuildPipeline } : {}),
-                ...overwriteFlag,
               }
         const value = await request(payload)
         latestBuild = value.build
@@ -1185,10 +1163,8 @@ export function createFaultInjectionBuild(React) {
             h('span', { role: 'status', className: `pangea-fi-status-pill ${statusTone(activeBuild.status)}` }, BUILD_STATUS_LABELS[activeBuild.status] || activeBuild.status)),
           activeBuild.status === 'pushing' && activeBuild.current_repository ? h('p', { className: 'pangea-fi-banner info' }, `正在推送仓库：${activeBuild.current_repository}`) : null,
           activeBuild.error ? h('div', { role: 'alert', className: 'pangea-fi-banner danger', style: { display: 'block' } },
-            h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : activeBuild.remote_diverged_commits?.length ? '远端分支存在非 PANGEA 打桩提交，已拦截覆盖推送。' : '本次出包未完成。'),
-            h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error)),
-            activeBuild.remote_diverged_commits?.length && canRetryActiveBuild ? h('div', { style: { marginTop: 10 } },
-              h('button', { type: 'button', className: 'primary', disabled: working || buildRunning || !commitCheck.ok, onClick: () => startBuild({ retryId: activeBuild.id, allowOverwriteRemoteDiverged: true }) }, '确认覆盖远端非打桩提交并重新推送')) : null) : null,
+            h('p', { style: { margin: 0, fontWeight: 600 } }, hasPatchFailures ? '部分打桩补丁与当前 HEAD 失配，本次未提交且未推送。' : '本次出包未完成。'),
+            h('details', { open: true }, h('summary', null, '查看错误详情'), h('pre', { style: { whiteSpace: 'pre-wrap', margin: '6px 0 0' } }, activeBuild.error))) : null,
           Array.isArray(activeBuild.notices) && activeBuild.notices.length ? h('div', { role: 'status', className: 'pangea-fi-banner warn', style: { display: 'block' } },
             activeBuild.notices.map((msg, idx) => h('p', { key: idx, style: { margin: idx ? '4px 0 0' : 0 } }, msg))) : null,
           (activeBuild.repositories || []).map(repo => h('div', { key: repo.repo_id, className: 'pangea-fi-repo-box', style: { fontSize: 13 } },

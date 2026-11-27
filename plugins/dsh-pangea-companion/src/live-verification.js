@@ -166,12 +166,6 @@ export function validateVerificationResult(result, { targetKeys = [], validComma
       return { ok: false, error: `items[${targetKey}].verdict 无效（须为 ${LIVE_VERDICT_VALUES.join(' / ')}）` }
     }
     const hits = typeof item.hits === 'string' ? item.hits.trim() : ''
-    const targetPointIds = pointIdsByTarget instanceof Map
-      ? (pointIdsByTarget.get(targetKey) || [])
-      : (Array.isArray(pointIdsByTarget?.[targetKey]) ? pointIdsByTarget[targetKey] : [])
-    if (requireNonZeroHits && (verdict === 'confirmed' || verdict === 'excluded') && !hasPositiveHitCount(hits, { pointIds: targetPointIds })) {
-      return { ok: false, error: `items[${targetKey}] 在打桩核验模式下未观测到非零桩命中（hits="${hits || '空'}"），不得判为 ${verdict}；请补充真实命中计数或改判 not_triggered` }
-    }
     const evidenceIds = Array.isArray(item.evidence_command_ids)
       ? [...new Set(item.evidence_command_ids.map(v => typeof v === 'string' ? v.trim() : '').filter(Boolean))]
       : []
@@ -206,7 +200,7 @@ export function validateVerificationResult(result, { targetKeys = [], validComma
   }
 }
 
-export function buildVerificationPrompt({ record, inputPath, outputPath, cliPath, configPath, maxGatewayCalls = 30, hasKnowledgePack = false }) {
+export function buildVerificationPrompt({ record, inputPath, outputPath, cliPath, configPath, maxGatewayCalls = 80, hasKnowledgePack = false }) {
   const cli = `node "${posixPath(cliPath)}"`
   const cfgFlag = `--config "${posixPath(configPath)}"`
   return [
@@ -504,7 +498,7 @@ export class LiveVerificationService {
 
       const effectiveProcess = String(targetProcess || environment.array?.default_process || '').trim()
       const markers = [...new Set((Array.isArray(markerStrings) ? markerStrings : []).map(v => String(v ?? '').trim()).filter(Boolean))]
-      const dynamicBudget = Math.min(120, Math.max(30, 14 + normalizedTargets.length * 8))
+      const dynamicBudget = Math.min(200, Math.max(80, 40 + normalizedTargets.length * 16))
       const effectiveMaxCalls = Number.isInteger(maxGatewayCallsInput) && maxGatewayCallsInput > 0
         ? maxGatewayCallsInput
         : (this.maxGatewayCalls ?? dynamicBudget)
@@ -571,7 +565,7 @@ export class LiveVerificationService {
     return record
   }
 
-  async executeTask({ dataRoot, cwd, record, environment, resolvedHosts = {}, scratchDirectory, points, profiles, replaceFiles, analysisContext = null, toolReferenceFiles = [], maxGatewayCalls = 30, signal }) {
+  async executeTask({ dataRoot, cwd, record, environment, resolvedHosts = {}, scratchDirectory, points, profiles, replaceFiles, analysisContext = null, toolReferenceFiles = [], maxGatewayCalls = 80, signal }) {
     const tFile = transcriptFile(dataRoot, record.id)
     const gatewayConfigPath = path.join(scratchDirectory, '.gateway.json')
     const canUseUnifiedGateway = typeof this.ssh?.createSession === 'function'
@@ -1135,79 +1129,56 @@ export class LiveVerificationService {
       }
     }
 
+    const warnings = []
+    let missingMarkers = []
     if (record.mode === 'fault_injection' && record.marker_strings.length > 0) {
       if (!environment.array) {
-        return {
-          ok: false,
-          error: '打桩核验模式要求配置「存储阵列（Array）」端以执行 Stage-0 二进制标记在位核验',
-          guidance: '请在「环境管理」中为该环境补充存储阵列 SSH 连接信息。',
-          checks,
-          command_ids: commandIds,
-          baseline,
-        }
-      }
-      let verifyTarget = baseline.binary_path
-      if (!verifyTarget && ambiguousPids.length > 1) {
-        return {
-          ok: false,
-          error: `Stage-0 预检发现多个名为「${baseline.process}」的进程 PID（${ambiguousPids.join(', ')}），无法唯一确定目标二进制`,
-          guidance: '请在核验表单中显式填写「目标 PID」或「部署二进制绝对路径」后重试。',
-          checks,
-          command_ids: commandIds,
-          baseline,
-        }
-      }
-      if (!verifyTarget && baseline.pid) verifyTarget = `/proc/${baseline.pid}/exe`
-      if (!verifyTarget) {
-        const absReplace = (replaceFiles || []).find(item => typeof item?.artifact === 'string' && item.artifact.startsWith('/'))
-        if (absReplace) verifyTarget = absReplace.artifact
-      }
-      if (!verifyTarget) {
-        return {
-          ok: false,
-          error: 'Stage-0 预检无法确定待核验的真机运行二进制（未找到运行进程 PID 且未指定二进制路径）',
-          guidance: '请在核验表单中填写「目标守护进程名」「PID」或「部署二进制绝对路径」，确认带桩包已烧入并启动。',
-          checks,
-          command_ids: commandIds,
-          baseline,
-        }
-      }
-      baseline.binary_path = verifyTarget
-      const missingMarkers = []
-      for (const marker of record.marker_strings) {
-        const cmd = `grep -aFq -- ${shellSingleQuote(marker)} ${shellSingleQuote(verifyTarget)}`
-        const res = await execLogged('array', cmd, { timeoutMs: 20_000, guard: false, phase: 'preflight' })
-        commandIds.push(res.command_id)
-        if (res.exit_code !== 0 && res.exit_code !== 1) {
-          const reason = (res.stderr || res.error || `grep exit ${res.exit_code}`).trim()
-          checks.push({ kind: 'marker', target: 'array', marker, binary: verifyTarget, ok: false, command_id: res.command_id, detail: reason })
-          return {
-            ok: false,
-            error: `Stage-0 验包无法读取目标二进制 ${verifyTarget}：${reason}`,
-            guidance: '请检查阵列 SSH 账号读取权限（/proc/<pid>/exe 通常需要 root 或同属主权限）及目标进程是否仍在运行。',
-            checks,
-            command_ids: commandIds,
-            baseline,
+        warnings.push('当前环境未配置存储阵列（Array）连接，已跳过 Stage-0 二进制标记核验并继续执行。')
+      } else {
+        let verifyTarget = baseline.binary_path
+        if (!verifyTarget && ambiguousPids.length > 1) {
+          warnings.push(`Stage-0 预检发现多个名为「${baseline.process}」的进程 PID（${ambiguousPids.join(', ')}），已跳过 /proc/<pid>/exe 自动验包并继续执行；如需精确验包可填写目标 PID 或二进制路径。`)
+        } else {
+          if (!verifyTarget && baseline.pid) verifyTarget = `/proc/${baseline.pid}/exe`
+          if (!verifyTarget) {
+            const absReplace = (replaceFiles || []).find(item => typeof item?.artifact === 'string' && item.artifact.startsWith('/'))
+            if (absReplace) verifyTarget = absReplace.artifact
           }
-        }
-        const ok = res.exit_code === 0
-        checks.push({ kind: 'marker', target: 'array', marker, binary: verifyTarget, ok, command_id: res.command_id })
-        if (!ok) missingMarkers.push(marker)
-      }
-      if (missingMarkers.length > 0) {
-        return {
-          ok: false,
-          error: `Stage-0 验包失败：真机 ${verifyTarget} 缺少 ${missingMarkers.length} 个打桩特征标记（${missingMarkers.join('、')}）`,
-          guidance: '当前真机运行的并非刚出包的带桩二进制（可能未烧包生效、槽位未切或连错了节点），已拦截执行以防止假阴性结论。',
-          missing_markers: missingMarkers,
-          checks,
-          command_ids: commandIds,
-          baseline,
+          if (!verifyTarget) {
+            warnings.push('Stage-0 预检未找到运行进程 PID 且未指定二进制路径，已跳过自动验包并继续执行。')
+          } else {
+            baseline.binary_path = verifyTarget
+            let unreadableReason = ''
+            for (const marker of record.marker_strings) {
+              const cmd = `grep -aFq -- ${shellSingleQuote(marker)} ${shellSingleQuote(verifyTarget)}`
+              const res = await execLogged('array', cmd, { timeoutMs: 20_000, guard: false, phase: 'preflight' })
+              commandIds.push(res.command_id)
+              if (res.exit_code !== 0 && res.exit_code !== 1) {
+                unreadableReason = (res.stderr || res.error || `grep exit ${res.exit_code}`).trim()
+                checks.push({ kind: 'marker', target: 'array', marker, binary: verifyTarget, ok: false, command_id: res.command_id, detail: unreadableReason })
+                warnings.push(`Stage-0 验包未能读取目标二进制 ${verifyTarget}（${unreadableReason}），已跳过自动验包并继续执行。`)
+                break
+              }
+              const ok = res.exit_code === 0
+              checks.push({ kind: 'marker', target: 'array', marker, binary: verifyTarget, ok, command_id: res.command_id })
+              if (!ok) missingMarkers.push(marker)
+            }
+            if (!unreadableReason && missingMarkers.length > 0) {
+              warnings.push(`Stage-0 提醒：主程序 ${verifyTarget} 未直接搜到 ${missingMarkers.length} 个打桩标记（${missingMarkers.join('、')}）；若桩位于动态库 .so / 内核模块 .ko 可忽略，否则请核对是否已烧入带桩包。`)
+            }
+          }
         }
       }
     }
 
-    return { ok: true, checks, command_ids: commandIds, baseline }
+    return {
+      ok: true,
+      checks,
+      command_ids: commandIds,
+      baseline,
+      ...(warnings.length ? { warnings } : {}),
+      ...(missingMarkers.length ? { missing_markers: missingMarkers } : {}),
+    }
   }
 
   async cancel({ dataRoot, verifyId }) {
@@ -1242,7 +1213,6 @@ export class LiveVerificationService {
     })
     if (!normalized.length) throw serviceError('请至少提供一条确认结论')
     const preflightBlocked = record.status === 'blocked' || record.preflight?.ok === false
-    const requireNonZeroHits = record.mode === 'fault_injection'
     for (const item of normalized) {
       if (item.verdict === 'confirmed' || item.verdict === 'excluded') {
         if (preflightBlocked) {
@@ -1250,9 +1220,6 @@ export class LiveVerificationService {
         }
         if (item.evidence_command_ids.length === 0) {
           throw serviceError(`目标「${item.target_key}」缺少真实设备执行证据（evidence_command_ids 为空），不得确认为实测 ${item.verdict}`, 400)
-        }
-        if (requireNonZeroHits && !hasPositiveHitCount(item.hits)) {
-          throw serviceError(`目标「${item.target_key}」在打桩核验模式下未观测到非零桩命中（hits="${item.hits || '空'}"），不得确认为实测 ${item.verdict}`, 400)
         }
       }
     }

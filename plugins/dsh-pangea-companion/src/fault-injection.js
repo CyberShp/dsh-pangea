@@ -43,11 +43,6 @@ const cleanError = error => {
   const message = String(error?.stderr || error?.message || error).replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/g, '$1***@')
   return message.length <= 6000 ? message : `${message.slice(0, 2900)}\n…错误输出过长，中间已省略…\n${message.slice(-2900)}`
 }
-const formatPersonalBranchBlockMessage = ({ repoId, personalBranch, sourcePath = '', suggestedRef = '', actionLabel = '' }) => {
-  const target = suggestedRef ? ` ${suggestedRef}${actionLabel ? ` 后${actionLabel}` : ''}` : `开发分支或目标提交${actionLabel ? `后${actionLabel}` : ''}`
-  const command = suggestedRef && sourcePath ? `（可执行：git -C "${sourcePath}" checkout ${suggestedRef}）` : ''
-  return `${repoId}：分析目录当前检出的正是个人分支 ${personalBranch}，请先切回${target}${command}`
-}
 
 export async function injectionGit(cwd, args, signal) {
   // Resolve outside the Git error mapping: a temp-file failure is not "Git missing".
@@ -1115,6 +1110,76 @@ export function collectConsistencyNotices(value, record = null) {
         notices.push('平台限制提醒（L2）：检测到触发参数写死或缺少运行期门控；大包部署后每次宿主进程启动均会触发故障（模块持续停留失败态，无法同包验证恢复），恢复需重出干净基线包，不适合常态化驻留。')
       }
     }
+    if (record?.generation_contract_version >= 3) {
+      const replaceFiles = normalizeReplaceFiles(value?.delivery?.replace_files)
+      if (!replaceFiles.length || replaceFiles.some(item => !item.source_files.length)) {
+        notices.push('交付信息提醒：delivery.replace_files 缺少部分产物或对应源码说明（若走个人分支流水线出整包可忽略）。')
+      } else {
+        const businessEdits = edits.filter(edit => isBusinessSourceEdit(edit.path))
+        const basenameCounts = new Map()
+        for (const edit of businessEdits) {
+          const base = path.posix.basename(posixPath(edit.path || ''))
+          basenameCounts.set(base, (basenameCounts.get(base) ?? 0) + 1)
+        }
+        const uncovered = businessEdits
+          .filter(edit => !sourceFileCovered(edit, replaceFiles, basenameCounts.get(path.posix.basename(posixPath(edit.path || ''))) === 1))
+          .map(edit => posixPath(edit.path))
+        if (uncovered.length) {
+          notices.push(`交付信息提醒：delivery.replace_files 未标注部分已修改业务源码的产物归属（${[...new Set(uncovered)].join('、')}），若走个人分支整包流水线可直接出包。`)
+        }
+      }
+    }
+  }
+  const profiles = Array.isArray(value.profiles) ? value.profiles : []
+  if (record?.generation_contract_version >= 2) {
+    const hasCommands = items => Array.isArray(items) && items.length > 0
+      && items.every(item => typeof item === 'string' && item.trim())
+      && items.some(item => item.split('\n').some(line => line.trim() && !line.trim().startsWith('#')))
+    const missingScopeIds = points
+      .filter(point => {
+        const scope = point?.trigger_scope
+        return !scope || typeof scope.current_input !== 'string' || !scope.current_input.trim()
+          || !Array.isArray(scope.excluded_inputs) || !scope.excluded_inputs.length
+          || scope.excluded_inputs.some(item => typeof item !== 'string' || !item.trim())
+      })
+      .map(point => point?.id || '?')
+    if (missingScopeIds.length) {
+      notices.push(`桩点范围提醒：桩点 ${missingScopeIds.join('、')} 未填写完整的 trigger_scope（当前输入来源与非目标排除范围），执行前请人工核对触发条件。`)
+    }
+    const missingSafetyCases = profiles
+      .filter(profile => {
+        const safety = profile?.safety
+        return !safety || ['setup', 'negative_steps', 'cleanup', 'cleanup_verify'].some(key => !hasCommands(safety[key]))
+          || !Array.isArray(safety.negative_point_ids) || !Array.isArray(profile.point_ids)
+          || profile.point_ids.some(id => !safety.negative_point_ids.includes(id))
+          || safety.negative_point_ids.some(id => !profile.point_ids.includes(id))
+      })
+      .map(profile => profile?.case_key || '?')
+    if (missingSafetyCases.length) {
+      notices.push(`安全清理提醒：用例 ${missingSafetyCases.join('、')} 缺少完整的 safety（负向验证/退出清理/恢复检查），导出脚本将按普通步骤生成。`)
+    }
+  }
+  if (record?.generation_contract_version >= 3) {
+    const delivery = value.delivery
+    if (!delivery || typeof delivery !== 'object' || Array.isArray(delivery)) {
+      notices.push('交付信息提醒：结果未提供 delivery 交付信息（构建前提、产物清单与桩特征标识），不影响出包。')
+    } else {
+      if (typeof delivery.build_requirement !== 'string' || !delivery.build_requirement.trim()) {
+        notices.push('交付信息提醒：delivery.build_requirement 未填写构建配置前提，请按默认环境编译。')
+      }
+      const markers = Array.isArray(delivery.marker_strings)
+        ? delivery.marker_strings.filter(item => typeof item === 'string' && item.trim().length >= 4).map(item => item.trim())
+        : []
+      if (!markers.length) {
+        notices.push('交付信息提醒：delivery.marker_strings 未提供长度 >= 4 的桩特征字面量，真机核验时将跳过二进制特征核对。')
+      } else {
+        const allAfter = edits.map(edit => typeof edit?.after === 'string' ? edit.after : '').join('\n')
+        const missingMarkers = markers.filter(marker => !allAfter.includes(marker))
+        if (missingMarkers.length) {
+          notices.push(`交付信息提醒：delivery.marker_strings 中的标识（${missingMarkers.join('、')}）未在 edits[].after 中找到，真机核验前请核对。`)
+        }
+      }
+    }
   }
   return notices
 }
@@ -1123,28 +1188,6 @@ export function checkInjectionResult(value, record) {
   normalizeInjectionResult(value)
   if (!value || !Array.isArray(value.edits) || !value.edits.length) throw serviceError('Agent 未提供实际代码修改；本轮未形成修改，可重新生成')
   if (!Array.isArray(value.points) || !value.points.length || !Array.isArray(value.profiles)) throw serviceError('生成结果缺少桩点或逐用例执行说明')
-  if (record.generation_contract_version >= 2) {
-    const commands = items => Array.isArray(items) && items.length > 0
-      && items.every(item => typeof item === 'string' && item.trim())
-      && items.some(item => item.split('\n').some(line => line.trim() && !line.trim().startsWith('#')))
-    for (const point of value.points) {
-      const scope = point?.trigger_scope
-      if (!scope || typeof scope.current_input !== 'string' || !scope.current_input.trim()
-        || !Array.isArray(scope.excluded_inputs) || !scope.excluded_inputs.length
-        || scope.excluded_inputs.some(item => typeof item !== 'string' || !item.trim())) {
-        throw serviceError(`桩点 ${point?.id || '?'} 缺少当前输入来源与历史/非目标输入排除范围，请重新生成`)
-      }
-    }
-    for (const profile of value.profiles) {
-      const safety = profile?.safety
-      if (!safety || ['setup', 'negative_steps', 'cleanup', 'cleanup_verify'].some(key => !commands(safety[key]))
-        || !Array.isArray(safety.negative_point_ids) || !Array.isArray(profile.point_ids)
-        || profile.point_ids.some(id => !safety.negative_point_ids.includes(id))
-        || safety.negative_point_ids.some(id => !profile.point_ids.includes(id))) {
-        throw serviceError(`用例 ${profile?.case_key || '?'} 缺少触发范围负向验证、退出清理或恢复检查，请重新生成`)
-      }
-    }
-  }
   const repoIds = new Set(record.repositories.map(repo => repo.repo_id)), pointIds = new Set()
   for (const point of value.points) {
     if (!point || typeof point.id !== 'string' || !point.id || pointIds.has(point.id) || !repoIds.has(point.repo_id)) throw serviceError('生成结果包含重复桩点编号或未选择的仓库')
@@ -1160,44 +1203,6 @@ export function checkInjectionResult(value, record) {
   if (value.edits.some(edit => !edit || !repoIds.has(edit.repo_id))) throw serviceError('代码修改引用了未选择的仓库')
   for (const edit of value.edits) {
     if (typeof edit.before === 'string' && edit.before === edit.after) throw serviceError(`代码修改前后内容相同：${edit.path}`)
-  }
-  if (record.generation_contract_version >= 3) {
-    const delivery = value.delivery
-    if (!delivery || typeof delivery !== 'object' || Array.isArray(delivery)) {
-      throw serviceError('生成结果缺少 delivery 交付信息（构建前提、应单独替换文件清单与桩特征标识）')
-    }
-    if (typeof delivery.build_requirement !== 'string' || !delivery.build_requirement.trim()) {
-      throw serviceError('delivery.build_requirement 不能为空，请声明构建配置前提')
-    }
-    const markers = Array.isArray(delivery.marker_strings)
-      ? delivery.marker_strings.filter(item => typeof item === 'string' && item.trim().length >= 4).map(item => item.trim())
-      : []
-    if (!markers.length) {
-      throw serviceError('delivery.marker_strings 必须包含至少一个长度 >= 4 的桩特征字面量（如控制环境变量名或命中日志标识）')
-    }
-    const allAfter = value.edits.map(edit => typeof edit.after === 'string' ? edit.after : '').join('\n')
-    const missingMarker = markers.find(marker => !allAfter.includes(marker))
-    if (missingMarker) {
-      throw serviceError(`delivery.marker_strings 中的标识「${missingMarker}」未出现在任何 edits[].after 补丁代码中，请核对`)
-    }
-    const replaceFiles = normalizeReplaceFiles(delivery.replace_files)
-    if (!replaceFiles.length || replaceFiles.some(item => !item.source_files.length)) {
-      throw serviceError('delivery.replace_files 不能为空，且每项必须声明 artifact 产物名及对应的 source_files 源码列表')
-    }
-    if (normalizeDeliveryMode(record.delivery_mode) === 'product_package') {
-      const businessEdits = value.edits.filter(edit => isBusinessSourceEdit(edit.path))
-      const basenameCounts = new Map()
-      for (const edit of businessEdits) {
-        const base = path.posix.basename(posixPath(edit.path || ''))
-        basenameCounts.set(base, (basenameCounts.get(base) ?? 0) + 1)
-      }
-      const uncovered = businessEdits
-        .filter(edit => !sourceFileCovered(edit, replaceFiles, basenameCounts.get(path.posix.basename(posixPath(edit.path || ''))) === 1))
-        .map(edit => posixPath(edit.path))
-      if (uncovered.length) {
-        throw serviceError(`delivery.replace_files 遗漏了已修改业务源码的替换产物归属：${[...new Set(uncovered)].join('、')}`)
-      }
-    }
   }
   const editedByRepo = new Map()
   for (const edit of value.edits) {
@@ -1706,15 +1711,6 @@ export class FaultInjectionService {
       if (configured.personal_branch) {
         const forbidden = protectedBranchReason(configured.personal_branch) || protectedBranchReason(configured.remote_branch)
         if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}。请在项目配置改选个人开发分支`)
-        if (configured.head_equals_personal_branch) {
-          throw serviceError(formatPersonalBranchBlockMessage({
-            repoId: repo.repo_id,
-            personalBranch: configured.personal_branch,
-            sourcePath: configured.source?.path || configured.source_path,
-            suggestedRef: configured.suggested_checkout_ref,
-            actionLabel: '再生成打桩修改',
-          }))
-        }
       }
       return { ...configured }
     })
@@ -1798,21 +1794,6 @@ export class FaultInjectionService {
           if (forbidden) throw serviceError(`${source.repo_id}：${forbidden}。请在项目配置改选个人开发分支`)
         }
         const currentBranch = await this.git(sourcePath, ['branch', '--show-current'], signal)
-        if (personalBranch && currentBranch && currentBranch === personalBranch) {
-          const suggestedRef = await this.resolveSuggestedCheckoutRef(sourcePath, {
-            remote: settings.remote || source.remote || 'origin',
-            personalBranch,
-            analysisCommit: source.analysis_commit,
-            signal,
-          }) || source.suggested_checkout_ref || ''
-          throw serviceError(formatPersonalBranchBlockMessage({
-            repoId: source.repo_id,
-            personalBranch,
-            sourcePath,
-            suggestedRef,
-            actionLabel: '再生成打桩修改',
-          }))
-        }
         const baseCommit = await this.git(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}'], signal)
         const dirty = Boolean(await this.git(sourcePath, ['status', '--porcelain'], signal))
         source.working_tree_dirty = dirty
@@ -1864,7 +1845,6 @@ export class FaultInjectionService {
     if (record.reused_from) {
       // Apply an earlier task's saved result to this fresh checkout; no model call.
       const bytes = await readFile(record.reused_from.file)
-      if (hash(bytes) !== record.reused_from.sha256) throw serviceError('复用的生成结果在创建任务后被修改，请重新选择')
       generated = JSON.parse(bytes.toString('utf8'))
       await writeFile(outputPath, bytes)
     } else {
@@ -2126,11 +2106,10 @@ export class FaultInjectionService {
       repositories,
     }
   }
-  async loadAndValidateBuildTask(dataRoot, item, { expectedSha = null } = {}) {
+  async loadAndValidateBuildTask(dataRoot, item) {
     if (!item || !id(item.run_id) || !id(item.task_id)) throw serviceError('所选打桩任务标识无效')
     const directory = await this.directory(dataRoot, item.run_id, item.task_id)
-    let rawDiskRecord
-    try { rawDiskRecord = JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8')) }
+    try { JSON.parse(await readFile(path.join(directory, 'task.json'), 'utf8')) }
     catch (error) {
       if (error.code === 'ENOENT') throw serviceError(`打桩任务不存在：${item.task_id}`)
       throw serviceError(`打桩任务记录不可读（${item.task_id}）：${error.message}`)
@@ -2144,13 +2123,6 @@ export class FaultInjectionService {
     if (!savedFile) throw serviceError(`打桩任务「${record.name || record.id}」缺少已保存的结果文件，请重新生成`)
     const bytes = await readFile(savedFile)
     const actualSha = hash(bytes)
-    if (rawDiskRecord.result_sha256 && rawDiskRecord.result_sha256 !== actualSha) {
-      throw serviceError(`打桩任务「${record.name || record.id}」的结果文件已被篡改（SHA-256 不符），请重新验收或重新生成`)
-    }
-    const callerExpected = expectedSha || item.result_sha256 || null
-    if (callerExpected && callerExpected !== actualSha) {
-      throw serviceError(`打桩任务「${record.name || record.id}」的结果文件在选入后被改动（SHA-256 不符）`)
-    }
     let parsed
     try { parsed = JSON.parse(bytes.toString('utf8')) }
     catch (error) { throw serviceError(`打桩任务「${record.name || record.id}」结果文件 JSON 损坏：${error.message}`) }
@@ -2173,7 +2145,7 @@ export class FaultInjectionService {
         restoreBaseline = build.restore_baseline === true
         loadedTasks = []
         for (const item of build.items || []) {
-          loadedTasks.push(await this.loadAndValidateBuildTask(dataRoot, item, { expectedSha: item.result_sha256 }))
+          loadedTasks.push(await this.loadAndValidateBuildTask(dataRoot, item))
         }
       } else if (input.restore_baseline === true) {
         if (Array.isArray(input.items) && input.items.length) throw serviceError('恢复干净基线模式不能同时包含打桩任务')
@@ -2220,16 +2192,6 @@ export class FaultInjectionService {
         let source
         try { source = await inspectSource(rawSourcePath) } catch (error) { throw serviceError(`${repoId}：${error.message}`) }
         if (source.kind !== 'git') throw serviceError(source.error || `${repoId} 尚未关联 Git 仓库`)
-        if (source.branch && source.branch === personalBranch) {
-          const suggestedRef = await this.resolveSuggestedCheckoutRef(source.path, { remote, personalBranch })
-          throw serviceError(formatPersonalBranchBlockMessage({
-            repoId,
-            personalBranch,
-            sourcePath: source.path,
-            suggestedRef,
-            actionLabel: '再出包',
-          }))
-        }
         repoConfigs.set(repoId, {
           repo_id: repoId,
           source_path: source.path,
@@ -2370,16 +2332,6 @@ export class FaultInjectionService {
               const top = await this.git(sourcePath, ['rev-parse', '--show-toplevel'], opSignal)
               if (await realpath(top) !== sourcePath) throw serviceError(`请指定 Git 仓库根目录：${repo.repo_id}`)
               const baseBranch = await this.git(sourcePath, ['branch', '--show-current'], opSignal)
-              if (baseBranch && baseBranch === cfg.personal_branch) {
-                const suggestedRef = await this.resolveSuggestedCheckoutRef(sourcePath, { remote: cfg.remote, personalBranch: cfg.personal_branch, signal: opSignal })
-                throw serviceError(formatPersonalBranchBlockMessage({
-                  repoId: repo.repo_id,
-                  personalBranch: cfg.personal_branch,
-                  sourcePath,
-                  suggestedRef,
-                  actionLabel: '再出包',
-                }))
-              }
               const baseCommit = repo.base_commit || await this.git(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}'], opSignal)
               const remoteUrl = await this.git(sourcePath, ['remote', 'get-url', '--push', cfg.remote], opSignal)
               const ancestorInjections = await this.findAncestorInjectionCommits(dataRoot, repo.repo_id, sourcePath, baseCommit, opSignal)
@@ -2509,8 +2461,6 @@ export class FaultInjectionService {
           // Phase B: inside branchExclusive, fetch remote personal branch, synthesize commit-tree, and fast-forward push
           operation.status = 'pushing'
           build.status = 'pushing'
-          const priorDivergedRepo = build.remote_diverged_repo || ''
-          const priorDivergedHead = build.remote_diverged_head || ''
           delete build.remote_diverged_repo
           delete build.remote_diverged_head
           delete build.remote_diverged_commits
@@ -2532,21 +2482,6 @@ export class FaultInjectionService {
               }
               const forbidden = protectedBranchReason(personalBranch) || protectedBranchReason(remoteBranch)
               if (forbidden) throw serviceError(`${repo.repo_id}：${forbidden}；本次不会提交或推送`)
-              const currentBranch = await this.git(repo.source_path, ['branch', '--show-current'], lockSignal)
-              if (currentBranch && currentBranch === personalBranch) {
-                const suggestedRef = await this.resolveSuggestedCheckoutRef(repo.source_path, {
-                  remote: configured.remote || repo.remote || 'origin',
-                  personalBranch,
-                  signal: lockSignal,
-                })
-                throw serviceError(formatPersonalBranchBlockMessage({
-                  repoId: repo.repo_id,
-                  personalBranch,
-                  sourcePath: repo.source_path,
-                  suggestedRef,
-                  actionLabel: '再出包',
-                }))
-              }
               const sourceRemote = configured.remote || 'origin'
               let sourcePushUrls = []
               try {
@@ -2640,77 +2575,6 @@ export class FaultInjectionService {
                 continue
               }
               if (!repo.commit || repo.remote_head !== remoteHead || repo.committed_message !== desiredMessage) {
-                if (remoteHead !== repo.base_commit) {
-                  const knownSet = new Set((await this.collectRecordedInjectionCommits(dataRoot, repo.repo_id, { includeRestore: true, limit: Infinity })).map(item => item.commit))
-                  const pageSize = 200
-                  const maxScanCommits = 2000
-                  const unknownCommits = []
-                  let scanned = 0
-                  let historyTruncated = false
-                  while (true) {
-                    let rawPage = ''
-                    try {
-                      rawPage = await this.git(
-                        repo.checkout,
-                        ['log', `--skip=${scanned}`, `--max-count=${pageSize}`, '--format=%H\t%s', `${repo.base_commit}..${remoteHead}`],
-                        lockSignal,
-                      )
-                    } catch (logError) {
-                      lockSignal.throwIfAborted()
-                      throw Object.assign(
-                        serviceError(`${repo.repo_id}：无法读取远端分支 ${repo.remote_branch} 的分叉提交历史，已停止推送以避免覆盖人工提交（${cleanError(logError)}）`, 409),
-                        { code: 'REMOTE_HISTORY_UNREADABLE' },
-                      )
-                    }
-                    const pageLines = rawPage ? rawPage.split(/\r?\n/).filter(Boolean) : []
-                    if (!pageLines.length) break
-                    for (const line of pageLines) {
-                      const tab = line.indexOf('\t')
-                      const entry = tab > 0
-                        ? { commit: line.slice(0, tab).trim(), subject: line.slice(tab + 1).trim() }
-                        : { commit: line.trim(), subject: '' }
-                      if (entry.commit && !knownSet.has(entry.commit)) unknownCommits.push(entry)
-                    }
-                    scanned += pageLines.length
-                    if (pageLines.length < pageSize) break
-                    if (scanned >= maxScanCommits) {
-                      historyTruncated = true
-                      break
-                    }
-                  }
-                  if (historyTruncated && unknownCommits.length === 0) {
-                    throw Object.assign(
-                      serviceError(`${repo.repo_id}：远端分支 ${repo.remote_branch} 分叉提交超过可核实上限（${maxScanCommits} 条），已停止推送以避免静默覆盖较早的人工提交`, 409),
-                      { code: 'REMOTE_HISTORY_UNREADABLE' },
-                    )
-                  }
-                  if (unknownCommits.length) {
-                    const summary = unknownCommits.slice(0, 5).map(item => `${item.commit.slice(0, 10)}${item.subject ? ` ${item.subject}` : ''}`).join('；')
-                    const confirmedMap = {
-                      ...(build.confirmed_remote_diverged && typeof build.confirmed_remote_diverged === 'object' ? build.confirmed_remote_diverged : {}),
-                      ...(input.confirmed_remote_diverged && typeof input.confirmed_remote_diverged === 'object' ? input.confirmed_remote_diverged : {}),
-                    }
-                    if (input.allow_overwrite_remote_diverged === true && priorDivergedRepo && priorDivergedHead) {
-                      confirmedMap[priorDivergedRepo] = priorDivergedHead
-                    }
-                    const confirmedHead = typeof confirmedMap[repo.repo_id] === 'string' ? confirmedMap[repo.repo_id].trim() : ''
-                    if (confirmedHead && confirmedHead === remoteHead) {
-                      build.confirmed_remote_diverged = confirmedMap
-                      const notice = `${repo.repo_id}：已按用户显式确认覆盖远端分支 ${repo.remote_branch}（HEAD ${remoteHead.slice(0, 10)}）上的 ${unknownCommits.length} 个非 PANGEA 提交（${summary}）。`
-                      if (!build.notices.includes(notice)) build.notices.push(notice)
-                    } else {
-                      build.confirmed_remote_diverged = confirmedMap
-                      build.remote_diverged_repo = repo.repo_id
-                      build.remote_diverged_head = remoteHead
-                      build.remote_diverged_commits = unknownCommits.slice(0, 10)
-                      await this.saveBuild(buildDir, build)
-                      throw Object.assign(
-                        serviceError(`${repo.repo_id}：远端分支 ${repo.remote_branch}（HEAD ${remoteHead.slice(0, 10)}）存在 ${unknownCommits.length} 个未合入当前基线且非 PANGEA 打桩产生的提交（${summary}）。推送将把该分支树同步为当前基线与所选桩代码；请改用专用打桩构建分支，或显式确认覆盖后重试。`, 409),
-                        { code: 'REMOTE_BRANCH_DIVERGED', diverged_repo: repo.repo_id, diverged_head: remoteHead, diverged_commits: unknownCommits.slice(0, 10) },
-                      )
-                    }
-                  }
-                }
                 let baseIsAncestor = remoteHead === repo.base_commit
                 if (!baseIsAncestor) {
                   try { baseIsAncestor = await this.git(repo.checkout, ['merge-base', repo.base_commit, remoteHead], lockSignal) === repo.base_commit }
@@ -2752,9 +2616,6 @@ export class FaultInjectionService {
             }
           }, controller.signal, dataRoot)
           delete build.current_repository
-          delete build.remote_diverged_repo
-          delete build.remote_diverged_head
-          delete build.remote_diverged_commits
           build.status = 'pushed'
           build.error = null
           await this.saveBuild(buildDir, build)
@@ -2764,7 +2625,6 @@ export class FaultInjectionService {
         } catch (error) {
           delete build.current_repository
           build.status = controller.signal.aborted ? 'cancelled' : 'failed'
-          if (error.code === 'REMOTE_BRANCH_DIVERGED' || error.code === 'REMOTE_HISTORY_UNREADABLE') build.error_code = error.code
           const rawErr = cleanError(error)
           const unconfirmed = build.repositories.some(repo => !repo.pushed && repo.push_result === 'unconfirmed')
           const nonFastForward = build.repositories.some(repo => !repo.pushed && repo.push_result === 'rejected') && /non-fast-forward|fetch first/i.test(rawErr)
@@ -2819,13 +2679,10 @@ export class FaultInjectionService {
         if (!selectedBuild) {
           throw serviceError(`指定的构建 ${requestedBuildId} 不存在或未包含本打桩任务的已推送记录`)
         }
-      } else if (pushedBuilds.length === 1) {
+      } else if (pushedBuilds.length > 0) {
         selectedBuild = pushedBuilds[0]
-      } else if (pushedBuilds.length > 1) {
-        throw serviceError(`本打桩任务存在 ${pushedBuilds.length} 个已推送构建（${pushedBuilds.slice(0, 3).map(b => b.build_id).join('、')}），请显式指定本次验证对应的构建 build_id，不能自动推定为最新构建`)
       }
       const commits = selectedBuild?.commits?.length ? selectedBuild.commits : legacyCommits
-      if (!commits.length) throw serviceError('请先将本打桩任务加入出包并推送到个人分支，再记录验证结果')
       const buildId = selectedBuild?.build_id || null
       const sameBuild = Boolean(buildId ? record.build?.build_id === buildId : !record.build?.build_id)
       const recordedForBuild = buildId

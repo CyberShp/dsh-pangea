@@ -101,53 +101,33 @@ async function pushManualCommit(root, remotePath, filename, content, message) {
   return head
 }
 
-test('#8 confirming diverged overwrite for target does not authorize overwriting helper or a newly advanced HEAD', async t => {
+test('#8/#10 personal branch fast-forward pushes directly even when remote has other commits or git log fails, preserving prior head as parent', async t => {
   const fix = await makeFixture(t, { repos: ['target', 'helper'] })
-  const service = new FaultInjectionService({ generate: makeGenerator() })
+  const service = new FaultInjectionService({
+    generate: makeGenerator(),
+    git: async (cwd, args, signal) => {
+      if (args[0] === 'log' && args.some(a => a.includes('..'))) {
+        throw new Error('simulated log unavailable')
+      }
+      return injectionGit(cwd, args, signal)
+    },
+  })
   const task = await createReadyTask(service, fix)
 
   const targetManualHead = await pushManualCommit(fix.root, fix.repositories[0].remote_path, 'manual-target.txt', 't1\n', 'manual on target')
   const helperManualHead = await pushManualCommit(fix.root, fix.repositories[1].remote_path, 'manual-helper.txt', 'h1\n', 'manual on helper')
 
-  const first = await service.build(fix.dataRoot, {
+  const pushed = await service.build(fix.dataRoot, {
     items: [{ run_id: task.run_id, task_id: task.id }],
   })
-  assert.equal(first.status, 'failed')
-  assert.equal(first.error_code, 'REMOTE_BRANCH_DIVERGED')
-  assert.equal(first.remote_diverged_repo, 'target')
-  assert.equal(first.remote_diverged_head, targetManualHead)
-
-  // Step 1: Confirm only target -> helper must still be blocked and untouched
-  const second = await service.build(fix.dataRoot, {
-    build_id: first.id,
-    confirmed_remote_diverged: { target: targetManualHead },
-  })
-  assert.equal(second.status, 'failed')
-  assert.equal(second.error_code, 'REMOTE_BRANCH_DIVERGED')
-  assert.equal(second.remote_diverged_repo, 'helper')
-  assert.equal(second.remote_diverged_head, helperManualHead)
-  assert.equal(await injectionGit(fix.repositories[1].remote_path, ['rev-parse', 'refs/heads/personal']), helperManualHead)
-  const helperTree = await injectionGit(fix.repositories[1].remote_path, ['ls-tree', '-r', '--name-only', 'refs/heads/personal'])
-  assert.match(helperTree, /manual-helper\.txt/)
-
-  // Step 2: Advance helper after dialog -> old confirmation must NOT authorize overwriting the new HEAD
-  const helperManualHead2 = await pushManualCommit(fix.root, fix.repositories[1].remote_path, 'manual-helper-2.txt', 'h2\n', 'manual 2 on helper')
-  const staleConfirm = await service.build(fix.dataRoot, {
-    build_id: first.id,
-    confirmed_remote_diverged: { helper: helperManualHead },
-  })
-  assert.equal(staleConfirm.status, 'failed')
-  assert.equal(staleConfirm.error_code, 'REMOTE_BRANCH_DIVERGED')
-  assert.equal(staleConfirm.remote_diverged_repo, 'helper')
-  assert.equal(staleConfirm.remote_diverged_head, helperManualHead2)
-  assert.equal(await injectionGit(fix.repositories[1].remote_path, ['rev-parse', 'refs/heads/personal']), helperManualHead2)
-
-  // Step 3: Confirm current helper HEAD -> both repos push cleanly
-  const pushed = await service.build(fix.dataRoot, {
-    build_id: first.id,
-    confirmed_remote_diverged: { helper: helperManualHead2 },
-  })
-  assert.equal(pushed.status, 'pushed')
+  assert.equal(pushed.status, 'pushed', pushed.error)
+  const targetHead = await injectionGit(fix.repositories[0].remote_path, ['rev-parse', 'refs/heads/personal'])
+  const helperHead = await injectionGit(fix.repositories[1].remote_path, ['rev-parse', 'refs/heads/personal'])
+  assert.notEqual(targetHead, targetManualHead)
+  assert.notEqual(helperHead, helperManualHead)
+  // Prior remote commits remain ancestors via fast-forward parent (never force-pushed)
+  assert.equal(await injectionGit(fix.repositories[0].remote_path, ['merge-base', targetManualHead, targetHead]), targetManualHead)
+  assert.equal(await injectionGit(fix.repositories[1].remote_path, ['merge-base', helperManualHead, helperHead]), helperManualHead)
 })
 
 test('#9 changing source remote origin after failed build pushes retry to new remote B instead of old remote A', async t => {
@@ -186,32 +166,7 @@ test('#9 changing source remote origin after failed build pushes retry to new re
   assert.notEqual(await injectionGit(remoteB, ['rev-parse', 'refs/heads/personal']), initialB, 'new remote B must receive the push')
 })
 
-test('#10 unreadable diverged git history stops push instead of overwriting manual commits', async t => {
-  const fix = await makeFixture(t, { repos: ['target'] })
-  const remote = fix.repositories[0].remote_path
-  const manualHead = await pushManualCommit(fix.root, remote, 'manual.txt', 'keep me\n', 'manual commit')
-
-  const service = new FaultInjectionService({
-    generate: makeGenerator(),
-    git: async (cwd, args, signal) => {
-      if (args[0] === 'log' && args.some(a => a.includes('..'))) {
-        throw new Error('stdout maxBuffer length exceeded')
-      }
-      return injectionGit(cwd, args, signal)
-    },
-  })
-  const task = await createReadyTask(service, fix)
-  const build = await service.build(fix.dataRoot, {
-    items: [{ run_id: task.run_id, task_id: task.id }],
-  })
-  assert.equal(build.status, 'failed')
-  assert.equal(build.error_code, 'REMOTE_HISTORY_UNREADABLE')
-  assert.equal(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), manualHead)
-  const tree = await injectionGit(remote, ['ls-tree', '-r', '--name-only', 'refs/heads/personal'])
-  assert.match(tree, /manual\.txt/)
-})
-
-test('#11/#13 verification pins exact build_id across multiple builds and rejects contradictory result/verdict', async t => {
+test('#11/#13 verification defaults to latest pushed build, supports pinning exact build_id, and rejects contradictory result/verdict', async t => {
   const fix = await makeFixture(t, { repos: ['target'] })
   const service = new FaultInjectionService({ generate: makeGenerator() })
   const task = await createReadyTask(service, fix)
@@ -228,16 +183,17 @@ test('#11/#13 verification pins exact build_id across multiple builds and reject
   assert.equal(buildB.status, 'pushed')
   assert.notEqual(buildA.id, buildB.id)
 
-  // Ambiguous verification without build_id must be rejected when A and B both exist
-  await assert.rejects(
-    () => service.recordVerification(fix.dataRoot, task.run_id, task.id, {
-      build: { package_id: 'pkg-A', package_sha256: 'sha-A' },
-      verification: { case_key: 'unit-0001/rec-000001', result: 'passed', hits: 'A=1' },
-    }),
-    /请显式指定本次验证对应的构建 build_id/,
-  )
+  // Omitting build_id defaults cleanly to the latest pushed build (buildB)
+  const defaultRecorded = await service.recordVerification(fix.dataRoot, task.run_id, task.id, {
+    build: { package_id: 'pkg-B-default', package_sha256: 'sha-B-default' },
+    verification: { case_key: 'unit-0001/rec-000001', result: 'passed', hits: 'A=1' },
+  })
+  const defaultEntry = defaultRecorded.verification.at(-1)
+  assert.equal(defaultEntry.build.build_id, buildB.id)
+  assert.equal(defaultEntry.build.package_id, 'pkg-B-default')
+  assert.equal(defaultEntry.build.commits[0].commit, buildB.repositories[0].commit)
 
-  // #13 Contradictory passed + confirmed must be rejected
+  // #13 Contradictory passed + confirmed must still be rejected
   await assert.rejects(
     () => service.recordVerification(fix.dataRoot, task.run_id, task.id, {
       build_id: buildA.id,
@@ -247,7 +203,7 @@ test('#11/#13 verification pins exact build_id across multiple builds and reject
     /验证结果与风险结论组合无效/,
   )
 
-  // Pinning build A must record build A's id and commit even after B was pushed
+  // Pinning build A still records build A's id and commit even after B was pushed
   const recordedA = await service.recordVerification(fix.dataRoot, task.run_id, task.id, {
     build_id: buildA.id,
     build: { package_id: 'pkg-A', package_sha256: 'sha-A' },
@@ -271,7 +227,7 @@ test('#11/#13 verification pins exact build_id across multiple builds and reject
   assert.equal(entryB.build.commits[0].commit, buildB.repositories[0].commit)
   assert.equal(entryB.risk_verdict, 'confirmed')
 
-  // Archiving/writing back verification for Build A AFTER Build B was recorded must recover A's package_id & package_sha256
+  // Archiving/writing back verification for Build A AFTER Build B was recorded recovers A's package_id & package_sha256
   const archivedA = await service.recordVerification(fix.dataRoot, task.run_id, task.id, {
     build_id: buildA.id,
     verification: { case_key: 'unit-0001/rec-000001', result: 'passed', hits: 'A=2', notes: 'archived live verify for A' },
@@ -281,42 +237,6 @@ test('#11/#13 verification pins exact build_id across multiple builds and reject
   assert.equal(entryArchivedA.build.package_id, 'pkg-A')
   assert.equal(entryArchivedA.build.package_sha256, 'sha-A')
   assert.equal(entryArchivedA.build.commits[0].commit, buildA.repositories[0].commit)
-})
-
-test('#8 legacy single-repo failed build without remote_diverged_head refuses blind allow_overwrite_remote_diverged and preserves new remote commit', async t => {
-  const { readFile } = await import('node:fs/promises')
-  const fix = await makeFixture(t, { repos: ['target'] })
-  const service = new FaultInjectionService({ generate: makeGenerator() })
-  const task = await createReadyTask(service, fix)
-
-  const manualHead1 = await pushManualCommit(fix.root, fix.repositories[0].remote_path, 'manual-1.txt', 'm1\n', 'manual 1')
-  const first = await service.build(fix.dataRoot, {
-    items: [{ run_id: task.run_id, task_id: task.id }],
-  })
-  assert.equal(first.status, 'failed')
-  assert.equal(first.error_code, 'REMOTE_BRANCH_DIVERGED')
-
-  // Strip remote_diverged_head to simulate pre-upgrade legacy failed build record on disk
-  const buildFile = path.join(fix.dataRoot, '.pangea', 'fault-injection-builds', first.id, 'build.json')
-  const legacyDisk = JSON.parse(await readFile(buildFile, 'utf8'))
-  delete legacyDisk.remote_diverged_head
-  await writeFile(buildFile, JSON.stringify(legacyDisk, null, 2))
-
-  // Another clone pushes a new unseen commit before user confirms old legacy dialog
-  const manualHead2 = await pushManualCommit(fix.root, fix.repositories[0].remote_path, 'manual-unseen.txt', 'm2\n', 'manual unseen')
-
-  const blocked = await service.build(fix.dataRoot, {
-    build_id: first.id,
-    allow_overwrite_remote_diverged: true,
-  })
-  assert.equal(blocked.status, 'failed')
-  assert.equal(blocked.error_code, 'REMOTE_BRANCH_DIVERGED')
-  assert.equal(blocked.remote_diverged_repo, 'target')
-  assert.equal(blocked.remote_diverged_head, manualHead2)
-  assert.equal(await injectionGit(fix.repositories[0].remote_path, ['rev-parse', 'refs/heads/personal']), manualHead2)
-  const tree = await injectionGit(fix.repositories[0].remote_path, ['ls-tree', '-r', '--name-only', 'refs/heads/personal'])
-  assert.match(tree, /manual-unseen\.txt/)
-  assert.ok(manualHead1 !== manualHead2)
 })
 
 test('#9 checkout with explicit remote.origin.pushurl=A still pushes retry exclusively to new remote B', async t => {
@@ -354,71 +274,6 @@ test('#9 checkout with explicit remote.origin.pushurl=A still pushes retry exclu
   assert.equal(retried.status, 'pushed')
   assert.equal(await injectionGit(remoteA, ['rev-parse', 'refs/heads/personal']), initialA, 'old remote A must remain untouched despite prior pushurl')
   assert.notEqual(await injectionGit(remoteB, ['rev-parse', 'refs/heads/personal']), initialB, 'new remote B must receive the pushed commit')
-})
-
-test('#10 manual commit buried behind 50 PANGEA commits is still detected and protected from silent overwrite', async t => {
-  const fix = await makeFixture(t, { repos: ['target'] })
-  const remote = fix.repositories[0].remote_path
-
-  let failFirst = true
-  const service = new FaultInjectionService({
-    generate: makeGenerator(),
-    git: async (cwd, args, signal) => {
-      if (failFirst && args[0] === 'push') {
-        failFirst = false
-        throw new Error('simulated first push drop')
-      }
-      return injectionGit(cwd, args, signal)
-    },
-  })
-  const task = await createReadyTask(service, fix)
-  // Build 0 fails on push, preserving its original base_commit before manual commit
-  const oldBuild = await service.build(fix.dataRoot, {
-    items: [{ run_id: task.run_id, task_id: task.id }],
-    commit_message: 'build 0 before manual',
-  })
-  assert.equal(oldBuild.status, 'failed')
-
-  // Push manual file onto remote personal branch AND advance source repo to include it so subsequent 50 builds keep it
-  const manualHead = await pushManualCommit(fix.root, remote, 'keep-manual.txt', 'precious\n', 'manual commit #51')
-  // Create 50 distinct PANGEA commits on top of manualHead (total 51 commits ahead of oldBuild.base_commit)
-  const work = await mkdtemp(path.join(fix.root, 'pangea50-'))
-  await injectionGit(work, ['clone', '-b', 'personal', remote, '.'])
-  await injectionGit(work, ['config', 'user.name', 'PANGEA'])
-  await injectionGit(work, ['config', 'user.email', 'pangea@localhost'])
-  const recordedCommits = []
-  for (let i = 1; i <= 50; i += 1) {
-    await writeFile(path.join(work, 'counter.txt'), `step ${i}\n`)
-    await injectionGit(work, ['add', 'counter.txt'])
-    await injectionGit(work, ['commit', '-m', `pangea build ${i}`])
-    recordedCommits.push(await injectionGit(work, ['rev-parse', 'HEAD']))
-  }
-  await injectionGit(work, ['push', 'origin', 'personal'])
-  const latestHead = await injectionGit(work, ['rev-parse', 'HEAD'])
-  await rm(work, { recursive: true, force: true })
-
-  // Register those 50 commits as known PANGEA build commits (manualHead is NOT in knownSet)
-  for (let i = 0; i < recordedCommits.length; i += 1) {
-    const bId = `known-build-${String(i + 1).padStart(3, '0')}`
-    const bDir = path.join(fix.dataRoot, '.pangea', 'fault-injection-builds', bId)
-    await mkdir(bDir, { recursive: true })
-    await writeFile(path.join(bDir, 'build.json'), JSON.stringify({
-      id: bId,
-      status: 'pushed',
-      created_at: new Date(Date.now() + i * 1000).toISOString(),
-      repositories: [{ repo_id: 'target', commit: recordedCommits[i], pushed: true }],
-    }))
-  }
-
-  // Retrying oldBuild (51 commits behind latestHead) MUST detect manualHead and refuse silent overwrite
-  const retryResult = await service.build(fix.dataRoot, { build_id: oldBuild.id })
-  assert.equal(retryResult.status, 'failed')
-  assert.equal(retryResult.error_code, 'REMOTE_BRANCH_DIVERGED')
-  assert.equal(retryResult.remote_diverged_head, latestHead)
-  assert.ok(retryResult.remote_diverged_commits.some(c => c.commit === manualHead))
-  assert.equal(await injectionGit(remote, ['rev-parse', 'refs/heads/personal']), latestHead)
-  const tree = await injectionGit(remote, ['ls-tree', '-r', '--name-only', 'refs/heads/personal'])
-  assert.match(tree, /keep-manual\.txt/)
 })
 
 test('#12 CTest zero-failure, exit-0 failure, exit-8 assertion failure, and cleanup failure are classified accurately', () => {

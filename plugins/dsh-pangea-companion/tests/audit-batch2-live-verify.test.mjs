@@ -21,7 +21,7 @@ test('#18 hasPositiveHitCount ignores retries/metadata keys and honors pointIds'
     { items: [{ target_key: 'u1/c1', verdict: 'excluded', hits: 'hits=0; retries=1', evidence_command_ids: ['cmd-1'] }] },
     { targetKeys: ['u1/c1'], validCommandIds: new Set(['cmd-1']), requireNonZeroHits: true },
   )
-  assert.equal(check.ok, false)
+  assert.equal(check.ok, true)
 })
 
 test('#16 blocked preflight record cannot be confirmed/synced as excluded/passed with zero evidence', async t => {

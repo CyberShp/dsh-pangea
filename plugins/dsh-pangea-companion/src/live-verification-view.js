@@ -746,6 +746,8 @@ export function createLiveVerificationWorkspace(React) {
               h('button', { type: 'button', className: 'lv-btn', onClick: () => setSubView('list') }, '返回列表'))),
           activeTask.error ? h('div', { className: 'pangea-lv-banner danger' }, activeTask.error) : null,
           activeTask.preflight?.guidance && !activeTask.preflight.ok ? h('div', { className: 'pangea-lv-banner warn' }, activeTask.preflight.guidance) : null,
+          Array.isArray(activeTask.preflight?.warnings) && activeTask.preflight.warnings.length
+            ? h('div', { className: 'pangea-lv-banner warn' }, activeTask.preflight.warnings.join('；')) : null,
           Array.isArray(activeTask.sync_warnings) && activeTask.sync_warnings.length
             ? h('div', { className: 'pangea-lv-banner warn' }, `回写来源打桩任务告警：${activeTask.sync_warnings.join('；')}`) : null,
           Array.isArray(activeTask.reference_warnings) && activeTask.reference_warnings.length
@@ -762,7 +764,8 @@ export function createLiveVerificationWorkspace(React) {
         // Single-line compact health strip (Stage-0 + Cleanup)
         h('div', { className: 'pangea-lv-strip' },
           activeTask.preflight ? h('span', { className: 'pangea-lv-strip-item' },
-            h('span', { className: `pangea-lv-pill ${activeTask.preflight.ok ? 'good' : 'danger'}` }, `Stage-0 在位预检：${activeTask.preflight.ok ? '通过' : '阻断'}`),
+            h('span', { className: `pangea-lv-pill ${!activeTask.preflight.ok ? 'danger' : (activeTask.preflight.warnings?.length ? 'warn' : 'good')}` },
+              `Stage-0 在位预检：${!activeTask.preflight.ok ? '阻断' : (activeTask.preflight.warnings?.length ? '通过（有提醒）' : '通过')}`),
             activeTask.preflight.baseline?.binary_path ? h('span', { style: { color: '#5e6773', fontSize: 12 } }, `${activeTask.preflight.baseline.binary_path}${activeTask.preflight.baseline.pid ? ` (PID ${activeTask.preflight.baseline.pid})` : ''}`) : null) : null,
           activeTask.cleanup ? h('span', { className: 'pangea-lv-strip-item' },
             h('span', { className: `pangea-lv-pill ${activeTask.cleanup.status === 'ok' ? 'good' : 'danger'}` }, `宿主兜底清理与进程对账：${activeTask.cleanup.status === 'ok' ? '正常' : '异常'}`),

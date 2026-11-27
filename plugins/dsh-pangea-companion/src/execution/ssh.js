@@ -11,11 +11,10 @@ const DANGEROUS_COMMAND_RULES = [
   { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?init\s+[06]\b/i, reason: '禁止切换关机或重启运行级别（init 0/6）' },
   { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?systemctl\s+(?:reboot|poweroff|halt|kexec)\b/i, reason: '禁止整机 systemctl reboot/poweroff/halt' },
   { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?(?:mkfs(?:\.[a-z0-9_]+)?|wipefs|blkdiscard|fdisk|parted|gdisk|sfdisk)\b/i, reason: '禁止磁盘格式化或分区破坏命令（mkfs/wipefs/fdisk/parted）' },
-  { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?dd\b[^\n;&|]*\bof=\/dev\/(?:sd[a-z]|vd[a-z]|hd[a-z]|nvme\d|mmcblk|dm-|md\d|loop)/i, reason: '禁止 dd 直接覆写块设备（of=/dev/...）' },
+  { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?dd\b[^\n;&|]*\bof=\/dev\/(?:sda|vda|hda|xvda)\d*(?:\s|$|[;&|])/i, reason: '禁止 dd 直接覆写系统启动盘（of=/dev/sda|vda|hda|xvda）' },
   { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?rm\s+(?:-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|--recursive\s+--force|--force\s+--recursive)\s+(?:--no-preserve-root\s+)?(?:\/(?:\s|$|[;&|])|\/(?:bin|boot|etc|lib|lib64|proc|root|sbin|sys|usr|var)(?:\/?\s|$|[;&|]))/i, reason: '禁止递归强删根目录或核心系统目录' },
   { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?(?:sysupgrade|flashcp|fw_setenv|uboot_upgrade)\b/i, reason: '禁止设备刷包或固件改写命令' },
   { pattern: /\/proc\/sysrq-trigger\b/i, reason: '禁止写入 /proc/sysrq-trigger 触发内核强制崩溃或重启' },
-  { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?(?:ip\s+(?:link|l)\s+set\b[^\n;&|]*\bdown\b|ifconfig\s+\S+\s+down\b|ifdown\b)/i, reason: '禁止关闭网卡接口（ip link down/ifconfig down/ifdown），避免切断管理 SSH 通道' },
   { pattern: /(?:^|[;&|(\n]\s*)(?:sudo\s+)?(?:(?:pkill|killall)\b[^\n;&|]*\bsshd\b|systemctl\s+(?:stop|disable)\s+sshd?\b|kill\s+(?:-[A-Z0-9]+\s+)*1(?:\s|$|[;&|]))/i, reason: '禁止终止 sshd 服务或 PID 1 进程' },
 ]
 

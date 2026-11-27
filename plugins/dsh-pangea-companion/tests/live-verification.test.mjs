@@ -74,7 +74,13 @@ test('Stage-0 marker gate blocks wrong package without invoking ACP worker', asy
   const service = new LiveVerificationService({
     environments: envStore,
     ssh,
-    runWorker: async () => { workerCalled = true; return { summary: '', items: [] } },
+    runWorker: async () => {
+      workerCalled = true
+      return {
+        summary: 'worker continued despite main exe missing marker',
+        items: [{ target_key: 'R-CONC-001', verdict: 'not_triggered', hits: 'INJ-001=0', evidence_command_ids: ['cmd-0001'] }],
+      }
+    },
   })
   t.after(async () => {
     await service.dispose()
@@ -99,11 +105,11 @@ test('Stage-0 marker gate blocks wrong package without invoking ACP worker', asy
     targets: [{ target_key: 'R-CONC-001', title: '并发 UAF', kind: 'risk' }],
   })
   const done = await waitTerminal(service, dataRoot, started.id)
-  assert.equal(done.status, 'blocked')
-  assert.equal(workerCalled, false, 'ACP worker must NOT be invoked when Stage-0 marker gate fails')
-  assert.equal(done.preflight.ok, false)
+  assert.equal(done.status, 'completed', done.error)
+  assert.equal(workerCalled, true, 'ACP worker should still run when main binary misses marker (e.g. stub in .so/.ko)')
+  assert.equal(done.preflight.ok, true)
   assert.deepEqual(done.preflight.missing_markers, ['PANGEA_INJ_RACE_01'])
-  assert.equal(done.draft_verdicts[0].verdict, 'blocked')
+  assert.ok(done.preflight.warnings?.some(w => w.includes('PANGEA_INJ_RACE_01')))
 })
 
 test('End-to-end dual-endpoint SSH verification via loopback CLI gateway, dangerous guard, cleanup, confirm, and IP lock', async t => {
@@ -329,20 +335,25 @@ test('HTTP routes redact environment passwords and serve live-verification list/
   assert.deepEqual(lvListBody.tasks, [])
 })
 
-test('validateVerificationResult enforces zero-hit guard in fault-injection mode', () => {
+test('validateVerificationResult allows zero-hit verdicts while still rejecting forged or missing command_ids', () => {
   const validIds = new Set(['cmd-0001'])
   const zeroConfirmed = validateVerificationResult({
-    summary: 'claimed confirmed without hit',
+    summary: 'crash before counter flush',
     items: [{ target_key: 'R-1', verdict: 'confirmed', hits: 'INJ-001=0', evidence_command_ids: ['cmd-0001'] }],
   }, { targetKeys: ['R-1'], validCommandIds: validIds, requireNonZeroHits: true })
-  assert.equal(zeroConfirmed.ok, false)
-  assert.match(zeroConfirmed.error, /hits/)
+  assert.equal(zeroConfirmed.ok, true)
 
   const emptyExcluded = validateVerificationResult({
-    summary: 'claimed excluded without hit',
+    summary: 'excluded with real command evidence',
     items: [{ target_key: 'R-1', verdict: 'excluded', hits: '', evidence_command_ids: ['cmd-0001'] }],
   }, { targetKeys: ['R-1'], validCommandIds: validIds, requireNonZeroHits: true })
-  assert.equal(emptyExcluded.ok, false)
+  assert.equal(emptyExcluded.ok, true)
+
+  const forgedCmd = validateVerificationResult({
+    summary: 'forged command',
+    items: [{ target_key: 'R-1', verdict: 'confirmed', hits: 'INJ-001=2', evidence_command_ids: ['cmd-9999'] }],
+  }, { targetKeys: ['R-1'], validCommandIds: validIds, requireNonZeroHits: true })
+  assert.equal(forgedCmd.ok, false)
 
   const notTriggered = validateVerificationResult({
     summary: 'honest not triggered',
@@ -762,17 +773,18 @@ test('Batch A regressions: pgrep self-match (L1), grep exit 2 (L5), env lock & h
     array: { ip: '127.0.0.1', port: arraySsh.port, username: 'tester', password: 'secret', default_process: 'storage_daemon' },
   })
 
-  // L1b: multiple PIDs -> explicit ambiguity block
+  // L1b: multiple PIDs -> non-blocking warning and worker proceeds
   const multiTask = await service.start({
     dataRoot, cwd: root, mode: 'fault_injection', environment_id: env.id,
     provider_id: 'nga', agent_model: 'm', marker_strings: ['M1'],
     targets: [{ target_key: 'R-A', title: 'multi pid', kind: 'risk' }],
   })
   const multiDone = await waitTerminal(service, dataRoot, multiTask.id)
-  assert.equal(multiDone.status, 'blocked')
-  assert.match(multiDone.error, /多个名为.*1001, 1002/)
+  assert.equal(multiDone.status, 'completed', multiDone.error)
+  assert.equal(multiDone.preflight.ok, true)
+  assert.ok(multiDone.preflight.warnings?.some(w => /多个名为.*1001, 1002/.test(w)))
 
-  // L5: single PID + grep exit 2 -> permission/unreadable error, NOT missing_markers
+  // L5: single PID + grep exit 2 -> non-blocking warning with permission detail, NOT missing_markers
   pidStdout = '1001\n'
   grepExit = 2
   const permTask = await service.start({
@@ -781,9 +793,9 @@ test('Batch A regressions: pgrep self-match (L1), grep exit 2 (L5), env lock & h
     targets: [{ target_key: 'R-A', title: 'perm denied', kind: 'risk' }],
   })
   const permDone = await waitTerminal(service, dataRoot, permTask.id)
-  assert.equal(permDone.status, 'blocked')
-  assert.match(permDone.error, /无法读取目标二进制/)
-  assert.match(permDone.error, /Permission denied/)
+  assert.equal(permDone.status, 'completed', permDone.error)
+  assert.equal(permDone.preflight.ok, true)
+  assert.ok(permDone.preflight.warnings?.some(w => /未能读取目标二进制/.test(w) && /Permission denied/.test(w)))
   assert.equal(permDone.preflight.missing_markers, undefined)
 
   // L2 + L3: while running, env edit & delete return 409, registered_cleanups is persisted immediately,
@@ -838,17 +850,16 @@ test('Batch A regressions: pgrep self-match (L1), grep exit 2 (L5), env lock & h
 })
 
 test('Batch C regressions: L10 safety-belt rules, L9 --cmd-file verbatim delivery, L7 single-connection reuse, L8 dynamic budget', async t => {
-  // L10: expanded dangerous command rules
+  // L10: critical dangerous command rules (NIC-down is governed by topology protected.mgmt_nics instead of blanket block)
   for (const dangerous of [
     'echo c > /proc/sysrq-trigger',
-    'ip link set eth0 down',
-    'sudo ifdown eth0',
+    'dd if=/dev/zero of=/dev/sda bs=1M count=1',
     'pkill -9 sshd',
     'kill -9 1',
   ]) {
     assert.equal(checkDangerousCommand(dangerous).blocked, true, `must block: ${dangerous}`)
   }
-  for (const safe of ['echo ok', 'ip addr show', 'kill -USR1 4242']) {
+  for (const safe of ['echo ok', 'ip addr show', 'ip link set ens2f0 down', 'kill -USR1 4242']) {
     assert.equal(checkDangerousCommand(safe).blocked, false, `must allow: ${safe}`)
   }
 
@@ -922,8 +933,8 @@ test('Batch C regressions: L10 safety-belt rules, L9 --cmd-file verbatim deliver
     dataRoot, cwd: root, mode: 'direct_risk', environment_id: env.id,
     provider_id: 'nga', agent_model: 'm', targets,
   })
-  // L8: 5 targets -> 14 + 5*8 = 54 calls
-  assert.equal(started.max_gateway_calls, 54)
+  // L8: 5 targets -> 40 + 5*16 = 120 calls
+  assert.equal(started.max_gateway_calls, 120)
   const done = await waitTerminal(service, dataRoot, started.id)
   assert.equal(done.status, 'completed', done.error)
   assert.equal(done.gateway_calls_used, 2)

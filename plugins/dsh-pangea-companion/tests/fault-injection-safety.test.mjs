@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { buildVerificationShellScript, parseVerificationLog } from '../src/fault-injection-candidates.js'
-import { checkInjectionResult } from '../src/fault-injection.js'
+import { checkInjectionResult, collectConsistencyNotices } from '../src/fault-injection.js'
 
 const bash = process.platform === 'darwin' ? '/bin/bash' : 'bash'
 const bashUnavailable = spawnSync(bash, ['--version']).status !== 0 && 'Bash is unavailable; exported shell runtime is not tested'
@@ -74,8 +74,10 @@ for (const signalName of ['SIGTERM', 'SIGINT']) test(`${signalName} runs cleanup
   assert.deepEqual(readFileSync(join(cwd, 'control')), Buffer.from([0, 1, 10, 255]))
   assert.match(output, /PANGEA_CASE_END.*status=143/)
 })
-test('v2 gates missing trigger scope, negative coverage and cleanup before applying edits', () => {
-  const good = task(); assert.doesNotThrow(() => checkInjectionResult(good.result, good))
+test('v2 records advisory notices for missing trigger scope, negative coverage and cleanup without blocking', () => {
+  const good = task()
+  assert.doesNotThrow(() => checkInjectionResult(good.result, good))
+  assert.deepEqual(collectConsistencyNotices(good.result, good), [])
   for (const mutate of [
     v => delete v.points[0].trigger_scope,
     v => v.points[0].trigger_scope.excluded_inputs = [],
@@ -84,16 +86,19 @@ test('v2 gates missing trigger scope, negative coverage and cleanup before apply
     v => v.profiles[0].safety.cleanup_verify = ['# prose only'],
   ]) {
     const input = task(); mutate(input.result)
-    assert.throws(() => checkInjectionResult(input.result, input), /重新生成/)
+    assert.doesNotThrow(() => checkInjectionResult(input.result, input))
+    assert.ok(collectConsistencyNotices(input.result, input).length > 0)
   }
 })
-test('legacy tasks still export without invented cleanup', () => {
+test('tasks without safety contract export plain steps without invented cleanup', () => {
   const input = task(); delete input.generation_contract_version; delete input.result.profiles[0].safety
   const script = buildVerificationShellScript(input)
   assert.doesNotMatch(script, /__pangea_finish|PANGEA_CLEANUP/)
   assert.match(script, /PANGEA_CASE_END.*status=0/)
   input.generation_contract_version = 2
-  assert.throws(() => buildVerificationShellScript(input), /重新生成/)
+  const v2Script = buildVerificationShellScript(input)
+  assert.doesNotMatch(v2Script, /__pangea_finish|PANGEA_CLEANUP/)
+  assert.match(v2Script, /PANGEA_CASE_END.*status=0/)
 })
 
 test('truncated v2 logs and cleanup failure override explicit passed records', () => {

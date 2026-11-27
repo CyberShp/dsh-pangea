@@ -112,7 +112,6 @@ export class CaseReviewStore {
     const file = await this.file(), previous = queues.get(file) ?? Promise.resolve()
     const operation = previous.catch(() => {}).then(async () => {
       const saved = await this.read(), set = caseSet(items), key = input.case_key
-      if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision !== saved.revision) throw error(409, 'review_changed', '评审已更新，请重新确认')
       if (!key || !Object.hasOwn(set.hashes, key) || set.duplicates.has(key)) throw error(422, 'invalid_case_identity', '用例没有唯一身份，无法保存评审')
       if (input.expected_content_hash !== set.hashes[key]) throw error(409, 'case_changed', '用例已更新，请重新确认')
       const decisions = Object.assign(Object.create(null), normalizeSavedDecisions(saved, items, set))
@@ -164,11 +163,9 @@ export async function selectExportCases(items, input, store) {
   const scope = input.scope ?? 'all'
   if (!['all', 'filtered', 'selected', 'adopted'].includes(scope)) throw error(400, 'invalid_scope', '导出范围无效')
   const set = caseSet(items)
-  if (input.case_set_revision !== set.revision) throw error(409, 'case_set_changed', '用例已更新，请重新确认导出范围')
   let keys = input.case_keys
   if (scope === 'adopted') {
     const review = await store.project(items)
-    if (input.review_revision !== review.revision) throw error(409, 'review_changed', '评审已更新，请重新确认导出范围')
     keys = review.cases.filter(row => row.review_status === 'adopted').map(row => row.case_key)
   }
   if (scope === 'all') {

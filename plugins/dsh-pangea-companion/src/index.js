@@ -891,9 +891,6 @@ export async function faultInjectionRouteHandler(req, res, service, runtime, { r
         return json(res, 200, { status: 'ok', ...await service.configureBuildPipeline(dataRoot, input.build_id, input.pipeline_url) })
       }
       const build = await service.build(dataRoot, { ...input, background: input.background !== false })
-      if (input.background === false && build.status === 'failed' && build.error_code === 'REMOTE_BRANCH_DIVERGED') {
-        return json(res, 409, { status: 'error', code: build.error_code, error: build.error, build })
-      }
       return json(res, 200, { status: 'ok', build })
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.run_id || '')) throw Object.assign(new Error('run_id 无效'), { statusCode: 400 })

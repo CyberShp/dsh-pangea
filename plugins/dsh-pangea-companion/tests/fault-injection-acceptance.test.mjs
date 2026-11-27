@@ -1276,7 +1276,7 @@ test('multi-artifact verification, duplicate basename source_files disambiguatio
       { repo_id: 'target', path: 'mod_b/init.c', before: 'return 0;', after: '/* MARKER_MOD_B */ return -2;' },
     ],
   }
-  assert.throws(() => checkInjectionResult({
+  const incompletePayload = {
     ...dupBasePayload,
     delivery: {
       mode: 'product_package',
@@ -1284,7 +1284,10 @@ test('multi-artifact verification, duplicate basename source_files disambiguatio
       replace_files: [{ artifact: 'libmod_a.a', kind: 'static_lib', source_files: ['init.c'] }],
       marker_strings: ['MARKER_MOD_A', 'MARKER_MOD_B'],
     },
-  }, dupRecord), /遗漏了已修改业务源码的替换产物归属/)
+  }
+  assert.doesNotThrow(() => checkInjectionResult(incompletePayload, dupRecord))
+  const notices = collectConsistencyNotices(incompletePayload, dupRecord)
+  assert.ok(notices.some(n => /delivery\.replace_files 未标注部分已修改业务源码的产物归属/.test(n)), `expected non-blocking notice: ${notices.join('; ')}`)
 
   const validMultiDelivery = {
     mode: 'product_package',

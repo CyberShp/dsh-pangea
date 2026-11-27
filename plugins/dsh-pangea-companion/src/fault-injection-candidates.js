@@ -435,10 +435,9 @@ export function buildVerificationShellScript(task, { buildVariant = null } = {})
       if (pt?.enable) lines.push(`# 启用 ${pid}: ${shellQuoteComment(pt.enable)}`)
       if (pt?.disable) lines.push(`# 关闭 ${pid}: ${shellQuoteComment(pt.disable)}`)
     }
-    // Old saved tasks retain their original export; v2 generation requires safety.
     const safety = profile.safety
-    if (task?.generation_contract_version >= 2 && !safety) throw new Error('缺少安全验证合同，请重新生成')
-    if (safety) {
+    const hasSafety = Boolean(safety && ['setup', 'negative_steps', 'cleanup', 'cleanup_verify'].every(k => Array.isArray(safety[k]) && safety[k].length > 0))
+    if (hasSafety) {
       lines.push(
         `trap 'kill -TERM "$__pangea_case_pid" 2>/dev/null || true; wait "$__pangea_case_pid" || true; exit 130' INT`,
         `trap 'kill -TERM "$__pangea_case_pid" 2>/dev/null || true; wait "$__pangea_case_pid" || true; exit 143' TERM`,
@@ -472,7 +471,7 @@ export function buildVerificationShellScript(task, { buildVariant = null } = {})
       const text = String(step)
       if (text.trim()) lines.push(text)
     }
-    if (safety) lines.push(') &', '__pangea_case_pid=$!', 'wait "$__pangea_case_pid"', 'trap - INT TERM')
+    if (hasSafety) lines.push(') &', '__pangea_case_pid=$!', 'wait "$__pangea_case_pid"', 'trap - INT TERM')
     else lines.push(`echo ${quote(`[PANGEA_CASE_END] case=${profile.case_key} status=0`)}`)
     lines.push('')
   }
