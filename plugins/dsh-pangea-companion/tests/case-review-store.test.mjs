@@ -45,7 +45,7 @@ test('failed writes retain the original decision and hash version changes cannot
   const failed = new CaseReviewStore({ dataRoot: root, runId: 'run-a', write: async () => { throw new Error('fixture disk fault') } })
   await assert.rejects(failed.update(cases, { expected_revision: saved.revision, case_key: 'u/c1', expected_content_hash: initial.cases[0].content_hash, decision: 'excluded' }), /fixture disk fault/)
   assert.equal((await store.project(cases)).counts.adopted, 1)
-  const file = await store.file(), stored = JSON.parse(await readFile(file, 'utf8')); stored.content_hash_version = 2; await writeFile(file, JSON.stringify(stored))
+  const file = await store.file(), stored = JSON.parse(await readFile(file, 'utf8')); stored.content_hash_version = 99; await writeFile(file, JSON.stringify(stored))
   assert.equal((await store.project(cases)).counts.needs_recheck, 1)
   const changed = await store.update(cases, { expected_revision: saved.revision, case_key: 'u/c2', expected_content_hash: initial.cases[1].content_hash, decision: 'adopted' })
   assert.equal(changed.counts.adopted, 1); assert.equal(changed.counts.needs_recheck, 1, 'saving another case must not revive the older hash version')

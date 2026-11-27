@@ -584,12 +584,22 @@ export function createFaultInjectionTaskDetail(React) {
                     || [...(task.verification || [])].reverse().find(entry => entry?.build?.build_id === nextId)?.build
                     || null)
                   : null
+                const commitSig = list => Array.isArray(list) && list.length
+                  ? list.map(c => `${c?.repo_id || ''}:${c?.commit || ''}`).sort().join('\0')
+                  : ''
+                const legacyMatchesSelected = Boolean(
+                  !task.build?.build_id
+                  && nextId
+                  && commitSig(task.build?.commits)
+                  && commitSig(task.build?.commits) === commitSig(matched?.commits),
+                )
+                const keepPrev = prev => prev.build_id === nextId || (!prev.build_id && legacyMatchesSelected)
                 setBuild(prev => ({
                   build_id: nextId,
-                  url: savedMeta?.url || (!prev.build_id ? prev.url : '') || matched?.pipeline_url || '',
-                  package_id: savedMeta?.package_id ?? (prev.build_id === nextId || !prev.build_id ? prev.package_id : ''),
-                  package_sha256: savedMeta?.package_sha256 ?? (prev.build_id === nextId || !prev.build_id ? prev.package_sha256 : ''),
-                  notes: savedMeta?.notes ?? (prev.build_id === nextId || !prev.build_id ? prev.notes : ''),
+                  url: savedMeta?.url || (keepPrev(prev) ? prev.url : '') || matched?.pipeline_url || '',
+                  package_id: savedMeta?.package_id ?? (keepPrev(prev) ? prev.package_id : ''),
+                  package_sha256: savedMeta?.package_sha256 ?? (keepPrev(prev) ? prev.package_sha256 : ''),
+                  notes: savedMeta?.notes ?? (keepPrev(prev) ? prev.notes : ''),
                 }))
               },
             }, [

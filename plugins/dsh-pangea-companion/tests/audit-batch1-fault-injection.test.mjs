@@ -470,6 +470,22 @@ test('#12 CTest zero-failure, exit-0 failure, exit-8 assertion failure, and clea
   const [infra] = parseVerificationLog(infraLog, task).entries
   assert.deepEqual([infra.result, infra.execution_status, infra.risk_verdict], ['failed', 'infra_error', 'unknown'])
 
+  // Real CTest missing executable (Not Run) must be infra_error/unknown, never confirmed
+  const ctestNotRunLog = [
+    `[PANGEA_CASE_BEGIN] case=${caseKey}`,
+    '1: hit:A',
+    '1/2 Test #1: check_one ........................   Passed    0.01 sec',
+    '2/2 Test #2: check_two ........................***Not Run   0.00 sec',
+    'Could not find executable /tmp/missing-bin',
+    '50% tests passed, 1 tests failed out of 2',
+    'The following tests FAILED:',
+    '\t  2 - check_two (Not Run)',
+    `[PANGEA_CLEANUP] case=${caseKey} cleanup=0 verify=0`,
+    `[PANGEA_CASE_END] case=${caseKey} status=8`,
+  ].join('\n')
+  const [notRun] = parseVerificationLog(ctestNotRunLog, task).entries
+  assert.deepEqual([notRun.result, notRun.execution_status, notRun.risk_verdict], ['failed', 'infra_error', 'unknown'])
+
   // Non-zero exit without explicit test failure count (e.g. crash/env error) -> must remain infra_error/unknown
   const crashLog = [
     `[PANGEA_CASE_BEGIN] case=${caseKey}`,

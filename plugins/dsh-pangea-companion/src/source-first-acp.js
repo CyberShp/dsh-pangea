@@ -69,7 +69,7 @@ export async function stopSourceFirstAcpRun({ dataRoot, runId, onStopped, onProg
       continue
     }
     try {
-      await entry.retry()
+      await entry.retry({ notify: false })
     } catch (error) {
       lateErrors.push(error)
     } finally {
@@ -449,13 +449,13 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
         timer = setTimeout(() => {
           const error = new Error('ACP 初始化或恢复会话超时，保留已有任务')
           controller.abort(error); reject(error)
-          const finalizeIfStopped = async () => {
+          const finalizeIfStopped = () => {
             if (!state.busy && state.stopRequested && state.pendingStartTasks.size === 0 && state.lateWorkers.size === 0
               && !(state.pendingStarts?.() > 0) && [...state.workers.keys()].every(id => state.closed.has(String(id)))) {
               liveRuns.delete(key)
               const notify = state.onStopped
               state.onStopped = undefined
-              await notify?.()
+              if (notify) void Promise.resolve().then(() => notify()).catch(() => {})
             }
           }
           const lateCleanup = Promise.resolve(attempt)
@@ -464,7 +464,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
                 worker: lateWorker,
                 attempts: 0,
                 lastError: null,
-                retry: async () => {
+                retry: async ({ notify = true } = {}) => {
                   entry.attempts += 1
                   try {
                     await disposed(lateWorker)
@@ -474,7 +474,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
                     })
                     entry.lastError = null
                     state.lateWorkers.delete(startId)
-                    await finalizeIfStopped()
+                    if (notify) finalizeIfStopped()
                   } catch (disposeError) {
                     entry.lastError = disposeError
                     throw disposeError
@@ -487,7 +487,7 @@ export function createSourceFirstAcpRun({ subagents, parent, providerId, agentMo
             .catch(() => {})
             .finally(() => {
               state.pendingStartTasks.delete(lateCleanup)
-              void finalizeIfStopped().catch(() => {})
+              finalizeIfStopped()
             })
           state.pendingStartTasks.add(lateCleanup)
         }, ms)

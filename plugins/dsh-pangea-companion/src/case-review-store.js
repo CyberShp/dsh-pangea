@@ -50,6 +50,38 @@ export function caseSet(items) {
   return { hashes, duplicates, revision: digest(items.map(item => [caseIdentity(item), caseContentHash(item)]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))) }
 }
 
+const CURRENT_CONTENT_HASH_VERSION = 2
+
+function legacyNoNotesHashes(item) {
+  const base = {
+    ...Object.fromEntries(fields.map(key => [key, item[key] ?? null])),
+    source_record: Object.fromEntries(['record_id', 'kind', 'body', 'evidence', 'relates_to'].map(key => [key, item.source_record?.[key] ?? null])),
+  }
+  return new Set([
+    digest(base),
+    digest({ ...base, linked_notes: [] }),
+  ])
+}
+
+function normalizeSavedDecisions(saved, items, set) {
+  if (saved.content_hash_version === CURRENT_CONTENT_HASH_VERSION) return saved.decisions
+  if (saved.content_hash_version === 1) {
+    const itemByKey = new Map()
+    for (const item of items) {
+      const key = caseIdentity(item)
+      if (key) itemByKey.set(key, item)
+    }
+    return Object.fromEntries(Object.entries(saved.decisions).map(([key, value]) => {
+      const item = itemByKey.get(key)
+      if (item && normalizedLinkedNotes(item).length === 0 && Object.hasOwn(set.hashes, key) && legacyNoNotesHashes(item).has(value.content_hash)) {
+        return [key, { ...value, content_hash: set.hashes[key] }]
+      }
+      return [key, { ...value, content_hash: '' }]
+    }))
+  }
+  return Object.fromEntries(Object.entries(saved.decisions).map(([key, value]) => [key, { ...value, content_hash: '' }]))
+}
+
 export class CaseReviewStore {
   constructor({ dataRoot, runId, write = writeTaskStoreFile }) {
     if (!/^[A-Za-z0-9._-]+$/.test(runId || '')) throw error(400, 'invalid_run_id', 'run_id 无效')
@@ -66,13 +98,13 @@ export class CaseReviewStore {
       for (const saved of Object.values(value.decisions)) if (!saved || !['adopted', 'excluded'].includes(saved.decision) || typeof saved.content_hash !== 'string') throw new Error('评审决定损坏')
       return value
     } catch (reason) {
-      if (reason.code === 'ENOENT') return { schema_version: 1, content_hash_version: 1, run_id: this.runId, revision: 0, decisions: {} }
+      if (reason.code === 'ENOENT') return { schema_version: 1, content_hash_version: CURRENT_CONTENT_HASH_VERSION, run_id: this.runId, revision: 0, decisions: {} }
       throw error(422, 'invalid_review_store', `评审记录不可读取：${reason.message}`)
     }
   }
   async project(items) {
     const saved = await this.read(), set = caseSet(items)
-    const decisions = saved.content_hash_version === 1 ? saved.decisions : Object.fromEntries(Object.entries(saved.decisions).map(([key, value]) => [key, { ...value, content_hash: '' }]))
+    const decisions = normalizeSavedDecisions(saved, items, set)
     return { status: 'ok', run_id: this.runId, revision: saved.revision, case_set_revision: set.revision, ...reviewProjection(items, decisions, set.hashes) }
   }
   async update(items, input) {
@@ -83,10 +115,10 @@ export class CaseReviewStore {
       if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision !== saved.revision) throw error(409, 'review_changed', '评审已更新，请重新确认')
       if (!key || !Object.hasOwn(set.hashes, key) || set.duplicates.has(key)) throw error(422, 'invalid_case_identity', '用例没有唯一身份，无法保存评审')
       if (input.expected_content_hash !== set.hashes[key]) throw error(409, 'case_changed', '用例已更新，请重新确认')
-      const decisions = Object.assign(Object.create(null), saved.content_hash_version === 1 ? saved.decisions : Object.fromEntries(Object.entries(saved.decisions).map(([id, value]) => [id, { ...value, content_hash: '' }])))
+      const decisions = Object.assign(Object.create(null), normalizeSavedDecisions(saved, items, set))
       if (input.decision === 'unreviewed') delete decisions[key]
       else decisions[key] = { decision: input.decision, content_hash: set.hashes[key], updated_at: new Date().toISOString() }
-      await this.write(file, `${JSON.stringify({ schema_version: 1, content_hash_version: 1, run_id: this.runId, revision: saved.revision + 1, decisions }, null, 2)}\n`)
+      await this.write(file, `${JSON.stringify({ schema_version: 1, content_hash_version: CURRENT_CONTENT_HASH_VERSION, run_id: this.runId, revision: saved.revision + 1, decisions }, null, 2)}\n`)
       return this.project(items)
     })
     queues.set(file, operation)
@@ -98,27 +130,28 @@ export class CaseReviewStore {
     }
     const parentStore = new CaseReviewStore({ dataRoot: this.dataRoot, runId: parentRunId, write: this.write })
     const parentSaved = await parentStore.read()
-    const parentDecisions = parentSaved.content_hash_version === 1 ? parentSaved.decisions : {}
+    const set = caseSet(items)
+    const parentDecisions = normalizeSavedDecisions(parentSaved, items, set)
     if (!Object.keys(parentDecisions).length) return { ...(await this.project(items)), inherited_count: 0 }
     const file = await this.file(), previous = queues.get(file) ?? Promise.resolve()
     const operation = previous.catch(() => {}).then(async () => {
-      const saved = await this.read(), set = caseSet(items)
-      const decisions = Object.assign(Object.create(null), saved.content_hash_version === 1 ? saved.decisions : {})
+      const saved = await this.read(), latestSet = caseSet(items)
+      const decisions = Object.assign(Object.create(null), normalizeSavedDecisions(saved, items, latestSet))
       let inheritedCount = 0
       for (const [key, parentDecision] of Object.entries(parentDecisions)) {
         if (Object.hasOwn(decisions, key)) continue
-        if (!Object.hasOwn(set.hashes, key) || set.duplicates.has(key)) continue
-        if (parentDecision.content_hash !== set.hashes[key]) continue
+        if (!Object.hasOwn(latestSet.hashes, key) || latestSet.duplicates.has(key)) continue
+        if (parentDecision.content_hash !== latestSet.hashes[key]) continue
         decisions[key] = {
           decision: parentDecision.decision,
-          content_hash: set.hashes[key],
+          content_hash: latestSet.hashes[key],
           inherited_from: parentRunId,
           updated_at: new Date().toISOString(),
         }
         inheritedCount += 1
       }
       if (inheritedCount > 0) {
-        await this.write(file, `${JSON.stringify({ schema_version: 1, content_hash_version: 1, run_id: this.runId, revision: saved.revision + 1, decisions }, null, 2)}\n`)
+        await this.write(file, `${JSON.stringify({ schema_version: 1, content_hash_version: CURRENT_CONTENT_HASH_VERSION, run_id: this.runId, revision: saved.revision + 1, decisions }, null, 2)}\n`)
       }
       return { ...(await this.project(items)), inherited_count: inheritedCount }
     })

@@ -229,8 +229,19 @@ test('#36 late-arriving worker whose first dispose fails stays retryable on subs
   const recoveryBefore = await inspectSourceFirstAcpRecovery({ dataRoot, runId })
   assert.equal(recoveryBefore.can_resume, false)
 
-  // Stop #2 retries dispose() on the exact same late handle, succeeds, clears disk pending_starts, and unlocks gates
-  const stopped = await stopSourceFirstAcpRun({ dataRoot, runId, pendingStartTimeoutMs: 200 })
+  // Stop #2 retries dispose() with a workbench-like onStopped callback that awaits the active stop operation:
+  // must NOT self-deadlock and must resolve true cleanly
+  let stop2Promise
+  stop2Promise = stopSourceFirstAcpRun({
+    dataRoot,
+    runId,
+    pendingStartTimeoutMs: 200,
+    onStopped: async () => { await stop2Promise },
+  })
+  const stopped = await Promise.race([
+    stop2Promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('self-deadlock on onStopped')), 500)),
+  ])
   assert.equal(stopped, true)
   assert.equal(disposeCalls, 2)
   assert.equal(sourceFirstAcpUpdateBusy(), false)
@@ -327,11 +338,46 @@ test('#38 editing or reordering linked operation notes invalidates prior adoptio
   const { createHash } = await import('node:crypto')
   const legacyFields = ['title', 'case_type', 'test_level', 'verification_goal', 'entry', 'preconditions', 'step_pairs', 'steps', 'expected_result', 'expected_results', 'observability', 'external_observations', 'cleanup', 'variants', 'execution_readiness', 'readiness', 'readiness_reason', 'missing_execution_conditions', 'unit_id', 'linked_risk_ids', 'linked_flow_ids', 'coverage_refs', 'evidence']
   const canonical = value => Array.isArray(value) ? value.map(canonical) : (value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : (value ?? null))
-  const legacyHash = createHash('sha256').update(JSON.stringify(canonical({
+  const legacyHash784 = createHash('sha256').update(JSON.stringify(canonical({
     ...Object.fromEntries(legacyFields.map(k => [k, noNotesEmpty[k] ?? null])),
     source_record: Object.fromEntries(['record_id', 'kind', 'body', 'evidence', 'relates_to'].map(k => [k, null])),
   }))).digest('hex')
-  assert.equal(caseContentHash(noNotesEmpty), legacyHash)
+  const legacyHashE3a = createHash('sha256').update(JSON.stringify(canonical({
+    ...Object.fromEntries(legacyFields.map(k => [k, noNotesEmpty[k] ?? null])),
+    linked_notes: [],
+    source_record: Object.fromEntries(['record_id', 'kind', 'body', 'evidence', 'relates_to'].map(k => [k, null])),
+  }))).digest('hex')
+  assert.equal(caseContentHash(noNotesEmpty), legacyHash784)
+
+  // v1 upgrade check:
+  // 1) v1 decision for a case WITH linked notes (e.g. e3a0828 sorted hash) MUST become needs_recheck
+  // 2) v1 decisions for unchanged cases WITHOUT linked notes (from both 784ad34 and e3a0828) stay adopted
+  const noNotesE3a = { projection_id: 'unit-0001/rec-000003', title: '无关联说明用例B', steps: ['step2'], expected_result: 'ok', linked_notes: [] }
+  const legacyHashE3aB = createHash('sha256').update(JSON.stringify(canonical({
+    ...Object.fromEntries(legacyFields.map(k => [k, noNotesE3a[k] ?? null])),
+    linked_notes: [],
+    source_record: Object.fromEntries(['record_id', 'kind', 'body', 'evidence', 'relates_to'].map(k => [k, null])),
+  }))).digest('hex')
+  const v1Store = new CaseReviewStore({ dataRoot: root, runId: 'run-audit38-v1' })
+  const v1File = await v1Store.file()
+  await mkdir(path.dirname(v1File), { recursive: true })
+  await writeFile(v1File, JSON.stringify({
+    schema_version: 1,
+    content_hash_version: 1,
+    run_id: 'run-audit38-v1',
+    revision: 3,
+    decisions: {
+      [baseCase.projection_id]: { decision: 'adopted', content_hash: caseContentHash(baseCase), updated_at: '2026-11-27T00:00:00.000Z' },
+      [noNotesEmpty.projection_id]: { decision: 'adopted', content_hash: legacyHash784, updated_at: '2026-11-27T00:00:00.000Z' },
+      [noNotesE3a.projection_id]: { decision: 'adopted', content_hash: legacyHashE3aB, updated_at: '2026-11-27T00:00:00.000Z' },
+    },
+  }, null, 2))
+  const upgraded = await v1Store.project([baseCase, noNotesEmpty, noNotesE3a])
+  const byId = new Map(upgraded.cases.map(c => [c.case_key, c.review_status]))
+  assert.equal(byId.get(baseCase.projection_id), 'needs_recheck', 'v1 multi-note adoption cannot prove delivery order and must require re-adoption')
+  assert.equal(byId.get(noNotesEmpty.projection_id), 'adopted', 'v1 784ad34 no-notes adoption must remain adopted')
+  assert.equal(byId.get(noNotesE3a.projection_id), 'adopted', 'v1 e3a0828 no-notes adoption must remain adopted')
+  assert.ok(legacyHashE3a !== legacyHash784)
 })
 
 test('#39 concurrent AcpSettingsStore.save calls all succeed and keep disk and process.env consistent', async t => {

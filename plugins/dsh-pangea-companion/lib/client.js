@@ -1516,6 +1516,9 @@ window.__ModuleLoader__.load({
     const NONZERO_FAILURE_COUNT_RE = /(?:\b([1-9]\d*)\s+tests?\s+failed\b|\[\s*FAILED\s*\]\s*([1-9]\d*)\s+tests?\b)/i
     const ZERO_TESTS_SIGNAL = /(?:\[\s*PASSED\s*\]\s*0 tests\b|0 tests from 0 test suites ran|No tests were found|0 tests failed out of 0\b)/i
 
+    const CTEST_NOT_RUN_RE = /(?:\*\*\*Not Run\b|\(\s*Not Run\s*\)|Could not find executable\b|Unable to find executable\b)/i
+    const CTEST_REAL_FAILED_RE = /(?:\*\*\*Failed\b|\(\s*Failed\s*\)|\*\*\*Exception:|\*\*\*SEGFAULT\b|\[\s*FAILED\s*\]\s+(?!0\s+tests?\b)\S|AssertionError|Traceback)/i
+
     function hasExplicitTestFailureCount(scopedLines) {
       for (const line of scopedLines) {
         if (NONZERO_FAILURE_COUNT_RE.test(line)) return true
@@ -1526,6 +1529,12 @@ window.__ModuleLoader__.load({
         }
       }
       return false
+    }
+
+    function hasOnlyNotRunInfraFailure(scopedLines) {
+      const hasNotRun = scopedLines.some(line => CTEST_NOT_RUN_RE.test(line))
+      if (!hasNotRun) return false
+      return !scopedLines.some(line => CTEST_REAL_FAILED_RE.test(line))
     }
 
     function detectFailureSignal(scopedLines) {
@@ -1621,6 +1630,7 @@ window.__ModuleLoader__.load({
           ? countPointHitsInLines(sectionLines, points)
           : (globalHits ?? { counts: new Map(), samples: [] })
         const hasExplicitFailureCount = hasExplicitTestFailureCount(scopedLines)
+        const notRunInfraFailure = hasOnlyNotRunInfraFailure(scopedLines)
         const hasFailureSignal = hasExplicitFailureCount || detectFailureSignal(scopedLines)
         const hasZeroTests = ZERO_TESTS_SIGNAL.test(scopedText)
         const profile = profiles.find(item => item.case_key === caseKey)
@@ -1646,11 +1656,13 @@ window.__ModuleLoader__.load({
           && !cleanupFailedCases.has(caseKey)
           && !missingExitStatusCases.has(caseKey)
           && !hasZeroTests
+          && !notRunInfraFailure
           && observedPairs.length > 0
           && hasExplicitFailureCount
         const isInfraError = cleanupFailedCases.has(caseKey)
           || missingExitStatusCases.has(caseKey)
           || incompleteSafety
+          || notRunInfraFailure
           || (nonZeroExitCases.has(caseKey) && !hasCompleteBoundedTestFailure)
         if (isInfraError || hasCompleteBoundedTestFailure) result = 'failed'
         if (!result && !hits) continue
@@ -1677,7 +1689,7 @@ window.__ModuleLoader__.load({
           risk_verdict: riskVerdict,
           hits: hits || (expectedPointIds.length ? expectedPointIds.map(pid => `${pid}=0`).join(', ') : ''),
           notes: isInfraError
-            ? '执行退出码非零、清理失败或缺少完整退出清理记录；不能判为通过'
+            ? (notRunInfraFailure ? '检测到测试未启动（Not Run / 缺少测试程序），归为执行环境异常，不能判为风险已证实' : '执行退出码非零、清理失败或缺少完整退出清理记录；不能判为通过')
             : hasZeroTests
             ? `检测到 0 条测试实际执行（未触发桩点）：\n${zeroTestLine}`
             : excerptLines.length ? `日志自动识别：\n${[...new Set(excerptLines)].slice(0, 3).join('\n')}` : '由执行日志自动解析填入',
@@ -2787,12 +2799,22 @@ window.__ModuleLoader__.load({
                         || [...(task.verification || [])].reverse().find(entry => entry?.build?.build_id === nextId)?.build
                         || null)
                       : null
+                    const commitSig = list => Array.isArray(list) && list.length
+                      ? list.map(c => `${c?.repo_id || ''}:${c?.commit || ''}`).sort().join('\0')
+                      : ''
+                    const legacyMatchesSelected = Boolean(
+                      !task.build?.build_id
+                      && nextId
+                      && commitSig(task.build?.commits)
+                      && commitSig(task.build?.commits) === commitSig(matched?.commits),
+                    )
+                    const keepPrev = prev => prev.build_id === nextId || (!prev.build_id && legacyMatchesSelected)
                     setBuild(prev => ({
                       build_id: nextId,
-                      url: savedMeta?.url || (!prev.build_id ? prev.url : '') || matched?.pipeline_url || '',
-                      package_id: savedMeta?.package_id ?? (prev.build_id === nextId || !prev.build_id ? prev.package_id : ''),
-                      package_sha256: savedMeta?.package_sha256 ?? (prev.build_id === nextId || !prev.build_id ? prev.package_sha256 : ''),
-                      notes: savedMeta?.notes ?? (prev.build_id === nextId || !prev.build_id ? prev.notes : ''),
+                      url: savedMeta?.url || (keepPrev(prev) ? prev.url : '') || matched?.pipeline_url || '',
+                      package_id: savedMeta?.package_id ?? (keepPrev(prev) ? prev.package_id : ''),
+                      package_sha256: savedMeta?.package_sha256 ?? (keepPrev(prev) ? prev.package_sha256 : ''),
+                      notes: savedMeta?.notes ?? (keepPrev(prev) ? prev.notes : ''),
                     }))
                   },
                 }, [
