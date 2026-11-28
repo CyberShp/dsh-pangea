@@ -237,6 +237,9 @@ test('memory_corruption 4th track projects cleanly and Stage 1 risk-blueprint-v1
   assert.match(stage1Prompt, /DTS-mcp \/ codehub-mcp/)
   assert.match(stage1Prompt, /memory_corruption/)
   assert.match(stage1Prompt, /显式点名认领/)
+  assert.match(stage1Prompt, /phase_hint=runtime/)
+  assert.match(stage1Prompt, /严禁把 init\/ 与大批运行态文件混塞进同一单元/)
+  assert.match(stage1Prompt, /严禁因 target 写“内存泄漏”就跳过 memory_corruption 第四轨/)
   assert.doesNotMatch(stage1Prompt, /不寻找插件或 MCP 配置/)
 
   const stage2Prompt = workerPrompt({
@@ -255,8 +258,13 @@ test('memory_corruption 4th track projects cleanly and Stage 1 risk-blueprint-v1
     python: 'python',
   })
   assert.match(stage2Prompt, /无论是否导入历史 DTS/)
+  assert.match(stage2Prompt, /file_directory/)
+  assert.match(stage2Prompt, /uncleaned_exit_lines/)
+  assert.match(stage2Prompt, /uncovered_alloc_functions/)
   assert.match(stage2Prompt, /global_alloc_assign/)
   assert.match(stage2Prompt, /判空—申请—写全局指针/)
+  assert.match(stage2Prompt, /量化三要素/)
+  assert.match(stage2Prompt, /零推诿落袋/)
   assert.doesNotMatch(stage2Prompt, /在无 DTS 盲测时/)
 })
 
