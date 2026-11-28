@@ -238,6 +238,26 @@ test('memory_corruption 4th track projects cleanly and Stage 1 risk-blueprint-v1
   assert.match(stage1Prompt, /memory_corruption/)
   assert.match(stage1Prompt, /显式点名认领/)
   assert.doesNotMatch(stage1Prompt, /不寻找插件或 MCP 配置/)
+
+  const stage2Prompt = workerPrompt({
+    action: { action_id: 'run-v2:analysis:U-RES', role: 'analysis', stage: 'unit_analysis', task_path: '/tmp/res.json' },
+    opened: {
+      task: {
+        scenario: 'risk-analysis',
+        risk_track: 'resource_lifecycle',
+        record_contracts: { blueprint: 'risk-blueprint-v1', risk: 'behavior-risk-v3', check: 'behavior-check-v2' },
+      },
+    },
+    cwd: '/work',
+    dataRoot: '/data',
+    runId: 'run-v2',
+    taskId: 'worker-res-1',
+    python: 'python',
+  })
+  assert.match(stage2Prompt, /无论是否导入历史 DTS/)
+  assert.match(stage2Prompt, /global_alloc_assign/)
+  assert.match(stage2Prompt, /判空—申请—写全局指针/)
+  assert.doesNotMatch(stage2Prompt, /在无 DTS 盲测时/)
 })
 
 test('TaskStore persists and reloads dts_context for risk-analysis and deriveAnalysisInput preserves it', async () => {
